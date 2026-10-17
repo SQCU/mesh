@@ -207,15 +207,21 @@ uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mes
 /* The wire a session's programs run on (libnccl-mesh's rings, nccl-mesh.c session_open): toward each other member two
    channels, a channel a ring of 2 lag slots each way, slot t % (2 lag) carrying position t; a step's piece on the
    `large` channel where it is more than lag small slots (else the small one) in pieces of its slot's bytes (`slot`,
-   NCCL_BUFFSIZE over lag rounded up to a block, or `small`, one block: the bridges' block, the page their window's rows
-   take, the same on every paired bridge); every position a whole slot on the wire, one where the end has nothing to
-   send a filler's; an end publishing position t once it has consumed its peer's t - lag (NCCL's Simple protocol, its
-   head credit the reverse direction's positions).  MESH_LAG is NCCL_STEPS and MESH_BUFFSIZE NCCL_BUFFSIZE's default,
-   in bytes; mesh_wire_of the rule for a block and an NCCL_BUFFSIZE. */
+   NCCL_BUFFSIZE over lag rounded up to a block, or `small`, the communicator's operand, else one block); `block` the
+   bridges' block, the page their window's rows take, the same on every paired bridge, and a ring's pitch: slot t of a
+   ring starts t whole blocks of its slot in.  Every position a whole slot on the wire (TN3205 pairs a SEND with a
+   receive of the same 4 KiB frames, so a slot's frames are the position's), one where the end has nothing to send a
+   filler's; an end publishing position t once it has consumed its peer's t - lag (NCCL's Simple protocol, its head
+   credit the reverse direction's positions).  MESH_LAG is NCCL_STEPS and MESH_BUFFSIZE NCCL_BUFFSIZE's default, in
+   bytes; mesh_wire_of the rule for a block, an NCCL_BUFFSIZE and a small slot (0: the block; at least MESH_SMALL_LEAST,
+   the members' agreement a session's first position carries, libnccl-mesh struct agreement). */
 #define MESH_LAG 8
+#define MESH_SMALL_LEAST 32
 #define MESH_BUFFSIZE 4194304
-struct mesh_wire { uint64_t slot,small; uint32_t lag,padding; };
-void mesh_wire_of(uint64_t block,uint64_t buffsize,struct mesh_wire *wire);
+struct mesh_wire { uint64_t slot,small,block; uint32_t lag,padding; };
+void mesh_wire_of(uint64_t block,uint64_t buffsize,uint64_t small,struct mesh_wire *wire);
+/* the bytes from one slot of `bytes` to the next on a ring of the wire: whole blocks */
+uint64_t mesh_wire_pitch(const struct mesh_wire *,uint64_t bytes);
 /* Whether a piece of `bytes` takes a wire's large channel, and its pieces there */
 int mesh_wire_large(const struct mesh_wire *,uint64_t bytes);
 uint64_t mesh_wire_pieces(const struct mesh_wire *,uint64_t bytes);
@@ -236,7 +242,7 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
    of them (nccl-mesh.c comm_routes: the caller's, or every collective along the caller's paths or the shortest-path
    trees, uncut); the library's session handshake carries it with its digest of the members' map, trees, programs and
    wire, so members planning by different rules fail the session rather than run it. */
-#define MESH_PLAN_VERSION 3u
+#define MESH_PLAN_VERSION 4u
 
 /* design/recovery.md#diagnosis: a node's health as its bridge last sampled it, carried in its record to every bridge.
    `sampled` the wall clock of the sample and `booted` of the node's boot (ns since the epoch); `session` its boot session

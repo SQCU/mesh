@@ -865,10 +865,11 @@ done:
 
 /* -- the wire: libnccl-mesh's rings and the positions a program takes on them ------------------------------------- */
 
-void mesh_wire_of(uint64_t block,uint64_t buffsize,struct mesh_wire *wire){
+void mesh_wire_of(uint64_t block,uint64_t buffsize,uint64_t small,struct mesh_wire *wire){
   const uint64_t b=block?block:1,slot=(buffsize/MESH_LAG+b-1)/b*b;
-  *wire=(struct mesh_wire){slot>b?slot:b,b,MESH_LAG,0};
+  *wire=(struct mesh_wire){slot>b?slot:b,!small?b:small<MESH_SMALL_LEAST?MESH_SMALL_LEAST:small,b,MESH_LAG,0};
 }
+uint64_t mesh_wire_pitch(const struct mesh_wire *wire,uint64_t bytes){ return (bytes+wire->block-1)/wire->block*wire->block; }
 int mesh_wire_large(const struct mesh_wire *wire,uint64_t bytes){ return bytes>(uint64_t)wire->lag*wire->small; }
 uint64_t mesh_wire_pieces(const struct mesh_wire *wire,uint64_t bytes){
   const uint64_t slot=mesh_wire_large(wire,bytes)?wire->slot:wire->small;

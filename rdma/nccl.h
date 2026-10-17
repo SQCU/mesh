@@ -847,12 +847,14 @@ ncclResult_t pncclGroupEnd(void);
    copied, kept for its life; a call runs the first whose collective, and a rooted one's root, is the call's and whose
    `below` its bytes are under, 0 any size), or with none (count 0) the structural table (above), every collective
    along `paths` (its routing tables: each member's trees; NULL: the map's shortest-path trees), checked against the
-   map at each session; rank r of `nranks` on the bridge of node node[r]; `name` the communicator's (NULL: "nccl").
-   Like every communicator, it reads the bridges' map at each opening of its session.  Every rank passes the same
-   nranks, paths, programs, nodes and name. */
+   map at each session; `small` the bytes of its small class's slot (mesh-plan.h mesh_wire: a step's piece of at most
+   lag of them takes that class, each position that many bytes on the wire, its frames the receive's; 0: the bridges'
+   block), which its splits and shrinks keep; rank r of `nranks` on the bridge of node node[r]; `name` the
+   communicator's (NULL: "nccl").  Like every communicator, it reads the bridges' map at each opening of its session.
+   Every rank passes the same nranks, paths, programs, small, nodes and name. */
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const struct mesh_trees* paths,
-                                  const ncclMeshProgram* programs, int count, const int* node, const char* name);
+                                  const ncclMeshProgram* programs, int count, uint64_t small, const int* node, const char* name);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose session failed returns the
@@ -862,7 +864,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int
    workspace may be reused in the stream's order. */
 uint64_t ncclMeshRetired(void);
 /* The bytes of its node's window one communicator's session takes there toward `peers` other members on `wire`
-   (mesh-plan.h mesh_wire: the session's, mesh_wire_of the bridge's block and NCCL_BUFFSIZE): its rings, its transfer
+   (mesh-plan.h mesh_wire: the session's, mesh_wire_of the bridge's block, NCCL_BUFFSIZE and its small slot): its rings, its transfer
    lists, SEND cells and completion words and its violation page, each a lease of whole blocks.  A session binds a
    channel toward every other member of its communicator (a point-to-point call may name any, and its members' agreement
    meets on them whatever map each read), and a split or shrink is a communicator of its own with a session of its own,

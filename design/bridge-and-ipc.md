@@ -453,7 +453,8 @@ the exclusive queue pairs' making and pairing each session. At a session a call 
 cost below some 2,500 to 8,000 steps a call, so a direct program's flows ride the lanes; the exclusive form stays in
 the code for a flow a READY asks it of, and goes with the next change that touches it.
 
-A position is a whole slot on the wire (512 KiB of the library's large class, one block of its small one), a filler
+A position is a whole slot on the wire (512 KiB of the library's large class; of its small one the communicator's
+`small`, one block where none is given, the pair's decode 3,072 bytes, one frame), a filler
 as much as a piece: TN3205 pairs a SEND with a receive of the same 4 KiB frames, and an exclusive ring posts its
 receives ahead of what lands, so a position shorter than its slot would leave its receives' frames unmatched and every
 later SEND of the ring a record off. A lane's header names the chunks and bytes of what follows it before its receives

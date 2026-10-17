@@ -264,15 +264,16 @@ def footprint(pid=0):
     return info[2 + 7]
 
 
-def wire(block=None, buffsize=None):
-    """mesh_wire_of: the rings a session of libnccl-mesh runs on (mesh-plan.h struct mesh_wire: `slot`, `small`, `lag`),
-    as this process's sessions make them: `block` (None: this machine's page, the block every bridge's region takes) and
-    `buffsize` (None: NCCL_BUFFSIZE as the library reads it, a positive integer, else NCCL's default MESH_BUFFSIZE)."""
+def wire(block=None, buffsize=None, small=0):
+    """mesh_wire_of: the rings a session of libnccl-mesh runs on (mesh-plan.h struct mesh_wire: `slot`, `small`,
+    `block`, `lag`), as this process's sessions make them: `block` (None: this machine's page, the block every bridge's
+    region takes), `buffsize` (None: NCCL_BUFFSIZE as the library reads it, a positive integer, else NCCL's default
+    MESH_BUFFSIZE) and `small` (the communicator's small slot, ncclMeshCommInitRank's; 0: the block)."""
     if buffsize is None:
         given = re.match(r'\s*([-+]?\d+)', os.environ.get('NCCL_BUFFSIZE', ''))
         buffsize = int(given.group(1)) if given and int(given.group(1)) > 0 else lib.MESH_BUFFSIZE
     made = ffi.new('struct mesh_wire *')
-    lib.mesh_wire_of(block if block is not None else os.sysconf('SC_PAGE_SIZE'), buffsize, made)
+    lib.mesh_wire_of(block if block is not None else os.sysconf('SC_PAGE_SIZE'), buffsize, small, made)
     return made
 
 

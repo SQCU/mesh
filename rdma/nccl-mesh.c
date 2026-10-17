@@ -206,6 +206,7 @@ struct session;
 struct ncclComm {
   struct mesh_link_map map;
   struct mesh_wire wire;
+  uint64_t small;
   uint32_t *next, *mark;
   uint64_t digest;
   struct mesh_trees paths, trees;
@@ -703,7 +704,7 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
 /* a communicator over the caller's collectives (ncclMeshProgram), or over the paths every collective of its structural
    table takes (comm_routes); as every communicator is, on the bridges' map read at each opening of its session */
 ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, int rank, const struct mesh_trees *paths,
-                                  const ncclMeshProgram *programs, int count, const int *node, const char *name) {
+                                  const ncclMeshProgram *programs, int count, uint64_t small, const int *node, const char *name) {
   if (!comm || !node || rank < 0 || rank >= nranks || count < 0 || (count && !programs) || (paths && paths->nodes != (uint32_t)nranks))
     return fail(ncclInvalidArgument, "ncclMeshCommInitRank's arguments: rank %d of %d, %d programs", rank, nranks, count);
   for (int e = 0; e < count; e++)
@@ -715,6 +716,7 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, int rank, const 
   free(members);
   if (result) return result;
   struct ncclComm *made = *comm;
+  made->small = small;
   const uint32_t trees = paths ? paths->count : 0;
   uint32_t *root = calloc(trees + 1, sizeof *root), *parent = calloc((size_t)trees * nranks + 1, sizeof *parent);
   double *weight = calloc(trees + 1, sizeof *weight);
@@ -937,7 +939,7 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 struct channel {
   uint32_t node;
   int large;
-  size_t slot;
+  size_t slot, pitch;
   struct mesh_section out, in;
   unsigned char *sending, *receiving;
   uint64_t sent, consumed, end, waited, checked;
@@ -1199,8 +1201,8 @@ static size_t setting(const char *name, size_t otherwise) {
   return x > 0 ? (size_t)x : otherwise;
 }
 
-static int ring_make(struct session *s, size_t slot, struct mesh_section *section, unsigned char **memory) {
-  const int status = mesh_section_create(&s->context, DEPTH * slot, 1, section);
+static int ring_make(struct session *s, size_t slot, size_t pitch, struct mesh_section *section, unsigned char **memory) {
+  const int status = mesh_section_create(&s->context, DEPTH * pitch, 1, section);
   if (status) return status;
   *memory = mesh_section_address(&s->context, *section, 0);
   section->bytes = slot;
@@ -1209,15 +1211,16 @@ static int ring_make(struct session *s, size_t slot, struct mesh_section *sectio
 
 /* a ring's transfer toward the member `node` on its queue `queue` (a queue's SENDs, and the receives its peer posts,
    run invocation by invocation through every transfer on it, so rings that advance apart need queues apart) */
-static int ring_bind(struct session *s, uint32_t node, uint32_t queue, int receive, uint32_t identity, struct mesh_section section) {
+static int ring_bind(struct session *s, uint32_t node, uint32_t queue, int receive, uint32_t identity, struct mesh_section section,
+                     size_t pitch) {
   return mesh_transfer_bind(&s->context, node, queue, receive ? MESH_RECEIVE : MESH_SEND, identity, section,
-                            (uint32_t)(section.bytes / s->header->pgsz), 0, UINT32_MAX, DEPTH);
+                            (uint32_t)(pitch / s->header->pgsz), 0, UINT32_MAX, DEPTH);
 }
 
 /* a channel's Metal side once its transfers are prepared: the rings wrapped, its SEND cell, its completion words */
 static int channel_metal(struct session *s, struct channel *ch) {
-  ch->ring_out = metal_wrap(ch->sending, DEPTH * ch->slot);
-  ch->ring_in = metal_wrap(ch->receiving, DEPTH * ch->slot);
+  ch->ring_out = metal_wrap(ch->sending, DEPTH * ch->pitch);
+  ch->ring_in = metal_wrap(ch->receiving, DEPTH * ch->pitch);
   struct prepared_publication record;
   if (mesh_publication_prepare(&s->context, ch->out.first, NULL) != 1) return EINVAL;
   mesh_publication_prepare(&s->context, ch->out.first, &record);
@@ -1248,6 +1251,7 @@ static ncclResult_t start_failure(struct session *s, int status) {
    value naming the disagreement, and its next group opens on the map then.  The wait is bounded by mesh.h
    MESH_SILENT_NS and ends at a revoke; `serial`, the map serial this rank read its map at, names it */
 struct agreement { uint64_t version, digest, serial, node; };
+_Static_assert(sizeof(struct agreement) <= MESH_SMALL_LEAST, "a small slot carries the agreement");
 static ncclResult_t session_agree(struct session *s, uint64_t serial) {
   struct ncclComm *comm = s->comm;
   const struct agreement mine = {MESH_PLAN_VERSION, comm->digest, serial, comm->members[comm->rank]};
@@ -1311,6 +1315,7 @@ ncclResult_t ncclMeshPosition(ncclComm_t comm, int peer, uint64_t *position) {
    peer still preparing is waited for; a revoke, a cancelled landing or a disagreement ends it), every cursor then past
    it */
 struct taken { uint64_t version, digest, ticket, node; };
+_Static_assert(sizeof(struct taken) <= MESH_SMALL_LEAST, "a small slot carries the agreement");
 ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
   if (revoked(comm)) return revoked_fail(comm);
@@ -1339,7 +1344,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
   const struct taken mine = {MESH_PLAN_VERSION, comm->digest, ticket, comm->members[comm->rank]};
   for (uint32_t h = 0; h < s->count; h++) {
     struct channel *ch = s->channels + h;
-    memcpy(ch->sending + (ch->end % DEPTH) * ch->slot, &mine, sizeof mine);
+    memcpy(ch->sending + (ch->end % DEPTH) * ch->pitch, &mine, sizeof mine);
     mesh_host_publish(&s->context, ch->out, ch->end);
   }
   pthread_mutex_unlock(&session_lock);
@@ -1352,7 +1357,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
                   ch->node, comm->name);
     if (!landed(arrived, at)) { usleep(20); continue; }
     struct taken theirs;
-    memcpy(&theirs, ch->receiving + (at % DEPTH) * ch->slot, sizeof theirs);
+    memcpy(&theirs, ch->receiving + (at % DEPTH) * ch->pitch, sizeof theirs);
     if (theirs.version != mine.version || theirs.digest != mine.digest || theirs.ticket != ticket)
       return fail(ncclRemoteError, "node %u took up %s for another execution or program (ticket %016llx, digest %016llx, version %llu; this "
                   "rank's %016llx, %016llx, %llu): the communicator is made again", ch->node, comm->name,
@@ -1380,15 +1385,16 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
    a terminal cell a transfer, a target each). */
 #define WHOLE(bytes, block) (((bytes) + (block) - 1) / (block) * (block))
 static uint64_t ring_bytes(uint64_t slot, const struct mesh_wire *wire) {
-  const struct mesh_transfer bound = {.count = 1, .invocation_pages = (uint32_t)(slot / wire->small), .depth = DEPTH, .bytes = slot};
-  return WHOLE(mesh_relay_slot(&bound, DEPTH, (uint32_t)wire->small), wire->small);
+  const struct mesh_transfer bound = {.count = 1, .invocation_pages = (uint32_t)(mesh_wire_pitch(wire, slot) / wire->block), .depth = DEPTH,
+                                      .bytes = slot};
+  return WHOLE(mesh_relay_slot(&bound, DEPTH, (uint32_t)wire->block), wire->block);
 }
 static uint64_t lists_bytes(const struct mesh_wire *wire) {
-  const uint64_t room = wire->small / (MESH_QUEUES * 2 * sizeof(struct mesh_transfer));
-  return WHOLE((uint64_t)MESH_QUEUES * 2 * (room ? room : 1) * sizeof(struct mesh_transfer), wire->small);
+  const uint64_t room = wire->block / (MESH_QUEUES * 2 * sizeof(struct mesh_transfer));
+  return WHOLE((uint64_t)MESH_QUEUES * 2 * (room ? room : 1) * sizeof(struct mesh_transfer), wire->block);
 }
 static uint64_t cells_bytes(uint64_t sends, const struct mesh_wire *wire) {
-  return WHOLE((sends ? sends * (POSITIONS + 1) : 1) * sizeof(struct mesh_send) + sends * sizeof(struct mesh_target), wire->small);
+  return WHOLE((sends ? sends * (POSITIONS + 1) : 1) * sizeof(struct mesh_send) + sends * sizeof(struct mesh_target), wire->block);
 }
 
 /* one session toward `peers` other members (ncclMeshSessionBytes): toward each peer its four rings (two of the large
@@ -1397,9 +1403,9 @@ static uint64_t cells_bytes(uint64_t sends, const struct mesh_wire *wire) {
    POSITIONS invocations, each destination's from a 16-word boundary); its cancellation ranges (one a destination);
    and its violation page */
 static uint64_t session_bytes(uint64_t peers, const struct mesh_wire *wire) {
-  const uint64_t block = wire->small, page = (uint64_t)getpagesize();
+  const uint64_t block = wire->block, page = (uint64_t)getpagesize();
   const uint64_t rings = 2 * ring_bytes(wire->slot, wire) + 2 * ring_bytes(wire->small, wire);
-  const uint64_t frames = (wire->slot / block + 1) * POSITIONS;
+  const uint64_t frames = (mesh_wire_pitch(wire, wire->slot) / block + mesh_wire_pitch(wire, wire->small) / block) * POSITIONS;
   const uint64_t words = peers ? (peers - 1) * ((frames + 15) & ~UINT64_C(15)) + frames : 0;
   return peers * (rings + lists_bytes(wire)) + cells_bytes(peers * 2, wire) + WHOLE(sizeof(uint64_t) * (words ? words : 1), block) +
          WHOLE(sizeof(struct mesh_cancellation) + (peers ? peers : 1) * sizeof(struct mesh_cancel_range), block) + WHOLE(page, block);
@@ -1414,13 +1420,13 @@ static uint64_t relay_bytes(const struct mesh_wire *wire) {
 #undef WHOLE
 
 ncclResult_t ncclMeshSessionBytes(int peers, const struct mesh_wire *wire, uint64_t *bytes) {
-  if (peers < 0 || !wire || !wire->small || !wire->slot || !bytes) return fail(ncclInvalidArgument, "ncclMeshSessionBytes's arguments");
+  if (peers < 0 || !wire || !wire->small || !wire->slot || !wire->block || !bytes) return fail(ncclInvalidArgument, "ncclMeshSessionBytes's arguments");
   *bytes = session_bytes((uint64_t)peers, wire);
   return ncclSuccess;
 }
 
 ncclResult_t ncclMeshRelayBytes(const struct mesh_wire *wire, uint64_t *bytes) {
-  if (!wire || !wire->small || !wire->slot || !bytes) return fail(ncclInvalidArgument, "ncclMeshRelayBytes's arguments");
+  if (!wire || !wire->small || !wire->slot || !wire->block || !bytes) return fail(ncclInvalidArgument, "ncclMeshRelayBytes's arguments");
   *bytes = relay_bytes(wire);
   return ncclSuccess;
 }
@@ -1460,7 +1466,7 @@ static ncclResult_t session_open(ncclComm_t comm) {
     session_close(s);
     return result;
   }
-  mesh_wire_of((uint64_t)m->pgsz * m->block, setting("NCCL_BUFFSIZE", MESH_BUFFSIZE), &comm->wire);
+  mesh_wire_of((uint64_t)m->pgsz * m->block, setting("NCCL_BUFFSIZE", MESH_BUFFSIZE), comm->small, &comm->wire);
   comm->digest = map_digest(comm, &comm->map);
   s->slot = comm->wire.slot;
   s->small = comm->wire.small;
@@ -1472,10 +1478,11 @@ static ncclResult_t session_open(ncclComm_t comm) {
       ch->node = comm->members[r];
       ch->large = (int)large;
       ch->slot = large ? s->slot : s->small;
-      status = ring_make(s, ch->slot, &ch->out, &ch->sending);
-      if (!status) status = ring_make(s, ch->slot, &ch->in, &ch->receiving);
-      if (!status) status = ring_bind(s, ch->node, !large, 0, IDENTITY + 2 * me + large, ch->out);
-      if (!status) status = ring_bind(s, ch->node, !large, 1, IDENTITY + 2 * r + large, ch->in);
+      ch->pitch = mesh_wire_pitch(&comm->wire, ch->slot);
+      status = ring_make(s, ch->slot, ch->pitch, &ch->out, &ch->sending);
+      if (!status) status = ring_make(s, ch->slot, ch->pitch, &ch->in, &ch->receiving);
+      if (!status) status = ring_bind(s, ch->node, !large, 0, IDENTITY + 2 * me + large, ch->out, ch->pitch);
+      if (!status) status = ring_bind(s, ch->node, !large, 1, IDENTITY + 2 * r + large, ch->in, ch->pitch);
     }
   if (!status) status = mesh_transfers_prepare(&s->context, 1, POSITIONS, DEPTH);
   if (!status) status = mesh_transfers_digest(&s->context, comm->digest);
@@ -1740,7 +1747,7 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
         struct message *m = p->in_at < p->ins ? p->in + p->in_at : NULL;
         const int data = m && at >= m->first;
         uint64_t seen;
-        memcpy(&seen, ch->receiving + (at % DEPTH) * ch->slot, sizeof seen);
+        memcpy(&seen, ch->receiving + (at % DEPTH) * ch->pitch, sizeof seen);
         if (data == (seen == METAL_STAMP(at)))
           return fail(ncclInvalidUsage, MISMATCH, (unsigned long long)at, ch->node, data ? "a piece" : "nothing", data ? "nothing" : "a piece");
         if (at + 1 > ch->checked) ch->checked = at + 1;
@@ -1748,7 +1755,7 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
           struct steps *s = m->c->bound;
           if (at == m->first && !ready(s, m->step)) break;
           size_t length, offset = piece_at(m, ch->slot, at, &length);
-          const unsigned char *from = ch->receiving + (at % DEPTH) * ch->slot;
+          const unsigned char *from = ch->receiving + (at % DEPTH) * ch->pitch;
           unsigned char *to = s->host[s->steps[m->step].buffer] + m->offset + offset;
           if (s->steps[m->step].op == MESH_STEP_REDUCE) combine_into(m->c->type, m->c->combine, to, from, length / SIZE[m->c->type]);
           else memcpy(to, from, length);
@@ -1762,11 +1769,11 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
         if (m && at >= m->first) {
           if (at == m->first && !ready(m->c->bound, m->step)) break;
           size_t length, offset = piece_at(m, ch->slot, at, &length);
-          memcpy(ch->sending + (at % DEPTH) * ch->slot, m->c->bound->host[m->c->bound->steps[m->step].buffer] + m->offset + offset, length);
+          memcpy(ch->sending + (at % DEPTH) * ch->pitch, m->c->bound->host[m->c->bound->steps[m->step].buffer] + m->offset + offset, length);
           if (at + 1 == m->first + m->pieces) p->out_at++;
         } else {
           const uint64_t stamp = METAL_STAMP(at);
-          memcpy(ch->sending + (at % DEPTH) * ch->slot, &stamp, sizeof stamp);
+          memcpy(ch->sending + (at % DEPTH) * ch->pitch, &stamp, sizeof stamp);
         }
         mesh_host_publish(&ses->context, ch->out, at);
         ch->sent++;
@@ -1946,7 +1953,7 @@ static struct metal_check check_of(struct session *s, struct channel *ch, uint64
   const uint32_t h = (uint32_t)(ch - s->channels);
   uint64_t first = ch->checked < count ? ch->checked : count;
   if (count - first > DEPTH) first = count - DEPTH;
-  struct metal_check check = {ch->ring_in, s->violation_buffer, ch->slot, first, (uint32_t)(count - first), 0, h, DEPTH, count ? count - 1 : 0};
+  struct metal_check check = {ch->ring_in, s->violation_buffer, ch->pitch, first, (uint32_t)(count - first), 0, h, DEPTH, count ? count - 1 : 0};
   for (uint64_t t = first; t < count; t++)
     if (receives_at(s, h, t)) check.mask |= 1u << (t - first);
   if (count > ch->checked) ch->checked = count;
@@ -2230,7 +2237,7 @@ static ncclResult_t consume(struct metal_program *program, struct session *s, ui
     if (m) {
       struct steps *st = m->c->bound;
       size_t length, offset = piece_at(m, ch->slot, at, &length);
-      const size_t from = (at % DEPTH) * ch->slot;
+      const size_t from = (at % DEPTH) * ch->pitch;
       const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
       const struct where to = st->gpu[st->steps[m->step].buffer];
       if (!ch->large) {
@@ -2280,23 +2287,23 @@ static ncclResult_t publish(struct metal_program *program, struct session *s, ui
     const struct steps *st = m->c->bound;
     size_t length, offset = piece_at(m, ch->slot, at, &length);
     if (!ch->large && fusing.publishes && !fusing.published && fused_piece(m, offset, length)) {
-      result = gpu(metal_send_deferred(program, ch->ring_out, (at % DEPTH) * ch->slot, length, s->transport.publication, cell, value,
+      result = gpu(metal_send_deferred(program, ch->ring_out, (at % DEPTH) * ch->pitch, length, s->transport.publication, cell, value,
                                        fusing.out->publish), "a fused publication's record");
       fusing.published = !result;
       released = 1;
     } else if (!ch->large) {
       const struct where source = st->gpu[st->steps[m->step].buffer];
-      result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->slot, source.buffer, source.offset + m->offset + offset,
+      result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->pitch, source.buffer, source.offset + m->offset + offset,
                                     length, s->transport.publication, cell, value), "a piece into its slot and its release");
       released = 1;
     } else
-      result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, st->gpu[st->steps[m->step].buffer].buffer,
+      result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->pitch, st->gpu[st->steps[m->step].buffer].buffer,
                               st->gpu[st->steps[m->step].buffer].offset + m->offset + offset, length), "a piece into its slot");
     if (at + 1 == m->first + m->pieces) p->out_at++;
   }
   if (!result && !released && m) result = gpu(metal_publish(program, s->transport.publication, cell, value), "a publication");
   else if (!result && !released)
-    result = gpu(metal_publish_filler(program, s->transport.publication, cell, value, ch->ring_out, (at % DEPTH) * ch->slot, at),
+    result = gpu(metal_publish_filler(program, s->transport.publication, cell, value, ch->ring_out, (at % DEPTH) * ch->pitch, at),
                  "an empty publication");
   if (!result) { ch->sent++; *published = 1; }
   return result;
@@ -2689,7 +2696,7 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
     pthread_mutex_lock(&attach_lock);
     struct attach *a = NULL;
     const int attached = attach_current(&a);
-    if (!attached) mesh_wire_of((uint64_t)a->context.M->pgsz * a->context.M->block, setting("NCCL_BUFFSIZE", MESH_BUFFSIZE), &comm->wire);
+    if (!attached) mesh_wire_of((uint64_t)a->context.M->pgsz * a->context.M->block, setting("NCCL_BUFFSIZE", MESH_BUFFSIZE), comm->small, &comm->wire);
     pthread_mutex_unlock(&attach_lock);
     if (attached) { pthread_mutex_unlock(&session_lock); return ncclSuccess; }
   }
@@ -2915,6 +2922,7 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
   }
   snprintf(name, sizeof name, "%s/%u.%d", comm->name, split, color);
   const ncclResult_t result = comm_make(made, count, members, rank, name);
+  if (!result) (*made)->small = comm->small;
   free(members);
   return result;
 }

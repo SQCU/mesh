@@ -223,7 +223,7 @@ A session is a communicator's program on its node's bridge. It opens at the firs
 3. `attach_current` + `mesh_program_attach(&s->context, &a->context, comm->name)`: a new slot on the process's
    attach, keyed by the name.
 4. Checks `hdr->node == members[rank]`.
-5. The wire: `mesh_wire_of(pgsz x block, NCCL_BUFFSIZE or MESH_BUFFSIZE)`. Then `digest = map_digest`, which covers
+5. The wire: `mesh_wire_of(pgsz x block, NCCL_BUFFSIZE or MESH_BUFFSIZE, comm->small)`. Then `digest = map_digest`, which covers
    `MESH_PLAN_VERSION`, the wire, the members, every member pair's route marks and its links' costs, the tree sets, and
    the caller's paths and programs.
 6. Two channels toward every other member, whatever the map. `ring_make` leases `DEPTH x slot` bytes each way.
@@ -283,12 +283,19 @@ A session is a communicator's program on its node's bridge. It opens at the firs
 
 **The wire (`mesh-collective.c:mesh_wire_of`, `mesh_wire_large`, `mesh_wire_pieces`).**
 
-- `small` is one block: `pgsz x block`, the bridge's row.
-- `slot` is `ceil(NCCL_BUFFSIZE / LAG / small) x small`, at least `small`.
+- `block` is `pgsz x block`, the bridge's row, and a ring's pitch: slot `t` of a ring starts at `t x
+  mesh_wire_pitch(slot)`, its bytes rounded up to blocks (the transfer's `invocation_pages`), whatever the slot's bytes.
+- `small` is the communicator's operand (`ncclMeshCommInitRank`'s `small`: mb's record names each flow's, its decode
+  crossings' largest, `tools/mesh/flows.py smalls`), at least `MESH_SMALL_LEAST` (32, the agreement position 0
+  carries); 0 gives one block.
+- `slot` is `ceil(NCCL_BUFFSIZE / LAG / block) x block`, at least a block.
 - `lag = MESH_LAG = 8` (NCCL_STEPS).
 - A piece takes the large channel if its bytes exceed `lag x small`. It is cut into `ceil(bytes / slot of its class)`
   positions.
-- On a 16 KiB block with the default 4 MiB: small 16 KiB, slot 512 KiB, large above 128 KiB.
+- Every position is its slot's bytes on the wire: TN3205 pairs a SEND with a receive of the same 4 KiB frames, and a
+  ring's receives are posted ahead at the slot's bytes, so a position's frames are the slot's (bridge-and-ipc.md,
+  lanes). A small slot of 3,072 bytes (the pair's one-row decode crossing) is one frame; one block is four.
+- On a 16 KiB block with the default 4 MiB and no small given: small 16 KiB, slot 512 KiB, large above 128 KiB.
 
 **A position t on a channel:**
 
@@ -596,8 +603,8 @@ stamps) is the same in both forms, so two members may encode the same crossing d
 | `NCCL_BUFFSIZE` (env, bytes; ≤ 0 or unset → `MESH_BUFFSIZE` = 4 MiB) | `setting` in `session_open` and `ncclMeshFusableRooted` | the large slot = `NCCL_BUFFSIZE / 8` rounded up to a block: ring bytes, pieces per message, and the digest (members must agree) |
 | `ncclMeshStream.polls` (per call) | `metal_begin`/`metal_begin4` → `p.polls` | bounds each GPU wait to `polls` loads (0: until it lands or is cancelled) |
 | `ncclMeshStream.workspace`, `issue`, `fused`, `argumentTable`, `residencySet`, `commandEncoder` | `enqueue`, `launch_metal` | form (classic or Metal 4), scratch source, issue/complete, deferred steps |
-| `ncclMeshCommInitRank`'s `paths`, `programs`, `node`, `name` | `comm_routes`, `program_of`, `comm_make`, `mesh_key` | trees and programs as operands; slot key = FNV-1a(name) |
-| Bridge configuration (window, `pgsz`, `block`) | read from the region | the window for leases; `small` = one block |
+| `ncclMeshCommInitRank`'s `paths`, `programs`, `small`, `node`, `name` | `comm_routes`, `program_of`, `mesh_wire_of`, `comm_make`, `mesh_key` | trees, programs and the small slot as operands; slot key = FNV-1a(name) |
+| Bridge configuration (window, `pgsz`, `block`) | read from the region | the window for leases; a ring's pitch; `small` where the caller gives none |
 | `ncclConfig_t`, `ncclCollConfig_t` | ignored | none (`algSelection` not read) |
 | `RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT` | `mesh_mpi.py` (`NCCL_COMM_ID` first) and torch's store | bootstrap only; the library reads none of them |
 | `MESH_RDMA` | torch-mesh `setup.py` | build only |

@@ -380,7 +380,9 @@ exclusive flow. Each step names the word written, its writer and its reader. The
   `nccl-mesh.c`).
 - Position `at` is invocation `t = at % 32` in cycle `c = at / 32`, and uses ring slot `at % 16`.
 - The large slot is `NCCL_BUFFSIZE / 8` rounded to a block (512 KiB, `mesh-collective.c mesh_wire_of`), which is 32
-  chunks of 16 KiB and 128 frames of 4 KiB. The large class rides queue 0 and the small class queue 1
+  chunks of 16 KiB and 128 frames of 4 KiB. The small slot is the communicator's `small` (one block where none is
+  given; the pair's decode passes 3,072 bytes, one frame), on a ring whose slots start a block apart (the transfer's
+  `invocation_pages`, its `bytes` the slot's). The large class rides queue 0 and the small class queue 1
   (`ring_bind(..., !large, ...)`). One slot per queue means ring index = queue = QP index.
 
 **Setup, once per session** (`nccl-mesh.c session_open`):
