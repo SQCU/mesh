@@ -628,3 +628,7 @@ different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) 
 every client at once, the node's processes and its neighbours; it keeps the mesh's map, each bridge's record of its
 ports flooded to every bridge (`mesh-plan.h` `mesh_map`, `mesh-stat`); and it forwards programs along their routes for
 members the cables do not join.
+
+The data flow of each, every word and buffer with its writer, its waiter and its failure path, cited to file and
+function: [design/bridge-dataflow.md](design/bridge-dataflow.md) (the bridge) and
+[design/collectives-dataflow.md](design/collectives-dataflow.md) (libnccl-mesh and its clients).
