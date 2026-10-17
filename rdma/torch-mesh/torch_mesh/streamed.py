@@ -30,6 +30,20 @@ them, only through them). An operation a coded matrix lacks is an error naming t
                                                           their gradients and the FFN against the decoded matrices;
                                                           each chosen instance against float64
 
+A decomposition operand names the instance a product runs as in place of the fit's choice (metal-microbench
+docs/kernels.md#decompositions): `spec_of('coop/M=64,SK=2,BANDS=1,J=1,LOADS=0,RING=32')` is an instance spec,
+Matrix.product, apply and ffn take it as `decomposition`, and decomposition_of gives the engine's entry for it (its
+kernel, args by ARGUMENTS' names, grid, threads, shares). The cooperative tensor's RING r >= 8 is the study's role split
+by rows (streamed.metal streamed_coop; restored from a9d17c7^ tools/streamed_gemv.metal streamed_gemm): SK producer
+simdgroups decode each tile once into a threadgroup ring and M / r consumers each multiply it by r rows of their own, at 32
+to 256 rows (a verify step's, a prefill chunk's). No fit prices it: it runs where an operand names it.
+
+  python -m torch_mesh.streamed decompose EXPORT NAME ... --form ROWS=SPEC ... --cold MIB --runs N --dispatches D --out ROWS
+                                                          each matrix's products at the named instances beside torch's
+                                                          fp16 product of the matrix decoded (and the fit's choice where
+                                                          the node has evidence), each against float64, timed by MPS
+                                                          events over copies past --cold MiB (_decompose)
+
 The instance fit (metal-microbench docs/kernels.md#the-instance-fit): an instance's time on a slice is a model of its
 units, t = c0 + smooth max(throughput, chain, bytes / bandwidth), the throughput the slice's tile visits, row work,
 planes, simdgroups, partials and register pressure over the node's cores, the chain a simdgroup's dependent steps over
@@ -449,7 +463,8 @@ def spec_arguments(spec, T, widths, finish=False):
     kernel = spec['kernel']
     values = dict({form: 0 for form in FORMS}, **spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
     if kernel == 'coop':
-        values['COOP'] = coop_slots()
+        slots = coop_slots()
+        values['COOP'] = slots if slots is not None or spec.get('RING', 0) < 8 else 0
     return kernel, tuple(values[name] for name in ARGUMENTS['panel' if kernel == 'panel_t' else kernel])
 
 
@@ -470,12 +485,51 @@ def spec_instance(spec, T, widths, finish=False):
 
 def launch(spec, outputs, rows):
     """An instance's threadgroups (x, y), threads and K shares on a slice of `outputs` coded rows at `rows` input rows (a
-    ring's band its producers and its consumers)."""
+    ring's band its producers and its consumers: RING 1 SK of each, the role split's (RING r >= 8) SK producers and M / r
+    consumers)."""
     if spec['kernel'] == 'panel':
         return (outputs // 32, -(-rows // spec['M'])), 256, 1
     if spec['kernel'] == 'couple':
         return (outputs // 32, 1), (64 if spec['APART'] else 32) * spec['SK'], 1
-    return (outputs // 32 // spec['BANDS'], spec['J']), 32 * spec['SK'] * spec['BANDS'] * (2 if spec.get('RING') else 1), spec['J']
+    ring = spec.get('RING', 0)
+    group = spec['SK'] + spec['M'] // ring if ring >= 8 else spec['SK'] * (2 if ring else 1)
+    return (outputs // 32 // spec['BANDS'], spec['J']), 32 * group * spec['BANDS'], spec['J']
+
+
+def spec_of(text):
+    """An instance spec from a decomposition operand's text, KIND/NAME=V,... (its template arguments by ARGUMENTS' names but
+    the slice's TILES and WIDTHS and the node's COOP, which spec_arguments supplies; a name not given 0): the restored role
+    split at 64 rows, for one, coop/M=64,SK=2,BANDS=1,J=1,LOADS=0,RING=32 (streamed.metal streamed_coop)."""
+    kernel, _, named = text.partition('/')
+    if kernel not in ARGUMENTS:
+        raise ValueError(f'{text}: KIND/NAME=V,..., KIND one of {sorted(ARGUMENTS)}')
+    given = dict(v.split('=', 1) for v in named.split(',') if v)
+    unknown = set(given) - set(ARGUMENTS[kernel]) - {'TILES', 'WIDTHS', 'COOP'}
+    if unknown or {'TILES', 'WIDTHS', 'COOP'} & set(given):
+        raise ValueError(f'{text}: {kernel}\'s arguments are {ARGUMENTS[kernel]}, TILES, WIDTHS and COOP the slice\'s and the node\'s')
+    spec = dict({k: int(given.get(k, 0)) for k in ARGUMENTS[kernel] if k not in ('TILES', 'WIDTHS', 'COOP', 'OUT')}, kernel=kernel)
+    if kernel == 'couple':
+        spec.update(BANDS=1, J=1, LUT=0)
+    return spec
+
+
+def admitted(spec, outputs, rows):
+    """Instance `spec` on a slice of `outputs` coded rows at `rows` input rows, or an error where the slice does not admit
+    it (its bands not a multiple of BANDS; a cooperative instance's rows past its M)."""
+    if spec['kernel'] != 'panel' and (outputs // 32) % spec.get('BANDS', 1):
+        raise ValueError(f'{spec}: {outputs // 32} bands, not a multiple of its BANDS')
+    if spec['kernel'] == 'coop' and rows > spec['M']:
+        raise ValueError(f'{spec}: {rows} rows past its M (the cooperative product holds every row in one threadgroup)')
+    return spec
+
+
+def decomposition_of(spec, outputs, columns, widths, rows):
+    """A decomposition operand's entry for instance `spec` on a slice of `outputs` x `columns` (width class `widths`) at
+    `rows` input rows (metal-microbench docs/kernels.md#decompositions: {"kernel", "args", "names", "grid", "threads",
+    "shares"}, the args in ARGUMENTS' order; admitted)."""
+    kernel, arguments = spec_arguments(admitted(spec, outputs, rows), columns // 32, widths)
+    grid, threads, shares = launch(spec, outputs, rows)
+    return {'kernel': kernel, 'args': list(arguments), 'names': list(ARGUMENTS[kernel]), 'grid': list(grid), 'threads': threads, 'shares': shares}
 
 
 def coop_slots():
@@ -674,11 +728,15 @@ class Matrix(torch.Tensor):
         a rotation basis) writing them."""
         return op == 'head' and self.rotation is not None
 
-    def dispatch(self, rows, op='product'):
-        """The instance of a product of `rows` coded input rows on this node (the instance fit's choice): its spec, name and
-        instantiation, threadgroups x and y, threads, K shares."""
-        spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op), widths=self.widths)
-        if spec['kernel'] == 'coop' and coop_slots() is None:
+    def dispatch(self, rows, op='product', decomposition=None):
+        """The instance of a product of `rows` coded input rows on this node: the `decomposition` operand's (an instance
+        spec: spec_of) where given, else the instance fit's choice; its spec, name and instantiation, threadgroups x and y,
+        threads, K shares."""
+        if decomposition is not None:
+            spec = dict(admitted(decomposition, self.rows, rows))
+        else:
+            spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op), widths=self.widths)
+        if spec['kernel'] == 'coop' and spec.get('RING', 0) < 8 and coop_slots() is None:
             spec = dict(kernel='alu', R=rows_class(rows), SK=8, BANDS=1, J=spec['J'], F=1, LUT=0)
         (gx, gy), threads, shares = launch(spec, self.rows, rows)
         return (spec, *spec_instance(spec, self.tiles_, self.widths), gx, gy, threads, shares)
@@ -727,11 +785,12 @@ class Matrix(torch.Tensor):
                     _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256)
         return outs
 
-    def product(self, xt, op='product', tables=None):
+    def product(self, xt, op='product', tables=None, decomposition=None):
         """The product of coded inputs xt [n, columns]: partials [shares, n, rows] in coded row order, unscaled (past 16
-        rows one share, the panel's); `tables` (coded_input's) where the instance reads 1-bit tiles by tables."""
+        rows one share, the panel's, or the `decomposition`'s: dispatch); `tables` (coded_input's) where the instance reads
+        1-bit tiles by tables."""
         n = xt.shape[0]
-        spec, name, line, gx, gy, threads, shares = self.dispatch(n, op)
+        spec, name, line, gx, gy, threads, shares = self.dispatch(n, op, decomposition)
         assert (tables is not None) == bool(spec.get('LUT')), f'{name}: tables where it reads them'
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
         buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, self.row_order, self.row_scale] if n > 16 else [])
@@ -764,12 +823,13 @@ class Matrix(torch.Tensor):
                 -(-(n * k) // 256), 1, 256)
         return y
 
-    def apply(self, xt):
-        """The product of coded inputs xt [n, columns] finished: y [n, rows] fp16 at its logical rows."""
+    def apply(self, xt, decomposition=None):
+        """The product of coded inputs xt [n, columns] finished: y [n, rows] fp16 at its logical rows (the
+        `decomposition`'s instance where given: dispatch; its partials finished by streamed_finish unless it is a panel)."""
         n = xt.shape[0]
-        if n <= 16:
-            return self.finish(self.product(xt))
-        _, name, line, gx, gy, threads, _ = self.dispatch(n)
+        if (n <= 16 if decomposition is None else decomposition['kernel'] != 'panel'):
+            return self.finish(self.product(xt, decomposition=decomposition))
+        _, name, line, gx, gy, threads, _ = self.dispatch(n, decomposition=decomposition)
         y = _half(n, self.rows)
         _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // 8), stride=self.rows, finish=1,
@@ -799,27 +859,29 @@ class Matrix(torch.Tensor):
         return y if factor is None else (y.float() / factor[:, None]).to(dtype)
 
     @staticmethod
-    def ffn(x, gate, up, down):
+    def ffn(x, gate, up, down, decomposition=None):
         """The fused GELU FFN couple down(GELU(x gate^T) * (x up^T)) of coded matrices sharing the hidden order (gate's
         and up's rows, down's columns: Streamed's FFNs), x [n, columns]: the input rotated or gathered once for gate and
         up; gate and up together in one kernel with the GELU in its reduction (streamed_couple) where the fit prices it
-        below their two products and streamed_gelu (couple), else those; down's coded input, down's product finished."""
+        below their two products and streamed_gelu (couple), else those; down's coded input, down's product finished.
+        A `decomposition` (an instance spec: spec_of) runs the three products as that instance, gate's and up's then
+        streamed_gelu."""
         x16 = x.half().contiguous()
         n = x16.shape[0]
         gx, ux = gate.coded_input(x16, (up,))
         hidden = _half(n, gate.rows)
-        spec, _ = couple(Fit.node(), slice_units(gate), slice_units(up), n, widths=max(gate.widths, up.widths))
+        spec = None if decomposition is not None else couple(Fit.node(), slice_units(gate), slice_units(up), n, widths=max(gate.widths, up.widths))[0]
         if spec is not None:
             name, line = spec_instance(spec, gate.tiles_, max(gate.widths, up.widths))
             (groups, _), threads, _ = launch(spec, gate.rows, n)
             _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, None, gate.row_scale],
                     _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), groups, 1, threads, line)
             return down.apply(hidden).to(x.dtype)
-        g, u = gate.product(gx), up.product(ux)
+        g, u = gate.product(gx, decomposition=decomposition), up.product(ux, decomposition=decomposition)
         _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
                 _dims(outputs=gate.rows, shares=g.shape[0], inputs=u.shape[0], split=n * gate.rows),
                 -(-gate.rows // 1024), n, 256)
-        return down.apply(hidden).to(x.dtype)
+        return down.apply(hidden, decomposition).to(x.dtype)
 
 
 def pair_units(sg, su):
@@ -1636,6 +1698,83 @@ def _probe(args):
           f'{_gpu_busy()} % after')
 
 
+def _gpu_us(calls, dispatches):
+    """GPU microseconds a dispatch: MPS events around `dispatches` calls, call i of them calls[i % len(calls)]."""
+    start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
+    start.record()
+    for i in range(dispatches):
+        calls[i % len(calls)]()
+    end.record()
+    torch.mps.synchronize()
+    return start.elapsed_time(end) * 1e3 / dispatches
+
+
+def _decompose(args):
+    """Each matrix NAME of the export's products at the instances named for their rows (--form ROWS=SPEC, spec_of: a
+    decomposition operand, the role split for one) beside torch's fp16 product of the same matrix decoded (the study's
+    baseline: a9d17c7^ metal-microbench tools/streamed_gemv.py bench, metal-microbench
+    docs/kernels.md#streaming-the-code-into-the-matmul) and, where this node has instance evidence, the fit's choice at
+    those rows: each instance's output finished and checked against float64 (`err`, its relative error), each form timed
+    by MPS events around --dispatches dispatches over copies past --cold MiB (_copies; the decoded fp16 matrix copied
+    likewise), --runs rounds over the forms interleaved after one not kept (the product alone: its finish is a consumer).
+    A JSON line a form and rows (kind decompose, naming this node) appended to --out; each rows' least times printed with
+    torch's over each."""
+    from . import _stream
+    torch.set_grad_enabled(False)
+    here, busy = list(node()), _gpu_busy()
+    named = {}
+    for e in args.form:
+        rows, _, text = e.partition('=')
+        named.setdefault(int(rows), []).append(spec_of(text))
+    try:
+        fit = Fit.node()
+    except RuntimeError as refused:
+        fit = None
+        print(f'no fit choice beside the named forms: {refused}', flush=True)
+    streamed = Streamed(args.export)
+    generator = torch.Generator().manual_seed(0)
+    for name in args.names:
+        m = streamed[name]
+        units = slice_units(m)
+        copies = _copies([m], units['bytes'], args.cold)
+        dense = m.dense()
+        weights = [dense] + [dense.clone() for _ in range(-(-(args.cold << 20) // (2 * dense.numel())))]
+        reference_w = dense.cpu().double()
+        x = (torch.randn(max(named), m.columns, generator=generator) * 0.5).half().to('mps')
+        for rows, specs in sorted(named.items()):
+            reference = x[:rows].cpu().double() @ reference_w.T
+            chosen = choose(fit, units, rows, widths=m.widths)[0] if fit is not None else None
+            if chosen is not None and chosen['kernel'] == 'coop' and chosen.get('RING', 0) < 8 and coop_slots() is None:
+                chosen = None
+            listed = [admitted(spec, m.rows, rows) for spec in specs] + ([chosen] if chosen is not None and chosen not in specs else [])
+            forms = _probe_forms(m, listed, rows, x, reference, copies, m.label)
+            xr, y = x[:rows].contiguous(), _half(rows, m.rows)
+            torch.mm(xr, dense.T, out=y)
+            calls = [[(lambda f=f, c=c: _stream.encode(f['h'], c, f['dims'], 15, f['gx'], f['gy'], f['threads'])) for c in f['sets']] for f in forms]
+            calls.append([(lambda w=w: torch.mm(xr, w.T, out=y)) for w in weights])
+            labels = [f['name'] for f in forms] + ['torch fp16']
+            errors = [f['err'] for f in forms] + [_relative(y.cpu().double(), reference)]
+            taken = [[] for _ in calls]
+            for r in range(args.runs + 1):
+                for i, c in enumerate(calls):
+                    t = _gpu_us(c, args.dispatches)
+                    if r:
+                        taken[i].append(t)
+            torch_us = min(taken[-1])
+            with open(args.out, 'a') as f:
+                for label, spec, t, err in zip(labels, listed + [None], taken, errors):
+                    t = sorted(t)
+                    f.write(json.dumps({'kind': 'decompose', 'node': here, 'matrix': name, 'shape': [m.rows, m.columns], 'widths': m.widths,
+                                        'rows': rows, 'form': label, 'spec': spec, 'fit': spec is not None and spec == chosen,
+                                        'best_us': t[0], 'median_us': t[len(t) // 2], 'err': err}) + '\n')
+            print(f'{name} [{m.rows} x {m.columns}] {rows} rows: torch fp16 {torch_us:.1f} us; '
+                  + '; '.join(f'{label} {min(t):.1f} us ({torch_us / min(t):.2f}x torch, err {err:.1e})' for label, t, err in zip(labels, taken, errors)
+                              if label != 'torch fp16'), flush=True)
+        del copies, weights, dense
+        torch.mps.empty_cache()
+    print(f'{args.out}: {here[0]} ({here[1]} GPU cores), GPU {busy} % busy before, {_gpu_busy()} % after')
+
+
 def lattice(record, axis, key=None):
     """The (extent, grain) of each of the call record's share decisions on `axis` (metal-microbench tools/mesh/programs.py
     decisions: 'column', 'head', 'row'), those whose keys name `key` where given ('<layer>.mlp', '<layer>.attention'),
@@ -1877,6 +2016,15 @@ def main():
     probe.add_argument('--runs', type=int, required=True, help='rounds over the forms interleaved, after one not kept')
     probe.add_argument('--dispatches', type=int, required=True, help='dispatches a sequence (one command buffer, its time over them)')
     probe.add_argument('--out', required=True, help='JSON lines the observations are appended to')
+    decompose = sub.add_parser('decompose')
+    decompose.add_argument('export')
+    decompose.add_argument('names', nargs='+', help="the export's matrices measured")
+    decompose.add_argument('--form', action='append', required=True,
+                           help="an instance at a rows count, ROWS=KIND/NAME=V,... (spec_of), e.g. 64=coop/M=64,SK=2,BANDS=1,J=1,LOADS=0,RING=32")
+    decompose.add_argument('--cold', type=int, required=True, help="MiB the copies of a matrix pass: more than the system cache holds")
+    decompose.add_argument('--runs', type=int, required=True, help='rounds over the forms interleaved, after one not kept')
+    decompose.add_argument('--dispatches', type=int, required=True, help='dispatches a round (MPS events around them)')
+    decompose.add_argument('--out', required=True, help='JSON lines the readings are appended to')
     fit = sub.add_parser('fit')
     fit.add_argument('observations', nargs='+')
     resolve = sub.add_parser('resolve')
@@ -1918,8 +2066,8 @@ def main():
     admit.add_argument('form', help='the form, H<h>')
     admit.add_argument('bar', type=float, help='the KL bar the record must be at or below (the operator\'s)')
     args = parser.parse_args()
-    {'check': _check, 'bandwidth': _bandwidth, 'probe': _probe, 'fit': _fit, 'resolve': _resolve, 'observe': _observe,
-     'epilogue': _epilogue, 'admit': _admit}[args.command](args)
+    {'check': _check, 'bandwidth': _bandwidth, 'probe': _probe, 'decompose': _decompose, 'fit': _fit, 'resolve': _resolve,
+     'observe': _observe, 'epilogue': _epilogue, 'admit': _admit}[args.command](args)
 
 
 if __name__ == '__main__':

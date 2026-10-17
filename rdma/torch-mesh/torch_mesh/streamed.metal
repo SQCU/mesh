@@ -29,7 +29,9 @@
 //   streamed_couple<R, SK, TILES, WIDTHS, F, APART, LOADS, H>      gate's and up's products together, GELU(gate) * up
 //   streamed_coop<M, SK, BANDS, J, TILES, WIDTHS, COOP, LOADS, RING>   8 to 16 rows: a tile decoded exactly into the right-input
 //       cooperative tensor of matmul2d<M, 32, 32> at the node's slots (COOP), one operation a tile; RING 1 the study's
-//       producer-consumer ring (producer simdgroups decoding into a double-buffered threadgroup ring, consumers multiplying)
+//       producer-consumer ring (producer simdgroups decoding into a double-buffered threadgroup ring, consumers multiplying);
+//       RING r >= 8 the study's role split by rows, 32 to 256 rows (a prefill chunk's): every consumer multiplying every
+//       producer's tile by r rows of its own
 //   streamed_panel<M, TILES, WIDTHS, LOADS>, streamed_panel_t<M, TILES, WIDTHS, LOADS>   prefill and the transposed product: eight
 //       tiles decoded into threadgroup memory in natural order, one operation a 256-wide panel
 //
@@ -950,6 +952,19 @@ static inline __attribute__((always_inline)) void fragment_ring(W w, half h, thr
     });
 }
 
+// A ring producer's step: the tile of word `word` (width b > 0) of the planes at `planes` decoded into its slot.
+template <uint WIDTHS, uint LOADS>
+static inline __attribute__((always_inline)) void fragment_ring_tile(uint word, device const uint *planes, threadgroup half *slot, uint lane) {
+    const uint b = (word >> 12) & 15u;
+    device const uint *from = planes + ((word & 0xFFFu) << 5);
+    const half h = half(0.5f * fragment_step(word));
+    uint w[FRAGMENT_MAX(WIDTHS)];
+    if (LOADS) fragment_load<WIDTHS, 1>(from, b, w);
+#define FRAGMENT_RING_TILE(B) { if (!LOADS) fragment_run<B>(from, w); fragment_ring<B>(w, h, slot, lane); }
+    FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_RING_TILE)
+#undef FRAGMENT_RING_TILE
+}
+
 // A simdgroup's destination acc into the share's partials at `at` (SK 1: rows below `rows`) or its band's sums in
 // threadgroup memory (the rows its slots name: the node's COOP map, or Natural, a ring's natural order).
 template <uint SK, uint COOP, bool Natural, typename A, typename P>
@@ -972,6 +987,14 @@ static inline void fragment_coop_out(thread A &acc, P stores, ulong at, uint out
 // band, the first SK producers decoding step s of their K parts into slot s & 1 of a threadgroup ring in natural order
 // (fragment_ring), the other SK consumers multiplying step s - 1's from slot (s - 1) & 1, STEPS + 1 stages of one barrier
 // each: the decode of one tile beside the operation of the one before it.
+// RING r >= 8 (a power of two to 64 dividing M; the study's role split by rows, a9d17c7^ streamed_gemm with its tokens
+// shared among consumers, metal-microbench docs/kernels.md#streaming-the-code-into-the-matmul: at 64 tokens 2 producers
+// and 2 consumers of 32 rows, at 128 4 and 4, a band a threadgroup): M rows (32 to 256: a decode's verify rows, a
+// prefill chunk's; the product's rows at most M), SK producers and M / r consumers a band, the producers decoding as
+// RING 1's, each producer's lane 0 writing its tile's width into `live`, and consumer c multiplying every producer's
+// slot of step s - 1 whose tile was nonzero by its rows [c r, c r + r) (matmul2d<r, 32, 32>), the band's K parts summed in
+// its destination, stored to the partials as it lies (no reduction in threadgroup memory); each tile decoded once for
+// all M rows.
 template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COOP, uint LOADS, uint RING, typename E = streamed_plain>
 kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                           device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
@@ -982,7 +1005,13 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
                           uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
-    constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, SUMS = BANDS * SK * M * 32, GROUP = (RING ? 2 : 1) * SK;
+    constexpr bool SPLIT = RING >= 8;
+    constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, SUMS = SPLIT ? 0 : BANDS * SK * M * 32;
+    constexpr uint RR = RING ? RING : 1, GROUP = SPLIT ? SK + M / RR : (RING ? 2 : 1) * SK, OM = SPLIT ? RING : M;
+    static_assert(RING <= 1 || (RING >= 8 && RING <= 64 && (RING & (RING - 1)) == 0 && M % RR == 0),
+                  "RING 0, 1 (the paired ring) or the role split's consumer rows, a power of two from 8 to 64 dividing M");
+    static_assert(BANDS * GROUP <= 32, "a threadgroup of at most 1024 threads");
+    static_assert(!SPLIT || 2 * BANDS * SK * (32 * FRAGMENT_RING * 2 + 4) + 4 * E::stage <= 32768, "the role split's ring in 32 KB");
     threadgroup float region[SUMS > E::stage ? SUMS : E::stage];
     threadgroup float (*sums)[SK][M * 32] = (threadgroup float (*)[SK][M * 32])region;
     threadgroup half ring[RING ? 2 : 1][BANDS][SK][RING ? 32 * FRAGMENT_RING : 1];
@@ -992,27 +1021,46 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
     const uint bw = bands[band];
     const ulong at = ulong(group.y) * d.split + band * 32;
     auto X = tensor(xs + streamed_slab(bw, d.inputs, TILES * 32), dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
-    constexpr auto descriptor = matmul2d_descriptor(M, 32, 32, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    constexpr auto descriptor = matmul2d_descriptor(OM, 32, 32, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
     matmul2d<descriptor, execution_simdgroup> op;
     device const uint *words = tiles + band * pitch + first, *planes = codes + (streamed_base(bw) << 5) + lane;
-    const uint held = fragment_words<SK, STEPS>(words, span, part, lane);
-    if constexpr (RING) {
+    const uint held = !SPLIT || role < SK ? fragment_words<SK, STEPS>(words, span, part, lane) : 0u;
+    if constexpr (SPLIT) {
+        threadgroup uint live[2][BANDS][SK];
+        auto W = tensor(&ring[0][0][0][0], dextents<int, 2>{32, 32}, array<int, 2>{1, int(FRAGMENT_RING)});
+        auto acc = op.template get_destination_cooperative_tensor<decltype(X), decltype(W), float>();
+        for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
+        const uint row0 = role >= SK ? (role - SK) * RING : 0u;
+        for (uint s = 0; s <= STEPS; s++) {
+            if (role < SK && s < STEPS) {
+                const uint word = fragment_word<SK, STEPS>(held, words, span, part, s), b = (word >> 12) & 15u;
+                if (lane == 0) live[s & 1u][local][part] = b;
+                if (b != 0) fragment_ring_tile<WIDTHS, LOADS>(word, planes, ring[s & 1u][local][part], lane);
+            }
+            if (role >= SK && s > 0 && row0 < rows)
+                for (uint p = 0; p < SK; p++) {
+                    if (live[(s - 1) & 1u][local][p] == 0) continue;
+                    auto right = tensor(&ring[(s - 1) & 1u][local][p][0], dextents<int, 2>{32, 32}, array<int, 2>{1, int(FRAGMENT_RING)});
+                    const int k = int((first + p + (s - 1) * SK) * 32);
+                    if (row0 + RING <= rows) {
+                        auto a = X.slice<32, OM>(k, int(row0));
+                        op.run(a, right, acc);
+                    } else {
+                        auto a = X.slice(k, int(row0));
+                        op.run(a, right, acc);
+                    }
+                }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        if (role >= SK) fragment_coop_out<1, COOP, true>(acc, stores, at + ulong(row0) * d.outputs, d.outputs, rows - min(row0, rows), nullptr);
+    } else if constexpr (RING) {
         auto W = tensor(&ring[0][0][0][0], dextents<int, 2>{32, 32}, array<int, 2>{1, int(FRAGMENT_RING)});
         auto acc = op.template get_destination_cooperative_tensor<decltype(X), decltype(W), float>();
         for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
         for (uint s = 0; s <= STEPS; s++) {
             if (role < SK && s < STEPS) {
-                const uint word = fragment_word<SK, STEPS>(held, words, span, part, s), b = (word >> 12) & 15u;
-                if (b != 0) {
-                    device const uint *from = planes + ((word & 0xFFFu) << 5);
-                    const half h = half(0.5f * fragment_step(word));
-                    threadgroup half *slot = ring[s & 1u][local][part];
-                    uint w[FRAGMENT_MAX(WIDTHS)];
-                    if (LOADS) fragment_load<WIDTHS, 1>(from, b, w);
-#define FRAGMENT_RING_TILE(B) { if (!LOADS) fragment_run<B>(from, w); fragment_ring<B>(w, h, slot, lane); }
-                    FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_RING_TILE)
-#undef FRAGMENT_RING_TILE
-                }
+                const uint word = fragment_word<SK, STEPS>(held, words, span, part, s);
+                if ((word >> 12) & 15u) fragment_ring_tile<WIDTHS, LOADS>(word, planes, ring[s & 1u][local][part], lane);
             }
             if (role >= SK && s > 0 && (fragment_word<SK, STEPS>(held, words, span, part, s - 1) >> 12) & 15u) {
                 auto right = tensor(&ring[(s - 1) & 1u][local][part][0], dextents<int, 2>{32, 32}, array<int, 2>{1, int(FRAGMENT_RING)});
@@ -1053,7 +1101,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
         }
         fragment_coop_out<SK, COOP, false>(acc, stores, at, d.outputs, rows, sums[local][part]);
     }
-    if (SK > 1) {
+    if (SK > 1 && !SPLIT) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint i = thread_id; i < BANDS * M * 32; i += BANDS * GROUP * 32) {
             const uint which = i / (M * 32), n = (i / 32) % M, r = i % 32;
