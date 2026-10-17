@@ -107,12 +107,13 @@ class Partial:
 
 class _Backing:
     """One allocation of a program, by its record index: its numel and scalar; its storage made at realize where a
-    member's task touches it, else at its first host write or constant (the window's where the program crosses)."""
+    member's task touches it, else at its first host write or constant; in the node's bridge's window where a crossing
+    of this member reads or writes it."""
 
     def __init__(self, program, numel, scalar, transferable):
         self.program, self.numel, self.scalar, self.transferable = program, numel, scalar, transferable
         self.index = len(program._backings)
-        self.storage = None
+        self.storage, self.window = None, False
         program._backings.append(self)
 
     # design/algorithm-sources.md#programtensor
@@ -120,7 +121,7 @@ class _Backing:
         if self.storage is None:
             program = self.program
             self.storage = _native.allocate(self.numel, self.scalar, program.device,
-                                            self.transferable and program.size > 1)
+                                            self.window and self.transferable and program.size > 1)
         return self.storage
 
 
@@ -779,6 +780,10 @@ class Program:
             for u in updaters:
                 named[u].guarding.append(named[a])
         self._local = [task for task in local if self.rank in task.owners]
+        for task in self._local:
+            if task.crossing:
+                for ref in itertools.chain(*self._roles(task, self.rank)):
+                    ref.backing.window = True
         for task in self._local:
             for ref in itertools.chain(*self._roles(task, self.rank)):
                 ref.backing.flat()

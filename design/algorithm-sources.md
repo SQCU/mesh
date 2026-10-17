@@ -28,8 +28,8 @@ edge is empty (a region is reused only once its readers finished: storage of cap
 bounded channels), a host write a token on the edges of the block it fills, a call whose inputs are all constants
 firing once. Kernels run on one compute thread, the ready call earliest by row, then record. Operands are torch
 tensors (`Ref.tensor`; `Ref.array` and `write` give NumPy views of CPU ones), each backing allocated where a member's
-call touches it, in the node's bridge's window when the program crosses (`torch_mesh.backend.blank`, over
-`mesh.lease`). Every wait is bounded by the program's `timeout` (default 10 s, mesh.h `MESH_SILENT_NS`'s bound);
+call touches it, in the node's bridge's window where a crossing of that member reads or writes it
+(`torch_mesh.backend.blank`, over `mesh.lease`). Every wait is bounded by the program's `timeout` (default 10 s, mesh.h `MESH_SILENT_NS`'s bound);
 a failure is a value (`Program.report`, `MeshError`) and the caller makes the program again. The package's import
 name is `mesh`, the name `rdma/mesh.py` also takes: importing it loads that module from the same checkout and carries
 its names (`ffi`, `lib`, `lease`, `current`, ...), so `torch_mesh` and `mesh_mpi` find what they import; a program
