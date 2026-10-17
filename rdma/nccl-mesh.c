@@ -1102,6 +1102,8 @@ static void violated(struct session *s) {
    cancelled it), every destination of the session is cancelled */
 /* how often a failed session's progress thread cancels its words again (progress_run) */
 #define RECANCEL_NS 10000000L
+/* how long the progress thread, a silent-link watcher, waits between its scans of a session's landings */
+#define WATCH_NS 1000000L
 
 static void *progress_run(void *argument) {
   struct session *s = argument;
@@ -1124,6 +1126,18 @@ static void *progress_run(void *argument) {
     if (moved) idle = now_s() + SILENT_S;
     else if (waiting && now_s() > idle)
       release_all(s, ncclRemoteError, "node %u landed nothing in %.0f s (mesh.h MESH_SILENT_NS): its links cancelled", silent, SILENT_S);
+    /* a watcher, never on a landing's path (the GPU and the host waits read the words themselves): between scans it
+       waits WATCH_NS or a wake (new targets, a failure, the stop), so it takes no core from the progress threads that
+       carry the crossings (metal-microbench docs/measurement.md 2026-10-17: a node's spinners descheduled ~13 ms) */
+    if (waiting && !moved && !atomic_load(&s->failed)) {
+      struct timespec until;
+      clock_gettime(CLOCK_REALTIME, &until);
+      until.tv_nsec += WATCH_NS;
+      if (until.tv_nsec >= 1000000000L) { until.tv_sec += 1; until.tv_nsec -= 1000000000L; }
+      pthread_mutex_lock(&s->lock);
+      if (!atomic_load(&s->stop)) pthread_cond_timedwait(&s->wake, &s->lock, &until);
+      pthread_mutex_unlock(&s->lock);
+    }
     if (!waiting || atomic_load(&s->failed)) {
       pthread_mutex_lock(&s->lock);
       while (!atomic_load(&s->stop) && (!outstanding(s) || atomic_load(&s->failed))) {
