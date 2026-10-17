@@ -230,6 +230,17 @@ def ask(node, service, data, timeout=None, need=0):
         return bytes(out)
 
 
+def run(node, command, data=b'', timeout=None):
+    """`command` run by the user's shell at `node` through its bridge's service `exec` (design/bridge-and-ipc.md#exec,
+    where the node's bridge configuration serves it), `data` its standard input: (its exit code, or -signal where a
+    signal ended it; its standard output and error, bytes).  OSError where no channel opened (EACCES: the node serves no
+    exec) or it failed, TimeoutError past `timeout`."""
+    out = ask(node, 'exec', command.encode() + b'\n' + data, timeout)
+    if len(out) < 4:
+        raise OSError(errno.EPROTO, f"node {node}'s exec ended without its status")
+    return os.waitstatus_to_exitcode(int.from_bytes(out[-4:], 'little', signed=True)), out[:-4]
+
+
 def serve(service, path):
     """`service` registered with this node's bridge as the Unix socket at `path` (a channel to it is a connection
     there): the socket whose life the registration lasts (closing it ends it; it reads end of file once the bridge

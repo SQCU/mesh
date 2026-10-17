@@ -10,6 +10,8 @@
 #include <sys/stat.h>
 #include <pwd.h>
 #include <libproc.h>
+#include <spawn.h>
+#include <signal.h>
 #include <ctype.h>
 #include <limits.h>
 #include <net/if.h>
@@ -2057,16 +2059,18 @@ static void lanes_heard(struct port *port,const struct message *heard){
 #define TAG_CHANNEL (UINT64_C(1)<<62)
 #define TAG_ASKING (UINT64_C(1)<<61)
 #define TAG_SERVING (UINT64_C(1)<<60)
-enum { END_SOCKET=1, END_PORT, END_OWN };
+enum { END_SOCKET=1, END_PORT, END_OWN, END_EXEC };
 struct end { int kind,fd,reading,writing,ended,told; struct port *port; uint64_t credit; unsigned char *queue; size_t queued,room; };
-struct channel { int used,open; uint64_t key,deadline; uint32_t origin,destination; char service[MESH_SERVICE_BYTES];
-  struct end end[2]; unsigned char *held; size_t held_bytes; };
+struct channel { int used,open,exited,status,drained,reported,child; pid_t pid; uint64_t key,deadline; uint32_t origin,destination;
+  char service[MESH_SERVICE_BYTES]; struct end end[2]; unsigned char *held; size_t held_bytes; };
 struct asking { int fd; uint64_t deadline; size_t got; struct mesh_request request; };
 struct serving { int fd; char service[MESH_SERVICE_BYTES],path[MESH_SERVICE_PATH]; };
 static struct channel channels[MESH_CHANNELS];
 static struct asking askings[MESH_CHANNELS];
 static struct serving servings[MESH_SERVICES];
 static uint32_t channel_sequence;
+static int exec_served;
+static pid_t orphans[MESH_CHANNELS];
 static void fd_watch(int fd,int filter,int on,uint64_t udata){
   struct kevent64_s event;EV_SET64(&event,(uint64_t)fd,filter,EV_ADD|(on?EV_ENABLE:EV_DISABLE),0,0,udata,0,0);
   kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
@@ -2090,6 +2094,10 @@ static void channel_end(struct channel *c,int64_t code,int from){
   struct channel was=*c;
   memset(c,0,sizeof *c);
   if(code)say("channel %u.%u to node %u's %s: %s\n",was.origin,(uint32_t)was.key,was.destination,was.service,strerror((int)code));
+  if(was.pid && !was.exited){
+    kill(-was.pid,SIGTERM);
+    for(uint32_t i=0;i<MESH_CHANNELS;i++)if(!orphans[i]){orphans[i]=was.pid;break;}
+  }
   for(int s=0;s<2;s++){
     struct end *e=was.end+s;
     if(e->kind==END_SOCKET && e->fd>=0){
@@ -2120,6 +2128,8 @@ static struct port *channel_hop(uint32_t node){
 }
 static void channel_pump(struct channel *c);
 static void hold_done(struct channel *c);
+static int64_t child_spawn(struct channel *c,int s);
+static void child_ended(struct channel *c);
 /* the bytes queued for end `t` given to it as far as it takes them, each granted back to the other end where it is a
    port; once none is left and the other end has ended, end `t` told so (a socket's write side shut, a port CHANNEL_SHUT, the
    bridge's own service answering) */
@@ -2133,6 +2143,20 @@ static void end_drain(struct channel *c,int t){
       if(sent<0 && (errno==EAGAIN || errno==EINTR))break;
       if(sent<=0){channel_end(c,sent?errno:EPIPE,-1);return;}
       n=(size_t)sent;
+    }else if(e->kind==END_EXEC){
+      const unsigned char *line=memchr(e->queue+given,'\n',n);
+      if(line)n=(size_t)(line-(e->queue+given))+1;
+      if(c->held_bytes+n>MESH_HOLD_BYTES){channel_end(c,EMSGSIZE,-1);return;}
+      unsigned char *grown=realloc(c->held,c->held_bytes+n+1);
+      if(!grown){channel_end(c,ENOMEM,-1);return;}
+      c->held=grown;memcpy(c->held+c->held_bytes,e->queue+given,n);c->held_bytes+=n;
+      if(o->kind==END_PORT)channel_say(c,1-t,CHANNEL_WINDOW,n,0,NULL,0);
+      given+=n;
+      if(!line)continue;
+      memmove(e->queue,e->queue+given,e->queued-given);e->queued-=given;given=0;
+      const int64_t error=child_spawn(c,t);
+      if(error){channel_end(c,error,-1);return;}
+      continue;
     }else if(e->kind==END_PORT){
       n=MIN(n,MIN(e->credit,MESH_PACKET));
       if(!n)break;
@@ -2152,6 +2176,10 @@ static void end_drain(struct channel *c,int t){
   if(e->kind==END_SOCKET){
     const int want=e->queued>0;
     if(want!=e->writing){e->writing=want;fd_watch(e->fd,EVFILT_WRITE,want,channel_udata(c,t));}
+  }
+  if(!e->queued && o->ended && !e->told && e->kind==END_EXEC){
+    const int64_t error=child_spawn(c,t);
+    if(error){channel_end(c,error,-1);return;}
   }
   if(!e->queued && o->ended && !e->told){
     e->told=1;
@@ -2177,7 +2205,7 @@ static void end_put(struct channel *c,int t,const void *bytes,size_t n){
 static void channel_pump(struct channel *c){
   for(int s=0;s<2;s++){
     struct end *e=c->end+s,*o=c->end+(1-s);
-    if(e->kind!=END_SOCKET || e->ended)continue;
+    if(e->kind!=END_SOCKET || e->ended || (c->pid && s==c->child && c->drained))continue;
     const int want=c->open && !o->queued && (o->kind!=END_PORT || o->credit>0);
     if(want!=e->reading){e->reading=want;fd_watch(e->fd,EVFILT_READ,want,channel_udata(c,s));}
   }
@@ -2191,7 +2219,11 @@ static void end_read(struct channel *c,int s){
   ssize_t got=recv(e->fd,block,room,0);
   if(got<0 && (errno==EAGAIN || errno==EINTR))return;
   if(got<0){channel_end(c,errno,-1);return;}
-  if(!got){e->ended=1;e->reading=0;fd_watch(e->fd,EVFILT_READ,0,channel_udata(c,s));end_drain(c,1-s);return;}
+  if(!got){
+    e->reading=0;fd_watch(e->fd,EVFILT_READ,0,channel_udata(c,s));
+    if(c->pid && s==c->child){c->drained=1;child_ended(c);return;}
+    e->ended=1;end_drain(c,1-s);return;
+  }
   end_put(c,1-s,block,(size_t)got);
 }
 /* #holds: the bridge's own service: one line, `<name> <the unix second it ends> <why>`, written to
@@ -2250,6 +2282,24 @@ static int64_t service_open(struct channel *c,int s,uint64_t bytes){
   const int64_t refused=admitted(c,bytes);
   if(refused)return refused;
   if(!strcmp(c->service,"hold")){e->kind=END_OWN;return 0;}
+  if(!strcmp(c->service,"exec")){
+    if(!exec_served)return EACCES;
+    e->kind=END_EXEC;return 0;
+  }
+  if(!strcmp(c->service,"nodeinfo")){
+    static const uint16_t served[]={8100,8099};
+    int64_t error=ECONNREFUSED;
+    for(size_t i=0;i<sizeof served/sizeof *served;i++){
+      struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(served[i]),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
+      int fd=socket(AF_INET6,SOCK_STREAM,0),on=1,bound=1;
+      if(fd<0)return errno;
+      if(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) || setsockopt(fd,IPPROTO_TCP,TCP_CONNECTIONTIMEOUT,&bound,sizeof bound) ||
+         connect(fd,(struct sockaddr *)&to,sizeof to) || fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK)){error=errno;close(fd);continue;}
+      e->kind=END_SOCKET;e->fd=fd;
+      return 0;
+    }
+    return error;
+  }
   for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0 && !strcmp(servings[i].service,c->service)){
     struct sockaddr_un to={.sun_family=AF_UNIX};
     snprintf(to.sun_path,sizeof to.sun_path,"%s",servings[i].path);
@@ -2261,6 +2311,70 @@ static int64_t service_open(struct channel *c,int s,uint64_t bytes){
     return 0;
   }
   return ENOENT;
+}
+/* #exec: the bridge's own service `exec`, where its configuration serves it: the request's first line a command run by
+   the user's shell (-c) in its home, its process group its own and every descriptor but its standard ones closed
+   (POSIX_SPAWN_CLOEXEC_DEFAULT: no device or socket of the bridge's), the rest of the request its standard input, and
+   the answer its standard output and error, then its wait status (int32), once both have ended; a channel that fails
+   while it runs sends its group SIGTERM */
+static int64_t child_spawn(struct channel *c,int s){
+  struct end *e=c->end+s;
+  int pair[2],on=1;
+  const struct passwd *user=getpwuid(getuid());
+  if(!user)return ENOENT;
+  if(socketpair(AF_UNIX,SOCK_STREAM,0,pair))return errno;
+  c->held=c->held?c->held:malloc(1);
+  size_t n=c->held_bytes;
+  while(n && (c->held[n-1]=='\n' || c->held[n-1]=='\r'))n--;
+  c->held[n]=0;
+  char *shell=user->pw_shell && *user->pw_shell?user->pw_shell:"/bin/zsh",temp[PATH_MAX]="/tmp";
+  confstr(_CS_DARWIN_USER_TEMP_DIR,temp,sizeof temp);
+  char home[PATH_MAX+8],name[256],login[256],shelled[PATH_MAX+8],tmpdir[PATH_MAX+8];
+  snprintf(home,sizeof home,"HOME=%s",user->pw_dir);snprintf(name,sizeof name,"USER=%s",user->pw_name);
+  snprintf(login,sizeof login,"LOGNAME=%s",user->pw_name);snprintf(shelled,sizeof shelled,"SHELL=%s",shell);
+  snprintf(tmpdir,sizeof tmpdir,"TMPDIR=%s",temp);
+  char *argv[]={shell,"-c",(char *)c->held,NULL};
+  char *envp[]={home,name,login,shelled,tmpdir,"PATH=/usr/bin:/bin:/usr/sbin:/sbin","LANG=en_US.UTF-8",NULL};
+  posix_spawn_file_actions_t actions;posix_spawnattr_t attributes;
+  sigset_t every,none;sigfillset(&every);sigemptyset(&none);
+  posix_spawn_file_actions_init(&actions);posix_spawnattr_init(&attributes);
+  for(int k=0;k<3;k++)posix_spawn_file_actions_adddup2(&actions,pair[1],k);
+  posix_spawn_file_actions_addchdir(&actions,user->pw_dir);
+  posix_spawnattr_setflags(&attributes,POSIX_SPAWN_CLOEXEC_DEFAULT|POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_SETSIGDEF|POSIX_SPAWN_SETSIGMASK);
+  posix_spawnattr_setpgroup(&attributes,0);posix_spawnattr_setsigdefault(&attributes,&every);posix_spawnattr_setsigmask(&attributes,&none);
+  pid_t pid=0;
+  const int error=posix_spawn(&pid,shell,&actions,&attributes,argv,envp);
+  posix_spawn_file_actions_destroy(&actions);posix_spawnattr_destroy(&attributes);
+  close(pair[1]);
+  if(error){close(pair[0]);return error;}
+  if(fcntl(pair[0],F_SETFL,fcntl(pair[0],F_GETFL)|O_NONBLOCK) || setsockopt(pair[0],SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on)){
+    kill(-pid,SIGTERM);close(pair[0]);c->pid=pid;return errno?errno:EIO;
+  }
+  e->kind=END_SOCKET;e->fd=pair[0];c->pid=pid;c->child=s;
+  struct kevent64_s watch;EV_SET64(&watch,(uint64_t)pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,UINT64_MAX,0,0);
+  kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+  say("exec from node %u, pid %d: %.200s\n",c->origin,pid,c->held);
+  channel_pump(c);
+  return 0;
+}
+/* a child's output ended and its process exited: its wait status sent after its output, and its end ended */
+static void child_ended(struct channel *c){
+  if(!c->exited){
+    int status=0;
+    const pid_t done=waitpid(c->pid,&status,WNOHANG);
+    if(done==c->pid){c->exited=1;c->status=status;}
+  }
+  if(!c->exited || !c->drained || c->reported)return;
+  int32_t status=(int32_t)c->status;
+  c->reported=1;c->end[c->child].ended=1;
+  end_put(c,1-c->child,&status,sizeof status);
+}
+/* a process exited: an exec's child whose channel awaits it, or one whose channel ended, reaped */
+static void child_heard(pid_t pid){
+  for(uint32_t i=0;i<MESH_CHANNELS;i++){
+    if(orphans[i]==pid && waitpid(pid,NULL,WNOHANG)==pid)orphans[i]=0;
+    if(channels[i].used && channels[i].pid==pid && !channels[i].exited)child_ended(channels+i);
+  }
 }
 /* a client's request read whole: a channel opened toward its node's service (here, or its CHANNEL_OPEN sent to the next hop),
    or a service registered */
@@ -2393,6 +2507,14 @@ static void requests_turn(void){
       channel_end(c,ETIMEDOUT,up?0:-1);
     }
     if(askings[i].fd>=0 && now>askings[i].deadline){close(askings[i].fd);askings[i].fd=-1;}
+    if(orphans[i] && waitpid(orphans[i],NULL,WNOHANG)==orphans[i])orphans[i]=0;
+    if(c->used && c->pid && !c->exited)child_ended(c);
+    /* a socket end that has ended its input and since been reset (a client's abort: its close with SO_LINGER 0)
+       fails its channel */
+    for(int k=0;c->used && k<2;k++)if(c->end[k].kind==END_SOCKET && c->end[k].ended && c->end[k].fd>=0){
+      int error=0;socklen_t size=sizeof error;
+      if(!getsockopt(c->end[k].fd,SOL_SOCKET,SO_ERROR,&error,&size) && error){channel_end(c,error,-1);break;}
+    }
   }
 }
 /* a port lost: every channel with an end on it fails, each other end told (#requests) */
@@ -2891,6 +3013,8 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   const char *refused=NULL;
   CFTypeRef named=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("name")):NULL;
   CFTypeRef sized=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("window")):NULL;
+  CFTypeRef executes=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("exec")):NULL;
+  exec_served=executes && CFGetTypeID(executes)==CFBooleanGetTypeID() && CFBooleanGetValue(executes);
   int64_t value=0;
   if(!list || CFGetTypeID(list)!=CFDictionaryGetTypeID())refused="not a property list of a configuration (rdma/bridge_configuration.py writes it)";
   else if(!named || CFGetTypeID(named)!=CFStringGetTypeID() || !CFStringGetCString(named,name,(CFIndex)room,kCFStringEncodingUTF8))refused="its name is missing";
@@ -3053,6 +3177,7 @@ int main(int argc,char **argv){
       struct kevent64_s *e=ready+i;
       if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
       else if(e->filter==EVFILT_PROC){
+        child_heard((pid_t)e->ident);
         for(uint32_t s=0;s<MESH_CLIENTS;s++){
           uint64_t owner=atomic_load(&((struct mesh_client *)((char *)M+M->client_off))[s].owner);
           if(owner && (uint32_t)owner==(uint32_t)e->ident)mesh_retire(M,owner);

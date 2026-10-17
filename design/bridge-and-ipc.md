@@ -16,7 +16,7 @@ The bridge's work, and nothing else:
   them, and forwards the programs whose routes pass through its node (`#protocol`, `#flows`, `#routes`), over queue
   pairs and threads it holds a link and a port, not a program and a hop (`#lanes`, `#progress`, `#cables`);
 - it carries requests, its clients' to the services of any node and its neighbours' to its own node's, admitting each
-  against its node's memory, and serves holds (`#requests`);
+  against its node's memory, and serves holds, its node's node-info and, where configured, commands (`#requests`);
 - it tells a program's failure, naming the node, to the program and the peer (design/recovery.md).
 
 Operator, 2026-10-14 (D10): "clients are clients, bridge services are bridge services. clients shouldn't know anything
@@ -324,6 +324,28 @@ is under a sixteenth of the node's (1.5 GiB on the Mini, 8 GiB on the M5), it lo
 runs, by physical footprint (`memory low: ...; largest: <name> (<pid>) <GiB>, ...`). It logs this as the condition
 begins and every minute while it lasts. That names what holds memory outside the window, whether the holder is a
 bridge client or not (the 2026-10-16 builders were not); the bridge never ends a process for it.
+
+### exec
+
+Where its configuration states `exec = true` (etc/bridge/README.md), the bridge runs its peers' commands as its user,
+as PRRTE's daemons launch a job's processes and forward their output once ssh has started the daemons.
+
+- **The request.** Its first line is a command, which the user's shell runs (`-c`) in the user's home. The rest of
+  the request is the command's standard input.
+- **The answer.** The command's standard output and error, then its wait status (int32, little-endian), once both its
+  output has ended and its process has exited (`mesh.run` returns the exit code, or -signal, with the output).
+- **Isolation.** Its process group is its own. It holds no descriptor but its standard three
+  (POSIX_SPAWN_CLOEXEC_DEFAULT: none of the bridge's devices or sockets). Its environment is HOME, USER, LOGNAME,
+  SHELL, TMPDIR, LANG and PATH=/usr/bin:/bin:/usr/sbin:/sbin; the shell's own startup file (zsh's .zshenv) adds to it.
+- **Aborts.** A channel that fails while the command runs sends its process group SIGTERM, and the bridge reaps it. A
+  client aborts by resetting its connection (closing it with SO_LINGER 0); its bridge notices a reset even after the
+  client has ended its input.
+- **Trust.** Any node on a cable to this one may run commands here once `exec` is served, as it may already write
+  into the window.
+
+The bridge also serves `nodeinfo`: a channel to it is a connection to the node's own node-info (io.mesh.nodeinfo,
+[::1]:8100, else 8099), so a driver reads every node's node-info by its bridge number. It needs no address and checks
+no identity.
 
 ### holds
 

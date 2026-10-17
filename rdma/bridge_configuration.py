@@ -1,8 +1,10 @@
 """The bridge's configuration, one operand its consumer passes (design/prepared-machine.md#M09, etc/bridge/README.md): a
 document in JSON, TOML or YAML, by its extension, read here into the one canonical form the bridge reads, a property
-list of its name (the document's stem), its purpose and its window in bytes.  A document states its `purpose` and its
-window, either `window_gib` (GiB) or `window_percent` (of the node's physical memory, read where this runs: the node's
-own bin/mesh-user.sh), and nothing else; the window is at most the node's memory.  There is no default.
+list of its name (the document's stem), its purpose, its window in bytes and whether it serves `exec`.  A document
+states its `purpose` and its window, either `window_gib` (GiB) or `window_percent` (of the node's physical memory, read
+where this runs: the node's own bin/mesh-user.sh), and may state `exec`, true where the bridge runs its peers' commands
+as its user (design/bridge-and-ipc.md#exec; a document that does not state it true serves none), and nothing else; the
+window is at most the node's memory.  There is no default.
 
     python bridge_configuration.py DOCUMENT CANONICAL"""
 import json
@@ -26,7 +28,8 @@ def memory():
 
 
 def load(path):
-    """The document at `path` as the bridge reads it, {'name', 'purpose', 'window'}; ValueError naming what it lacks."""
+    """The document at `path` as the bridge reads it, {'name', 'purpose', 'window', 'exec'}; ValueError naming what it
+    lacks."""
     path = Path(path)
     reader = READERS.get(path.suffix.lower())
     if reader is None:
@@ -34,7 +37,7 @@ def load(path):
     document = reader(path.read_bytes())
     if not isinstance(document, dict):
         raise ValueError(f'{path}: a bridge configuration is a table of its purpose and its window')
-    unknown = sorted(set(document) - {'purpose', *SIZES})
+    unknown = sorted(set(document) - {'purpose', 'exec', *SIZES})
     if unknown:
         raise ValueError(f'{path}: {", ".join(unknown)}: no key of a bridge configuration')
     purpose = document.get('purpose')
@@ -49,7 +52,9 @@ def load(path):
     window = SIZES[sizes[0]](value, total)
     if window > total:
         raise ValueError(f'{path}: a window of {window} bytes is more than the node\'s {total} bytes of memory')
-    return {'name': path.stem, 'purpose': ' '.join(purpose.split()), 'window': window}
+    if not isinstance(document.get('exec', False), bool):
+        raise ValueError(f'{path}: exec is true or false')
+    return {'name': path.stem, 'purpose': ' '.join(purpose.split()), 'window': window, 'exec': document.get('exec', False)}
 
 
 if __name__ == '__main__':

@@ -15,6 +15,9 @@ A document has two keys:
 
 - `purpose`: one line stating what the configuration is for (required).
 - the window, exactly one of `window_gib` (GiB) or `window_percent` (of the node's physical memory).
+- `exec` (optional): true where the bridge runs its peers' commands as its user, its own service `exec`
+  (design/bridge-and-ipc.md#exec). Any node on a cable to this one may then run commands here, as it may already write
+  into the window. A document that does not state it true serves none.
 
 The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
 when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
