@@ -13,7 +13,9 @@
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-#define MESH_VERSION 117u
+/* 118: the stripe request rings (`rings_off`, struct mesh_requests) and the STRIPES and STREAM messages
+   (design/bridge-dataflow.md#stripes, #streams) */
+#define MESH_VERSION 118u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -139,7 +141,27 @@ struct hdr {
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length,boot;
   _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
   _Atomic uint64_t bell[MESH_PORTS];
+  uint64_t rings_off;
 };
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe's request rings, on the resident bridge): the rings of stripe
+   requests the node's clients registered (mesh-call.h mesh_requests_create), MESH_RINGS region offsets at `rings_off`,
+   each a client's struct mesh_requests, 0 vacant.  A stripe request writes the `bytes` bytes at byte `offset` of this
+   node's window (the arena, from data_off) to the same offset of the window of node `node`, a neighbour on a cable,
+   with no program at the peer, and stores `value` into the word at region offset `word` (0: none) on both nodes as the
+   RDMA driver completes it: the writer's once its last SEND completes, the peer's once its last receive lands; a
+   request the bridge cannot carry stores UINT64_MAX into the writer's word (mesh_cancel's convention) and counts in its
+   ring's `failed`, its code in `code`.  Request k of a ring is its entry k mod `entries` once that entry's `ready` is
+   k + 1 (stored last, release) by whoever writes it (a thread of any process, or a GPU); `taken` is how many the bridge
+   has taken (it only grows), so an entry is written again only once the request it held is taken; `head` is the next
+   request's number for host writers (mesh_write takes it atomically); `owner` the client slot whose lease the ring is
+   (its retirement deregisters the ring), `at` the ring's own region offset */
+#define MESH_RINGS 256
+struct mesh_stripe { _Alignas(64) _Atomic uint64_t ready; uint64_t offset,bytes,word,value; uint32_t node,padding; uint64_t reserved[2]; };
+struct mesh_requests { _Alignas(128) _Atomic uint64_t taken; uint64_t entries,owner,at; _Atomic uint64_t failed; _Atomic int64_t code;
+  _Alignas(64) _Atomic uint64_t head; uint64_t reserved[7]; struct mesh_stripe request[]; };
+_Static_assert(sizeof(struct mesh_stripe)==64 && offsetof(struct mesh_requests,head)==64 && offsetof(struct mesh_requests,request)==128,
+  "stripe requests");
+static inline _Atomic uint64_t *mesh_rings(struct hdr *m){ return (_Atomic uint64_t *)((char *)m+m->rings_off); }
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */
@@ -256,7 +278,8 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
 /* design/algorithm-sources.md#programkernel_call; design/prepared-machine.md#M01 */
 /* design/bridge-and-ipc.md#region; design/prepared-machine.md#M09: the node's region: `pages` arena pages of `block`
    pages a block (the bridge's window, its node's configured share of its memory), a page-table row a block (its page
-   entry, buffer and delivery, 64 bytes, and a bit in each plane), the node's ports and the client slots; a program's
+   entry, buffer and delivery, 64 bytes, and a bit in each plane), the node's ports, the client slots and the stripe
+   request rings' table (MESH_RINGS words); a program's
    publication targets are no part of it but a section of the program's slot (mesh_row_targets), nor are the map's
    records, a lease the bridge takes from the arena (mesh_records); the arena is registered whole on every port's device
    before any queue pair exists (mesh-verbs.h device_up) */
@@ -270,7 +293,8 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)MESH_PORTS*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->client_off=at; at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_client); at=(at+pgsz-1)/pgsz*pgsz;
-  h->delivery_off=at; at+=(uint64_t)rows*sizeof(struct mesh_delivery);
+  h->delivery_off=at; at+=(uint64_t)rows*sizeof(struct mesh_delivery); at=(at+pgsz-1)/pgsz*pgsz;
+  h->rings_off=at; at+=(uint64_t)MESH_RINGS*sizeof(uint64_t);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)arena*pgsz;
   h->length=at; return at;

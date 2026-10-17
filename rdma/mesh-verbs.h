@@ -105,6 +105,27 @@ static int down_pair(struct mesh_verbs *provider){
   free(provider->queues);provider->queues=NULL;provider->count=0;
   return 1;
 }
+/* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": each queue pair moved to the error state, so the
+   device ends its posted receives and SENDs (flushed, IBV_WC_WR_FLUSH_ERR) before it is destroyed, and its completion
+   queues drained of what that returns until `polls` polls in a row take none; the completions drained.  A queue pair
+   whose move is refused is destroyed as down_pair destroys it.  The stripe flow's teardown takes it (mesh-flow.c
+   stripes_job); every other teardown destroys its queue pairs as they stand. */
+static uint32_t pair_flush(struct mesh_verbs *provider,uint32_t polls){
+  for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
+    struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
+    ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE);
+  }
+  uint32_t drained=0,empty=0;
+  struct ibv_wc done[16];
+  while(empty<polls){
+    int taken=0;
+    struct ibv_cq *queues[2]={provider->completion,provider->sent};
+    for(int c=0;c<2;c++)if(queues[c]){const int n=ibv_poll_cq(queues[c],16,done);if(n>0)taken+=n;}
+    if(taken){drained+=(uint32_t)taken;empty=0;}
+    else empty++;
+  }
+  return drained;
+}
 /* design/RDMA-KERNEL-RECOVERY.md: registrations, protection domain, context, each kept where its release fails; a
    device's registrations go only here, at its retirement (design/prepared-machine.md#M09) */
 static int down_device(struct mesh_device *device){

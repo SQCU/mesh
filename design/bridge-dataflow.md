@@ -4,7 +4,8 @@ Where each byte and word of the mesh bridge goes: who writes it, who waits on it
 reasons for the design are in [bridge-and-ipc.md](bridge-and-ipc.md) (the bridge), [recovery.md](recovery.md) (loss
 and recovery) and [heterogeneity.md](heterogeneity.md) (link costs and shares); this page repeats none of them.
 
-Conventions. The page describes the code at mesh `725a3dfb` (`MESH_VERSION` 117). A file name with no directory is in
+Conventions. The page describes the code at mesh `725a3dfb` (`MESH_VERSION` 117); its Stripes section, the guard and
+the STRIPES message, MESH_VERSION 118. A file name with no directory is in
 `rdma/`. A citation is `file function`. Line numbers are given only where the code is ambiguous. "Word" means an
 8-byte atomic in the shared region. "Block" is `hdr.block * hdr.pgsz`. The bridge always starts with `block` = 1
 (`mesh-flow.c main`: `mesh_layout(&geometry,pg,1,...)`), so a block is one 16 KiB page on Apple silicon, and a row is
@@ -41,6 +42,7 @@ buffer_off    struct mesh_buffer[rows]       owner (client owner word), closed, 
 link_off      struct mesh_link_info[8]       the port table
 client_off    struct mesh_client[64]         client slots
 delivery_off  struct mesh_delivery[rows]     device_input (region offset of a landing word), device_stride
+rings_off     uint64_t[MESH_RINGS]          the stripe request rings' region offsets, 0 vacant (#stripes)
 data_off      ARENA = the window: arena pages, registered on every port's device
 ```
 
@@ -59,7 +61,8 @@ Every time a client or reader maps the region, it checks the region's `magic` an
 | `health` | bridge (`health_put`) | `mesh_nodes_health` | a second seqlock for health-only record changes |
 | `busy`, `idle_since` | bridge (`busy_tell`) | `mesh_busy`, `mesh-stat` | flows plus awaiting programs; wall-clock ns at which the count last reached 0 |
 | `stopping` | bridge (`main`, once its binary changed) | clients (`nccl-mesh.c ncclMeshBridgeStopping`; metal-microbench `mesh_rank.m`) | "release held flows between executions" (§5) |
-| `bell[8]` | clients (`mesh_transfers_wake`); bridge (`port_bell`, `send_wake`) | port p's progress threads, when parked | a futex-like word; this is not a hardware doorbell |
+| `bell[8]` | clients (`mesh_transfers_wake`, `mesh_requests_wake`); bridge (`port_bell`, `send_wake`) | port p's progress threads, when parked | a futex-like word; this is not a hardware doorbell |
+| `rings_off` table | clients (`mesh_requests_create`, `mesh_retire`); bridge (`stripes_requests_turn`, a gone owner's ring) | the bridge's event loop and send threads | the registered stripe request rings (#stripes) |
 
 **A client slot** (`mesh.h struct mesh_client`, 64 slots):
 
@@ -213,6 +216,7 @@ A flow is named by `(port, key, near, far, stripe)` (`flow_on`); a message names
 | FAIL | `flow_fail` with a `tell`; `ready_refuse` (a READY refused, as a value) | `flow_fail(ESTALE` if the code is ESTALE, else `ECANCELED`, domain 4); with ESTALE on a non-relay flow, also `program_stale` |
 | LANES | `lanes_turn` once lanes are made (count 2, the peer QPs, `code` = header room); `lanes_reset` (count 0, `code` = why) | `lanes_heard`: stores the peer QPs and room, then connects; count 0, or new QPs while joined, resets this end's lanes (`lanes_reset`, untold) |
 | FAREWELL | `main` at stop, with `code` = the signal, or -1 for a binary change | `port.parted = 1`, after which loss is reported as `ECONNRESET` "parted" |
+| STRIPES | `stripes_turn` once the stripe flow is made (count 2, the QPs, `code` = this end's largest piece); `stripes_reset` (count 0, `code` = why) | `stripes_heard`: stores the peer's QPs and piece, makes this end's (`wanted`), connects; count 0, or new QPs while joined, resets this end's (#stripes) |
 | CHANNEL_OPEN / CONFIRM / REFUSE / DATA / WINDOW / SHUT / CLOSE | requests (below) | `channel_heard` |
 
 ### Client slots: `clients_turn`
@@ -676,6 +680,130 @@ change, so the binary-change stop (§5) applies.
 | Requests? | `asked`, `channel_heard`, `service_open`, `end_drain`, `requests_lost` |
 | The QP budget? | `flow_make`, `lanes_turn`, `mesh-verbs.h pair_up`, `device_up` (`max_pairs`) |
 | The configuration? | `bridge_configuration.py load`, `mesh-flow.c configuration_read`, `bin/mesh-user.sh` |
+
+## Stripes
+
+The operator, 2026-10-01 (metal-microbench docs/principles.md section 2, The bridge): "MAKING K-MANY COMPUTERS INTO A
+SHARED ADDRESS SPACE WHERE EXTREMELY HIGH NUMBERS OF CPU CORES CAN ASYNCHRONOUSLY START WRITING TO STRIPES OF THE REALLY
+BIG SHARED ADDRESS SPACE"; and the same day, of the bridge, an API "which lets ANY PROGRAM IN THE UNIVERSE to say 'HEY,
+I WOULD LIKE TO WRITE TO A GLOBALLY ACCESSIBLE WORKSPACE ANY PROGRAM IN THE UNIVERSE ON THE OTHER COMPUTER CAN READ,
+YAH/NAH?' then gets a 'YAH, I WROTE THAT'". Stripe writes landed in mesh 8fc27cbe (MESH_VERSION 120 of that line, 15:07)
+and went 19 minutes later with eight other commits in 753676bc, for a double deregistration and two kernel panics
+that were never located (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1"). They are restored here on
+the resident bridge at MESH_VERSION 118: any thread of any client process, or a GPU, writes a stripe of its node's
+window into the same offset of a neighbour's window, and no program runs at the peer.
+
+**The request** (`mesh.h struct mesh_requests`, `struct mesh_stripe`; `mesh-call.h`):
+
+| step | who | what |
+|---|---|---|
+| a ring | the client, `mesh_requests_create(context, entries, &ring)` | a lease of its slot (`mesh_section_create`) of 128 bytes and `entries` × 64; `owner` its slot's owner word, `at` its region offset; its offset compare-exchanged into a vacant word of the region's ring table (`hdr.rings_off`, `MESH_RINGS` = 256 words; `EBUSY` where none is vacant) |
+| exact pages | the client, `mesh_section_at(context, page, bytes, &section)` | a lease at exactly arena page `page` (8fc27cbe's), so both nodes' clients place what they exchange at one offset; `ENOMEM` where a page is held (`mesh-dataflow.c mesh_arena_claim`) |
+| a request | any thread, `mesh_write(ring, node, offset, bytes, word, value)` | `head` taken by compare-exchange (`EAGAIN` while `entries` requests are untaken), the entry written, `ready = k + 1` stored last; `offset` and `bytes` a range of the window, `word` 0 or an 8-byte-aligned region offset in the window (`EINVAL` otherwise). A GPU writes the entry and `ready` itself |
+| the wake | `mesh_requests_wake(ring, node)` (`mesh_write` calls it) | the bell of each port paired with `node` (its send thread takes the request at once; parked, it looks again within 1 ms while a stripe flow is up), and `hdr.control` (the event loop makes the stripe flow where none is up) |
+| deregistration | `mesh_retire` (the client's detach, or the bridge for a dead pid) | each table word naming a ring of that owner set to 0; the bridge also drops a ring whose owner is not owned (`stripes_requests_turn`) |
+
+**The event loop** (`stripes_requests_turn`, every iteration): for each registered ring, the request at `taken`, where
+`ready == taken + 1`:
+- toward a node one of whose cables has its stripe flow up: left to the send threads;
+- toward a node with cables and no stripe flow up: each of those ports `wanted`, and the request waits while one is made;
+- refused as a value (`taken` compare-exchanged, the writer's `word` set to `UINT64_MAX`, the ring's `failed` + 1 and
+  `code`), and logged once per code: toward this node (`EINVAL`), toward a node with no cable (`EHOSTUNREACH`: a stripe
+  rides one link; routed stripes are not built), or where every cable's stripe flow could not be made within the last
+  pause (its `code`: `ENOSPC` the device's queue pairs, `ENOMEM` the descriptor pages).
+
+**The stripe flow** of a port (`struct stripes`, `stripes_turn`, `stripes_job`, `stripes_heard`), made as the lanes are
+and kept while the link is paired:
+
+| state | entered | job (port's queue, always guarded: below) | leaves when |
+|---|---|---|---|
+| `STRIPES_DOWN` | start; a closing done | — | `wanted` (a request, or the peer's STRIPES), the link greeted, a pause after the last closing, its descriptor pages leased (`2 × MESH_DESCRIPTORS × 64` bytes, once) and two queue pairs of room (`committed + 2 <= max_pairs`) → MAKING |
+| `STRIPES_MAKING` | | `pair_up(2)`: control pair 0, data pair 1, a receive and a SEND completion queue | done → `STRIPES` (count 2, the two QPs and PSNs, `code` = this end's largest piece) → MADE |
+| `STRIPES_MADE` | | — | the peer's STRIPES heard → CONNECTING |
+| `STRIPES_CONNECTING` | | `pair_receive`, `pair_send`, `stripes_ready` (piece = the lesser of the two ends', the data pair's frames less the descriptors their completion queues hold, every count 0, the 256 descriptor slots' receives posted on pair 0), `port_threads` | done → UP (`up = 1`, the bell rung) |
+| `STRIPES_UP` | | the progress threads serve it at every pass (`port_pass`) | a failure (`stripes_lost` → `stripes_reset`, STRIPES of 0 to the peer), the peer's STRIPES of 0 or of new QPs, the link lost → CLOSING |
+| `STRIPES_CLOSING` | | `up = 0`, `port_settle` (neither thread reads it), `stripes_abandon` (each request taken and not completed fails: `ECONNRESET`), `pair_flush` (each QP to `IBV_QPS_ERR`, both completion queues drained until 65,536 polls take none), `down_pair` | done → DOWN, `committed -= 2`, "stripes closed (N completions flushed)" logged |
+
+A piece is at most `MESH_STRIPE_PIECE` (4 MiB, 8fc27cbe's `MESH_STRIPE_CHUNK`) and the device's `max_msg_sz` in whole
+frames, the lesser of the two ends' (STRIPES' `code`), and never crosses a 1 GiB registration (`stripe_length`), so both
+ends cut a stripe alike.
+
+**Sending** (`stripes_send`, the port's send thread, while `up`):
+1. SEND completions from the `sent` queue: a descriptor's frees a descriptor credit (`descriptors_done`); a piece's
+   frees its frames and its slot of the piece ring (`MESH_STRIPE_CHUNKS` = 1024); a stripe's last piece's stores
+   `value` into the writer's `word` (where the writer's slot is still owned), `written + 1`, `flight - 1`.
+2. With no stripe being cut and fewer than 256 descriptors in flight: the rings from `cursor`; a ring's request at
+   `taken` that is ready and names this port's peer is read, then taken by compare-exchange of `taken` (every port
+   toward the node scans every ring; each request is taken once, by the first), `flight + 1`. A range past this
+   window or the peer's (its record's `window`) or a word that is no word fails as a value (`EINVAL`).
+3. The descriptor (`offset`, `bytes`, `word`, `value`; 64 bytes) copied into a sent slot of the descriptor pages and
+   posted as one SEND on pair 0.
+4. The pieces posted in order on pair 1 while the pair's frames (`send_capacity`) and the piece ring hold them; a
+   stripe of 0 bytes is one SEND of 0 bytes, so its word still lands.
+
+**Receiving** (`stripes_receive`, the port's receive thread, while `up`):
+1. Receive completions (an acquire fence after a poll that took any): a descriptor's slot appended to the arrival
+   FIFO (`arrived`); a piece's frees its frames and slot, and a stripe's last piece's stores `value` into `word` in
+   this node's region, `landed + 1`.
+2. The FIFO's head descriptor read from its slot (a range past this window or a word that is no word is the peer's
+   protocol error: `EPROTO`, the flow reset); its pieces' receives posted at its offset, cut as the sender cuts them,
+   while pair 1's frames (`receive_capacity`) and the piece ring hold them; once the last is posted, its slot's receive
+   is posted again (`stripe_listen`). The 256 slots so bound the descriptors in flight: credit flow control holds the
+   peer's next descriptor until a slot is posted again (TN3205), and the peer's pieces until their receives are.
+   This is the bridge's one header-driven receive, and it carries stripes alone (bridge-and-ipc.md#lanes).
+
+**The guard** (`port_guard`, `guard_raise`, `guard_lower`). On a port whose device holds a stripe flow's queue pairs,
+every change of the device's verbs objects on the port's queue (a flow's `flow_work` jobs: `pair_up`, `pair_receive`,
+`pair_send` and the first receives posted; its `down_pair` in `flow_release`; every lanes job; every stripes job) runs
+with the guard raised: `guard` made odd, and the job waits until each started progress thread has stored that value in
+`guarded[side]`. A thread checks `guard` at the top of its loop, before each pass; while it is odd the thread makes no
+pass (no post and no poll on any queue pair of the device) and tells the port's `epoch` as it moves, so a
+`port_settle` inside the guarded job returns. The guard is lowered (`guard` even) and the bell rung when the job's verbs
+calls return. A stripe flow's own jobs always raise it. With no stripe flow on the port, nothing is guarded and HEAD's
+jobs run as before.
+
+**Words and failures, as the clients see them:**
+
+| event | writer's `word` | peer's `word` | ring |
+|---|---|---|---|
+| the stripe's last SEND completed / its last piece landed | `value` | `value` | — |
+| refused by the event loop or the send thread | `UINT64_MAX` | untouched | `failed + 1`, `code` |
+| the stripe flow failed or closed with it in flight (`stripes_abandon`) | `UINT64_MAX` | untouched (no acknowledgement crosses back, as at 8fc27cbe) | `failed + 1`, `code` `ECONNRESET` |
+| the writer's slot retired meanwhile | untouched (its rows stay held while `flight` is nonzero: `clients_turn`) | as above | — |
+
+**Trust.** As at 8fc27cbe: a neighbour's descriptor names any offset of this node's window and any word in it, and
+nothing at the peer checks who wrote what (any node on a cable may already write into the window: bridge-and-ipc.md
+#exec).
+
+**Deviations from 8fc27cbe**, each for HEAD's interfaces or for the October 1 diagnosis:
+1. A request names its destination node (`node`), never a port (8fc27cbe's `link`): clients name nodes on the
+   resident bridge (#clients). Every cable toward the node takes requests.
+2. The service is a flow of the port, made on demand with STRIPES over the link's control socket and served by the
+   port's two progress threads, which park; 8fc27cbe ran a `mesh.stripes` thread per link that never parked, paired
+   its own two queue pairs over a pairing connection of key 0 for the bridge's life, and made, connected and
+   destroyed them on that thread.
+3. One owner of every teardown (the port's queue), the guard, and the flush before destroying (above).
+4. A descriptor slot is posted again only once its stripe's receives are all posted; 8fc27cbe copied each landed
+   descriptor into a 256-entry ring and reposted its slot at once, so more than 256 descriptors landed ahead of their
+   pieces' receives overran the ring.
+5. The piece is the lesser of the two ends' (each its device's `max_msg_sz`, at most 4 MiB), told in STRIPES.
+6. Refusals and losses are values (the writer's word `UINT64_MAX`, the ring's `failed` and `code`); 8fc27cbe had none.
+7. A ring is a lease of a client slot, deregistered at its retirement and reclaimed with its rows; 8fc27cbe's
+   outlived a process that died without `mesh_detach`.
+
+**Integration check** (the main session, both bridges at MESH_VERSION 118; never measured, at 8fc27cbe or since):
+- On each node a client leases the same exact pages (`mesh_section_at`) and a word; the M5's client fills its range
+  with a pattern (page index and word index, as `rdma/mesh-stream.c` writes), writes 1 GiB as 256 stripes of 4 MiB
+  toward the Mini, and waits on its word; the Mini's client (no program of the key) waits on its word and checks every
+  word of the range. Read the bridges' "stripes up ... pieces of N bytes" and, at the end, "stripes closed (N
+  completions flushed)".
+- Reproduction target: the raw stream's 9.383 GB/s one way (design/transport-one-gib-2026-09-10.md, `mesh-stream
+  raw`); the stripe path's rate is the bridge's overhead on it.
+- The guard: E2B pair calls (sessions made and released) while one node writes stripes continuously; a session's
+  teardown with the stripe flow up must crash nothing (the October 17 `tbt_post_recv + 492` signature) and fail no
+  flow's first SENDs with `IBV_WC_LOC_PROT_ERR`.
+- The teardown: stop the Mini's bridge with a stripe flow up, then the M5's, apart; the kernel log names each
+  extent's deregistration once and no panic follows (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1").
 
 ## Places where the code and bridge-and-ipc.md disagree
 

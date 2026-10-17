@@ -273,6 +273,13 @@ void mesh_retire(struct hdr *m,uint64_t client){
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
   }
+  /* design/bridge-dataflow.md#stripes: its request rings deregistered (the bridge takes none of them past here) */
+  _Atomic uint64_t *rings=mesh_rings(m);
+  for(uint32_t r=0;r<MESH_RINGS;r++){
+    uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
+    if(at && at>=m->data_off && at<=m->length-sizeof(struct mesh_requests) && ((const struct mesh_requests *)((char *)m+at))->owner==client)
+      atomic_compare_exchange_strong(rings+r,&at,0);
+  }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
   /* a start waiting on its destinations' status (mesh-call.c mesh_transfers_start) reads the slot gone at once: a
      revoke from another thread of its process retires the program it waits for (nccl-mesh.c ncclCommRevoke) */
@@ -405,6 +412,19 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
   return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
+}
+
+/* design/bridge-dataflow.md#stripes: the exact pages a stripe's two ends place alike, claimed as a scan's are; a range a
+   returned lease still holds hot is reclaimed first, as mesh_allocate's last scan does */
+uint32_t mesh_arena_claim(struct mesh_ctx *c,uint32_t first,uint32_t pages){
+  const uint32_t arena=mesh_arena_pages(c->M);
+  if(!pages || first>arena || pages>arena-first){ errno=EINVAL; return MESH_ABSENT; }
+  _Atomic uint64_t *bits=mesh_arena_bits(c->M);
+  if(mesh_claim(bits,bits,first,pages))return first;
+  mesh_reclaim(c->M);
+  if(mesh_claim(bits,bits,first,pages))return first;
+  errno=ENOMEM;
+  return MESH_ABSENT;
 }
 
 /* design/prepared-machine.md#M09 */

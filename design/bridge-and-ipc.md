@@ -541,6 +541,29 @@ a mapping's offset 8: design/RDMA-KERNEL-RECOVERY.md's September signature of th
 failed the next flow's first SENDs with IBV_WC_LOC_PROT_ERR, and left the lanes' frames unheard from the second call
 on. Nothing posts on a queue pair that outlives a teardown of another.
 
+## stripes
+
+A client writes into a neighbour's window with no program at the neighbour: a stripe (the operator, 2026-10-01:
+"MAKING K-MANY COMPUTERS INTO A SHARED ADDRESS SPACE WHERE EXTREMELY HIGH NUMBERS OF CPU CORES CAN ASYNCHRONOUSLY START
+WRITING TO STRIPES OF THE REALLY BIG SHARED ADDRESS SPACE"; metal-microbench docs/acceptance-20261014.md A51: "The
+bridge serves a neighbour's request over a link whether or not a local client has configured a matching program").
+Any thread of any client, or a GPU, puts a request (the bytes at an offset of its node's window, the neighbour, a word
+and a value) into a ring of its own that it registered with its bridge (mesh-call.h `mesh_requests_create`,
+`mesh_write`); the bridge sends a descriptor and then the bytes, the neighbour's bridge posts its receives at the
+same offset as the descriptor lands, and each bridge stores the value into its word as its side completes. A port's
+stripes ride a flow of its own, two queue pairs made on demand and told the peer as the lanes are (STRIPES), served by
+the port's progress threads (design/bridge-dataflow.md#stripes, which also holds the deviations from mesh 8fc27cbe,
+where they were first built and from which they are restored, and the integration check). The descriptor's receive
+posting is a header's, the one the bridge keeps for anything but the lanes' control: stripes are a client's writes
+into memory, never a program's operands, which ride pre-posted exclusive flows alone (#lanes).
+
+The flow's queue pairs live while the link is paired, so their posts would cross every other queue pair's teardown
+on the device (#keepalive's hazard). While a port's device holds them, every change of the device's verbs objects
+runs with the port's guard raised, the progress threads making no pass until it returns, and the stripe flow's own
+teardown moves its queue pairs to the error state and drains them before destroying them: the answer to the double
+deregistration and the panics that ended 8fc27cbe (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1").
+With no stripe flow on a port, its verbs work runs unguarded, as before.
+
 ## ledger
 
 Where its configuration states `ledger = true` (etc/bridge/README.md), the bridge keeps a ledger of each flow: Q5P's

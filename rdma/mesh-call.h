@@ -6,6 +6,25 @@
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe): a lease of one slot of `bytes` at exactly arena page `page` (a
+   multiple of the block), so the two ends of a stripe place what they exchange at the same window offsets; ENOMEM where
+   a page of it is held, EINVAL where `page` is not a block's first */
+int mesh_section_at(struct mesh_ctx *,uint32_t page,size_t bytes,struct mesh_section *);
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe, on the resident bridge): a ring of `entries` (a power of two, 4 at
+   least) stripe requests (mesh.h struct mesh_requests), a lease of the client's slot registered with its node's bridge
+   (MESH_RINGS of every client's at once), whose requests the bridge takes while the slot is the client's (its
+   retirement deregisters the ring); a GPU writes requests into a ring of its own by the protocol mesh.h states.  0,
+   EINVAL, EBUSY where MESH_RINGS rings are registered, or the refused lease */
+int mesh_requests_create(struct mesh_ctx *,uint32_t entries,struct mesh_requests **);
+/* a host thread's request into a ring (any number of threads at once; mesh.h struct mesh_stripe's operands, `offset` a
+   byte offset of the window, `word` a region offset), then mesh_requests_wake: 0, EAGAIN where the ring holds `entries`
+   requests the bridge has not taken (not yet: write it again), EINVAL where it is not one the window holds */
+int mesh_write(struct mesh_requests *,uint32_t node,uint64_t offset,uint64_t bytes,uint64_t word,uint64_t value);
+/* the bridge told a ring's requests toward `node` are written: the bells of the ports paired with `node` rung (each
+   port's send thread takes them; one parked looks again within 1 ms anyway while a stripe flow is up on it) and the
+   control word (the bridge makes the ports' stripe flows where none is up); a GPU writer's host calls it once its
+   kernel wrote its requests */
+void mesh_requests_wake(struct mesh_requests *,uint32_t node);
 /* design/algorithm-sources.md#programcopy: `section` sent to or received from (`direction`) the member `node`, never a
    port, on its `queue` (< MESH_QUEUES), for the invocations [begin, end) alone, invocation t at ring slot (t - begin)
    mod `depth` (0: the program's), its cells, words and slots indexed from `begin`; 0, EINVAL or a refused lease */

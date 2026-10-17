@@ -45,6 +45,10 @@ uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path);
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 /* design/prepared-machine.md#M09 */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe): exactly arena pages [first, first + pages), claimed by
+   compare-exchange as mesh_arena_alloc's are; MESH_ABSENT (errno ENOMEM) where a page of them is held, EINVAL past the
+   arena */
+uint32_t mesh_arena_claim(struct mesh_ctx *,uint32_t first,uint32_t pages);
 /* design/prepared-machine.md#M09: the window's arena pages no lease holds */
 uint32_t mesh_arena_free(struct hdr *);
 /* design/prepared-machine.md#M09: a lease its client returns while it holds it (mesh-call.h mesh_section_create's

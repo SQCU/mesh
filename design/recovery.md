@@ -139,6 +139,12 @@ loss of the port itself (link off, interface detached) also retires the port's
 device: registrations, protection domain and context, once no flow and no lane holds a queue pair on it. A flow's own
 failure is told to the peer (FAIL), which fails its side.
 
+A port's stripe flow (design/bridge-dataflow.md#stripes) fails as its lanes do: alone (`stripes_reset`), the requests it
+held failing as values (each writer's word `UINT64_MAX`, its ring's code), the peer told (a STRIPES of none and why),
+and made again a pause later where a request still names the peer; a link lost closes it with the lanes. Its teardown
+moves its queue pairs to the error state and drains them before destroying them, and every verbs change on a port
+holding one runs under the port's guard (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1").
+
 ### farewell
 
 A bridge that stops sends FAREWELL on every link before closing it, carrying why it stops (the signal it took, or its
@@ -257,6 +263,10 @@ recovery with its duration and count, goes to `fabric.log` and the unified log, 
    failing. No path here runs a program again after a cut: a failed execution's process prepares its programs again,
    their counts starting at zero.
 
+4. **The stripe flow's guard and flush are unverified.** A move to the error state and its flushed completions have
+   never run on Apple's provider, and the guard's pause of a port's progress threads during another flow's verbs
+   work is unmeasured; integration reads both first (design/bridge-dataflow.md#stripes).
+
 ## Failures by kind and topology
 
 Topologies: **P** the TB5 pair; **R** a ring or complete mesh of 3-6 nodes; **U** uncabled pairs routed through other nodes' bridges; **H** heterogeneous links (TB5, TB4, Ethernet); **Q** links of
@@ -283,6 +293,7 @@ several queue pairs (the torch/NCCL sessions: four).
 | F22 | two ends of a routed pair start on maps a flap apart | both take the lower end's route (design/bridge-and-ipc.md#routes); a cable one end sees and the other does not fails both at once (EPROTO) |
 | F23 | members' programs of one execution made from maps a change apart | the READYs carry each program's digest: every member's program fails at start (ESTALE, `#first`), through MESH_VERSION 114 one bound to a member whose program did not bind it back waited 630 s |
 | F24 | a routed start whose relays' own jobs end before the next hop's POSTED | each relay tells POSTED as its partner hears it (design/bridge-and-ipc.md#protocol); through MESH_VERSION 114 such a relay never told it and both ends waited 630 s, in a third of the routed starts of a transcription of the code |
+| F25 | a stripe flow fails (a completion's error, a descriptor out of the window, the peer's reset) | its own alone: the requests it held fail as values, it is closed (flushed) and made again a pause later where a request needs it; the link, its lanes and flows run on |
 
 ## The review this asks for
 

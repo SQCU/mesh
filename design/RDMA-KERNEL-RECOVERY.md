@@ -322,3 +322,90 @@ write at 0x100840008 (8 bytes into a 16 KiB page no longer mapped, beside a 16 K
 (9e0b3a4a, kb1). Without posts on the lanes, hundreds of calls with the same teardowns ran clean. The keepalive now
 rides each flow's own queue pairs (design/bridge-and-ipc.md#keepalive), and nothing posts on a queue pair that
 outlives a teardown of another.
+
+## The stripe writes of October 1
+
+mesh 8fc27cbe (2026-10-01 15:07, MESH_VERSION 120 of that line) added stripe writes: any thread of any process
+writing into a peer's window with no program at the peer. 753676bc (15:26) took rdma/ back to 3981ca80 with eight
+other commits, because the bridge then running "deregistered each of its two memory regions twice at shutdown on both
+nodes (lkeys 525 and 269, 2026-10-01 15:20:19); both kernels then panicked in IOThunderboltFamily/AppleThunderboltRDMA
+(the Mini 15:21:47, a data abort; the M5 a tag check fault)". The defect was attributed to the stack and never located.
+This section reads the source that ran (753676bc^ = 9248e895: 8fc27cbe, c5919fa1 and 9248e895; the revert also names
+uncommitted edits, which are lost) and nothing else: nothing below was run.
+
+### What the code shows
+
+1. **There is no second deregistration call.** 9248e895's tree calls `ibv_dereg_mr` in two places (`git grep
+   ibv_dereg_mr 9248e895`): `mesh-verbs.h down_device` (lines 118-127), which `main` calls once per device after it
+   has joined every thread that could open, register or pair (mesh-flow.c line 1129: the sessions' controllers, the
+   stripe services' threads, the acceptors), and `device_up`'s registration fallback (mesh-verbs.h lines 313-316),
+   which deregisters the extents it took when the device refuses a later one and registers again at the device's
+   advertised `max_mr_size`. The fallback runs only during a registration, never at a stop, and `device_up` holds the
+   device's `setup` mutex. Each extent therefore had one user-space deregistration at the 15:20:19 stop. (The geometry
+   run_pair.py started both bridges with, metal-microbench 408461a `BRIDGE_GEOMETRY` `-W 262144` at 16 KiB pages, is a
+   4 GiB window, four 1 GiB extents a device; the message names two lkeys, each twice. Whether the bridges of that stop
+   ran that geometry is not recorded.)
+2. **Queue pairs lived for the bridge's life, with receives posted.** Each link's stripe service (`peer_run`,
+   `peer_serve`, thread `mesh.stripes`) paired a control and a data queue pair once and kept them until the bridge
+   stopped; `peer_configure` posted 256 descriptor receives on the control pair before RTS, and `peer_serve` posted
+   again each slot as its descriptor landed, so from pairing to stop the device held a queue pair in RTS with receives
+   posted. At the stop, `peer_run` destroyed both (`down_pair`: no move to the error state, the receives still posted)
+   and `main` then deregistered the window, freed the protection domain and closed the context at once
+   (`down_device`). At 3981ca80 (d6dceac's transport), a bridge stopped between programs held no queue pair at all.
+3. **Posts on those queue pairs crossed other queue pairs' teardowns.** The `mesh.stripes` thread posted on its two
+   queue pairs (descriptor receives, data receives, descriptor and data SENDs) whenever a stripe moved, with no
+   coordination with the sessions' threads, each of which made its queue pairs (`verbs_up`, before its pairing
+   connection since c5919fa1) and destroyed them (`link_close` → `down_pair`) on its own thread whenever a session
+   ended, on the same device. metal-microbench 408461a's readings ran sessions and stripe readings in one sequence
+   (the prepared bandwidth, then the stripe duplex at 12 MiB; the GPU handoff, prepared then stripe), so a session's
+   teardown with stripes in flight was the readings' ordinary course. This is the provider hazard found on 2026-10-17
+   (October 16 and 17, above): a post on a long-lived queue pair while another queue pair of the device is destroyed
+   stores to the device's shared doorbell mapping after it moved (`tbt_post_recv + 492`), and the next flow's first
+   SENDs fail `IBV_WC_LOC_PROT_ERR`.
+4. **Verbs calls ran on many threads at once.** Only `device_up` was serialized (the `setup` mutex). `ibv_create_qp`,
+   `ibv_modify_qp` and `ibv_destroy_qp` ran concurrently on the stripe services' threads, every session's controller
+   and their pairing retries (a failed pairing destroyed its queue pairs and, since c5919fa1, made new ones before
+   the next connection).
+5. **The stripe thread never parked.** `peer_serve` polled its completion queue and every ring without pause for the
+   bridge's life (a zero-timeout `kevent64` every 4,096 empty passes): one core a link, always.
+
+### Diagnosis
+
+The second deregistration of each extent was not a second call of the bridge's committed code (1). The difference
+8fc27cbe made that both the double deregistration and the panics follow is (2): every stop of that bridge destroyed
+queue pairs in RTS with receives posted and then tore the device down at once, on both nodes. The provider and driver
+are closed source, so the second deregistration's caller cannot be named from here; the reading most consistent with
+the record is the driver's own teardown of those queue pairs' receive queues (the "RX/TX queue shutdown and
+ring-management-region unmapping" of September's logs above), releasing the registrations their posted receives
+named after the bridge had deregistered them, and then a null-derived access in IOThunderboltFamily: the Mini's
+September and October signature, and the same state as both of the Mini's panics of October 16 and 17 (each a stop with
+its lanes up: queue pairs in RTS with receives posted; none of its stops with its lanes failed, their queue pairs in the
+error state, panicked). Not excluded: a second bridge process per node holding the same lkey numbers (on that day
+stale KeepAlive bridges ran beside the drivers' own, mesh 67f959bf), and the lost uncommitted edits. Where trouble
+appeared, in the operator's terms: the scheduling had no guard between one queue pair's posts and another's teardown
+on one device (3), and no one owner of a device's verbs objects (4); the peer operations at the stop left posted
+receives in RTS queue pairs as the device closed (2).
+
+### The restored service's answer to each
+
+The stripe service restored at MESH_VERSION 118 (design/bridge-dataflow.md#stripes) is built so that none of the
+three can happen:
+- **One owner of every teardown.** Its queue pairs are a flow of the port, made, connected and destroyed only by jobs on
+  the port's serial queue, where every flow's and the lanes' are; its posts run on the port's two progress threads, as
+  every flow's do; the device's registrations go only at its retirement (`down_device`, `port_turn`, once no flow, no
+  lanes and no stripe flow hold a queue pair on it). No thread of its own; it parks with the port's threads.
+- **A guard, the operator's "nodeguard".** While a port's device holds a stripe flow, every change of its verbs objects
+  (any flow's, the lanes', the stripe flow's) runs with the port's guard raised: both progress threads stop passing,
+  so no queue pair of the device is posted on, and they go on once the change returns (`port_guard`). No stripe post
+  crosses another queue pair's teardown, and no post of another flow crosses the stripe flow's.
+- **Receives flushed before destruction.** Its teardown moves both queue pairs to the error state and drains the
+  flushed completions (`pair_flush`, 65,536 empty polls at most) before `down_pair`, so the device holds no posted
+  receive of it when it is destroyed, at a stripe flow's reset and at the bridge's stop alike.
+
+What integration testing reads first (design/bridge-dataflow.md#stripes): "stripes closed (N completions flushed)" with
+N > 0 where receives were posted (the provider's flush works; with N = 0 the move to the error state did nothing here,
+and the queue pairs were destroyed as before); a session's teardown on a port with stripes up crashing nothing; the
+Mini's bridge stopped with a stripe flow up, then the M5's, apart, with each extent deregistered once in the kernel log
+and no panic. If the flush is shown to work, the same flush before HEAD's other teardowns (the lanes' at every bridge
+stop, the October 16 and 17 condition) is a one-line change to `down_pair`'s callers, HEAD's default path, for the
+main line to decide.

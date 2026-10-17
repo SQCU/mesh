@@ -132,7 +132,7 @@ struct ledger {
    the node where a failure happened, and `bytes` of what follows it: a READY's program, a RECORD's record.  A port's
    LANES tells its lanes' queue pairs (#lanes) */
 enum { HELLO=1, READY, PAIRS, POSTED, END, FAIL, FAREWELL, RECORD, LANES, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_REFUSE, CHANNEL_DATA,
-       CHANNEL_WINDOW, CHANNEL_SHUT, CHANNEL_CLOSE };
+       CHANNEL_WINDOW, CHANNEL_SHUT, CHANNEL_CLOSE, STRIPES, STREAM };
 struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code; uint32_t block,port,from,to,failed,bytes;
   uint16_t lid,stripe; uint8_t gid[16]; uint32_t pair[MESH_PAIRS][2]; };
 #define XMAGIC (0x4d595048u+MESH_VERSION)
@@ -249,11 +249,60 @@ struct lanes {
 /* design/recovery.md#loss: lanes that failed to connect this many times in a row retire their port's device, which opens
    again (a context that refuses every connection, as after a peer's restart, is not one the retries mend) */
 #define MESH_REFUSED_RETIRE 3u
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe's per-link stripe service, on the resident bridge): a port's stripe
+   flow, two UC queue pairs of its own, a control pair carrying each stripe's descriptor (where the peer posts its
+   receives, the word its last one stores and the value) and a data pair carrying its bytes, with their two completion
+   queues; made where a client's request ring names the port's peer (`wanted`) or the peer made its own, told the peer
+   (STRIPES, as LANES tells lanes) and kept while the link is paired.  Its state (STRIPES_DOWN, made and told, up,
+   closing), the peer's queue pairs and its largest piece (`peer_piece`), the piece both ends cut by (`piece`, the
+   lesser of the two), its pages (MESH_DESCRIPTORS descriptors received, then as many sent), why it last could not be
+   made (`code`, cleared once up), when it is made or closed again (`retry`), the peer's window (its record's: no
+   request passes it) and the census (requests written and landed, completions a teardown's flush drained).  The send
+   thread's: the stripes' pieces posted on the data pair and not completed (a ring: frames, and for a stripe's last its
+   word, value, writer and ring), their frames, the descriptors sent and completed, the stripe being cut (`out`) and the
+   ring it looks at next; the receive thread's: the descriptors landed, by their slot in arrival order, the pieces
+   posted, their frames, the stripe being received (`in`).  `flight`: requests taken and not yet completed or failed,
+   which hold a retired client's rows (clients_turn).  A request is one ring entry's: the bytes at `offset` of this
+   node's window to the same offset of the peer's, cut alike at both ends (stripe_length), a descriptor and then its
+   pieces in order on one flow, so the peer's receives for them are posted in the order its SENDs come, each when its
+   descriptor lands (the one header-driven receive the bridge keeps, for stripes alone: design/bridge-and-ipc.md#lanes) */
+#define MESH_DESCRIPTORS 256u
+#define MESH_STRIPE_CHUNKS 1024u
+#define MESH_STRIPE_PIECE (UINT32_C(4)<<20)
+#define MESH_FLUSH_POLLS 65536u
+struct mesh_descriptor { _Alignas(64) uint64_t offset; uint64_t bytes,word,value,reserved[4]; };
+_Static_assert(sizeof(struct mesh_descriptor)==64,"stripe descriptor");
+#define STRIPE_DESCRIPTOR (UINT64_C(1)<<56)
+#define STRIPE_DATA (UINT64_C(2)<<56)
+#define STRIPE_SLOT ((UINT64_C(1)<<56)-1)
+struct stripe_piece { uint64_t word,value,owner,ring; uint32_t frames,last; };
+struct stripe_cut { struct mesh_descriptor d; uint64_t done,owner,ring; uint32_t slot; int active; };
+enum { STRIPES_DOWN, STRIPES_MAKING, STRIPES_MADE, STRIPES_CONNECTING, STRIPES_UP, STRIPES_CLOSING };
+struct stripes {
+  struct mesh_verbs provider;
+  int state,job,result,heard,committed,wanted;
+  _Atomic int up,done;
+  _Atomic int64_t failed;
+  uint32_t peer[2][2],peer_piece,piece,page,pages,flushed;
+  uint64_t retry;
+  int64_t code;
+  _Atomic uint64_t window,flight,written,landed;
+  _Alignas(128) struct stripe_piece sent[MESH_STRIPE_CHUNKS];
+  uint64_t send_head,send_tail,descriptors_sent,descriptors_done;
+  uint32_t send_frames,send_capacity,cursor;
+  struct stripe_cut out;
+  _Alignas(128) struct stripe_piece posted[MESH_STRIPE_CHUNKS];
+  uint64_t receive_head,receive_tail,arrived_head,arrived_tail;
+  uint32_t receive_frames,receive_capacity,arrived[MESH_DESCRIPTORS];
+  struct stripe_cut in;
+};
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue, a
    refused registration's pause (`backoff`), the queue pairs its flows and lanes hold or will (`committed`, of the
    device's usable queue pairs), its lanes, its table of flows (`table`, the indices reserved and their generations, the
    highest reserved plus one), and its progress threads (#progress: the epochs each has seen of `epoch`, which a flow
-   leaving the table moves, and whether each is parked on the port's bell) */
+   leaving the table moves, and whether each is parked on the port's bell); its stripe flow (design/bridge-dataflow.md
+   #stripes) and the guard of its device's verbs objects (`guard`, odd while raised, and the value each progress thread
+   last held at: port_guard) */
 struct port {
   struct mesh_device device;
   uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,retiring,open,flows,committed;
@@ -276,6 +325,8 @@ struct port {
   _Atomic uint64_t epoch,seen[2];
   _Atomic int parked[2];
   pthread_t thread[2];
+  struct stripes stripes;
+  _Atomic uint64_t guard,guarded[2];
 };
 static struct hdr *M;
 static struct wire_mapping wire;
@@ -1330,6 +1381,184 @@ static int lane_receive(struct port *port){
   return count>0;
 }
 
+/* design/bridge-dataflow.md#stripes: a stripe flow's failure, the event loop's to reset (stripes_turn) */
+static void stripes_lost(struct port *port,int64_t code){
+  int64_t none=0;
+  atomic_compare_exchange_strong(&port->stripes.failed,&none,code?code:EIO);
+  atomic_store_explicit(&port->stripes.up,0,memory_order_release);
+  wake();
+}
+/* a stripe's next piece from window offset `offset`, `remaining` bytes left: at most the flow's piece and never past a
+   registered extent (MESH_REGION), so both ends cut a stripe alike and each piece is one SGE of one registration */
+static uint32_t stripe_length(uint64_t offset,uint64_t remaining,uint32_t piece){
+  const uint64_t room=MESH_REGION-offset%MESH_REGION,most=remaining<piece?remaining:piece;
+  return (uint32_t)(most<room?most:room);
+}
+static struct ibv_sge stripe_span(const struct port *port,uint64_t offset,uint32_t length){
+  const uint64_t at=offset<wire.length?offset:0;
+  return (struct ibv_sge){.addr=(uintptr_t)port->device.wire+offset,.length=length,.lkey=port->device.regions[at/MESH_REGION]->lkey};
+}
+/* the window offset of descriptor slot `slot` of the port's stripe flow (received 0 to MESH_DESCRIPTORS - 1, sent the
+   next MESH_DESCRIPTORS) */
+static uint64_t stripe_descriptor(const struct port *port,uint32_t slot){
+  return (uint64_t)port->stripes.page*M->pgsz+(uint64_t)slot*sizeof(struct mesh_descriptor);
+}
+/* a word of this node's region a stripe stores (`word` a region offset in the window, 8-byte aligned; 0 none) */
+static int stripe_word_valid(uint64_t word){ return !word || (!(word&7) && word>=M->data_off && word<=M->length-sizeof(uint64_t)); }
+static void stripe_word(uint64_t word,uint64_t value){
+  if(word && stripe_word_valid(word))atomic_store_explicit((_Atomic uint64_t *)((char *)M+word),value,memory_order_release);
+}
+/* a request failed as a value: its writer's word UINT64_MAX, its ring's failures counted and the code kept (a ring whose
+   client retired meanwhile is left alone: its rows stay held while the request is in flight, clients_turn) */
+static void stripe_failed(uint64_t ring,uint64_t owner,uint64_t word,int64_t code){
+  if(!owned(owner))return;
+  stripe_word(word,UINT64_MAX);
+  if(ring<M->data_off || ring>M->length-sizeof(struct mesh_requests))return;
+  struct mesh_requests *q=(void *)((char *)M+ring);
+  atomic_fetch_add_explicit(&q->failed,1,memory_order_relaxed);
+  atomic_store_explicit(&q->code,code,memory_order_release);
+}
+/* design/bridge-dataflow.md#stripes: one pass of the port's send thread over its stripe flow (mesh 8fc27cbe peer_serve's
+   SEND half): its SEND completions taken (a stripe's last piece completing stores its writer's word), then the next
+   request of each registered ring naming the port's peer taken (compare-exchange of the ring's `taken`, so the threads
+   of every port toward that node take each request once), its descriptor posted on the control pair, then its pieces
+   on the data pair while the pair's frames and the piece ring hold them; a request of a range the windows do not hold
+   or a word that is no word fails as a value (EINVAL).  Whether anything moved; a failure is the flow's (stripes_lost) */
+static int stripes_send(struct port *port){
+  struct stripes *s=&port->stripes;
+  const struct mesh_queue *control=s->provider.queues,*data=s->provider.queues+1;
+  struct ibv_wc done[16];
+  const int count=control->poll(s->provider.sent,16,done);
+  if(count<0){stripes_lost(port,EIO);return 1;}
+  for(int i=0;i<count;i++){
+    if(done[i].status){stripes_lost(port,(int64_t)done[i].status);return 1;}
+    if((done[i].wr_id&~STRIPE_SLOT)==STRIPE_DESCRIPTOR){s->descriptors_done++;continue;}
+    const struct stripe_piece *p=s->sent+(done[i].wr_id&STRIPE_SLOT)%MESH_STRIPE_CHUNKS;
+    s->send_frames-=p->frames;s->send_tail++;
+    if(!p->last)continue;
+    if(owned(p->owner))stripe_word(p->word,p->value);
+    atomic_fetch_add_explicit(&s->written,1,memory_order_relaxed);
+    atomic_fetch_sub_explicit(&s->flight,1,memory_order_release);
+  }
+  int moved=count>0;
+  _Atomic uint64_t *rings=mesh_rings(M);
+  const uint64_t window=atomic_load_explicit(&s->window,memory_order_relaxed);
+  for(uint32_t scanned=0;scanned<MESH_RINGS;scanned++){
+    if(!s->out.active){
+      if(s->descriptors_sent-s->descriptors_done>=MESH_DESCRIPTORS)break;
+      const uint32_t r=(s->cursor+scanned)%MESH_RINGS;
+      const uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
+      if(!at || at<M->data_off || at>M->length-sizeof(struct mesh_requests))continue;
+      struct mesh_requests *q=(void *)((char *)M+at);
+      const uint64_t entries=q->entries;
+      if(!entries || (entries&(entries-1)) || entries>(M->length-at-sizeof *q)/sizeof(struct mesh_stripe))continue;
+      uint64_t k=atomic_load_explicit(&q->taken,memory_order_acquire);
+      const struct mesh_stripe *e=q->request+(k&(entries-1));
+      if(atomic_load_explicit(&e->ready,memory_order_acquire)!=k+1 || e->node!=port->peer)continue;
+      const struct mesh_descriptor d={.offset=e->offset,.bytes=e->bytes,.word=e->word,.value=e->value};
+      const uint64_t owner=q->owner;
+      if(!atomic_compare_exchange_strong_explicit(&q->taken,&k,k+1,memory_order_acq_rel,memory_order_relaxed))continue;
+      s->cursor=(r+1)%MESH_RINGS;moved=1;
+      atomic_fetch_add_explicit(&s->flight,1,memory_order_acq_rel);
+      if(d.offset>wire.length || d.bytes>wire.length-d.offset || d.offset>window || d.bytes>window-d.offset || !stripe_word_valid(d.word)){
+        stripe_failed(at,owner,d.word,EINVAL);
+        atomic_fetch_sub_explicit(&s->flight,1,memory_order_release);
+        continue;
+      }
+      const uint32_t slot=(uint32_t)(s->descriptors_sent%MESH_DESCRIPTORS);
+      const uint64_t offset=stripe_descriptor(port,MESH_DESCRIPTORS+slot);
+      memcpy(wire.data+offset,&d,sizeof d);
+      struct ibv_sge span=stripe_span(port,offset,sizeof d);
+      struct ibv_send_wr posting={.wr_id=STRIPE_DESCRIPTOR|slot,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+      const int error=control->send(control->pair,&posting,&bad);
+      if(error){
+        stripe_failed(at,owner,d.word,error<0?-error:error);
+        atomic_fetch_sub_explicit(&s->flight,1,memory_order_release);
+        stripes_lost(port,error<0?-error:error);
+        return 1;
+      }
+      s->descriptors_sent++;
+      s->out=(struct stripe_cut){.d=d,.owner=owner,.ring=at,.active=1};
+    }
+    while(s->out.active){
+      const uint64_t offset=s->out.d.offset+s->out.done;
+      const uint32_t length=stripe_length(offset,s->out.d.bytes-s->out.done,s->piece),frames=length?(length+4095)/4096:1;
+      if(s->send_frames+frames>s->send_capacity || s->send_head-s->send_tail>=MESH_STRIPE_CHUNKS)break;
+      const int last=s->out.done+length>=s->out.d.bytes;
+      const uint32_t slot=(uint32_t)(s->send_head%MESH_STRIPE_CHUNKS);
+      s->sent[slot]=(struct stripe_piece){.word=last?s->out.d.word:0,.value=s->out.d.value,.owner=s->out.owner,.ring=s->out.ring,
+        .frames=frames,.last=(uint32_t)last};
+      struct ibv_sge span=stripe_span(port,offset,length);
+      struct ibv_send_wr posting={.wr_id=STRIPE_DATA|slot,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+      const int error=data->send(data->pair,&posting,&bad);
+      if(error){stripes_lost(port,error<0?-error:error);return 1;}
+      s->send_frames+=frames;s->send_head++;s->out.done+=length;moved=1;
+      if(last)s->out.active=0;
+    }
+    if(s->out.active)break;
+  }
+  return moved;
+}
+/* a descriptor slot's receive posted again, once the stripe it named has every piece's receive posted */
+static int stripe_listen(struct port *port,uint32_t slot){
+  struct stripes *s=&port->stripes;
+  struct ibv_sge span=stripe_span(port,stripe_descriptor(port,slot),sizeof(struct mesh_descriptor));
+  struct ibv_recv_wr request={.wr_id=STRIPE_DESCRIPTOR|slot,.sg_list=&span,.num_sge=1},*bad;
+  const int error=s->provider.queues[0].receive(s->provider.queues[0].pair,&request,&bad);
+  return error<0?-error:error;
+}
+/* design/bridge-dataflow.md#stripes: one pass of the port's receive thread over its stripe flow (peer_serve's receive
+   half): its receive completions taken (a descriptor landed queued by its slot; a stripe's last piece landing stores
+   its word here), then each landed descriptor's pieces' receives posted at its offset, in the order the descriptors
+   landed, while the data pair's frames and the piece ring hold them, and its slot's receive posted again once they all
+   are (so no more descriptors are in flight than slots: credit flow control holds the peer's next one until then,
+   TN3205).  A descriptor naming bytes past this node's window or a word that is no word is the peer's protocol error
+   (EPROTO).  Whether anything moved; a failure is the flow's (stripes_lost) */
+static int stripes_receive(struct port *port){
+  struct stripes *s=&port->stripes;
+  const struct mesh_queue *data=s->provider.queues+1;
+  struct ibv_wc done[16];
+  const int count=s->provider.queues[0].poll(s->provider.completion,16,done);
+  if(count<0){stripes_lost(port,EIO);return 1;}
+  if(count)atomic_thread_fence(memory_order_acquire);
+  for(int i=0;i<count;i++){
+    if(done[i].status){stripes_lost(port,(int64_t)done[i].status);return 1;}
+    const uint64_t slot=done[i].wr_id&STRIPE_SLOT;
+    if((done[i].wr_id&~STRIPE_SLOT)==STRIPE_DESCRIPTOR){s->arrived[s->arrived_head++%MESH_DESCRIPTORS]=(uint32_t)slot;continue;}
+    const struct stripe_piece *p=s->posted+slot%MESH_STRIPE_CHUNKS;
+    s->receive_frames-=p->frames;s->receive_tail++;
+    if(!p->last)continue;
+    stripe_word(p->word,p->value);
+    atomic_fetch_add_explicit(&s->landed,1,memory_order_relaxed);
+  }
+  int moved=count>0;
+  for(;;){
+    if(!s->in.active){
+      if(s->arrived_tail==s->arrived_head)break;
+      const uint32_t slot=s->arrived[s->arrived_tail%MESH_DESCRIPTORS];
+      memcpy(&s->in.d,wire.data+stripe_descriptor(port,slot),sizeof s->in.d);
+      const struct mesh_descriptor *d=&s->in.d;
+      if(d->offset>wire.length || d->bytes>wire.length-d->offset || !stripe_word_valid(d->word)){stripes_lost(port,EPROTO);return 1;}
+      s->in.done=0;s->in.slot=slot;s->in.active=1;
+    }
+    const uint64_t offset=s->in.d.offset+s->in.done;
+    const uint32_t length=stripe_length(offset,s->in.d.bytes-s->in.done,s->piece),frames=length?(length+4095)/4096:1;
+    if(s->receive_frames+frames>s->receive_capacity || s->receive_head-s->receive_tail>=MESH_STRIPE_CHUNKS)break;
+    const int last=s->in.done+length>=s->in.d.bytes;
+    const uint32_t slot=(uint32_t)(s->receive_head%MESH_STRIPE_CHUNKS);
+    s->posted[slot]=(struct stripe_piece){.word=last?s->in.d.word:0,.value=s->in.d.value,.frames=frames,.last=(uint32_t)last};
+    struct ibv_sge span=stripe_span(port,offset,length);
+    struct ibv_recv_wr request={.wr_id=STRIPE_DATA|slot,.sg_list=&span,.num_sge=1},*bad;
+    int error=data->receive(data->pair,&request,&bad);
+    if(error){stripes_lost(port,error<0?-error:error);return 1;}
+    s->receive_frames+=frames;s->receive_head++;s->in.done+=length;moved=1;
+    if(!last)continue;
+    s->in.active=0;s->arrived_tail++;
+    if((error=stripe_listen(port,s->in.slot))){stripes_lost(port,error);return 1;}
+  }
+  return moved;
+}
+
 /* design/bridge-and-ipc.md#progress: one pass of a port's progress thread, `side` 0 its receives' and 1 its SENDs':
    every exclusive flow in the port's table it serves (while the flow is progressing) and the port's lanes while they are
    up.  The pass reads the table's epoch, serves each, and tells the epoch it began at, so a flow taken out of the table
@@ -1366,6 +1595,9 @@ static int port_pass(struct port *port,int side,int *any,uint64_t *told){
       *any|=flight;
     }else if(riders || l->records){moved|=lane_receive(port);*any|=l->records!=0;}
   }
+  /* design/bridge-dataflow.md#stripes: the port's stripe flow while it is up, its receives always posted and any ring
+     able to name its peer at any time */
+  if(atomic_load_explicit(&port->stripes.up,memory_order_acquire)){*any=1;moved|=side?stripes_send(port):stripes_receive(port);}
   /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it), so the line the two threads
      read every pass (`high`, `epoch`) is not written by either each pass */
   if(epoch!=*told){atomic_store_explicit(&port->seen[side],epoch,memory_order_release);*told=epoch;}
@@ -1389,6 +1621,19 @@ static void *port_progress(void *argument){
   uint32_t empty=0;
   int resting=0,any=0;
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
+    /* design/bridge-dataflow.md#stripes: while the port's guard stands, no pass (no post on any queue pair of its device)
+       and no flow read, so the epoch is told as it moves (port_settle inside a guarded job returns) */
+    const uint64_t guard=atomic_load_explicit(&port->guard,memory_order_acquire);
+    if(guard&1){
+      atomic_store_explicit(&port->guarded[side],guard,memory_order_release);
+      while(atomic_load_explicit(&port->guard,memory_order_acquire)==guard && !atomic_load_explicit(&port->closing,memory_order_acquire)){
+        const uint64_t epoch=atomic_load_explicit(&port->epoch,memory_order_acquire);
+        if(epoch!=told){atomic_store_explicit(&port->seen[side],epoch,memory_order_release);told=epoch;}
+        sched_yield();
+      }
+      empty=0;quiet=0;resting=0;
+      continue;
+    }
     const uint64_t rung=atomic_load_explicit(bell,memory_order_acquire);
     if(port_pass(port,side,&any,&told)){empty=0;quiet=0;resting=0;continue;}
     if(any && !resting){
@@ -1449,6 +1694,27 @@ static void port_settle(struct port *port){
   for(int side=0;side<port->threads;side++)
     while(atomic_load_explicit(&port->seen[side],memory_order_acquire)<epoch){port_bell(port);sched_yield();}
 }
+/* design/bridge-dataflow.md#stripes, design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": the guard of a
+   port's device, on the port's queue, around a change of its verbs objects (queue pairs and completion queues made,
+   connected or destroyed): raised, it returns once each started progress thread holds (it told the guard's value before
+   its next pass, and passes no more while the guard stands), so no queue pair of the device is posted on while another
+   is made, changed or destroyed (Apple's provider: a post on a long-lived queue pair across another's teardown stores
+   to the device's shared doorbell mapping after it moved, tbt_post_recv); lowered, the threads go on.  It stands for a
+   change of the stripe flow's own (`always`) and, while the device holds a stripe flow's queue pairs (whose posts
+   outlive every other's teardown), for every flow's and the lanes' too; with none, HEAD's verbs work runs unguarded as
+   it did */
+static void port_guard(struct port *port,int raise){
+  if(!raise){atomic_fetch_add_explicit(&port->guard,1,memory_order_release);port_bell(port);return;}
+  const uint64_t guard=atomic_fetch_add_explicit(&port->guard,1,memory_order_acq_rel)+1;
+  for(int side=0;side<port->threads;side++)
+    while(atomic_load_explicit(&port->guarded[side],memory_order_acquire)!=guard){port_bell(port);sched_yield();}
+}
+static int guard_raise(struct port *port,int always){
+  if(!always && !port->stripes.provider.queues)return 0;
+  port_guard(port,1);
+  return 1;
+}
+static void guard_lower(struct port *port,int raised){ if(raised)port_guard(port,0); }
 /* design/bridge-and-ipc.md#progress: a flow's SENDs (and an exclusive flow's receives) no longer served, on its port's
    queue, returning once neither thread is serving them (a flow on the lanes keeps taking its headers' records) */
 static void port_quiet(struct flow *f){
@@ -1508,7 +1774,10 @@ static void port_pairs(struct port *port){
 static void flow_job(struct flow *f,int job){
   f->job=job;atomic_store_explicit(&f->done,0,memory_order_relaxed);
   dispatch_async(f->port->work,^{
+    /* design/bridge-dataflow.md#stripes: guarded where the device holds a stripe flow (port_guard) */
+    const int raised=guard_raise(f->port,0);
     f->result=flow_work(f,job);
+    guard_lower(f->port,raised);
     port_pairs(f->port);
     atomic_store_explicit(&f->done,1,memory_order_release);
     wake();
@@ -1535,7 +1804,10 @@ static int flow_release(struct flow *flow){
                      flow->peer_alive?"":", the peer made no keepalive queue pair");
   if(!flow->exclusive && atomic_load_explicit(&flow->lane_frames,memory_order_acquire) &&
      flow->port->lanes.generation==flow->lane_epoch)return 0;
-  if(!down_pair(&flow->provider))return 0;
+  /* design/bridge-dataflow.md#stripes: guarded where the device holds a stripe flow (port_guard) */
+  const int raised=guard_raise(flow->port,0),down=down_pair(&flow->provider);
+  guard_lower(flow->port,raised);
+  if(!down)return 0;
   ledger_write(flow);
   free(flow->receive);free(flow->streams);free(flow->gates);free(flow->rings);free(flow->requests);
   flow->receive=NULL;flow->streams=NULL;flow->gates=NULL;flow->rings=NULL;flow->requests=NULL;
@@ -2264,6 +2536,8 @@ static void lanes_job(struct port *port,int job){
   l->job=job;atomic_store_explicit(&l->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
     int result=0;
+    /* design/bridge-dataflow.md#stripes: guarded where the device holds a stripe flow (port_guard) */
+    const int raised=guard_raise(port,0);
     if(job==LANES_MAKING)result=pair_up(&l->provider,MESH_LANES);
     else if(job==LANES_CONNECTING){
       result=pair_receive(&l->provider,(const uint32_t (*)[2])l->peer,port->heard.lid,port->heard.gid);
@@ -2281,6 +2555,7 @@ static void lanes_job(struct port *port,int job){
       result=down_pair(&l->provider)?0:EBUSY;
       if(!result)l->generation++;
     }
+    guard_lower(port,raised);
     l->result=result;
     port_pairs(port);
     atomic_store_explicit(&l->done,1,memory_order_release);
@@ -2386,6 +2661,199 @@ static void lanes_heard(struct port *port,const struct message *heard){
   memcpy(l->peer,heard->pair,sizeof l->peer);
   l->peer_room=(uint32_t)heard->code;l->heard=1;
   lanes_turn(port);
+}
+
+/* design/bridge-dataflow.md#stripes: the largest piece this end's device takes in one SEND (its port's max_msg_sz, in
+   whole frames, at most MESH_STRIPE_PIECE: mesh 8fc27cbe's 4 MiB, MESH_STRIPE_CHUNK) */
+static uint32_t stripes_piece(const struct port *port){
+  const uint32_t most=port->device.port.max_msg_sz/4096*4096;
+  return most && most<MESH_STRIPE_PIECE?most:MESH_STRIPE_PIECE;
+}
+/* the stripe flow ready to run, on the port's queue once its queue pairs are connected: the piece both ends cut by, its
+   queue pairs' frames less the descriptors their completion queues hold beside them, every count from zero and every
+   descriptor slot's receive posted; 0, or the post's error */
+static int stripes_ready(struct port *port){
+  struct stripes *s=&port->stripes;
+  const uint32_t own=stripes_piece(port);
+  s->piece=s->peer_piece && s->peer_piece/4096*4096<own?s->peer_piece/4096*4096:own;
+  if(!s->piece)s->piece=4096;
+  const uint32_t sends=(uint32_t)s->provider.sent->cqe,receives=(uint32_t)s->provider.completion->cqe;
+  s->send_capacity=MIN(s->provider.queues[1].send_capacity,sends>MESH_DESCRIPTORS+1?sends-MESH_DESCRIPTORS-1:1);
+  s->receive_capacity=MIN(s->provider.queues[1].receive_capacity,receives>MESH_DESCRIPTORS+1?receives-MESH_DESCRIPTORS-1:1);
+  s->send_head=s->send_tail=s->descriptors_sent=s->descriptors_done=s->receive_head=s->receive_tail=s->arrived_head=s->arrived_tail=0;
+  s->send_frames=s->receive_frames=s->cursor=0;
+  s->out=s->in=(struct stripe_cut){0};
+  int error=s->provider.queues[0].receive_capacity<MESH_DESCRIPTORS || s->provider.queues[0].send_capacity<MESH_DESCRIPTORS?ENOSPC:0;
+  for(uint32_t slot=0;slot<MESH_DESCRIPTORS && !error;slot++)error=stripe_listen(port,slot);
+  return error;
+}
+/* the requests a stripe flow took and had not completed when it stopped (the threads read it no more): each failed as
+   a value (its writer's word UINT64_MAX, ECONNRESET) */
+static void stripes_abandon(struct port *port){
+  struct stripes *s=&port->stripes;
+  uint64_t abandoned=0;
+  if(s->out.active){stripe_failed(s->out.ring,s->out.owner,s->out.d.word,ECONNRESET);s->out.active=0;abandoned++;}
+  for(;s->send_tail!=s->send_head;s->send_tail++){
+    const struct stripe_piece *p=s->sent+s->send_tail%MESH_STRIPE_CHUNKS;
+    if(p->last){stripe_failed(p->ring,p->owner,p->word,ECONNRESET);abandoned++;}
+  }
+  atomic_fetch_sub_explicit(&s->flight,abandoned,memory_order_release);
+}
+/* design/bridge-dataflow.md#stripes: a stripe flow's job on its port's queue, always guarded (port_guard): its two
+   queue pairs and completion queues made (STRIPES_MAKING); connected to the peer's, ready (stripes_ready) and the port's
+   progress threads started (STRIPES_CONNECTING: the event loop alone makes it up as it takes the job); or, once neither
+   progress thread reads it, the requests it held failed, its queue pairs moved to the error state and their flushed
+   completions drained (pair_flush), then destroyed (STRIPES_CLOSING): the one owner of its teardown, and the device's
+   registrations stay until the device retires (down_device, port_turn) */
+static void stripes_job(struct port *port,int job){
+  struct stripes *s=&port->stripes;
+  s->job=job;atomic_store_explicit(&s->done,0,memory_order_relaxed);
+  dispatch_async(port->work,^{
+    int result=0;
+    if(job==STRIPES_CLOSING){
+      atomic_store_explicit(&s->up,0,memory_order_release);
+      port_settle(port);
+      stripes_abandon(port);
+    }
+    port_guard(port,1);
+    if(job==STRIPES_MAKING)result=pair_up(&s->provider,2);
+    else if(job==STRIPES_CONNECTING){
+      result=pair_receive(&s->provider,(const uint32_t (*)[2])s->peer,port->heard.lid,port->heard.gid);
+      if(!result)result=pair_send(&s->provider);
+      if(!result)result=stripes_ready(port);
+      if(!result)result=port_threads(port);
+    }else{
+      s->flushed=s->provider.queues?pair_flush(&s->provider,MESH_FLUSH_POLLS):0;
+      result=down_pair(&s->provider)?0:EBUSY;
+    }
+    port_guard(port,0);
+    s->result=result;
+    port_pairs(port);
+    atomic_store_explicit(&s->done,1,memory_order_release);
+    wake();
+  });
+}
+/* design/recovery.md#loss: a stripe flow that failed (made, connected or run) or whose peer's did: the requests it held
+   fail as values, it is closed and made again a pause later where a request still needs it, and the peer is told (a
+   STRIPES of none and why) where the failure is this end's; the link, its lanes and its flows run on */
+static void stripes_reset(struct port *port,int64_t code,const char *what,int tell){
+  struct stripes *s=&port->stripes;
+  say("link %u (%s): stripes toward node %u %s: %s (%llu written, %llu landed)\n",port->index,port->name,port->peer,what,
+      strerror((int)code),(unsigned long long)atomic_load(&s->written),(unsigned long long)atomic_load(&s->landed));
+  if(tell)port_say(port,(struct message){.kind=STRIPES,.count=0,.code=code},NULL,0);
+  atomic_store_explicit(&s->up,0,memory_order_release);
+  if(s->state!=STRIPES_DOWN)s->state=STRIPES_CLOSING;
+  s->heard=0;s->wanted=0;s->code=code;
+}
+/* design/bridge-dataflow.md#stripes: the port's stripe flow's turn, on the event loop, as lanes_turn's: a job's end
+   taken (made: STRIPES told the peer, its queue pairs and its piece; connected: up; closed: down, the device's queue
+   pairs given back; a make or connect that failed: stripes_reset); its failure reset; made where it is wanted and the
+   link paired, a pause after it last closed, where the window gives its pages and the device has room for its two
+   queue pairs (else `code` says why, and the requests naming the peer fail as values: stripes_requests_turn), connected
+   once both ends made theirs, closed once it failed or the link went */
+static void stripes_turn(struct port *port){
+  struct stripes *s=&port->stripes;
+  if(port->greeted){
+    const struct mesh_record *r=record_held(port->peer);
+    atomic_store_explicit(&s->window,r?r->window:0,memory_order_relaxed);
+  }
+  if(s->job){
+    if(!atomic_load_explicit(&s->done,memory_order_acquire))return;
+    const int job=s->job,result=s->result;
+    s->job=0;
+    if(job==STRIPES_CLOSING){
+      if(result)say("link %u (%s): stripes teardown: %s\n",port->index,port->name,strerror(result));
+      else{
+        say("link %u (%s): stripes closed (%u completions flushed)\n",port->index,port->name,s->flushed);
+        s->state=STRIPES_DOWN;if(s->committed)port->committed-=2;s->committed=0;
+      }
+    }else if(s->state==STRIPES_CLOSING){}
+    else if(result)stripes_reset(port,result,job==STRIPES_MAKING?"not made":"not connected",1);
+    else if(job==STRIPES_MAKING){
+      s->state=STRIPES_MADE;
+      struct message said={.kind=STRIPES,.count=2,.code=stripes_piece(port)};
+      for(uint32_t q=0;q<2;q++){said.pair[q][0]=s->provider.queues[q].pair->qp_num;said.pair[q][1]=(s->provider.psn+q)&0xffffff;}
+      port_say(port,said,NULL,0);
+    }else{
+      s->state=STRIPES_UP;s->code=0;
+      atomic_store_explicit(&s->up,1,memory_order_release);port_bell(port);
+      say("link %u (%s): stripes up toward node %u: pieces of %u bytes\n",port->index,port->name,port->peer,s->piece);
+    }
+  }
+  const int64_t failed=atomic_exchange(&s->failed,0);
+  if(failed && port->greeted && (s->state==STRIPES_UP || s->state==STRIPES_CONNECTING))stripes_reset(port,failed,"failed",1);
+  if(s->job)return;
+  if(s->state==STRIPES_CLOSING && now>=s->retry){s->retry=now+MESH_PAUSE_NS;stripes_job(port,STRIPES_CLOSING);}
+  else if(port->greeted && s->state==STRIPES_DOWN && s->wanted && now>=s->retry){
+    if(!s->pages){
+      const uint32_t pages=(uint32_t)((2*MESH_DESCRIPTORS*sizeof(struct mesh_descriptor)+M->pgsz-1)/M->pgsz);
+      const uint32_t page=mesh_arena_alloc(&bridge,pages,pages);
+      if(page!=MESH_ABSENT){s->page=page;s->pages=pages;}
+    }
+    if(!s->pages){
+      if(s->code!=ENOMEM)say("link %u (%s): stripes not made: the window holds no pages for their descriptors\n",port->index,port->name);
+      s->code=ENOMEM;s->retry=now+MESH_PAUSE_NS;
+    }else if(port->committed+2>port->device.max_pairs){
+      if(s->code!=ENOSPC)say("link %u (%s): stripes not made: the device holds %u of its %u usable queue pairs\n",port->index,port->name,
+                             port->committed,port->device.max_pairs);
+      s->code=ENOSPC;s->retry=now+MESH_PAUSE_NS;
+    }else{port->committed+=2;s->committed=1;s->state=STRIPES_MAKING;stripes_job(port,STRIPES_MAKING);}
+  }
+  else if(port->greeted && s->state==STRIPES_MADE && s->heard){s->state=STRIPES_CONNECTING;stripes_job(port,STRIPES_CONNECTING);}
+}
+/* a peer's STRIPES: its stripe flow's queue pairs and its largest piece (this end makes its own where it has none), or
+   (count 0) its stripe flow failed, with why: this end's, where joined to it, reset untold */
+static void stripes_heard(struct port *port,const struct message *heard){
+  struct stripes *s=&port->stripes;
+  const int joined=s->state==STRIPES_UP || s->state==STRIPES_CONNECTING;
+  if(heard->count!=2){
+    if(joined)stripes_reset(port,heard->code?heard->code:EPROTO,"failed at its peer",0);
+    else s->heard=0;
+    return;
+  }
+  if(joined)stripes_reset(port,EPROTO,"made again by its peer",0);
+  memcpy(s->peer,heard->pair,sizeof s->peer);
+  s->peer_piece=(uint32_t)heard->code;s->heard=1;s->wanted=1;
+  stripes_turn(port);
+}
+/* design/bridge-dataflow.md#stripes: every registered ring's next request read on the event loop: a ring whose client
+   is gone deregistered; a request naming a node that a stripe flow of this node's carries toward is left to the send
+   threads of the ports up toward it, which take it; else the ports paired with its node want their stripe flows made
+   (stripes_turn), and it waits while one is being made; and it fails as a value (its writer's word UINT64_MAX, its
+   ring's code) where its node is this node (EINVAL) or no cable's (EHOSTUNREACH: a stripe goes over one link, its
+   node a neighbour), or where every cable's stripe flow could not be made (its code: ENOSPC, ENOMEM) */
+static void stripes_requests_turn(void){
+  _Atomic uint64_t *rings=mesh_rings(M);
+  for(uint32_t r=0;r<MESH_RINGS;r++){
+    uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
+    if(!at)continue;
+    struct mesh_requests *q=at>=M->data_off && at<=M->length-sizeof(struct mesh_requests)?(void *)((char *)M+at):NULL;
+    if(!q || !owned(q->owner) || !q->entries || (q->entries&(q->entries-1)) || q->entries>(M->length-at-sizeof *q)/sizeof(struct mesh_stripe)){
+      atomic_compare_exchange_strong(rings+r,&at,0);
+      continue;
+    }
+    uint64_t k=atomic_load_explicit(&q->taken,memory_order_acquire);
+    const struct mesh_stripe *e=q->request+(k&(q->entries-1));
+    if(atomic_load_explicit(&e->ready,memory_order_acquire)!=k+1)continue;
+    const uint32_t node=e->node;
+    struct port *cable[MESH_PORTS];
+    const uint32_t n=node==M->node?0:cables(node,cable);
+    int64_t code=node==M->node?EINVAL:n?0:EHOSTUNREACH;
+    int up=0,failing=n>0;
+    for(uint32_t j=0;j<n;j++){
+      struct stripes *s=&cable[j]->stripes;
+      up|=s->state==STRIPES_UP;
+      if(s->state==STRIPES_DOWN && s->code && now<s->retry){if(!code)code=s->code;}
+      else failing=0;
+      if(s->state!=STRIPES_UP)s->wanted=1;
+    }
+    if(up || (n && !failing))continue;
+    const uint64_t word=e->word,owner=q->owner;
+    if(!atomic_compare_exchange_strong_explicit(&q->taken,&k,k+1,memory_order_acq_rel,memory_order_relaxed))continue;
+    if(atomic_load_explicit(&q->code,memory_order_relaxed)!=code)
+      say("stripes: a request of client %llx toward node %u refused: %s\n",(unsigned long long)owner,node,strerror((int)code));
+    stripe_failed(at,owner,word,code);
+  }
 }
 
 /* design/bridge-and-ipc.md#requests: a channel (RFC 4254 s5) from a client of one node to a service of another, the
@@ -2901,6 +3369,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
   if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;return;}
   if(heard->kind==READY){ready_heard(port,heard,payload);return;}
   if(heard->kind==LANES){lanes_heard(port,heard);return;}
+  if(heard->kind==STRIPES){stripes_heard(port,heard);return;}
   if(heard->kind>=CHANNEL_OPEN && heard->kind<=CHANNEL_CLOSE){channel_heard(port,heard,payload);return;}
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from,heard->stripe);
   if(!f)return;
@@ -2949,6 +3418,10 @@ static void port_lost(struct port *port,int64_t code,int retire){
   requests_lost(port,port->parted?ECONNRESET:code);
   if(port->lanes.state!=LANES_DOWN)port->lanes.state=LANES_CLOSING;
   port->lanes.heard=0;port->lanes.retry=0;
+  /* design/bridge-dataflow.md#stripes: the stripe flow alike, closed once the stops before it have run */
+  atomic_store_explicit(&port->stripes.up,0,memory_order_release);
+  if(port->stripes.state!=STRIPES_DOWN)port->stripes.state=STRIPES_CLOSING;
+  port->stripes.heard=0;port->stripes.wanted=0;port->stripes.retry=0;
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
   port->retiring|=retire;port->open&=!retire;port->next=now+MESH_PAUSE_NS;
   link_set(port,0,retire?MESH_STOPPED:MESH_PAIRING,code);
@@ -2975,7 +3448,7 @@ static struct port *port_at(uint32_t interface){
    flow and no lane holds queue pairs on it), else opened and its port read; then, while it has no peer, its hello sent to every
    node on its link */
 static void port_turn(struct port *port){
-  if(port->job || port->control>=0 || now<port->next || (port->retiring && (port->flows || port->lanes.state!=LANES_DOWN)))return;
+  if(port->job || port->control>=0 || now<port->next || (port->retiring && (port->flows || port->lanes.state!=LANES_DOWN || port->stripes.state!=STRIPES_DOWN)))return;
   port->next=now+MESH_PAUSE_NS;
   port->interface=if_nametoindex(port->name);
   const int retire=port->retiring;
@@ -3304,6 +3777,8 @@ static void clients_turn(int liveness){
   }
   for(struct flow *f=flows;f;f=f->next)
     zombie|=(f->owner && !owned(f->owner)) || (f->side[0].owner && !owned(f->side[0].owner)) || (f->side[1].owner && !owned(f->side[1].owner));
+  /* design/bridge-dataflow.md#stripes: a stripe in flight may name a retired client's bytes and word */
+  for(uint32_t p=0;p<port_count;p++)zombie|=atomic_load_explicit(&ports[p].stripes.flight,memory_order_acquire)!=0;
   unreleased|=changed;
   if(unreleased && !zombie){unreleased=0;mesh_retired_release(M);}
 }
@@ -3515,8 +3990,10 @@ int main(int argc,char **argv){
       if((port->connecting || (port->control>=0 && !port->greeted)) && now>port->next)port_lost(port,ETIMEDOUT,0);
       port_turn(port);
       lanes_turn(port);
+      stripes_turn(port);
     }
     flows_turn();
+    stripes_requests_turn();
     requests_turn();
     health_turn();
     host_taken();
@@ -3594,6 +4071,11 @@ int main(int argc,char **argv){
     });
     port_still(port);
     dispatch_sync(port->work,^{
+      /* design/bridge-dataflow.md#stripes: no progress thread runs: the stripe flow's queue pairs flushed and destroyed */
+      if(port->stripes.provider.queues){
+        pair_flush(&port->stripes.provider,MESH_FLUSH_POLLS);
+        if(!down_pair(&port->stripes.provider))say("link %u (%s): stripes teardown: %s\n",port->index,port->name,strerror(errno));
+      }
       if(!down_pair(&port->lanes.provider))say("link %u (%s): lanes teardown: %s\n",port->index,port->name,strerror(errno));
       if(!down_device(&port->device))say("link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno));
     });
