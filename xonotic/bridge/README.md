@@ -2,14 +2,16 @@
 
 The bridge has one engine implementation and one transport implementation.
 
-- `../darkplaces-work/mesh_ipc.c` implements the QuakeC builtins.
-- `../../rdma/mesh.h` and `../../rdma/mesh-client.c` implement the transport used by the engine.
+- `../darkplaces-work/mesh_ipc.c` implements the QuakeC builtins and the engine's end of
+  its local socket (`MESH_EXPERT_SOCKET`).
+- `../solver/xonwire.py` (`Engine`, `RuntimeFrames`) is the worker's end of that socket
+  and the wire's framing; between nodes the rows ride libnccl-mesh
+  (`../solver/worker.py`, xonotic/README.md "The solver").
 - `../qcsrc/common/gamemodes/gamemode/payload/mesh_ipc.qh` declares the builtins used by game code.
-- `../solver/strat/strat_responder.py` consumes requests and publishes policy responses.
 
-Darkplaces includes `mesh_ipc.c` from `prvm_cmds.c`. The bridge source includes
-the canonical transport files directly from `rdma/`; there are no copied headers,
-copied C files, generated patches, or patch-application scripts.
+Darkplaces includes `mesh_ipc.c` from `prvm_cmds.c`. Its wire constants come from
+`rdma/xonwire.def`; there are no copied headers, copied C files, generated patches, or
+patch-application scripts.
 
 The active builtins are:
 

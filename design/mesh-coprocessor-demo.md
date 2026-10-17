@@ -134,6 +134,15 @@ conversion, and perturbation response are separate realized behavior measures. A
 compares mirrored interventions with their observation and missing masses; it does not
 label a self-play policy “improved.”
 
+The solver (`xonotic/solver/worker.py`, restored from ef6adb10^; xonotic/README.md "The
+solver") is this demonstration's measured operating point: the window of R = 4,096 rows
+lifted to 2,048 residual columns, eight experts at a mean of 512 rows each
+(T·k/E ≥ 512) and the window's Gram, about 104 GFLOP and 269 MB of resident weights a
+solve, its experts and Gram divided among the members by column shares the Balancer
+moves on the ticks' own times. Its reproduction target is the Mini alone at 24 ms a
+solve (4.29 TF/s, 4905622f) and a 26.6 ms full-scale tick (ac3b543b); on the pair each
+member's share and the tick are read against it.
+
 The game is one demonstrator, not a special telemetry mode. The macroscopic result is a
 live account of where pages, bytes, arithmetic, time, and optimization reside across the
 entire reachable mesh, joined to observable consequences in an independently controlled

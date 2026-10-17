@@ -16,6 +16,50 @@ payload from it with `payload/build.sh`. The engine's side of the fabric is
 `darkplaces-work/mesh_ipc.c`, the game's
 `qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.{qc,qh}`.
 
+## The solver
+
+`solver/worker.py` is the planner's whole form, the mesh answering the game (restored
+from ef6adb10^, where the Mini answered it alone over the sealed mesh; the planner kept
+only its routed experts, about 1/100 of its compute, with synthetic positions). Every
+tick's request rows join a window of the 4,096 most recent rows, lifted into a
+2,048-wide residual basis, routed through eight experts and conditioned by the window's
+Gram matrix; a closed-form Stackelberg strategy over the scores (team, leader and
+follower tiers) with a REINFORCE logit field of 81,920 parameters under L2 decay toward
+logit 0 (ac3b543b) picks each bot's objective. On a world it divides as the planner
+does: rank r holds `columns.parts[r]` of every expert's columns, one all-reduce
+completes the expert output, the window's Gram is column-parallel over the same share
+with one all-reduce of its row-parallel products and an MPI_Allgatherv of the
+conditioned rows; `rdma/allocate.py`'s Balancer moves the parts on each tick's own
+times. The torch backend computes on the GPU with torch.distributed's `mesh` backend
+(`rdma/torch-mesh`), the numpy backend with `mesh_mpi`; operands are window leases.
+
+    RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 \
+        PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.worker serve CONFIG.json
+
+`CONFIG.json` is the call's operand; `solver/configs/pair-example.json` is didactic (an
+even split, the GPU, 16 KiB frames) and names every field. Rank 0 is the game's host:
+it serves the engine's local socket (`MESH_EXPERT_SOCKET`, `solver/xonwire.py`
+`Engine`: mesh_ipc.c's hello, status and frames), joins each tick's OBSERVATION, CART,
+TEAM and STATE by session and tick (`xonwire.RuntimeFrames`), binds them to the 72-column
+request of 08-29 (`request_rows`: the held objective is the team's vote over the
+worker's own last answer; item posts are the items the bots perceived, each at class
+rank 1, since the wire carries no item class), and frames one 8-column row a bot back
+(id, pick, five node weights, leader) under the configured `response` kind. Rank 0
+broadcasts an idle tick every `idle_s` without a request, so the other ranks never wait
+past the library's silent-link bound. `rdma/xonwire.def` defines no plan kind at HEAD
+and the game opens no handle for one: until the game side restores sv_payload_mesh.qc's
+consumer (a `PLAN` entry in xonwire.def, `mesh_open(node, NONE, PLAN, 8, maxclients)`,
+`mesh_scatter_rows` into the pick, weights and leader fields, the per-team vote), the
+worker solves every tick and withholds its rows. `solver/sendreq.py CONFIG.json` stands
+in for the engine; `solver.worker --check`, `--bench N` and `--synth N` run on one
+process with no mesh.
+
+Reproduction targets: 104 GFLOP a solve (`ctx_flops`, T=4096, RES=2048) in 24 ms
+median at 4.29 TF/s on the Mini alone, numpy 54 ms (4905622f, mlx); a full-scale tick
+(50 bots, 5 teams, 4 carts) 26.6 ms (ac3b543b); the synthetic gang-up rate predicted
+0.254 and measured 0.254 (990fd5e5, `--synth`). On the pair the solve's share on each
+member and the tick are measured against the Mini-alone figure.
+
 ## The 256-player / 256-team payload contract
 
 The engine and scoreboard admit 256 clients, and shared score, spawn, sound,
