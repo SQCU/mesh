@@ -405,14 +405,21 @@ exclusive flow. Each step names the word written, its writer and its reader. The
 1. **Payload.** The host copies the piece into `ch->sending + (at % 16) * slot` (`nccl-mesh.c run`). The GPU form
    copies into `ring_out` (`metal_copy(METAL_SEND)`), or, for a small piece, copies and releases in one kernel
    (`metal_send_small`). A position with nothing to send carries `METAL_STAMP(at)` in its first 8 bytes (a filler).
-   It still costs a whole slot on the wire.
+   <a id="send-length"></a>**Its length.** Every release stores, before `ready`, its cell's first SEND's length at
+   cell offset `MESH_SEND_LENGTH` (40, the `span.length` the prepared request's SGE names), as NCCL's kernel writes
+   `connFifo[slot].size` for the proxy to post: a small slot is one block (one SEND), so a position sends its piece
+   (a filler 8 bytes) rather than the 16 KB block; a large slot's first SEND stays a block and its other blocks keep
+   their prepared lengths. The kernels store `p.n` (`mesh_step_release`, `publish_filler`), the host its argument
+   (`mesh_host_publish(..., bytes)`), each from `nccl-mesh.c first_send`. Until 2026-10-17 every small position sent
+   the whole block: a decode's 3,072-byte crossing paid four frames (metal-microbench output_data/split-20261017,
+   the link census; Q5P, mesh git 5702ea5, sent its 3,072).
 2. **Client credit.** The host publishes position `at` only once `at < consumed + LAG` (`run`). A rank's consumption
    of the peer's position `at - LAG` is what lets it publish `at`, so the reverse direction's positions carry the
    head credit.
 3. **Release.**
-   - Host: `mesh-collective.c mesh_host_publish(ctx, ch->out, at)` finds the row's targets (`mesh_publication_prepare`
-     → `mesh_row_targets`). It stores `argument + c` = `1 + c` (release order) into `ready` of the cell at
-     `targets[i].cells + 256 * t`.
+   - Host: `mesh-collective.c mesh_host_publish(ctx, ch->out, at, bytes)` finds the row's targets (`mesh_publication_prepare`
+     → `mesh_row_targets`). It stores `bytes` at offset `MESH_SEND_LENGTH`, then `argument + c` = `1 + c` (release
+     order) into `ready` of the cell at `targets[i].cells + 256 * t`.
    - GPU: `mesh.metal mesh_publish(cell, ch->argument + cycle_of(at))`, after a system-scope fence. The cell is at
      publication-buffer offset `ch->cell + (at % 32) * 256` (`nccl-mesh.c`, the walk that issues `metal_publish`).
 4. **The bridge notices.** There is no interrupt and no kqueue event on the data path. Bridge a's send thread polls

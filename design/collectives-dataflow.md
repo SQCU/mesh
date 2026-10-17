@@ -412,7 +412,8 @@ A change of the map never closes a session.
      - a piece's first position waits until its prior receive is `done`.
    - **Publish.** While `sent < consumed + LAG`:
      - `memcpy` the piece from `host[buffer]` into the out slot, or write the filler stamp;
-     - `mesh_host_publish(out, sent)` stores `argument + cycle` into the position's SEND cell.
+     - `mesh_host_publish(out, sent, first_send(...))` stores the position's first SEND length, then `argument + cycle`,
+       into the position's SEND cell (bridge-dataflow.md#send-length).
    - On `~0` or `s->failed`: fail, and `session_close` the session.
 6. Unlock. `finish` copies `result` into `recv`, or truncates and divides for an integer `ncclAvg`.
    `target = signaled = waited = end`.
