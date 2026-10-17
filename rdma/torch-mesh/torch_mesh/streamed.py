@@ -71,7 +71,7 @@ model there, else of the fit's prices (every measurement, a probe's too, moves t
                                                                 kind attention), the bandwidth its reads' (else, a refit,
                                                                 its evidence's); a record of another node refused
   python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--rows 1,2,4,...] [--explore R=C[/FORM<v>],...]
-                                [--plan R=PLAN[/PARTS][@sliding]] [--apart R] --out CHOICES
+                                [--plan R=PLAN[/PARTS][@sliding]] [--apart R] [--draft DRAFTER] --out CHOICES
                                                                 the fit evaluated where the engine runs: each slice's chosen
                                                                 instance at each row count the member runs (the record's,
                                                                 call_rows: its step's, its chunks' and their head's; without a
@@ -81,7 +81,9 @@ model there, else of the fit's prices (every measurement, a probe's too, moves t
                                                                 each of those row counts: the choices an engine reads
                                                                 (LM_STREAMED_INSTANCES), naming this node; no row count is
                                                                 rounded to another, and none the member does not run is
-                                                                evaluated
+                                                                evaluated; with --draft DRAFTER, the drafter's matrices
+                                                                too, a drafting member's share of a product as views on
+                                                                its `draft <kind>` lattice (draft_slices)
   python -m torch_mesh.streamed observe READING EXPORT [--loads L] [--program RECORD --rank R] --out ROWS
                                                                 a served reading's profile (metal-microbench
                                                                 tools/reading.py) as observations of its instances and
@@ -1869,6 +1871,57 @@ def slices(streamed, record=None, rank=None):
     return out
 
 
+# metal-microbench tools/mesh/programs.py DRAFT_PRODUCTS: the kind of the `draft <kind>` decision that splits each drafter
+# product, by its export's name (a layer's in every layer); a convolution's tap generator is no decision's
+DRAFT_KINDS = {'fc': 'fc', 'self_attn.qk': 'qk', 'self_attn.o_proj': 'o', 'mlp.gate_up': 'gate_up', 'mlp.down_proj': 'down',
+               'head_gate': 'head'}
+
+
+def draft_kind(name):
+    """The kind of the `draft <kind>` decision that splits the drafter's matrix `name` (DRAFT_KINDS), else None."""
+    return DRAFT_KINDS.get(name.split('.', 2)[2] if name.startswith('layers.') else name)
+
+
+def _band_view(m, a, b):
+    """Coded rows [a, b) of `m` (whole bands) as the engine's StreamedMatrix.view takes them: their bands, tile words, row
+    scales and row order (the places among the whole's outputs they write: the drafter's export orders a product's rows by
+    energy, so a run of coded rows is natural rows scattered over the product), at the whole's width class.  A slice the
+    resolver keys and prices (products: outputs, columns, width class, units); no product of it runs here."""
+    assert a % 32 == 0 and b % 32 == 0 and 0 <= a < b <= m.rows, f'{m.label}: a view of whole bands, not [{a}:{b}]'
+    out = m.like(tiles=m.tiles[a // 32:b // 32], bands=m.bands[a // 32:b // 32], row_scale=m.row_scale[a:b].contiguous(),
+                 row_order=m.row_order[a:b].contiguous())
+    out.label = f'{m.label}[{a}:{b}] view'
+    return out
+
+
+def draft_slices(drafter, record=None, rank=None):
+    """The drafter's slices a rank holds (metal-microbench docs/kernels.md#the-drafter-as-a-share), (name, matrix): each
+    matrix whole, but a product the record's speculate gives the rank a run of (`draft`, one {kind: [start, end)} a
+    drafting member in `drafting` order: programs.py draft_shares; the engine's Drafter.part runs it as a view): where
+    the record's `ragged` names `draft`, every width on that product's `draft <kind>` decision's lattice (spans: whole
+    bands of 32 coded rows, from the member's side), as slices takes the head's rows on the `row` lattice, else its run;
+    each a view of the whole's bands (_band_view) at the whole matrix's code widths.  Without a record, or on a rank
+    that drafts no share, every matrix whole (one drafting member: HEAD's form)."""
+    speculate = (record or {}).get('speculate') or {}
+    drafting = list(speculate.get('drafting') or ([speculate['on']] if 'on' in speculate else []))
+    runs = speculate.get('draft') or []
+    own = runs[drafting.index(rank)] if rank in drafting and len(runs) == len(drafting) else {}
+    ragged = 'draft' in ((record or {}).get('ragged') or ())
+    out, seen = [], set()
+    for name, m in drafter.matrices.items():
+        kind = draft_kind(name)
+        held = own.get(kind) if kind else None
+        if not held:
+            out.append((name, m))
+            continue
+        widths = [s for extent, grain in lattice(record, 'draft', f'draft {kind}') for s in spans(m.rows, extent, grain, held)] if ragged else []
+        for a, b in widths or [tuple(held)]:
+            if (name, a, b) not in seen:
+                seen.add((name, a, b))
+                out.append((name, _band_view(m, a, b)))
+    return out
+
+
 def _text_config(export):
     """The text model's configuration an export names (its metadata's model directory)."""
     from safetensors import safe_open
@@ -1962,7 +2015,7 @@ def _resolve(args):
         plans[int(found.group(1))] = (found.group(2), int(found.group(3) or 0), bool(found.group(4)))
     held = slices(streamed, record or None, args.rank)
     for draft in args.draft:
-        held += list(Streamed(draft, 'cpu').matrices.items())
+        held += draft_slices(Streamed(draft, 'cpu'), record or None, args.rank)
     keyed, runs = products(held)
     fused = fused_classes(fit.fused, [c for c in classes if c <= 16])
     entries = []
@@ -2034,7 +2087,8 @@ def main():
     resolve.add_argument('--rows', default=None, help="the row counts the engine runs (the served engine's batch buckets); without it, the record's (call_rows)")
     resolve.add_argument('--ctx', type=int, default=0, help="the positions a global layer's attention is priced at (default: the record's ctx_mean, else 1024)")
     resolve.add_argument('--draft', action='append', default=[],
-                         help="a drafter's export whose matrices the member runs whole (metal-microbench tools/draft/dflash2.py export)")
+                         help="a drafter's export whose matrices the member runs (metal-microbench tools/draft/dflash2.py export): whole, "
+                              "or a product the record's speculate gives the --rank a run of, as views on its 'draft <kind>' lattice (draft_slices)")
     resolve.add_argument('--explore', action='append', default=[],
                          help="a rows class whose slices take the fit's argmin over the named configurations alone, ROWS=KIND/ARGS[/FORM<v>],..., "
                               "or ROWS=FORM<v> alone: a form named (FORMS: H<h>, RING1, LOADS1; one value a form) taken by every slice of the class "
