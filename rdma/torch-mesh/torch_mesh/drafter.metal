@@ -220,6 +220,14 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
     }
 }
 
+// A product's output zeroed before a drafting member's share of it (metal-microbench docs/kernels.md#the-drafter-as-a-share)
+// writes its rows: the export orders a product's rows by their energy, so a member's run of coded rows lands scattered
+// over the product's natural rows, and the members' partials, zeros outside each one's rows, are summed by the product's
+// point; `n` the output's halves over 4.
+kernel void mesh_draft_zero(device half4 *y [[buffer(0)]], constant uint &n [[buffer(1)]], uint i [[thread_position_in_grid]]) {
+    if (i < n) y[i] = half4(0.0h);
+}
+
 // Every member's step rows from the drafts (after their crossing): rows 1 .. R - 1 the proposals, unless the stream
 // stopped (spec_step's flags bit 1: its rows repeat their positions), given (bit 2: its rows replay the history) or, with
 // `hybrid` > 0, the prompt lookup's match this step (spec_step's state word 4) reached `hybrid` tokens: its rows stand.
