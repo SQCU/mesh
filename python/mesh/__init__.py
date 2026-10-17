@@ -981,9 +981,11 @@ class Program:
         with self._cond:
             self._closed = True
             self._cond.notify_all()
+        deadline = time.monotonic() + self.timeout
         for thread in self._threads:
-            thread.join(self.timeout)
-        self._world.close()
+            thread.join(max(0.0, deadline - time.monotonic()))
+        if not any(thread.is_alive() for thread in self._threads):
+            self._world.close()
         self._operations.clear()
         self._replicated.clear()
 

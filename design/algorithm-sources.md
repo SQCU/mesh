@@ -1334,6 +1334,38 @@ no default collective may invoke it.
 In the Python surface `collective.sync_on_remote_fill(*results, timeout=None)` waits until every result is filled,
 within its program's `timeout` (TimeoutError past it; MeshError where the program failed). No verb calls it.
 
+## Streaming overlap measurement
+
+The Python surface's reproduction harnesses (restored from mesh `57628982^:examples/streaming-chain.py`,
+`82be91f:examples/streaming-algebra.py` and `4540397d^:examples/streaming-overlap.py`). Each runs paired (two ranks,
+launched as torchrun launches them: `RANK`, `WORLD_SIZE=2`, `MASTER_ADDR`, `MASTER_PORT`, one a node, each node's
+bridge resident) or at world size 1 (`--local`, one rank, no crossing), on `--backend cpu` or `metal`, and states the
+comparison it reproduces; the frontier records stay where they are.
+
+- `examples/streaming-chain.py --chain literature`: `FFN → RMSNorm → summed learned embedding → FFN → RMSNorm` on
+  256 x 128 FP32 inputs in 64-row, 64-K, 64-column tiles (`nn.ffn`, `nn.rmsnorm`, `nn.summed_embedding`), the first
+  FFN's hidden tiles crossing from rank 0 to rank 1 and the second's back, each tile as it finishes (a queue per row
+  section and direction); one warm instance, then eight supplied together, row section 0 of the first withheld until
+  its output's section 1 is seen (the check that a withheld extent holds back nothing else). Frontier
+  (measurements/literature-pipeline-2026-09-13, mesh 82be91f, the deleted native executor): paired CPU **675.0**
+  invocations/s against **558.3** at world size 1 (+21%), first section 4.9 ms against 13.4; paired Metal **172.6**
+  against **155.5**. The reproduction is the pair against world size 1 with this harness on both.
+- `examples/streaming-chain.py --chain tensor-parallel --input X.npy --up-weight U.npy --down-weight D.npy
+  --consumer-weight C.npy --split S`: the 09-14 chain, each member's FFN over its hidden columns, `collective.reduce`
+  to the root, optional `--normalize` (`--residual`), swish, the consumer's contraction
+  (measurements/tensor-parallel-chain-2026-09-14.txt records its outputs, no timing).
+- `examples/streaming-overlap.py streamed|whole`: `Y = (X @ W) @ V`, rank 0 producing `X @ W` tile by tile, rank 1
+  consuming each tile as it lands and returning `Y`'s tiles (a queue per input slot and direction); streamed in
+  64-row tiles against whole (one tile), the same arithmetic. Frontier (measurements/streaming-overlap-2026-09-13.json,
+  mesh fb7828b: `--rows 4096 --depth 2`, 10 warm then 3,000 measured): **1,429.2** results/s streamed against
+  **962.9** whole (+48.6% paired), 1.326 ms against 2.007 ms a result.
+- `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`: the explicit wait and its counterexample
+  (`deadlock` ends in the program's bound, TimeoutError, rather than waiting forever); section 0 rides queues of its
+  own, so `independent` (section 0 never written) completes every other.
+
+`--trace FILE` keeps each call's (kind, record, row, begin and end ns, thread); the literature summary counts the
+crossings that overlap a kernel on the same member.
+
 ## report statistics
 
 Optional; reporting count, mean or variance is not required.
