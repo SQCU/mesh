@@ -938,6 +938,16 @@ void ncclMeshSessionWaits(uint64_t* ns);
    execution-planned-ahead) destroys them between executions and holds none after: 1, else 0 (no attach, or a bridge
    that runs on). */
 int ncclMeshBridgeStopping(void);
+/* A held communicator taken up by a new execution (metal-microbench docs/placement.md#retention-and-protention-the-next-
+   execution-planned-ahead): every member that takes it up agrees on `ticket`, the execution's identity (the same on every
+   member), at its session's next position, so the members run one execution on one session or none.  ncclSuccess where
+   every peer agreed; ncclRemoteError where a peer's program ended (its landings cancelled: its process exited, or it
+   destroyed its communicator to make one), a peer agreed on another ticket or program, or the session has positions in
+   flight: the caller destroys the communicator and makes one, as its peers do.  The wait ends at a landing, a
+   cancellation or a revoke (the caller's cancellation of its execution), never at a time: a peer that still prepares the
+   execution is waited for (design/collectives-dataflow.md, held and adopted communicators).  A communicator with no open
+   session agrees at once: its first group opens one, whose own agreement is at position 0 (session_agree). */
+ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket);
 /* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */

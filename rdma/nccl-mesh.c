@@ -1055,10 +1055,18 @@ static void release_all(struct session *s, int result, const char *format, ...) 
 
 /* the communicator's session's failure, where no group holds the sessions' lock (a group in progress returns its own) */
 static void violated(struct session *s);
+static int outstanding(struct session *s);
 static ncclResult_t session_async(ncclComm_t comm) {
-  if (pthread_mutex_trylock(&session_lock)) return ncclSuccess;
+  pthread_mutex_lock(&session_lock);
   struct session *s = comm->session;
   if (s) violated(s);
+  if (s && !atomic_load(&s->failed) && !outstanding(s))
+    for (uint32_t h = 0; h < s->count; h++)
+      if (mesh_host_arrived(&s->context, s->channels[h].in, (uint32_t)s->channels[h].end) == UINT64_MAX) {
+        release_all(s, ncclRemoteError, "node %u's program of %s ended while the session was idle (its landings cancelled)", s->channels[h].node,
+                    comm->name);
+        break;
+      }
   const ncclResult_t failed = s ? (ncclResult_t)atomic_load(&s->failed) : ncclSuccess;
   if (failed) fail(failed, "%s", s->failure);
   pthread_mutex_unlock(&session_lock);
@@ -1319,6 +1327,71 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
     atomic_store(&ch->target, 1); atomic_store(&ch->signaled, 1);
     h++;
   }
+  return ncclSuccess;
+}
+
+/* nccl.h ncclMeshCommAgree: the members' agreement on taking up a held communicator, one position of every channel
+   (its `end`) carrying {MESH_PLAN_VERSION, digest, ticket, node}, published and awaited with session_lock released (a
+   peer still preparing is waited for; a revoke, a cancelled landing or a disagreement ends it), every cursor then past
+   it */
+struct taken { uint64_t version, digest, ticket, node; };
+ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
+  if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
+  if (revoked(comm)) return revoked_fail(comm);
+  pthread_mutex_lock(&session_lock);
+  struct session *s = comm->session;
+  if (!s) { pthread_mutex_unlock(&session_lock); return ncclSuccess; }
+  violated(s);
+  const ncclResult_t failed = (ncclResult_t)atomic_load(&s->failed);
+  if (failed) {
+    const ncclResult_t result = fail(failed, "%s", s->failure);
+    pthread_mutex_unlock(&session_lock);
+    return result;
+  }
+  for (uint32_t h = 0; h < s->count; h++) {
+    const struct channel *ch = s->channels + h;
+    if (ch->sent != ch->end || ch->consumed != ch->end || ch->waited != ch->end || ch->checked != ch->end ||
+        atomic_load(&ch->target) != ch->end || atomic_load(&ch->signaled) != ch->end) {
+      const ncclResult_t result = fail(ncclRemoteError, "communicator %s: its session has positions in flight toward node %u (sent %llu, "
+                                       "consumed %llu, landed %llu of %llu): it is not taken up", comm->name, ch->node,
+                                       (unsigned long long)ch->sent, (unsigned long long)ch->consumed,
+                                       (unsigned long long)atomic_load(&ch->signaled), (unsigned long long)ch->end);
+      pthread_mutex_unlock(&session_lock);
+      return result;
+    }
+  }
+  const struct taken mine = {MESH_PLAN_VERSION, comm->digest, ticket, comm->members[comm->rank]};
+  for (uint32_t h = 0; h < s->count; h++) {
+    struct channel *ch = s->channels + h;
+    memcpy(ch->sending + (ch->end % DEPTH) * ch->slot, &mine, sizeof mine);
+    mesh_host_publish(&s->context, ch->out, (uint32_t)ch->end);
+  }
+  pthread_mutex_unlock(&session_lock);
+  for (uint32_t h = 0; h < s->count;) {
+    struct channel *ch = s->channels + h;
+    const uint64_t at = ch->end, arrived = mesh_host_arrived(&s->context, ch->in, (uint32_t)at);
+    if (revoked(comm)) return revoked_fail(comm);
+    if (arrived == UINT64_MAX)
+      return fail(ncclRemoteError, "node %u's program of %s ended while it was held (its landings cancelled): the communicator is made again",
+                  ch->node, comm->name);
+    if (!landed(arrived, at)) { usleep(20); continue; }
+    struct taken theirs;
+    memcpy(&theirs, ch->receiving + (at % DEPTH) * ch->slot, sizeof theirs);
+    if (theirs.version != mine.version || theirs.digest != mine.digest || theirs.ticket != ticket)
+      return fail(ncclRemoteError, "node %u took up %s for another execution or program (ticket %016llx, digest %016llx, version %llu; this "
+                  "rank's %016llx, %016llx, %llu): the communicator is made again", ch->node, comm->name,
+                  (unsigned long long)theirs.ticket, (unsigned long long)theirs.digest, (unsigned long long)theirs.version,
+                  (unsigned long long)ticket, (unsigned long long)mine.digest, (unsigned long long)mine.version);
+    h++;
+  }
+  pthread_mutex_lock(&session_lock);
+  for (uint32_t h = 0; h < s->count; h++) {
+    struct channel *ch = s->channels + h;
+    const uint64_t next = ch->end + 1;
+    ch->sent = ch->consumed = ch->end = ch->checked = ch->waited = next;
+    atomic_store(&ch->target, next); atomic_store(&ch->signaled, next);
+  }
+  pthread_mutex_unlock(&session_lock);
   return ncclSuccess;
 }
 
