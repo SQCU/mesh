@@ -1283,7 +1283,7 @@ static int lane_receive(struct port *port){
    the thread's to look for: a flow it serves (a SEND side progressing; an exclusive flow's receives, or a lane rider
    taking its headers' records), a lane's records posted and not landed, or its SENDs in flight; nothing lands on a lane
    for a flow this end has not listed, since the peer sends only after this end's POSTED, which follows the listing */
-static int port_pass(struct port *port,int side,int *any){
+static int port_pass(struct port *port,int side,int *any,uint64_t *told){
   const uint64_t epoch=atomic_load(&port->epoch);
   int moved=0;
   *any=0;
@@ -1303,7 +1303,9 @@ static int port_pass(struct port *port,int side,int *any){
       for(uint32_t lane=0;lane<MESH_LANES;lane++)*any|=((l->gate[lane].posted-l->gate[lane].retired)&MESH_GATE_MASK)!=0;
     }else{moved|=lane_receive(port);*any|=l->records!=0;}
   }
-  atomic_store_explicit(&port->seen[side],epoch,memory_order_release);
+  /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it), so the line the two threads
+     read every pass (`high`, `epoch`) is not written by either each pass */
+  if(epoch!=*told){atomic_store_explicit(&port->seen[side],epoch,memory_order_release);*told=epoch;}
   return moved;
 }
 /* design/bridge-and-ipc.md#progress: a port's progress thread: passes while anything moves, and with nothing moved for
@@ -1320,12 +1322,12 @@ static void *port_progress(void *argument){
   free(argument);
   pthread_setname_np(side?"mesh.rdma.send":"mesh.rdma.receive");
   _Atomic uint64_t *bell=&M->bell[port->index];
-  uint64_t quiet=0;
+  uint64_t quiet=0,told=atomic_load_explicit(&port->seen[side],memory_order_relaxed);
   uint32_t empty=0;
   int resting=0,any=0;
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
     const uint64_t rung=atomic_load_explicit(bell,memory_order_acquire);
-    if(port_pass(port,side,&any)){empty=0;quiet=0;resting=0;continue;}
+    if(port_pass(port,side,&any,&told)){empty=0;quiet=0;resting=0;continue;}
     if(any && !resting){
       if(++empty<MESH_IDLE_PASSES)continue;
       empty=0;
@@ -1336,7 +1338,7 @@ static void *port_progress(void *argument){
     atomic_store_explicit(&port->parked[side],1,memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
     const uint64_t last=atomic_load_explicit(bell,memory_order_acquire);
-    if(port_pass(port,side,&any)){atomic_store_explicit(&port->parked[side],0,memory_order_relaxed);empty=0;quiet=0;resting=0;continue;}
+    if(port_pass(port,side,&any,&told)){atomic_store_explicit(&port->parked[side],0,memory_order_relaxed);empty=0;quiet=0;resting=0;continue;}
     resting=1;
     os_sync_wait_on_address_with_timeout(bell,last,sizeof *bell,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
       any?MESH_IDLE_POLL_NS:MESH_PAUSE_NS);

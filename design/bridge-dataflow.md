@@ -370,7 +370,8 @@ once.
 
 **Table changes.** Flows enter the port's table with `port_list` (release store, then a bell ring). They leave with
 `port_unlist` and `port_settle`: `epoch++`, then wait until both threads report `seen >= epoch`. After that, no
-thread reads the flow.
+thread reads the flow. A thread stores `seen` only when the epoch it read differs from the one it last told, so the
+line of `high`, `epoch` and `seen` stays clean in both cores between table changes.
 
 ## 4. The life of one transfer
 

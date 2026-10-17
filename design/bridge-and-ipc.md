@@ -483,7 +483,9 @@ A port's flows and lanes are served by the port's two progress threads, its rece
 first flow or its lanes and kept for the bridge's life: one pass serves every exclusive flow in the port's table (its
 completion queues, its streams) and the port's lanes (their headers, their landings, their SENDs and completions).
 A flow enters the table when it is to be served and leaves it once neither thread reads it (an epoch each thread tells
-at each pass). MESH_VERSION 112 started two threads a flow, spinning while the flow lived, so a session kept 2(N-1)
+at the end of the first pass that read it: the two threads read `high` and `epoch` on one line at every pass, and a
+store of each pass's epoch by both bounced that line between their cores at the pass rate, a coherence miss in every
+pass of the latency path; mesh git 765a8590^ told it every pass). MESH_VERSION 112 started two threads a flow, spinning while the flow lived, so a session kept 2(N-1)
 spinning, and four a relayed pair: 10 to 34 on a member of a six-node mesh and 50 to 70 on a relay hub, above the
 rank's encoding threads (QOS_CLASS_USER_INTERACTIVE). A node now runs two a paired port (at most two a cable,
 independent of members, communicators and routes), and they spin only while something moves: after MESH_IDLE_NS
