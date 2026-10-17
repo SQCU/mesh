@@ -135,7 +135,8 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
   works for any array on any node whose bridge runs (NumPy, CPU tensors). It is functional, not the measured path.
 - **Metal path.** An `ncclMeshStream`: the group is encoded into a Metal command buffer, and every buffer is an
   `ncclMeshBuffer` (an `MTLBuffer` and a byte offset). The kernels copy each operand into the session's rings in the
-  bridge's window and land what arrives from them, with no staging on the host.
+  bridge's window and land what arrives from them, with no staging on the host; a send buffer that is a lease's Metal
+  buffer is read in place ([Memory](#memory)).
   - torch-mesh runs MPS tensors here.
   - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
   - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
@@ -232,9 +233,25 @@ Porting:
 - Python's lease is `mesh.lease(nbytes)`: a writable buffer for `numpy.frombuffer` or `torch.frombuffer`, returned to
   the window when it and everything over it are gone.
 - torch-mesh's own CPU staging and temporaries are leases ([torch-mesh](torch-mesh/README.md)).
-- Both paths copy every operand, a lease or not, through the session's rings; no libnccl-mesh collective crosses a
-  caller's buffer without a copy yet. The window is where a program that binds its own section (`mesh-call.h`
-  `mesh_transfer_bind`) crosses without one; `ncclCommRegister` refuses a buffer outside it.
+- `ncclMeshMemBuffer(ptr, &buffer, &offset)` is the Metal buffer over the whole lease holding `ptr` (any byte of it)
+  and ptr's offset in it, made once and released by `ncclMemFree`: the buffer a tensor allocator makes MPS tensors over
+  (torch-mesh's window tensors).
+- A Metal-path collective whose send buffer is a lease's Metal buffer reads it in place where its program allows: a
+  SEND of a range no step of the rank wrote reads the send buffer, the first combine of such a range writes send op
+  piece (`combine3_*`), the result's ranges no step writes are copied from it after the publications, and no staging
+  or scratch copy of the operand is made (a scratch buffer no step writes is never made). The two-rank all-reduce out of
+  place, for one, makes no copy of its operand where it made two (the stage into the result and the scratch its SEND
+  read). Every such read is in the group's own command buffer or encoder (an issued group stages its operand as
+  before), and the bridges read only the session's rings, so once that command buffer completes nothing reads the
+  lease and `ncclMemFree` may return its pages. The bytes on the wire still pass through the session's rings (the
+  bridges' pre-posted flows, bound when the session opened); in-place, an operand's own copies go, not the ring's.
+  Reproduction target (metal-microbench docs/measurement.md 2026-09-30 part A, 95967e6..42a16ed): per 16.8 MB
+  all-reduce, the library's copies of the operand 16.78 MB to 0; tp 271.5-272.2 ms a step.
+- The host path copies every operand through the session's rings, a lease or not; `ncclMeshMemUse(ptr, bytes, event,
+  value, write)` declares the caller's GPU work on a lease (an `MTLSharedEvent` and the value it reaches), which a
+  host-path group reading or writing that lease waits for (at most `MESH_SILENT_NS`). The window is where a program
+  that binds its own section (`mesh-call.h` `mesh_transfer_bind`) crosses without the rings; `ncclCommRegister`
+  refuses a buffer outside it.
 
 ## Routes between unlinked ranks
 

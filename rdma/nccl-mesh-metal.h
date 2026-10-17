@@ -22,6 +22,7 @@ uint64_t metal_signaled(void *event);
 /* 1 once `event` reaches `value`, 0 where `ns` pass first */
 int metal_wait(void *event, uint64_t value, uint64_t ns);
 void metal_release(void *object);
+void *metal_retain(void *object);
 
 /* A program's waits bounded where `polls` is set and a dispatch has violation words to record in (the session's,
    `violation`, or those a wait's metal_check names): at most `polls` loads of a completion word (rdma/mesh.metal mesh_wait_bounded), past which the dispatch stores the position, its
@@ -47,6 +48,10 @@ int metal_metal4(const struct metal_program *);
 void metal_resident(struct metal_program *, void *buffer);
 int metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
 int metal_combine(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n);
+/* dst = with op src, n elements of an ncclDataType_t: a landed slot (src, loaded system-coherent) combined with an operand
+   read in place (`with`: a lease's send buffer, nccl.h ncclMeshMemBuffer), the first combine of a range no step wrote */
+int metal_combine3(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, void *with,
+                   size_t with_offset, size_t n);
 int metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar);
 int metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor);
 /* positions [first, first + count) of a channel whose landing a wait covers, checked once it has landed (unless its

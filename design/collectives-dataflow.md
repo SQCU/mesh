@@ -375,13 +375,31 @@ so members configured with different forms fail there too.
 **Scratch.** `program->scratch` is the most scratch buffers a rank uses.
 
 - Host path: `malloc` copies of the staged operand (`launch` 1865-1867).
-- Metal path, each a `metal_copy` of `own` (`launch_metal` 2527-2535) into either:
+- Metal path, each a `metal_copy` of `own` (`launch_metal`; none where the send buffer is read in place, below) into
+  either:
   - the stream's `workspace` callback (classic form; required with a borrowed encoder);
   - the communicator's `scratch[k]` (Metal 4 form without a workspace; grown, never shrunk);
   - a private buffer the program keeps until it ends (classic form without an encoder).
 - **The two-rank all-reduce** (the direct exchange, `whole`) has exactly one scratch: the rank's copy of its operand,
   which only its SEND reads while the REDUCE sums into buffer 0. The fused form makes no copy and aliases the scratch to
   `own` (line 2530), because the caller's kernel publishes from its own store.
+
+**Reading a lease in place** (`plan_direct`, mesh 95967e6 ported onto the session's rings). On the Metal path a
+collective whose send buffer is a lease's Metal buffer (`lease_buffer`, `ncclMeshMemBuffer`; `lease_of_buffer` tells it
+by the buffer) is planned to read it in place where the program allows: not issued, fused or premultiplied, the send
+buffer apart from its result, and every step's range in its buffer wholly written or wholly unwritten by the rank's
+steps before it (`spans_meet`, `spans_add`).
+
+- A SEND of an unwritten range reads the send buffer (`struct steps` `read`); `publish` takes it as the piece's source.
+- A REDUCE of an unwritten range is its first combine (`fresh`): `consume` encodes `arrive` and `combine3_<type>`
+  (buffer = send op the landed piece) in place of `land_<type>`/`combine_<type>`.
+- No stage copy of the operand and no scratch copy; a scratch buffer no step writes (`needed`) is never made.
+- The result's ranges no step writes (an all-gather's own segment, a broadcast root's operand) are `complement`,
+  copied from the send buffer after the walk's publications (`complement_copy`, before `retire`).
+- Every read is encoded in the group's own command buffer or encoder, and the bridges read only the rings, so a lease
+  is free to return once that command buffer completes; an issued group stages as before.
+- The host path copies as before; `ncclMeshMemUse` points on a lease (`struct lease` `points`) are waited for by a
+  host-path group that reads or writes it (`lease_wait`, before `session_lock`).
 
 **A counted all-to-all** (`ncclMeshAlltoAllCounted`, mesh 3981ca80^ `run_counted` and `counted_copy` ported onto the
 session's positions) is a group call of its own kind (`WHAT_COUNTED`) whose steps `counted_steps` makes, all of round 0:

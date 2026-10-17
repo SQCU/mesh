@@ -472,9 +472,11 @@ static uint64_t map_digest(const struct ncclComm *comm, const struct mesh_link_m
    The attach of a bridge gone stays mapped while a lease of it is held or a session on it is open (a session on it is
    closed at its next group, session_ensure), then is detached. --- */
 
-/* a lease: its address, its first row, its bytes, and the Metal buffer over it (lease_buffer, made at its first use; NULL
-   until then) */
-struct lease { void *address; uint32_t row; size_t bytes; void *buffer; };
+/* a lease: its address, its first row, its bytes, the Metal buffer over it (lease_buffer, made at its first use; NULL
+   until then), and the points its caller's GPU work on it declared (ncclMeshMemUse: an event, the value it reaches once
+   that work is done, whether the work writes the lease), which a host-path group waits for (lease_wait) */
+struct point { void *event; uint64_t value; int write; };
+struct lease { void *address; uint32_t row; size_t bytes; void *buffer; struct point *points; size_t npoints; };
 struct attach {
   struct mesh_ctx context;
   struct lease *leases;
@@ -931,7 +933,7 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
                   mesh_arena_pages(m), strerror(status));
   } else {
     *ptr = mesh_section_address(&a->context, lease, 0);
-    a->leases[a->count++] = (struct lease){*ptr, lease.first, (size_t)lease.pages * a->context.M->pgsz, NULL};
+    a->leases[a->count++] = (struct lease){*ptr, lease.first, (size_t)lease.pages * a->context.M->pgsz, NULL, NULL, 0};
   }
   pthread_mutex_unlock(&attach_lock);
   return result;
@@ -949,6 +951,8 @@ ncclResult_t ncclMemFree(void *ptr) {
         found = 1;
         row = a->leases[i].row;
         if (a->leases[i].buffer) metal_release(a->leases[i].buffer);
+        for (size_t k = 0; k < a->leases[i].npoints; k++) metal_release(a->leases[i].points[k].event);
+        free(a->leases[i].points);
         status = mesh_lease_return(&a->context, row);
         a->leases[i] = a->leases[--a->count];
       }
@@ -977,6 +981,87 @@ static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
     }
   pthread_mutex_unlock(&attach_lock);
   return status;
+}
+
+/* the lease of this process whose Metal buffer is `buffer` (lease_buffer's, nccl.h ncclMeshMemBuffer's): whether there
+   is one, of a bridge that runs */
+static int lease_of_buffer(const void *buffer) {
+  int found = 0;
+  pthread_mutex_lock(&attach_lock);
+  for (struct attach *a = attaches; a && buffer && !found; a = a->next)
+    for (size_t i = 0; i < a->count && !found; i++) found = a->leases[i].buffer == buffer && attach_live(a);
+  pthread_mutex_unlock(&attach_lock);
+  return found;
+}
+
+/* a lease's points that are reached dropped */
+static void points_prune(struct lease *l) {
+  size_t kept = 0;
+  for (size_t k = 0; k < l->npoints; k++)
+    if (metal_signaled(l->points[k].event) >= l->points[k].value) metal_release(l->points[k].event);
+    else l->points[kept++] = l->points[k];
+  l->npoints = kept;
+}
+
+/* the lease holding ptr, under attach_lock (NULL: none) */
+static struct lease *lease_at(const void *ptr) {
+  for (struct attach *a = attaches; a; a = a->next)
+    for (size_t i = 0; i < a->count; i++) {
+      const uintptr_t at = (uintptr_t)ptr, first = (uintptr_t)a->leases[i].address;
+      if (at >= first && at < first + a->leases[i].bytes) return a->leases + i;
+    }
+  return NULL;
+}
+
+/* nccl.h ncclMeshMemBuffer */
+ncclResult_t ncclMeshMemBuffer(const void *ptr, void **buffer, size_t *offset) {
+  if (!ptr || !buffer || !offset) return fail(ncclInvalidArgument, "ncclMeshMemBuffer: a NULL argument");
+  const int status = lease_buffer(ptr, buffer, offset);
+  if (status == ESTALE) return attach_fail(status, "ncclMeshMemBuffer of %p", ptr);
+  if (status == ENOMEM) return fail(ncclSystemError, "ncclMeshMemBuffer of %p: no Metal buffer over its lease", ptr);
+  return status ? fail(ncclInvalidArgument, "ncclMeshMemBuffer: %p is in no lease of this process (ncclMemAlloc)", ptr) : ncclSuccess;
+}
+
+/* nccl.h ncclMeshMemUse: the point recorded on the lease holding ptr (its event retained until it is reached and
+   dropped, or the lease freed) */
+ncclResult_t ncclMeshMemUse(const void *ptr, size_t bytes, void *event, uint64_t value, int write) {
+  (void)bytes;
+  if (!ptr || !event) return fail(ncclInvalidArgument, "ncclMeshMemUse: a NULL argument");
+  pthread_mutex_lock(&attach_lock);
+  struct lease *l = lease_at(ptr);
+  struct point *grown = l ? realloc(l->points, (l->npoints + 1) * sizeof *grown) : NULL;
+  if (grown) {
+    l->points = grown;
+    points_prune(l);
+    l->points[l->npoints++] = (struct point){metal_retain(event), value, write != 0};
+  }
+  pthread_mutex_unlock(&attach_lock);
+  if (!l) return fail(ncclInvalidArgument, "ncclMeshMemUse: %p is in no lease of this process (ncclMemAlloc)", ptr);
+  return grown ? ncclSuccess : fail(ncclSystemError, "out of memory");
+}
+
+/* a host-path group's wait for the points recorded on the lease holding ptr (none where it is no lease): its writers'
+   where the group reads it, every one where it writes it; each bounded by mesh.h MESH_SILENT_NS, past which the group
+   fails as a value */
+static ncclResult_t lease_wait(const void *ptr, int write) {
+  if (!ptr) return ncclSuccess;
+  for (;;) {
+    pthread_mutex_lock(&attach_lock);
+    struct lease *l = lease_at(ptr);
+    struct point wait = {NULL, 0, 0};
+    if (l) {
+      points_prune(l);
+      for (size_t k = 0; k < l->npoints && !wait.event; k++)
+        if (write || l->points[k].write) wait = (struct point){metal_retain(l->points[k].event), l->points[k].value, l->points[k].write};
+    }
+    pthread_mutex_unlock(&attach_lock);
+    if (!wait.event) return ncclSuccess;
+    const int reached = metal_wait(wait.event, wait.value, MESH_SILENT_NS);
+    metal_release(wait.event);
+    if (!reached)
+      return fail(ncclSystemError, "the GPU work on the lease at %p (ncclMeshMemUse) did not reach its point %llu in %.0f s", ptr,
+                  (unsigned long long)wait.value, SILENT_S);
+  }
 }
 
 /* every lease the process holds of a bridge that runs: ncclSuccess, or ncclRemoteError where one is of a bridge that
@@ -1651,6 +1736,11 @@ struct steps {
      `borrowed`: a counted all-to-all's are the call's) or on the GPU (`gpu`) */
   uint32_t buffers;
   int borrowed;
+  /* a call reading its send buffer in place (plan_direct): each step's source where it reads the send buffer (`read`,
+     buffer NULL: its own buffer), whether a receive's combine is its range's first (`fresh`: buffer = send op piece), and
+     which buffers any step writes (`needed`, a buffer each; one no step writes is never made) */
+  struct where *read;
+  unsigned char *fresh, *needed;
   unsigned char **host;
   struct where *gpu;
   const struct mesh_program *program;
@@ -1683,6 +1773,10 @@ struct call {
   struct where counts_at, received_at, landed_at, arrived_at, got_at;
   uint32_t counting;
   int ended;
+  /* a call reading its send buffer in place (plan_direct): the ranges of its result no step writes, copied from it after
+     its publications are encoded (`complement`, triples: the result's byte offset, the send buffer's, the bytes) */
+  uint64_t *complement;
+  uint32_t complements;
   ncclDataType_t type;
   ncclRedOp_t op;
   ncclComm_t comm;
@@ -1762,7 +1856,8 @@ static void steps_free(struct steps *s) {
   if (!s) return;
   for (uint32_t b = 1; s->host && !s->borrowed && b < s->buffers; b++) free(s->host[b]);
   free(s->host); free(s->gpu);
-  free(s->steps); free(s->done); free(s->channel); free(s->first); free(s->pieces); free(s->before); free(s);
+  free(s->steps); free(s->done); free(s->channel); free(s->first); free(s->pieces); free(s->before); free(s->read); free(s->fresh); free(s->needed);
+  free(s);
 }
 
 /* a counted all-to-all's steps, all of round 0 (mesh 3981ca80^ run_counted's one exchange: to each rank its segment of the
@@ -2170,6 +2265,15 @@ static ncclResult_t launch(struct call *list, size_t n) {
     remote |= crosses(list + i);
   }
   if (revoked(comm)) return revoked_fail(comm);
+  for (size_t i = 0; i < n && !result; i++) {
+    const struct call *c = list + i;
+    result = lease_wait(c->send, 0);
+    if (!result) result = lease_wait(c->recv, 1);
+    if (!result && counted(c)) result = lease_wait(c->counts, 0);
+    if (!result && counted(c)) result = lease_wait(c->received, 1);
+    if (!result && counted(c)) result = lease_wait(c->landed, 1);
+  }
+  if (result) { counted_failed(list, n); return result; }
   pthread_mutex_lock(&session_lock);
   if (remote) result = session_ensure(comm);
   if (!result && remote && inflight) result = fail(ncclInvalidUsage, "a host-path group while GPU groups are issued and not complete (ncclMeshComplete)");
@@ -2285,6 +2389,7 @@ static void calls_free(struct call *list, size_t n) {
     free(list[i].copy);
     free(list[i].segments);
     free(list[i].got);
+    free(list[i].complement);
   }
   free(list);
 }
@@ -2591,6 +2696,12 @@ static ncclResult_t consume(struct metal_program *program, struct session *s, ui
             .d = to.buffer, .dst = to.offset, .s = ch->ring_in, .src = from, .bytes = length, .scalar = offset, .a = m->c->got_at.buffer,
             .aux = m->c->got_at.offset, .first = seg_first(rseg, q), .entries = (uint32_t)rseg[q], .row = row_bytes(m->c),
             .limit = m->c->capacity * row_bytes(m->c)}), "a counted landing");
+      } else if (st->fresh && st->fresh[m->step]) {
+        const struct where with = st->read[m->step];
+        result = arrive(program, s, ch, at + 1);
+        if (!result)
+          result = gpu(metal_combine3(program, m->c->type, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from, with.buffer,
+                                      with.offset + m->offset + offset, length / SIZE[m->c->type]), "a first combine");
       } else if (!ch->large) {
         const struct metal_check check = check_of(s, ch, at + 1);
         if (fusing.lands && !fusing.landed && fused_piece(m, offset, length)) {
@@ -2653,13 +2764,15 @@ static ncclResult_t publish(struct metal_program *program, struct session *s, ui
       fusing.published = !result;
       released = 1;
     } else if (!ch->large) {
-      const struct where source = st->gpu[st->steps[m->step].buffer];
+      const struct where source = st->read && st->read[m->step].buffer ? st->read[m->step] : st->gpu[st->steps[m->step].buffer];
       result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->pitch, source.buffer, source.offset + m->offset + offset,
                                     length, s->transport.publication, cell, value), "a piece into its slot and its release");
       released = 1;
-    } else
-      result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->pitch, st->gpu[st->steps[m->step].buffer].buffer,
-                              st->gpu[st->steps[m->step].buffer].offset + m->offset + offset, length), "a piece into its slot");
+    } else {
+      const struct where source = st->read && st->read[m->step].buffer ? st->read[m->step] : st->gpu[st->steps[m->step].buffer];
+      result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->pitch, source.buffer, source.offset + m->offset + offset,
+                              length), "a piece into its slot");
+    }
     if (at + 1 == m->first + m->pieces) p->out_at++;
   }
   if (!result && !released && m) result = gpu(metal_publish(program, s->transport.publication, cell, value), "a publication");
@@ -2776,6 +2889,113 @@ static void *workspace(struct metal_program *program, const struct call *c, size
   void *made = metal_scratch(bytes);
   if (made) { metal_keep(program, made); metal_release(made); }
   return made;
+}
+
+/* one buffer's written ranges, in elements, disjoint and in order */
+struct spans { uint64_t (*span)[2]; size_t count, room; };
+/* how [lo, hi) meets them: 0 none of it written, 1 all of it, -1 part of it */
+static int spans_meet(const struct spans *w, uint64_t lo, uint64_t hi) {
+  uint64_t covered = 0;
+  for (size_t k = 0; k < w->count; k++) {
+    const uint64_t a = w->span[k][0] > lo ? w->span[k][0] : lo, b = w->span[k][1] < hi ? w->span[k][1] : hi;
+    if (a < b) covered += b - a;
+  }
+  return !covered ? 0 : covered == hi - lo ? 1 : -1;
+}
+/* [lo, hi) written: merged into the ranges; 0, or ENOMEM */
+static int spans_add(struct spans *w, uint64_t lo, uint64_t hi) {
+  if (lo >= hi) return 0;
+  if (w->count == w->room) {
+    const size_t room = w->room ? 2 * w->room : 8;
+    uint64_t (*grown)[2] = realloc(w->span, room * sizeof *grown);
+    if (!grown) return ENOMEM;
+    w->span = grown; w->room = room;
+  }
+  size_t at = 0;
+  while (at < w->count && w->span[at][0] < lo) at++;
+  memmove(w->span + at + 1, w->span + at, (w->count - at) * sizeof *w->span);
+  w->span[at][0] = lo; w->span[at][1] = hi; w->count++;
+  size_t kept = 0;
+  for (size_t k = 0; k < w->count; k++)
+    if (kept && w->span[k][0] <= w->span[kept - 1][1]) { if (w->span[k][1] > w->span[kept - 1][1]) w->span[kept - 1][1] = w->span[k][1]; }
+    else { w->span[kept][0] = w->span[k][0]; w->span[kept][1] = w->span[k][1]; kept++; }
+  w->count = kept;
+  return 0;
+}
+
+/* whether a call reads its send buffer in place on the Metal path (mesh 95967e6; rdma/NCCL.md Memory), planned into its
+   steps (struct steps read, fresh, needed) and its complement: a collective that crosses a link, not issued (every read
+   of the send buffer then in its own command buffer or encoder, so once that completes nothing reads it: the caller may
+   free its lease), fused or premultiplied, whose send buffer is a lease's Metal buffer (nccl.h ncclMeshMemBuffer) apart
+   from its result `own`, every step's range in its buffer wholly written or wholly unwritten by the rank's steps before it
+   (by round, then order: the order its walk encodes a receive before the SEND after it, mesh_steps_before).  Then a SEND
+   of a range no earlier step wrote reads the send buffer, a receive's first combine of such a range writes buffer = send
+   op piece, a scratch buffer no step writes is never made and none is copied, and the ranges of buffer 0 no step writes
+   are copied from the send buffer after the publications (`complement`); else (0) the operand is staged as ever */
+static int plan_direct(struct call *c, struct where own, int issued) {
+  struct steps *st = c->bound;
+  const size_t z = SIZE[c->type];
+  uint64_t lo = 0, hi = elements(c);
+  if (!st || p2p(c) || counted(c) || c->fused || c->premultiplied || issued || !st->count || !lease_of_buffer(c->send_at.buffer)) return 0;
+  if (c->what == MESH_BROADCAST && c->root != c->comm->rank) return 0;
+  if (c->what == MESH_ALLGATHER) { size_t length; lo = segment_at(c, c->comm->rank, &length); hi = lo + length; }
+  const struct where send = c->send_at;
+  const unsigned char *a = metal_contents(send.buffer), *b = metal_contents(own.buffer);
+  const size_t sent = (size_t)(hi - lo) * z, made = elements(c) * z;
+  if (send.buffer == own.buffer ? send.offset < own.offset + made && own.offset < send.offset + sent
+                                : a && b && a + send.offset < b + own.offset + made && b + own.offset < a + send.offset + sent)
+    return 0;
+  const uint32_t B = st->buffers;
+  struct spans *w = calloc(B, sizeof *w);
+  st->read = calloc(st->count, sizeof *st->read); st->fresh = calloc(st->count, 1); st->needed = calloc(B, 1);
+  int direct = w && st->read && st->fresh && st->needed;
+  const struct where map = {send.buffer, send.offset - (size_t)lo * z};
+  for (uint32_t k = 0; direct && k < st->count; k++) {
+    const struct mesh_step *step = st->steps + k;
+    const uint64_t from = step->first, to = step->first + step->piece.elements;
+    const int meet = spans_meet(w + step->buffer, from, to), inside = from >= lo && to <= hi;
+    if (meet < 0 || (!meet && step->op != MESH_STEP_COPY && !inside)) direct = 0;
+    else if (step->op == MESH_STEP_SEND) { if (!meet) st->read[k] = map; }
+    else {
+      if (step->op == MESH_STEP_REDUCE && !meet) { st->fresh[k] = 1; st->read[k] = map; }
+      st->needed[step->buffer] = 1;
+      if (spans_add(w + step->buffer, from, to)) direct = 0;
+    }
+  }
+  /* the result's own ranges: a reduce-scatter's segment, nothing of a reduce off its root, else the whole */
+  uint64_t first = lo, last = hi;
+  if (c->what == MESH_REDUCE_SCATTER) { size_t length; first = segment_at(c, c->comm->rank, &length); last = first + length; }
+  if (c->what == MESH_REDUCE && c->root != c->comm->rank) last = first;
+  if (direct) {
+    c->complement = calloc(3 * (w[0].count + 1), sizeof *c->complement);
+    direct = c->complement != NULL;
+    for (size_t k = 0, at = first; direct && at < last; k++) {
+      const uint64_t end = k < w[0].count ? (w[0].span[k][0] < last ? w[0].span[k][0] : last) : last;
+      if (end > at) {
+        uint64_t *x = c->complement + 3 * c->complements++;
+        x[0] = own.offset + at * z; x[1] = send.offset + (at - lo) * z; x[2] = (end - at) * z;
+      }
+      if (k >= w[0].count) break;
+      if (w[0].span[k][1] > at) at = w[0].span[k][1];
+    }
+  }
+  for (uint32_t x = 0; w && x < B; x++) free(w[x].span);
+  free(w);
+  if (!direct) {
+    free(st->read); free(st->fresh); free(st->needed); free(c->complement);
+    st->read = NULL; st->fresh = st->needed = NULL; c->complement = NULL; c->complements = 0;
+  }
+  return direct;
+}
+
+/* a call reading its send buffer in place: its result's ranges no step wrote, copied from the send buffer */
+static ncclResult_t complement_copy(struct metal_program *program, const struct call *c) {
+  ncclResult_t result = ncclSuccess;
+  for (uint32_t k = 0; k < c->complements && !result; k++) {
+    const uint64_t *x = c->complement + 3 * k;
+    result = gpu(metal_copy(program, METAL_PLAIN, c->sum.buffer, x[0], c->send_at.buffer, x[1], x[2]), "the operand's own ranges");
+  }
+  return result;
 }
 
 /* a premultiplier as the kernels read it: a floating type's value as float32 bits, an integer's bits */
@@ -2939,9 +3159,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     size_t length = c->count;
     const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, (int)r, &length) : 0;
     const struct where segment = {own.buffer, own.offset + before * z};
-    if (reducing(c->what) && c->premultiplied)
+    const int direct = plan_direct(c, own, issue != NULL);
+    if (!direct && reducing(c->what) && c->premultiplied)
       result = gpu(metal_premultiply(program, c->type, own.buffer, own.offset, send.buffer, send.offset, all, scalar_bits(c)), "the operand");
-    else if ((reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
+    else if (!direct && (reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) &&
+             !same(segment, send))
       result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset,
                               reducing(c->what) ? bytes : length * z), "the operand");
     c->sum = own;
@@ -2950,10 +3172,13 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       /* a fused two-rank all-reduce's copy feeds only its SEND, which the caller's kernel publishes from its own store:
          no copy is made, and nothing reads the scratch */
       if (c->fused && c->what == MESH_ALLREDUCE && comm->nranks == 2) { st->gpu[b] = own; continue; }
+      /* read in place: a scratch no step writes is never read (its SENDs read the send buffer), one a step writes is
+         written before it is read (its first combine from the send buffer) */
+      if (direct && !st->needed[b]) { st->gpu[b] = (struct where){NULL, 0}; continue; }
       void *scratch = workspace(program, c, bytes);
       if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
       st->gpu[b] = (struct where){scratch, 0};
-      result = gpu(metal_copy(program, METAL_PLAIN, scratch, 0, own.buffer, own.offset, bytes), "a scratch copy");
+      if (!direct) result = gpu(metal_copy(program, METAL_PLAIN, scratch, 0, own.buffer, own.offset, bytes), "a scratch copy");
     }
   }
   int scheduled = 0, published = 0, owned = 1;
@@ -2986,6 +3211,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
           result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publication and landing of its whole operand "
                                           "(ncclMeshFusable, ncclMeshFusableRooted)");
         fusing.out = NULL; fusing.call = NULL;
+        for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
         if (!result) result = retire(program);
       }
     }

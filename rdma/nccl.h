@@ -103,10 +103,16 @@
    as ncclMeshMemLive (below) does, until the process has freed every one (ncclMemFree); it then leases from the bridge
    that runs, so a process never holds leases of two regions (design/recovery.md mandates 12 and 13).  Weights, KV and
    every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being outside of
-   it means that they cannot be zero copy passed to peers."  Both paths copy every operand, a lease or not, through the
-   session's rings: no libnccl-mesh collective crosses a caller's buffer without a copy yet.  The window is where a
-   program that binds its own section (mesh-call.h mesh_transfer_bind) crosses without one, and ncclCommRegister refuses
-   a buffer outside it.  Design: design/prepared-machine.md#M09.
+   it means that they cannot be zero copy passed to peers."  A lease's Metal buffer is ncclMeshMemBuffer's (below), the
+   buffer an MPS tensor or a kernel takes over the lease; a Metal-path collective whose send buffer is that buffer
+   reads it in place where its program allows (a SEND of a range no step of the rank wrote reads it, the first combine
+   of such a range writes send op piece, the ranges of the result no step writes are copied from it after the
+   publications, and no staging copy or scratch copy of the operand is made: its scratch buffers that no step writes
+   are never made), every read in the group's own command buffer (an issued group stages its operand as ever), and a
+   wire's bytes still cross through the session's rings (the bridges' pre-posted flows, bound when the session opened).
+   The host path copies every operand through them, a lease or not.  The window is where a program that binds its own
+   section (mesh-call.h mesh_transfer_bind) crosses without them, and ncclCommRegister refuses a buffer outside it.
+   Design: design/prepared-machine.md#M09.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and the
    group after a failure is returned opens a session again, on the map current then (a revoked communicator's none).
@@ -997,6 +1003,22 @@ ncclResult_t ncclMeshPosition(ncclComm_t comm, int peer, uint64_t* position);
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */
 ncclResult_t ncclMeshMemLive(void);
+/* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
+   in it: the library's, made at the lease's first such call and released by ncclMemFree, the buffer a tensor allocator
+   or the caller's kernels bind over the lease (mesh 3981ca80^'s).  A Metal-path collective whose ncclMeshBuffer names
+   it as its send buffer reads it in place (Memory, above): every such read is encoded in the group's own command buffer
+   or encoder (a group issued with ncclMeshIssue stages its operand instead), and the bridges read only the session's
+   rings, never a caller's lease, so once that command buffer completes nothing reads the lease and ncclMemFree may
+   return its pages.  ncclInvalidArgument where ptr is in no lease of this process; ncclRemoteError where its bridge
+   stopped (Memory). */
+ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
+/* The caller's GPU work on the lease holding `ptr` (writing it where `write`, else reading it) is done once `event` (an
+   id<MTLSharedEvent>, retained until then) reaches `value` (mesh 3981ca80^'s, for leases): a host-path group that reads
+   the lease waits for its writers' points, one that writes it for every point, on the host, each at most mesh.h
+   MESH_SILENT_NS (ncclSystemError past it); a point reached is dropped, and ncclMemFree drops the rest.  `bytes` is not
+   read (a point is the whole lease's).  The Metal path orders its work by its stream and reads no point.
+   ncclInvalidArgument where ptr is in no lease of this process. */
+ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t value, int write);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks entries, the same on
    every rank, any of them 0), the segments packed in rank order, so rank r's lies after the segments of the ranks
    before it.  ncclMeshAllGatherV sends counts[rank] elements of sendbuff and leaves every segment in recvbuff (in place

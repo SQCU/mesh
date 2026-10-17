@@ -76,7 +76,10 @@ static NSString *const KERNELS =
   "return op == 0 ? f8_from(x + y, E5) : op == 1 ? f8_from(x * y, E5) : (op == 2 ? y > x : y < x) ? b : a; }\n"
   "#define BODY(T, OP) device T *x = (device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
   "LOOP x[k] = OP(x[k], mesh_payload(y + k), p.op);\n"
-  "#define COMBINE(name, T, OP) HEAD(combine_##name) { ENTER(i == 0) BODY(T, OP) } GROUP(land_##name) { ENTER(i == 0) AWAIT BODY(T, OP) }\n"
+  "#define COMBINE(name, T, OP) HEAD(combine_##name) { ENTER(i == 0) BODY(T, OP) } GROUP(land_##name) { ENTER(i == 0) AWAIT BODY(T, OP) } "
+  "kernel void combine3_##name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]]) { "
+  "ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *z = (device const T *)(a + p.aux); "
+  "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP x[k] = OP(z[k], mesh_payload(y + k), p.op); }\n"
   "#define INTEGER(name, T, SIGNED) COMBINE(name, T, op_int<T>) "
   "HEAD(premul_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
   "HEAD(truncdiv_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); LOOP { T v = y[k]; bool negative = SIGNED && v < T(0); "
@@ -244,6 +247,7 @@ void *metal_event(void) { return [(id<MTLDevice>)metal_device() newSharedEvent];
 uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signaledValue; }
 int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLSharedEvent>)event waitUntilSignaledValue:value timeoutMS:ns / 1000000]; }
 void metal_release(void *object) { [(id)object release]; }
+void *metal_retain(void *object) { return [(id)object retain]; }
 
 struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls) {
   struct metal_program *program = calloc(1, sizeof *program);
@@ -334,14 +338,21 @@ static int dispatch4(struct metal_program *program, id<MTLComputePipelineState> 
 
 /* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v the program's violation words where
    its waits are bounded) and the arguments p (2, its polls the program's where v is such words), the progress word
-   (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`a` given, the cells or the
-   completion words) as one threadgroup of up to 1024 threads over a block's piece, any other over `units` threads */
+   (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`) as one threadgroup of up to
+   1024 threads over a block's piece, any other over `units` threads */
+static int dispatch_as(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units,
+                       int group);
+/* a GROUP kernel where `a` is given (the cells or the completion words) */
 static int dispatch(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units) {
+  return dispatch_as(program, name, d, s, a, v, p, units, a != NULL);
+}
+static int dispatch_as(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units,
+                       int group) {
   if (!units) return 0;
   id<MTLComputePipelineState> state = pipeline(program->encoder4 ? program->residency.device : (id<MTLDevice>)metal_device(), name);
   if (!state) return EINVAL;
   @autoreleasepool {
-    if (program->encoder4) return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, a != NULL);
+    if (program->encoder4) return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, group);
     if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
     id<MTLComputeCommandEncoder> encoder = program->encoder;
     if (!v && program->polls) v = (void *)program->violation;
@@ -353,8 +364,8 @@ static int dispatch(struct metal_program *program, NSString *name, void *d, void
     [encoder setBuffer:(id<MTLBuffer>)(a ? a : d) offset:0 atIndex:3];
     [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
     [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:5];
-    const NSUInteger most = a ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
-    if (a) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    const NSUInteger most = group ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
+    if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   }
   return 0;
@@ -373,6 +384,13 @@ static NSString *typed(const char *what, int type) {
 int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
   NSString *name = typed("combine", type);
   return name ? dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op}, n) : EINVAL;
+}
+
+int metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, void *with,
+                   size_t with_offset, size_t n) {
+  NSString *name = typed("combine3", type);
+  return name ? dispatch_as(program, name, dst, src, with, NULL,
+                            (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op, .aux = with_offset}, n, 0) : EINVAL;
 }
 
 int metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar) {
