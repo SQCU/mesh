@@ -1060,6 +1060,20 @@ ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, 
    count), and received and arrived host pointers in this process's leases (ncclMemAlloc), which the GPU writes
    (system-coherent, the word last); its waits are the session's in-stream waits on the bridge's completion words
    (rdma/mesh.metal mesh_remote_wait, ended by the canceller), as every Metal-path group's.  A word a call in flight. */
+/* Split-KV attention partials merged by their log-sum-exp [Dao et al. 2023, Flash-Decoding; FlashInfer's state merge]:
+   each member's float32 partials of `rows` rows, [m: rows][l: rows][O: rows x dim] (a row's maximum score, its sum of
+   exponentials and its unnormalized output, metal-microbench decode_attention_partial's piece), merged into recvbuff as
+   the members' together: M = the rows' maximum over the members (over the parts with l > 0), and each member's (l, O)
+   rescaled by e^(m - M) and summed, so recvbuff holds (M, L, O) with O / L the attention over every member's positions
+   (0 where L is 0) and is itself a partial a later merge takes.  The planner's `reduce` form for partials
+   (metal-microbench docs/placement.md Crossings): the maxima by an all-reduce of max into a scratch, the rescale on this
+   rank, then the (l, O) sums by the communicator's all-reduce (ncclMeshAllReducePartials) or reduce to `root`
+   (ncclMeshReducePartials: a member off the root keeps its rescaled partial).  Three groups in sequence on the stream,
+   the last of them the stream's (issued where its issue is set), the first two completed in it: not inside
+   ncclGroupStart/End (ncclInvalidUsage).  Both paths; the Metal path's buffers ncclMeshBuffers, its scratch (2 x rows
+   floats) the stream's workspace, else the communicator's own. */
+ncclResult_t ncclMeshAllReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
                                      size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,
                                      ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);

@@ -106,6 +106,13 @@ enum { METAL_COUNTED_START, METAL_COUNTED_CHECK, METAL_COUNTED_ARRIVED, METAL_CO
 struct metal_counted { void *d, *s, *a; size_t dst, src, aux; uint64_t bytes, scalar, first, row, limit; uint32_t entries; };
 int metal_counted(struct metal_program *, int kind, const struct metal_counted *);
 void *metal_contents(void *buffer);
+/* A split-KV merge's two local steps (nccl.h ncclMeshAllReducePartials): float32 partials of `rows` rows at piece +
+   piece_offset, [m: rows][l: rows][O: rows x dim], O unnormalized.  rescale 0: scratch[0, rows) the rows' maxima to
+   merge, m where l > 0, else the least float (a part with no positions counts for none); rescale 1, once
+   scratch[rows, 2 rows) holds their maxima over the members M: w = e^(m - M) (0 for a part with none), m = M, l = w l,
+   O = w O (0 where w is), so the (l, O) sums are the merge [Dao et al. 2023, Flash-Decoding; FlashInfer's state merge]. */
+int metal_partials(struct metal_program *, int rescale, void *piece, size_t piece_offset, void *scratch, size_t scratch_offset, uint64_t rows,
+                   uint64_t dim);
 /* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
 const char *metal_steps(void);
 void metal_keep(struct metal_program *, void *object);

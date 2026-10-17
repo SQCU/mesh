@@ -424,6 +424,15 @@ every counts receive (`mesh_steps_before`), its rows (buffer 3, the receive buff
 - `received` and `arrived` on the Metal path are host memory in leases; `lease_buffer` gives the lease's Metal buffer,
   made at its first use and released by `ncclMemFree`.
 
+**Split-KV partials** (`ncclMeshAllReducePartials`, `ncclMeshReducePartials`: `partials`) are three groups on one
+stream, not a program of their own: the operand staged into `recv` and each row's maximum to merge written into a
+scratch (`partials_prepare`: m where l > 0, else the least float), an all-reduce of max over the scratch (completed in
+the stream: its stream copy has no issue), the rescale (`partials_rescale`: w = e^(m - M), m = M, (l, O) times w), then
+the (l, O) sums by the communicator's all-reduce or reduce (the caller's stream, issued where it says). The prepare and
+rescale are the library's own programs on the stream (`metal_begin`/`metal_begin4`, `program_end`, under
+`session_lock`); the scratch is the stream's workspace, else the communicator's `merge` (grown, the replaced one kept
+on `spent`). The host path does the same with `expf` on the host.
+
 **Roots.**
 
 | Collective | Root's role |

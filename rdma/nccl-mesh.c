@@ -224,6 +224,8 @@ struct ncclComm {
   void **scratch, **spent;
   size_t *scratch_bytes;
   uint32_t scratches, scratch_used, spents;
+  void *merge;
+  size_t merge_bytes;
 };
 
 /* the sessions' one lock: a group, a completion, a session's opening and closing; `opened` is signalled when a session
@@ -256,6 +258,7 @@ static void comm_free(struct ncclComm *comm) {
   routes_free(comm, 1);
   for (uint32_t k = 0; k < comm->scratches; k++) metal_release(comm->scratch[k]);
   for (uint32_t k = 0; k < comm->spents; k++) metal_release(comm->spent[k]);
+  if (comm->merge) metal_release(comm->merge);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent);
   pthread_mutex_destroy(&comm->guard);
   free(comm->members); free(comm->forms);
@@ -3511,6 +3514,86 @@ ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff, size_t sendrows, cons
   for (int r = 0; r < n; r++) { c.segments[r] = sendsegs[r]; c.segments[n + r] = recvsegs[r]; }
   __atomic_store_n(arrived, 0, __ATOMIC_RELEASE);
   return enqueue(c);
+}
+
+/* nccl.h ncclMeshAllReducePartials, ncclMeshReducePartials: split-KV attention partials merged by their log-sum-exp
+   (the planner's `reduce` form for partials, metal-microbench docs/placement.md Crossings; the engine's
+   decode_attention_partial/rescale/reduced, metal-microbench metal/layers.metal, and torch-mesh's mesh_merge, moved into
+   the library): the operand staged into recvbuff, each row's maximum to merge (m where l > 0) all-reduced by max into
+   the scratch, the rows rescaled to it, then their (l, O) summed by the communicator's all-reduce (root -1) or reduce
+   to root; three groups in sequence on the stream, the last the caller's (issued where its stream says), so not inside
+   ncclGroupStart/End.  The Metal path's scratch is the stream's workspace, else the communicator's own (`merge`, grown,
+   its last one released at its end) */
+static const float PARTIAL_NONE = -3.4028234663852886e38f;
+static ncclResult_t partials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream) {
+  if (!comm || !sendbuff || !recvbuff) return fail(ncclInvalidArgument, "a partials merge's comm, sendbuff or recvbuff is NULL");
+  if (root < -1 || root >= comm->nranks) return fail(ncclInvalidArgument, "root %d of %d ranks", root, comm->nranks);
+  if (depth) return fail(ncclInvalidUsage, "a partials merge is three groups in sequence (the maxima, the rescale, the sums): not inside a group");
+  const size_t bytes = rows * (2 + dim) * sizeof(float), sums = rows * (1 + dim);
+  if (!rows) return ncclSuccess;
+  ncclResult_t result = ncclSuccess;
+  if (!stream) {
+    float *piece = recvbuff, *scratch = malloc(2 * rows * sizeof *scratch);
+    if (!scratch) return fail(ncclSystemError, "out of memory");
+    if (sendbuff != recvbuff) memmove(recvbuff, sendbuff, bytes);
+    for (size_t i = 0; i < rows; i++) scratch[i] = piece[rows + i] > 0 ? piece[i] : PARTIAL_NONE;
+    result = ncclAllReduce(scratch, scratch + rows, rows, ncclFloat32, ncclMax, comm, NULL);
+    for (size_t k = 0; !result && k < rows * (2 + dim); k++) {
+      const size_t row = k < rows ? k : k < 2 * rows ? k - rows : (k - 2 * rows) / (dim ? dim : 1);
+      const float mine = scratch[row], top = scratch[rows + row], w = mine == PARTIAL_NONE ? 0.0f : expf(mine - top);
+      piece[k] = k < rows ? top : w > 0.0f ? piece[k] * w : 0.0f;
+    }
+    free(scratch);
+    if (!result) result = root < 0 ? ncclAllReduce(piece + rows, piece + rows, sums, ncclFloat32, ncclSum, comm, NULL)
+                                    : ncclReduce(piece + rows, piece + rows, sums, ncclFloat32, ncclSum, root, comm, NULL);
+    return result;
+  }
+  const ncclMeshStream *given = stream;
+  if (given->fused) return fail(ncclInvalidUsage, "a partials merge is no fused crossing");
+  const struct where send = where_of(sendbuff), recv = where_of(recvbuff);
+  ncclMeshStream inner = *given;
+  inner.issue = NULL; inner.fused = NULL;
+  void *scratch = NULL;
+  for (int step = 0; step < 2 && !result; step++) {
+    pthread_mutex_lock(&session_lock);
+    if (!scratch && given->workspace) scratch = given->workspace(2 * rows * sizeof(float), given->context);
+    else if (!scratch) {
+      if (comm->merge_bytes < 2 * rows * sizeof(float)) {
+        void **spent = comm->merge ? realloc(comm->spent, (comm->spents + 1) * sizeof *spent) : comm->spent;
+        void *made = (comm->merge && !spent) ? NULL : metal_scratch(2 * rows * sizeof(float));
+        if (made) {
+          if (comm->merge) { comm->spent = spent; comm->spent[comm->spents++] = comm->merge; }
+          comm->merge = made; comm->merge_bytes = 2 * rows * sizeof(float);
+        }
+      }
+      scratch = comm->merge_bytes >= 2 * rows * sizeof(float) ? comm->merge : NULL;
+    }
+    struct metal_program *program = !scratch ? NULL
+      : given->argumentTable ? metal_begin4(given->commandEncoder, given->argumentTable, given->residencySet, NULL, given->polls)
+      : metal_begin(given->commandBuffer, given->commandEncoder, NULL, given->polls);
+    if (!scratch) result = fail(ncclSystemError, "out of GPU memory");
+    else if (!program) result = fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
+    else {
+      if (!step && !same(send, recv)) result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, send.buffer, send.offset, bytes), "the partials");
+      if (!result) result = gpu(metal_partials(program, step, recv.buffer, recv.offset, scratch, 0, rows, dim), step ? "the rescale" : "the rows' maxima");
+      program_end(program, given->commandEncoder != NULL);
+    }
+    pthread_mutex_unlock(&session_lock);
+    if (!result && !step) {
+      ncclMeshBuffer mine = {scratch, 0}, most = {scratch, rows * sizeof(float)};
+      result = ncclAllReduce(&mine, &most, rows, ncclFloat32, ncclMax, comm, &inner);
+    }
+  }
+  if (result) return result;
+  ncclMeshBuffer sum = {recv.buffer, recv.offset + rows * sizeof(float)};
+  return root < 0 ? ncclAllReduce(&sum, &sum, sums, ncclFloat32, ncclSum, comm, stream)
+                  : ncclReduce(&sum, &sum, sums, ncclFloat32, ncclSum, root, comm, stream);
+}
+ncclResult_t ncclMeshAllReducePartials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, ncclComm_t comm, cudaStream_t stream) {
+  return partials(sendbuff, recvbuff, rows, dim, -1, comm, stream);
+}
+ncclResult_t ncclMeshReducePartials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream) {
+  return partials(sendbuff, recvbuff, rows, dim, root < 0 ? -2 : root, comm, stream);
 }
 
 ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {

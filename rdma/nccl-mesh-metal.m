@@ -135,7 +135,14 @@ static NSString *const KERNELS =
   "device W *x = (device W *)(d + p.dst + place[0]); device const W *y = (device const W *)(s + p.src + place[1]); "
   "for (ulong k = i; k < place[2] / sizeof(W); k += g) x[k] = y[k]; }\n"
   "COUNTED(4, uint)\n"
-  "COUNTED(1, uchar)\n";
+  "COUNTED(1, uchar)\n"
+  "constant float PARTIAL_NONE = -3.4028234663852886e38f;\n"
+  "HEAD(partials_prepare) { ENTER(i == 0) device float *x = (device float *)(d + p.dst); device const float *m = (device const float *)(s + p.src); "
+  "LOOP x[k] = m[p.n + k] > 0.0f ? m[k] : PARTIAL_NONE; }\n"
+  "HEAD(partials_rescale) { ENTER(i == 0) device float *x = (device float *)(d + p.dst); device const float *e = (device const float *)(s + p.src); "
+  "for (ulong k = i; k < p.n; k += g) { const ulong rows = p.first, row = k < rows ? k : k < 2 * rows ? k - rows : (k - 2 * rows) / p.slot; "
+  "const float mine = e[row], top = e[rows + row], w = mine == PARTIAL_NONE ? 0.0f : exp(mine - top); "
+  "x[k] = k < rows ? top : w > 0.0f ? x[k] * w : 0.0f; } }\n";
 
 /* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2 */
 static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2"};
@@ -475,6 +482,16 @@ int metal_counted(struct metal_program *program, int kind, const struct metal_co
 }
 
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
+
+int metal_partials(struct metal_program *program, int rescale, void *piece, size_t piece_offset, void *scratch, size_t scratch_offset, uint64_t rows,
+                   uint64_t dim) {
+  if (!rescale)
+    return dispatch(program, @"partials_prepare", scratch, piece, NULL, NULL, (struct args){.dst = scratch_offset, .src = piece_offset, .n = rows},
+                    rows);
+  return dispatch(program, @"partials_rescale", piece, scratch, NULL, NULL,
+                  (struct args){.dst = piece_offset, .src = scratch_offset, .n = rows * (2 + dim), .first = rows, .slot = dim ? dim : 1},
+                  rows * (2 + dim));
+}
 
 const char *metal_steps(void) { return STEPS.UTF8String; }
 

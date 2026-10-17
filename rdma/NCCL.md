@@ -97,6 +97,17 @@ that layout fail as a value with `*arrived` 2. Reproduction target (metal-microb
 part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
 473-480 us, the host idle 7.4-7.9 ms.
 
+**Split-KV partials.** `ncclMeshAllReducePartials(send, recv, rows, dim, comm, stream)` and
+`ncclMeshReducePartials(send, recv, rows, dim, root, comm, stream)` merge split-KV attention partials, each member's
+float32 `[m: rows][l: rows][O: rows x dim]` (a row's maximum, its sum of exponentials, its unnormalized output; the
+engine's partial piece), by their log-sum-exp: the rows' maxima over the members by an all-reduce of max, each member's
+(l, O) rescaled to them on its own GPU (`partials_rescale`), then summed by the communicator's all-reduce or reduce
+[Dao et al. 2023, Flash-Decoding]. The result is the merged partial (M, L, O), the attention O / L. This is the
+planner's `reduce` form for partials (metal-microbench docs/placement.md Crossings), until now only the engine's own
+kernels and torch-mesh's single-GPU merge. Three groups in sequence on the stream, so not inside a group. Reproduction
+target: never measured; the planner's pricing of it at 3, 4 and 6 members of a full mesh was 331, 331 and 226 us
+against the gather's 534 a chunk's layer (metal-microbench output_data/planner-20261015/pass2 engine2-after.json).
+
 **Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
 list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, compiled ahead of the
 structural table at each map read, so a call takes the first form that fits it and the default otherwise:
