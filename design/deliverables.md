@@ -238,7 +238,57 @@ recovery, [recovery.md](recovery.md); the collectives' API, [rdma/NCCL.md](../rd
 | I24 | The existence of a crossover does not justify any overhead (operator 2026-09-17). The divisor is the engine's own solo measured next to the pair; there is no reference-class refusal. | — |
 | I25 | Latency minimization is the specification; duplicated computation is free, a serial hop is not. The cost of a layer is the number of serial pushes on its critical path times the floor of one push (~12 µs), plus the split compute; bytes moved and FLOPs repeated are not costs until they exceed that. Therefore: (a) **one serial push per layer** on the decode path — every node computes in full (duplicated) everything whose duplicated cost is below one hop (norms, residual adds, embeddings, attention at short context, sampling), computes its slice of what is split (FFN columns; the vocabulary tiles, since the lm_head at 0.8 GB is 1.3 ms and is split, its slice's logits/top-k pushed in the same single hop), and **pushes its partial directly to every consumer** (Definition: a codomain-shaped term, summed locally on arrival, in any order); (b) reduce-scatter + all-gather (two hops) is used only where `(N−1)·bytes / 10 GB/s` exceeds one hop latency, i.e. prefill-class tiles, and then pipelined per tile (F3) so the exposed cost is one hop per layer; the choice is made at `start()` from bytes and `N`, never at runtime; (c) "avoid duplicate computation" is not a specification anywhere in this document and a hop added to avoid a duplication smaller than a hop is a defect; (d) the demand is a net improvement on the pair we have: Goal B, pair decoded tokens/s ≥ 1.035× solo at heads [7,1] and FFN 7:1. Head-split attention adds one o_proj collective per attention block (standard Megatron); duplicated versus head-split attention is the caller's placement choice. | the plan shows one direct push per projection pair on the critical path, and RS+AG only above ~120 KiB |
 
-## 2. References to cross-implement from
+## 2. Public surface (closed)
+
+Restored 2026-10-17 against the restored interfaces (mesh 604f210e deleted it with the Swift module's record; the
+module came back in 71bced9e, the Python surface in python/mesh). The importable library is the Swift module `Mesh`
+(`swift/Mesh.swift`, `Bounds.swift`, `Topology.swift`) over the C runtime (`rdma/mesh-call.c`, `mesh-dataflow.c`,
+`mesh.h`, the node's resident bridge `mesh-flow.c`), and its Python surface `mesh` (`python/mesh`) over libnccl-mesh
+(`torch.distributed`'s "mesh" backend, rdma/torch-mesh) with torch operands:
+
+```
+Mesh(region:, rank:, size:, workers:, inFlight:, placement:, nodes:) // the execution's name; rank r's bridge node
+Placement(owners:, routes:, work:, bytes:, cuts:, path:)  // explicit ownership, directed routes, optional bound inputs
+Placement.Edge(source, destination)                     // ordered endpoints; route excludes source and includes destination
+Mesh.tensor(on:sections:) -> [TensorPart]                 // storage of one term T_i or block Q'_j T(X) (Definition): contiguous sections, each with a rank
+Mesh.constant(on:bytes:initialize:) -> TensorPart
+TensorFunction.cpu / .metal(device) / .metal(device, operands:) / .resident(device) / .prediction(model, inputs:, outputs:)
+mesh_call_operand.load(at:as:)                           // logical element indexing through canonical backing
+Mesh.call(function, inputs:, outputs:, on:, worker:)
+Mesh.map(function, inputs: [[TensorPart]], outputs:, workers:)
+Mesh.send(part, to:, queue:) -> TensorPart
+Mesh.broadcast / scatter / allScatter / gather / allGather / allToAll
+Mesh.reduce(parts, to:, using:, worker:) / reduceScatter(contributions, to:, using:, workers:) / allReduce(…)
+Mesh.start()                                              // realize storage, bindings, receives, links
+Mesh.invocation(slot).submit() -> generation              // admission of one instance
+MeshInvocation.result(generation) -> Result<Void, MeshError> // N2: one status load; busy until conclusion
+MeshError.busy / .link(peer:code:) / .function(call:code:)
+Mesh.syncOnRemoteFill(parts, index:)                      // explicit, diegetic, never default
+Mesh.observe() -> Topology                                // the bridges' map
+bounds(program, placement, topology, capability) -> Bounds // pure lower bounds; never picks a placement
+
+mesh.Program(backend, *, functions, engines, group, timeout, trace)   // SPMD; realize() == start()
+Program.tensor(shape, block_shape, dtype, transferable, *, contiguous) -> Tensor  // blocks of Refs (views of backings)
+Program.kernel_call(kernel, *, out_shape, grid, in_specs, out_specs, peer)(*operands)
+BlockSpec(block_shape, index_map, region_map) / ShapeDtypeStruct(shape, dtype) / Partial(required, terms)
+Program.copy(src.on(a), dst.on(b), *, queue) == send == recv / Program.replicate(tensor.on(a), b)
+Program.constant(ref, value) / Program.write(ref) / Ref.writable / Program.export(ref) -> Result (ready, array, consume)
+mesh.kernels: arguments, indices, program_id, select, expression, dot; add, maximum, minimum, swish, matmul, gather
+mesh.collective: send, recv, recv_like, broadcast, scatter, gather, all_gather, all_to_all,
+                 reduce, reduce_scatter, sum_scatter, all_reduce, all_sum, all_max, all_min, sync_on_remote_fill
+mesh.nn: linear, ffn, rmsnorm, embedding, summed_embedding                // K-split partials published tile by tile
+Program.report / MeshError(kind busy|link|function, code)
+```
+
+Frontier, stated as measured: the module restored in 71bced9e has not been measured. Its commit credits it with the
+12B cooperative FFN's 1.145-1.31x over the M5 alone (metal-microbench 43724cb, b6efa23, 11a4a7a); those runs
+(2026-09-11/12) went through metal-microbench `tools/mesh/nfe.sh` on the mesh transport before `swift/Mesh.swift`
+existed. The partial-tensor library's own frontier is the deleted native executor's (mesh 57628982): the literature
+chain paired CPU 675.0 invocations/s against 558.3 at world size 1 (+21%), Metal 172.6 against 155.5; streamed
+1,429.2 results/s against 962.9 whole (+48.6%). The Python surface's harnesses reproduce both comparisons
+([algorithm-sources.md#streaming-overlap-measurement](algorithm-sources.md#streaming-overlap-measurement)).
+
+## 3. References to cross-implement from
 
 | Construct | Reference | What to copy |
 |---|---|---|
@@ -254,7 +304,7 @@ recovery, [recovery.md](recovery.md); the collectives' API, [rdma/NCCL.md](../rd
 | topology/bounds | Patarasuk–Yuan (spanning tree suffices); Hockney; LogGP; COSMA | routes over any graph; cut/path lower bounds |
 | legitimacy | Amdahl 1967; Karp–Flatt 1990; Pope et al. 2023 | measured serial fraction; TP decode/prefill bound |
 
-## 3. Deliverables
+## 4. Deliverables
 
 Each: **Signature** · **Reference** · **Check** · **Not it**.
 
@@ -268,13 +318,54 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **S4. Out-of-band pairing on the control socket; every syscall bounded.** The link hello (node, boot, LID, GID, block size), then each program's READY, PAIRS and POSTED ([bridge-and-ipc.md#protocol](bridge-and-ipc.md#protocol)); `accept/connect/read` each with a deadline ([recovery.md](recovery.md) Q14). Ref: TN3205; `RDMA-RULES.md`. Check: each of those calls in `rdma/mesh-flow.c` has a deadline.
 
+### L — library core
+
+Restored 2026-10-17 (deleted in 604f210e; L5 in 974b5046) against the restored surfaces; each row's text is the
+record's, its last sentence the restored surfaces' names.
+
+**L1. Partial tensor storage = sections with ranks.** A `TensorPart(rank, bytes)` is the storage of one term `T_i = T(Q_i X)` (layout `P`) or one block `Q'_j T(X)` (layout `S`) of the Definition; `Mesh.tensor(on:sections:)`. The partial itself is the mathematical term; the storage never carries more than its coordinates. Ref: Pallas BlockSpec. Check: a section is contiguous locally, addressable globally by `(rank, section)`; no hidden dense copy (I4); I23. Restored surfaces: Swift `TensorPart`; Python `Tensor` blocks and `Ref` views (`Program.tensor`, `region`).
+
+**L2. Supplied function over sections.** `TensorFunction.cpu/.metal/.prediction`; `Mesh.call/map`. Ref: Pallas `pallas_call`; StarPU codelets. Check: I7; a CPU, a Metal and a Core ML function each bound through the same `call`. Not it: an expression compiler; a kernel zoo. Restored surfaces: Swift `TensorFunction`; Python `Program.kernel_call` with a supplied `kernel(program, inputs, outputs)` or a `kernels.expression`, evaluated by torch (nothing compiled; the tension with "Not it: an expression compiler" is the operator's to settle).
+
+**L3. Publish on visibility, fire on presence.** completion → `mesh_publish(row)` → for each consumer in the row's contiguous use range: decrement its pending count; zero enqueues it on its worker. No consumer evaluates "are my inputs present". Ref: Monsoon; Realm; TensorFlow Send/Recv; Naiad occurrence counts. Check: I2, I3, I17; `mesh_publish` walks one contiguous range and performs one decrement per use. Restored surfaces: Swift `rdma/mesh-call.c` (a call's pending count); Python `Program` (a token per (writer, reader) edge, a call firing at its last token, design/algorithm-sources.md#program).
+
+**L4. Ten collective verbs as movement + supplied combine.** §2 list; `reduce*` take `using: TensorFunction`. Ref: MPI-4.1 ch. 5; Rabenseifner/Patarasuk–Yuan; Gloo. Check: every verb is `send` + `call(combine)`; movement does no arithmetic; explicit destinations at every world size. Not it: gather-everything-then-sum; any verb inferred from `size`. Restored surfaces: Swift's verbs; Python `mesh.collective` (movement a copy or a libnccl-mesh broadcast; a reduction by `add`, `maximum` or `minimum` libnccl-mesh's own, in place; any other combine movement plus the combine's kernel).
+
+**L5. Partial is a type.** A `P`-layout term of the Definition (full support, pending `+`) is typed: `TensorPart.partial: Bool` set on `reduceScatter/reduce` contributions; `Mesh.call` throws `MeshError.partialOperand(part)` at setup when a non-combine function binds a partial. Ref: DTensor `Partial`; Legion `reduce`; Korthikanti 2022. Check: one `throw` in `call`; no runtime state. Restored surfaces: Python `Partial` (`kernel_call` refuses a partial operand of any kernel but `kernels.add`, TypeError at recording; `Partial.merge` refuses a contribution counted twice); Swift has no partial type yet.
+
+**L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. A *partial tensor* (Definition) has combine `+` and the exactness of I23; another associative combine is movement plus a supplied function and carries no claim beyond associativity. Ref: `MPI_Op`; Blelloch. Check: no special case for `+` in the movement. Restored surfaces: Swift `reduce(using:)`; Python `op=` (any kernel; add, maximum and minimum go to libnccl-mesh).
+
+**L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5. Restored surfaces: Swift's sections and leases; Python storage freed with its last view (a window lease returned with it, `mesh.lease`).
+
+**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Swift `Mesh.syncOnRemoteFill`, `examples/sync-on-remote-fill.swift`; Python `collective.sync_on_remote_fill` (bounded by the program's timeout), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
+
+### G — genericity
+
+**G1. Contraction is a two-operand `call`; K-partials are `reduceScatter` inputs.** caller: `call(dot, inputs:[x_k, w_k], outputs:[c_k])` per K-panel; `reduceScatter([[c_k]…], to:, using: add)`. Ref: SUMMA. Check: Gram `R(RᵀZ)` and FFN down-projection are the same calls with different operands; the Gram output feeds the next `call` with no copy. Not it: `nn.linear` inside mesh. Restored surfaces: Swift `call` + `reduceScatter(using:)` (examples/gram-chain.swift); Python `nn.linear` (K panels of `kernels.matmul`, `Partial`s summed tile by tile) and `collective.reduce_scatter` (the tension with "Not it: `nn.linear` inside mesh" is the operator's to settle).
+
+**G2. Indices as data.** `Mesh.map(function, inputs: [[x], [idx]], …)`; `idx` is a `TensorPart` whose presence gates the map; the supplied function does the indexed read. Ref: Pallas scalar prefetch; `jax.lax.gather`; Megablox. Check: routed-expert and neighbourhood callers exist outside mesh using only `map`; no routing code in mesh. Restored surfaces: Swift `Mesh.map` (examples/indexed-gather.swift); Python `BlockSpec(index_map, region_map)`, `kernels.gather`, an expression's `.at(row, column, mask, other)`.
+
+**G3. Two callers, zero specialization.** `metal-microbench` and `xonotic/solver` both `import Mesh`; mesh imports neither. Check: I8; both build against the same module. Restored surfaces: the Swift module and the Python surface (the xonotic solver was deleted in 57628982; its restoration is open).
+
+### N — instances and lifecycle
+
+**N1. Realize once, submit per instance, unbounded.** `Mesh(…, inFlight:)`; `submit(index) -> Result<Void, MeshError>`; the arena is sized at `start()` as inFlight × bytes-per-instance (SDF balance); an instance's pages return to a per-worker free list when its reference count reaches zero (an event, X5), and `submit` when no instance slot is free returns `MeshError.busy` immediately — never waits, never checks readers. Ref: MPI-4 persistent collectives; Pathways; CUDA graphs. Check: `submit(inFlight + k)` is legal and returns a value; `start()` prints bytes per in-flight instance; no allocation, no reader query, no wait inside `submit`. Restored surfaces: Swift `Mesh(…, inFlight:)`, `invocation(slot).submit()`; Python instances are recorded graph copies, each run again by a host write once its readers finished (capacity one; `Ref.writable`).
+
+**N2. Early conclusion as a value.** `Mesh.result(index) -> Result<Void, MeshError>` is one load of the instance's status word (no scan, no poll loop); `MeshError.link(peer, code)`, `.function(call, code)`. Ref: fail-stop; end-to-end argument. Check: I12; the Core ML chain concludes early on a killed peer and the driver re-realizes. Restored surfaces: Swift `MeshInvocation.result(generation)`; Python `Result.ready`, `Program.report`, `MeshError`.
+
 ### T — topology and fleet
 
 **T1. The map is a graph value, observed.** `mesh-plan.h` `struct mesh_link_map` from `mesh_map`: the bridges' records of every node's ports, flooded to every bridge, two nodes linked where each holds a port paired with the other ([bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)). Ref: JACCL hostfile as the full-mesh case; OSPF flooding (RFC 2328 §13). Check: a tree, a ring with spurs and a full mesh run the same program with nothing configured; no code path assumes a link exists.
 
 **T2. Routes are the map's; the bridges forward.** `mesh_map` joins members the links leave apart along the whole mesh's path on fewest links; on each node of the route the program is a relay's two flows, a landed record releasing the next hop's SEND cell ([bridge-and-ipc.md#flows](bridge-and-ipc.md#flows)). Ref: Patarasuk–Yuan (spanning tree suffices); Monsoon. Check: leaf→leaf on a star is two SENDs with no process of the hub taking part; per-cut bytes equal declared traffic.
 
+**T3. Multi-link striping per pair.** `send(part, to:, queue:)` where `queue` selects among a pair's links; chunks round-robin when `queue == .all`. Ref: JACCL `ring_impl` wires; TN3205 10 QPs/device. Check: equal bytes per link of a pair in `report`. Restored surfaces: Swift `send(part, to:, queue:)` (a queue of the bridge's flows); Python `queue=` (a libnccl-mesh communicator of its own, its crossings progressing apart from other queues').
+
+**T4. Bounds before runs.** `bounds(program, placement, topology, capability) -> {compute, memory, cut: {cut: s}, path: s, max}`, pure; `topology` is the T1 value (links, observed), `capability: [node: Capability(rate, bandwidth)]` the caller's sustained rates. Ref: `docs/amdahl_superiority.md` four lower bounds; Hockney; LogGP; COSMA. Check: reproduces the ten-minute table (1+3, 2+17, 1+1). Restored surfaces: `swift/Bounds.swift` `bounds(_:_:_:_:)`, `examples/bounds-table.swift`.
+
 **T5. A change of the map fails the executions it cuts; the next reads the map.** A lost link or relay fails each program across it, its status naming the node; nothing is resumed; the next execution's start reads the map as it is then ([recovery.md](recovery.md), mandates 11 and 13). Ref: fail-stop; Dean–Ghemawat; `RDMA-RULES.md`. Check: pull one cable mid-run on a ring: the failure names the node, the next execution completes on the remaining links, and the replug is in a later map.
+
+**T6. Replicas are placement, not protocol.** `Placement(…, replicas: [section: [rank, rank]])`: a replicated section is produced on every listed rank as an ordinary extra output edge; each consumer is bound at `start()` to ONE replica (the placement's primary for that consumer); loss of the primary's link is a T5 retopology event whose re-realization binds the next replica. No read-time choice, no "first present" branch. Ref: Legion physical instances; end-to-end. Check: no runtime conditional selects among replicas; losing a link changes `bounds()` and triggers T5, not a branch. Restored surfaces: none yet (`Placement` has no replicas).
 
 **T7. Many clients, by lease.** The node's bridge serves every client at once, none aware of another ([bridge-and-ipc.md#clients](bridge-and-ipc.md#clients)): rows and arena pages claimed by compare-exchange, an attach refused (EBUSY) where no slot is vacant, a lease refused as a value (ENOMEM, ENOSPC) where the node cannot give it. Ref: NCCL communicator per job; PMIx. Check: two users' programs run on disjoint rows and queue pairs; one client's exit leaves the other untouched; no `SIGKILL` path.
 
@@ -418,7 +509,7 @@ symbols has a runtime reader.
 Its definition is [recovery.md](recovery.md): its Q5-Q11 are this group's R1-R7 at their end state, R4 (a realized
 program surviving a link loss) dropped by mandate 13.
 
-**X9. Presence stamps are device-readable; consumers may be resident kernels.** Optional. Signature: `TensorPart.stamp` — the address (in the same shared mapping the GPU sees via `bytesNoCopy`) of the section's per-instance presence word; the bridge/worker writes it with a release store after the data is visible (X1). A supplied `TensorFunction.metal` may encode one command buffer for a whole local step and wait *inside the kernel* on the stamps of the sections it consumes (device-scope atomic load loop), or use a Metal 4 queue-side `waitForEvent` that the RX thread signals — either way the dependent work is resident before the tile lands and the crossing costs the wire only. The in-kernel wait is the X2 firing rule executed on the device: presence only, no data-dependent branch, no retry; the GPU watchdog is the fail-stop (`Result.function` on timeout, I12/I19). Ref: MLX `fence_wait` (`MLX_METAL_FAST_SYNCH`); NCCL LL flags; MSCCL++ device semaphores; Gupta et al. 2012 persistent threads; Anukari (spin to keep the Apple GPU clocked). Check: `TensorPart.stamp` exists and `mesh_publish` stores it release-ordered after the payload; a caller example encodes one command buffer per step with in-kernel waits and completes with command buffers per step = O(segments), not O(tiles) or O(layers); measured µs-class arrival-to-consume on the pair.
+**X9. Presence stamps are device-readable; consumers may be resident kernels.** Required (2026-10-17: the in-stream crossings are restored and measured; metal-microbench docs/principles.md section 6, the operator 2026-10-16, and docs/measurement.md, mb ea5954e). Signature: `TensorPart.stamp` — the address (in the same shared mapping the GPU sees via `bytesNoCopy`) of the section's per-instance presence word; the bridge/worker writes it with a release store after the data is visible (X1). A supplied `TensorFunction.metal` may encode one command buffer for a whole local step and wait *inside the kernel* on the stamps of the sections it consumes (device-scope atomic load loop), or use a Metal 4 queue-side `waitForEvent` that the RX thread signals — either way the dependent work is resident before the tile lands and the crossing costs the wire only. The in-kernel wait is the X2 firing rule executed on the device: presence only, no data-dependent branch, no retry; the GPU watchdog is the fail-stop (`Result.function` on timeout, I12/I19). Ref: MLX `fence_wait` (`MLX_METAL_FAST_SYNCH`); NCCL LL flags; MSCCL++ device semaphores; Gupta et al. 2012 persistent threads; Anukari (spin to keep the Apple GPU clocked). Check: `TensorPart.stamp` exists and `mesh_publish` stores it release-ordered after the payload; a caller example encodes one command buffer per step with in-kernel waits and completes with command buffers per step = O(segments), not O(tiles) or O(layers); measured µs-class arrival-to-consume on the pair.
 
 ### F — the scale-out structure as types and satisfaction constraints
 
@@ -435,11 +526,11 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 
 **F4. Hops per layer = 1; bytes are chosen to keep it 1 (I25).** Direct push of each node's partial to every consumer (`(N−1)·|vector|·rows·sizeof(elem)` per node, one hop, summed on arrival) whenever `(N−1)·bytes / 10 GB/s < one hop (~12 µs)`, i.e. below ~120 KiB per push — every decode vector (3 KiB per token on E2B, ×B); reduce-scatter + all-gather (`2·(N−1)/N·|vector|…`, Patarasuk–Yuan; two hops) only above that, pipelined per tile so the exposed cost per layer is still one hop. The choice is a pure function of `(bytes, N)` evaluated at `start()` and printed. Satisfied when: the printed plan shows one serial push per layer on the decode critical path and the byte rule for every edge; the bridge's per-link byte counters agree after a run. Not it: bandwidth-optimal RS+AG on a 3 KiB vector (two hops to save 6 KiB); any runtime choice.
 
-**F5. Command buffers per step per node are constant in N and K.** Optional. `cb(step) ≤ segments_per_layer × layers` today (E1c: 3), and `cb(step) = O(1)` with resident consumers (X9: one command buffer per step with in-kernel stamp waits). Satisfied when: the count is printed at `start()` and does not change with `LM_MESH_SIZE` or the tile count; no completion-handler commit sits between a tile's arrival and its consumption.
+**F5. Command buffers per step per node are constant in N and K.** Required (2026-10-17, as X9). `cb(step) ≤ segments_per_layer × layers` today (E1c: 3), and `cb(step) = O(1)` with resident consumers (X9: one command buffer per step with in-kernel stamp waits). Satisfied when: the count is printed at `start()` and does not change with `LM_MESH_SIZE` or the tile count; no completion-handler commit sits between a tile's arrival and its consumption.
 
 **F6. Placement is rate-proportional and bound-checked.** `share_i = r_i / Σ r`; `columns_i = round4(share_i · W)`; heads by the grouping rule; `bound(N) = 1 / ((1−f) + f / Σ r)` is context. Satisfied when: `placement.py` writes the files and prints the bound.
 
-**F7. The exposed crossing has no host term.** Optional. `c_exposed = latency_base + tile_bytes / bandwidth + hops · hop_latency`, all wire; the consumer is resident (X9) or already committed; no `waitUntilCompleted`, completion-handler commit, or shared-event wait between arrival and use. Satisfied when: the trace shows arrival-to-first-consuming-kernel-start ≤ 2× the wire estimate.
+**F7. The exposed crossing has no host term.** Required (2026-10-17, as X9). `c_exposed = latency_base + tile_bytes / bandwidth + hops · hop_latency`, all wire; the consumer is resident (X9) or already committed; no `waitUntilCompleted`, completion-handler commit, or shared-event wait between arrival and use. Satisfied when: the trace shows arrival-to-first-consuming-kernel-start ≤ 2× the wire estimate.
 
 **F8. Asymptote.** Backlog; not a gate. `T(N) = T_rest + T_f / Σ r + c_exposed / K` per layer; `T(N+1) ≤ T(N)` always (diminishing, never negative); `T(∞) = T_rest + c_exposed / K`. Satisfied when: measured `T(2)` and `T(4)` on the fleet are within 15% of the formula with the rates from `report.py`, and no measured `T(N+1) > T(N)`.
 
@@ -449,7 +540,7 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 
 **X10 (superseded by H2/H3; kept for the record shapes).** Signature: `struct mesh_send_record` (per transfer chunk, indexed by the TX ring slot / `wr_id`): `{page, bytes, queue, tag[4], release_row}`; `struct mesh_receive_record` (per posted RECV, indexed by `wr_id`): `{row, stamp_index, use_first, use_count, publish_last_chunk}`; `struct mesh_use_record` (per consumer edge, contiguous per row): `{call, pending_address}`; `struct mesh_call_record` (per (call, instance)): `{operand_array_address, worker, pending, output_rows[k]}`; `struct mesh_instance_record`: `{status_word, first_row, row_count}`. Each `_Alignas(32)`, `sizeof ≤ 32` (or ≤ 64 documented), filled at `start()`, read once per event, never mutated except the counters they name. The receive completion is: `rec = receive_records[wr_id]; store presence[rec.stamp_index]; for u in uses[rec.use_first ..< +rec.use_count]: if(!--*u.pending_address) enqueue(u.call)` — one metadata line, one contiguous use range, one countdown. The send is: `rec = send_records[slot]; ibv_post_send(&rec.wr)` with the WR and SGE pre-built inside the record. Ref: LMAX Disruptor (preallocated ring of fixed records), Monsoon token store (presence next to the operand), Kalia ATC'16 (cache-line-sized WQEs, doorbell batching), NCCL LL (flag co-located with data). Check: the ontology audit's dependent-load count per event equals 1 metadata record + payload on every runtime path; `sizeof` and alignment of every runtime record asserted at compile time; a trace shows completion→consume within the wire + one record load.
 
-**F11. Sequence-split attention is a partial with an associative combine.** Not a requirement (countermanded 2026-09-22). Signature: for a query and a range of KV positions `[p_i, p_{i+1})`, the supplied attention kernel produces, per head, `(m_i, l_i, O_i)` — running max, running sum, unnormalized output — over its positions only; `reduce(parts, to:, using: lseCombine)` with `m = max_i m_i`, `l = Σ_i l_i·e^{m_i−m}`, `O = Σ_i O_i·e^{m_i−m} / l` (flash-decoding split-K; associative, exact in fp32). KV positions are placed **once, when written** (prefill writes each node's positions to that node), proportional to memory bandwidth; K and V never move at decode. On E2B (7 global layers reading full-length caches; 28 sliding layers stay local): crossings per decoded token = 7, bytes per crossing per sequence = 8 heads × (512 + 2) × 4 B = 16.4 KiB, KV bytes read per node per token = its shard. Ref: flash-decoding (Dao et al. 2023); ring/sequence attention (Liu et al. 2023) for the placement; [crossover note §5](e2b-crossover-2026-09-16.md). Check: the plan printed at `start()` shows per node exactly its positions' KV bytes and 7 `reduce` calls per token with 16.4 KiB parts; no `allGather` of K or V anywhere; `T_mesh(B, L) − T_w` in the trace equals `B·L·14 KiB/Σ BW + 7·c` within 15%. Not it: head split on an MQA model (every node would read the whole KV); replicating KV; gathering K/V to the leader.
+**F11. Sequence-split attention is a partial with an associative combine.** A requirement (2026-10-17: metal-microbench docs/principles.md section 4, "split-KV attention for long context (Flash-Decoding [Dao et al. 2023])"; the log-sum-exp combine is a collective of the library, libnccl-mesh, rdma/NCCL.md, and in the Python surface any combine kernel `collective.reduce(..., op=)` takes). Signature: for a query and a range of KV positions `[p_i, p_{i+1})`, the supplied attention kernel produces, per head, `(m_i, l_i, O_i)` — running max, running sum, unnormalized output — over its positions only; `reduce(parts, to:, using: lseCombine)` with `m = max_i m_i`, `l = Σ_i l_i·e^{m_i−m}`, `O = Σ_i O_i·e^{m_i−m} / l` (flash-decoding split-K; associative, exact in fp32). KV positions are placed **once, when written** (prefill writes each node's positions to that node), proportional to memory bandwidth; K and V never move at decode. On E2B (7 global layers reading full-length caches; 28 sliding layers stay local): crossings per decoded token = 7, bytes per crossing per sequence = 8 heads × (512 + 2) × 4 B = 16.4 KiB, KV bytes read per node per token = its shard. Ref: flash-decoding (Dao et al. 2023); ring/sequence attention (Liu et al. 2023) for the placement; [crossover note §5](e2b-crossover-2026-09-16.md). Check: the plan printed at `start()` shows per node exactly its positions' KV bytes and 7 `reduce` calls per token with 16.4 KiB parts; no `allGather` of K or V anywhere; `T_mesh(B, L) − T_w` in the trace equals `B·L·14 KiB/Σ BW + 7·c` within 15%. Not it: head split on an MQA model (every node would read the whole KV); replicating KV; gathering K/V to the leader.
 
 ### P — packaging
 
@@ -457,11 +548,15 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 
 **P2. Pushed.** `git log @{u}..HEAD` empty on both repositories at the end of every turn.
 
-## 4. Not part of the library
+## 5. Not part of the library
 
 
 - An expression compiler, kernel zoo, scalar DSL, or any numerics inside mesh (I7).
 - Migrating a caller's operators into mesh (I8), or a model/layer API in mesh.
+- The Python surface's `mesh.kernels` and `mesh.nn` are compositions over torch (their numerics torch's and
+  torch_mesh's engines', nothing generated or executed by mesh's C runtime), restored 2026-10-17 from the 09-14
+  library on the operator's "1: SOME FUCKING HIGHER ORDER FUNCTIONS FOR PARTIAL TENSORS" (collective-goals-2026-09-14.md);
+  how they stand against I7, I8 and the two lines above is the operator's to settle.
 - A cost model, auto-placement, or a verb inferred from world size (I9).
 - A reuse guard, claim check, ready byte, occupancy check, or handshake (I3, I4).
 - A default wait: any `waitUntilCompleted`, semaphore, or poll on the publish path (I2).
