@@ -577,8 +577,9 @@ either side is configured.
 | a record landed | `flow_receive` / `lane_receive` → `ledger_landed` | the record index, cycle, `landed` (after its word was stored) |
 
 **Names.** Cells and records are named at configure time (`sends_configure`, `receives_configure`) by queue (ring),
-invocation, position among that invocation's transfers on the queue, binding, chunks and chunk. Both ends' lists are
-in the same order, so a cell and its records share (queue, invocation, position, cycle) across the link.
+invocation, position among that invocation's transfers on the queue, binding, chunks and chunk; a cell also keeps its
+transfer's bytes (`out[i].bytes`). Both ends' lists are in the same order, so a cell and its records share (queue,
+invocation, position, cycle) across the link.
 
 **Limits.** At most `MESH_LEDGER_EVENTS` (65,536) of each side, covering one pass, or every pass of a cyclic program.
 Past the limit the ledger keeps the first events.
@@ -591,15 +592,17 @@ the flow:
 - With more than `MESH_LEDGER_LINES` (2048) events, and stderr a regular file, the events go to
   `ledger-<key>-<node>-<peer>-<stripe>-<id>-<UTC>.jsonl` beside the log, which also starts with the header.
   Otherwise they go to the log.
-- Event lines: `{"s":[id,queue,invocation,position,binding,cycle,chunks,seen,first,posted,completed]}` and
-  `{"r":[id,ring,invocation,position,binding,chunk,chunks,cycle,landed]}`.
+- Event lines: `{"s":[id,queue,invocation,position,binding,cycle,chunks,seen,first,posted,completed,bytes]}` and
+  `{"r":[id,ring,invocation,position,binding,chunk,chunks,cycle,landed]}`. A SEND line's `bytes` (last, after the
+  fields it had before) is its cell's transfer's, -1 where the cell was not named; metal-microbench
+  `tools/torch_parallel/timeline.py` takes the wire's time out of a crossing's by it.
 
 **Reader, `ledger.py`:**
 - `read`: parses JSON from the log lines (dropping the `say` prefix), follows a header's `file` beside the log or in
   any directory given, and attaches events to the latest header of their ledger id.
 - `peer_of`: the same key and stripe, with node/peer and near/far swapped; ties are broken by shared names.
-- `crossings`: a cell counts only when all its chunks landed, at the last chunk's time; `--skip` drops early
-  invocations.
+- `crossings`: a cell counts only when all its chunks landed, at the last chunk's time, with its SEND's fields
+  (`bytes` among them where the ledger recorded it); `--skip` drops early invocations.
 - Clock offset (each node's own `CLOCK_UPTIME_RAW`, with an unknown offset): `pair` matches each crossing A→B with a
   crossing B→A of the same name, otherwise the nearest by B's `seen`. Then:
   - `hop = ((landed_B - seen_A) + (landed_A - seen_B)) / 2`;

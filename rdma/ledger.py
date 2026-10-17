@@ -9,7 +9,10 @@ released and every receive record that landed, and writes them at the flow's rel
 event, in the bridge's log or, past MESH_LEDGER_LINES, in a file beside the log that the header names.  An event names
 its cell or record by queue (the peer's ring of the same index), program invocation, position among that invocation's
 transfers of the queue, binding and cycle, so one node's SEND of a cell and its peer's landing of the cell's records
-pair across the two nodes, whose clocks (each bridge's ledger_ns, CLOCK_UPTIME_RAW) differ by an unknown offset.
+pair across the two nodes, whose clocks (each bridge's ledger_ns, CLOCK_UPTIME_RAW) differ by an unknown offset.  A
+SEND's line ends with the cell's bytes (its transfer's: -1 where the cell was not named), so a reader takes the wire's
+time out of a crossing's (metal-microbench tools/torch_parallel/timeline.py); a ledger written before the bytes were
+recorded has none, and its events carry no 'bytes'.
 
 For each direction between two nodes it reports, in microseconds (median, p10, p90):
 
@@ -40,7 +43,7 @@ import statistics
 import sys
 from pathlib import Path
 
-SEND = ('queue', 'invocation', 'position', 'binding', 'cycle', 'chunks', 'seen', 'first', 'posted', 'completed')
+SEND = ('queue', 'invocation', 'position', 'binding', 'cycle', 'chunks', 'seen', 'first', 'posted', 'completed', 'bytes')
 LANDING = ('ring', 'invocation', 'position', 'binding', 'chunk', 'chunks', 'cycle', 'landed')
 
 

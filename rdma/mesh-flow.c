@@ -104,14 +104,15 @@ struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; ui
    bridge's clock_ns; at most MESH_LEDGER_EVENTS of each, allocated as the flow's sides are prepared, the progress
    threads only storing into them.  `current` is each queue's event of the cell being posted, `pending` and `last` its
    oldest event whose completion is not yet taken and its newest (`next` links a queue's events).  The names of the
-   cells (`cell`: queue, invocation, position among the invocation's transfers of the queue, binding, chunks) and of the
+   cells (`cell`: queue, invocation, position among the invocation's transfers of the queue, binding, chunks, and the
+   transfer's bytes, by which a reader takes the wire's time out of a crossing's) and of the
    records (`record`, by index: the same, and the chunk) are kept as the sides are prepared, for ledger_write alone */
 #define MESH_LEDGER_EVENTS (UINT32_C(1)<<16)
 #define MESH_LEDGER_LINES 2048u
 #define LEDGER_NONE UINT32_MAX
 struct ledger_send { uint64_t cell,mark,seen,first,posted,completed; uint32_t cycle,next; };
 struct ledger_landing { uint32_t record,cycle; uint64_t landed; };
-struct ledger_cell { uint64_t cell; uint32_t queue,invocation,position,binding,chunks; };
+struct ledger_cell { uint64_t cell,bytes; uint32_t queue,invocation,position,binding,chunks; };
 struct ledger_record { uint32_t position,binding,chunk,chunks; };
 struct ledger;
 struct ledger_entry { struct ledger *ledger; uint32_t event,done; };
@@ -749,9 +750,10 @@ static void ledger_events(const struct flow *f,struct ledger *l,uint32_t sends,u
   for(uint32_t e=sends-l->cut_sends>l->send_room?sends-l->send_room:l->cut_sends;e!=sends;e++){
     const struct ledger_send *s=l->send+e%l->send_room;
     const struct ledger_cell key={.cell=s->cell},*c=l->cells?bsearch(&key,l->cell,l->cells,sizeof *l->cell,ledger_cell_order):NULL;
-    snprintf(line,sizeof line,"{\"s\":[%u,%lld,%lld,%lld,%lld,%u,%lld,%llu,%llu,%llu,%llu]}\n",l->id,c?(long long)c->queue:-1ll,
+    snprintf(line,sizeof line,"{\"s\":[%u,%lld,%lld,%lld,%lld,%u,%lld,%llu,%llu,%llu,%llu,%lld]}\n",l->id,c?(long long)c->queue:-1ll,
              c?(long long)c->invocation:-1ll,c?(long long)c->position:-1ll,c?(long long)c->binding:-1ll,s->cycle,c?(long long)c->chunks:-1ll,
-             (unsigned long long)s->seen,(unsigned long long)s->first,(unsigned long long)s->posted,(unsigned long long)s->completed);
+             (unsigned long long)s->seen,(unsigned long long)s->first,(unsigned long long)s->posted,(unsigned long long)s->completed,
+             c?(long long)c->bytes:-1ll);
     if(out)fputs(line,out);else say("%s",line);
   }
   for(uint32_t e=landings-l->cut_landings>l->landing_room?landings-l->landing_room:l->cut_landings;e!=landings;e++){
@@ -920,7 +922,7 @@ static int sends_configure(struct flow *link){
         /* #ledger: the cell's name, its position among the stream's cells of invocation t */
         if(positions && ledger->cells<cells){
           if(positions[2*slot]!=t+1){positions[2*slot]=t+1;positions[2*slot+1]=0;}
-          ledger->cell[ledger->cells++]=(struct ledger_cell){(uintptr_t)cell,stream,t,positions[2*slot+1]++,out[i].binding,
+          ledger->cell[ledger->cells++]=(struct ledger_cell){(uintptr_t)cell,out[i].bytes,stream,t,positions[2*slot+1]++,out[i].binding,
             mesh_row_chunks(m,out[i].local_row+slot*out[i].stride,out[i].bytes)};
         }
       }
