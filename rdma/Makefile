@@ -1,10 +1,17 @@
-BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib
+BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh_swift.dylib
+# the Swift module (../swift: the numerical executor's API, mesh-call.h) and its callers (../examples)
+SWIFT = ../swift/Mesh.swift ../swift/Bounds.swift ../swift/Topology.swift
+EXAMPLES = linear-chain sync-on-remote-fill bounds-table coreml-chain indexed-gather gram-chain
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
 # one's deprecation must not leave a node's bridge unbuilt); native-audit keeps every warning an error
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 all: $(BINS)
-native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
+examples: $(EXAMPLES)
+native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s .build/Mesh.s
+.build/Mesh.s: $(SWIFT) mesh.h mesh-plan.h mesh-call.h mesh-collective.h mesh-dataflow.h module.modulemap Makefile
+	mkdir -p .build
+	swiftc -O -whole-module-optimization -parse-as-library -emit-assembly -module-name Mesh -I . $(SWIFT) -o $@
 .build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
@@ -41,9 +48,23 @@ libmesh-coreml.dylib: mesh-coreml.m Makefile
 	  -framework CoreML -framework Foundation
 libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
+libmesh_swift.dylib: $(SWIFT) libmesh.dylib module.modulemap mesh.h mesh-plan.h mesh-call.h mesh-collective.h mesh-dataflow.h Makefile
+	swiftc -O -whole-module-optimization -emit-library -emit-module -module-name Mesh -I . -L . -lmesh -Xlinker -rpath -Xlinker @loader_path -Xlinker -install_name -Xlinker @rpath/libmesh_swift.dylib $(SWIFT) -o $@
+linear-chain: ../examples/linear-chain.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+sync-on-remote-fill: ../examples/sync-on-remote-fill.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+bounds-table: ../examples/bounds-table.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+coreml-chain: ../examples/coreml-chain.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+indexed-gather: ../examples/indexed-gather.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+gram-chain: ../examples/gram-chain.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -Xcc -DACCELERATE_NEW_LAPACK -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 clean:
-	rm -f $(BINS)
-.PHONY: all clean native-audit
+	rm -f $(BINS) $(EXAMPLES) Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
+.PHONY: all examples clean native-audit
 
 # _mesh_c: the headers as one Python module (mesh_c_build.py), for the interpreter that imports it
 PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python

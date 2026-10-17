@@ -4,6 +4,16 @@ networks.conf
 rdma/mesh-flow
 rdma/mesh-stat
 rdma/*.dylib
+rdma/Mesh.swiftmodule
+rdma/Mesh.swiftdoc
+rdma/Mesh.swiftsourceinfo
+rdma/Mesh.abi.json
+rdma/linear-chain
+rdma/sync-on-remote-fill
+rdma/bounds-table
+rdma/coreml-chain
+rdma/gram-chain
+rdma/indexed-gather
 user/mesh-bandwidth
 .claude/*
 !.claude/settings.json
