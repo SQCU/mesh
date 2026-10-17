@@ -239,7 +239,9 @@ instantiations of its shapes to the source): `streamed_alu` (1 to 4 rows on the 
 simdgroups a band, J shares of K, F tiles a simdgroup in flight, 8 independent sums a lane, 1-bit tiles by tables of
 x's sums where LUT), `streamed_couple` (gate and up with the GELU between), `streamed_coop` (8 to 16 rows: each tile
 decoded into the right-input cooperative tensor of matmul2d<M, 32, 32> at the node's slots, read once by
-`streamed_coopmap`), `streamed_panel` and `streamed_panel_t` (prefill and the transposed product: eight tiles decoded
+`streamed_coopmap`; RING 1 the paired producer-consumer ring; RING r >= 8, 32 to 256 rows, the role split by rows: SK
+producer simdgroups a band decoding each tile once into the threadgroup ring, M / r consumers each multiplying every
+producer's tile by r rows of their own), `streamed_panel` and `streamed_panel_t` (prefill and the transposed product: eight tiles decoded
 into threadgroup memory, one operation a 256-wide panel); and the finish, the input gather, rotation (writing the 1-bit
 tables) and Hadamard butterfly (`streamed_hadamard`, a threadgroup a row: H_N by structured.metal's stages on every
 block at once, H_K mixing the blocks as each coordinate is put, the RMS norm foldable), the GELU of gate and up, the
@@ -254,11 +256,31 @@ as a table of a member's slices (`python -m torch_mesh.streamed resolve`), by me
 the same source. `streamed_value` and `streamed_rows` take the partials as any pointer type, so a finish run inside its
 product reads them `coherent(device)`.
 
+A product's decomposition (its instance: kernel, template arguments, grid, threads, shares) is also an operand, in
+place of the fit's choice: `streamed.spec_of('coop/M=64,SK=2,BANDS=1,J=1,LOADS=0,RING=32')` makes one, `Matrix.dispatch`,
+`product`, `apply` and `ffn` take it as `decomposition=` (admitted where the matrix's bands are a multiple of BANDS and
+the rows at most M), and `decomposition_of` gives metal-microbench's engine its decompositions entry (kernel, args,
+grid, threads, shares; metal-microbench docs/kernels.md#decompositions). The role split by rows (RING r >= 8, mesh
+99a9e70a, restored from metal-microbench a9d17c7^ tools/streamed_gemv.metal `streamed_gemm`) is reached this way only:
+no candidate of the fit lists it and nothing prices it. `python -m torch_mesh.streamed decompose EXPORT NAME... --form
+ROWS=SPEC...` reads named instances beside torch's fp16 product of the same matrix decoded and the fit's choice, each
+against float64, over copies past `--cold` MiB. Reproduction target (the E2B FFN gate on the M5, cold): at 64 rows at
+least 1.41-1.49x torch's fp16 product (the study's 752 us against 1128.6), at 128 rows at or under torch's, at 256 rows
+against the 128-row panel's 0.123 ms and torch's 0.086 (metal-microbench docs/kernels.md#fragment-tiles).
+
 `torch_mesh/attention.metal` is decode attention as one algorithm over a KV type (`mesh_attention<A>`): a task's chunks
 (the KV type's scores of each lane's positions, the chunk's online softmax of R rows, the KV type's value product), the
 position groups' sum and the KV type's finish (its parts' merge and store). metal-microbench's engine instantiates it over
 its fp16 pages (`decode_paged`) and its recorder over LiteRT's int8 window (`k7_window`, K7); a new KV layout is a new type
-(metal-microbench docs/kernels.md#decode-attention). `torch_mesh/argmax.metal` is the library's selection: the draw at temperature 1
+(metal-microbench docs/kernels.md#decode-attention). A prefix several streams share (their first positions [0, end) in
+the same physical pages of every one's block table) is an operand of the Tile plan (mesh 2bc084cf, restored from
+metal-microbench 845838e^ `paged_attn_{slide,full}_ar_shared`): `mesh_shared {end, splits}` the range and its part
+count, `mesh_shared_part` a `mesh_tile` task of 8 sharing rows of any streams and query heads of one KV head over the
+range (its `splits` parts at slots [0, splits)), `mesh_shared_tail` a sharing stream's own task cut to the positions past
+the range (its parts at slots [splits, splits + J), returning splits + J), and `mesh_merge_row` over a row's parts after
+both dispatches. A task holds 8 rows, so it reads the range less than the per-row path only where a stream holds fewer
+than 8 rows of a KV head. The file still defines no kernel: metal-microbench's `decode_attention_shared<D>` instantiates it
+(not built; metal-microbench docs/kernels.md#decode-attention, its reproduction target). `torch_mesh/argmax.metal` is the library's selection: the draw at temperature 1
 (`mesh_draw`: the greatest of each candidate's logit plus its Gumbel noise, keyed by the row's seed, key and token), the
 normaliser (`mesh_normaliser`: a row's greatest logit and its sum of exponentials, log Z) and the retained set
 (`mesh_retain`: a head of the 2^k greatest logits and a tail of 2^m of the rest drawn as the draw is, with log Z), each a
