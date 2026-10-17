@@ -520,7 +520,7 @@ line says "ledgers kept".
   so the completion whose gate count reaches the cell's last SEND's is the cell's (an exclusive flow's; a lane's
   completions retire frames its flows share and are not attributed). For each receive record that landed
   (`flow_receive`, `lane_receive`): its index, its cycle, and when its word was stored. Every time is the bridge's
-  `clock_ns` (CLOCK_MONOTONIC, ns), each node its own.
+  `ledger_ns` (CLOCK_UPTIME_RAW, ns: CLOCK_MONOTONIC reads whole microseconds on macOS), each node its own.
 - **Its bound.** A side's events are one pass of the flow's cells or records, and every pass of a cyclic program's,
   up to MESH_LEDGER_EVENTS (65,536) each; past it the flow runs on and the ledger keeps the first. They are allocated
   as the side is prepared, 56 bytes an event sent and 16 a landing (4.5 MiB a flow at the bound), with the cells' and

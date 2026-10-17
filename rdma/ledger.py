@@ -9,7 +9,7 @@ released and every receive record that landed, and writes them at the flow's rel
 event, in the bridge's log or, past MESH_LEDGER_LINES, in a file beside the log that the header names.  An event names
 its cell or record by queue (the peer's ring of the same index), program invocation, position among that invocation's
 transfers of the queue, binding and cycle, so one node's SEND of a cell and its peer's landing of the cell's records
-pair across the two nodes, whose clocks (each bridge's clock_ns) differ by an unknown offset.
+pair across the two nodes, whose clocks (each bridge's ledger_ns, CLOCK_UPTIME_RAW) differ by an unknown offset.
 
 For each direction between two nodes it reports, in microseconds (median, p10, p90):
 

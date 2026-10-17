@@ -558,7 +558,7 @@ says "ledgers kept".
 **What is recorded, per flow.** `ledger_open` runs on the port's queue at the flow's first non-pair job, before
 either side is configured.
 
-| event | recorded by | fields (each time is `clock_ns` = `CLOCK_MONOTONIC` ns of that node) |
+| event | recorded by | fields (each time is `ledger_ns` = `CLOCK_UPTIME_RAW` ns of that node, the clock the rank reads) |
 |---|---|---|
 | SEND cell first seen released | `flow_send` / `lane_send` → `ledger_seen` | the cell, the stream cycle, `seen` |
 | its SENDs posted | `ledger_stamp` | `first` (the first post), `posted` and `mark` (the gate's frames after the last post; an exclusive flow only) |
@@ -589,7 +589,7 @@ the flow:
 - `peer_of`: the same key and stripe, with node/peer and near/far swapped; ties are broken by shared names.
 - `crossings`: a cell counts only when all its chunks landed, at the last chunk's time; `--skip` drops early
   invocations.
-- Clock offset (each node's own `CLOCK_MONOTONIC`, with an unknown offset): `pair` matches each crossing A→B with a
+- Clock offset (each node's own `CLOCK_UPTIME_RAW`, with an unknown offset): `pair` matches each crossing A→B with a
   crossing B→A of the same name, otherwise the nearest by B's `seen`. Then:
   - `hop = ((landed_B - seen_A) + (landed_A - seen_B)) / 2`;
   - `offset = ((landed_B - seen_A) - (landed_A - seen_B)) / 2`;

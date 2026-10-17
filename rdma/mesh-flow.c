@@ -290,6 +290,9 @@ static uint32_t device_count;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 
 static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+/* design/bridge-and-ipc.md#ledger: the ledger's clock, nanoseconds (CLOCK_MONOTONIC's are whole microseconds here), as
+   Q5P's trace kept (mesh git 5702ea5, M27) */
+static uint64_t ledger_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static uint64_t memory;
 /* design/bridge-and-ipc.md#records: the bytes the kernel can give without pressure (kern.memorystatus_level percent of
    the node's memory), read now */
@@ -563,7 +566,7 @@ static void ledger_open(struct flow *f){
     return;
   }
   for(size_t i=0;i<3*(size_t)f->qps;i++)words[i]=LEDGER_NONE;
-  l->id=atomic_fetch_add(&ledger_ids,1)+1;l->queues=(uint32_t)f->qps;l->started=clock_ns();
+  l->id=atomic_fetch_add(&ledger_ids,1)+1;l->queues=(uint32_t)f->qps;l->started=ledger_ns();
   l->current=words;l->pending=words+f->qps;l->last=words+2*(size_t)f->qps;
   f->ledger=l;
 }
@@ -578,7 +581,7 @@ static void ledger_seen(struct ledger *l,const struct mesh_send *cell,uint64_t c
   const uint32_t q=cell->queue;
   if(!l->send_room){l->current[q]=LEDGER_NONE;return;}
   const uint32_t e=l->sends;
-  l->send[e%l->send_room]=(struct ledger_send){.cell=(uintptr_t)cell,.seen=clock_ns(),.cycle=(uint32_t)cycle,.next=LEDGER_NONE};
+  l->send[e%l->send_room]=(struct ledger_send){.cell=(uintptr_t)cell,.seen=ledger_ns(),.cycle=(uint32_t)cycle,.next=LEDGER_NONE};
   if(l->last[q]!=LEDGER_NONE)l->send[l->last[q]%l->send_room].next=e;
   if(l->pending[q]==LEDGER_NONE)l->pending[q]=e;
   l->last[q]=e;l->current[q]=e;
@@ -598,7 +601,7 @@ static void ledger_retired(struct ledger *l,uint32_t q,uint64_t retired){
   for(uint32_t e;q<l->queues && (e=l->pending[q])!=LEDGER_NONE;){
     struct ledger_send *s=l->send+e%l->send_room;
     if(!s->posted || ((retired-s->mark)&MESH_GATE_MASK)>=(UINT64_C(1)<<47))break;
-    if(!at)at=clock_ns();
+    if(!at)at=ledger_ns();
     s->completed=at;l->pending[q]=s->next;
   }
 }
@@ -607,7 +610,7 @@ static void ledger_landed(struct flow *link,const struct prepared_receive *recor
   struct ledger *l=link->ledger;
   if(!l->landing_room)return;
   const uint32_t e=l->landings;
-  l->landing[e%l->landing_room]=(struct ledger_landing){(uint32_t)(record-link->receive),record->cycle,clock_ns()};
+  l->landing[e%l->landing_room]=(struct ledger_landing){(uint32_t)(record-link->receive),record->cycle,ledger_ns()};
   __atomic_store_n(&l->landings,e+1,__ATOMIC_RELEASE);
 }
 /* design/bridge-and-ipc.md#ledger: a flow's ledger written at its release, on its port's queue once neither progress
@@ -1021,7 +1024,7 @@ static int flow_send(struct flow *link){
         stream->next=request->next;stream->remaining--;gate->requests++;moved=1;
       }
       /* #ledger */
-      if(ledger && stream->remaining!=unposted)ledger_stamp(ledger,ledger->current[cell->queue],!stream->remaining,gate->posted,clock_ns());
+      if(ledger && stream->remaining!=unposted)ledger_stamp(ledger,ledger->current[cell->queue],!stream->remaining,gate->posted,ledger_ns());
       if(stream->remaining)break;
       stream->cell=(struct mesh_send *)cell->successor;
       if(stream->cell==stream->first)stream->cycle++;
@@ -1176,7 +1179,7 @@ static int lane_send(struct port *port,uint32_t lane){
   }
   if(error)lanes_lost(port,error<0?-error:error);
   else if(tracing){
-    const uint64_t at=clock_ns();
+    const uint64_t at=ledger_ns();
     for(uint32_t e=0;e<tracing;e++)ledger_stamp(traced[e].ledger,traced[e].event,(int)traced[e].done,0,at);
   }
   return 1;
