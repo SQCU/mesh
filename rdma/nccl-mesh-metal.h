@@ -58,10 +58,9 @@ struct metal_check { void *ring, *violation; size_t slot; uint64_t first; uint32
 /* a filler's stamp at position t, the host's and the kernels' one definition */
 #define METAL_STAMP(t) (0x6d6573682d66696cUL ^ ((t) * 0x9e3779b97f4a7c15UL))
 int metal_publish(struct metal_program *, void *cells, size_t offset, uint64_t argument);
-/* an empty position's publication: its slot's first eight bytes the position's stamp, its cell's first SEND `length`
-   bytes (mesh.h MESH_SEND_LENGTH), then its cell released */
+/* an empty position's publication: its slot's first eight bytes the position's stamp, then its cell released */
 int metal_publish_filler(struct metal_program *, void *cells, size_t offset, uint64_t argument, void *slot, size_t slot_offset,
-                         uint64_t position, size_t length);
+                         uint64_t position);
 int metal_spin(struct metal_program *, void *words, size_t offset, uint64_t cycle, const struct metal_check *check);
 /* a block's piece in one kernel: copied into its slot and its cell released (send), or awaited and combined (an
    ncclDataType_t, op as combine_into) or copied (type -1, n bytes) where it landed (land) */

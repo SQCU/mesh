@@ -1,7 +1,6 @@
 #import <Metal/Metal.h>
 #include "nccl-mesh-metal.h"
 #include "mesh_metal.h"
-#include "mesh.h"
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,8 +47,7 @@ static NSString *const STEPS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "return !(p.polls && ((volatile device const ulong *)vb)[2]); }\n"
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *cells, uint i) { "
-  "threadgroup_barrier(mem_flags::mem_device); if (i == 0) { *(volatile coherent(system) device uint *)(cells + p.aux + " XSTR(MESH_SEND_LENGTH) ") = uint(p.n); "
-  "mesh_publish((volatile coherent(system) device ulong *)(cells + p.aux), p.scalar); } }\n"
+  "threadgroup_barrier(mem_flags::mem_device); if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(cells + p.aux), p.scalar); }\n"
   "static inline void mesh_step_store(constant mesh_args &p, device uchar *slot, ulong k, half value) { "
   "((volatile coherent(system) device half *)(slot + p.dst))[k] = value; }\n"
   "static inline half4 mesh_step_read(constant mesh_args &p, device uchar *slot, ulong k) { "
@@ -101,9 +99,7 @@ static NSString *const KERNELS =
   "kernel void publish(device uchar *cells [[buffer(0)]], constant mesh_args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]]) { "
   "ENTER(true) mesh_publish((volatile coherent(system) device ulong *)(cells + p.dst), p.scalar); }\n"
   "kernel void publish_filler(device uchar *cells [[buffer(0)]], device uchar *ring [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]]) { "
-  "ENTER(true) *(volatile coherent(system) device ulong *)(ring + p.src) = mesh_step_stamp(p.first); "
-  "*(volatile coherent(system) device uint *)(cells + p.dst + " XSTR(MESH_SEND_LENGTH) ") = uint(p.n); "
-  "mesh_publish((volatile coherent(system) device ulong *)(cells + p.dst), p.scalar); }\n"
+  "ENTER(true) *(volatile coherent(system) device ulong *)(ring + p.src) = mesh_step_stamp(p.first); mesh_publish((volatile coherent(system) device ulong *)(cells + p.dst), p.scalar); }\n"
   "GROUP(send_small) { ENTER(i == 0) volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); LOOP x[k] = y[k]; "
   "mesh_step_release(p, a, i); }\n"
   "GROUP(land_copy) { ENTER(i == 0) AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
@@ -374,9 +370,9 @@ int metal_publish(struct metal_program *program, void *cells, size_t offset, uin
 }
 
 int metal_publish_filler(struct metal_program *program, void *cells, size_t offset, uint64_t argument, void *slot, size_t slot_offset,
-                         uint64_t position, size_t length) {
+                         uint64_t position) {
   return dispatch(program, @"publish_filler", cells, slot, NULL, NULL,
-                  (struct args){.dst = offset, .src = slot_offset, .n = length, .scalar = argument, .first = position}, 1);
+                  (struct args){.dst = offset, .src = slot_offset, .n = 1, .scalar = argument, .first = position}, 1);
 }
 
 int metal_spin(struct metal_program *program, void *words, size_t offset, uint64_t cycle, const struct metal_check *check) {

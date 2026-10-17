@@ -1242,12 +1242,6 @@ static ncclResult_t start_failure(struct session *s, int status) {
               s->comm->name, strerror(status));
 }
 
-/* design/bridge-dataflow.md#send-length: the first SEND of a position of `length` bytes on channel ch: a small slot is
-   one block, its one SEND the piece; a large slot's SENDs are its blocks as the bridge prepared them, the first a block */
-static uint32_t first_send(const struct session *s, const struct channel *ch, size_t length) {
-  return (uint32_t)(ch->large ? s->small : length);
-}
-
 /* the members' agreement, the session's position 0 on each channel: this rank's digest of its programs' making
    (map_digest) published on every channel and every peer's awaited there and compared, before any group runs, so the
    members of a session run the programs of one map or none: a session the map changed under as it opened fails as a
@@ -1259,7 +1253,7 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
   const struct agreement mine = {MESH_PLAN_VERSION, comm->digest, serial, comm->members[comm->rank]};
   for (uint32_t h = 0; h < s->count; h++) {
     memcpy(s->channels[h].sending, &mine, sizeof mine);
-    mesh_host_publish(&s->context, s->channels[h].out, 0, first_send(s, s->channels + h, sizeof mine));
+    mesh_host_publish(&s->context, s->channels[h].out, 0);
   }
   const double deadline = now_s() + SILENT_S;
   for (uint32_t h = 0; h < s->count;) {
@@ -1346,7 +1340,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
   for (uint32_t h = 0; h < s->count; h++) {
     struct channel *ch = s->channels + h;
     memcpy(ch->sending + (ch->end % DEPTH) * ch->slot, &mine, sizeof mine);
-    mesh_host_publish(&s->context, ch->out, ch->end, first_send(s, ch, sizeof mine));
+    mesh_host_publish(&s->context, ch->out, ch->end);
   }
   pthread_mutex_unlock(&session_lock);
   for (uint32_t h = 0; h < s->count;) {
@@ -1765,17 +1759,16 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
       while (ch->sent < ch->end && ch->sent < ch->consumed + LAG) {
         const uint64_t at = ch->sent;
         struct message *m = p->out_at < p->outs ? p->out + p->out_at : NULL;
-        size_t length = sizeof(uint64_t);
         if (m && at >= m->first) {
           if (at == m->first && !ready(m->c->bound, m->step)) break;
-          const size_t offset = piece_at(m, ch->slot, at, &length);
+          size_t length, offset = piece_at(m, ch->slot, at, &length);
           memcpy(ch->sending + (at % DEPTH) * ch->slot, m->c->bound->host[m->c->bound->steps[m->step].buffer] + m->offset + offset, length);
           if (at + 1 == m->first + m->pieces) p->out_at++;
         } else {
           const uint64_t stamp = METAL_STAMP(at);
           memcpy(ch->sending + (at % DEPTH) * ch->slot, &stamp, sizeof stamp);
         }
-        mesh_host_publish(&ses->context, ch->out, at, first_send(ses, ch, length));
+        mesh_host_publish(&ses->context, ch->out, at);
         ch->sent++;
       }
       open |= ch->sent < ch->end || ch->consumed < ch->end;
@@ -2303,8 +2296,7 @@ static ncclResult_t publish(struct metal_program *program, struct session *s, ui
   }
   if (!result && !released && m) result = gpu(metal_publish(program, s->transport.publication, cell, value), "a publication");
   else if (!result && !released)
-    result = gpu(metal_publish_filler(program, s->transport.publication, cell, value, ch->ring_out, (at % DEPTH) * ch->slot, at,
-                                      first_send(s, ch, sizeof(uint64_t))),
+    result = gpu(metal_publish_filler(program, s->transport.publication, cell, value, ch->ring_out, (at % DEPTH) * ch->slot, at),
                  "an empty publication");
   if (!result) { ch->sent++; *published = 1; }
   return result;

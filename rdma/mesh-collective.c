@@ -989,16 +989,14 @@ static uint32_t program_invocations(struct mesh_ctx *context){
   return mesh_client_at(context->M,context->client)->tx[0].invocations;
 }
 
-void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint64_t invocation,uint32_t bytes){
+void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint64_t invocation){
   uint32_t count=mesh_publication_prepare(context,section.first,NULL),n=program_invocations(context);
   struct prepared_publication records[count?count:1];
   mesh_publication_prepare(context,section.first,records);
   const uint64_t t=n?invocation%n:invocation,cycle=n?invocation/n:0;
-  for(uint32_t i=0;i<count;i++){
-    const uintptr_t cell=(uintptr_t)(records[i].destination+t*sizeof(struct mesh_send));
-    *(uint32_t *)(cell+MESH_SEND_LENGTH)=bytes;
-    atomic_store_explicit((_Atomic uint64_t *)cell,records[i].argument+cycle,memory_order_release);
-  }
+  for(uint32_t i=0;i<count;i++)
+    atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)(records[i].destination+t*sizeof(struct mesh_send)),
+      records[i].argument+cycle,memory_order_release);
 }
 
 /* The last chunk's word, as mesh_metal_receive_prepare reads it: chunks of one receive land in order. */

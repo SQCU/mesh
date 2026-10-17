@@ -77,11 +77,6 @@ struct mesh_send {
    list in the lease headed at row `lists`, which grows by doubling to MESH_ORDERS: mesh-call.c mesh_transfer_bind) */
 struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders; uint32_t node; _Atomic uint32_t length[MESH_QUEUES*2];
   uint32_t room,lists; };
-/* design/bridge-dataflow.md#send-length: the byte offset in a SEND cell of its first request's length (span.length),
-   which the release of a one-block piece stores before its ready word (NCCL's connFifo size: the proxy posts the bytes
-   the kernel wrote), so a position sends its piece, not its slot */
-#define MESH_SEND_LENGTH 40
-_Static_assert(offsetof(struct mesh_send,span)+offsetof(struct ibv_sge,length)==MESH_SEND_LENGTH,"MESH_SEND_LENGTH");
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
   offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,port)+4<=256 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
