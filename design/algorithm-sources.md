@@ -164,6 +164,21 @@ views of the same backing; two views overlap where their element intervals do (t
 it; `region` cuts within a block, `broadcast_to` and `T` view every block. A whole block is the unit of host
 publication (`write`) and of `constant`.
 
+## MeshError
+
+Saltzer, Reed and Clark's end-to-end argument, cited below, places recovery with
+the caller. The current `MeshError` reports native link/function failures and
+admission status. Its setup error `partialOperand` was deleted at `3bd1eaa`;
+the [restored L5 requirement](deliverables.md#l--library-core) remains unimplemented.
+The end-to-end argument does not authorize removing that requirement. See the
+[algebra and implementation account](distributed-reduce.md#l5-same-function-different-operand-scopes).
+
+Restored 2026-10-17 with the module that cites it (swift/Mesh.swift, 71bced9e). The Python surface's `MeshError`
+(`python/mesh`) carries the same three kinds as an exception (`busy`, `link` with the member across it, `function`
+with the call's record index, each an errno), raised by a wait on a failed program; its L5 refusal is a TypeError at
+recording (`Partial`, design/algorithm-sources.md#programkernel_call), so L5 holds there while Swift's
+`partialOperand` stays deleted.
+
 ## Mesh.result
 
 Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
@@ -1089,6 +1104,23 @@ chunks of less than a slot at their bytes, so it chose them where each costs a w
 output_data/libreview-20261015: up to 8.8 times off); this rule equals the review's position-level simulator of the host
 path to the last bit on 1,520 candidates (output_data/library-20261015/pass2/sims/model_vs_review.json).
 
+Swift's `Topology` (swift/Topology.swift, restored 71bced9e) is that map as `Mesh.observe` reads it: its nodes and, on
+each unordered pair, the list of its links. Its anchors are restored (deleted in 604f210e and 224961a6):
+
+### Topology.Pair
+
+`Topology.Pair`: the [graph representation above](#topology), with the smaller endpoint first, gives both endpoint orders the same dictionary key.
+
+### Topology.links
+
+`Topology.links(between:_:)`: the [graph representation above](#topology) represents a missing edge by an empty list; dictionary subscripts remain optional.
+
+### Topology.merging
+
+`Topology.merging`: the [graph representation above](#topology) uses node-set union and per-pair list concatenation; the caller supplies observations and mesh exchanges none.
+Concatenation preserves repeated observations, including both endpoint descriptions
+of the same physical link; this operation does not deduplicate them.
+
 ### Link
 
 `port_bandwidth` (mesh-verbs.h): Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
@@ -1333,6 +1365,24 @@ no default collective may invoke it.
 
 In the Python surface `collective.sync_on_remote_fill(*results, timeout=None)` waits until every result is filled,
 within its program's `timeout` (TimeoutError past it; MeshError where the program failed). No verb calls it.
+
+## bounds
+
+`bounds` and its plain value types (`Topology`, `Program`, `Placement`, `Bounds`) follow
+Hockney (1994, `t0 + n/r∞`), Alexandrov et al., [LogGP](https://doi.org/10.1145/215399.215427)
+(1995, startup and per-byte gap), Kwasniewski et al., [COSMA](https://arxiv.org/abs/1908.09606)
+(2019, I/O lower bound), and the four-lower-bounds paragraph of
+`metal-microbench/docs/amdahl_superiority.md`: aggregate and per-node work over
+sustained rate, aggregate and per-node traffic over bandwidth, bytes across each cut
+over that cut's summed bandwidth, and the dependency path's summed startup and
+transfer time; "their maximum is a lower bound, not an exact execution-time formula".
+The caller supplies the placement; `bounds` evaluates it and never chooses one
+(`examples/bounds-table.swift` supplies the proportional placement of the ten-minute table).
+Zero work or traffic takes zero time; positive work or traffic at zero capacity
+yields infinity. Missing nodes and links contribute zero capacity. These rules
+come from the existing `seconds` function; its prose comments now live here.
+
+Restored 2026-10-17 with swift/Bounds.swift and examples/bounds-table.swift (71bced9e).
 
 ## Streaming overlap measurement
 

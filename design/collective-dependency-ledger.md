@@ -4,6 +4,13 @@ The [user's requirements](collective-goals.md) define scope. These are reference
 notes about upstream mechanisms and the retained bridge, not architecture mandates.
 Descriptions of protocol decisions do not require preserving those decisions.
 
+The licences D10, D11 and D16 are restored verbatim (2026-10-17; a07d7f66 had replaced their quotes with "follow the
+caller's graph" prose, which stays below each), their sources as the record listed them:
+
+- [Thakur] Thakur, Rabenseifner and Gropp, *Optimization of Collective Communication Operations in MPICH*, IJHPCA 2005
+- [JACCL] Apple, MLX `mlx/distributed/jaccl/lib/jaccl/{mesh_impl.h,rdma.h,rdma.cpp}`, https://github.com/ml-explore/mlx
+- [Megatron] Shoeybi et al., *Megatron-LM*, https://arxiv.org/abs/1909.08053
+
 ## D1. The verb is SEND into a posted RECV; there is no remote write
 
 Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
@@ -74,14 +81,28 @@ live sections and automatic reference release satisfy the ownership relationship
 The [ownership relation](pages-and-functions.md#what-the-page-table-is) includes
 numerical uses, external ownership and device uses.
 
-## D10. Reduction and movement have different algebras
+## D10. Collectives stream by chunk
+
+> For long messages and predefined reduction operations, we use Rabenseifner's algorithm for allreduce [19], which does a reduce-scatter followed by an allgather.
+> — [Thakur]
+> Bandwidth optimal all reduce for large messages: a reduce scatter followed by an all gather.
+> — [JACCL] `mesh_impl.h`
+> Recv completed. Reduce the peer's contribution into our chunk and, if there is more data to fetch from that peer, post another recv.
+> — [JACCL] `mesh_impl.h`, `sum_scatter`
+
+Licensed use, measured: the streaming reduce tiles that took the 12B cooperative FFN from 1.209x to 1.310x the M5
+alone (metal-microbench b6efa23, 2026-09-12, 512-row tiles); libnccl-mesh's chunked rings and the Python surface's
+tile-by-tile reductions (design/algorithm-sources.md#collectivereduce_scatter) are its current forms.
 
 The MPI Forum's [collective communication](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm)
 and Rabenseifner's *Optimization of Collective Reduction Operations* (2004) supply
 distinct movement and reduction compositions. Mesh binds each verb's index relation;
 reductions use existing numerical functions over partial contributions.
 
-## D11. Tensor-parallel boundaries follow the caller's graph
+## D11. One all-reduce per tensor-parallel block is a data dependency, not a barrier
+
+> This approach splits both GEMMs in the MLP block across GPUs and requires only a single all-reduce operation in the forward pass (g operator)
+> — [Megatron]
 
 Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
 [tensor-parallel layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py)
@@ -120,7 +141,12 @@ The same retirement routine claims the old client identity before clearing it;
 connection teardown preserves process-exit observation. It does not cancel a still-attached
 failed program's unissued uses or authorize reclaiming backing before QP teardown.
 
-## D16. Application-specific output communication stays in the caller
+## D16. A vocabulary-parallel head is reduced before it is communicated
+
+> We parallelize the input embedding weight matrix EH×v along the vocabulary dimension E = [E1 , E2 ] (column-wise).
+> — [Megatron] §3
+> However, for this case, the all-gather will communicate b × s × v elements (b is the batch-size and s is the sequence length) which is huge due to vocabulary size being large. To reduce the communication size, we fuse the output of the parallel GEMM [Y1 , Y2 ] with the cross entropy loss which reduces the dimension to b × s.
+> — [Megatron] §3
 
 Megatron's vocabulary-parallel example fuses its loss to reduce communicated values.
 That is application algebra, not a requirement to add a vocabulary head or model
