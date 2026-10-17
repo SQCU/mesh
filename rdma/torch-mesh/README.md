@@ -66,9 +66,12 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   Megatron's overlapped gradient reduction, side streams) does not port as written. What overlaps here: an
   `async_op=True` collective waited after the compute it may overlap, or a compiled graph of functional
   collectives.
-- `DeviceMesh("mps")`, so DTensor, tensor and context parallelism and 2-D meshes on MPS: torch 2.14's DeviceMesh
-  calls `torch.mps.is_initialized` and `set_device`, which torch's MPS module does not have, and DTensor has no
-  sharding of MPS's `linear_backward` or SDPA. torch-mesh patches none of them.
+- `init_device_mesh("mps", ...)` and `DeviceMesh("mps", ...)`: torch 2.14's DeviceMesh setup calls
+  `torch.mps.is_initialized` and `set_device`, which torch's MPS module does not have. Form an MPS mesh from the
+  groups instead, which skips that setup: `DeviceMesh.from_group(dist.group.WORLD, "mps", mesh_dim_names=("tp",))`
+  (a list of groups and `mesh=` for more dimensions); DTensor, tensor and context parallelism then run on it.
+  DTensor's own sharding has no rule for MPS's `linear_backward` or SDPA: on a mesh dimension `partition` attaches,
+  its RaggedTensor's dispatch carries both (Uneven nodes, below). torch-mesh patches nothing of torch.
 - ReduceOp PREMUL_SUM and the bitwise ops; `monitored_barrier` (it needs a CPU device type the group does not
   list); `split_group`. One call mixing MPS and CPU tensors.
 - More than one rank a node.
