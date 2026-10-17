@@ -257,6 +257,13 @@ static uint32_t device_count;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 
 static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static uint64_t memory;
+/* design/bridge-and-ipc.md#records: the bytes the kernel can give without pressure (kern.memorystatus_level percent of
+   the node's memory), read now */
+static uint64_t available_now(void){
+  int level=0;size_t size=sizeof level;
+  return sysctlbyname("kern.memorystatus_level",&level,&size,NULL,0) || level<0?0:(uint64_t)level*(memory/100);
+}
 
 
 /* design/recovery.md#diagnosis: why this bridge stops, the code its FAREWELL carries (a signal's number; its binary
@@ -310,6 +317,7 @@ static void health_sample(struct mesh_health *h){
   if(host_statistics64(host_port,HOST_VM_INFO64,(host_info64_t)&vm,&count)==KERN_SUCCESS){
     h->free=(uint64_t)vm.free_count*vm_kernel_page_size;h->wired=(uint64_t)vm.wire_count*vm_kernel_page_size;
   }
+  h->available=available_now();
   int level=0;size_t size=sizeof level;
   if(!sysctlbyname("kern.memorystatus_vm_pressure_level",&level,&size,NULL,0))h->pressure=(uint32_t)level;
   uint64_t state=0;
@@ -368,8 +376,9 @@ static void health_text(const struct mesh_health *h,char *out,size_t room){
   else snprintf(power,sizeof power,"unknown");
   if(h->thermal<5)snprintf(thermal,sizeof thermal,"%s",thermals[h->thermal]);else snprintf(thermal,sizeof thermal,"%u",h->thermal);
   time_t booted=(time_t)(h->booted/1000000000u);struct tm utc;gmtime_r(&booted,&utc);strftime(when,sizeof when,"%Y-%m-%dT%H:%M:%SZ",&utc);
-  snprintf(out,room,"power %s; memory free %.2f GiB, wired %.2f GiB, pressure %s; thermal %s; booted %s (session %.36s), "
-           "last restart %s (%.79s)",power,(double)h->free/1073741824.0,(double)h->wired/1073741824.0,
+  snprintf(out,room,"power %s; memory available %.2f GiB, free %.2f GiB, wired %.2f GiB, pressure %s; thermal %s; booted %s "
+           "(session %.36s), last restart %s (%.79s)",power,(double)h->available/1073741824.0,(double)h->free/1073741824.0,
+           (double)h->wired/1073741824.0,
            h->pressure==4?"critical":h->pressure==2?"warning":h->pressure==1?"normal":"unread",thermal,when,h->session,
            h->reset<5?resets[h->reset]:"unknown",h->shutdown);
 }
@@ -1794,7 +1803,6 @@ static struct mesh_record *record_held(uint32_t node){
   return NULL;
 }
 /* design/bridge-and-ipc.md#records: this node's record, its window, memory and model with its ports and health */
-static uint64_t memory;
 static char model[MESH_MODEL_BYTES];
 static void record_changed(void){
   struct mesh_record own={.node=M->node,.ports=port_count,.boot=M->boot,.sequence=++sequence,.window=wire.length,.memory=memory};
@@ -2190,9 +2198,20 @@ static void hold_done(struct channel *c){
   const int t=own==c->end?1:0;
   end_put(c,t,answer,strlen(answer));
 }
+/* #admission: a request for `bytes` outside the window admitted while the node's available memory, read now, holds
+   them; a refusal logged */
+static int64_t admitted(const struct channel *c,uint64_t bytes){
+  const uint64_t room=bytes?available_now():0;
+  if(!bytes || room>=bytes)return 0;
+  say("admission: node %u's request to %s for %.2f GiB refused: %.2f GiB available, pressure %u\n",c->origin,c->service,
+      (double)bytes/1073741824.0,(double)room/1073741824.0,health.pressure);
+  return ENOMEM;
+}
 /* a channel's far end opened here: the service's socket connected, or the bridge's own */
-static int64_t service_open(struct channel *c,int s){
+static int64_t service_open(struct channel *c,int s,uint64_t bytes){
   struct end *e=c->end+s;
+  const int64_t refused=admitted(c,bytes);
+  if(refused)return refused;
   if(!strcmp(c->service,"hold")){e->kind=END_OWN;return 0;}
   for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0 && !strcmp(servings[i].service,c->service)){
     struct sockaddr_un to={.sun_family=AF_UNIX};
@@ -2231,7 +2250,7 @@ static void asked(struct asking *a){
   memcpy(c->service,r->service,sizeof c->service);
   c->end[0].kind=END_SOCKET;c->end[0].fd=fd;
   if(r->node==M->node){
-    const int64_t error=service_open(c,1);
+    const int64_t error=service_open(c,1,r->bytes);
     if(error){channel_end(c,error,-1);return;}
     c->open=1;fd_answer(fd,0);channel_pump(c);
     return;
@@ -2239,7 +2258,7 @@ static void asked(struct asking *a){
   struct port *hop=channel_hop(r->node);
   if(!hop){channel_end(c,EHOSTUNREACH,-1);return;}
   c->end[1].kind=END_PORT;c->end[1].port=hop;c->deadline=now+MESH_PAIR_NS;
-  channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,0,c->service,(uint32_t)sizeof c->service);
+  channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,(int64_t)r->bytes,c->service,(uint32_t)sizeof c->service);
 }
 static void asking_heard(struct asking *a){
   ssize_t got=recv(a->fd,(char *)&a->request+a->got,sizeof a->request-a->got,0);
@@ -2270,7 +2289,7 @@ static void channel_heard(struct port *port,const struct message *heard,const un
     memcpy(c->service,payload,MIN(heard->bytes,sizeof c->service));c->service[sizeof c->service-1]=0;
     c->end[0].kind=END_PORT;c->end[0].port=port;c->end[0].credit=heard->count;
     if(heard->to==M->node){
-      const int64_t error=service_open(c,1);
+      const int64_t error=service_open(c,1,(uint64_t)heard->code);
       if(error){refuse.code=error;port_say(port,refuse,NULL,0);channel_end(c,0,-1);return;}
       c->open=1;channel_say(c,0,CHANNEL_CONFIRM,MESH_WINDOW,0,NULL,0);channel_pump(c);
       return;
@@ -2278,7 +2297,7 @@ static void channel_heard(struct port *port,const struct message *heard,const un
     struct port *hop=channel_hop(heard->to);
     if(!hop || hop==port){refuse.code=EHOSTUNREACH;port_say(port,refuse,NULL,0);channel_end(c,0,-1);return;}
     c->end[1].kind=END_PORT;c->end[1].port=hop;c->deadline=now+MESH_PAIR_NS;
-    channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,0,c->service,(uint32_t)sizeof c->service);
+    channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,heard->code,c->service,(uint32_t)sizeof c->service);
     return;
   }
   struct channel *c=NULL;int s=0;

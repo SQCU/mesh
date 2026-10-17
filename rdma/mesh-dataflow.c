@@ -516,8 +516,8 @@ static int bridge_ask(const struct mesh_request *request){
   if(answer){close(fd);return -answer;}
   return fd;
 }
-int mesh_request(uint32_t node,const char *service){
-  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_OPEN,.node=node};
+int mesh_request(uint32_t node,const char *service,uint64_t bytes){
+  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_OPEN,.node=node,.bytes=bytes};
   if(!service || strlen(service)>=sizeof request.service)return -EINVAL;
   strcpy(request.service,service);
   return bridge_ask(&request);

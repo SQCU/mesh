@@ -15,8 +15,8 @@ The bridge's work, and nothing else:
 - it pairs each program toward every node it binds, over a link or along the map's route, runs its transfers and ends
   them, and forwards the programs whose routes pass through its node (`#protocol`, `#flows`, `#routes`), over queue
   pairs and threads it holds a link and a port, not a program and a hop (`#lanes`, `#progress`, `#cables`);
-- it carries requests, its clients' to the services of any node and its neighbours' to its own node's, and serves
-  holds (`#requests`);
+- it carries requests, its clients' to the services of any node and its neighbours' to its own node's, admitting each
+  against its node's memory, and serves holds (`#requests`);
 - it tells a program's failure, naming the node, to the program and the peer (design/recovery.md).
 
 Operator, 2026-10-14 (D10): "clients are clients, bridge services are bridge services. clients shouldn't know anything
@@ -298,13 +298,26 @@ A channel's messages ride the links' control sockets beside the bridges' own (#p
   path) on a connection it holds open. The registration lasts while that connection does, and a newer one of the
   same name replaces it. The resident rank registers `rank` (metal-microbench rank.swift) and registers again
   whenever its bridge restarts.
-- **Compatibility.** MESH_VERSION is unchanged. The kinds are new, so an older bridge drops them (an OPEN toward it
-  times out), and the region is untouched.
+- **Compatibility.** The kinds came at MESH_VERSION 115, unchanged then: an older bridge dropped them (an OPEN toward
+  it timed out), and the region was untouched. MESH_VERSION 116 adds the health record's `available` and a request's
+  `bytes` (#admission).
 
 Exercised on one node (metal-microbench output_data/bridge-20261016): a 3 MiB echo through a registered service in
 38.6 ms; 40 concurrent channels of 1 B to 5 MiB, all correct, in 0.44 s; a reader slower than its writer held to the
 window; 300 clients dropping mid-request, each failing as a value (logged) with no descriptor left open and the
 bridge idle after.
+
+### admission
+
+A request names the memory it will take outside the window at its node (`struct mesh_request` `bytes`, carried in its
+OPEN). The destination's bridge reads the node's available memory at that moment and refuses the channel (REFUSE,
+ENOMEM) where the reading is short of the bytes. Available memory is what the kernel can give without pressure, the
+measure jetsam keeps: kern.memorystatus_level percent of hw.memsize. Each refusal is logged with the bytes asked, the
+memory available and the pressure. This is the kubelet's admission (a pod is not admitted on a node under memory
+pressure), with the client stating the bytes: the operator's 2026-10-15 rule that a client knows how much it allocates
+(#clients). A request that names none, a cancel's, is admitted at any pressure. The health record carries `available`
+beside `free` (the kernel's free pages, which leave out the cache it reclaims): on the Mini with its rank resident,
+0.27 GiB free against 5.3 GiB available (2026-10-16).
 
 ### holds
 

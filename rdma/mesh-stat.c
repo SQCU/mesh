@@ -60,8 +60,8 @@ int main(void){
     printf("\",\"sampled\":%llu,\"booted\":%llu,\"session\":\"%.36s\",\"reset\":\"%s\",\"shutdown\":\"",
            (unsigned long long)h->sampled,(unsigned long long)h->booted,h->session,h->reset<5?resets[h->reset]:"unknown");
     for(const char *c=h->shutdown;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
-    printf("\",\"power\":\"%s\",\"charge\":%d,\"minutes\":%d,\"free\":%llu,\"wired\":%llu,\"pressure\":%u,\"thermal\":%u}",
-           h->power<4?powers[h->power]:"unknown",h->charge,h->minutes,(unsigned long long)h->free,(unsigned long long)h->wired,
+    printf("\",\"power\":\"%s\",\"charge\":%d,\"minutes\":%d,\"free\":%llu,\"available\":%llu,\"wired\":%llu,\"pressure\":%u,\"thermal\":%u}",
+           h->power<4?powers[h->power]:"unknown",h->charge,h->minutes,(unsigned long long)h->free,(unsigned long long)h->available,(unsigned long long)h->wired,
            h->pressure,h->thermal);
   }
   printf("]}\n");
