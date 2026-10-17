@@ -313,3 +313,12 @@ device after three such refusals in a row (design/recovery.md#loss).
 
 Until the trigger is known, a substrate upgrade restarts the Mini's bridge with no program running and well apart
 from the M5's.
+
+On 2026-10-17 at 14:23:56Z the M5's bridge crashed with the September provider signature: EXC_BAD_ACCESS, a byte
+write at 0x100840008 (8 bytes into a 16 KiB page no longer mapped, beside a 16 KiB shared-memory mapping) in
+`tbt_post_recv + 492`, from `port_pass` on its receive thread posting a flow's next record (`ring_advance`),
+1.5 s after the previous call's flow was destroyed. Its bridge posted then on its lanes' long-lived queue pairs every
+5 us (mesh b21ced65, a keepalive); the call after the next teardown failed its first SENDs with IBV_WC_LOC_PROT_ERR
+(9e0b3a4a, kb1). Without posts on the lanes, hundreds of calls with the same teardowns ran clean. The keepalive now
+rides each flow's own queue pairs (design/bridge-and-ipc.md#keepalive), and nothing posts on a queue pair that
+outlives a teardown of another.
