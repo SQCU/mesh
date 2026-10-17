@@ -23,7 +23,21 @@ CONTROL = Path.home() / ".local/share/mesh/ssh"
 KIND_RANK = {"fabric-v4ll": 0, "fabric-routed": 1, "fabric-adjacent": 2,
              "lan": 3, "lan-v6": 4}
 
+@functools.lru_cache(maxsize=1)
+def fabric() -> frozenset[str]:
+    """This node's fabric interfaces: its RDMA devices' (ibv_devices, rdma_<interface>), its Thunderbolt ports, the
+    only links the mesh's control rides (bin/mesh-router-init.sh and bin/mesh-peers.sh read them alike)."""
+    try:
+        listed = subprocess.run(["ibv_devices"], capture_output=True, text=True, timeout=5).stdout.splitlines()[2:]
+    except (OSError, subprocess.TimeoutExpired):
+        return frozenset()
+    return frozenset(f[0].removeprefix("rdma_") for f in (line.split() for line in listed) if f)
+
 def classify(addr: str) -> str | None:
+    """An address's kind: fabric-adjacent, a link-local address scoped to one of this node's fabric interfaces (its
+    cable's peer); fabric-routed, a mesh ULA (babeld's routes along the cables); lan, lan-v6 and fabric-v4ll (an IPv4
+    link-local address, which names no interface, so no cable); None for a loopback, unspecified or unscoped address,
+    or a link-local one over any other link (Wi-Fi's, AWDL's)."""
     scope = None
     if "%" in addr:
         addr, scope = addr.split("%", 1)
@@ -45,7 +59,7 @@ def classify(addr: str) -> str | None:
             return "lan"
         return None
     if ip.is_link_local:
-        return "fabric-adjacent" if scope else None
+        return "fabric-adjacent" if scope in fabric() else None
     if addr.lower().startswith("fd6d:6573:68:"):
         return "fabric-routed"
     if ip.is_global:
@@ -190,8 +204,8 @@ def nodeinfo(address: str | list[str], timeout: float = 2.0, limit: int = 1 << 2
     """A node's node-info sample from `address` (a name or an address, or a list of them in the order they are
     tried): every port of NODEINFO_PORTS on an address at once (ports are services on one path), the addresses in
     order (each name's in resolver order, the names resolved at once; with `order`, a list of classify's kinds, every
-    resolved address by its kind's place in it, those of no listed kind last, the given order kept within a kind: the
-    path a consumer's control rides, its LAN before the fabric's cables) `stagger` seconds apart, or at once when no
+    resolved address by its kind's place in it and one of no listed kind never tried, the given order kept within a
+    kind: the paths a consumer's control may ride, a cabled node's its cables alone) `stagger` seconds apart, or at once when no
     attempt is pending; the first whole sample that `accept` takes (accept(sample): None, else why not, as another
     node's) answers, and the reading ends `timeout` seconds past the last address's turn, so every address has at
     least `timeout`; the names' resolution is inside that bound.  (the sample, the address:port that gave it, why each
@@ -210,7 +224,10 @@ def nodeinfo(address: str | list[str], timeout: float = 2.0, limit: int = 1 << 2
                  for each in found for family, kind, proto, _, sockaddr in each]
     if order is not None:
         place = {kind: i for i, kind in enumerate(order)}
-        addresses.sort(key=lambda each: place.get(classify(host(each[0][3])), len(place)))
+        errors += [f"{host(each[0][3])}: a {classify(host(each[0][3]))} address, not one of {list(order)}" for each in addresses
+                   if classify(host(each[0][3])) not in place]
+        addresses = sorted((each for each in addresses if classify(host(each[0][3])) in place),
+                           key=lambda each: place[classify(host(each[0][3]))])
     deadline = began + timeout + stagger * max(0, len(addresses) - 1)
     chooser, pending, started = selectors.DefaultSelector(), {}, 0.0
 
