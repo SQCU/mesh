@@ -855,6 +855,74 @@ bridge's path within 0.5 % of it (9.338). The mb ledger's "link best" of 9.21-9.
 docs/measurement.md) is below the raw reading; the raw line, read the same day, is the denominator of a crossing's
 efficiency.
 
+## The loopback fabric
+
+The operator: "our tensor parallelism code should be fast both on days when the 5 computers are a ring and also on days
+when the 5 computers are a star" (metal-microbench docs/principles.md section 4), and "i cannot and will not precommit to
+a specific ordering or routing!" (2026-10-03). Before the Studios arrive, the only way to run the bridge's relays and
+forwarding (#routes, A47), the lanes routed flows ride, and the library's trees on 3 to 8 nodes is N bridges on one
+host. mesh 800fe6bc deleted the fabric that did that ("which stood for a per-call fabric"): `rdma/loopverbs.c`, the
+host executor `rdma/nccl-mesh-host.c` and the `mesh-flow-loop` and `host` targets, whose last readings were the NCCL
+matrix on an 8-node line 2,346 of 2,346 and line 8, shuffled ring 8, star 8 and torus 2x4 104 of 104 each, and which
+found the 4-node ring+tree deadlock (c65445c) and the cycle-0 defect (c5a4674), which "nothing at two nodes can show".
+They are restored on the resident bridge as separate build targets; the deployed `mesh-flow` is the same source without
+`MESH_LOOP_FABRIC` and behaves as before.
+
+**loopverbs** (`rdma/loopverbs.c`): the ibverbs calls the bridge makes, over a shared segment (its name the loop
+configuration's `fabric`): a byte ring a queue pair, its number the ring's, held while the queue pair lives (each making
+moves the ring's generation). A SEND is copied into its destination's ring and completes as it is delivered (one to a
+queue pair gone or made again is dropped and completes, as UC drops it); the owner's polls drain its ring into its
+receives in the order posted, a SEND waiting for its receive as TB5's credit flow control holds it, `IBV_WC_LOC_LEN_ERR`
+for a SEND longer than its receive; a move to `IBV_QPS_ERR` flushes the posted receives and SENDs
+(`IBV_WC_WR_FLUSH_ERR`), as `pair_flush` expects; 10 queue pairs a device (TB5's); a SEND at most half a ring, 4 MiB,
+the port's `max_msg_sz`; one link-local GID a port. Deviations from 800fe6bc^: the segment's name from the bridge's
+configuration (`loop_fabric`), not an environment variable; device names `rdma_loop0` to `rdma_loop63`; a queue pair's
+ring taken by compare-exchange of its `used` word, so numbers are reused only once free (800fe6bc^ took the next of
+1,024 modulo, clobbering a live ring past 1,024 makings); the dropped SEND; the flush; rings of 8 MiB (1 MiB).
+
+**A loop bridge** (`make -C rdma mesh-flow-loop`, `rdma/.build/loop/mesh-flow-loop CONFIGURATION`): mesh-flow.c built
+with `MESH_LOOP_FABRIC` and loopverbs in place of `-lrdma`. Its configuration (the canonical property list, written by
+`mesh-loop up`, not by `bridge_configuration.py`) adds `loop`: `region` (its shared memory object, in place of
+`/mesh0`), `node` (its number, in place of the host UUID's fold), `service` (its clients' requests' loopback port, in
+place of 18519), `fabric`, and `ports`, each a loopverbs `device` and its cable's two loopback ports (`listen`, this
+end's; `peer`, the other end's). `configuration_read` refuses one without them (`loop_read`). Its ports are those
+devices alone, in that order (`ports_find`); a port's turn opens its device and the cable's lower port dials the
+higher's listener, which accepts it as the port's control socket (`port_opened`, the event loop's `TAG_LOOP`), in
+place of a link's hello and the lower node's dial; the HELLO, records, map, lanes, flows, relays, stripes and streams
+are the deployed bridge's. Its name is its configuration's (`host_read` reads no host name).
+
+**A loop client** (`make -C rdma host`): `rdma/.build/host/libmesh.dylib` (libmesh with `MESH_LOOP_FABRIC`:
+`mesh_loop_bind(region, service)` names the bridge a process attaches to and asks, before its first attach or
+request) and `rdma/.build/host/libnccl-mesh.dylib` (nccl-mesh.c with `MESH_HOST_EXECUTOR` and nccl-mesh-host.c in
+place of nccl-mesh-metal.m and mesh-metal.m: every function of nccl-mesh-metal.h run on the CPU in the walk's order,
+transcribed from the kernels, its waits polls of the words the bridge stores, bounded by the program's polls where it
+has violation words, so the Metal path's walk runs with no GPU kernel; the Metal 4 form's own steps are refused as the
+classic form refuses them). Deviation from 800fe6bc^: HEAD's Metal half (bounded waits, the violation words, combine3,
+counted all-to-all, split-KV partials, retain and contents) transcribed; the arithmetic is nccl-mesh.c's own
+(`nccl_mesh_combine`, `nccl_mesh_premultiply`, `nccl_mesh_truncdiv`, hidden, where `MESH_HOST_EXECUTOR` is defined).
+
+**The driver** (`rdma/.build/host/mesh-loop`, rdma/mesh-loop.c; metal-microbench b9dbc43^ tools/nccl_demo.py `loop`'s
+part that needs no Python):
+- `mesh-loop up FAMILY N WINDOW_MIB DIRECTORY`: a line, ring, star, complete map or a torus of two rows, of N (2 to 8)
+  nodes, every cable two loopverbs devices and two free loopback ports; each node's configuration written, its bridge
+  started (posix_spawn, its log in DIRECTORY), and the call returns once every bridge's map holds N nodes and its own
+  cables are paired (`mesh_nodes_health`, `mesh_observe`, within 60 s).
+- `mesh-loop relay DIRECTORY BYTES`: every ordered pair, one after another, a program of one transfer of BYTES from
+  the one to the other (the routed pairs through the relays between, on lanes), every word checked at the receiver.
+- `mesh-loop stripes DIRECTORY BYTES`: every cable each way, a stripe of BYTES (#stripes) to the same exact pages
+  (`mesh_section_at`) near the far window's top, the far reader with no program of its own, every word checked.
+- `mesh-loop nccl DIRECTORY COUNT host|walk`: N ranks, all-reduce, all-gather, reduce-scatter, broadcast and reduce
+  from every root, and a send/receive around the ring, COUNT float32 each, every value exact, on the host path or the
+  Metal path's walk on the host executor.
+- `mesh-loop down DIRECTORY`: SIGTERM to every bridge, the fabric unlinked.
+
+**Reproduction targets** (800fe6bc^, its readings with the GPU walk on the host executor): the NCCL matrix on an 8-node
+line 2,346 of 2,346; line 8, shuffled ring 8, star 8 and torus 2x4 104 of 104 each; ring 5 with routes 46 of 46. The
+matrix itself (every datatype, op and root, metal-microbench b9dbc43^ tools/nccl_demo.py) is the consumer's driver's to
+restore on these targets; `mesh-loop nccl` is its float32 core. The integration check: `mesh-loop up line 8 512 D`,
+then `relay D 4194304` (56 pairs, the farthest 7 hops), `stripes D 4194304`, `nccl D 65536 host` and `nccl D 65536
+walk`, then the same on star 8, ring 5 and torus 8; the resident bridge's relays have never run on more than two nodes.
+
 ## Routed readiness
 
 Scatter-add and an expert layer's dispatch and combine route each update to a destination known only at run time

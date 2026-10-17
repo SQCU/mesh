@@ -12,12 +12,28 @@
 #include <netinet/tcp.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 static void mesh_reclaim(struct hdr *);
+#ifdef MESH_LOOP_FABRIC
+/* design/bridge-dataflow.md#the-loopback-fabric: a loop client's bridge, its region and its requests' loopback port (the
+   host build of libmesh alone: make host); the region MESH_NAME and MESH_PORT until bound */
+static char mesh_loop_region[32]=MESH_NAME;
+static uint16_t mesh_loop_service;
+int mesh_loop_bind(const char *region,uint16_t service){
+  if(!region || region[0]!='/' || strlen(region)>=sizeof mesh_loop_region || !service)return EINVAL;
+  strcpy(mesh_loop_region,region);mesh_loop_service=service;
+  return 0;
+}
+#define MESH_REGION_NAME mesh_loop_region
+#define MESH_SERVICE_PORT (mesh_loop_service?mesh_loop_service:(uint16_t)atoi(MESH_PORT))
+#else
+#define MESH_REGION_NAME MESH_NAME
+#define MESH_SERVICE_PORT ((uint16_t)atoi(MESH_PORT))
+#endif
 
 /* design/bridge-and-ipc.md#region: the node's region mapped, `writable` (a client's) or read-only (a reader's, which
    attaches no client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for: 0, EINVAL
    where it is no region of this version, ESRCH where its bridge is gone, else the errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
-  int file=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
+  int file=shm_open(MESH_REGION_NAME,writable?O_RDWR:O_RDONLY,0);
   if(file<0)return errno;
   struct stat info;
   if(fstat(file,&info)){int error=errno;close(file);return error;}
@@ -524,7 +540,7 @@ uint32_t mesh_publication_prepare(struct mesh_ctx *c,uint32_t row,struct prepare
 static int bridge_ask(const struct mesh_request *request){
   int fd=socket(AF_INET6,SOCK_STREAM,0),on=1;
   if(fd<0)return -errno;
-  struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
+  struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(MESH_SERVICE_PORT),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
   int32_t answer=0;
   size_t got=0;
   if(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) || setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&on,sizeof on) ||

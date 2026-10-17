@@ -652,6 +652,16 @@ static _Atomic uint32_t ledger_ids;
    lets pass between frames on its keepalive queue pair while it progresses; 0 where it states none (its flows make no
    such pair) */
 static uint64_t keepalive_ns;
+#ifdef MESH_LOOP_FABRIC
+/* design/bridge-dataflow.md#the-loopback-fabric (mesh 800fe6bc^ mesh-flow-loop, on the resident bridge): a loop bridge's
+   configuration's `loop`: its region's name, its node, the loopback port its clients' requests come to (`service`, in
+   place of MESH_PORT), the loopverbs fabric it shares with the host's other loop bridges (loopverbs.c loop_fabric), and
+   its ports, each a loopverbs device and a cable: the loopback port this end listens on for it and the peer end's, the
+   lower of the two dialing the higher (in place of a link's hello) */
+void loop_fabric(const char *name);
+struct loop_port { char device[32]; uint16_t listen,peer; int fd; };
+static struct { char region[32],fabric[64]; uint32_t node,ports; uint16_t service; struct loop_port port[MESH_PORTS]; } loop_config;
+#endif
 /* a flow's ledger, made on its port's queue before either side is prepared or the flow listed, where the configuration
    keeps them; a flow whose ledger cannot be allocated runs without one, logged */
 static void ledger_open(struct flow *f){
@@ -2967,6 +2977,8 @@ static void stripes_requests_turn(void){
 #define TAG_CHANNEL (UINT64_C(1)<<62)
 #define TAG_ASKING (UINT64_C(1)<<61)
 #define TAG_SERVING (UINT64_C(1)<<60)
+/* design/bridge-dataflow.md#the-loopback-fabric: a loop port's cable listener's event, its index */
+#define TAG_LOOP (UINT64_C(1)<<59)
 enum { END_SOCKET=1, END_PORT, END_OWN, END_EXEC };
 struct end { int kind,fd,reading,writing,ended,told; struct port *port; uint64_t credit; unsigned char *queue; size_t queued,room; };
 struct channel { int used,open,exited,status,drained,reported,child; pid_t pid; uint64_t key,deadline; uint32_t origin,destination;
@@ -3799,6 +3811,20 @@ static void port_opened(struct port *port){
   port->bandwidth=port_bandwidth(&port->device.port);
   if(port->control>=0)return;
   link_set(port,0,MESH_PAIRING,0);
+#ifdef MESH_LOOP_FABRIC
+  /* design/bridge-dataflow.md#the-loopback-fabric: the cable's lower end dials the higher's listener on loopback, as a
+     link's lower node dials the higher's on the address it heard; the higher accepts (main, TAG_LOOP) */
+  for(uint32_t k=0;k<loop_config.ports;k++)if(!strcmp(loop_config.port[k].device,port->device.name) && loop_config.port[k].listen<loop_config.port[k].peer){
+    struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(loop_config.port[k].peer),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
+    port->control=socket(AF_INET6,SOCK_STREAM,0);
+    if(port->control<0 || fcntl(port->control,F_SETFL,O_NONBLOCK) || (connect(port->control,(struct sockaddr *)&to,sizeof to) && errno!=EINPROGRESS)){
+      port_lost(port,errno,0);return;
+    }
+    port->peer=0;port->connecting=1;port->next=now+MESH_PAIR_NS;
+    port_watch(port,EVFILT_WRITE);
+  }
+  return;
+#endif
   struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=port->interface};
   setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
   setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_IF,&port->interface,sizeof port->interface);
@@ -3869,6 +3895,12 @@ static void ports_find(void){
   dispatch_async(finder,^{
     struct ibv_device **list=ibv_get_device_list(NULL);
     uint32_t n=0;
+#ifdef MESH_LOOP_FABRIC
+    /* design/bridge-dataflow.md#the-loopback-fabric: the configuration's devices alone, in its order */
+    for(uint32_t k=0;k<loop_config.ports && n<MESH_PORTS;k++)snprintf(devices[n++],sizeof devices[0],"%s",loop_config.port[k].device);
+    if(list)ibv_free_device_list(list);
+    list=NULL;
+#endif
     for(int i=0;list && list[i] && n<MESH_PORTS;i++)if(!strncmp(ibv_get_device_name(list[i]),"rdma_",5))
       snprintf(devices[n++],sizeof devices[0],"%s",ibv_get_device_name(list[i]));
     if(list)ibv_free_device_list(list);
@@ -4140,6 +4172,40 @@ static void *control_watch(void *unused){
    the consumer's document (rdma/bridge_configuration.py): its name and its window in bytes, and whether it serves `exec`
    and keeps ledgers (#ledger), and its `keepalive` in nanoseconds where it states one (#keepalive); NULL, or why it is
    refused */
+#ifdef MESH_LOOP_FABRIC
+/* design/bridge-dataflow.md#the-loopback-fabric: a loop bridge's `loop` (a dictionary: `region`, `fabric`, `node`,
+   `service` and `ports`, each port a dictionary of `device`, `listen` and `peer`); NULL, or why it is refused */
+static int loop_number(CFDictionaryRef d,CFStringRef key,int64_t most,int64_t *value){
+  CFTypeRef v=CFDictionaryGetValue(d,key);
+  return v && CFGetTypeID(v)==CFNumberGetTypeID() && CFNumberGetValue(v,kCFNumberSInt64Type,value) && *value>0 && *value<=most;
+}
+static int loop_text(CFDictionaryRef d,CFStringRef key,char *out,size_t room){
+  CFTypeRef v=CFDictionaryGetValue(d,key);
+  return v && CFGetTypeID(v)==CFStringGetTypeID() && CFStringGetCString(v,out,(CFIndex)room,kCFStringEncodingUTF8) && out[0];
+}
+static const char *loop_read(CFPropertyListRef list){
+  CFTypeRef l=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("loop")):NULL;
+  if(!l || CFGetTypeID(l)!=CFDictionaryGetTypeID())return "a loop bridge's configuration states its `loop`";
+  int64_t node=0,service=0;
+  if(!loop_text(l,CFSTR("region"),loop_config.region,sizeof loop_config.region) || loop_config.region[0]!='/')return "its loop's region, a shared memory name";
+  if(!loop_text(l,CFSTR("fabric"),loop_config.fabric,sizeof loop_config.fabric) || loop_config.fabric[0]!='/')return "its loop's fabric, a shared memory name";
+  if(!loop_number(l,CFSTR("node"),0x7fffffff,&node))return "its loop's node, a positive 31-bit number";
+  if(!loop_number(l,CFSTR("service"),65535,&service))return "its loop's service, a port";
+  loop_config.node=(uint32_t)node;loop_config.service=(uint16_t)service;
+  CFTypeRef ports=CFDictionaryGetValue(l,CFSTR("ports"));
+  if(!ports || CFGetTypeID(ports)!=CFArrayGetTypeID() || CFArrayGetCount(ports)>MESH_PORTS)return "its loop's ports, at most MESH_PORTS";
+  loop_config.ports=(uint32_t)CFArrayGetCount(ports);
+  for(uint32_t k=0;k<loop_config.ports;k++){
+    CFTypeRef p=CFArrayGetValueAtIndex(ports,k);
+    int64_t listen=0,peer=0;
+    if(!p || CFGetTypeID(p)!=CFDictionaryGetTypeID() || !loop_text(p,CFSTR("device"),loop_config.port[k].device,sizeof loop_config.port[k].device) ||
+       strncmp(loop_config.port[k].device,"rdma_",5) || !loop_number(p,CFSTR("listen"),65535,&listen) || !loop_number(p,CFSTR("peer"),65535,&peer) ||
+       listen==peer)return "a loop port: its device (rdma_...) and its cable's two ports, apart";
+    loop_config.port[k].listen=(uint16_t)listen;loop_config.port[k].peer=(uint16_t)peer;loop_config.port[k].fd=-1;
+  }
+  return NULL;
+}
+#endif
 static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *window){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
@@ -4168,6 +4234,9 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
     refused="its window, a positive number of bytes, is missing";
   else if(alive && (CFGetTypeID(alive)!=CFNumberGetTypeID() || !CFNumberGetValue(alive,kCFNumberSInt64Type,&interval) || interval<=0))
     refused="its keepalive, where stated, is not a positive number of nanoseconds";
+#ifdef MESH_LOOP_FABRIC
+  if(!refused)refused=loop_read(list);
+#endif
   keepalive_ns=refused?0:(uint64_t)interval;
   if(list)CFRelease(list);
   *window=(uint64_t)value;
@@ -4202,6 +4271,10 @@ static void host_name(char *name){
 static char host_heard[MESH_NAME_BYTES];
 static _Atomic int host_reading,host_read_done;
 static void host_read(void){
+#ifdef MESH_LOOP_FABRIC
+  /* design/bridge-dataflow.md#the-loopback-fabric: a loop bridge's name is its configuration's, never the host's */
+  return;
+#endif
   if(atomic_load(&host_read_done) || atomic_exchange(&host_reading,1))return;
   dispatch_async(finder,^{
     char name[MESH_NAME_BYTES]={0};
@@ -4235,6 +4308,16 @@ int main(int argc,char **argv){
   uint32_t node=0;
   for(int i=0;i<16;i++)node=(node*0x01000193u)^uuid[i];
   node=(node&0x7fffffffu)?node&0x7fffffffu:1;
+  /* design/bridge-dataflow.md#the-loopback-fabric: a loop bridge's node, region and service its configuration's */
+#ifdef MESH_LOOP_FABRIC
+  node=loop_config.node;
+  const char *region=loop_config.region;
+  const uint16_t service=loop_config.service;
+  loop_fabric(loop_config.fabric);
+#else
+  const char *region=MESH_NAME;
+  const uint16_t service=(uint16_t)atoi(MESH_PORT);
+#endif
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
@@ -4243,10 +4326,10 @@ int main(int argc,char **argv){
   uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
   signal(SIGPIPE,SIG_IGN);signal(SIGINT,SIG_IGN);signal(SIGTERM,SIG_IGN);signal(SIGHUP,SIG_IGN);
   atexit(down);
-  shm_unlink(MESH_NAME);int fd=shm_open(MESH_NAME,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");
+  shm_unlink(region);int fd=shm_open(region,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");
   if(ftruncate(fd,(off_t)length))die("ftruncate");fchmod(fd,MESH_MODE);
   M=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-  if(M==MAP_FAILED)die("mmap");shm=MESH_NAME;
+  if(M==MAP_FAILED)die("mmap");shm=region;
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
   *M=geometry;M->node=node;M->version=MESH_VERSION;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
   for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
@@ -4254,6 +4337,9 @@ int main(int argc,char **argv){
   close(fd);
   bridge.M=M;
   host_name(host);
+#ifdef MESH_LOOP_FABRIC
+  snprintf(host,sizeof host,"%s",name);
+#endif
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
   /* design/bridge-and-ipc.md#records: the node's memory and hardware model, which its record carries with its window */
   size_t size=sizeof memory;
@@ -4266,7 +4352,10 @@ int main(int argc,char **argv){
   lanes_reserve();
   struct kevent64_s event;
   int on=1;
-  struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=IN6ADDR_ANY_INIT};
+  struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
+#ifdef MESH_LOOP_FABRIC
+  any.sin6_addr=in6addr_loopback;
+#endif
   listener=socket(AF_INET6,SOCK_STREAM,0);hello=socket(AF_INET6,SOCK_DGRAM,0);network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
   struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
   unsigned loop=0;
@@ -4286,6 +4375,18 @@ int main(int argc,char **argv){
   requests_init();
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
+#ifdef MESH_LOOP_FABRIC
+  /* design/bridge-dataflow.md#the-loopback-fabric: each cable's listener on loopback, its events tagged by the port */
+  for(uint32_t k=0;k<loop_config.ports;k++){
+    struct sockaddr_in6 at={.sin6_len=sizeof at,.sin6_family=AF_INET6,.sin6_port=htons(loop_config.port[k].listen),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
+    int fd=socket(AF_INET6,SOCK_STREAM,0);
+    if(fd<0 || setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) || bind(fd,(struct sockaddr *)&at,sizeof at) || listen(fd,SOMAXCONN) ||
+       fcntl(fd,F_SETFL,O_NONBLOCK))die("a loop cable's listener");
+    loop_config.port[k].fd=fd;
+    EV_SET64(&event,(uint64_t)fd,EVFILT_READ,EV_ADD,0,0,TAG_LOOP|k,0,0);
+    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
+  }
+#endif
   ports_find();
   char alive[128]="";
   if(keepalive_ns)snprintf(alive,sizeof alive,", a keepalive frame every %llu ns on each exclusive flow's own queue pair (design/bridge-and-ipc.md#keepalive)",
@@ -4354,6 +4455,21 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)hello)hello_heard();
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard();
+#ifdef MESH_LOOP_FABRIC
+      /* design/bridge-dataflow.md#the-loopback-fabric: a cable's lower end dialed: its port's control socket, as a link's
+         listener takes the lower node's dial */
+      else if(e->udata!=UINT64_MAX && (e->udata&TAG_LOOP)){
+        const uint32_t k=(uint32_t)(e->udata&0xff);
+        int accepted;
+        while(k<loop_config.ports && (accepted=accept(loop_config.port[k].fd,NULL,NULL))>=0){
+          struct port *port=NULL;
+          for(uint32_t p=0;p<port_count;p++)if(!strcmp(ports[p].device.name,loop_config.port[k].device))port=ports+p;
+          if(!port || port->control>=0 || !port->open){close(accepted);continue;}
+          port->control=accepted;port->peer=0;port->next=now+MESH_PAIR_NS;
+          port_greet(port);
+        }
+      }
+#endif
       else if(e->udata!=UINT64_MAX && (e->udata&(TAG_CHANNEL|TAG_ASKING|TAG_SERVING)))request_event(e);
       else if(e->udata<port_count && (int)e->ident==ports[e->udata].control){
         struct port *port=ports+e->udata;

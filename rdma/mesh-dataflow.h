@@ -71,4 +71,10 @@ void mesh_retired_release(struct hdr *);
    EBUSY a stream on the port, ENOMEM no window for it at either end, ETIMEDOUT past the pairing window, a verbs or
    completion error) */
 int mesh_stream(uint32_t node,uint64_t bytes,char *result,size_t room);
+#ifdef MESH_LOOP_FABRIC
+/* design/bridge-dataflow.md#the-loopback-fabric: the loop bridge this process is a client of, before its first attach or
+   request (the host build of libmesh alone, make host): its region (a loop bridge's configuration's `region`) and its
+   requests' loopback port (its `service`); 0, or EINVAL */
+int mesh_loop_bind(const char *region,uint16_t service);
+#endif
 #endif
