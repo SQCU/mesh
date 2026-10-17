@@ -7,6 +7,8 @@ The bridge has one engine implementation and one transport implementation.
 - `../solver/xonwire.py` (`Engine`, `RuntimeFrames`) is the worker's end of that socket
   and the wire's framing; between nodes the rows ride libnccl-mesh
   (`../solver/worker.py`, xonotic/README.md "The solver").
+- `../solver/strat/strat_responder.py` consumes STATE requests and publishes STRATEGY responses
+  (xonotic/README.md "The policy learner").
 - `../qcsrc/common/gamemodes/gamemode/payload/mesh_ipc.qh` declares the builtins used by game code.
 
 Darkplaces includes `mesh_ipc.c` from `prvm_cmds.c`. Its wire constants come from

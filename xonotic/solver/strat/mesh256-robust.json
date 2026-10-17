@@ -1,0 +1,38 @@
+{
+  "defaults": {
+    "split": "train",
+    "map": "genarena256",
+    "teams": 8,
+    "players_per_team": [32, 32, 32, 32, 32, 32, 32, 32],
+    "controllers": {"bot": 256, "human": 0, "external": 0},
+    "carts": 4,
+    "duration": 120,
+    "skill": 5,
+    "off_policy_players": 64,
+    "server_cvars": {
+      "g_payload_point_limit": 1,
+      "g_payload_warmup": 0
+    },
+    "responder_args": [
+      "--replay-batch", "2",
+      "--replay-steps", "1",
+      "--replay-memory-mb", "512",
+      "--save-secs", "30",
+      "--model-sample-every", "20"
+    ]
+  },
+  "matches": [
+    {"id": "mesh256-matrix_fusion-baseline", "policy_arm": "matrix_fusion", "perturbation": "baseline"},
+    {"id": "mesh256-matrix_fusion-fast", "policy_arm": "matrix_fusion", "perturbation": "fast"},
+    {"id": "mesh256-matrix_fusion-slow", "policy_arm": "matrix_fusion", "perturbation": "slow"},
+    {"id": "mesh256-matrix_fusion-volatile", "policy_arm": "matrix_fusion", "perturbation": "volatile"},
+    {"id": "mesh256-ffn-baseline", "policy_arm": "ffn", "perturbation": "baseline"},
+    {"id": "mesh256-ffn-fast", "policy_arm": "ffn", "perturbation": "fast"},
+    {"id": "mesh256-ffn-slow", "policy_arm": "ffn", "perturbation": "slow"},
+    {"id": "mesh256-ffn-volatile", "policy_arm": "ffn", "perturbation": "volatile"},
+    {"id": "mesh256-linear-baseline", "policy_arm": "linear", "perturbation": "baseline"},
+    {"id": "mesh256-linear-fast", "policy_arm": "linear", "perturbation": "fast"},
+    {"id": "mesh256-linear-slow", "policy_arm": "linear", "perturbation": "slow"},
+    {"id": "mesh256-linear-volatile", "policy_arm": "linear", "perturbation": "volatile"}
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "source": "A didactic placement: a world of one (WORLD_SIZE unset), every product whole on this node's GPU; the host-only native run of 09-06 (15 optimizer updates) ran so.",
+  "device": "mps",
+  "products": {},
+  "socket": "/tmp/mesh-expert-worker.sock",
+  "framebytes": 16384,
+  "anticipatory_lead": 1.0
+}

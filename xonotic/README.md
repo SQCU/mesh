@@ -54,11 +54,59 @@ worker solves every tick and withholds its rows. `solver/sendreq.py CONFIG.json`
 in for the engine; `solver.worker --check`, `--bench N` and `--synth N` run on one
 process with no mesh.
 
-Reproduction targets: 104 GFLOP a solve (`ctx_flops`, T=4096, RES=2048) in 24 ms
+Reproduction targets (the solver): 104 GFLOP a solve (`ctx_flops`, T=4096, RES=2048) in 24 ms
 median at 4.29 TF/s on the Mini alone, numpy 54 ms (4905622f, mlx); a full-scale tick
 (50 bots, 5 teams, 4 carts) 26.6 ms (ac3b543b); the synthetic gang-up rate predicted
 0.254 and measured 0.254 (990fd5e5, `--synth`). On the pair the solve's share on each
 member and the tick are measured against the Mini-alone figure.
+
+## The policy learner
+
+`solver/strat` is the policy learner of 09-14 (57628982^, 1e1d8fb5^, 578de271^,
+38eeebbc^), restored on torch: the matrix-fusion policy (`cast_header.Wally`,
+`strategy.strategy`: native observation, cart, team, event, state and navigation rows,
+the local neighborhood, team and rival Gram actions, the routed scale experts, the rate
+heads), its learner (`online.OnlineLearner`: decoupled PPO with rollout importance
+weights, winner and loser values, replay), the responder that answers the game
+(`strat_responder.py`: STATE pages in, STRATEGY residual/rate pages out through
+`xonwire.Engine`), the match supervisor (`curriculum.py`) and the analyses (`study.py`,
+`roofline.py`, `joracle/`). Evaluation and training are queries of one torch program
+(`execution.PolicyProgram`); autograd derives every backward. The 09-14 graph compiler
+and Metal executor are not restored.
+
+The learner is one program on every rank of a world (`products.World`, torch.distributed's
+`mesh` backend): rank 0 is the game's host, serves the engine's socket and runs the
+responder; it announces each model call with its operands in one broadcast and every
+other rank runs the same call (`execution.serve`), with an empty announcement every
+`heartbeat_s` between calls. The placement document's `products` divide the remote
+products as Megatron-LM divides a block (`products.py` copy/reduce, `scale_rpc.py`):
+`cross`, the row-Gram contraction Rᵀ V, by rows; `scale`, the routed experts, by hidden
+columns, each rank keeping and updating its columns (saved as `<checkpoint>.rank<r>.npz`
+beside rank 0's checkpoint). A rank updates only what it holds and reads the replicated
+parameters from rank 0 after each update. Parts are relative; `[0, 1]` places the whole
+product on rank 1 (09-06's RDMA cross). `anticipatory_lead` imposes z = w_next + lead·dw/dt
+on the residual pages (9855a829^'s anticipatory update, AGENDA C6; 0 is the plain
+integrator). `solver/strat/placements/` holds didactic placements.
+
+    RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 PYTHONPATH=xonotic:rdma \
+        bin/mesh-python -B -m solver.strat.strat_responder --placement PLACEMENT.json --train ...
+    RANK=r WORLD_SIZE=2 MASTER_ADDR=host0 MASTER_PORT=29500 PYTHONPATH=xonotic:rdma \
+        bin/mesh-python -B -m solver.strat.cross PLACEMENT.json [--capture FRAME.npz]
+
+`curriculum.py --placement` runs matches on the game's host (rank 0); the other ranks
+are started on their nodes with the same responder arguments, as any world's ranks
+are. `jspace_probe.py` probes the trained IR against random-init and projection
+controls over a responder journal (9855a829^'s instrument, X5). The worker and the
+responder each serve `MESH_EXPERT_SOCKET`; a game talks to one of them.
+
+Reproduction targets (the learner, measurements/policy-feature-integration-20260906):
+the RDMA cross test, `solver.strat.cross` on the pair with `placements/pair-cross.json`:
+a 257 × 13 and 257 × 19 contraction's forward and both VJPs exact (errors 0, 0, 0) and the
+policy's largest parameter-gradient discrepancy 3.73e-9 against the local cross; a
+native run of the responder (`placements/local.json`, host-only as on 09-06) reaching 15
+optimizer updates (1,336 raw events, 20 actor rows attributed, no view faults). The
+j-space probe's 08-31 frontier: weapon_bit 0.926 against 0.836 for a random-init
+encoder (43c0030d).
 
 ## The 256-player / 256-team payload contract
 

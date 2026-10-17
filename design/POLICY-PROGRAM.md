@@ -262,6 +262,19 @@ as the shared source frame and reporting arrays.
 Report-only source construction is timed separately from response preparation,
 inference, native publication and policy comparison.
 
+## Restored execution (2026-10-17)
+
+`xonotic/solver/strat` is the 09-14 program (57628982^, 1e1d8fb5^, 578de271^) on torch:
+the model, its loss and its AdamW (mlx's formula: no bias correction, decoupled decay)
+are torch modules and functions, and autograd derives every backward; `PolicyProgram`
+answers the same queries (infer, emit, integrate, contribute, update) as calls of one
+program, with no graph compiler, executor or Metal kernels of its own (`tensor.py`,
+`tensor_metal.py`, `paged_matrix.py`, `tensor_runtime.py` are not restored). On a world
+the queries are SPMD: rank 0 announces each with its operands and every rank runs it, so
+the partitioned products' collectives pair (xonotic/README.md "The policy learner").
+Sampling draws its Gaussian on the host's torch generator from the same two-word key
+counter. The rest of this section is the 09-14 record.
+
 ## Persistent execution and transport
 
 `execution.py::PolicyProgram` realizes the input capacity and invokes

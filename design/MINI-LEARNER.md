@@ -1,6 +1,10 @@
 # Tethered learner placement
 
-**Historical execution record.** The persistent runtime, learner/responder and
+**Historical execution record.** The learner, responder and curriculum were restored
+on 2026-10-17 on torch and the library (xonotic/README.md "The policy learner"): rank 0
+of the responder's world runs on the game's host, and the Mini holds the products the
+placement gives it, so the placement below (the whole learner on the Mini) is no longer
+how it runs. The persistent runtime, learner/responder and
 curriculum described here were removed on September 13, 2026. Numerical model
 source and mathematical contracts remain; the deployment and execution
 instructions below are historical, not available launch alternatives.

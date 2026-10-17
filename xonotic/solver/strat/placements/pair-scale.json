@@ -1,0 +1,9 @@
+{
+  "source": "A didactic placement (xonotic/README.md 'The policy learner'): two ranks; the cross contraction's rows and the scale experts' hidden columns divided evenly (Megatron columns: each rank keeps and updates its columns, cast_header.Wally scale_shard, its shard saved beside rank 0's checkpoint as <checkpoint>.rank<r>.npz). Parts are relative and fixed for a checkpoint's lineage.",
+  "device": "mps",
+  "products": {"cross": [1, 1], "scale": [1, 1]},
+  "socket": "/tmp/mesh-expert-worker.sock",
+  "framebytes": 16384,
+  "anticipatory_lead": 1.0,
+  "heartbeat_s": 1.0
+}

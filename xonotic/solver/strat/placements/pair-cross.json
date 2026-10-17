@@ -1,0 +1,9 @@
+{
+  "source": "A didactic placement (xonotic/README.md 'The policy learner'): two ranks, rank 0 the game's host serving the engine's socket and running the responder, rank 1 on the Mini; the row-Gram cross contraction wholly on rank 1 as the 09-06 RDMA cross test placed it (scale_rpc.RemoteCross, parts [0, 1]); the scale experts whole on every rank. torch on the GPU through torch.distributed's mesh backend. The anticipatory lead of 9855a829^'s estimator (z = w_next + lead dw/dt, AGENDA C6) at its old default of 1; 0 is the plain integrator.",
+  "device": "mps",
+  "products": {"cross": [0, 1]},
+  "socket": "/tmp/mesh-expert-worker.sock",
+  "framebytes": 16384,
+  "anticipatory_lead": 1.0,
+  "heartbeat_s": 1.0
+}

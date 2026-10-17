@@ -101,11 +101,16 @@ addresses, masks and expert assignments are tensor data. New capacities still re
 preparation, and persistent allocation-free intermediate storage remains an explicit
 execution obligation rather than a consequence of fixed kernel templates.
 
-Each learned policy has one parameter/optimizer/checkpoint lineage. The complete
-learner can run on the Mini, with native state and responses crossing RDMA. Optional
-split execution places the genuine row-Gram cross-contraction or routed FFN on another
-node and returns all required operand and parameter cotangents. Workers do not own
-separate policy optimizers. Forward, cotangent, update, checkpoint, FLOP, byte and
+Each learned policy has one parameter/optimizer/checkpoint lineage. The learner
+(`xonotic/solver/strat`, restored on torch; xonotic/README.md "The policy learner") is
+one program on every rank of a world on the library: rank 0 serves the game and runs
+the responder, every rank runs each model call it announces, and the row-Gram
+cross-contraction and the routed scale experts are divided among the ranks by the
+placement's parts (parts [0, 1] put the whole cross on the Mini, as on 09-06), their
+operand and parameter cotangents derived by autograd through Megatron's mappings. A
+rank updates only what it holds (rank 0 the replicated parameters, which every rank
+then reads from it; each rank its own expert columns): one optimizer over one
+parameter set, not a worker's own. Forward, cotangent, update, checkpoint, FLOP, byte and
 deadline measures must identify the actual placement for the same batch. Historical
 two-host runs are evidence for their recorded architecture, not automatic validation
 of a subsequently changed tensor program.

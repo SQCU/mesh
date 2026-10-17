@@ -1,5 +1,14 @@
 # Policy transport ownership
 
+**At HEAD (restored 2026-10-17).** The runtime transport, `matrix_worker.py` and the
+tensor executor described below were removed on 09-13/14. The restored learner
+(xonotic/README.md "The policy learner") keeps the local envelope this page specifies,
+served by `xonotic/solver/xonwire.py` `Engine` on rank 0 of the responder's world (the
+game's host), and moves everything between nodes through libnccl-mesh: each model call
+is announced to every rank in one broadcast and the partitioned products' collectives
+are torch.distributed's `mesh` backend. There is no second mesh client and no worker
+process; what follows is the 09-07 record.
+
 The numerical runtime owns the server participant's single mesh allocator/context.
 The game is a client of that runtime. This is the source implementation as of
 September 7, 2026. The native library and policy shaders build locally; this new
