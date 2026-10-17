@@ -46,6 +46,94 @@ Superseded by the operator's 2026-09-22 telos in [collective-goals.md](collectiv
 
 > delete. the fucking. 'inherited'. implementation. delete it immediately and commit the deletion.
 
+## The September 13 and 14 sessions' lines deleted with collective-goals.md (restored 2026-10-17)
+
+mesh a07d7f66 (2026-09-14, "Remove obsolete collective specifications and anchor scope in user instructions") deleted
+the operator lines below with design/collective-goals.md's normative section; they are restored verbatim with the
+session and time the record gave each (AGENTS.md: "Verbatim operator quotes outrank everything else here"). Lines of
+that record still held elsewhere are not repeated: "pallas is to provide an api header style ..." (2026-09-14T16:51:47Z,
+[SPECIFICATION.md](SPECIFICATION.md) section 25) and "successful compilation is not important ..." (above).
+
+Session `01a09bf3`, 2026-09-13T18:21:35Z:
+
+> how do we implement the streaming producers and streaming consumers we want, which
+> explicitly take chunks of a tensor which can be partially processed elementwise, and
+> begin that partial processing without waiting for a big operand (which would have been
+> fed into a matmul implementation one 'tile' at a time anyways once it was ready)?
+
+Session `01a09bf3`, 2026-09-13T18:25:15Z:
+
+> mesh can give us a way to use the rdma link through generalized linear algebraic
+> operations and scatters and allgathers and reduces and stuff like that; a dnn ops
+> library can then implement dnn modules using compositions of that linear algebra
+
+> "I would make the first acceptance program streamed producer → peer sum → elementwise
+> transform → contraction. Deliberately delay an unrelated extent" yeah so true bestie i
+> agree, this is a good starting scope
+
+Session `01a09bf3`, 2026-09-13T19:06:48Z:
+
+> we should have a trivially deducible ring-of-buffers structure where we use MORE of
+> the shmem on our peer computers by passing DIFFERENT OUTPUTs into DIFFERENT TARGET
+> BUFFERS ... remember that we're here to implement the pallas async tp collective code,
+> not to rewrite or reaffirm whatever ended up in mesh.
+
+Session `01a09bf3`, 2026-09-13T19:27:14Z:
+
+> it's time to add this inner 'mesh send function use' inside of the linear algebra
+> kernels we use for our collectives so we never give users the impression they have the
+> *option* to make or use mesh implementait[ions that stall]
+
+Session `01a0a0ca`, 2026-09-14T16:42:04Z:
+
+> we're workign on implementing a pallas like interface for distributed collective
+> operations which don't block, don't expose low level synchronization or memory table
+> implementation details to callers, and induce streaming operations by default for both
+> producers and consumers of linear algebraic work being passed along meshes for work
+> sharing. you're descirbing a whole lot of code which isn't part of hte mesh repo as it
+> was last bashed out in specification, and also isn't necessary for the pallas like
+> interface, suggesting most of the code you're 'fixing' incrementally is totally
+> superfluosu
+
+Session `01a0a0ca`, 2026-09-14T16:49:23Z:
+
+> why are there cost models lol we're talking about a scituation where we specified
+> asnyc producers, async consumers, and all responsibilty lands on the CALLER to supply
+> a MESH AND TENSOR PLACEMENT CONFIG which is USEFUL instead of USELESS.
+
+Current session, 2026-09-14:
+
+> a definite list of goals that conclude in streaming tensor partial collective ops
+> that, trivially, interleave and don't have a bunch of wrapping abstractions or control
+> flow that stop them from being literally used
+
+> it is so much simpler to literally implement distributed collective code instead of
+> doing all of these other interventions though. the goal is really not open ended at
+> all; it's *literally* 'there is a need for overlapped streaming tensor partials.
+> implement overlapped streaming tensor partials. no, seriously, still streamed, still
+> tensor, still partials, still overlapped.'
+
+Current-session clarification:
+
+> we do not even need to run the programs to know whether they satisfy our
+> distributed collective async properties
+
+(Superseded 2026-09-18 and 2026-09-22: measuring Goal A and Goal B on the pair is the task.)
+
+Current-session constraint on implementation work:
+
+> we are talking about RDMA CODE ON WEAK PROCESSORS! we cannot HIDE any LATENCY
+> behind SOME OTHER OPERATION and ASSUME we can WASTE A BUNCH OF OPERATIONS OR
+> CONTEXT SHIFTS. that is why the requirements are SIMPEL and mention SIMPLICITY SO MUCH
+
+From the same record's implementation inventory, 2026-09-14 (the current conversation then):
+
+> views aren't intrinsically contiguous
+
+> did the transcript say to write a refcounter and garbage collector? is it
+> possible to write a refcounter for buffers over a known data flow when you know
+> functions are completely feed forward?
+
 The subsequent deployment clarification is also authoritative:
 
 > we should note that writing something which sounds like it satisfies all contraints but is slow and doesn't utilize flops on two computers concurrently would be 'fake'. so would anything which is depthwise recurrent, like a resnet with 4 ffn-residual-layers, running slower with the mesh collectives than without them, because some asshole decided to add a global sync or global guard or global wait again
