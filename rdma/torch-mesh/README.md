@@ -101,8 +101,8 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 - A coordinate's capacity is the most it holds; a rank that keeps its share in a buffer of its capacity, its valid
   elements first, keeps its shapes while the parts move within the capacities. `partition.write(mesh, tp=parts)`
   changes the parts between calls, the same on every rank.
-- The first parts can come from each node's rates (`rdma/allocate.py` `equal_finish`), later ones from the run itself
-  (below); see [design/heterogeneity.md](../../design/heterogeneity.md). Parts are indexed by rank, not by node.
+- The parts move on the run's own evidence (below); see [design/heterogeneity.md](../../design/heterogeneity.md).
+  Parts are indexed by rank, not by node.
 
 ### Parts from the run's own evidence
 
@@ -121,8 +121,8 @@ parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved wit
   stretches of the slowest rank's, not the ranks' totals, which can agree while every collective still waits. That
   step is DFPA: the ranks' measured points, the grains given to whoever finishes earliest with them, and a stop once
   the measurements promise no gain past their own resolution. The parts then stand, so jitter does not reshard.
-- Parts that move past a capacity are the program's to attach again (capacities and parts both), at the cost of its
-  buffers' new shapes.
+- Parts that move past a capacity are the program's to attach again (capacities and parts both), its buffers taking
+  new shapes.
 - `partition.balancing(mesh, "tp")` returns what the last window saw.
 
 ## Uneven engines within a node
@@ -132,10 +132,9 @@ each other. `torch_mesh/engines.py` resolves an operation's backend as one joint
 node's configured engines (`mps`: torch's GPU queue; `cpu`: fp32 products through Accelerate, the CPU's matrix units;
 `ane`: the Neural Engine, Core ML graphs of 1x1 convolutions with constant weights through `rdma/mesh-coreml.m`, which
 predicts on torch's shared MPS memory with no CPU copy), each holding its shard of the weights resident, the shares
-running at once on unified memory, and `allocate.Coupled` choosing the allocation: each engine's time a fitted
-function of every engine's share (its own work, slowed multiplicatively by each co-runner's), the call's the slowest
-engine's plus its set's measured overhead, minimised over the whole lattice of allocations (no per-engine moves to
-conflict), a design about the start until the model is determined, a measured allocation outranking the model.
+running at once on unified memory, and `allocate.Coupled` moving the allocation: a compass search over allocations
+whose measure is the call's measured time (the engines' slowing of each other in it), the allocation moving only to one
+measured faster beyond the measurement's resolution, the step halving down to a grain, where it stands.
 
 ```python
 from torch_mesh import engines
@@ -151,15 +150,12 @@ engines.rebalance(pool)                                    # every few steps
   run by `engines.ffn` (an operand type's fused couple where no gradient is due), another engine's decoded by its copy. A decision
   is an (operation name, row count): a stack's layers of one name share it and pool their evidence, measured where
   the program runs them, between its other operations.
-- Engines never time-share a physical unit: each states what it occupies (the GPU, the CPU's cores, the Neural
-  Engine, and whatever units Core ML's compute plan places a Neural Engine share's operations on), and two engines
-  occupying one unit never hold units of a decision together (`Coupled.forbid`).
-- An operation's `tolerance` is checked on each allocation's first call (every non-GPU share against the same share on
-  the GPU); an engine that misses it holds none of the decision. The Neural Engine's outputs carry an absolute error
+- An operation's `tolerance` is measured on each allocation's first call (every non-GPU share against the same share
+  on the GPU), recorded in `Engines.errors` and `Engines.excluded`, never a routing input. The Neural Engine's outputs carry an absolute error
   floor (about 3e-4 RMS for a 3840-wide contraction): accurate on normalized activations (an FFN 1.5e-3), not on small
   ones.
 - Nothing is implicit: an operation without an `Engines` operand is torch's own; an engine the configuration names and
-  the node lacks is an error; an engine's limits (dtypes, constant weights, row tiles) are data. A share's preparation
+  the node lacks is an error; an engine's limits (dtypes, constant weights) are data. A share's preparation
   and first run at a row count are no evidence; once an allocation stands, one call in 16 is measured.
 
 ## Streamed coded weights

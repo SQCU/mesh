@@ -1179,7 +1179,7 @@ def rebalance(mesh, name='tp', every=8):
     capacity: the evidence measures parts where they are the capacities, and parts that move within capacities set
     only what is valid.  Returns (parts, written): written where the parts moved and fit the capacities (then written
     here, and the program relays its tensors, relay); parts that moved past a capacity are the program's to attach
-    again (capacities and parts both: the shapes change, the one cost R11 weighs), whose dimension's group keeps this
+    again (capacities and parts both: the shapes change, which R11 weighs), whose dimension's group keeps this
     balancer.  The parts stand once the evidence promises no gain past its resolution."""
     import allocate
     from . import evidence

@@ -1,6 +1,6 @@
 """Tile-sparse linear products in the mesh library (metal-microbench docs/kernels.md "Tile sparsity"), operand gated: a
 weight carries a closure over its tiles, and its products route between the dense reference and the closure's kernels
-by their measured prices.
+by their measured times.
 
 The mask is a closure: a predicate KEPT(k, n) over a weight's tiles (k its output tile, n its input tile in torch's
 [out, in] layout), compiled into every kernel (sparse.metal), its environment captured as constants (an arithmetic
@@ -16,18 +16,15 @@ closure as a quantizer induces a lattice, the fewest tiles whose product on held
 docs/kernels.md); a model trained toward a tile support (a projection distance, metal-microbench docs/kernels.md
 "Learning the support") is not.
 
-Routing.  `SparseLinear` holds one copy of the masked weight; each call runs on the lowering its prices give the
-least time: `dense` (torch's product of the masked weight, the reference) or `tiles` (the closure's kernel).  A
-lowering's price is a line in its work in units of 64 x 64 x 64 multiply-adds, padded to whole tiles (dense: every
-tile, rows in blocks of 64; tiles: the kept tiles), fitted to every observation of every SparseLinear of this process
-(`Prices`, one per process: the node's evidence, no identity of operation or shape); a shape's own measurements
-outrank the line: the two lowerings explored in alternation (each its first call untimed, then `window` timed, so a
-GPU's clocks ramping weigh on neither), the measured faster runs, sampled again every `sample` calls; where the closure's kernel leads within the resolution,
-the alternation runs on (up to four windows) before the reference is kept.  A lowering the line prices
-past the other by more than `margin` at a shape is not explored there, and where a shape's two medians lie within
-their resolution (twice the larger relative standard error, at least 2 %) the reference runs: the closure's kernel
-replaces it only where it measures faster.  So a call is never slower than the reference beyond the exploration of a
-lowering the line could not rule out and the measurement's resolution.
+Routing.  `SparseLinear` holds one copy of the masked weight; each row count's calls run on the lowering measured
+faster at that row count: `dense` (torch's product of the masked weight, the reference) or `tiles` (the closure's
+kernel).  A row count's first calls run the two in alternation (each its first call untimed, then `window` timed, so a
+GPU's clocks ramping weigh on neither); then the closure's kernel runs where its median is below the reference's by
+more than the resolution (twice the larger relative standard error, at least 2 %), and where it leads within the
+resolution the alternation runs on (up to four windows) before the reference is kept.  No lowering is chosen at a row
+count before both ran there, and none by a time measured at another, so a call is never slower than the reference
+beyond the exploration of the two lowerings at its row count and the measurement's resolution.  A row count's choice,
+once made, stands.
 
   python -m torch_mesh.sparse check    every closure's three products against float64, rows not a multiple of 64
   python -m torch_mesh.sparse time     the lowerings' times by density and the routing's choice"""
@@ -270,34 +267,11 @@ def sparsify(w, x, tolerance, tile=64, held=0.4):
     return bitmap(_keep(scores, low), tile), low / total, error(low)
 
 
-class Prices:
-    """Each lowering's price in its work (units of 64 x 64 x 64 multiply-adds, padded to whole tiles): a least-squares
-    line through every observation (seconds) of this process, by lowering."""
-
-    def __init__(self):
-        self.seen = {}
-
-    def observe(self, lowering, work, seconds):
-        self.seen.setdefault(lowering, []).append((float(work), float(seconds)))
-
-    def predict(self, lowering, work):
-        points = self.seen.get(lowering) or []
-        if len({w for w, _ in points}) < 2:
-            return None
-        n = len(points)
-        mw, ms = sum(w for w, _ in points) / n, sum(s for _, s in points) / n
-        slope = sum((w - mw) * (s - ms) for w, s in points) / sum((w - mw) ** 2 for w, _ in points)
-        return max(0.0, ms + slope * (work - mw))
-
-
-PRICES = Prices()
-
-
 class SparseLinear(torch.nn.Module):
-    """y = x . (W (.) M)^T + b, W [out, in] fp16 on MPS and its closure (or a tile mask [out/tile, in/tile]), each call
-    routed to its cheaper lowering (module docstring)."""
+    """y = x . (W (.) M)^T + b, W [out, in] fp16 on MPS and its closure (or a tile mask [out/tile, in/tile]), each row
+    count's calls on the lowering measured faster there (module docstring)."""
 
-    def __init__(self, weight, closure, bias=None, tile=64, prices=None, window=5, sample=64, margin=0.25):
+    def __init__(self, weight, closure, bias=None, tile=64, window=5):
         super().__init__()
         n, k = weight.shape
         if n % tile or k % tile:
@@ -306,26 +280,13 @@ class SparseLinear(torch.nn.Module):
         mask = self.closure.mask(n, k)
         self.weight = torch.nn.Parameter((weight.float() * expand(mask, tile, weight.shape).to(weight.device)).half(), requires_grad=False)
         self.bias = bias
-        self.kept, self.tile = int(mask.sum()), tile
-        self.prices, self.window, self.sample, self.margin = prices or PRICES, window, sample, margin
+        self.tile, self.window = tile, window
         self.seen, self.calls, self.pending, self.decided, self.rounds, self.rounds_most = {}, {}, [], {}, {}, 4
 
-    def work(self, lowering, rows):
-        n, k = self.weight.shape
-        blocks = -(-rows // 64)
-        return blocks * (self.kept * (self.tile // 64) ** 2 if lowering == 'tiles' else (n // 64) * (k // 64))
-
     def route(self, rows):
-        """The lowering of a call of `rows` rows: the price's where it rules the other out, else the two explored in
-        alternation (each its first call untimed, then `window` timed), then the measured faster beyond the resolution,
-        ties to the reference."""
+        """The lowering of a call of `rows` rows: the two in alternation (each its first call untimed, then `window`
+        timed), then the measured faster beyond the resolution, ties to the reference."""
         issued = {l: self.calls.get((rows, l), 0) for l in ('dense', 'tiles')}
-        priced = {l: self.prices.predict(l, self.work(l, rows)) for l in ('dense', 'tiles')}
-        if all(p is not None for p in priced.values()) and min(issued.values()) == 0:
-            best = min(priced, key=priced.get)
-            if priced['tiles' if best == 'dense' else 'dense'] > priced[best] * (1 + self.margin):
-                self.decided[rows] = best
-                return best
         rounds = self.rounds.get(rows, 1)
         if min(issued.values()) <= self.window * rounds:
             return 'dense' if issued['dense'] <= issued['tiles'] else 'tiles'
@@ -352,9 +313,7 @@ class SparseLinear(torch.nn.Module):
         still = []
         for rows, lowering, begin, end in self.pending:
             if end.query():
-                seconds = begin.elapsed_time(end) / 1e3
-                self.seen.setdefault(rows, {}).setdefault(lowering, []).append(seconds)
-                self.prices.observe(lowering, self.work(lowering, rows), seconds)
+                self.seen.setdefault(rows, {}).setdefault(lowering, []).append(begin.elapsed_time(end) / 1e3)
             else:
                 still.append((rows, lowering, begin, end))
         self.pending = still
@@ -365,9 +324,7 @@ class SparseLinear(torch.nn.Module):
         if lowering is None:
             lowering = self.route(rows)
         count = self.calls[rows, lowering] = self.calls.get((rows, lowering), 0) + 1
-        timed = count > 1 and (rows not in self.decided or count % self.sample == 0)
-        if self.pending and count % self.sample == 0:
-            self._settle()
+        timed = count > 1 and rows not in self.decided
         if timed:
             begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
             begin.record()
