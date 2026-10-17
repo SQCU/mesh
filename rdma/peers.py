@@ -224,8 +224,6 @@ def nodeinfo(address: str | list[str], timeout: float = 2.0, limit: int = 1 << 2
                  for each in found for family, kind, proto, _, sockaddr in each]
     if order is not None:
         place = {kind: i for i, kind in enumerate(order)}
-        errors += [f"{host(each[0][3])}: a {classify(host(each[0][3]))} address, not one of {list(order)}" for each in addresses
-                   if classify(host(each[0][3])) not in place]
         addresses = sorted((each for each in addresses if classify(host(each[0][3])) in place),
                            key=lambda each: place[classify(host(each[0][3]))])
     deadline = began + timeout + stagger * max(0, len(addresses) - 1)
