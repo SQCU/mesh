@@ -80,9 +80,45 @@ template <typename T> static inline T dims_of(constant T &bound) {
     return made;
 }
 static inline uint lanes_of(uint builtin) { return is_function_constant_defined(mesh_literal_lanes) ? mesh_literal_lanes : builtin; }
+// A scalar a kernel binds at buffer N (a size, a count, an origin), specialized as function constant 210 + N where the
+// pipeline is its command's literal one, so the compiler folds it as it folds the block's sizes
+constant uint mesh_scalar_0 [[function_constant(210)]];
+constant uint mesh_scalar_1 [[function_constant(211)]];
+constant uint mesh_scalar_2 [[function_constant(212)]];
+constant uint mesh_scalar_3 [[function_constant(213)]];
+constant uint mesh_scalar_4 [[function_constant(214)]];
+constant uint mesh_scalar_5 [[function_constant(215)]];
+constant uint mesh_scalar_6 [[function_constant(216)]];
+constant uint mesh_scalar_7 [[function_constant(217)]];
+constant uint mesh_scalar_8 [[function_constant(218)]];
+constant uint mesh_scalar_9 [[function_constant(219)]];
+constant uint mesh_scalar_10 [[function_constant(220)]];
+constant uint mesh_scalar_11 [[function_constant(221)]];
+constant uint mesh_scalar_12 [[function_constant(222)]];
+constant uint mesh_scalar_13 [[function_constant(223)]];
+constant uint mesh_scalar_14 [[function_constant(224)]];
+constant uint mesh_scalar_15 [[function_constant(225)]];
+constant uint mesh_scalar_16 [[function_constant(226)]];
+constant uint mesh_scalar_17 [[function_constant(227)]];
+constant uint mesh_scalar_18 [[function_constant(228)]];
+constant uint mesh_scalar_19 [[function_constant(229)]];
+constant uint mesh_scalar_20 [[function_constant(230)]];
+constant uint mesh_scalar_21 [[function_constant(231)]];
+constant uint mesh_scalar_22 [[function_constant(232)]];
+constant uint mesh_scalar_23 [[function_constant(233)]];
+constant uint mesh_scalar_24 [[function_constant(234)]];
+constant uint mesh_scalar_25 [[function_constant(235)]];
+constant uint mesh_scalar_26 [[function_constant(236)]];
+constant uint mesh_scalar_27 [[function_constant(237)]];
+constant uint mesh_scalar_28 [[function_constant(238)]];
+constant uint mesh_scalar_29 [[function_constant(239)]];
+constant uint mesh_scalar_30 [[function_constant(240)]];
+constant uint mesh_scalar_31 [[function_constant(241)]];
+#define MESH_SCALAR(N, T, bound) (is_function_constant_defined(mesh_scalar_##N) ? as_type<T>(mesh_scalar_##N) : (T)(bound))
 #else
 template <typename T> static inline T dims_of(constant T &bound) { return bound; }
 static inline uint lanes_of(uint builtin) { return builtin; }
+#define MESH_SCALAR(N, T, bound) ((T)(bound))
 #endif
 
 // A finish's elements of output block x, the shares product threadgroups (x, y) wrote: element k of
