@@ -2221,9 +2221,10 @@ static uint64_t flow_outstanding(const struct flow *flow){
    are destroyed (their generation moved: lanes that failed and are not yet closed may still land a SEND in its rows,
    which a relay's lease returns to the window as it is freed), its ledger then written (#ledger).  An exclusive
    flow's queue pairs are moved to the error state and their flushed completions drained before they are destroyed
-   (mesh-verbs.h pair_flush: until every work request it holds completed, flow_outstanding), all under the port's guard
-   (port_guard: no queue pair of the device is posted on meanwhile, design/RDMA-KERNEL-RECOVERY.md).  1 once nothing is
-   held (a failed destruction, or records still posted, keep it for the next turn) */
+   (mesh-verbs.h pair_flush: until every work request it holds completed, flow_outstanding; the count drained, of how
+   many, and how long, logged), all under the port's guard (port_guard: no queue pair of the device is posted on
+   meanwhile, design/RDMA-KERNEL-RECOVERY.md).  1 once nothing is held (a failed destruction, or records still posted,
+   keep it for the next turn) */
 static int flow_release(struct flow *flow){
   port_unlist(flow);
   for(int q=0;flow->rings && q<flow->qps;q++){
@@ -2246,7 +2247,13 @@ static int flow_release(struct flow *flow){
   if(!flow->exclusive && atomic_load_explicit(&flow->lane_frames,memory_order_acquire) &&
      flow->port->lanes.generation==flow->lane_epoch)return 0;
   const int raised=flow->provider.queues?guard_raise(flow->port,1):0;
-  if(flow->provider.queues && !flow->flushed){pair_flush(&flow->provider,flow_outstanding(flow),MESH_FLUSH_POLLS);flow->flushed=1;}
+  if(flow->provider.queues && !flow->flushed){
+    const uint64_t outstanding=flow_outstanding(flow),began=ledger_ns();
+    const uint32_t drained=pair_flush(&flow->provider,outstanding,MESH_FLUSH_POLLS);
+    say("link %u flushed %u of %llu work requests in %.1f us\n",flow->port->index,drained,(unsigned long long)outstanding,
+        (double)(ledger_ns()-began)/1e3);
+    flow->flushed=1;
+  }
   const int down=down_pair(&flow->provider);
   guard_lower(flow->port,raised);
   if(!down)return 0;
