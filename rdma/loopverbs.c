@@ -73,8 +73,8 @@ static uint32_t keys_ = 1;
    any device is opened */
 void loop_fabric(const char *name) { snprintf(fabric_name_, sizeof fabric_name_, "%s", name ? name : ""); }
 
-/* the fabric segment, made and sized by the first process to need it (a shared memory object is sized once), which the
-   others wait for */
+/* the fabric segment, made and sized by the first process to need it (a shared memory object is sized once), the
+   others looking at its size until the maker's ftruncate, which follows its shm_open */
 static struct loop_fabric *fabric(void) {
   if (fabric_) return fabric_;
   if (!fabric_name_[0]) { errno = ENOENT; return NULL; }
@@ -83,9 +83,7 @@ static struct loop_fabric *fabric(void) {
   if (file < 0) {
     if (errno != EEXIST || (file = shm_open(fabric_name_, O_RDWR, 0600)) < 0) return NULL;
     struct stat info;
-    for (int polls = 0; !fstat(file, &info) && info.st_size < (off_t)sizeof(struct loop_fabric); polls++)
-      if (polls == 100000) { close(file); errno = ETIMEDOUT; return NULL; }
-      else usleep(100);
+    while (!fstat(file, &info) && info.st_size < (off_t)sizeof(struct loop_fabric)) sched_yield();
   }
   void *mapped = mmap(NULL, sizeof(struct loop_fabric), PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
   close(file);
@@ -176,8 +174,7 @@ static int poll_cq(struct ibv_cq *cq, int entries, struct ibv_wc *wc) {
   pthread_mutex_unlock(&lock_);
   /* a bridge's progress threads poll without pause while anything moves, as a device's completion queue lets them; N
      bridges' on one host's cores yield once a queue has stayed empty, so the processes with work run */
-  if (idle > 64) usleep(20);
-  else if (idle > 8) sched_yield();
+  if (idle > 8) sched_yield();
   return error ? -1 : taken;
 }
 

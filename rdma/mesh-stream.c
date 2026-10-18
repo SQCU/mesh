@@ -10,8 +10,9 @@
      mesh-stream receive NODE BYTES
        the bridge's path as a client takes it: a program of one transfer of BYTES toward NODE, bound, prepared, started
        and published as any client's (mesh-call.h, mesh-collective.h mesh_host_publish), received into a lease with a
-       landing word a block (mesh_host_inputs), which the receiver follows in order; run the receiver first, then the
-       sender, on the two nodes; the receiver's JSON line
+       landing word a block (mesh_host_inputs), which the receiver follows in order until every block landed or one was
+       cancelled; the sender detaches once it published (its bridge posts the transfer and releases its flows once those
+       SENDs completed); run the receiver first, then the sender, on the two nodes; the receiver's JSON line
 
    Each line names its mode, the bytes, the blocks, the mismatched words, the receiver's first-to-last time and its
    interior: the bytes landed between a tenth and nine tenths of the blocks and their time, the rate the 2026-09-10
@@ -59,29 +60,17 @@ static int stream_flow(int receive,uint32_t node,uint64_t bytes){
   fflush(stdout);
   status=mesh_transfers_start(&context);
   if(status){fprintf(stderr,"mesh-stream: start: %s\n",strerror(status));mesh_detach(&context);return 1;}
-  struct mesh_client *client=mesh_client_at(m,context.client);
-  struct mesh_port_info *peer=&client->status[mesh_destination(client,node)];
-  const uint64_t bound=MESH_PEER_NS;
   if(!receive){
     const uint64_t begin=clock_ns();
     mesh_host_publish(&context,section,0);
     mesh_transfers_wake(&context);
-    /* the receiver's program ends once it has checked every word: this program's destination then stops (ECONNRESET) */
-    while(atomic_load_explicit(&peer->phase,memory_order_acquire)!=MESH_STOPPED && clock_ns()-begin<bound){
-      uint64_t seen=atomic_load_explicit(&peer->prepared,memory_order_acquire);
-      if(atomic_load_explicit(&peer->phase,memory_order_acquire)==MESH_STOPPED)break;
-      os_sync_wait_on_address_with_timeout(&peer->prepared,seen,sizeof seen,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
-                                           MESH_PAUSE_NS);
-    }
-    printf("{\"stream\":\"flow\",\"role\":\"send\",\"bytes\":%llu,\"blocks\":%llu,\"publish_to_peer_end_s\":%.9f,\"peer_code\":%lld}\n",
-           (unsigned long long)bytes,(unsigned long long)blocks,(double)(clock_ns()-begin)/1e9,
-           (long long)atomic_load_explicit(&peer->code,memory_order_relaxed));
+    printf("{\"stream\":\"flow\",\"role\":\"send\",\"bytes\":%llu,\"blocks\":%llu,\"publish_s\":%.9f}\n",
+           (unsigned long long)bytes,(unsigned long long)blocks,(double)(clock_ns()-begin)/1e9);
     mesh_detach(&context);
     return 0;
   }
   uint64_t completed=0,first_count=0,low_count=0,high_count=0,polls=0,first=0,low=0,high=0,last=0,cancelled=0;
-  const uint64_t begin=clock_ns();
-  while(completed<blocks && !cancelled && clock_ns()-begin<bound){
+  while(completed<blocks && !cancelled){
     polls++;
     const uint64_t before=completed;
     for(;completed<blocks;completed++){

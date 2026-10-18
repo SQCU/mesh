@@ -31,26 +31,6 @@ __attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coh
     return mesh_wait(completion, 1 + cycle);
 }
 
-// The word at `word` once it holds at least `target`, or as it is after `polls` loads (each after the same fence as
-// mesh_wait's): a wait a dispatch bounds itself, for a program whose window no wait may hold past its plan (libnccl-mesh's
-// bounded programs, the caller's bound a crossing: nccl.h ncclMeshStream polls; a load's period the node GPU's, about
-// 250 ns on the M4 Pro at its working clock, rdma/NCCL.md "Bounded waits"); the word is still a canceller's
-// (design/recovery.md Q16), and the caller tells a word short of `target` (the bound reached) from a landing.
-template <typename W>
-__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
-    W seen;
-    uint k = 0u;
-    do {
-        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
-        seen = *word;
-    } while (seen < target && ++k < polls);
-    return seen;
-}
-__attribute__((always_inline)) static inline ulong mesh_remote_wait_bounded(volatile coherent(system) device const ulong *completion, ulong cycle,
-                                                                             uint polls) {
-    return mesh_wait_bounded(completion, 1 + cycle, polls);
-}
-
 // A landed slot's value, loaded through volatile coherent(system) (the NIC wrote it) in the widest words that divide it.
 template <typename T>
 __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(system) device const T *at) {

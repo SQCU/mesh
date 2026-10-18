@@ -21,9 +21,8 @@ int mesh_requests_create(struct mesh_ctx *,uint32_t entries,struct mesh_requests
    requests the bridge has not taken (not yet: write it again), EINVAL where it is not one the window holds */
 int mesh_write(struct mesh_requests *,uint32_t node,uint64_t offset,uint64_t bytes,uint64_t word,uint64_t value);
 /* the bridge told a ring's requests toward `node` are written: the bells of the ports paired with `node` rung (each
-   port's send thread takes them; one parked looks again within 1 ms anyway while a stripe flow is up on it) and the
-   control word (the bridge makes the ports' stripe flows where none is up); a GPU writer's host calls it once its
-   kernel wrote its requests */
+   port's send thread takes them) and the control word (the bridge makes the ports' stripe flows where none is up); a
+   GPU writer's host calls it once its kernel wrote its requests */
 void mesh_requests_wake(struct mesh_requests *,uint32_t node);
 /* design/algorithm-sources.md#programcopy: `section` sent to or received from (`direction`) the member `node`, never a
    port, on its `queue` (< MESH_QUEUES), for the invocations [begin, end) alone, invocation t at ring slot (t - begin)
@@ -41,15 +40,15 @@ int mesh_transfers_cyclic(struct mesh_ctx *);
 int mesh_transfers_digest(struct mesh_ctx *,uint64_t digest);
 /* design/bridge-and-ipc.md#clients, design/recovery.md#first: 0 once the node's bridge has paired the program toward
    every node it binds, on its current map, directly or along its route through other nodes' bridges; else the failure,
-   and that node's status in the client's slot names the node and the code: ESRCH the bridge gone, ETIMEDOUT past
-   MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS, EHOSTUNREACH no cable or route reaches it, ENETDOWN, ECONNRESET,
-   ECANCELED a link or the peer's program lost, or this program's own slot retired while it waits (a revoke), ESTALE a
-   member's program of the execution made from another digest (mesh_transfers_digest; every destination fails, naming
-   that member), ENOSPC, ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
+   and that node's status in the client's slot names the node and the code: ESRCH the bridge gone, EHOSTUNREACH no
+   cable or route reaches it, ENETDOWN, ECONNRESET, ECANCELED a link or the peer's program lost, or this program's own
+   slot retired while it waits (a revoke), ESTALE a member's program of the execution made from another digest
+   (mesh_transfers_digest; every destination fails, naming that member), ENOSPC, ENOMEM a grant refused.  It waits on
+   those events alone: a peer whose program never starts is waited for until the caller's revoke.  A later loss fails
+   the program alike; the next start rereads the map */
 int mesh_transfers_start(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#progress: the progress threads of the ports a started program's flows ride woken (each port's
-   bell), a group of it about to publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks
-   again within 1 ms anyway while a flow is its port's) */
+   bell), a group of it about to publish or to wait on its landings */
 void mesh_transfers_wake(struct mesh_ctx *);
 
 /* ---- The numerical executor (mesh 2b49f3c6^, restored on the resident bridge's substrate) -----------------------

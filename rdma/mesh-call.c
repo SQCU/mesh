@@ -194,8 +194,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
 /* design/bridge-and-ipc.md#clients: the program handed to the node's bridge, which pairs it toward each destination
    node, over a port paired with it or along the map's route, or fails it (that destination's status names the code and
    the node where it failed): 0 once every destination is paired, else the first failed destination's code; ESRCH where
-   the bridge is gone, ECANCELED once the program's own slot is retired while it waits (mesh_retire wakes it: a revoke,
-   nccl-mesh.c session_retire), and ETIMEDOUT where it answers within none of its own windows (design/recovery.md#first) */
+   the bridge is gone (its exit wakes it: mesh-dataflow.c mesh_watch), and ECANCELED once the program's own slot is
+   retired while it waits (mesh_retire wakes it: a revoke, nccl-mesh.c session_retire); it waits on nothing else */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
@@ -204,7 +204,6 @@ int mesh_transfers_start(struct mesh_ctx *context){
   if(!atomic_compare_exchange_strong_explicit(&client->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
   /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
-  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS;
   const uint32_t destinations=mesh_destination(client,0);
   int failed=0;
   for(uint32_t d=0;d<destinations;d++){
@@ -212,11 +211,8 @@ int mesh_transfers_start(struct mesh_ctx *context){
     struct mesh_port_info *status=&client->status[d];
     for(uint64_t seen;(seen=atomic_load_explicit(&status->prepared,memory_order_acquire))!=context->client;){
       if(atomic_load_explicit(&client->owner,memory_order_acquire)!=context->client)return ECANCELED;
-      if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed)))return ESRCH;
-      uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-      if(at>deadline)return ETIMEDOUT;
-      os_sync_wait_on_address_with_timeout(&status->prepared,seen,sizeof seen,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-        OS_CLOCK_MACH_ABSOLUTE_TIME,deadline-at<MESH_PAUSE_NS?deadline-at:MESH_PAUSE_NS);
+      if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire)))return ESRCH;
+      os_sync_wait_on_address(&status->prepared,seen,sizeof seen,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
     }
     if(!failed && atomic_load_explicit(&status->phase,memory_order_relaxed)==MESH_STOPPED)
       failed=(int)atomic_load_explicit(&status->code,memory_order_relaxed);

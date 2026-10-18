@@ -25,6 +25,15 @@ int mesh_window(uint64_t *bytes,uint64_t *unleased);
    came to hold none (0 while it holds any; mesh.h struct hdr `busy`, `idle_since`, design/bridge-and-ipc.md#region; a
    read that meets the bridge as it becomes busy is told busy, 1); 0, or -errno where the bridge is unreachable. */
 int mesh_busy(uint64_t *busy,uint64_t *idle_since);
+/* The node's bridge's two lifecycle events a client blocks on, each with no bound: mesh_bridge_wait returns 0 once a
+   bridge of this version holds the region, at once where one does, else at the notify(3) name a bridge posts once its
+   sockets listen and its region is open (MESH_STARTED, a loop bridge's followed by its region's name), or an errno where
+   the name cannot be watched; mesh_stopping_wait returns 0 once the bridge waits to stop (mesh.h struct hdr `stopping`:
+   its binary changed; a client holding flows past their execution releases them), ESRCH once it is gone, or the
+   unreachable bridge's errno. */
+#define MESH_STARTED "io.mesh.bridge.started"
+int mesh_bridge_wait(void);
+int mesh_stopping_wait(void);
 
 /* A link map, an operand: `nodes` nodes and `links` links of a kind.
      MESH_LINKS_MESH   every pair is linked (`link` lists only the pairs given bandwidths, if any)
@@ -105,10 +114,12 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
    to 63 bytes and its NUL, the record's name field (mesh.h struct mesh_record). */
 #define MESH_NAME_BYTES 64
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map);
-/* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
-   passes and writes it there; 0 where it differs, ETIMEDOUT where the bound passed, else an unreachable bridge's errno.
-   Read (*serial 0) before mesh_map, it makes a later change end the next wait at once. */
-int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
+/* The bridge's map serial (never 0; it changes with the records, odd while the bridge writes them): mesh_map_serial reads
+   it now (0 where the bridge is unreachable); mesh_map_wait waits on it, with no bound, until it is whole (even) and
+   differs from *serial, and writes it there: 0, or the unreachable bridge's errno (ESRCH once the bridge is gone).  Read
+   before mesh_map, it makes a later change end the next wait at once. */
+uint64_t mesh_map_serial(void);
+int mesh_map_wait(uint64_t *serial);
 /* Whether the map links its nodes a and b, either way (a mesh every pair; with a table, their route crossing relays
    alone). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
@@ -296,7 +307,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
    the request will take there, 0 for none) and reads the bridge's int32 answer: 0 once the service's end is open, else
    an errno (EHOSTUNREACH: the map holds no path to the node; ENOENT: the node serves no such service; ECONNREFUSED: the
    service's socket refused; ENOMEM: the node's available memory, read at the request, is short of its `bytes`;
-   ETIMEDOUT). The connection then carries the client's
+   ENETRESET: a link of its route lost). The connection then carries the client's
    bytes to the service and the service's back, each direction ended by its writer's half close (shutdown SHUT_WR);
    a channel that fails anywhere resets the connection. A service registers its listening Unix socket
    (MESH_REQUEST_SERVE, its name and its socket's path) on a connection it holds open: the registration lasts while

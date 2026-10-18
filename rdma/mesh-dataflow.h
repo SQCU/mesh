@@ -17,10 +17,10 @@ int mesh_slot_take(struct mesh_ctx *,struct hdr *,uint64_t key);
    mesh_attach's), sharing its mapping: a slot is one execution's program, so a client running several takes one each
    on its one attach.  0, EBUSY where none is vacant, ESRCH where the client's bridge is gone */
 int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,const char *name);
-/* the slot retired in order (design/bridge-and-ipc.md#control: its bridge posts what its program released, ends its
-   flows with END and their peers' CLOSED, and holds its rows until then; the caller waits on none of it), and the region
-   unmapped where the context mapped it (mesh_attach's; a program's slot leaves its client's mapping alone); an abort
-   calls mesh_retire first */
+/* the slot retired in order (design/bridge-and-ipc.md#control: its bridge posts every cell its program released, takes
+   those SENDs' completions and then releases its flows, holding its rows until then; nothing goes to a peer and the
+   caller waits on none of it), and the region unmapped where the context mapped it (mesh_attach's; a program's slot
+   leaves its client's mapping alone); an abort calls mesh_retire first */
 int mesh_detach(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#region: a process gone (its slot's or the bridge's pid; 0: none) */
 static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
@@ -68,8 +68,7 @@ void mesh_retired_release(struct hdr *);
    MESH_REQUEST_STREAM, its `node` the receiver (a neighbour) and `bytes` the stream's, in whole blocks; a raw one-way stream of `bytes` from this node's bridge to node `node`'s, every word checked there: the bridges' JSON
    line of the sender's and the receiver's numbers (rate between 10 and 90 percent of the pages landed, mismatched words,
    misordered completions) into `result` (`room` bytes); 0, or the -errno the bridge answered (EHOSTUNREACH no cable,
-   EBUSY a stream on the port, ENOMEM no window for it at either end, ETIMEDOUT past the pairing window, a verbs or
-   completion error) */
+   EBUSY a stream on the port, ENOMEM no window for it at either end, the link lost, a verbs or completion error) */
 int mesh_stream(uint32_t node,uint64_t bytes,char *result,size_t room);
 #ifdef MESH_LOOP_FABRIC
 /* design/bridge-dataflow.md#the-loopback-fabric: the loop bridge this process is a client of, before its first attach or

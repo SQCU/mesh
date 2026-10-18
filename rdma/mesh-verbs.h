@@ -70,8 +70,12 @@ struct mesh_queue {
   uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
-/* a program's queue pairs on one port and their two completion queues */
-struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn; };
+/* a program's queue pairs on one port and their two completion queues, and the work requests posted on them and the
+   completions taken from them, each way (`sent_*` the SENDs', the send thread's; `received_*` the receives', the receive
+   thread's, or the port's queue while no thread serves them): every post and every poll counts, an error's too, so the
+   difference is what the error state flushes (pair_flush) */
+struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn;
+  uint64_t sent_posted,sent_polled,received_posted,received_polled; };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
@@ -105,26 +109,33 @@ static int down_pair(struct mesh_verbs *provider){
   free(provider->queues);provider->queues=NULL;provider->count=0;
   return 1;
 }
+/* the work requests a provider's queue pairs hold posted and not yet taken from its completion queues */
+static uint64_t pair_outstanding(const struct mesh_verbs *provider){
+  return provider->sent_posted-provider->sent_polled+provider->received_posted-provider->received_polled;
+}
 /* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": each queue pair moved to the error state, so the
    device ends its posted receives and SENDs (flushed, IBV_WC_WR_FLUSH_ERR) before it is destroyed, and its completion
-   queues drained of what that returns: until `expected` completions came (the work requests the caller holds posted
-   and not taken, each flushed to one: an event, mesh-flow.c flow_outstanding; UINT64_MAX where the caller keeps no
-   count), or, where the device returns fewer, until `polls` polls in a row take none; the completions drained.  A queue pair whose move is refused is
-   destroyed as down_pair destroys it.  Every flow's and the stripe flow's teardown takes it (mesh-flow.c flow_release,
-   stripes_job: design/bridge-and-ipc.md#control). */
-static uint32_t pair_flush(struct mesh_verbs *provider,uint64_t expected,uint32_t polls){
+   queues drained of what that returns: every work request posted and not yet taken (pair_outstanding), each of which
+   the error state flushes to one completion, until they came or the device fails a poll; the completions drained.
+   Where a queue pair's move is refused, nothing is drained and the queue pairs are destroyed as down_pair destroys
+   them.  Every flow's, the stripe flow's and a stream's
+   teardown takes it, from the port's queue once no progress thread serves the provider (mesh-flow.c flow_release,
+   stripes_job, streams_job: design/bridge-and-ipc.md#control). */
+static uint64_t pair_flush(struct mesh_verbs *provider){
+  int moved=1;
   for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
     struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
-    ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE);
+    if(ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE))moved=0;
   }
-  uint32_t drained=0,empty=0;
+  uint64_t drained=0;
   struct ibv_wc done[16];
-  while(empty<polls && drained<expected){
-    int taken=0;
-    struct ibv_cq *queues[2]={provider->completion,provider->sent};
-    for(int c=0;c<2;c++)if(queues[c]){const int n=ibv_poll_cq(queues[c],16,done);if(n>0)taken+=n;}
-    if(taken){drained+=(uint32_t)taken;empty=0;}
-    else empty++;
+  struct ibv_cq *queues[2]={provider->completion,provider->sent};
+  uint64_t *polled[2]={&provider->received_polled,&provider->sent_polled};
+  const uint64_t posted[2]={provider->received_posted,provider->sent_posted};
+  for(int c=0;moved && c<2;c++)while(queues[c] && *polled[c]<posted[c]){
+    const int n=ibv_poll_cq(queues[c],16,done);
+    if(n<0)break;
+    *polled[c]+=(uint64_t)n;drained+=(uint64_t)n;
   }
   return drained;
 }
@@ -216,6 +227,7 @@ static int pair_up(struct mesh_verbs *provider,int count){
   provider->queues=calloc((size_t)count,sizeof *provider->queues);
   if(!provider->queues)return ENOMEM;
   provider->count=count;provider->psn=arc4random()&0xffffff;
+  provider->sent_posted=provider->sent_polled=provider->received_posted=provider->received_polled=0;
   if(!(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   if(!(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   for(int q=0;q<count;q++){

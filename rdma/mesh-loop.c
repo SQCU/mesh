@@ -20,17 +20,22 @@
      mesh-loop destroy DIRECTORY COUNT RUNS host|walk
        RUNS times, N ranks: an all-reduce, then a last group (a send and receive around the ring) of COUNT float32 each,
        every value exact, and every rank's ncclCommDestroy right after its last group (design/bridge-and-ipc.md#control:
-       the bridges close the session's flows in order, so a landing is never cancelled); then every bridge idle, and
-       each flow the runs closed read from the bridges' logs: its cells sent against those its peer reported landed
+       each bridge posts what its rank released and releases its flows once those SENDs completed, telling no peer, so
+       a landing is never cancelled); then every bridge holding no flow, and the bridges' logs read: the flows ended in
+       order, the relays released by both their ends, the flows failed, and each exclusive flow's flush (every work
+       request it held drained)
      mesh-loop kill DIRECTORY COUNT host|walk [bridge]
        N ranks: an all-reduce, then the last rank waits while the others begin a second (of COUNT float32 each) and is
-       killed (SIGKILL): each other rank's call fails as a value, and the time from the kill to its return is read;
-       with `bridge`, its node's loop bridge is stopped (SIGSTOP) in its place, so its peers' missing-frame detectors
-       alone find it (design/bridge-and-ipc.md#control), and continued once they returned
+       killed (SIGKILL): each other rank's call fails as a value, and the time from the kill to its return is read; with
+       `bridge`, every rank begins the second and the last rank's node's bridge is stopped (SIGTERM, as launchd stops
+       one) in its place: every rank's call fails as a value, the last rank's by its client's watch of its bridge's exit
+       (mesh-dataflow.c mesh_watch: its waits' words cancelled), the others' by the stopped bridge's FAREWELL; run it
+       last, the stopped bridge stays stopped
      mesh-loop down DIRECTORY
-       every bridge stopped (SIGTERM, as launchd stops one), the fabric unlinked
+       every bridge stopped (SIGTERM, as launchd stops one) and its exit awaited, the fabric unlinked
 
-   A JSON line a reading, with its status; the exit status is nonzero where any failed. */
+   Every wait is on an event (a map's serial, a process's exit, a landing word, a pipe), none bounded by a clock.  A
+   JSON line a reading, with its status; the exit status is nonzero where any failed. */
 #include "nccl.h"
 #include "mesh-collective.h"
 #include <errno.h>
@@ -45,6 +50,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/event.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sched.h>
@@ -138,8 +144,9 @@ static int map_read(const char *directory, struct loop_map *map) {
   return ok ? 0 : EINVAL;
 }
 
-/* node i's canonical configuration (bridge_configuration.py's form, and its `loop`: mesh-flow.c loop_read), its
-   keepalive the pair's (metal-microbench's bridge configuration, keepalive_us 5: design/bridge-and-ipc.md#control) */
+/* node i's canonical configuration (bridge_configuration.py's form, and its `loop`: mesh-flow.c loop_read), its keepalive
+   and HELLO intervals the deployed bridges' (etc/bridge: keepalive_us 5, hello_us 1000000; a loop port's lower end dials
+   a listener that may not listen yet, and dials again at the next HELLO) */
 static int plist_write(const char *directory, const struct loop_map *map, int i) {
   char path[PATH_MAX];
   if (snprintf(path, sizeof path, "%s/node%d.plist", directory, i) >= (int)sizeof path) return ENAMETOOLONG;
@@ -149,6 +156,7 @@ static int plist_write(const char *directory, const struct loop_map *map, int i)
              "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n"
              "<key>name</key><string>loop%d</string>\n<key>purpose</key><string>node %d of a %s of %d on the loopback fabric "
              "(mesh-loop)</string>\n<key>window</key><integer>%llu</integer>\n<key>exec</key><false/>\n<key>keepalive</key><integer>5000</integer>\n"
+             "<key>hello</key><integer>1000000000</integer>\n"
              "<key>loop</key><dict>\n<key>region</key><string>%s</string>\n<key>fabric</key><string>%s</string>\n"
              "<key>node</key><integer>%u</integer>\n<key>service</key><integer>%u</integer>\n<key>ports</key><array>\n",
           i, i, map->family, map->n, (unsigned long long)map->window, map->node[i].region, LOOP_FABRIC, map->node[i].node,
@@ -195,25 +203,25 @@ static int hops(const struct loop_map *map, int a, int b) {
   return distance[b] > 0 ? distance[b] : 0;
 }
 
-/* every bridge's map holding the n nodes and its own cables paired, within `seconds` */
-static int converged(const struct loop_map *map, double seconds) {
-  const uint64_t deadline = clock_ns() + (uint64_t)(seconds * 1e9);
-  int done = 0;
-  while (!done && clock_ns() < deadline) {
-    done = 1;
-    for (int i = 0; i < map->n && done; i++) {
+/* every bridge's map holding the n nodes and its own cables paired, each bridge's awaited on its map's serial (its
+   ports' pairings move its record, so its map); 0, or the bridge's error */
+static int converged(const struct loop_map *map) {
+  for (int i = 0; i < map->n; i++) {
+    if (mesh_loop_bind(map->node[i].region, map->node[i].service)) return EINVAL;
+    for (;;) {
+      uint64_t serial = mesh_map_serial();
       struct mesh_node_health health[LOOP_NODES + 1];
       struct mesh_link_view links[MESH_PORTS];
       uint32_t node = 0;
       int paired = 0;
-      if (mesh_loop_bind(map->node[i].region, map->node[i].service)) return EINVAL;
       const int records = mesh_nodes_health(health, LOOP_NODES + 1), ports = mesh_observe(links, MESH_PORTS, &node);
       for (int p = 0; p < ports && p < MESH_PORTS; p++) paired += links[p].phase == MESH_PAIRED;
-      done = records == map->n && paired == degree(map, i);
+      if (records == map->n && paired == degree(map, i)) break;
+      const int error = serial ? mesh_map_wait(&serial) : mesh_bridge_wait();
+      if (error) return error;
     }
-    if (!done) usleep(100000);
   }
-  return done ? 0 : ETIMEDOUT;
+  return 0;
 }
 
 static int loop_up(const char *family, int n, uint64_t window_mib, const char *directory) {
@@ -245,7 +253,7 @@ static int loop_up(const char *family, int n, uint64_t window_mib, const char *d
     if (error) { fprintf(stderr, "mesh-loop: node %d's bridge: %s\n", i, strerror(error)); return 1; }
   }
   if (map_write(directory, &map)) return 1;
-  const int status = converged(&map, 60);
+  const int status = converged(&map);
   for (int i = 0; i < n; i++)
     printf("{\"loop\":\"up\",\"family\":\"%s\",\"nodes\":%d,\"index\":%d,\"node\":%u,\"region\":\"%s\",\"service\":%u,\"pid\":%d,"
            "\"cables\":%d,\"converged\":%s}\n", family, n, i, map.node[i].node, map.node[i].region, map.node[i].service,
@@ -253,27 +261,31 @@ static int loop_up(const char *family, int n, uint64_t window_mib, const char *d
   return status ? 1 : 0;
 }
 
+/* every bridge stopped (SIGTERM) and each exit awaited (EVFILT_PROC: a bridge another invocation started) */
 static int loop_down(const char *directory) {
   struct loop_map map;
   if (map_read(directory, &map)) return usage();
-  for (int i = 0; i < map.n; i++) if (map.node[i].pid > 0) kill(map.node[i].pid, SIGTERM);
-  const uint64_t deadline = clock_ns() + UINT64_C(30000000000);
-  int left = 1;
-  while (left && clock_ns() < deadline) {
-    left = 0;
-    for (int i = 0; i < map.n; i++) if (map.node[i].pid > 0 && !kill(map.node[i].pid, 0)) left = 1;
-    if (left) usleep(100000);
+  const int events = kqueue();
+  int left = 0;
+  for (int i = 0; i < map.n && events >= 0; i++) {
+    struct kevent64_s watch;
+    EV_SET64(&watch, (uint64_t)map.node[i].pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, 0, 0, 0);
+    if (map.node[i].pid > 0 && !kevent64(events, &watch, 1, NULL, 0, KEVENT_FLAG_IMMEDIATE, NULL)) left++;
+    if (map.node[i].pid > 0) kill(map.node[i].pid, SIGTERM);
   }
+  for (struct kevent64_s exited; left > 0 && kevent64(events, NULL, 0, &exited, 1, 0, NULL) == 1;) left--;
+  if (events >= 0) close(events);
   shm_unlink(LOOP_FABRIC);
-  printf("{\"loop\":\"down\",\"nodes\":%d,\"stopped\":%s}\n", map.n, left ? "false" : "true");
-  return left;
+  printf("{\"loop\":\"down\",\"nodes\":%d,\"stopped\":%s}\n", map.n, left || events < 0 ? "false" : "true");
+  return left || events < 0;
 }
 
 /* the pattern word w of block p of a reading (mesh-stream.c's, the loop's magic) */
 static uint64_t pattern(uint64_t p, uint64_t w) { return (p << 32) ^ w ^ LOOP_MAGIC; }
 
-/* one end of a relayed program: one transfer of `bytes` toward or from node `peer`, the receiver following its landing
-   words and checking every word (mesh-stream.c's flow path); 0, or what failed */
+/* one end of a relayed program: one transfer of `bytes` toward or from node `peer`, the sender detaching once it
+   published (its bridge posts it and releases its flows in order), the receiver following its landing words and
+   checking every word (mesh-stream.c's flow path); 0, or what failed */
 static int relay_end(const struct loop_map *map, int self, int peer, int receive, uint64_t bytes, int ready) {
   struct mesh_ctx context = {0};
   char name[64];
@@ -294,38 +306,36 @@ static int relay_end(const struct loop_map *map, int self, int peer, int receive
     for (uint64_t w = 0; w < words; w++) ((uint64_t *)(data + p * block))[w] = receive ? 0 : pattern(p, w);
   if (ready >= 0) { if (write(ready, "r", 1) != 1) status = status ? status : EPIPE; close(ready); }
   if (!status) status = mesh_transfers_start(&context);
-  struct mesh_client *client = mesh_client_at(m, context.client);
-  struct mesh_port_info *far = &client->status[mesh_destination(client, map->node[peer].node)];
-  const uint64_t deadline = clock_ns() + MESH_PAIR_NS;
   if (!status && !receive) {
     mesh_host_publish(&context, section, 0);
     mesh_transfers_wake(&context);
-    while (atomic_load_explicit(&far->phase, memory_order_acquire) != MESH_STOPPED && clock_ns() < deadline) usleep(1000);
   }
   uint64_t completed = 0, mismatches = 0;
   if (!status && receive) {
-    while (completed < blocks && clock_ns() < deadline) {
+    while (completed < blocks) {
       const struct mesh_delivery *delivery = mesh_delivery_at(m, section.first + (uint32_t)completed);
       const uint64_t word = atomic_load_explicit((_Atomic uint64_t *)((char *)m + delivery->device_input), memory_order_acquire);
       if (word == UINT64_MAX) { status = ECANCELED; break; }
       if (word) completed++;
-      else usleep(10);
+      else sched_yield();
     }
     for (uint64_t p = 0; p < completed; p++)
       for (uint64_t w = 0; w < words; w++) mismatches += ((const uint64_t *)(data + p * block))[w] != pattern(p, w);
-    if (!status && (completed != blocks || mismatches)) status = completed != blocks ? ETIMEDOUT : EIO;
+    if (!status && mismatches) status = EIO;
   }
   mesh_detach(&context);
   return status;
 }
 
-/* run `count` children, child i running `run(i)`, and wait for all; how many exited nonzero */
-static int children(int count, int (^run)(int)) {
+/* run `count` children, child i running `run(i)`, then `forked` here (the parent's ends of their pipes closed, so a
+   child reads end of file where another exited without writing), and wait for all; how many exited nonzero */
+static int children(int count, int (^run)(int), void (^forked)(void)) {
   pid_t pid[2 * LOOP_NODES];
   for (int i = 0; i < count; i++) {
     pid[i] = fork();
     if (!pid[i]) _exit(run(i) & 0xff);
   }
+  if (forked) forked();
   int failed = 0;
   for (int i = 0; i < count; i++) {
     int status = 0;
@@ -351,8 +361,7 @@ static int loop_relay(const char *directory, uint64_t bytes) {
       if (read(heard, &r, 1) != 1) return EPIPE;
       close(heard);
       return relay_end(&map, a, b, 0, bytes, -1);
-    });
-    close(heard); close(told);
+    }, ^{ close(heard); close(told); });
     failed += bad != 0;
     printf("{\"loop\":\"relay\",\"family\":\"%s\",\"nodes\":%d,\"from\":%d,\"to\":%d,\"hops\":%d,\"bytes\":%llu,\"seconds\":%.6f,"
            "\"status\":\"%s\"}\n", map.family, map.n, a, b, hops(&map, a, b), (unsigned long long)bytes, (double)(clock_ns() - begin) / 1e9,
@@ -384,17 +393,16 @@ static int stripe_end(const struct loop_map *map, int self, int peer, int writer
   for (uint64_t p = 0; data && p < blocks; p++)
     for (uint64_t w = 0; w < words; w++) ((uint64_t *)(data + p * block))[w] = writer ? pattern(p, w) : 0;
   if (ready >= 0) { if (write(ready, "r", 1) != 1) status = status ? status : EPIPE; close(ready); }
-  const uint64_t deadline = clock_ns() + MESH_PAIR_NS, offset = (uint64_t)page * m->pgsz, at = (uint64_t)((char *)word - (char *)m);
+  const uint64_t offset = (uint64_t)page * m->pgsz, at = (uint64_t)((char *)word - (char *)m);
   if (!status && writer) {
     struct mesh_requests *ring = NULL;
     status = mesh_requests_create(&context, 16, &ring);
-    while (!status && (status = mesh_write(ring, map->node[peer].node, offset, bytes, at, LOOP_MAGIC)) == EAGAIN) usleep(100);
+    if (!status) status = mesh_write(ring, map->node[peer].node, offset, bytes, at, LOOP_MAGIC);
   }
-  while (!status && atomic_load_explicit(word, memory_order_acquire) != LOOP_MAGIC && clock_ns() < deadline) {
+  while (!status && atomic_load_explicit(word, memory_order_acquire) != LOOP_MAGIC) {
     if (atomic_load_explicit(word, memory_order_acquire) == UINT64_MAX) { status = ECANCELED; break; }
-    usleep(100);
+    sched_yield();
   }
-  if (!status && atomic_load_explicit(word, memory_order_acquire) != LOOP_MAGIC) status = ETIMEDOUT;
   uint64_t mismatches = 0;
   for (uint64_t p = 0; !status && !writer && p < blocks; p++)
     for (uint64_t w = 0; w < words; w++) mismatches += ((const uint64_t *)(data + p * block))[w] != pattern(p, w);
@@ -420,8 +428,7 @@ static int loop_stripes(const char *directory, uint64_t bytes) {
       if (read(heard, &r, 1) != 1) return EPIPE;
       close(heard);
       return stripe_end(&map, a, b, 1, bytes, -1);
-    });
-    close(heard); close(told);
+    }, ^{ close(heard); close(told); });
     failed += bad != 0;
     printf("{\"loop\":\"stripes\",\"family\":\"%s\",\"from\":%d,\"to\":%d,\"bytes\":%llu,\"seconds\":%.6f,\"status\":\"%s\"}\n", map.family, a, b,
            (unsigned long long)bytes, (double)(clock_ns() - begin) / 1e9, bad ? "failed" : "ok");
@@ -432,11 +439,9 @@ static int loop_stripes(const char *directory, uint64_t bytes) {
 
 /* a rank's NCCL calls, each checked exactly (every value an integer a float32 holds): rank r's element k is r + k mod 97 */
 static float value_of(int rank, uint64_t k) { return (float)(rank + (int)(k % 97)); }
-static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int walk, uint16_t root_port) {
+static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int walk, ncclUniqueId id) {
   const int n = map->n;
   if (mesh_loop_bind(map->node[rank].region, map->node[rank].service)) return 1;
-  ncclUniqueId id = {{0}};
-  snprintf(id.internal, sizeof id.internal, "::1:%u", root_port);
   ncclComm_t comm;
   if (ncclCommInitRank(&comm, n, id, rank)) { fprintf(stderr, "rank %d: %s\n", rank, ncclGetLastError(NULL)); return 1; }
   float *send = calloc((size_t)count * n, sizeof *send), *receive = calloc((size_t)count * n, sizeof *receive);
@@ -484,21 +489,28 @@ static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int 
   return failed != 0;
 }
 
+/* the ranks' unique id, its root's listener opened here before the ranks are forked (nccl-mesh.c ncclGetUniqueId), so
+   every rank's connect meets it listening */
+static int unique_id(ncclUniqueId *id) {
+  if (ncclGetUniqueId(id) == ncclSuccess) return 0;
+  fprintf(stderr, "mesh-loop: the unique id: %s\n", ncclGetLastError(NULL));
+  return 1;
+}
+
 static int loop_nccl(const char *directory, uint64_t count, int walk) {
   struct loop_map map;
+  ncclUniqueId root;
   if (map_read(directory, &map) || !count) return usage();
-  const uint16_t root = free_port();
-  const int failed = children(map.n, ^(int i) { return rank_calls(&map, i, count, walk, root); });
+  if (unique_id(&root)) return 1;
+  const int failed = children(map.n, ^(int i) { return rank_calls(&map, i, count, walk, root); }, NULL);
   printf("{\"loop\":\"nccl\",\"path\":\"%s\",\"family\":\"%s\",\"ranks\":%d,\"count\":%llu,\"ranks_failed\":%d}\n", walk ? "walk" : "host",
          map.family, map.n, (unsigned long long)count, failed);
   return failed != 0;
 }
 
-/* a rank's communicator over the map's nodes, its root at loopback `root_port` */
-static ncclResult_t rank_comm(const struct loop_map *map, int rank, uint16_t root_port, ncclComm_t *comm) {
+/* a rank's communicator over the map's nodes, met at the unique id `id` */
+static ncclResult_t rank_comm(const struct loop_map *map, int rank, ncclUniqueId id, ncclComm_t *comm) {
   if (mesh_loop_bind(map->node[rank].region, map->node[rank].service)) return ncclInvalidArgument;
-  ncclUniqueId id = {{0}};
-  snprintf(id.internal, sizeof id.internal, "::1:%u", root_port);
   return ncclCommInitRank(comm, map->n, id, rank);
 }
 /* an all-reduce of `count` (send) or a send and receive around the ring (last), every value exact; its result where
@@ -543,10 +555,12 @@ static void logs_mark(const char *directory, int n, off_t *at) {
     at[i] = stat(path, &info) ? 0 : info.st_size;
   }
 }
-/* the bridges' lines past `at` (mesh-flow.c flow_closed, flow_fail): flows closed, those of them whose cells sent were
-   not all reported landed, and flows failed */
-static void logs_read(const char *directory, int n, const off_t *at, uint64_t *closed, uint64_t *short_of, uint64_t *failed) {
-  *closed = *short_of = *failed = 0;
+/* the bridges' lines past `at` (mesh-flow.c flow_released, relay_released, flow_fail, flow_release): flows ended in
+   order, relays released by both their ends, flows failed, exclusive flows flushed, and those of the flushes that
+   drained fewer completions than work requests held */
+struct log_counts { uint64_t ended, relays, failed, flushed, short_of; };
+static void logs_read(const char *directory, int n, const off_t *at, struct log_counts *counts) {
+  *counts = (struct log_counts){0};
   for (int i = 0; i < n; i++) {
     char path[PATH_MAX], line[2048];
     snprintf(path, sizeof path, "%s/node%d.log", directory, i);
@@ -554,23 +568,23 @@ static void logs_read(const char *directory, int n, const off_t *at, uint64_t *c
     if (!f) continue;
     fseeko(f, at[i], SEEK_SET);
     while (fgets(line, sizeof line, f)) {
-      const char *c = strstr(line, ") closed: ");
-      unsigned long long sent, delivered;
-      if (c && sscanf(c, ") closed: %llu cells sent, %llu delivered", &sent, &delivered) == 2) { ++*closed; *short_of += sent != delivered; }
-      else if (strstr(line, ") failed at node ")) ++*failed;
+      const char *c = strstr(line, " flushed ");
+      unsigned long long drained, held;
+      if (strstr(line, ") ended in order")) counts->ended++;
+      else if (strstr(line, ") released by both its ends")) counts->relays++;
+      else if (strstr(line, ") failed at node ")) counts->failed++;
+      else if (c && sscanf(c, " flushed %llu of %llu work requests", &drained, &held) == 2) { counts->flushed++; counts->short_of += drained != held; }
     }
     fclose(f);
   }
 }
-/* every bridge holding no flow and no awaiting program (mesh_busy), within `seconds`; 0, or ETIMEDOUT */
-static int bridges_idle(const struct loop_map *map, double seconds) {
-  const uint64_t deadline = clock_ns() + (uint64_t)(seconds * 1e9);
+/* every bridge holding no flow and no awaiting program (mesh_busy), each looked at until it holds none; 0, or EINVAL */
+static int bridges_idle(const struct loop_map *map) {
   for (int i = 0; i < map->n;) {
     uint64_t busy = 1, since = 0;
     if (mesh_loop_bind(map->node[i].region, map->node[i].service) || mesh_busy(&busy, &since) < 0) return EINVAL;
-    if (!busy) { i++; continue; }
-    if (clock_ns() > deadline) return ETIMEDOUT;
-    usleep(1000);
+    if (!busy) i++;
+    else sched_yield();
   }
   return 0;
 }
@@ -583,7 +597,8 @@ static int loop_destroy(const char *directory, uint64_t count, int runs, int wal
   int failed_runs = 0;
   uint64_t cancelled = 0;
   for (int run = 0; run < runs; run++) {
-    const uint16_t root = free_port();
+    ncclUniqueId root;
+    if (unique_id(&root)) return 1;
     int held[LOOP_NODES][2], (*pipes)[2] = held;
     for (int i = 0; i < map.n; i++) if (pipe(pipes[i])) return 1;
     const uint64_t begin = clock_ns();
@@ -601,11 +616,10 @@ static int loop_destroy(const char *directory, uint64_t count, int runs, int wal
       if (write(pipes[i][1], &mark, 1) != 1) return 1;
       if (result) fprintf(stderr, "destroy run %d rank %d: %s\n", run, i, said);
       return result || wrong;
-    });
+    }, ^{ for (int j = 0; j < map.n; j++) close(pipes[j][1]); });
     int cancels = 0, others = 0;
     for (int i = 0; i < map.n; i++) {
       char mark = 'f';
-      close(pipes[i][1]);
       if (read(pipes[i][0], &mark, 1) != 1) mark = 'f';
       close(pipes[i][0]);
       cancels += mark == 'c';
@@ -618,38 +632,41 @@ static int loop_destroy(const char *directory, uint64_t count, int runs, int wal
            (double)(clock_ns() - begin) / 1e9, bad, cancels, others);
     fflush(stdout);
   }
-  const int idle = bridges_idle(&map, 60);
-  uint64_t closed, short_of, failed;
-  logs_read(directory, map.n, marks, &closed, &short_of, &failed);
+  const int idle = bridges_idle(&map);
+  struct log_counts counts;
+  logs_read(directory, map.n, marks, &counts);
   printf("{\"loop\":\"destroy\",\"path\":\"%s\",\"family\":\"%s\",\"runs\":%d,\"runs_failed\":%d,\"cancelled\":%llu,\"bridges_idle\":%s,"
-         "\"flows_closed\":%llu,\"closed_short\":%llu,\"flows_failed\":%llu}\n", walk ? "walk" : "host", map.family, runs, failed_runs,
-         (unsigned long long)cancelled, idle ? "false" : "true", (unsigned long long)closed, (unsigned long long)short_of, (unsigned long long)failed);
-  return failed_runs || idle || short_of || failed;
+         "\"flows_ended\":%llu,\"relays_released\":%llu,\"flows_failed\":%llu,\"flushed\":%llu,\"flushed_short\":%llu}\n",
+         walk ? "walk" : "host", map.family, runs, failed_runs, (unsigned long long)cancelled, idle ? "false" : "true",
+         (unsigned long long)counts.ended, (unsigned long long)counts.relays, (unsigned long long)counts.failed,
+         (unsigned long long)counts.flushed, (unsigned long long)counts.short_of);
+  return failed_runs || idle || counts.short_of || counts.failed;
 }
 
-/* the kill reading's shared page: when the victim was killed, whether it is ready, how many ranks entered the call,
-   and each rank's return (its time and result) */
-struct kill_page { _Atomic uint64_t killed, ready, entered, returned[LOOP_NODES], wrong[LOOP_NODES]; _Atomic int result[LOOP_NODES];
-  char said[LOOP_NODES][160]; };
+/* the kill reading's shared page: when the victim was killed, and each rank's return (its time and result) */
+struct kill_page { _Atomic uint64_t killed, returned[LOOP_NODES], wrong[LOOP_NODES]; _Atomic int result[LOOP_NODES]; char said[LOOP_NODES][160]; };
 static int loop_kill(const char *directory, uint64_t count, int walk, int bridge) {
   struct loop_map map;
+  ncclUniqueId root;
   if (map_read(directory, &map) || !count || map.n < 2) return usage();
   struct kill_page *page = mmap(NULL, sizeof *page, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANON, -1, 0);
-  if (page == MAP_FAILED) return 1;
+  int told[2];
+  if (page == MAP_FAILED || pipe(told) || unique_id(&root)) return 1;
   memset(page, 0, sizeof *page);
-  const uint16_t root = free_port();
   const int victim = map.n - 1;
   pid_t pid[LOOP_NODES];
   for (int i = 0; i < map.n; i++) {
     pid[i] = fork();
     if (pid[i]) continue;
+    close(told[0]);
     ncclComm_t comm = NULL;
     ncclResult_t result = rank_comm(&map, i, root, &comm);
     uint64_t wrong = 0;
     if (!result) result = rank_group(comm, i, map.n, count, walk, 0, &wrong);
-    if (result || wrong) _exit(2);
-    if (i == victim) { atomic_store(&page->ready, 1); for (;;) pause(); }
-    atomic_fetch_add(&page->entered, 1);
+    const char mark = result || wrong ? 'f' : 'r';
+    if (write(told[1], &mark, 1) != 1 || mark == 'f') _exit(2);
+    close(told[1]);
+    if (i == victim && !bridge) for (;;) pause();
     result = rank_group(comm, i, map.n, count, walk, 0, &wrong);
     atomic_store(&page->returned[i], clock_ns());
     atomic_store(&page->result[i], (int)result);
@@ -658,34 +675,26 @@ static int loop_kill(const char *directory, uint64_t count, int walk, int bridge
     ncclCommDestroy(comm);
     _exit(0);
   }
-  const uint64_t until = clock_ns() + UINT64_C(60000000000);
-  while ((!atomic_load(&page->ready) || atomic_load(&page->entered) < (uint64_t)victim) && clock_ns() < until) usleep(1000);
-  /* the other ranks inside their call: their landings from the victim are awaited */
-  usleep(200000);
+  close(told[1]);
+  /* every rank through its first all-reduce (a byte each), the others then entering the second, which awaits the
+     victim's contribution */
+  int ready = 0, failed = 0;
+  for (char mark; ready + failed < map.n && read(told[0], &mark, 1) == 1;) mark == 'r' ? ready++ : failed++;
+  close(told[0]);
   atomic_store(&page->killed, clock_ns());
-  kill(bridge ? map.node[victim].pid : pid[victim], bridge ? SIGSTOP : SIGKILL);
-  /* the others' returns awaited at most 60 s (the reading's own bound), the stopped bridge then continued */
-  int failed = 0, left = map.n - bridge;
-  const uint64_t bound = clock_ns() + UINT64_C(60000000000);
-  int done[LOOP_NODES] = {0};
-  while (left && clock_ns() < bound) {
-    for (int i = 0; i < map.n; i++) {
-      int status = 0;
-      if (done[i] || (i == victim && bridge) || waitpid(pid[i], &status, WNOHANG) != pid[i]) continue;
-      done[i] = 1; left--;
-      if (i != victim && (!WIFEXITED(status) || WEXITSTATUS(status))) failed++;
-    }
-    usleep(1000);
+  kill(bridge ? map.node[victim].pid : pid[victim], bridge ? SIGTERM : SIGKILL);
+  for (int i = 0; i < map.n; i++) {
+    int status = 0;
+    const int counted = i != victim || bridge;
+    if (waitpid(pid[i], &status, 0) != pid[i] || (counted && (!WIFEXITED(status) || WEXITSTATUS(status)))) failed += counted;
   }
-  if (bridge) kill(map.node[victim].pid, SIGCONT);
-  for (int i = 0; i < map.n; i++)
-    if (!done[i] && (i != victim || bridge)) { kill(pid[i], SIGKILL); waitpid(pid[i], NULL, 0); failed += i != victim; }
-  for (int i = 0; i < victim; i++) {
+  for (int i = 0; i < map.n - !bridge; i++) {
     const uint64_t at = atomic_load(&page->returned[i]), killed = atomic_load(&page->killed);
     const int result = atomic_load(&page->result[i]);
     failed += !result;
-    printf("{\"loop\":\"kill\",\"path\":\"%s\",\"family\":\"%s\",\"ranks\":%d,\"victim\":%d,\"stopped\":\"%s\",\"rank\":%d,\"failed_as_value\":%s,"
-           "\"wrong\":%llu,\"latency_us\":%.1f,\"result\":\"%s\"}\n", walk ? "walk" : "host", map.family, map.n, victim, bridge ? "bridge" : "client", i,
+    printf("{\"loop\":\"kill\",\"path\":\"%s\",\"family\":\"%s\",\"ranks\":%d,\"victim\":%d,\"stopped\":\"%s\",\"rank\":%d,"
+           "\"failed_as_value\":%s,\"wrong\":%llu,\"latency_us\":%.1f,\"result\":\"%s\"}\n", walk ? "walk" : "host", map.family, map.n, victim,
+           bridge ? "bridge" : "client", i,
            result ? "true" : "false", (unsigned long long)atomic_load(&page->wrong[i]), at > killed ? (double)(at - killed) / 1e3 : -1.0, page->said[i]);
   }
   fflush(stdout);

@@ -13,13 +13,16 @@
    this one.  Installing, linking and running it: rdma/NCCL.md.  The mesh's own calls (ncclMesh*) are last.
 
    A rank is a process on a node, a client of its node's resident bridge (mesh-flow): the rank asks, the bridge does.
-   It passes no region, map file, silent bound or queue-pair count, and keeps no step executor of its own: every
+   It passes no region, map file or queue-pair count, and keeps no step executor of its own: every
    crossing a program makes between nodes is one of these calls, and this library (nccl-mesh.c's walk of a program's
    steps, nccl-mesh-metal.m's kernels) is the only code that publishes a piece, lands or combines it, and waits on it.
 
    Communicators.  ncclCommInitRank is NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else the
-   listener ncclGetUniqueId opens; the bindings take MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets
-   them), every rank's node (mesh_observe) meets there; the id is its name.  Every communicator reads its bridge's map
+   listener ncclGetUniqueId opens and holds until the root's ncclCommInitRank, so it listens before any rank holds the
+   id; the bindings take MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets them), every rank's node
+   (mesh_observe) meets there; the id is its name.  Each rank connects once: an id whose root does not listen yet
+   refuses it, ncclRemoteError naming the id (start the root first, or hand the ranks its ncclGetUniqueId's id); the
+   root accepts until every rank has reported, and nothing in it is bounded by a clock.  Every communicator reads its bridge's map
    over its members (mesh-plan.h mesh_map: the other nodes its relays, with the routing table the bridges forward
    along) each time its session opens.  ncclMeshCommInitRank (below) is for a program that passes its own programs or
    paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take, on the bridges' map like any
@@ -29,11 +32,11 @@
    end), its groups in flight fail, a session opening (its wait for its peers' programs, or for their agreement) ends
    and none opens after it, and every later group on comm fails at once (ncclRemoteError), until ncclCommDestroy closes
    the session; from any thread, under comm's own lock alone, never one a group of any communicator holds while it
-   waits.  The close (design/bridge-and-ipc.md#control): ncclCommDestroy hands the session's close to its bridge and
-   returns once its own GPU work has finished, without waiting on any peer (the bridge posts every cell the session
-   released, ends each flow with END carrying its count, holds the session's rows until the peer's CLOSED, then reclaims
-   them); ncclCommFinalize also waits for the delivery of what it published (each channel's delivered word, its peers'
-   reports); ncclCommAbort and ncclCommRevoke discard.  Making a
+   waits.  The close (design/bridge-and-ipc.md#control): ncclCommFinalize finishes the communicator's own GPU work and
+   touches nothing on the wire; ncclCommDestroy then hands the session to its bridge in order and returns, waiting on
+   no peer (the bridge posts every cell the session released, takes those SENDs' completions, then releases the
+   session's flows and rows, telling no peer); ncclCommAbort and ncclCommRevoke discard (FAIL to each peer, the
+   session's words cancelled past their landed counts).  Making a
    communicator (a lone rank's too) attaches the process's client of its node's bridge where it
    has none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot
    held, no region of a bridge that runs, or a lease of a bridge that stopped still held.
@@ -80,16 +83,13 @@
    it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
    once, with every group before it; a host-path group fails while groups are issued and not complete.  A wait is a
    kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait's spin), a word of the session's that
-   its bridge's cancel ends (design/bridge-and-ipc.md#control: a lost link or peer, a revoke; past the landed count alone,
-   and the first cancelled wait halts the program's later waits).  The stream's `polls` bounds it: the most
-   loads of the word a wait makes (mesh_wait_bounded), the caller's bound for the group's crossings, which it derives
-   from its plan (the lag it expects at them, over the period of one load on the node's GPU: rdma/NCCL.md "Bounded
-   waits"); a wait that reaches it leaves its position, its channel and its bound in the session's violation words, every
-   later dispatch of the session does nothing, and the group fails as a value after its command buffer
-   (ncclCommGetAsyncError, or the communicator's next group).  0: a wait ends only at its landing or its cancellation.
+   ends only at its landing or its cancel: its bridge's (design/bridge-and-ipc.md#control: a lost link or peer, a revoke;
+   past the landed count alone) or the process's own where its bridge exits (mesh-dataflow.c mesh_watch).  The first
+   cancelled wait leaves its position and channel in the session's violation words and halts the program's later waits,
+   and the group fails as a value after its command buffer (ncclCommGetAsyncError, or the communicator's next group).
    The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
-   id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
-   classic form's: ncclMeshEncodeMetal4, below.
+   id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read): ncclMeshEncodeMetal4,
+   below.
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and on which each communicator's session takes
@@ -124,8 +124,8 @@
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and the
    group after a failure is returned opens a session again, on the map current then (a revoked communicator's none).
    A loss is an event the bridges see (design/bridge-and-ipc.md#control): a link off, a control socket's end, a peer's
-   FAREWELL or FAIL, or its flow's control frames missing past what their measured gaps make likely; the bridge then
-   cancels the session's words past their landed counts, ending every wait on them, and no clock of the library's
+   FAREWELL or FAIL, an error completion, a client's exit; the bridge then cancels the session's words past their landed
+   counts, ending every wait on them (and where the bridge itself exits, the process cancels its own), and no clock
    decides it.  A group on a cancelled or lost link fails with ncclRemoteError; a failure the Metal
    path finds after its group returned (calls that do not pair, too) is the communicator's asynchronous error
    (ncclCommGetAsyncError) and the next group's result.
@@ -171,7 +171,6 @@ typedef struct {
   ncclMeshIssue *issue;
   void *argumentTable;
   void *residencySet;
-  uint32_t polls;
   ncclMeshFused *fused;
 } ncclMeshStream;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
@@ -446,17 +445,15 @@ ncclResult_t pncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId
 ncclResult_t  ncclCommInitAll(ncclComm_t* comm, int ndev, const int* devlist);
 ncclResult_t pncclCommInitAll(ncclComm_t* comm, int ndev, const int* devlist);
 
-/* Finalize a communicator (design/bridge-and-ipc.md#control): every GPU program it issued finished, its close handed to
-   its bridge (each flow posts what the session released, then END), and the delivery of every position it published
-   awaited, events alone (each channel's delivered word: its peers' LANDED and CLOSED reports); ncclSuccess once
-   delivered, else the failure that ended a channel first (its link or peer lost).  No group runs on comm after it;
-   ncclCommDestroy then frees it. */
+/* Finalize a communicator (design/bridge-and-ipc.md#control): every GPU program it issued finished, nothing on the
+   wire; ncclSuccess, else the failure its session holds (a landing cancelled: its link or peer lost).  No group runs on
+   comm after it; ncclCommDestroy then frees it. */
 ncclResult_t  ncclCommFinalize(ncclComm_t comm);
 ncclResult_t pncclCommFinalize(ncclComm_t comm);
 
-/* Frees comm once its own GPU work has finished, its session's close handed to its bridge in order (the bridge posts
-   every cell the session released, ends each flow with END and its count, and holds the session's rows until each
-   peer's CLOSED); it waits on no peer.  A failed or revoked session's close is an abort. */
+/* Frees comm once its own GPU work has finished, its session handed to its bridge in order (the bridge posts every cell
+   the session released, takes those SENDs' completions, then releases the session's flows and rows; no peer is told);
+   it waits on no peer.  A failed or revoked session's close is an abort. */
 ncclResult_t  ncclCommDestroy(ncclComm_t comm);
 ncclResult_t pncclCommDestroy(ncclComm_t comm);
 
@@ -911,7 +908,7 @@ typedef struct {
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
-   commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
+   commandEncoder, or the Metal 4 form's; issue and workspace not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose session failed returns the
    failure. */
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
@@ -937,17 +934,16 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
    through the caller's id<MTL4ArgumentTable> `table` (at least 6 buffer bindings; no setBytes, the arguments records
    of the library's ring), on pipelines of the caller's device (the residency set's), every buffer of the library's it
    touches added to the caller's id<MTLResidencySet> `residency` (committed where one was added).  Nothing is committed
-   or signalled: the caller commits its command buffer.  Its waits poll the words the bridge writes, which the bridge's
-   cancel ends (a lost link or peer, a revoke), never a spin on another queue's work, as the classic form's: `polls`
-   0, a wait ends at its landing or its cancellation, as the in-stream crossings of 2026-10-13 (metal-microbench Q5P);
-   else the bound above.  A failure is a value: ncclCommGetAsyncError (or the communicator's next group) after the
-   window.  The group completes in the encoder: with no workspace
+   or signalled: the caller commits its command buffer.  Its waits poll the words the bridge writes, never a spin on
+   another queue's work, as the classic form's: a wait ends at its landing or its cancellation, as the in-stream
+   crossings of 2026-10-13 (metal-microbench Q5P).  A failure is a value: ncclCommGetAsyncError (or the communicator's
+   next group) after the window.  The group completes in the encoder: with no workspace
    its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm is any
    communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program its table's (above).  The same as
-   ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency,
-   .polls = polls}, which every other collective and group also takes. */
+   ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency},
+   which every other collective and group also takes. */
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,
-                                  void* encoder, void* table, void* residency, uint32_t polls);
+                                  void* encoder, void* table, void* residency);
 /* A crossing whose steps the caller's own kernels run (the Metal 4 form; metal-microbench docs/kernels.md#collectives,
    Q5P's in-stream form, the steps still this library's: docs/acceptance-20261014.md A39, A40).  *fusable is 1 where an
    in-place ncclAllReduce of `count` elements of `type` by `op` on comm is, on its program, this rank's publication of
@@ -1026,13 +1022,6 @@ ncclResult_t ncclMeshMemLive(void);
    return its pages.  ncclInvalidArgument where ptr is in no lease of this process; ncclRemoteError where its bridge
    stopped (Memory). */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
-/* The caller's GPU work on the lease holding `ptr` (writing it where `write`, else reading it) is done once `event` (an
-   id<MTLSharedEvent>, retained until then) reaches `value` (mesh 3981ca80^'s, for leases): a host-path group that reads
-   the lease waits for its writers' points, one that writes it for every point, on the host, each at most mesh.h
-   MESH_SILENT_NS (ncclSystemError past it); a point reached is dropped, and ncclMemFree drops the rest.  `bytes` is not
-   read (a point is the whole lease's).  The Metal path orders its work by its stream and reads no point.
-   ncclInvalidArgument where ptr is in no lease of this process. */
-ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t value, int write);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks entries, the same on
    every rank, any of them 0), the segments packed in rank order, so rank r's lies after the segments of the ranks
    before it.  ncclMeshAllGatherV sends counts[rank] elements of sendbuff and leaves every segment in recvbuff (in place
