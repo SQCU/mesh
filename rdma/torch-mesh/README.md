@@ -137,8 +137,8 @@ replay's command buffers on the calls' landings (`MetalRecordGate`); and made ea
 ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
 (`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
 (no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
-Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (an exclusive flow's receives
-are posted ahead of the data: [design/bridge-dataflow.md](../../design/bridge-dataflow.md)), and the planning once is
+Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a session's receives are
+posted ahead of the data on its leases: [design/bridge-dataflow.md](../../design/bridge-dataflow.md)), and the planning once is
 the communicator's compiled programs'. A training step's backward, run
 by autograd, is compiled but not batched.
 

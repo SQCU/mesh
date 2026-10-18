@@ -65,9 +65,9 @@ route").
 
 A session opens in two steps. Its members agree on their leases and relays (`mesh-call.h` `mesh_transfers_agree`):
 they meet at the first member's bridge, whose plan gives every two members that bind a lease of each of their two
-queues on each link of their route (a TB5 link has at most 9 leases) and starts a relay program on each node between them;
-two openings at once that claim every free lease of a link fail the later one's group as a value (`EBUSY`), and its
-next group opens again. Then each member starts its program on its own bridge (`mesh_transfers_start`), which waits on
+queues on each link of their route (a TB5 link has at most 9 leases) and starts a relay program on each node between
+them; two openings at once that claim every free lease of a link fail the later one's group as a value (`EBUSY`), and
+its next group opens again. Then each member starts its program on its own bridge (`mesh_transfers_start`), which waits on
 that bridge alone: a peer's sends to receives not yet posted wait in the hardware.
 
 Before any group runs, the members agree: each publishes its digest of what its programs are made from (the route
