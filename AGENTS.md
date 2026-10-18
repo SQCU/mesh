@@ -3,8 +3,9 @@
 Read `THREAT-MODEL.md` first. This file is the operational rule that follows from it.
 
 **Recovery is critical priority.** An execution that loses a link or an operand fails, returning an error, and is
-never resumed; the node's resident bridge (`rdma/mesh-flow.c`, design/bridge-and-ipc.md) pairs its links again with or
-without a client. Read `design/recovery.md` (its mandates, requirements and risks) before changing any of it.
+never resumed: the node's resident bridge (`rdma/mesh-flow.c`, design/bridge-and-ipc.md) fails each program holding a
+lease of a lost link as a value naming the node, its peers' programs with it, and pairs its links again with or without
+a client. Read `design/recovery.md` (its mandates, requirements and risks) before changing any of it.
 
 ## The contract
 
@@ -256,6 +257,121 @@ previous file is saved at `~/.zshrc.bak-meshguard`.
 `.gitignore` un-ignores `.claude/settings.json` (`.claude/*` plus a negation) so
 the hook travels with the repo instead of living on one machine. The hook script
 lives in `bin/` for the same reason.
+
+## The bridge's wire is closed
+
+The bridge's whole wire vocabulary is one enum, design/bridge-and-ipc.md#wire:
+
+    enum wire { HELLO=1, PAIRS, FAREWELL, RECORD, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_REFUSE, CHANNEL_DATA, CHANNEL_WINDOW,
+                CHANNEL_SHUT, CHANNEL_CLOSE, KEEPALIVE };
+
+Adding a member to it, or a state to the bridge (a lease word's value, a program's state, a link's phase, a message a
+loop waits for), is a design change: it needs an operator's quote, verbatim and dated, in design/bridge-and-ipc.md#wire
+before it is written. A program's data crosses as SENDs on its leases, and a landing's word is the only signal a reader
+acts on. The record and the rule a change is held to, restored verbatim:
+
+From d8d69cca:design/distributed-reduce.md:203-242 (2026-09-09):
+
+### What was done instead, and why it is forbidden
+
+Every divergence from this document that reached the repository was a
+control-flow object standing in for something the page table already held,
+written by an agent that had not read the prior art and did not want to. The
+record is kept here so that the next such object is recognized on sight.
+
+- A `K_DIGEST` control frame carrying the sent hash, a mismatch poisoning the
+  whole program through the status word, and a paragraph added to this
+  specification to bless it (2026-09-08, `f47fc4e`, `2188f44`), after the
+  operator had said that acknowledgements are a private feature of the
+  transport and not the algorithm. The digest is a page.
+- A `K_OPEN`/`K_READY` rendezvous with exponential backoff that held every
+  page until a "ready" message arrived, and `K_ABORT`/`K_ABORTED` propagation
+  between peers: a hand-rolled connection protocol on a link that already
+  has flow control. Its one real function — not sending to a peer whose client
+  had not attached — was the receiving bridge dropping frames addressed to it;
+  the bridge now holds them.
+- A runtime reduce node that counted generations by one where a row family
+  advances by the number in flight, so families past the first never reduced;
+  it was committed as measured without a run that could have shown it.
+- Hidden-state rows read as a contiguous matrix across two pages, crossing the
+  page headers; the paged path was committed with a relative error copied from
+  the CPU path it replaced.
+- The digest page used as the gate on the next stage's issue — the numerical
+  check made a dependency of the numerical program, which this document
+  forbids in two places.
+- A driver with phases, per-job state, per-call tasks awaiting predictions,
+  completion words, and fixed 128-row groups: a scheduler. It issued about two
+  thousand GPU command buffers per evaluation and made the pass three times
+  slower than the barrier it was meant to remove. The readiness it tracked was
+  already in the stamps.
+
+None of these was hard to avoid. The token store, the in-data flag, the
+region runtime, the timestamped epoch and the row-streamed reduce-scatter are
+each thirty to fifty years old, documented, and measured; reinventing a piece
+of one from a message-passing reflex is not engineering caution, it is not
+having done the reading. A change to this repository that adds a frame kind,
+a handshake, a retry, a phase, a token, a gate, or a scheduler is wrong before
+it is measured, and measurement has so far agreed every time.
+
+From 1347b7aa:design/pages-and-functions.md:156-212 (2026-09-08):
+
+### Addendum: waiting for messages about data, on infinitely many Minis
+
+Suppose a Mini does not wait on its input rows. Suppose it waits for a
+message that says the data is coming, or is done, or may be used: a token, a
+gate value, a "ready" flag, a scheduler's decision, a completion callback that
+stands in for the pages. Then it acts on the message. This is what goes wrong.
+
+1. **The message is a second thing on the same link.** The pages take one
+   hop. The message about them takes a hop too. Every dependency on the chain
+   now costs a hop for the pages and a hop for the message. On a chain of
+   depth D the NFE waits for D messages it did not need. On an infinite mesh
+   D is not bounded, so the extra wait is not bounded either. Waiting on the
+   rows costs nothing extra: the row is stamped when the page lands.
+2. **The message can be true and the data still absent.** A message says
+   something about the sender's state. The pages may still be in flight, or
+   lost, or land out of order, or be corrupt. Acting on the message is acting
+   on a claim. To make the claim safe, the sender and receiver need
+   acknowledgements, retries, and ordering. That is a protocol on top of page
+   delivery. The digest, computed after the pages were used, already finds a
+   wrong page without any of it.
+3. **The message can be false and the data present.** The pages landed and
+   the rows are stamped, but the message is late, or the sender concluded
+   early, or the link that carried the message broke while the link that
+   carried the pages did not. The Mini sits with everything it needs and does
+   nothing. Waiting on the rows would have run the function at once.
+4. **The wait binds this Mini to another Mini's control flow.** A message
+   comes from a sender's scheduler, not from data. If that scheduler is slow,
+   this Mini is slow, and every Mini downstream is slow, even though their
+   pages have all arrived. On an infinite mesh there is always a slowest
+   scheduler somewhere, and the chain of "waiting for whose message" has no
+   end. Waiting on rows binds a Mini only to the pages in front of it.
+5. **Work handed to the GPU while it waits for a message is killed or idles.**
+   We measured this: a command buffer that waits on a signal for seconds is
+   ended by the watchdog, and every buffer behind it dies with it. A GPU given
+   only functions whose rows are stamped runs at its roofline fraction. Its
+   utilization then does not depend on the mesh at all.
+6. **Messages need their own storage and their own freeing.** Every message in
+   flight is state: a queue entry, a counter, an event value, a callback. On an
+   infinite mesh the number of messages in flight is not bounded, so this
+   state is not bounded, and it is freed by other messages. Pages are freed by
+   release when the dependent's rows are stamped. That state is bounded by the
+   pages, and the pages were needed anyway.
+7. **A speculative message lets a function run before its data.** "The pages
+   will arrive" is not "the pages have arrived". A function that runs on the
+   promise reads stale pages and writes a wrong output with a good stamp. The
+   digest will disagree later, and the NFE will be repeated, but the work was
+   wasted and the wrong output already travelled a hop.
+8. **Fan-in multiplies all of the above.** A function whose inputs come from
+   many Minis would need a message from each, each a hop, each a race with its
+   pages. The rows give one check for all of them: are they all stamped k.
+
+The rule that follows is the one already in the spec. A Mini acts on data,
+and only on data, and acts the moment the data is present. The row's stamp is
+the only signal. The GPU is handed only functions whose rows are stamped. The
+NFE concludes on a status word, never on a message inside the data. With that
+rule a Mini's latency and utilization are the same whether it has one
+neighbour or an infinite mesh behind it. Without it they are not.
 
 ## Collectives and tensor parallelism
 
