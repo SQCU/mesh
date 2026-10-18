@@ -196,17 +196,17 @@ def _issue_reduce_scatter(program, task):
 # design/algorithm-sources.md#collectivereduce_scatter
 def _issue_partials(program, task):
     _, refs, roots, peers = task.run
-    me = task.members.index(program.rank)
+    me, works = task.members.index(program.rank), []
     for ref, root in zip(refs, roots):
         whole = _buffer(program, ref.dtype, ref.rows * ref.columns)
         if program.rank in peers:
             _pack(whole, (ref,))
         else:
             whole.zero_()
-        _native.partials(whole.view(ref.shape), root, program._world.of(task.queue, task.members))
+        works.append(_native.partials(whole.view(ref.shape), root, program._world.of(task.queue, task.members)))
         if root in (None, me):
             _unpack(whole, (ref,))
-    return ()
+    return tuple(works)
 
 
 # design/algorithm-sources.md#collectivereduce_scatter

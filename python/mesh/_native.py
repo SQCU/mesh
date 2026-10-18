@@ -126,13 +126,6 @@ def all_reduce(tensor, op, group):
 # design/algorithm-sources.md#collectivereduce_scatter
 def partials(tensor, root, group):
     """nccl.h's log-sum-exp merge of a (rows, 2 + dim) float32 operand laid out [m: rows][l: rows][O: rows x dim], in
-    place, toward every member (root None) or `root`: its host path (three groups of its own, never inside one); the
-    MPS path is the backend's to bind (its stream, _stream.mm), not yet made."""
-    from torch_mesh import backend
-    if tensor.device.type != 'cpu':
-        raise NotImplementedError('mesh: torch_mesh binds no partials merge on MPS yet (ncclMeshAllReducePartials on torch\'s stream)')
-    held, comm = backend.operand(tensor), group._get_backend(tensor.device).comm
-    rows, dim = tensor.shape[0], tensor.shape[1] - 2
-    backend.check(backend.LIB.ncclMeshAllReducePartials(held.at(), held.at(), rows, dim, comm, backend.ffi.NULL) if root is None
-                  else backend.LIB.ncclMeshReducePartials(held.at(), held.at(), rows, dim, root, comm, backend.ffi.NULL))
-    held.back()
+    place, toward every member (root None) or `root` (the backend's ProcessGroupMesh.merge_partials, both paths)."""
+    return group._get_backend(tensor.device).merge_partials(tensor, tensor, tensor.shape[1] - 2, -1 if root is None else root,
+                                                             async_op=True)
