@@ -716,8 +716,9 @@ three times and a torus of 6 once: 32 of 32 readings with every bridge exited 0 
 closed", no region left and 0 of the fabric's queue pairs held; from the SIGTERM to the last exit 0.9-3.0 ms on the line
 and 1.4-5.8 ms on the torus (metal-microbench output_data/dead-history-20261017/scratch-rewrite/all.txt). At mesh
 a68717f9, a line of 4 and a torus of 6 once each: 16 of 16 readings with every bridge exited 0, its last line "stopped:
-... left to the kernel's reclaim at its exit" and no region left; the fabric's queue pairs held 0 in every state but the
-line's `pairing`, which read 40, its cause not yet read; 1.1-2.5 ms on the line and 1.4-7.7 ms on the torus
+... left to the kernel's reclaim at its exit" and no region left; the fabric's queue pairs held 0 in every state (the line's
+`pairing` read 40 until the reading reaped the bridges it starts itself, whose unreaped exits still answered `kill(pid,
+0)`; 0 in 3 of 3 after); 1.1-2.5 ms on the line and 1.4-7.7 ms on the torus
 (metal-microbench output_data/mesh-noteardown-20261018).
 
 **A client (mesh-dataflow.c, mesh-call.c).**

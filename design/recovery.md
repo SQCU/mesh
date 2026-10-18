@@ -316,8 +316,8 @@ failed as a value, the bridge started again and the map converged each time, and
 peer): 32 of 32 readings exited 0 with no region and no queue pair left, each stop within 6 ms (metal-microbench
 output_data/dead-history-20261017/scratch-rewrite/all.txt). At mesh a68717f9, which tears nothing down, once on each: 16
 of 16 exited 0 with their stopped line ("q queue pairs on p ports left to the kernel's reclaim at its exit") and no
-region left, within 7.7 ms; the fabric's queue pairs held by a live process read 0 in each state but the line's pairing,
-which read 40 (metal-microbench output_data/mesh-noteardown-20261018).
+region left, within 7.7 ms; the fabric's queue pairs held by a live process read 0 in each state (the line's pairing read 40 until the reading reaped
+the bridges it starts itself; 0 in 3 of 3 after; metal-microbench output_data/mesh-noteardown-20261018).
 
 ### port
 

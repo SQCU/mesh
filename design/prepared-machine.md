@@ -46,7 +46,8 @@ measurement configuration.
 
 M09's window is registered eagerly and whole, and a device's registrations do not change while it is up: the steady
 state never calls `ibv_reg_mr`, never changes a device's address translation while DMA may be live, and never
-allocates a registration; a device deregisters only when it retires. The operator, 2026-10-15, on registering an extent
+allocates a registration; the bridge never deregisters one (the kernel reclaims them at its exit,
+design/RDMA-KERNEL-RECOVERY.md). The operator, 2026-10-15, on registering an extent
 at a program's first page: "now that's a memory safety issue or a forced synchronization across all nodes to re-map
 address translation tables, which can happen mid function execution with asynchronous collective concurrent operations
 (which we want and need lol). so it's too dangerous and we can't use it without applying absurd allgather state

@@ -715,8 +715,9 @@ once (ECONNRESET, its programs failing as values naming this node), and logs the
 On the loopback fabric (mesh-loop `sigterm`), SIGTERM to every bridge of a line of four and of a torus of six, once
 each, in each state the loop makes (idle, pairing, a host-path call, a GPU-walk call, a relayed call, after a link loss,
 with a client killed, with a peer's bridge stopped), at mesh a68717f9: every bridge exited 0 with its stopped line and
-no region left, in 1.1-7.7 ms, and the fabric's queue pairs held by a live process read 0 in every state but the line's
-pairing, which read 40, its cause not yet read (metal-microbench output_data/mesh-noteardown-20261018, line4.txt and
+no region left, in 1.1-7.7 ms, and the fabric's queue pairs held by a live process read 0 in every state (the line's
+pairing read 40 until the reading reaped the bridges it starts itself, unreaped children answering `kill(pid, 0)`; 0 in
+3 of 3 after; metal-microbench output_data/mesh-noteardown-20261018, line4.txt, line4-pairing-after-reap.txt and
 torus6.txt; loopverbs holds a queue pair's ring by its process and frees it at that process's exit, as the kernel
 reclaims, design/bridge-dataflow.md#the-loopback-fabric). SIGTERM is launchd's stop; a bridge never receives SIGKILL
 from the mesh (RDMA-RULES.md).

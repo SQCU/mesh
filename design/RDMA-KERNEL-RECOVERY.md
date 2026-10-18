@@ -484,8 +484,8 @@ line of 4 and a torus of 6 on one loaded host), these read 0 failed: `nccl` on t
 `destroy` 20 runs on each path (every program and relay ended in order, 0 cancelled), `revoke` and `share`, `kill` of a
 client, of the binary and of the bridge (every survivor's call failed as a value), and `nccl`, the walk and `relay`
 again after a peer's binary restart. Under SIGTERM in all 8 states every bridge exited 0 with its stopped line and no
-region left, and the fabric held 0 queue pairs in every state but the line's pairing, which read 40 (its cause not yet
-read). The one-way hop's median read 31 us on the line of 4 and 76 us on the torus of 6 (`hop`, 200 rounds).
+region left, and the fabric held 0 queue pairs in every state (the line's pairing read 40 until the reading reaped the
+bridges it starts itself; 0 in 3 of 3 after). The one-way hop's median read 31 us on the line of 4 and 76 us on the torus of 6 (`hop`, 200 rounds).
 
 Not yet read on TB5 hardware, and read the next time the pair runs:
 - whether Apple's provider accepts the move of a queue pair from the error state to reset and INIT, on a link made

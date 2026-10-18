@@ -45,7 +45,8 @@ The pair's documents state `keepalive_us` 5; the pair's and the Studios' state `
 10,000,000; the examples state `hello_us` alone.
 
 The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
-when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
+when the device comes up, before any queue pair exists, and never deregisters it: the kernel reclaims it at the bridge's
+exit (design/RDMA-KERNEL-RECOVERY.md). Each device
 checks the window against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a window of more
 extents than that device registers is refused for that port, logged with the extent, its bytes, the errno and the
 extents the device holds, and the port turns again at its next memory-pressure change or link event, keeping its extents
