@@ -80,8 +80,9 @@ its keepalive frames, taken as the port is found (`#keepalive`), and the map's p
 
 The map is the bridge's table of records, one a node (`struct mesh_record`): its node number and name, the record's
 sequence (which orders a node's records, `#records`), its bridge's window in bytes, the node's memory in bytes and
-hardware model (`hw.memsize`, `hw.model`), its ports by index, each port's peer, phase, code, bandwidth, pairings and
-the queue pairs its device can use (`max_pairs`: its max_qp less one), and its health (mesh-plan.h `struct
+hardware model (`hw.memsize`, `hw.model`), its ports by index, each port's peer, phase, code, bandwidth, pairings, the
+queue pairs its device can use (`max_pairs`: its max_qp less one), and its link's queue pairs and leases (`pairs`,
+`leases`, set at the link's pairing, which floods a new record, and 0 at its loss), and its health (mesh-plan.h `struct
 mesh_health`, design/recovery.md#diagnosis): every node's window and model are in every bridge's map, read where the
 records are (`#records`). Its `map_nodes` records lie at `map_off` in arena pages the bridge leases for itself and
 leases again larger as the mesh grows (`mesh_records`), so no node count caps it. The map serial (`map`) is the
@@ -447,8 +448,8 @@ The agreement returns 0, or on every member alike the plan's refusal: EINVAL, EH
 ECONNRESET where a member's meeting was cut short, ECANCELED where the member's own slot retired. It waits on its
 sockets alone, with no bound; `mesh_transfers_interrupt` from another thread ends the wait (libnccl-mesh's revoke
 retires the session's slot, then interrupts it). The relay channels it opened are kept in the program's context until
-`mesh_detach` (`#relays`). A member whose program binds no destination returns 0 without meeting, so the others'
-meeting waits for it until their interrupt.
+`mesh_detach` (`#relays`). Every member of several meets, whether or not its program binds a destination; a lone
+member (`n` 1) that binds none returns 0 at once.
 
 ## relays
 

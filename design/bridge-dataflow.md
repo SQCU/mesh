@@ -12,7 +12,8 @@ path MTU): a request of `n` bytes is `ceil(n / 4096)` frames.
 
 In one paragraph: the bridge registers its window once on every port's device; at a link's pairing it makes the link's
 two completion queues and its queue pairs once (pair 0 the keepalive's, pairs 1 and up the link's leases) and keeps
-them for the link's life, making one again only where its holder lets go of it or fails; a program's members agree
+them for the link's life, making one again in place (reset, never destroyed while the link is up) only where its
+holder lets go of it or fails; a program's members agree
 which leases each of their transfers rides, and through which relays, at the bridge of the first member; the bridge
 compiles each started program's SEND chains and receive rings onto those leases, and each port's two progress threads
 spin over the link's two completion queues, posting what the clients release and storing what lands.
@@ -86,8 +87,9 @@ a port only where its link table entry is `MESH_PAIRED` with `leases` > 0.
 **The port table** (`struct mesh_link_info`, 8 entries, bridge-written): `peer` (the paired node, 0 none) and `phase`
 (`MESH_STOPPED`, `MESH_PAIRING`, `MESH_PAIRED`) and `code` (the last stop's) by `link_set`; `bandwidth`, `peer_port`
 (the index the peer gave the cable) and `pairings` (one more at each HELLO heard on the control socket) by `port_heard`;
-`max_pairs` by `port_opened`; `leases` (the link's pair count less one) by `pairs_heard`, 0 by `port_lost`. A change of
-peer or phase is a new record (`record_changed`). `phase` is `MESH_PAIRED` from the peer's HELLO on the control socket;
+`max_pairs` by `port_opened`; `pairs` (the link's pair count) and `leases` (that count less one) by `pairs_heard`, 0
+by `port_lost`. A change of peer or phase is a new record (`record_changed`), and so is the link's pairing, so the
+flooded record carries its lease count. `phase` is `MESH_PAIRED` from the peer's HELLO on the control socket;
 the leases exist from its PAIRS (§2).
 
 **A client slot** (`mesh.h struct mesh_client`, 64 slots):
@@ -139,18 +141,19 @@ is the bridge's own).
 
 | object | per | made | destroyed | owner |
 |---|---|---|---|---|
-| context, PD | port (its device) | `mesh-verbs.h device_up` on the port's queue (`port_turn`), only while the port holds no queue pair | `down_device`: a retiring port's turn (its link off or interface detached, or its device failed with its link active), and the stop (`dispatch_sync` on the port's queue) | `port.device` |
+| context, PD | port (its device) | `mesh-verbs.h device_up` on the port's queue (`port_turn`), only while the port holds no queue pair | `down_device`: a retiring port's turn (its link off or interface detached, its device failed with its link active, or a verbs call refused while a pair was made, made again in place or connected: `port_lost(…, 1)`), and the stop (`dispatch_sync` on the port's queue) | `port.device` |
 | MRs | device: the window in 1 GiB extents (`MESH_REGION`), `IBV_ACCESS_LOCAL_WRITE` only | `device_up`, before any queue pair exists, checked against `max_mr` (`EFBIG`); a refused extent keeps the ones registered; `device_up` stops between extents at `stop` | `down_device` | `device.regions[]` |
 | the link's two CQs: `sent` (SEND completions) and `received` (receive completions) | link | `link_make` at the peer's HELLO on the control socket (`port_heard`): `min(n * frame_capacity, max_cqe)` entries each, n the link's pairs | `link_unmake`: the link's loss and the stop | `port.sent`, `port.received` |
 | pair 0, the keepalive's UC QP | link | `link_make` (`pair_new`: created, INIT); joined at the peer's PAIRS (`pair_join`: RTR, RTS, its 16 receive slots posted) | `link_unmake` | `port.pair[0]` |
-| pairs 1 to n − 1, the leases' UC QPs | link | `link_make`; made again, its `round` one more, where its holder lets go (`path_release`), where the peer's newer making is heard and no program holds it, or where it failed with none holding it (`lease_remake`) | `pair_new` before each making again; `link_unmake` | `port.pair[k]`; `pair.path` while a program holds lease k − 1 |
+| pairs 1 to n − 1, the leases' UC QPs | link | `link_make`; made again in place (`pair_new`, mesh-verbs.h `pair_reset`: ERR, RESET, INIT, its number kept, its `round` one more) where its holder lets go (`path_release`), where the peer's newer making is heard and no program holds it, or where it failed with none holding it (`lease_remake`) | `link_unmake` alone: never while the link is up | `port.pair[k]`; `pair.path` while a program holds lease k − 1 |
 
 n is `min(max_pairs, LINK_PAIRS = 17)` at this end, and the link uses the fewer of its two ends' counts (`pairs_heard`):
 a TB5 device's `max_qp` 11 is `max_pairs` 10 (one held back: RDMA-FIRST.md), so a TB5 link is 10 queue pairs, its
 keepalive's and 9 leases, as a loopverbs link is. Every queue pair is `IBV_QPT_UC` (`pair_make`) on the link's two CQs,
 its send and receive capacities `frame_capacity` = `min(max_qp_wr, QD = 4095)` (less than `max_cqe`), one SGE, path MTU
 4096, a GRH with hop limit 1 and the port's GID (`device_gid` takes the first non-empty entry), the peer's LID and GID
-from its HELLO on the control socket, a random 24-bit PSN at each making. Each pair's `share` of a CQ is its entries
+from its HELLO on the control socket, a random 24-bit PSN at each making (a making again in place keeps the queue pair's
+number and draws a new PSN). Each pair's `share` of a CQ is its entries
 over n; a pair's SEND gate is `min(sends, share)` frames and its receive ring's capacity `min(receives, share)` frames,
 so neither CQ overflows. Only `IBV_WR_SEND` and `post_recv` are posted, each with one SGE, every SEND signaled. There is
 no RDMA WRITE or READ: TB5 offers SEND and RECEIVE alone (TN3205).
@@ -158,10 +161,11 @@ no RDMA WRITE or READ: TB5 offers SEND and RECEIVE alone (TN3205).
 A work request's `wr_id` is `round (16 bits) << 48 | pair index (8 bits) << 40 | low (40 bits)` (`wr_id`): the low bits
 are a receive record's index in its ring, a lease SEND's gate position (frames posted, cumulative), a keepalive receive
 slot, or a keepalive SEND's position. A completion whose pair index is past the link's pairs, or whose round is not its
-pair's current one, is skipped (`receive_pass`, `send_pass`): it is a making's that has been destroyed.
+pair's current one, is skipped (`receive_pass`, `send_pass`): it is an earlier making's, among them the flushed
+completions of a pair's move to the error state as it was made again in place.
 
 **The port's guard** (`guard_raise`, `guard_lower`). Every change of a device's queue pairs or CQs (made, connected,
-made again, destroyed) and every change of what holds a pair (a path attached or released) runs on the event loop
+made again in place, destroyed: a link's pairs are destroyed only all together, at its loss or the stop) and every change of what holds a pair (a path attached or released) runs on the event loop
 with the port's `guard` raised: `guard` is made odd and `bell` rung, and `guard_raise` returns once each running
 progress thread has told, in `quiet[side]`, that it holds at that guard value (or returned at `stop`: `UINT64_MAX`). The
 threads pass again once `guard_lower` makes it even and rings `bell`. So no queue pair of a device is posted on or
@@ -226,16 +230,19 @@ lost (`port_lost`) is `wanted` again, so a link that had paired says HELLO again
 
 ### PAIRS: a link's queue pairs, rounds, codes and `sent`
 
-`link_make` makes the link's CQs and its n pairs (`pair_new`: each its `round` one more, a new PSN, its gate
-`min(sends, share)`, its counts zero) under the guard and tells the peer every pair (`pairs_tell(LINK_PAIRS)`): a PAIRS
+`link_make` makes the link's CQs and its n pairs (`pair_new`: `pair_make` creates each and moves it to INIT, its
+`round` one more, a new PSN, its gate `min(sends, share)`, its counts zero; for a pair that exists, `pair_new` resets it
+in place instead, `pair_reset`: ERR, RESET, INIT, its number kept) under the guard and tells the peer every pair (`pairs_tell(LINK_PAIRS)`): a PAIRS
 message, `count` = n, and an entry a pair (`struct pairs_entry`: `index`, `qpn`, `psn`, `round`, `code`, `sent`).
 
 `pairs_heard`, at the link's pairing (`port->count` 0): the link's count is the fewer of the two ends' n; each pair
 below it joined to the peer's of its index (`pair_join`: RTR to the peer's `qpn` and `psn`, RTS, the keepalive pair's
 16 receive slots posted) under the guard; the lease words below the count free (0), the rest `MESH_LEASE_DOWN`; the
 port table's `leases`; the port's two progress threads started (once for the bridge's life); `up` = 1 and `bell` rung;
-logged "node N paired: n queue pairs, n − 1 leases, `share` frames a pair". A count under 2, or a join refused, is the
-link's loss.
+the region's link record its `pairs` (n) and `leases`, and the node's record flooded at once (`record_changed`); logged
+"node N paired: n queue pairs, n − 1 leases, `share` frames a pair". A count under 2 is the link's loss (ENOSPC); a join
+refused is the link's loss with the port's device retired (`port_lost(…, 1)`), as is a pair's making or making again
+refused.
 
 After the pairing, PAIRS tells one pair made again (`pairs_tell(k, code, sent)`), from `path_release` (its holder let
 go), `lease_remake` (the peer's newer making answered, or a failed pair with no holder) and `link_make`. For each entry:
@@ -248,12 +255,12 @@ go), `lease_remake` (the peer's newer making answered, or a failed pair with no 
 - a newer round where a program here holds the pair, with `code` 0: the peer's holder ended in order; `peer_gone` set
   and `peer_sent` = `sent`, the SENDs that holder completed on the pair's making before; once this pair's ring has
   landed that many (`pairs_turn`), the program here lets go of the lease (`peer_released`, §3);
-- a newer round where nothing here holds the pair: this end's made again to the peer's round and told
+- a newer round where nothing here holds the pair: this end's made again in place to the peer's round and told
   (`lease_remake(k, 0)`), and the peer joins it as it hears that.
 
 A pair is joined only where the peer's last told making is this end's `round` (`pair_join`), so the two ends of a lease
-always run the same making, and each end makes its pair again only at its own release or failure, or to follow the
-peer's.
+always run the same making, and each end makes its pair again (in place) only at its own release or failure, or to
+follow the peer's; until then a pair made again waits in INIT and takes nothing.
 
 ### Messages on a control socket
 
@@ -277,7 +284,7 @@ Any other kind is `EPROTO` and loses the link. A link's pair 0 carries `KEEPALIV
 
 Each node's record (`struct mesh_record`: node, name, sequence, window, memory, model, its ports' table entries, its
 health) is built from the port table (`record_changed`, its sequence one more) at each change of a port's peer or
-phase, a rename, an urgent health change, and the configuration's `health` interval; it is put in the map and sent on
+phase, a link's pairing (its `pairs` and `leases` set), a rename, an urgent health change, and the configuration's `health` interval; it is put in the map and sent on
 every greeted port. `record_heard` (RFC 2328 s13): this node's own record from an earlier start of its bridge, newer
 than its own, moves its sequence past it; another node's record no newer than the newest known of it is dropped (the
 newer one sent back where this end's is newer; a record the map pruned put back only where a paired path reaches it);
@@ -359,7 +366,8 @@ a link never ends the channel twice.
 
 After `mesh_transfers_prepare` (and `_cyclic`) and before `mesh_transfers_start`, each member of an execution calls
 `mesh_transfers_agree(context, nodes, n, rank)` with the same `nodes` list (bridge node numbers; this node at `rank`).
-A program that binds no transfer returns 0 at once.
+Every member of several meets, whether or not its program binds a transfer; a lone member (`n` 1) that binds none
+returns 0 at once.
 
 1. **Claims.** For every port its bridge reports `MESH_PAIRED` with leases, the member claims every free lease word
    (compare-exchange 0 → its owner) and reports the port: its index, peer, `peer_port`, lease count and the mask of the
@@ -393,7 +401,8 @@ The client sets `configured` (compare-exchange 0 → owner), notifies `hdr.contr
 loop's turn, and never waits on a peer:
 
 1. A `struct program` (owner, relay or not, `RUNNING`, invocations, cyclic) and a path a destination with transfers
-   (`port` = `tx[d].port − 1`), with a ledger where the configuration keeps them.
+   (`port` = `tx[d].port − 1`, and `cancel` = `tx[d].cancel`, the cancellation record `words_cancel` reads whoever
+   holds the slot later), with a ledger where the configuration keeps them.
 2. Refused at once as a value, every destination's status `MESH_STOPPED` with the code, domain 1, naming this node:
    `EINVAL` (no node or this node; a transfer of more slots than the program's or past `MESH_QUEUES`; a chunk outside the
    window; a lease index 0 or past the link's pairs), `ENETDOWN` (its port not up), `ENETRESET` (a lease word not this
@@ -470,14 +479,15 @@ The root's `mesh_detach` writes the byte `e` on each relay channel where its own
 
 | end | starts at | the bridge | the peer and the far end |
 |---|---|---|---|
-| **in order** | `mesh_detach` (`ncclCommDestroy` after its GPU work finished): `owner \| MESH_RETIRING \| MESH_ORDERLY` | `ENDING`, every path `closing`; the send thread sets a ring's `drained` bit once its stream has no released cell left to post and its pair's SENDs all completed (`posted == retired`), or the peer let go of the lease; with every ring drained, `path_release(code 0)`: each lease pair made again and told with code 0 and `sent` = its SEND completions on the making before, its lease word freed; with no path attached, "ended in order" and the slot vacated. The landing words are not cancelled; the client waits on none of this | each peer holding the lease: `peer_gone`; once its ring has landed `sent` (`pairs_turn`), `peer_released`: its status toward that destination `MESH_STOPPED`, `ECONNRESET`, domain 4, naming the far node (where its client still owns the slot), its words kept; the lease let go (`path_release(code 0, only that pair)`) and made again; a relay passes it on (above) |
+| **in order** | `mesh_detach` (`ncclCommDestroy` after its GPU work finished): `owner \| MESH_RETIRING \| MESH_ORDERLY` | `ENDING`, every path `closing`; the send thread sets a ring's `drained` bit once its stream has no released cell left to post and its pair's SENDs all completed (`posted == retired`), or the peer let go of the lease; with every ring drained, `path_release(code 0)`: each lease pair made again in place and told with code 0 and `sent` = its SEND completions on the making before, its lease word freed; with no path attached, "ended in order" and the slot vacated. The landing words are not cancelled; the client waits on none of this | each peer holding the lease: `peer_gone`; once its ring has landed `sent` (`pairs_turn`), `peer_released`: its status toward that destination `MESH_STOPPED`, `ECONNRESET`, domain 4, naming the far node (where its client still owns the slot), its words kept; the lease let go (`path_release(code 0, only that pair)`) and made again in place; a relay passes it on (above) |
 | **peer's in-order end** | a PAIRS entry of a newer round with code 0 on a held lease | as the right column | — |
-| **abort** | `mesh_retire` (a revoke, `ncclMeshCommCancel`, `ncclCommAbort`, the client's process exit seen by the bridge) | `program_fail(ECANCELED, domain 4, this node)` and freed; each lease made again and told `ECANCELED` | each peer holding the lease fails as a value with that code (below) |
-| **failure** | a pair's error (`pairs_turn`: a lease's, domain 2, this node); a code told on a held lease (domain 4, the peer); the link's loss (domain 4, the peer; `ECONNRESET` where it parted); a relay's channel cut (above) | `program_fail`: every path's leases let go under the guard, its words past their landed counts cancelled where the client still owns the slot, each lease made again (while its link is up) and told with the code; destinations never attached their words cancelled; every destination's status the failure | each peer holding one of those leases fails alike, its own other leases told the code: the failure runs along every member and relay the program's leases touch |
+| **abort** | `mesh_retire` (a revoke, `ncclMeshCommCancel`, `ncclCommAbort`, the client's process exit seen by the bridge) | `program_fail(ECANCELED, domain 4, this node)` and freed: its words cancelled though its client gave up the slot first, so the revoking process's own waits end; each lease made again in place and told `ECANCELED` | each peer holding the lease fails as a value with that code (below) |
+| **failure** | a pair's error (`pairs_turn`: a lease's, domain 2, this node); a code told on a held lease (domain 4, the peer); the link's loss (domain 4, the peer; `ECONNRESET` where it parted); a relay's channel cut (above) | `program_fail`: every path's leases let go under the guard, its words past their landed counts cancelled whether or not the client still owns the slot, each lease made again in place (while its link is up) and told with the code; destinations never attached their words cancelled (by the path's `cancel`); every destination's status the failure where the client still owns the slot | each peer holding one of those leases fails alike, its own other leases told the code: the failure runs along every member and relay the program's leases touch |
 | **link loss** | `port_lost` | §4 | the peer's own loss of the same link (its socket's end, its FAREWELL) |
 
-A lease pair that fails with no program on it is made again and told with the code (`lease_remake(code)`); the peer's
-holder, if any, fails by it. The keepalive pair's failure, or a CQ's, is the link's loss.
+A lease pair that fails with no program on it is made again in place and told with the code (`lease_remake(code)`); the
+peer's holder, if any, fails by it. The keepalive pair's failure, or a CQ's, is the link's loss; a verbs call refused
+while a pair is made again in place or joined is the link's loss with the port's device retired (`port_lost(…, 1)`).
 
 ## 4. Failure, cancellation and release
 
@@ -485,19 +495,21 @@ holder, if any, fails by it. The keepalive pair's failure, or a CQ's, is the lin
 
 A landing word holds 0 (not landed), 1 + cycle (landed in that cycle), or `~0` (cancelled). Writers of `~0`:
 
-- `ring_cancel` (in `path_release` with `cancel`, from `program_fail` where the client still owns the slot): for each
+- `ring_cancel` (in `path_release` with `cancel`, from every `program_fail`, whether or not the client still owns the
+  slot: the program's rows stay its own until it is freed): for each
   ring, every record from its first not landed through the program's invocations less the ring's depth (a cyclic
   program's readers keep within its depth of the landings), every one not landed in a one-pass program; never a
   relay's `release` cell or a record's own `sink`. Landed words stay.
-- `words_cancel` (from `program_fail`, a destination whose rings were never attached): every word of its range that is
-  0, or, in a cyclic program, any word not already `~0`.
+- `words_cancel` (from `program_fail`, a destination whose rings were never attached, by the cancellation record the
+  path saved at the take): every word of its range that is 0, or, in a cyclic program, any word not already `~0`.
 - `mesh-dataflow.c mesh_words_cancel` (the client's watcher at its bridge's exit): the same rule over each of the
   process's slots' destinations.
 
 A cancelled word ends a wait on it: the host path's polls fail the session (`session_watch`, `run`), and a GPU wait
 that reads `~0` records it in its violation words, which end its program's later waits (nccl-mesh-metal.m
-`mesh_step_check`). A program failed after its client gave up its slot (an abort: `mesh_retire` vacates it first) has
-none of its words cancelled by the bridge.
+`mesh_step_check`). A program failed after its client gave up its slot (an abort: `mesh_retire` vacates it first) has its
+words cancelled all the same, so a revoke or a cancel ends its process's own waits, a GPU walk's among them; only its
+statuses, which a new owner of the slot may hold, are left alone.
 
 ### Statuses
 
@@ -514,12 +526,12 @@ naming the far node, a relay's cut naming this node). The client's watcher write
 | link off, interface detached (M24) | `network_heard` | `port_lost(ENETDOWN, retire)`: programs on the link fail; at the port's next turn its device is retired and opened again, which succeeds once its link is on again (`KEV_DL_LINK_ON`, `KEV_DL_IF_ATTACHED` turn it) | the peer's own link-off |
 | control socket's end, a send failing, a protocol error | `control_heard`, `port_flush`, `port_heard` | `port_lost(code)` (`ENETRESET` at the socket's end, `ECONNRESET` after a FAREWELL; a read's or send's errno; `EPROTO`) | the peer's socket end |
 | peer's FAREWELL | `port_heard` | `port_lost(ECONNRESET)`, logged "parted" with the reason | — |
-| an error completion or a refused post on a lease | the progress thread (`pair_failed`), then `pairs_turn` | the holder's `program_fail(status or errno, domain 2)`; with no holder, the lease made again with the code | the code on the lease's PAIRS fails the peer's holder |
+| an error completion or a refused post on a lease | the progress thread (`pair_failed`), then `pairs_turn` | the holder's `program_fail(status or errno, domain 2)`; with no holder, the lease made again in place with the code | the code on the lease's PAIRS fails the peer's holder |
 | an error on pair 0, or a CQ poll failing | as above | `port_lost(code)` | the peer's socket end at the loss |
 | a code on a PAIRS entry for a held lease | `pairs_heard` | `program_fail(code, domain 4, the peer)` | the code passed on along this program's other leases |
 | the client's process exit | `EVFILT_PROC` | `mesh_retire`, then `clients_turn`: `program_fail(ECANCELED)` | by the code |
-| a revoke, `ncclMeshCommCancel`, `ncclCommAbort` | the client (`session_retire`: `mesh_retire`, `mesh_transfers_interrupt`) | as above; an agreement in progress ends (`ECANCELED`, or its descriptor shut) | by the code |
-| the peer's program ends in order | PAIRS code 0 with `sent` | status `ECONNRESET` naming the far node once `sent` landed; the lease made again | — |
+| a revoke, `ncclMeshCommCancel`, `ncclCommAbort` | the client (`session_retire`: `mesh_retire`, `mesh_transfers_interrupt`) | as above, its words cancelled; an agreement in progress ends (`ECANCELED`, or its descriptor shut) | by the code |
+| the peer's program ends in order | PAIRS code 0 with `sent` | status `ECONNRESET` naming the far node once `sent` landed; the lease made again in place; an `ncclMeshCommAgree` waiting on that peer ends (`ncclRemoteError`) | — |
 | a relay channel cut | `relay_drop` | the relay's programs `ECONNRESET` | by the code |
 | the bridge's exit | the client's watcher | words cancelled, statuses `ESRCH`, waits woken | the bridge's FAREWELL, or its socket's end |
 
@@ -527,16 +539,16 @@ naming the far node, a relay's cut naming this node). The client's watcher write
 
 1. The control socket closed; logged ("closed toward node N: this bridge is stopping", "node N parted, its bridge
    stopping (reason)", "node N lost: code").
-2. `up` = 0; every lease word `MESH_LEASE_DOWN`; the port table's `leases` 0.
+2. `up` = 0; every lease word `MESH_LEASE_DOWN`; the port table's `leases` and `pairs` 0.
 3. Every program with a path on the port fails as a value (`ECONNRESET` where the peer parted, else the code; domain 4;
    naming the peer). Its paths on this port let go of their pairs without making them again (the link is down) and
-   cancel their words where the client owns the slot; its paths on other ports make theirs again and tell their peers
-   the code.
-4. `link_unmake` under the guard: every pair moved to the error state and destroyed, both CQs destroyed, the counts
-   zero (a refused destruction logged, its handle let go).
+   cancel their words, whether or not the client still owns the slot; its paths on other ports make theirs again in
+   place and tell their peers the code.
+4. `link_unmake` under the guard: every pair of the link, all together, moved to the error state and destroyed, both
+   CQs destroyed, the counts zero (a refused destruction logged, its handle let go).
 5. Every channel riding the port ends with the code (`requests_lost`).
 6. The port `wanted` (a link that had paired, or a retirement), its socket state cleared, `retiring` where the port
-   itself went away; the port table `MESH_PAIRING`, or `MESH_STOPPED` where retiring (a new record).
+   itself went away or a verbs call refused a pair's making, making again or joining (`port_lost(…, 1)`); the port table `MESH_PAIRING`, or `MESH_STOPPED` where retiring (a new record).
 
 ### The client's watch of its bridge
 
@@ -609,7 +621,7 @@ MiB; `nccl-mesh.c setting`) sets the large slot through `mesh_wire_of`.
 
 | part | functions |
 |---|---|
-| verbs (mesh-verbs.h) | `device_gid`, `wire_span`, `wire_map`, `down_device`, `say`, `device_up`, `link_cqs`, `pair_make`, `pair_connect`, `pair_destroy`, `port_bandwidth` |
+| verbs (mesh-verbs.h) | `device_gid`, `wire_span`, `wire_map`, `down_device`, `say`, `device_up`, `link_cqs`, `pair_make`, `pair_reset`, `pair_connect`, `pair_destroy`, `port_bandwidth` |
 | identifiers and wakes | `wr_id`, `wr_index`, `wr_round`, `now_ns`, `bell_ring`, `wake` |
 | health and diagnosis | `available_now`, `farewell_text`, `sysctl_text`, `power_read`, `health_sample`, `reset_read`, `health_init`, `health_text`, `known_at`, `record_newer` |
 | ledger | `ledger_seen`, `ledger_posted`, `ledger_landed`, `ledger_cell_order`, `ledger_free`, `ledger_cut` |
@@ -675,11 +687,11 @@ before it waits on `bell`, `device_up` between extents, `control_watch` after ea
 1. logs "stopping (reason)";
 2. for each port, rings `bell` and joins its two threads;
 3. ends every channel with `ESHUTDOWN` (`requests_stop`; a relay channel whose requester said it ends in order leaves
-   its programs to the ports' loss below, the others fail them with `ECONNRESET`, their leases made again and their
-   peers told the code while the links are up), and closes the asking and service sockets;
+   its programs to the ports' loss below, the others fail them with `ECONNRESET`, their leases made again in place and
+   their peers told the code while the links are up), and closes the asking and service sockets;
 4. for each port, says FAREWELL with the reason and loses the link (`port_lost(ESHUTDOWN, retire)`: every program on it
-   fails as a value, its words cancelled where owned; every pair moved to the error state and destroyed, the CQs
-   destroyed);
+   fails as a value, its words cancelled; every pair of the link moved to the error state and destroyed, all together,
+   the CQs destroyed);
 5. frees every program; stores `bridge_pid` = 0; notifies `hdr.control` and joins the control watch;
 6. retires each port's device on its queue (`dispatch_sync` of `down_device`): registrations, PD, context;
 7. logs "stopped: N queue pairs destroyed, P ports' devices closed", unmaps the alias and the region and returns 0; the
@@ -718,9 +730,9 @@ fabric's queue pairs held; from the SIGTERM to the last exit 0.9-3.0 ms on the l
 | `comm->opening` (`pthread_cond_wait` on `opened`: ncclCommFinalize, ncclCommDestroy, a group's `session_ensure`) | the opening thread's open ending, done or failed | the open's own waits (the agreement, the start, `session_agree`), which end as their rows say |
 | `session_lock` | the group of any communicator that holds it while it waits on its peers ending | that group's waits; `ncclMeshCommCancel` and `ncclCommRevoke` take only the communicator's own `guard`, so they reach a group waiting there at once |
 | the agreement and the start (`session_open`, with `session_lock` released and `opening` the session) | as in the client's table | as there; a revoke or cancel retires the slot and shuts the agreement's descriptor (`session_retire`) |
-| `session_agree`, `ncclMeshCommAgree`: each channel's position 0 (or `end`) polled, yielding | the peer's landing; its cancel (`~0`: a link on the way lost, the peer's program failed and its code told, this bridge's exit through the watcher); a revoke, read each turn | the live peer, its death an event; or the caller |
+| `session_agree`, `ncclMeshCommAgree`: each channel's position 0 (or `end`) polled, yielding | the peer's landing; its cancel (`~0`: a link on the way lost, the peer's program failed and its code told, this bridge's exit through the watcher); a revoke, read each turn; for `ncclMeshCommAgree`, the peer's destination status `MESH_STOPPED` with its position not landed (`peer_stopped`: its program ended in order or failed while it was held) | the live peer, its death or its end an event; or the caller |
 | `run` (the host path): each channel's landing words polled | every position consumed and sent; a cancel (`~0`); the session's failure (`failed`, set by a cancel, a revoke or a cancel call) | as the agreement |
-| the walk's GPU waits (`mesh_step_wait`, a spin in the kernel) and the host executor's (`step_wait`, yielding after 256 reads) | the word reaching 1 + the cycle; `~0`; the program's violation word [2] set (an earlier wait's cancel, which halts the program) | as the agreement, for a program whose slot its client still owns. A revoke or cancel vacates the slot before the bridge fails the program, so the bridge cancels none of that session's words: a GPU wait of a revoked or cancelled session ends only at a landing (recovery.md, Risks) |
+| the walk's GPU waits (`mesh_step_wait`, a spin in the kernel) and the host executor's (`step_wait`, yielding after 256 reads) | the word reaching 1 + the cycle; `~0`; the program's violation word [2] set (an earlier wait's cancel, which halts the program) | as the agreement. A revoke or cancel vacates the slot before the bridge fails the program, and the bridge cancels the program's words all the same (`program_fail`, by its paths' own records and saved cancellation records), so a revoked or cancelled session's GPU waits end there |
 | `drain` (`metal_wait` on `finished`: `waitUntilSignaledValue` with no timeout; the host executor's polls, yielding) | every encoded program finished | each program's waits ending (the row above), then the platform's completion of its command buffer |
 | the bootstrap (`ncclCommInitRank`): the root's `accept` of each other rank, then the reports read; a rank's `connect` to the root, then its read | each rank's connect and report; a connected rank's death is its socket's end (`ECONNRESET`) | the caller's launch of every rank (as NCCL's own bootstrap: a rank never started leaves the root's accept waiting); the connect: the platform (taken by the root's listener backlog, which `ncclGetUniqueId` opens before the ranks start where it is called in their parent, or refused at once where none listens) |
 
@@ -730,7 +742,8 @@ fabric's queue pairs held; from the SIGTERM to the last exit 0.9-3.0 ms on the l
 |---|---|---|
 | `up`: each bridge's map serial (`mesh_map_wait`) or its start (`mesh_bridge_wait`) until every map holds N nodes and its cables are paired | each pairing's record, each start | the bridges it started; one that exits before its region leaves it waiting on its start |
 | `relay`: a pipe's byte, the children's `waitpid`, a receiver's landing words polled (yielding) | the byte or the writer's exit (end of file); each child's exit; a landing or `~0` | the children's own waits |
-| `nccl`, `destroy`, `kill`, `hop`, `share`: each rank's byte on its pipe, `waitpid` | each rank's result or exit | the ranks' library waits (above) |
+| `nccl`, `destroy`, `kill`, `hop`, `share`, `revoke`: each rank's byte on its pipe, `waitpid` | each rank's result or exit | the ranks' library waits (above) |
+| `revoke`: the revoking thread's 100 ms sleep before its revoke, then up to 10 s of 100 ms sleeps for its call's return; the never-calling rank's read of a pipe | the sleeps' ends (the one clock in the readings: it places the revoke inside the wait and names a wait the revoke does not end `hung`); the pipe's end once every other rank exited | the platform |
 | `destroy`'s `bridges_idle`: each bridge's lease words and client slots read, yielding, until every lease is free or down and every slot but the bridge's own vacant | every program ended in order | each program's end in order (the bridge's table) |
 | `kill`: `EVFILT_PROC` on the victim's bridge; the victim rank's `pause` | the bridge's exit (`SIGTERM`, or its binary replaced by rename: either stops it at once); the victim's `SIGKILL` | the platform; the driver sends both |
 | `sigterm`: the workers' bytes on a pipe, then `EVFILT_PROC NOTE_EXITSTATUS` on each bridge after `SIGTERM`, then `waitpid` of the workers | each worker's first result; each bridge's exit; each worker's exit (its calls fail as values once its bridge stops) | the platform; the bridges' stop (above) |
@@ -750,11 +763,15 @@ cycle-0 defect (c5a4674), which "nothing at two nodes can show". The deployed `m
 
 **loopverbs** (`rdma/loopverbs.c`): the ibverbs calls the bridge makes, over a shared segment (its name the loop
 configuration's `fabric`): a byte ring a queue pair, its number the ring's, held while the queue pair lives (each making
-moves the ring's generation; a ring is taken by compare-exchange of its `used` word, so numbers are reused only once
-free). A SEND is copied into its destination's ring and completes as it is delivered (one to a queue pair gone or made
-again is dropped and completes, as UC drops it); the owner's polls drain its ring into its receives in the order
-posted, a SEND waiting for its receive as TB5's credit flow control holds it, `IBV_WC_LOC_LEN_ERR` for a SEND longer
-than its receive; a move to `IBV_QPS_ERR` flushes the posted receives and SENDs (`IBV_WC_WR_FLUSH_ERR`); a device
+and each move to `IBV_QPS_RESET` moves the ring's generation; a ring is taken by compare-exchange of its `used` word, so
+numbers are reused only once free). A SEND is copied into its destination's ring, its record's length word carrying the
+ring generation its sender connected to, and completes as it is delivered (one to a queue pair gone, made again or
+reset since its sender connected is dropped and completes, as UC drops it); the owner's polls drain its ring into its
+receives in the order posted, dropping a record of an older generation (delivered before the pair's reset), a SEND
+waiting for its receive as TB5's credit flow control holds it, `IBV_WC_LOC_LEN_ERR` for a SEND longer than its
+receive; a move to `IBV_QPS_ERR` flushes the posted receives and SENDs (`IBV_WC_WR_FLUSH_ERR`); a move to
+`IBV_QPS_RESET` empties the pair's queues and disconnects it until its next RTR, which records the peer ring's
+generation again; a device
 reports `max_qp` 11 (TB5's: 10 queue pairs usable, so a loop link is 10 pairs, 9 leases), `max_qp_wr` 4,095, `max_cqe`
 65,535 and `max_mr` 1,024; a SEND at most half a ring (rings of 8 MiB), the port's `max_msg_sz`; one link-local GID a
 port; devices `rdma_loop0` to `rdma_loop63`. Its polls never sleep: a completion queue that stayed empty more than 8
@@ -787,7 +804,7 @@ nccl-mesh.c's own (`nccl_mesh_combine`, `nccl_mesh_premultiply`, `nccl_mesh_trun
 
 **The driver** (`rdma/.build/host/mesh-loop`, rdma/mesh-loop.c; metal-microbench b9dbc43^ tools/nccl_demo.py `loop`'s
 part that needs no Python). Every wait of the driver is on an event (a map's serial, a bridge's start, a process's exit,
-a landing word, a pipe), none bounded by a clock:
+a landing word, a pipe), none bounded by a clock but `revoke`'s, which places its revoke inside the wait:
 - `mesh-loop up FAMILY N WINDOW_MIB DIRECTORY`: a line, ring, star, complete map or a torus of two rows, of N (2 to 8)
   nodes, every cable two loopverbs devices and two free loopback ports; each node's configuration written, its bridge
   started from its own copy of the loop bridge's binary (DIRECTORY/node<i>.bridge, staged and renamed into place;
@@ -820,9 +837,15 @@ a landing word, a pipe), none bounded by a clock:
 - `mesh-loop share DIRECTORY COUNT`: two communicators over nodes 0 and 1 at once, each its own processes, their
   sessions opened one after the other, then both running the NCCL calls of `nccl` (COUNT float32) at once: both hold
   leases of the one cable.
+- `mesh-loop revoke DIRECTORY COUNT host|walk`: N ranks; the last makes its communicator and never calls, and each
+  other begins an all-reduce of COUNT float32, which waits for the last rank's part, while another of its threads
+  revokes the communicator once the call has waited 100 ms (`ncclCommRevoke`, as metal-microbench's rank cancels a
+  call): the call returns an error and `ncclCommDestroy` returns, and the time from the revoke to the call's return is
+  read (a call not back 10 s after its revoke reads `hung`). Both paths' executors read the revoke themselves, so the
+  reading does not reach the bridge's cancel of an aborted program's words, which a GPU walk's waits need (§4).
 - `mesh-loop down DIRECTORY`: SIGTERM to every bridge and each exit awaited (`EVFILT_PROC`), the fabric unlinked.
 
-The ranks of `nccl`, `destroy`, `kill`, `sigterm` and `hop` meet at a unique id the driver makes before it forks them
+The ranks of `nccl`, `destroy`, `kill`, `sigterm`, `hop` and `revoke` meet at a unique id the driver makes before it forks them
 (`ncclGetUniqueId`: its root's listener opened in the driver and inherited, so every rank's connect meets it
 listening); `share`'s make their communicators with `ncclMeshCommInitRank`, as a rank makes its own.
 
@@ -840,6 +863,16 @@ time, no rank failed. `hop` on a line, 3,000 rounds, the median one-way time aga
 program's own queue pairs) in two alternating runs: on a line of 2, 15.3 and 12.7 us (122: 13.1 and 16.6); on a line
 of 4, 26.3 and 26.0 us (122: 14.9 and 13.0), where each of the four bridges' paired ports spins two progress threads
 on the one host's cores (12 threads for 3 cables) beside the two ranks.
+
+**Readings at mesh 0b330488** (every lease's pair made again in place, a refused verbs call retiring the device, an
+abort's words cancelled; the same tree, scratch-rewrite run15 to run17): the line of 4 and torus of 6 batteries as
+above, unchanged (the matrix 48 of 48 and 96 of 96 on each path, `destroy` 20 runs each with 0 cancelled and every
+program and relay ended in order, `kill`, `kill ... binary` and `kill ... bridge` as above); `sigterm` in all eight
+states on a line of 4 twice and a torus of 6 once, 24 of 24 clean, 0.9-5.0 ms; `share` 3 of 3; `revoke` on a line of
+3, three times on each path, 6 of 6 calls back 0.08-0.22 ms after their revoke and every `ncclCommDestroy` returned,
+the matrix exact after; a ledger cut on a line of 2 read by rdma/ledger.py, 10 crossings each way paired by name; `hop`
+on a line of 2 beside MESH_VERSION 122 back to back on a loaded host, 14.3-16.3 us against 15.4-20.0 us. Each bridge's
+stop logged 10 queue pairs destroyed a port: the link's, made once.
 
 **Reproduction targets** (800fe6bc^, its readings with the GPU walk on the host executor): the NCCL matrix on an 8-node
 line 2,346 of 2,346; line 8, shuffled ring 8, star 8 and torus 2x4 104 of 104 each; ring 5 with routes 46 of 46. The
