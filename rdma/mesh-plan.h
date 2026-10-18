@@ -252,6 +252,15 @@ uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int
 /* Each step's receive before it (by round, then the steps' order) of any bytes, -1 where none: a step's first piece
    waits until that receive is consumed, and so, by induction, every receive before it.  0, or ENOMEM. */
 int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before);
+/* A compiled program's advisories on a wire for an operand (design/collectives-dataflow.md#advisories): warnings only,
+   each a line "check: ..." handed to warn(arg, line), the check one of projection (each pair's SENDs against its
+   receives, and both ends' positions on each channel), priorities (each rank's steps by round, a round's SENDs first;
+   a SEND and its receive in one round), depth (an element wider than its slot; a step that waits on its own channel at
+   or past its first position), causality (the program's publications and consumptions under the wire's rule, without
+   timing: a cycle among them is a deadlock) and hazard (a receive that may write what a SEND of the same rank still
+   reads, or a SEND not ordered after a receive of what it reads).  It refuses nothing and changes nothing; the count
+   of warnings, UINT32_MAX where its room could not be had. */
+uint32_t mesh_program_advise(const struct mesh_program *,const struct mesh_wire *,struct mesh_operand,void (*warn)(void *,const char *),void *arg);
 /* The planner's rules' version: the trees, routes, compiles and wire above, and libnccl-mesh's table of programs made
    of them (nccl-mesh.c comm_routes: the caller's, or the communicator's configured forms, nccl.h ncclMeshCommForms,
    and then every collective along the caller's paths or the shortest-path trees, uncut); the library's session

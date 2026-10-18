@@ -471,6 +471,27 @@ stream's workspace, else the communicator's `merge` (grown, the replaced one kep
 | broadcast | runs down the root's trees |
 | reduce-scatter, all-gather | segment s up or down s's trees; non-roots of a reduce and every reduce-scatter work in scratch (`launch_metal`'s `in_place`) |
 
+### Advisories
+
+`mesh_program_advise(program, wire, operand, warn, arg)` (mesh-plan.h, mesh-collective.c) reads a compiled program's
+steps for an operand on a wire and hands each finding to `warn` as a line `check: ...`. It is advisory: it refuses
+nothing, changes nothing, and nothing calls it on a call's path. `make mesh-advise` builds `.build/mesh-advise`, which
+runs it over every collective `mesh_compile` makes on the loopback fabric's maps (the pair, line 4, ring 5, star 8,
+torus 6 and 8; shortest-path and packed trees; chunks 1 to 4; every root; both all-reduce forms; all or the even
+nodes contributing; four operands) and prints each program's findings and a summary.
+
+| Check | What it reads | Source |
+|---|---|---|
+| projection | rank r's i-th SEND to p against p's i-th receive from r, piece for piece (first, elements, element type and bytes); both ends' layout of each channel (`mesh_lay`), position for position, and its length: TN3205's equal frames at both ends | session types' projection [Honda, Yoshida & Carbone 2008]; synchronous dataflow's balance [Lee & Messerschmitt 1987] |
+| priorities | each rank's steps in (round, a round's SENDs first) order, and each SEND and its receive in one round: with projection clean, the program is deadlock-free by the priority argument | priorities [Dardha & Gay 2018], after [Caires & Pfenning 2010] |
+| depth | an element wider than its channel's slot (a position splits it); a step whose first position waits on its own channel's receive ending at or past that position (the publication rule leaves `lag` positions of slack) | n-synchronous bounded buffers [Cohen et al. 2006] |
+| causality | every rank's publications and consumptions of every channel's positions under libnccl-mesh's rule (`run`: position t published once the peer's t − lag is consumed; consumed in order once landed; a step's first position after the receive before it, `mesh_steps_before`, is consumed), a marked graph, sorted with no timing: an event that can never occur is a deadlock, reported with a cycle | an admissible schedule [Lee & Messerschmitt 1987]; Lustre's instantaneous-cycle rejection [Halbwachs et al. 1991] |
+| hazard | a receive after a SEND of the same rank into elements the SEND reads, with no order in the graph from the SEND's last position to the receive's first (a write after read); a SEND after a receive of what it reads, with none from the receive's last position to the SEND's first (a read after write) | — |
+
+The bound on a channel's outstanding positions (2 lag, the ring's slots) holds by the publication rule itself, which
+the causality graph encodes; it is not a property of a program. The checks read one call's program alone: a group's
+several calls on one channel (`lay`'s call order), counted all-to-alls and point-to-point calls are not read yet.
+
 ## 5. The life of one collective
 
 ### (a) Library form, host path: `ncclAllReduce(send, recv, n, type, op, comm, NULL)`

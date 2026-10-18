@@ -31,6 +31,13 @@ mesh-stream: .build/mesh-stream
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-stream.c $(LIBMESH)
 .PHONY: mesh-stream
+# design/collectives-dataflow.md#advisories: the compiled collectives' advisories (mesh_program_advise) over the loopback
+# fabric's maps, at .build/mesh-advise with libmesh's sources compiled in (the installed libmesh.dylib untouched); not in `all`
+mesh-advise: .build/mesh-advise
+.build/mesh-advise: mesh-advise.c mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
+	mkdir -p .build
+	cc -fblocks -O2 -Wall -Wextra -Werror -o $@ mesh-advise.c mesh-dataflow.c mesh-call.c mesh-collective.c
+.PHONY: mesh-advise
 # design/bridge-dataflow.md#the-loopback-fabric: N bridges on one host over loopverbs.c (shared memory in place of RDMA),
 # each its configuration's node, region and loopback ports: never a production bridge (no RDMA, ad-hoc signed); the
 # deployed mesh-flow is built from the same source without MESH_LOOP_FABRIC and stays as it is
