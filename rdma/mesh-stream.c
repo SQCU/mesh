@@ -1,17 +1,17 @@
-/* design/transport-one-gib-2026-09-10.md, design/bridge-dataflow.md#streams: the one-way stream readings of a link, the
-   raw one against the bridge's own path, every payload word checked at the receiver (mesh 554a3793^ mesh-verbs-stream.c
-   and cea7fce7^ mesh-page-stream.c, on the resident bridge, whose bridge alone opens verbs).
+/* design/transport-one-gib-2026-09-10.md, design/bridge-dataflow.md#streams: the one-way stream reading of a link, a
+   client's program of one transfer on a lane pair of the link, every payload word checked at the receiver (mesh
+   554a3793^ mesh-verbs-stream.c and cea7fce7^ mesh-page-stream.c; the bridge's own raw stream, its own queue pair and
+   its STREAM messages, is gone with the per-program queue pairs: design/bridge-and-ipc.md#lanes).
 
-     mesh-stream raw NODE BYTES
-       this node's bridge streams BYTES (whole blocks) to NODE's, a neighbour, over one queue pair each end made for it,
-       posted in chains of at most 1,023 pages by the port's progress threads (mesh-dataflow.h mesh_stream); the bridges'
-       JSON line of both ends' numbers
-     mesh-stream send NODE BYTES
-     mesh-stream receive NODE BYTES
-       the bridge's path as a client takes it: a program of one transfer of BYTES toward NODE, bound, prepared, started
-       and published as any client's (mesh-call.h, mesh-collective.h mesh_host_publish), received into a lease with a
-       landing word a block (mesh_host_inputs), which the receiver follows in order; run the receiver first, then the
-       sender, on the two nodes; the receiver's JSON line
+     mesh-stream send NODE BYTES PAIR
+     mesh-stream receive NODE BYTES PAIR
+       a program of one transfer of BYTES toward NODE, a neighbour, bound, prepared, started and published as any
+       client's (mesh-call.h, mesh-collective.h mesh_host_publish), received into a lease with a landing word a block
+       (mesh_host_inputs), which the receiver follows in order, riding the link lanes' pair PAIR (0 to
+       MESH_LANE_PAIRS - 1, the same at both ends: its large lane MESH_LANE_FIRST + 2 PAIR), which each end leases at its
+       own bridge on every cable to NODE (mesh.h struct hdr `lanes`, a compare-exchange of each lease word, 0 to the
+       slot's owner word) and lets go at its end; run the receiver first, then the sender, on the two nodes; the
+       receiver's JSON line
 
    Each line names its mode, the bytes, the blocks, the mismatched words, the receiver's first-to-last time and its
    interior: the bytes landed between a tenth and nine tenths of the blocks and their time, the rate the 2026-09-10
@@ -27,12 +27,38 @@
 static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 
 static int usage(void){
-  fprintf(stderr,"usage: mesh-stream raw|send|receive NODE BYTES\n");
+  fprintf(stderr,"usage: mesh-stream send|receive NODE BYTES PAIR\n");
   return 2;
 }
 
+/* the lane pair `pair` of every cable to `node` leased to the slot (`owner`) at its own bridge: each lease word 0 to the
+   owner word by compare-exchange (wait-free: mesh.h struct hdr `lanes`); the cables leased, a bit a port (0: none
+   paired with the node, or a word held by another) */
+static uint32_t lanes_claim(struct hdr *m,uint64_t owner,uint32_t node,uint32_t pair){
+  uint32_t claimed=0;
+  for(uint32_t p=0;p<MESH_PORTS;p++){
+    const struct mesh_link_info *link=mesh_links(m)+p;
+    if(atomic_load(&link->phase)!=MESH_PAIRED || atomic_load(&link->peer)!=node)continue;
+    uint64_t free0=0,free1=0;
+    _Atomic uint64_t *words=m->lanes[p]+MESH_LANE_FIRST+2*pair;
+    if(!atomic_compare_exchange_strong(words,&free0,owner))continue;
+    if(!atomic_compare_exchange_strong(words+1,&free1,owner)){atomic_store(words,0);continue;}
+    claimed|=UINT32_C(1)<<p;
+  }
+  return claimed;
+}
+/* the lease let go: each word the owner's back to 0, or, where the bridge found its lane left dirty, to its DIRTY alone
+   (the bridge makes the lane again once nothing rides its link) */
+static void lanes_let_go(struct hdr *m,uint64_t owner,uint32_t claimed,uint32_t pair){
+  for(uint32_t p=0;p<MESH_PORTS;p++)if(claimed>>p&1)for(uint32_t k=0;k<2;k++){
+    _Atomic uint64_t *word=m->lanes[p]+MESH_LANE_FIRST+2*pair+k;
+    uint64_t was=owner;
+    if(!atomic_compare_exchange_strong(word,&was,0) && (was&~MESH_LANE_DIRTY)==owner)atomic_compare_exchange_strong(word,&was,MESH_LANE_DIRTY);
+  }
+}
+
 /* the bridge's path: one program of one transfer, the receiver following its landing words in order */
-static int stream_flow(int receive,uint32_t node,uint64_t bytes){
+static int stream_flow(int receive,uint32_t node,uint64_t bytes,uint32_t pair){
   struct mesh_ctx context={0};
   char name[64];
   snprintf(name,sizeof name,"mesh-stream-%llu",(unsigned long long)bytes);
@@ -47,6 +73,11 @@ static int stream_flow(int receive,uint32_t node,uint64_t bytes){
   if(!status)status=mesh_transfers_prepare(&context,1,1,1);
   if(!status && receive)status=mesh_host_inputs(&context);
   if(status){fprintf(stderr,"mesh-stream: %s: %s\n",receive?"receive":"send",strerror(status));mesh_detach(&context);return 1;}
+  struct mesh_client *client=mesh_client_at(m,context.client);
+  const uint64_t owner=atomic_load(&client->owner);
+  const uint32_t claimed=lanes_claim(m,owner,node,pair);
+  if(!claimed){fprintf(stderr,"mesh-stream: lane pair %u toward node %u: not free on any cable to it\n",pair,node);mesh_detach(&context);return 1;}
+  client->tx[mesh_destination(client,node)].lane[0]=MESH_LANE_FIRST+2*pair;client->tx[mesh_destination(client,node)].lane[1]=MESH_LANE_FIRST+2*pair+1;
   unsigned char *data=mesh_section_address(&context,section,0);
   const uint64_t words=block/sizeof(uint64_t);
   for(uint64_t p=0;p<blocks;p++){
@@ -58,8 +89,7 @@ static int stream_flow(int receive,uint32_t node,uint64_t bytes){
          (unsigned long long)bytes,(unsigned long long)blocks);
   fflush(stdout);
   status=mesh_transfers_start(&context);
-  if(status){fprintf(stderr,"mesh-stream: start: %s\n",strerror(status));mesh_detach(&context);return 1;}
-  struct mesh_client *client=mesh_client_at(m,context.client);
+  if(status){fprintf(stderr,"mesh-stream: start: %s\n",strerror(status));lanes_let_go(m,owner,claimed,pair);mesh_detach(&context);return 1;}
   struct mesh_port_info *peer=&client->status[mesh_destination(client,node)];
   const uint64_t bound=MESH_PEER_NS;
   if(!receive){
@@ -76,6 +106,7 @@ static int stream_flow(int receive,uint32_t node,uint64_t bytes){
     printf("{\"stream\":\"flow\",\"role\":\"send\",\"bytes\":%llu,\"blocks\":%llu,\"publish_to_peer_end_s\":%.9f,\"peer_code\":%lld}\n",
            (unsigned long long)bytes,(unsigned long long)blocks,(double)(clock_ns()-begin)/1e9,
            (long long)atomic_load_explicit(&peer->code,memory_order_relaxed));
+    lanes_let_go(m,owner,claimed,pair);
     mesh_detach(&context);
     return 0;
   }
@@ -111,24 +142,20 @@ static int stream_flow(int receive,uint32_t node,uint64_t bytes){
          (unsigned long long)blocks,(unsigned long long)completed,(unsigned long long)cancelled,(unsigned long long)mismatches,
          (unsigned long long)correct,last>first?(double)(last-first)/1e9:0,(unsigned long long)((completed-first_count)*block),interior,
          (unsigned long long)interior_bytes,interior>0?(double)interior_bytes/interior/1e9:0,(unsigned long long)polls);
+  lanes_let_go(m,owner,claimed,pair);
   mesh_detach(&context);
   return completed!=blocks || mismatches;
 }
 
 int main(int argc,char **argv){
-  if(argc!=4)return usage();
+  if(argc!=5)return usage();
   char *end;
   const unsigned long node=strtoul(argv[2],&end,0);
   if(*end || !node || node>UINT32_MAX)return usage();
   const unsigned long long bytes=strtoull(argv[3],&end,0);
   if(*end || !bytes)return usage();
-  if(!strcmp(argv[1],"raw")){
-    char result[2048];
-    const int status=mesh_stream((uint32_t)node,bytes,result,sizeof result);
-    if(status<0){fprintf(stderr,"mesh-stream: raw: %s\n",strerror(-status));return 1;}
-    fputs(result,stdout);
-    return strstr(result,"\"mismatches\":0,")?0:1;
-  }
-  if(!strcmp(argv[1],"send") || !strcmp(argv[1],"receive"))return stream_flow(!strcmp(argv[1],"receive"),(uint32_t)node,bytes);
+  const unsigned long pair=strtoul(argv[4],&end,0);
+  if(*end || pair>=MESH_LANE_PAIRS)return usage();
+  if(!strcmp(argv[1],"send") || !strcmp(argv[1],"receive"))return stream_flow(!strcmp(argv[1],"receive"),(uint32_t)node,bytes,(uint32_t)pair);
   return usage();
 }

@@ -101,11 +101,11 @@ git's and output_data's to say (AGENTS.md: assignments expire), not this table's
 | Q11 | A cable pull and replug, three times, with time to repair and to the first completed execution recorded | mandates 1, 3, 10 | a measurement on hardware, its record in output_data |
 | Q12 | Recovery costs nothing on the healthy path | mandate 7 | the data path reads no recovery state |
 | Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | the control socket carries a program's pairing messages and the map's records, nothing per transfer |
-| Q14 | Every wait has a guaranteed end; no clock decides (operator 10-18, metal-microbench output_data/structural-20261018/WAITS.md) | RDMA-RULES.md, mandate 12 | the bridge's loop waits on kevent64 with a 250 ms tick that only paces its turns; a port's progress threads park on their port's bell at most 1 ms at a time while anything is theirs to look for (3 s otherwise, design/bridge-and-ipc.md#progress); a control socket never blocks (a message queues behind what the socket has not taken: mesh-link.c port_say, port_flush) and carries no keepalive: its peer's loss is the kernel's to tell (its end closed, a reset, `KEV_DL_LINK_OFF`); a connect ends at the kernel's own result; the device opens at the start and at its link's coming on, never on a clock, and a refusal leaves the port down until its link next comes on; the stop waits on no queue, thread or verbs call (design/bridge-and-ipc.md#stop). The verbs calls that can sleep in the driver (opening a device, registering, making, connecting or destroying a queue pair) are made only on the port's own queue and only on hearing the peer (a link's pairing, a lane made again) or at a link event, never on a failure; programs' own windows (`MESH_PEER_NS`, `MESH_PAIR_NS`) go with WP2 |
-| Q15 | A reconnection keeps context, PD and registrations; no verbs object is released while the bridge runs but a link's lanes at its next pairing | RDMA-KERNEL-RECOVERY.md "October 18" | a link off or a detached interface makes no verbs call; the link's next pairing, on hearing the peer, destroys its lanes and makes them again (d6dceac's sequence: `pairs_down`, `pair_up`, LINK, RTR, RTS), the completion queues, context, PD and registration kept; a lane that fails while the link is up is made again on both ends in a round the lower node leads once the peer is next heard; a device that fails with its link active is forgotten with no verbs call and opened afresh; the kernel releases what was forgotten at the bridge's exit (design/bridge-and-ipc.md#lanes) |
+| Q14 | Every wait has a guaranteed end; no clock decides (operator 10-18, metal-microbench output_data/structural-20261018/WAITS.md) | RDMA-RULES.md, mandate 12 | the bridge's loop waits on kevent64 with a 250 ms tick that only paces its turns; a port's progress threads park on their port's bell at most 1 ms at a time while anything is theirs to look for (3 s otherwise, design/bridge-and-ipc.md#progress); a control socket never blocks (a message queues behind what the socket has not taken: mesh-link.c port_say, port_flush) and carries no keepalive: its peer's loss is the kernel's to tell (its end closed, a reset, `KEV_DL_LINK_OFF`); a connect ends at the kernel's own result; the device opens at the start and at its link's coming on, never on a clock, and a refusal leaves the port down until its link next comes on; the stop waits on no queue, thread or verbs call (design/bridge-and-ipc.md#stop). The verbs calls that can sleep in the driver (opening a device, registering, making, connecting or destroying a queue pair) are made only on the port's own queue and only on hearing the peer (a link's pairing) or at a link event, never on a failure; a program makes none (it rides its leased lanes) and waits on no window (WP2: no READY, PAIRS or POSTED is awaited; the client's own start window goes with WP4) |
+| Q15 | A reconnection keeps context, PD and registrations; no verbs object is released while the bridge runs but a link's lanes at its next pairing | RDMA-KERNEL-RECOVERY.md "October 18" | a link off or a detached interface makes no verbs call; the link's next pairing, on hearing the peer, destroys its lanes and makes them again (d6dceac's sequence: `pairs_down`, `pair_up`, LINK, RTR, RTS), the completion queues, context, PD and registration kept; a lane that fails, or that a program leaves with positions outstanding (DIRTY), is leased to no new program, and once nothing rides the link the bridge closes its control socket so both ends pair it afresh; a device that fails with its link active is forgotten with no verbs call and opened afresh; the kernel releases what was forgotten at the bridge's exit (design/bridge-and-ipc.md#lanes) |
 | Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | a failed flow cancels its client's words toward the node (prepared-machine.md M12) |
-| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | open: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or the library's silent bound fails a paired one's (`#detection`); the bridge exchanges nothing of its own over RDMA to tell it |
-| Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | the map is every algorithm's operand (mesh-plan.h `struct mesh_link_map`), and members its links leave apart are joined along routes the bridges forward (`mesh_map`) |
+| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | open: such a link's programs' positions never land, and their waits end by their callers' revokes (the library's silent bound goes with WP3); the bridge exchanges nothing of its own over RDMA to tell it but the keepalive's frames |
+| Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | the map is every algorithm's operand (mesh-plan.h `struct mesh_link_map`), and members its links leave apart are joined through member ranks on their routes with no contribution (DESIGN.md decision 1; the bridges forward nothing) |
 
 ## The module
 
@@ -122,19 +122,22 @@ library's one bound, its session's progress thread the watcher (rdma/nccl.h).
 ### loss
 
 A link's loss fails every flow on it: its client's pending words on the link cancelled, its status the loss's code
-(ECONNRESET where the peer said farewell), its queue pairs destroyed. The link's lanes (design/bridge-and-ipc.md#lanes)
+(ECONNRESET where the peer said farewell); a flow holds no queue pair, so none is destroyed. The link's lanes (design/bridge-and-ipc.md#lanes)
 are left as they are, no verbs call made: served no more, they are destroyed and made again at the link's next pairing,
 on hearing the peer, with the sequence d6dceac paired by, and a job of the lost pairing still on the port's queue is
 dropped as it ends. A lane's failure while the link stays up (a completion's error, a post refused, a descriptor out of
-the window) is that lane's alone: served no more, it is made again on both ends in a round the link's lower node leads
-once the peer is next heard (design/bridge-and-ipc.md#lanes), the link, its other lanes and its flows running on. A link job
-that fails (making, connecting or making a lane again) leaves the port down until its link next comes on: no retry runs
+the window) is that lane's alone: served no more, its holder's flow failed, and the lane dirty, leased to no new
+program; the link and its other lanes run on, and once nothing rides the link here, the bridge closes its control
+socket so both ends pair it afresh, every lane made again (design/bridge-and-ipc.md#lanes). A lane a program left with
+positions outstanding (a receive posted and not landed, a SEND posted and not completed) is dirty alike. A link job
+that fails (making or connecting) leaves the port down until its link next comes on: no retry runs
 on a clock (on 2026-10-17 the Mac mini, back from a kernel panic, refused every queue pair's INIT to RTR on the context
 its bridge opened 11 s after boot for five minutes, retried every 3 s, and a new bridge process connected at once:
 metal-microbench output_data/split-20261017). A loss of the port itself (link off, interface detached) keeps the port's
 device: its context, protection domain and registrations are used again at the next pairing; a device that fails with
 its link active (its context gone with the peer's power) is forgotten with no verbs call and opened afresh, the kernel
-releasing the old one at the bridge's exit. A flow's own failure is told to the peer (FAIL), which fails its side.
+releasing the old one at the bridge's exit. A flow's own failure is told to no one: the peer's program ends by what
+ends it at its own end (its link's loss, its caller's revoke).
 
 A port's stripes (design/bridge-dataflow.md#stripes) ride the link's lane 1 and fail as it does: the requests in flight
 fail as values (each writer's word `UINT64_MAX`, its ring's code), failed by the send thread that holds them, and the
@@ -208,30 +211,15 @@ panic"). The device opens only at the start and at its link's coming on. No sett
 
 ### first
 
-A program started on a link that is not paired fails at once (ENETDOWN). A program waits for its peer's program to
-start at most 600 s (members prepare their programs at their own speeds: metal-microbench docs/measurement.md
-2026-10-10, the verify step), and for its queue pairs to pair at most 30 s from then. The client's own wait for its
-start is bounded by the same windows and a pause (mesh.h `MESH_PEER_NS`, `MESH_PAIR_NS`, `MESH_PAUSE_NS`, their one
-definition), so a bridge that never answers ends it as ETIMEDOUT. A program toward a node its map gives no route fails
-at once (EHOSTUNREACH) where it is the pair's lower end; the higher end awaits the lower's route (below), its peer
-told of the lower's failure by none, so its wait ends at the peer window or at its own program's revoke.
-
-A routed program's start returns once the far member's program has started and every relay between has posted (POSTED
-is end to end, design/bridge-and-ipc.md#protocol), so a member that starts 25 s after its peer delays the peer's start,
-as over a direct cable, rather than failing its first group at the library's silent bound. Its route is its lower
-node's (design/bridge-and-ipc.md#routes): the higher end awaits the lower's READY within the peer window and fails
-ETIMEDOUT naming the lower past it, whatever its own map holds (it reads no route of its own to pair, so a higher end
-that sees none at its start still pairs on the lower's); where its map has no route to the lower, it waits the pairing
-window (30 s) from when the lower was last reachable (a link of the route pairing again), the peer window once a route
-appears, and is refused at once (EHOSTUNREACH, naming the lower) where the lower has been unreachable longer or was
-never heard of, so a call toward a dead node fails within 30 s at either end; two ends whose maps differ at their
-starts still pair along one route; a routed program's start returns once every one of its stripes runs (design/bridge-and-ipc.md#cables). Two ends
-that disagree on whether a cable joins them (one sees it paired, the other not yet) fail at once as values (EPROTO,
-naming the node that refused) rather than wait out the peer window. Members whose programs of an execution are made
-from different maps (their digests differ, mesh-call.h `mesh_transfers_digest`) fail at once, every destination of
-each as a value (ESTALE, naming the node whose program differs), wherever a READY of one reaches the other: none
-waits the peer window for a READY no program of the other's takes, so a caller may bind only the members its programs
-move with and run the execution again on the map as it is then (design/bridge-and-ipc.md#protocol).
+A program starts with no message to its peer (WP2): its flows are made as it starts, on the lanes its client leased at
+its communicator's init, and its start is paired once they are listed. It fails at once as a value where its node is
+on no cable of this one (EHOSTUNREACH: the bridges forward nothing; a member on its route is a member rank with no
+contribution, DESIGN.md decision 1), where no cable carries its lease (ENOLCK), or where it is not a lane pair's shape
+(EINVAL). A peer whose program starts later finds its posted receives already waiting, and a SEND waits in the
+hardware for its receive (TN3205's credit), so no member's start waits on another's: the 600 s and 30 s windows of the
+READY, PAIRS and POSTED handshake are deleted with it. Members whose programs of an execution are made from different
+maps find it in their session's first position (the digest travels as data: nccl-mesh.c's agreement), not at the
+start.
 
 ### the driver's side
 
@@ -273,22 +261,22 @@ several queue pairs (the torch/NCCL sessions: four).
 | F1 | a direct link down mid-call | the executions on it fail; the link pairs again a pause after it is back |
 | F3 | a link down when a program starts | the program fails at once (ENETDOWN) |
 | F6 | the peer bridge stops or crashes | its farewell or the keepalive: the executions fail; the link pairs again with the new bridge |
-| F7 | the peer's program fails or ends | END or FAIL: this side's program on the link fails |
+| F7 | the peer's program fails or ends | nothing is told: this side's program's waits on its positions end by its caller's revoke; a lane left with positions outstanding is dirty at its end |
 | F8 | the peer node reboots or loses power | the keepalive or the link-off: the executions fail, the port's device kept (opened afresh where its context died) |
 | F9 | the control plane (LAN, ssh, mDNS) lost, the cable up | the bridges' links are unaffected; the driver's reach is |
 | F10 | the data path dead, the control socket alive | the library's silent bound (`MESH_SILENT_NS`) cancels the destination; the execution fails |
 | F11 | one direction lost | undefined |
 | F12 | a link degrades (speed, errors) | the Balancer on evidence |
 | F13 | one link of several drops | the executions on it fail; the others' links are untouched |
-| F14 | a relay bridge on a route drops | the programs routed through it fail, naming the relay node; the next execution's route is the current map's |
+| F14 | a relay member on a route drops | its links' loss fails the programs on them at both ends of each; the next execution's membership is the current map's |
 | F15 | a cable moved to another port or peer | the old port's executions fail; the new port pairs with whatever node it reaches |
 | F18 | the driver's own node fails | the stream stops (one driver) |
 | F19 | a node of several cables stops in a mesh whose survivors hold a cycle | its last record ends at the first bridge that has heard it (design/bridge-and-ipc.md#records); at MESH_VERSION 112 it circulated for good, reopening every session |
-| F20 | a link lane fails (a completion's error, a post refused) | that lane's alone (`#loss`): served no more, made again on both ends in a round the lower node leads once the peer is next heard; the link and its other lanes run on; a link job that fails leaves the port down until its link next comes on |
+| F20 | a link lane fails (a completion's error, a post refused) | that lane's alone (`#loss`): served no more, its program failed, the lane dirty; the link and its other lanes run on, and once nothing rides it both ends pair it afresh; a link job that fails leaves the port down until its link next comes on |
 | F21 | a device refuses the window's registration | logged with the extent; the port is down until its link next comes on (`#registration`) |
 | F22 | two ends of a routed pair start on maps a flap apart | both take the lower end's route (design/bridge-and-ipc.md#routes); a cable one end sees and the other does not fails both at once (EPROTO) |
-| F23 | members' programs of one execution made from maps a change apart | the READYs carry each program's digest: every member's program fails at start (ESTALE, `#first`), through MESH_VERSION 114 one bound to a member whose program did not bind it back waited 630 s |
-| F24 | a routed start whose relays' own jobs end before the next hop's POSTED | each relay tells POSTED as its partner hears it (design/bridge-and-ipc.md#protocol); through MESH_VERSION 114 such a relay never told it and both ends waited 630 s, in a third of the routed starts of a transcription of the code |
+| F23 | members' programs of one execution made from maps a change apart | the session's first position carries the digest, which the members' agreement compares (`#first`) |
+| F24 | a routed start whose relays' own jobs end before the next hop's POSTED | gone with POSTED and the bridges' relays (WP2) |
 | F25 | the stripes' lane fails (a completion's error, a descriptor out of the window) | as F20: the requests in flight fail as values, the lane is made again once the peer is next heard |
 
 ## The review this asks for

@@ -1,7 +1,7 @@
 /* design/bridge-and-ipc.md#files: the bridge's own declarations, shared by its two translation units, mesh-link.c (the
-   ports, links and lanes, the progress threads, the event loop and the stop) and mesh-program.c (programs and their
-   flows, relays, stripes, streams, records and services): the types, the state both read (defined in mesh-link.c) and
-   the functions each calls of the other's */
+   ports, links and lanes, the progress threads and the data path, the event loop and the stop) and mesh-program.c
+   (programs on their communicators' leased lanes, the stripes' requests, records and services): the types, the state
+   both read (defined in mesh-link.c) and the functions each calls of the other's */
 #ifndef MESH_BRIDGE_H
 #define MESH_BRIDGE_H
 #include "mesh-verbs.h"
@@ -60,9 +60,9 @@ _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_sen
 /* design/prepared-machine.md#M08 */
 /* One chunk of a receive transfer in one invocation: its native request and SGE into the chunk's
    destination range, the completion word it stores (`input`; its own `sink` where no reader waits on its landing;
-   `release` where it is a SEND cell's ready word, the index hand-off, design/bridge-and-ipc.md#progress), its queue
-   pair, the frames it holds posted, its invocation and ring, and its flow (`link`: the one whose ring holds it, which a
-   lane's completion names, design/bridge-and-ipc.md#lanes). */
+   `release` where it is a SEND cell's ready word, the index hand-off, design/bridge-and-ipc.md#progress), its lane's
+   queue pair, the frames it holds posted, its invocation and ring (its program's queue), and its flow (`link`: the one
+   whose ring holds it, the lane's holder while its receives are posted, design/bridge-and-ipc.md#lanes). */
 struct flow;
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
@@ -132,61 +132,47 @@ struct ledger {
   struct ledger_record *record;
 };
 
-#define MESH_PAIRS 16
-/* design/bridge-and-ipc.md#protocol: a message, a flow's keyed by its execution's key, its program's two end nodes
-   (`from` the sender's end, `to` the far one) and its stripe (#cables: several of one program may share a port), `failed`
-   the node where a failure happened, and `bytes` of what follows it: a READY's program, a RECORD's record.  A port's
-   LINK tells its link lanes' queue pairs (#lanes: `count` lanes from lane `from`, each lane's number and first sequence
-   number in `pair`, and in `code` the largest stripe piece this end takes) */
-enum { HELLO=1, READY, PAIRS, POSTED, END, FAIL, FAREWELL, RECORD, LINK, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_REFUSE, CHANNEL_DATA,
-       CHANNEL_WINDOW, CHANNEL_SHUT, CHANNEL_CLOSE, STREAM };
-struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code; uint32_t block,port,from,to,failed,bytes;
-  uint16_t lid,stripe; uint8_t gid[16]; uint32_t pair[MESH_PAIRS][2]; };
+/* design/bridge-and-ipc.md#protocol: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD,
+   LINK, and the channels' kinds), `bytes` of what follows it: a RECORD's record, a channel's data.  A port's LINK tells
+   its link lanes' queue pairs (#lanes: every lane, each one's number and first sequence number in `pair`, and in `code`
+   the largest stripe piece this end takes); a channel's names its key, its two end nodes (`from` its origin, `to` its
+   destination), a count and a code (#requests) */
+enum { HELLO=1, FAREWELL, RECORD, LINK, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_REFUSE, CHANNEL_DATA, CHANNEL_WINDOW, CHANNEL_SHUT,
+       CHANNEL_CLOSE };
+struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code; uint32_t block,port,from,to,bytes;
+  uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 #define XMAGIC (0x4d595048u+MESH_VERSION)
-/* A READY's program: `hops` nodes of its route from the receiver to the far end, then the transfers the sender sends
-   toward the far end, lengths[k] of them on queue k, and its lists' slots, invocations, ring depth and whether it is
-   cyclic, the flow's stripe of the program's invocations, `stripe` of `stripes` (design/bridge-and-ipc.md#cables, at
-   most MESH_STRIPES), whether the sender's end takes queue pairs of its own for it (`exclusive`, #lanes), and the
-   digest of what the sender's program is made from (mesh.h mesh_client `digest`, a relay's its lease's: #protocol);
-   the message's count is its queues times its slots */
-struct ready { uint32_t hops,slots,invocations,depth,cyclic,stripe,stripes,exclusive,lengths[MESH_QUEUES]; uint64_t digest; };
+/* design/bridge-and-ipc.md#cables: the cables a program toward one node spans, at most the node's ports */
 #define MESH_STRIPES MESH_PORTS
-_Static_assert(MESH_LINK_LANES<=MESH_PAIRS,"a LINK names every lane");
 /* design/bridge-and-ipc.md#flows: the flows a port's table holds, by their index (a flow's index and the index's generation
    name it on the port) */
 #define MESH_FLOWS 256
-/* design/bridge-and-ipc.md#flows: a program on one port, over its link toward the program's far end (`near` its other
-   end): its lists each way, a slot's destination (its client's, or on a relay a lease of the bridge's own; a flow held
-   for its client, `hold`, has none until the client's program takes it), its `queues` queues of `slots` rings each,
-   the program's invocations t with t mod `stripes` = `stripe` (#cables), and on a relay its partner, the route's other
-   flow.  It holds a queue pair a ring (`qps`, its own completion queues), its index in the port's table and its
-   generation (`slot`).  Its verbs work runs on its port's queue, one job at a time (`job`, `done`); the event loop
-   alone changes the rest, and a side whose lists arrive while a job runs (`pending`) between jobs.  The port's two
-   progress threads serve it while it is in the port's table and `progressing`.
-   A held flow keeps the digest its READY named (`digest`), which the program that takes it must name too (#protocol),
-   and where the configuration keeps them its ledger (`ledger`, #ledger) */
-enum { READIED, PAIRING, POSTING, RUNNING, FAILED };
-enum { HEARD_READY=1, HEARD_PAIRS=2, HEARD_POSTED=4 };
-enum { JOB_PAIR=1, JOB_RECEIVE, JOB_RUN, JOB_CHANGE };
-struct lease { struct mesh_ctx context; uint32_t users; uint64_t shape; };
-struct side { uint64_t owner; uint32_t destination; struct lease *lease; };
+/* design/bridge-and-ipc.md#flows: a client program's destination on one port: its lists each way toward the far node
+   (its client's slot `owner`, its destination `destination`), its `queues` queues (at most two: its communicator's lane
+   pair), queue k riding the port's link lane `lane[k]` (the lease its client holds, mesh.h struct hdr `lanes`), the
+   program's invocations t with t mod `stripes` = `stripe` (#cables), its index in the port's table and its generation
+   (`slot`).  It holds no queue pair: its rings post receives on its lanes' queue pairs, its streams' SENDs go on them
+   through the lanes' gates (struct link), and its lanes' completions come to it as their holder.  Its one job (`job`,
+   `done`) runs on its port's queue: its rings and cells prepared, then it is listed in the port's table, where the
+   port's two progress threads serve it while it is `progressing` (the receive thread posts its rings' first records,
+   `armed`).  It has ended (`ended`) once it failed or its program ended; its stop runs on the port's queue and frees it
+   (`stopping`, `stopped`).  Where the configuration keeps them, its ledger (`ledger`, #ledger) */
 struct port;
 struct flow {
-  struct flow *next,*partner;
-  uint32_t stream_count,near,far,queues,stripe,stripes,heard,configured,destination,invocations;
+  struct flow *next;
+  uint32_t stream_count,far,queues,stripe,stripes,destination,invocations,lane[2];
   uint32_t slot,generation;
   _Atomic int progressing,done,stopped;
   _Atomic int64_t failed;
   _Atomic uint32_t domain;
-  int state,job,result,stopping,hold,qps,cyclic,told,listed;
-  uint64_t key,owner,created,deadline,retry,digest;
-  struct side side[2],pending[2];
-  uint32_t pairs[MESH_PAIRS][2];
-  struct hdr *M; struct port *port; struct mesh_verbs provider;
+  int job,result,stopping,cyclic,listed,armed,ended,running;
+  uint64_t key,owner;
+  struct hdr *M; struct port *port;
+  int (*post_send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
+  int (*post_receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
   struct prepared_receive *receive;
   size_t receive_count;
   struct receive_ring *rings;
-  struct send_gate *gates;
   struct send_stream *streams;
   struct prepared_send *requests;
   size_t request_count;
@@ -204,21 +190,21 @@ struct flow {
 #define MESH_UNSENT (UINT64_C(64)<<20)
 /* design/bridge-and-ipc.md#lanes: a port's link lanes (mesh.h MESH_LINK_LANES), its queue pairs made once at each of
    its pairings, on the two completion queues its device's context holds (made once a context, kept across pairings),
-   each lane's share of them (`share` frames, a request one frame at least: no lane overruns its queues).  Its state
-   (LINK_DOWN; made and told, LINK_MADE; connecting; up), the pairing it belongs to (`pairing`, moved at each loss, so a
-   job of a pairing gone is dropped as it ends), the peer's lanes (`peer`, heard in its LINK: `heard`), its largest
-   stripe piece; the lanes the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a
-   thread's to clear where it found its lane failed), the lanes a progress thread found failed (`broken`, the event
-   loop's to take).  A lane made again while the link is up is a round the link's lower node leads (DESIGN.md L2;
-   metal-microbench output_data/structural-20261018/wp1-remake-model3.py checks it): the leader's lanes to make again
-   (`dirty`: its own failed or dirty lanes, and those the higher node reported), its open rounds (`round`: made again and
-   told, each lane's round in `seq`), and those whose acknowledgement came (`acked`: the higher node's new numbers in
-   `peer`); the higher node's lanes reported (`dirty`) and those the leader made again (`pending`, its round in `seq`),
-   each made again, joined and acknowledged at once.  `joining`: the lanes of the running job.  Lane
-   MESH_LANE_KEEPALIVE's frames (design/bridge-and-ipc.md#keepalive: one every `keepalive_ns` while any lane is leased,
-   its census `alive_posted` and `alive_heard`), and its pages: the keepalive's block and the stripes' descriptors */
+   each lane's share of them (`share` frames, a request one frame at least: no lane overruns its queues), and each
+   lane's queue pair number (`qpn`, by which a completion names its lane).  Its state (LINK_DOWN; made and told,
+   LINK_MADE; connecting; up), the pairing it belongs to (`pairing`, moved at each loss, so a job of a pairing gone is
+   dropped as it ends), the peer's lanes (`peer`, heard in its LINK: `heard`), its largest stripe piece; the lanes the
+   progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to clear where it
+   found its lane failed), the lanes a progress thread found failed (`broken`, the event loop's to take) and those found
+   so here (`dirty`: none is made again while the link is up; once no lane of the link is leased here, its control
+   socket is closed and both ends pair it afresh, every lane made again: link_turn).  Each lane's SEND gate (`gate`:
+   the frames posted and retired, the send thread's; its capacity, set as the lane connects) and the flow whose program
+   rides it (`holder`: the event loop's to set as the flow is made, the port's queue's to clear as it stops; a lane's
+   completions go to its holder, and none is read once it has none).  Lane MESH_LANE_KEEPALIVE's frames
+   (design/bridge-and-ipc.md#keepalive: one every `keepalive_ns` while any lane is leased, its census `alive_posted`
+   and `alive_heard`), and its pages: the keepalive's block and the stripes' descriptors */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
-enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT, LINK_JOB_REMAKE, LINK_JOB_JOIN, LINK_JOB_REJOIN };
+enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 #define LINK_ALIVE_SENT (UINT64_C(3)<<56)
 #define LINK_ALIVE_HEARD (UINT64_C(4)<<56)
 #define LINK_ALIVE_BYTES 16u
@@ -228,7 +214,9 @@ struct link {
   int state,job,result,heard;
   _Atomic int done;
   _Atomic uint32_t served,broken;
-  uint32_t peer[MESH_LINK_LANES][2],seq[MESH_LINK_LANES],peer_piece,share,page,pages,pairing,job_pairing,dirty,round,acked,pending,joining;
+  uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],peer_piece,share,page,pages,pairing,job_pairing,dirty;
+  struct send_gate gate[MESH_LINK_LANES];
+  struct flow *_Atomic holder[MESH_LINK_LANES];
   uint64_t alive_at,alive_posted,alive_heard;
   int alive_flight,counted;
 };
@@ -249,7 +237,6 @@ struct link {
 #define MESH_DESCRIPTORS 256u
 #define MESH_STRIPE_CHUNKS 1024u
 #define MESH_STRIPE_PIECE (UINT32_C(4)<<20)
-#define MESH_FLUSH_POLLS 65536u
 struct mesh_descriptor { _Alignas(64) uint64_t offset; uint64_t bytes,word,value,reserved[4]; };
 _Static_assert(sizeof(struct mesh_descriptor)==64,"stripe descriptor");
 #define STRIPE_DESCRIPTOR (UINT64_C(1)<<56)
@@ -270,46 +257,17 @@ struct stripes {
   uint32_t receive_frames,receive_capacity,arrived[MESH_DESCRIPTORS];
   struct stripe_cut in;
 };
-/* design/bridge-dataflow.md#streams (mesh 554a3793^ rdma/mesh-verbs-stream.c, inside the bridge, the one opener of
-   verbs): a raw one-way stream a client asked its bridge for (mesh-dataflow.h MESH_REQUEST_STREAM), `bytes` in pages of
-   one block from a lease of the sender's window to one of the receiver's, over one UC queue pair each end made for it
-   and nothing else of the bridge's (no cell, ring, record or landing word), its SENDs and receives posted by the port's
-   progress threads in chains of at most `window` pages in flight (mesh-verbs-stream.c's 1,023), every word checked at
-   the receiver; the STREAM message's phases (`count`): an offer (the sender's queue pair, `code` the bytes), posted
-   (the receiver's queue pair, its first receives posted), the result (the receiver's numbers), 0 a failure (`code`).
-   Its state (STREAMS_DOWN, filling or zeroing its lease, made, connecting, running, checking, closing), whether this
-   end sends, the requester's socket (the sender's end), the lease (`page`, `pages`), the pages, the times and counts
-   each end keeps (`own`) and the receiver's as its result told them (`told`) */
-#define MESH_STREAM_MAGIC UINT64_C(0x6d65736870616765)
-#define MESH_STREAM_WINDOW 1023u
-enum { STREAM_FAILED, STREAM_OFFER, STREAM_POSTED, STREAM_RESULT };
-enum { STREAMS_DOWN, STREAMS_FILLING, STREAMS_MAKING, STREAMS_MADE, STREAMS_CONNECTING, STREAMS_RUNNING, STREAMS_CHECKING, STREAMS_CLOSING };
-struct stream_result { uint64_t bytes,pages,page_bytes,window,completed,mismatches,correct,misordered,first_count,low_count,high_count,
-  begin_ns,first_ns,low_ns,high_ns,last_ns,posts,polls,empty_polls; };
-struct stream {
-  struct mesh_verbs provider;
-  int state,job,result,sending,committed,fd;
-  _Atomic int up,done,finished;
-  _Atomic int64_t failed;
-  uint32_t peer[1][2],page,pages,count,page_bytes,window;
-  uint64_t key,bytes,deadline,flushed;
-  struct ibv_sge *spans;
-  struct ibv_send_wr *sends;
-  struct ibv_recv_wr *receives;
-  struct ibv_wc *completions;
-  uint64_t posted,completed;
-  struct stream_result own,told;
-};
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue, whether
    its device is to be opened (`opening`: at the start and at its link's coming on, never on a clock), the queue pairs its
-   link lanes and its stream hold (`committed`, of the device's usable queue pairs), its link lanes, its table of flows
-   (`table`, the indices reserved and their generations, the highest reserved plus one), and its progress threads
-   (#progress: the epochs each has seen of `epoch`, which a flow leaving the table moves, and whether each is parked on
-   the port's bell); its stripe writes (design/bridge-dataflow.md#stripes) and the guard of its device's verbs objects
-   (`guard`, odd while raised, and the value each progress thread last held at: port_guard) */
+   link lanes hold (`committed`, of the device's usable queue pairs), its link lanes, its table of flows (`table`, the
+   indices reserved and their generations, the highest reserved plus one), and its progress threads (#progress: the
+   epochs each has seen of `epoch`, which a flow leaving the table moves, and whether each is parked on the port's bell);
+   its stripe writes (design/bridge-dataflow.md#stripes), the guard of its device's verbs objects (`guard`, odd while
+   raised, and the value each progress thread last held at: port_guard), and whether this end closed its control socket
+   so both ends pair its link afresh (`cycling`, link_turn) */
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,flows,committed;
+  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,flows,committed,cycling;
   int64_t farewell;
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
@@ -330,7 +288,6 @@ struct port {
   _Atomic int parked[2];
   pthread_t thread[2];
   struct stripes stripes;
-  struct stream stream;
   _Atomic uint64_t guard,guarded[2];
 };
 
@@ -354,12 +311,6 @@ struct known { uint32_t node; uint64_t heard,gone,boot,sequence; char session[40
    parked, then looks once more before it waits, so a release whose send_wake read it unparked is served by that look */
 #define MESH_IDLE_PASSES 4096u
 struct progress { struct port *port; int side; };
-
-/* design/bridge-and-ipc.md#routes: a client program awaiting the READYs of its routed peer, the pair's lower node, whose
-   route both ends take: its `stripes` once the first came (#cables), the stripes it has taken (a bit each), and its
-   `deadline`: the peer window from `created` where this end's map routes to the peer (`routed`), else the pairing
-   window from when the peer was last reachable (program_await) */
-struct await { struct await *next; uint64_t key,owner,created,taken,deadline; uint32_t destination,far,stripes,routed; };
 /* design/recovery.md#diagnosis: this node's health sampled each turn; a change of its power source, of its charge off
    AC, or of its memory or thermal pressure is logged and sent at once, anything else with its record at most
    MESH_HEALTH_NS later */
@@ -400,7 +351,7 @@ extern struct wire_mapping wire;
 extern struct port ports[MESH_PORTS];
 extern uint32_t port_count;
 extern struct flow *flows;
-extern uint32_t flow_count,await_count;
+extern uint32_t flow_count;
 extern int events,listener,hello,network,unreleased,finding;
 extern uint64_t now,sequence;
 extern char host[MESH_NAME_BYTES];
@@ -414,17 +365,13 @@ extern uint64_t owners[MESH_CLIENTS],accepted[MESH_CLIENTS];
 extern char model[MESH_MODEL_BYTES];
 extern int exec_served;
 
-/* the data path's small helpers, inlined into both units: the clock the ledgers and streams read, whether a client's slot
-   is still `owner`'s, a span of the window on a port's device, and a receive ring's next records posted */
+/* the data path's small helpers, inlined into both units: the clock the ledgers read, whether a client's slot is still
+   `owner`'s, a span of the window on a port's device, and a receive ring's next records posted */
 static inline uint64_t ledger_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static inline int owned(uint64_t owner){ return owner && atomic_load(&mesh_client_at(M,owner)->owner)==owner; }
 static inline struct ibv_sge stripe_span(const struct port *port,uint64_t offset,uint32_t length){
   const uint64_t at=offset<wire.length?offset:0;
   return (struct ibv_sge){.addr=(uintptr_t)port->device.wire+offset,.length=length,.lkey=port->device.regions[at/MESH_REGION]->lkey};
-}
-/* design/bridge-dataflow.md#streams: the window offset of a stream's page */
-static inline uint64_t stream_offset(const struct port *port,uint64_t page){
-  return (uint64_t)port->stream.page*M->pgsz+page*port->stream.page_bytes;
 }
 /* design/prepared-machine.md#M08 */
 /* Posts the ring's next records while its queue has room and the record behind each has landed (its
@@ -434,9 +381,10 @@ static inline uint64_t stream_offset(const struct port *port,uint64_t page){
 /* A cyclic program's ring wraps: its posted count runs on, record posted % count in cycle posted / count,
    at running invocation invocation + cycle * N; the span is held under N and a record with no record of
    its transfer behind it waits on its own previous posting, so a record is posted again only after its
-   last posting completed (completions arrive in order). */
+   last posting completed (completions arrive in order).  Called by the port's receive thread alone, once the flow is
+   listed (port_pass), so a lane's records are posted by the thread that takes their completions. */
 static inline int ring_advance(struct flow *link,struct receive_ring *ring){
-  int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=link->provider.queues[0].receive;
+  int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=link->post_receive;
   while(ring->count && (link->cyclic || ring->posted<ring->count)){
     struct prepared_receive *record=ring->first+ring->posted%ring->count;
     uint64_t cycle=ring->posted/ring->count;
@@ -456,25 +404,13 @@ void sysctl_text(const char *name,char *out,size_t room);
 void health_init(void);
 void wake(void);
 void stripe_failed(uint64_t ring,uint64_t owner,uint64_t word,int64_t code);
-int stream_post(struct port *port,uint32_t n);
-void port_bell(struct port *port);
-int port_threads(struct port *port);
 int port_list(struct flow *f);
-void port_settle(struct port *port);
-void port_guard(struct port *port,int raise);
-int guard_raise(struct port *port);
-void guard_lower(struct port *port,int raised);
-void port_quiet(struct flow *f);
 void port_unlist(struct flow *f);
-void port_pairs(struct port *port);
 void port_say(struct port *port,struct message said,const void *payload,uint32_t bytes);
-void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t tell,uint32_t where,uint32_t origin);
-void program_stale(uint64_t owner,uint32_t node);
+int lanes_leased(const struct port *port,uint64_t owner,const uint32_t *lane,uint32_t queues);
+uint32_t lanes_release(struct flow *f);
+void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t where);
 void programs_stop(int64_t code);
-void flow_tell(struct flow *f);
-void flow_step(struct flow *f);
-struct flow *flow_on(struct port *port,uint64_t key,uint32_t near,uint32_t far,uint32_t stripe);
-void ready_heard(struct port *port,const struct message *heard,const unsigned char *payload);
 void record_changed(void);
 struct mesh_record *record_held(uint32_t node);
 void health_turn(void);
@@ -487,11 +423,9 @@ void channel_heard(struct port *port,const struct message *heard,const unsigned 
 void request_event(const struct kevent64_s *e);
 void requests_turn(void);
 void requests_lost(struct port *port,int64_t code);
+int requests_held(const struct port *port);
 void requests_init(void);
 void requests_stop(void);
-void streams_fail(struct port *port,int64_t code,int tell);
-void stream_heard(struct port *port,const struct message *heard,const unsigned char *payload);
-void streams_turn(struct port *port);
 void port_lost(struct port *port,int64_t code);
 void clients_turn(int liveness);
 void flows_turn(void);

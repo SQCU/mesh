@@ -104,34 +104,27 @@ numeric LAN address in the measurement command.
 ## Reproduction and allocation
 
 The 2026-09-10 recipe below named `mesh-page-stream` and `mesh-verbs-stream`, deleted on 2026-09-12 (mesh f92e9eee,
-554a3793), and a bridge each reading started and stopped; on the resident bridge, whose bridge alone opens verbs, both
-readings come from one tool (mesh design/bridge-dataflow.md#streams). Build it beside the bridges as they run (it is
-a client of libmesh; the bridges must be at MESH_VERSION 118 or later, whose bridge serves a raw stream):
+554a3793), and a bridge each reading started and stopped. On the resident bridge (MESH_VERSION 124, WP2), the reading
+is a client program on a lane pair of the link (mesh design/bridge-dataflow.md#streams); the bridge's own raw stream
+of MESH_VERSION 118 is deleted with the per-program queue pairs, so the raw denominator is no longer read by this
+tool. Build it beside the bridges as they run (a client of libmesh):
 
 ```
 make -C rdma mesh-stream
 ```
 
-Each bridge's window must hold the stream's GiB beside what its clients lease (a bridge leases its raw stream's GiB
-from the window as a client's would be refused: `ENOMEM` as a value). With the Mini's node number N (mesh-stat's
-`nodes`), raw, from the M5 alone (the Mini's bridge receives with no program of the Mini's):
+Each bridge's window must hold the stream's GiB beside what its clients lease. With the Mini's node number N
+(mesh-stat's `nodes`) and the M5's M, the receiver first (it prints a ready line, then its result once every block
+landed and every word was checked), then the sender, both naming the same lane pair P (0 to 3, free at both ends):
 
 ```
-rdma/.build/mesh-stream raw N 1073741824
+rdma/.build/mesh-stream receive M 1073741824 P     # on the Mini
+rdma/.build/mesh-stream send N 1073741824 P        # on the M5
 ```
 
-and the bridge's path, the receiver first (it prints a ready line, then its result once every block landed and every
-word was checked), then the sender:
-
-```
-rdma/.build/mesh-stream receive M 1073741824     # on the Mini, M the M5's node
-rdma/.build/mesh-stream send N 1073741824        # on the M5
-```
-
-Each prints a JSON line whose `interior_GBps` is the rate between 10 % and 90 % of the 65,536 pages, as below; repeat
-each without restarting anything to keep the first-use and repeat readings apart, and read both the same day: the raw
-line is the denominator of the bridge's overhead and of a crossing's efficiency (the target: raw 9.383, the bridge's
-path within 0.5 % of it, 9.338).
+The receiver's JSON line's `interior_GBps` is the rate between 10 % and 90 % of the 65,536 pages, as below; repeat it
+without restarting anything to keep the first-use and repeat readings apart (the target: the bridge's path within
+0.5 % of the 2026-09-10 raw 9.383, 9.338).
 
 ### The 2026-09-10 recipe (historical: its targets and bridge lifecycle are gone)
 

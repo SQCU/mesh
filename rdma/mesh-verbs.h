@@ -91,42 +91,6 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
 }
 /* the region's name and the stop flag, defined once in mesh-link.c (design/bridge-and-ipc.md#files) */
 extern const char *shm; extern _Atomic sig_atomic_t stop;
-/* design/prepared-machine.md#M11 */
-/* design/RDMA-KERNEL-RECOVERY.md: queue pairs, then completion queues; a failed destruction keeps its handle for the
-   next retirement turn.  1 once nothing is held. */
-static __attribute__((unused)) int down_pair(struct mesh_verbs *provider){
-  while(provider->qp_count){
-    struct ibv_qp *q=provider->queues[provider->qp_count-1].pair;
-    if(q && ibv_destroy_qp(q))return 0;
-    provider->queues[--provider->qp_count].pair=NULL;
-    if(q)provider->device->pairs--;
-  }
-  if(provider->completion){if(ibv_destroy_cq(provider->completion))return 0;provider->completion=NULL;}
-  if(provider->sent){if(ibv_destroy_cq(provider->sent))return 0;provider->sent=NULL;}
-  free(provider->queues);provider->queues=NULL;provider->count=0;
-  return 1;
-}
-/* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": each queue pair moved to the error state, so the
-   device ends its posted receives and SENDs (flushed, IBV_WC_WR_FLUSH_ERR) before it is destroyed, and its completion
-   queues drained of what that returns until `polls` polls in a row take none; the completions drained.  A queue pair
-   whose move is refused is destroyed as down_pair destroys it.  The stripe flow's teardown takes it (mesh-program.c
-   stripes_job); every other teardown destroys its queue pairs as they stand. */
-static __attribute__((unused)) uint32_t pair_flush(struct mesh_verbs *provider,uint32_t polls){
-  for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
-    struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
-    ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE);
-  }
-  uint32_t drained=0,empty=0;
-  struct ibv_wc done[16];
-  while(empty<polls){
-    int taken=0;
-    struct ibv_cq *queues[2]={provider->completion,provider->sent};
-    for(int c=0;c<2;c++)if(queues[c]){const int n=ibv_poll_cq(queues[c],16,done);if(n>0)taken+=n;}
-    if(taken){drained+=(uint32_t)taken;empty=0;}
-    else empty++;
-  }
-  return drained;
-}
 /* design/RDMA-KERNEL-RECOVERY.md "October 18": a retired device's registrations, protection domain and context
    forgotten with no verbs call (ibv_dealloc_pd during the device's termination deadlocks Apple's driver, 09-05 and
    10-18); the kernel releases them at the process's exit */
@@ -255,15 +219,6 @@ static __attribute__((unused)) int queue_receive(struct mesh_verbs *provider,int
 static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q){
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
   if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
-  return 0;
-}
-/* each queue pair ready to receive from the peer's, then each ready to send */
-static __attribute__((unused)) int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],uint16_t lid,const uint8_t *gid){
-  for(int q=0;q<provider->count;q++){const int error=queue_receive(provider,q,remote[q],lid,gid);if(error)return error;}
-  return 0;
-}
-static __attribute__((unused)) int pair_send(struct mesh_verbs *provider){
-  for(int q=0;q<provider->count;q++){const int error=queue_send(provider,q);if(error)return error;}
   return 0;
 }
 /* design/bridge-and-ipc.md#lanes: a link's queue pairs destroyed at its next pairing (d6dceac's down_pair, its completion

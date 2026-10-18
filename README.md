@@ -554,9 +554,9 @@ same for its layer with that script's subcommands. A layer changes only to image
 Nothing stops a bridge but the bridge. Its agent's definition names its program and its configuration's path alone, so
 it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the
 installation above, or `make` by hand, which relinks the binary whenever libmesh changes) or a new configuration
-(`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge restarts itself on a new
-binary between calls, never ending a call it carries, a relayed one among them (design/bridge-and-ipc.md); a process
-already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
+(`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge stops at once on a new binary,
+its programs failing as values, and launchd starts the new one (design/bridge-and-ipc.md#stop); a process already
+running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
 
 Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what
 each layer installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two
