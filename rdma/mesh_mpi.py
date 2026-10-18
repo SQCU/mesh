@@ -7,7 +7,8 @@ by its import (rdma/NCCL.md "NumPy"):
 
 Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
 communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
-links among the ranks' nodes their bridges hold paired), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
+links among the ranks' nodes their bridges hold paired; rank 0 listens there, and a rank whose connection finds no
+listener fails as a value, ncclRemoteError, so rank 0 starts first), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
 complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Allgatherv,
 Reduce_scatter_block, Reduce_scatter, Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions
 pair), Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use

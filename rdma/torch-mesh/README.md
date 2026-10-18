@@ -36,8 +36,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   Separate `isend`/`irecv` calls in the same order on both sides do not pair; the library reports it, and on MPS
   tensors the next call raises.
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group.
-- A link that lands nothing for the library's one bound (`mesh.h` `MESH_SILENT_NS`, 10 s) is cancelled, and the
-  collective waiting on it fails; the group's `timeout` is not the library's to read.
+- A link lost (an event its bridges see: the link off, the peer's bridge or program gone, a revoke) has its landings
+  cancelled, and the collective waiting on it fails as a value; no clock of the library's ends a wait, and the group's
+  `timeout` is not the library's to read.
 - Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
   `gather`, `scatter`, a collective's crossings) are forwarded by the bridges on their route
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
@@ -121,9 +122,8 @@ rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 `torch_mesh.record(step)` and `torch_mesh.replay(recording, steps)` are a step recorded once and replayed (the CUDA
 graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
 (`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
-each issued on torch's stream and batched into torch's command buffers: Performance), every rank's compilation met at
-the default group's store before any of its collectives runs (a rank compiling past the library's silent-link bound
-would otherwise cancel its peers' first crossings). Each replay is waited for; `replay` returns the last one's seconds
+each issued on torch's stream and batched into torch's command buffers: Performance); a peer's crossings wait on
+their landings however long a rank compiles. Each replay is waited for; `replay` returns the last one's seconds
 on the GPU (MPS timing events). Its caller is metal-microbench `tools/torch_parallel/tp.py` with `CAPTURE=K`: a
 training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
 traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target

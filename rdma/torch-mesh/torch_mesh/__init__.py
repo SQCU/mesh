@@ -134,8 +134,8 @@ def merge_partials(out, lse, group=None, root=-1):
 
 
 class Recording:
-    """A record()ed step: `step` compiled whole by the "mesh" backend at its first replay, each rank's compilation met
-    by every rank's before any of its collectives runs; `graphs` the graphs compiled so far."""
+    """A record()ed step: `step` compiled whole by the "mesh" backend at its first replay; `graphs` the graphs compiled
+    so far."""
 
     def __init__(self, step, name):
         import torch
@@ -143,15 +143,8 @@ class Recording:
         self.compiled = torch.compile(step, backend=self._backend, fullgraph=True, dynamic=False)
 
     def _backend(self, gm, example_inputs):
-        """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
-        outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
-        timeout."""
-        import torch.distributed as dist
+        """compiler's graph (a peer's crossings wait on their landings, however long this rank compiles)."""
         made = compiler(gm, example_inputs)
-        if dist.is_initialized():
-            store, key = dist.distributed_c10d._get_default_store(), f'mesh/recording/{self.name}/{self.graphs}'
-            store.set(f'{key}/{dist.get_rank()}', b'1')
-            store.wait([f'{key}/{r}' for r in range(dist.get_world_size())])
         self.graphs += 1
         return made
 
@@ -164,7 +157,7 @@ def record(step):
     CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of the step
     (torch.compile with fullgraph, its collectives functional ones), compiled at its first replay by the "mesh"
     backend (compiler: Inductor's kernels, the graph's collectives batched into torch's command buffers, each issued on
-    torch's stream and completed where it is waited) after every rank has compiled it.  Nothing runs while it records:
+    torch's stream and completed where it is waited).  Nothing runs while it records:
     its tensors keep what they held, and each replay writes them.  Every rank records the same steps in the same
     order.  What the 10-01 form (mesh 4cbe704, metal-microbench 35c30a9 metal_recording.m) did beyond this needs an
     interposed recorder of torch's Metal commands, which has no documented extension point (README, Record and
