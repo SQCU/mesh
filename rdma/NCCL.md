@@ -96,7 +96,20 @@ in leases, which the GPU writes. The positions are laid without the counts: each
 `min(sendrows, capacity)` rows (every rank passes the same `sendrows`, `capacity`, `row` and type), and counts that pass
 that layout fail as a value with `*arrived` 2. Reproduction target (metal-microbench docs/measurement.md 2026-09-30,
 part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
-473-480 us, the host idle 7.4-7.9 ms.
+473-480 us, the host idle 7.4-7.9 ms. A crossing counted call had failed since its restoration (mesh 598cb6cf: a NULL
+program read where the uneven collectives check their segments) and, on a reused window, could read a pair's position
+with no rows as a filler; with both fixed, on the loopback fabric (a line of 4) every rank's counts and rows land,
+host path and walk.
+
+**All-to-all with host counts.** `ncclMeshAlltoAllV(send, sendcounts, recv, recvcounts, type, comm, stream)` is
+MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
+`recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`). It is the
+counted all-to-all's call with its counts known to both ends: no count crosses, each pair's elements move as one
+message of their own size, one call a group. NCCL's `ncclAlltoAll` is it with every count `count`, and `ncclGather` and
+`ncclScatter` its rooted forms (every count 0 but toward or from the root), where they were each rank's sends and
+receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). On the loopback fabric (a line of 4) every rank's
+elements land, host path and walk, the all-to-all, every root's gather and scatter and an uneven all-to-all with
+zero counts among its pairs.
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -276,7 +289,7 @@ Porting:
 
 ## Routes between unlinked ranks
 
-A message between ranks the map does not link (send/recv, all-to-all, gather and scatter, which are grouped sends, and
+A message between ranks the map does not link (send/recv, the all-to-alls, gather and scatter, and
 a collective's crossing between ranks the map joins by a route) is one program toward its destination node. The
 sending node's bridge carries it over the first link of the route, and each bridge on the route forwards it to the
 next node the route names, landing each record in rows it leases and sending it on from there, zero copy

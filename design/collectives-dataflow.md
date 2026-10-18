@@ -427,6 +427,17 @@ every counts receive (`mesh_steps_before`), its rows (buffer 3, the receive buff
   `inflight_lose`).
 - `received` and `arrived` on the Metal path are host memory in leases; `lease_buffer` gives the lease's Metal buffer,
   made at its first use and released by `ncclMemFree`.
+- A pair whose counts carry no rows still takes its room's positions; its sender writes none of the slot, so every ring
+  slot's first word is cleared when the session makes its rings (`ring_make`): a filler's stamp an earlier session left
+  at the same position is none of this one's.
+
+**An all-to-all with host counts** (`ncclMeshAlltoAllV`; NCCL's `ncclAlltoAll`, `ncclGather`, `ncclScatter`: `routed`)
+is the counted call with no `counts` (`hosted`): its `segments` the elements to each rank and then from each, the
+same on both ends of every pair, so `counted_steps` makes to each other rank q one SEND of its elements for q (buffer
+0, the send buffer at q's segment) and from each one COPY (buffer 1, the receive buffer at q's segment), sized by the
+counts, and every piece runs the plain paths (`run`, `publish`, `consume`); its own segment is copied (`own_segment`:
+`counted_host_end` on the host, `counted_stage` on the GPU, none where it is in place). A gather's counts are 0 but
+toward the root and a scatter's but from it, so their unused buffers are never read (NULL off the root).
 
 **The partials merge** (`ncclMeshRedOpCreatePartials`) is an operator of the communicator's table (`struct redop`
 `unit` = 2 + dim), as PreMulSum's is. `reduction` gives the call `combine = COMBINE_MERGE` and its `unit`, and from
@@ -689,7 +700,6 @@ Compile-time constants that shape the flow, none of them settable:
 | `MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS` | 600 + 30 + 3 s | the start's bound |
 | `MESH_PLAN_VERSION` | 5 | planning rules, in digest and agreement |
 | `OPS` | 64 | operators made on a communicator (PreMulSum, the partials merge) |
-| `MAX_RANKS` | 64 | the Metal lowering of all-to-all, gather, scatter |
 | `RECORDS` x `RECORD` | 65,536 x 128 B | the Metal 4 argument ring; overflow is `EOVERFLOW` |
 | `MESH_CLIENTS` / `MESH_DESTINATIONS` / `MESH_QUEUES` | 64 / 64 / 4 | region limits |
 

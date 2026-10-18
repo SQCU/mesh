@@ -1038,6 +1038,15 @@ ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const 
                                     ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
                                           ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
+/* MPI_Alltoallv with counts on the host: rank r sends sendcounts[q] elements to rank q, its segments packed in rank order
+   in sendbuff, and receives recvcounts[q] elements from rank q into recvbuff, packed in rank order (rank r's
+   sendcounts[q] is rank q's recvcounts[r], else the calls do not pair: ncclInvalidUsage; sendcounts[rank] is
+   recvcounts[rank], its own segment copied).  The counted all-to-all's call (below) with its counts known to both
+   ends: no count crosses, and each pair's elements move as one message of their size, in one group.  ncclAlltoAll is
+   it with every count `count`, and ncclGather and ncclScatter its rooted forms (every count 0 but toward or from the
+   root), so recvbuff off a gather's root and sendbuff off a scatter's are not read and may be NULL.  Both paths. */
+ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, void* recvbuff, const size_t* recvcounts, ncclDataType_t datatype,
+                               ncclComm_t comm, cudaStream_t stream);
 /* MPI_Alltoallv with counts the GPU wrote (mesh 3981ca80^'s, its signature; expert-parallel dispatch and combine with no
    host count and no host wait on the GPU): rank r sends each rank q the rows of sendbuff (grouped by destination in rank
    order: sendrows rows of `row` elements of datatype) that segment q of `counts` sums to (int64, sendsegs[q] entries for
