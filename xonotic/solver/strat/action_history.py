@@ -1,12 +1,10 @@
 from collections import defaultdict
 import json
 import os
-import tempfile
-import time
 
 import numpy as np
 
-from payload.tools.strategy_io_schema import BOT_CONFIGURATION_COLUMNS, OBS, OBS_OUTCOME_COUNTER_COLUMNS, STRATEGY_DEADLINE_S
+from payload.tools.strategy_io_schema import BOT_CONFIGURATION_COLUMNS, OBS, OBS_OUTCOME_COUNTER_COLUMNS
 from .inputs import participant_successors
 from .row_window import RowWindow
 from .game_value import GAME_CONTRACT, role_rewards, winner
@@ -137,8 +135,9 @@ def retained_source_rows(rows):
 
 
 class ActionHistory:
-    def __init__(self, capacity, max_bytes=256 << 20, directory=None):
+    def __init__(self, capacity, max_bytes, directory, interval):
         self.requests = RowWindow(capacity, lambda entry: len(entry["rows"]))
+        self.interval = float(interval)
         self.max_bytes = int(max_bytes)
         self.directory = directory
         self.previous = None
@@ -196,11 +195,11 @@ class ActionHistory:
             self.restore_features(entry)
         return entry
 
-    def spill(self, entry):
+    def spill(self, sequence):
         from .checkpoint_state import atomic_save, pack_state
-        if self.directory is None:
-            self.directory = tempfile.mkdtemp(prefix='mesh-action-history-')
-        path = os.path.join(self.directory, str(time.time_ns()) + '.npz')
+        entry = self.requests.get(sequence)
+        os.makedirs(self.directory, exist_ok=True)
+        path = os.path.join(self.directory, f'{sequence}.npz')
         stored = {key: entry[key] for key in ('state', 'rows', '_bytes')}
         stored['rows'] = retained_source_rows(entry['rows'])
         atomic_save(path, pack_state(stored))
@@ -243,7 +242,7 @@ class ActionHistory:
             oldest = next((key for key, entry in self.requests.items() if key not in retained and '_spill' not in entry), None)
             if oldest is None:
                 break
-            self.spill(self.requests.get(oldest))
+            self.spill(oldest)
 
     @property
     def nbytes(self):
@@ -273,7 +272,7 @@ class ActionHistory:
             if state is not None:
                 teams = np.asarray(state["context"].team_of)
                 entry["returns"] += entry["discount"] * rewards[teams]
-                entry["discount"] *= gamma ** (elapsed / STRATEGY_DEADLINE_S) * ((teams == before_role) == (teams == after_role))
+                entry["discount"] *= gamma ** (elapsed / self.interval) * ((teams == before_role) == (teams == after_role))
         groups = {}
         missing = repeated = 0
         for row, applied_sequence in zip(rows, application_sequences):
@@ -298,7 +297,7 @@ class ActionHistory:
             applied = np.isin(ids, list(selected)) & (successors >= 0)
             source = self.requests.get(state["request_seq"])
             age = max(0.0, now - state["engine_time"])
-            discount = (learning.bootstrap_gamma ** (age / STRATEGY_DEADLINE_S)
+            discount = (learning.bootstrap_gamma ** (age / self.interval)
                         if arm == "terminal_win" or value_weight else source["discount"])
             return {
                 "context": state["context"], "frame": state["frame"], "next_frame": frame,

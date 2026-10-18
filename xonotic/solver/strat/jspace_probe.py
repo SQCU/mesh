@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "rdma"))
 sys.path.insert(0, str(ROOT / "xonotic"))
 
-from payload.tools.strategy_io_schema import CS, OBS, OBS_AMMO_COLUMNS, OBS_WEAPON_COLUMNS, STRATEGY_DEADLINE_S
+from payload.tools.strategy_io_schema import CS, OBS, OBS_AMMO_COLUMNS, OBS_WEAPON_COLUMNS
 from solver.strat.cast_header import Wally, parameter_seed
 from solver.strat.checkpoint_state import load_policy
 from solver.strat.game_value import hierarchy_rows
@@ -51,8 +51,8 @@ ap.add_argument("--checkpoint", action="append", required=True, help="a trained 
 ap.add_argument("--arm", default="matrix_fusion")
 ap.add_argument("--device", required=True)
 ap.add_argument("--limit", type=int, default=0, help="only the first N steps")
-ap.add_argument("--integration-interval", type=float, default=STRATEGY_DEADLINE_S)
-ap.add_argument("--relaxation-time", type=float, default=1.0)
+ap.add_argument("--integration-interval", type=float, required=True, help="the journal's run's strategy_interval")
+ap.add_argument("--relaxation-time", type=float, required=True, help="the journal's run's relaxation_time")
 ap.add_argument("--scale-rank", type=int, default=SCALE_RANK)
 ap.add_argument("--scale-hidden", type=int, default=SCALE_HIDDEN)
 ap.add_argument("--scale-experts", type=int, default=SCALE_EXPERTS)

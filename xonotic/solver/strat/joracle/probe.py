@@ -1115,10 +1115,9 @@ class LiteralJWindow:
 
 class LiteralJReporter:
     # ../../../../../design/algorithm-sources.md#program
-    def __init__(self, max_rows=4000, interval=20.0, artifact_path=None):
-        self.artifact_path = os.path.abspath(artifact_path or "j-measures")
+    def __init__(self, max_rows, artifact_path):
+        self.artifact_path = os.path.abspath(artifact_path)
         self.max_rows = max(1, int(max_rows))
-        self.interval = max(0.1, float(interval))
         self.lock = threading.Lock()
         self.pending = deque()
         self.generation = 0
@@ -1134,7 +1133,6 @@ class LiteralJReporter:
         self.evicted_pending_transition_row_mass = 0
         self.stop_event = threading.Event()
         self.measure_event = threading.Event()
-        self.needs_initial_measure = True
         self.thread = threading.Thread(target=self.run, name="literal-j-measures", daemon=True)
 
     def start(self):
@@ -1152,7 +1150,6 @@ class LiteralJReporter:
             self.generation += 1
             self.report = {}
             self.revision += 1
-            self.needs_initial_measure = True
             self.pending_coordinate_row_mass = 0
             self.pending_transition_row_mass = 0
             self.ingested_coordinate_row_mass = 0
@@ -1183,9 +1180,7 @@ class LiteralJReporter:
                 self.pending_transition_row_mass -= removed_transitions
                 self.evicted_pending_coordinate_row_mass += removed_coordinates
                 self.evicted_pending_transition_row_mass += removed_transitions
-            if self.needs_initial_measure:
-                self.needs_initial_measure = False
-                self.measure_event.set()
+        self.measure_event.set()
 
     def snapshot(self):
         with self.lock:
@@ -1205,7 +1200,8 @@ class LiteralJReporter:
         window = LiteralJWindow(self.max_rows)
         generation = 0
         while True:
-            self.measure_event.wait(self.interval)
+            if not self.stop_event.is_set():
+                self.measure_event.wait()
             self.measure_event.clear()
             with self.lock:
                 current_generation = self.generation

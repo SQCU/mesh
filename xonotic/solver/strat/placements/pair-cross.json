@@ -4,6 +4,7 @@
   "products": {"cross": [0, 1]},
   "socket": "/tmp/mesh-expert-worker.sock",
   "framebytes": 16384,
-  "anticipatory_lead": 1.0,
-  "heartbeat_s": 1.0
+  "strategy_interval": 0.4,
+  "relaxation_time": 1.0,
+  "anticipatory_lead": 1.0
 }

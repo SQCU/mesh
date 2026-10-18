@@ -1,4 +1,4 @@
-import argparse, json, os, signal, socket, sys, time, uuid
+import argparse, json, os, select, signal, socket, sys, time, uuid
 from collections import deque
 from itertools import chain
 
@@ -40,7 +40,6 @@ from solver.strat.scale_config import (
 from workload import WorkloadMeter
 
 from payload.tools.strategy_io_schema import (
-    STRATEGY_DEADLINE_S,
     OBS,
     CS,
     TS,
@@ -105,7 +104,7 @@ def place(model, arm, world):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--placement", required=True,
-                    help="the call's placement document (xonotic/README.md \"The policy learner\"): device, products, socket, framebytes, anticipatory_lead")
+                    help="the call's placement document (xonotic/README.md \"The policy learner\"): device, products, socket, framebytes, strategy_interval, relaxation_time, anticipatory_lead")
     ap.add_argument("--train", action="store_true")
     ap.add_argument("--train-arms")
     ap.add_argument("--match-metadata", default="{}")
@@ -121,7 +120,6 @@ def main():
     ap.add_argument("--learning-rate", type=float, default=3e-4)
     ap.add_argument("--gradient-clip", type=float, default=1.0)
     ap.add_argument("--save-every", type=int, default=25)
-    ap.add_argument("--save-secs", type=float, default=30.0)
     ap.add_argument("--checkpoint")
     ap.add_argument("--online-checkpoint", default=ONLINE_CKPT)
     ap.add_argument("--initial-checkpoint")
@@ -132,7 +130,6 @@ def main():
     ap.add_argument("--append-telemetry", action="store_true")
     ap.add_argument("--model-sample-every", type=int, default=50)
     ap.add_argument("--measure-rows", type=int, default=4000)
-    ap.add_argument("--measure-interval", type=float, default=4.0)
     ap.add_argument("--seed", type=int, default=20260829)
     ap.add_argument("--control-weight", type=float, default=0.5)
     ap.add_argument("--exploration-weight", type=float, default=0.05)
@@ -146,19 +143,21 @@ def main():
                     help="historical value examples mixed into each shared fresh-state update")
     ap.add_argument("--replay-weight", type=float, default=0.5)
     ap.add_argument("--replay-steps", type=int, help="deprecated; both policies take one step per fresh attributed group")
-    ap.add_argument("--relaxation-time", type=float, default=1.0)
-    ap.add_argument("--integration-interval", type=float, default=STRATEGY_DEADLINE_S)
     args = ap.parse_args()
     from solver.strat.online import OnlineLearner, OPTIMIZER_WEIGHT_DECAY
     with open(args.placement) as source:
         placement = json.load(source)
     device = placement["device"]
     lead = float(placement.get("anticipatory_lead", 0.0))
+    interval, relaxation = float(placement["strategy_interval"]), float(placement["relaxation_time"])
     world = World(device, placement.get("products"))
     application = json.loads(os.environ.get('MESH_APPLICATION_IDENTITY', '{"state":"unbundled"}'))
     print(json.dumps({'event': 'application_runtime', 'application': application}), flush=True)
 
     stopping = {"signal": None}
+    wake, woken = os.pipe()
+    os.set_blocking(woken, False)
+    signal.set_wakeup_fd(woken)
     def stop(signum, frame):
         stopping["signal"] = signum
         print(json.dumps({"event": "responder_stop", "signal": signum}), flush=True)
@@ -167,8 +166,8 @@ def main():
     retired = {key: getattr(args, key) for key in
                ("control_weight", "exploration_weight", "off_policy_players", "replay_steps")}
     print(json.dumps({"event": "state_rate_interface", "retired_candidate_options": retired,
-                      "relaxation_time": args.relaxation_time,
-                      "integration_interval": args.integration_interval}), flush=True)
+                      "relaxation_time": relaxation,
+                      "integration_interval": interval}), flush=True)
     assigned = tuple(filter(None, (args.team_policy_arms or args.policy_arm).split(',')))
     train_arms = tuple(filter(None, (args.train_arms or args.policy_arm).split(','))) if args.train else ()
     evaluation_arms = tuple(dict.fromkeys((*assigned, *train_arms)))
@@ -217,13 +216,12 @@ def main():
     key = np.asarray([(args.seed >> 32) & 0xffffffff, args.seed & 0xffffffff], dtype=np.uint32)
     sampling_key = np.empty_like(key)
     history = ActionHistory(args.measure_rows, args.replay_memory_mb * (1 << 20),
-                            os.path.abspath(args.online_checkpoint or CKPT) + '.actions')
+                            os.path.abspath(args.online_checkpoint or CKPT) + '.actions', interval)
     episode_key = None
     observation_memory = ObservationMemory()
     remotes = {}
     count = 0
     started = time.monotonic()
-    last_status = started
     runstate_path = os.path.abspath(args.online_checkpoint or CKPT) + '.runstate.npz'
     saved, saved_payload = None, None
     if args.append_telemetry and os.path.isfile(runstate_path):
@@ -233,7 +231,10 @@ def main():
             saved = unpack_state(saved_payload)
         except (OSError, ValueError, KeyError) as error:
             print(json.dumps({'event': 'runstate_recovery', 'error': str(error)}), flush=True)
-    journal = TrainingJournal(saved['journal_path'] if saved else runstate_path + '.steps.' + str(time.time_ns()))
+    generation = int(saved.get('journal_generation', 0)) if saved else 0
+    journal = TrainingJournal(saved['journal_path'] if saved else runstate_path + '.steps.0')
+    if saved is None:
+        open(journal.path, 'wb').close()
     journal_offset = int(saved['journal_offset']) if saved else 0
     recovery = deque(journal.read(journal_offset))
     journal.repair_tail(recovery[-1][0] if recovery else journal_offset)
@@ -241,22 +242,22 @@ def main():
     meter = WorkloadMeter('xonotic.strategy', {'environment': args.environment,
                           'policy_arm': 'mixed' if len(assigned) > 1 else args.policy_arm,
                           'host_role': 'responder', 'host': socket.gethostname()})
-    last_save = time.monotonic()
     telemetry_path = os.path.abspath(args.telemetry)
     os.makedirs(os.path.dirname(telemetry_path), exist_ok=True)
-    reporter = LiteralJReporter(args.measure_rows, args.measure_interval,
+    reporter = LiteralJReporter(args.measure_rows,
                                os.path.join(os.path.dirname(telemetry_path), "j-measures." + os.path.basename(telemetry_path))).start()
     published = False
     telemetry = open(telemetry_path, 'a')
     producer_id = uuid.uuid4().hex
     def save():
-        nonlocal journal, journal_offset
+        nonlocal journal, journal_offset, generation
         if schema is None:
             return
-        world.heartbeat(placement.get("heartbeat_s", 1.0))
         previous_journal = journal
-        next_journal = journal if recovery else TrainingJournal(runstate_path + '.steps.' + str(time.time_ns()))
-        with open(next_journal.path, 'ab') as target:
+        if not recovery:
+            generation += 1
+        next_journal = journal if recovery else TrainingJournal(runstate_path + '.steps.' + str(generation))
+        with open(next_journal.path, 'ab' if recovery else 'wb') as target:
             target.flush()
             os.fsync(target.fileno())
         state = {'model_key': key, 'resp_id': count, 'schema': schema, 'episode_key': episode_key,
@@ -264,12 +265,12 @@ def main():
                  'observation_memory': observation_memory.export_state(),
                  'transport': inbox.export_state(), 'backlog': list(backlog),
                  'journal_path': next_journal.path, 'journal_offset': journal_offset if recovery else 0,
+                 'journal_generation': generation,
                  'assigned': assigned, 'train_arms': train_arms, 'at': time.time()}
         payload = pack_state(state)
         for arm, learning in learners.items():
             payload.update({f'__learner_{arm}__/{name}': value for name, value in learning.export_payload().items()})
         atomic_save(runstate_path, payload)
-        world.heartbeat(placement.get("heartbeat_s", 1.0))
         history.collect_spills()
         journal = next_journal
         journal_offset = state['journal_offset']
@@ -288,6 +289,7 @@ def main():
                 target.flush()
                 os.fsync(target.fileno())
             os.replace(outcome_path + '.new', outcome_path)
+            print(json.dumps({'event': 'outcome_acknowledged', 'episode_id': episode_key, 'path': outcome_path}), flush=True)
     navigation = None
     if args.navigation_realization:
         with open(args.navigation_realization) as source:
@@ -302,7 +304,6 @@ def main():
         for arm in evaluation_arms:
             model, forward, seed = made[arm]
             source = checkpoint_sources.get(arm) or args.resume_checkpoint or args.checkpoint
-            world.heartbeat(placement.get("heartbeat_s", 1.0))
             loaded = None
             if arm in train_arms:
                 target = checkpoint_path(args.online_checkpoint, arm) if len(train_arms) > 1 else args.online_checkpoint
@@ -359,7 +360,6 @@ def main():
         saved_payload = None
     try:
         while stopping['signal'] is None:
-            world.heartbeat(placement.get("heartbeat_s", 1.0))
             replaying = bool(recovery)
             recovered = None
             if replaying:
@@ -368,12 +368,15 @@ def main():
                 records = recovered['records']
                 event_frames = recovered['event_frames']
                 event_batches = event_frames if isinstance(event_frames, dict) else {(session, tick_id, None): recovered['events']}
-                inbox.replay_snapshot(recovered['key'], event_frames, recovered['outcomes'])
+                inbox.replay_snapshot(event_frames, recovered['outcomes'])
             else:
+                readable, _, _ = select.select([engine, wake], [], [])
+                if wake in readable:
+                    os.read(wake, 64)
+                    continue
                 for node, address, buffer in engine.receive():
                     inbox.feed(buffer)
                     route['engine'] = (node, address)
-                engine.progress()
                 ready = inbox.take()
                 if ready is None:
                     resolved = False
@@ -384,11 +387,6 @@ def main():
                                 resolved = True
                     if resolved:
                         save()
-                    if time.monotonic() - last_status >= 5:
-                        print(json.dumps({'event': 'responder_status', 'responses': count,
-                                          'transport': inbox.report(), 'state_schema': schema}), flush=True)
-                        last_status = time.monotonic()
-                    time.sleep(0.001)
                     continue
                 (session, tick_id), records, event_batches = ready
             step_complete = False
@@ -404,7 +402,7 @@ def main():
                 episode_key = current_episode
             event_rows = observation_memory.rows
             view_pages, chorus = native_inputs(records[STATE_KIND][1], obs_rows, cart_rows, team_rows,
-                event_rows, args.integration_interval, args.relaxation_time, navigation)
+                event_rows, interval, relaxation, navigation)
             state_header = view_pages.headers
             state_rows, residual_rows = chorus.state, chorus.residual
             if not len(state_rows):
@@ -455,14 +453,13 @@ def main():
             velocity, behavior_logp, integrated = emission.velocity, emission.logp, emission.residual
             preparation_elapsed, inference_elapsed = emission.preparation_seconds, emission.inference_seconds
             request = records[STATE_KIND][0]['req_id']
-            response = view_pages.response(velocity, args.integration_interval, args.relaxation_time, lead)
+            response = view_pages.response(velocity, interval, relaxation, lead)
             if not replaying:
                 journal_offset = journal.append({'key': (session, tick_id), 'records': records, 'event_frames': event_batches,
                     'outcomes': inbox.outcomes, 'velocity': velocity, 'behavior_logp': behavior_logp})
                 if 'engine' in route:
                     node, address = route['engine']
                     engine.send(address, node, frames(STRATEGY_KIND, request, tick_id, response, placement["framebytes"], session))
-                    engine.progress()
             response_elapsed = time.perf_counter() - response_started
             reporting_started = time.perf_counter()
             assignments, decisions = history.assignments(rows, applied_sequences, request, velocity, integrated,
@@ -486,8 +483,8 @@ def main():
                             'moe': {arm: {'residual_stats': np.asarray(output.scale_residual_stats).tolist(),
                                          'expert_load': np.asarray(output.scale_expert_load).tolist(),
                                          'balance': float(output.scale_balance)} for arm, output in outputs.items()},
-                            'team_ids': teams, 'delta': args.integration_interval,
-                            'relaxation_time': args.relaxation_time, 'rate': velocity, 'residual': integrated}
+                            'team_ids': teams, 'delta': interval,
+                            'relaxation_time': relaxation, 'rate': velocity, 'residual': integrated}
             for index, item in enumerate(assignments):
                 observed_state, observed_labels = view_observation(chorus, index)
                 item['successor_state'] = observed_state.tolist()
@@ -598,13 +595,13 @@ def main():
             line['work'] = {**totals, 'elapsed_s': response_elapsed,
                             'preparation_elapsed_s': preparation_elapsed, 'inference_elapsed_s': inference_elapsed,
                             'source_reporting_elapsed_s': source_reporting_elapsed,
-                            'deadline_s': args.integration_interval,
+                            'strategy_interval_s': interval,
                             'optimization': {'elapsed_s': optimization_elapsed,
                                              'gradient_steps': sum(value['gradient_steps'] for value in learning.values())}}
             meter.record(response_elapsed,
                          flops_lower=totals['lower_flops'], flops_upper=totals['upper_flops'],
                          bytes_lower=totals['lower_bytes'], bytes_upper=totals['upper_bytes'],
-                         deadline_s=args.integration_interval, rows=len(rows),
+                         rows=len(rows),
                          operations={'stage': 'state_rate_response', 'players': len(rows), 'teams': k,
                                      'state_width': state_rows.shape[1], 'host_role': 'responder'},
                          measures={**line['j_measures'], 'moe': model_record['moe'], **{f'learning.{arm}': {**state, 'last_update': learning.get(arm, {})}
@@ -620,9 +617,8 @@ def main():
             if not published:
                 publish_active_run(telemetry_path)
                 published = True
-            if terminal_new or time.monotonic() - last_save >= args.save_secs or (args.save_every and count % args.save_every == 0):
+            if terminal_new or (args.save_every and count % args.save_every == 0):
                 save()
-                last_save = time.monotonic()
     finally:
         if step_complete:
             save()

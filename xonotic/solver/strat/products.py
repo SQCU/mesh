@@ -14,7 +14,6 @@ no executor of its own).  Parts are relative: a product of n rows or columns giv
 (`split`), [0, 1] the whole product to rank 1 (57628982^'s RemoteCross placing the row-Gram cross on the Mini)."""
 import json
 import os
-import time
 
 import numpy as np
 import torch
@@ -78,7 +77,6 @@ class World:
         self.header = self.buffer((3,), torch.int64, 'cpu')
         self.payload = None
         self.calls = 0
-        self.announced = time.monotonic()
 
     def buffer(self, shape, dtype, device):
         if self.dist is None:
@@ -183,23 +181,11 @@ class World:
             torch.cat(chunks, out=self.payload[len(meta):len(meta) + length])
         self.dist.broadcast(self.payload[:len(meta) + length], 0)
         self.calls += 1
-        self.announced = time.monotonic()
-
-    def heartbeat(self, interval):
-        """Rank 0, between calls: an empty announcement once `interval` seconds have passed without one, so no other
-        rank's wait for the next call reaches the library's silent-link bound (rdma/mesh.h MESH_SILENT_NS)."""
-        if self.size > 1 and self.rank == 0 and time.monotonic() - self.announced >= interval:
-            self.header[0], self.header[1], self.header[2] = 2, 0, 0
-            self.dist.broadcast(self.header, 0)
-            self.announced = time.monotonic()
 
     def receive(self):
         """Every other rank: the next call rank 0 announced, (name, operands), or None once rank 0 has stopped."""
-        while True:
-            self.dist.broadcast(self.header, 0)
-            kind, meta, length = (int(value) for value in self.header)
-            if kind != 2:
-                break
+        self.dist.broadcast(self.header, 0)
+        kind, meta, length = (int(value) for value in self.header)
         if kind != 1:
             return None
         if self.payload is None or self.payload.numel() < meta + length:
