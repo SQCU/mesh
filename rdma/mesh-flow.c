@@ -1331,9 +1331,9 @@ static void channel_say(const struct channel *c,int s,uint32_t kind,uint64_t cou
    still awaiting its answer answered with the code); the slot freed first, so a port lost meanwhile finds it free */
 static void service_gone(struct channel *c);
 static void channel_end(struct channel *c,int64_t code,int from){
-  if(c->end[1].kind==END_MEET || c->end[1].kind==END_RELAY)service_gone(c);
   struct channel was=*c;
   memset(c,0,sizeof *c);
+  if(was.end[1].kind==END_MEET || was.end[1].kind==END_RELAY)service_gone(c);
   if(code)say("channel %u.%u to node %u's %s: %s\n",was.origin,(uint32_t)was.key,was.destination,was.service,strerror((int)code));
   if(was.pid && !was.exited){
     kill(-was.pid,SIGTERM);
@@ -1432,7 +1432,7 @@ static void end_drain(struct channel *c,int t){
   }
   if(!e->queued && o->ended && !e->told){
     e->told=1;
-    if(e->kind==END_RELAY){service_gone(c);e->ended=1;end_drain(c,1-t);}
+    if(e->kind==END_RELAY){service_gone(c);if(!c->used)return;e->ended=1;end_drain(c,1-t);}
     else if(e->kind==END_SOCKET)shutdown(e->fd,SHUT_WR);
     else if(e->kind!=END_MEET)channel_say(c,t,CHANNEL_SHUT,0,0,NULL,0);
     if(!c->used)return;
@@ -1791,13 +1791,13 @@ static struct program *program_owned(uint64_t owner){
   return NULL;
 }
 static void relay_drop(struct relay_hold *hold,int orderly){
+  for(struct relay_hold **at=&relays;*at;at=&(*at)->next)if(*at==hold){*at=hold->next;break;}
   for(uint32_t i=0;i<hold->count;i++){
     struct program *prog=program_owned(hold->owner[i]);
     if(prog && orderly && atomic_load(&prog->state)!=FAILED)continue;
     if(prog){program_fail(prog,ECONNRESET,4,M->node);program_free(prog);}
     mesh_retire(M,hold->owner[i]);
   }
-  for(struct relay_hold **at=&relays;*at;at=&(*at)->next)if(*at==hold){*at=hold->next;break;}
   free(hold);
 }
 /* the lists of one relayed direction pair mirrored into the bridge's slot `c`: each transfer from the far end through
