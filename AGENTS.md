@@ -154,7 +154,7 @@ Operator instruction, 2026-09-05:
 Verify actual user sessions and workloads, then perform the ordinary restart
 without another approval request when the node is idle.
 This authorization applies to every mesh machine. It does not authorize
-uncatchable signals to verbs owners; retain the teardown procedure below.
+uncatchable signals to verbs owners; retain the SIGTERM stop below.
 
 ## The kill guard
 
@@ -204,9 +204,13 @@ hook and the zsh line check.
 
 ### Signals are distinguished, not blocked uniformly
 
-`SIGTERM` to the bridge is correct and safe: the teardown handler runs
-`ibv_destroy_qp` / `ibv_dereg_mr` / `ibv_dealloc_pd` / `ibv_close_device` and the
-device is released; the driver that started a bridge stops it that way. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
+`SIGTERM` to the bridge is correct: its handler sets the stop, the bridge tells its
+peers FAREWELL and fails its programs as values, and it exits with no verbs call, its
+queue pairs, registrations, protection domain and context left to the kernel's
+reclaim at the exit (design/bridge-and-ipc.md#stop; `ibv_dealloc_pd` deadlocks the
+driver while the device terminates, and whether the exit-time reclaim avoids that on
+TB5 is unread: design/RDMA-KERNEL-RECOVERY.md, October 18); the driver that started
+a bridge stops it that way. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
 allowed. What is blocked is anything uncatchable or unhandled: `-9`, `-KILL`,
 `-STOP`, `-17`, `launchctl kill KILL`, and — because a `pgrep -f mesh-flow` or a
 `launchctl print` makes a PID feel like a safe target — *any* non-TERM signal
