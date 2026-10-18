@@ -617,6 +617,8 @@ def main():
             if not published:
                 publish_active_run(telemetry_path)
                 published = True
+            if terminal is not None and not learners:
+                print(json.dumps({'event': 'outcome_acknowledged', 'episode_id': current_episode, 'path': telemetry_path}), flush=True)
             if terminal_new or (args.save_every and count % args.save_every == 0):
                 save()
     finally:

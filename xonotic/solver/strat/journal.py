@@ -7,7 +7,6 @@ import struct
 import numpy as np
 
 
-
 class TrainingJournal:
     def __init__(self, path):
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -60,52 +59,3 @@ class TrainingJournal:
                 target.truncate(valid_position)
                 target.flush()
                 os.fsync(target.fileno())
-
-
-class Journal:
-    def __init__(self, store=None):
-        self.positions = {}
-        self.store = store
-        self.errors = []
-
-    def seek(self, path, position):
-        with path.open('rb') as handle:
-            head = handle.read(min(4096, position))
-            handle.seek(max(0, position - 128))
-            tail = handle.read(min(128, position))
-        self.positions[str(path)] = position, head, tail
-        if self.store:
-            self.store.move(path, position, head, tail)
-
-    def read(self, path, prefix=""):
-        key = str(path)
-        saved = self.positions.get(key) or (self.store.cursor(path) if self.store else None)
-        with path.open('rb') as handle:
-            position, head, tail = saved or (0, b'', b'')
-            size = os.fstat(handle.fileno()).st_size
-            actual_head = handle.read(len(head))
-            handle.seek(max(0, position - len(tail)))
-            actual_tail = handle.read(len(tail))
-            if size < position or actual_head != head or actual_tail != tail:
-                position = 0
-            handle.seek(position)
-            while True:
-                start = handle.tell()
-                line = handle.readline()
-                if not line.endswith(b'\n'):
-                    position = start
-                    break
-                position = handle.tell()
-                if not prefix or prefix.encode() in line:
-                    try:
-                        yield json.loads(line.partition(prefix.encode())[2] if prefix else line)
-                    except (ValueError, UnicodeError) as error:
-                        self.errors.append({'path': key, 'offset': start, 'error': str(error)})
-                        self.errors = self.errors[-64:]
-            handle.seek(0)
-            head = handle.read(min(4096, position))
-            handle.seek(max(0, position - 128))
-            tail = handle.read(min(128, position))
-            self.positions[key] = position, head, tail
-            if self.store:
-                self.store.move(path, position, head, tail)
