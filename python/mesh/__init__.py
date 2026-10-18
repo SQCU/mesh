@@ -12,7 +12,9 @@ host writes its inputs (write), each publication firing what it completes (a pen
 executor's rule, design/deliverables.md L3), and reads its results (export, Result.ready, consume).  Kernels run
 on one compute thread; crossings and collectives are libnccl-mesh's (mesh._native), issued in one order every
 member computes from the graph (each queue its own communicator), so their positions pair (rdma/NCCL.md "Rules a
-program keeps").  Every wait is bounded by the program's `timeout`; a failure is a value (Program.report, MeshError).
+program keeps").  A failure is a value (Program.report, MeshError); every wait ends at an event (a call completing, a
+failure, close), never at a time, and close() abandoning work in flight revokes the program's communicators, so its
+crossings end with an error here and at its peers.
 
 The package is `mesh`, the import name rdma/mesh.py also takes: importing it loads that module from this checkout's
 rdma/ and carries its names (ffi, lib, lease, current, ...), so torch_mesh and mesh_mpi find what they import."""
@@ -463,11 +465,8 @@ class _Order:
 
 class Program:
     # design/algorithm-sources.md#program
-    def __init__(self, backend='cpu', *, functions=None, group=None, timeout=10.0, trace=False):
-        if timeout is None or not timeout > 0:
-            raise ValueError('A program bounds every wait: timeout is a positive number of seconds')
+    def __init__(self, backend='cpu', *, functions=None, group=None, trace=False):
         self.device = _native.DEVICES[backend]
-        self.timeout = float(timeout)
         self._functions = dict(functions or {})
         self._world = _native.World(self.device, group)
         self.node = self.rank = self._world.rank
@@ -912,7 +911,7 @@ class Program:
                     if chosen is not None:
                         chosen[1].running = True
                         break
-                    self._cond.wait(0.05)
+                    self._cond.wait()
             order, task = chosen
             try:
                 works = self._execute(task)
@@ -937,7 +936,7 @@ class Program:
                     if self._ready(task):
                         task.running = True
                         break
-                    self._cond.wait(0.05)
+                    self._cond.wait()
             try:
                 works = self._execute(task)
             except Exception as error:
@@ -958,14 +957,18 @@ class Program:
         return (_native.recv(dst.tensor, task.members.index(sender), group),)
 
     # design/algorithm-sources.md#collectivesync_on_remote_fill
-    def _wait_results(self, results, timeout=None):
-        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
-        while not all(result.ready for result in results):
-            with self._cond:
+    def _wait_results(self, results, every=True):
+        with self._cond:
+            while True:
+                filled = [result for result in results if result._task.done]
+                if len(filled) == len(results) or filled and not every:
+                    break
                 self._raise()
-                if time.monotonic() > deadline:
-                    raise TimeoutError(errno.ETIMEDOUT, 'sync_on_remote_fill: a result was not filled within the bound')
-                self._cond.wait(0.0005)
+                self._cond.wait()
+        for result in filled:
+            if result._task.event is not None:
+                result._task.event.synchronize()
+        return filled
 
     # design/algorithm-sources.md#program
     def close(self):
@@ -973,12 +976,13 @@ class Program:
             return
         with self._cond:
             self._closed = True
+            abandoned = bool(self.report.code) or any(task.running for task in self._tasks)
             self._cond.notify_all()
-        deadline = time.monotonic() + self.timeout
+        if abandoned:
+            self._world.revoke()
         for thread in self._threads:
-            thread.join(max(0.0, deadline - time.monotonic()))
-        if not any(thread.is_alive() for thread in self._threads):
-            self._world.close()
+            thread.join()
+        self._world.close()
         self._replicated.clear()
 
     # design/algorithm-sources.md#program

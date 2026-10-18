@@ -46,7 +46,7 @@ class World:
     own and each set of members a collective spans another, made in one order on every member at realize."""
 
     def __init__(self, device, group):
-        self.owned = False
+        self.device, self.owned = device, False
         if group is None and dist.is_available() and dist.is_initialized():
             group = dist.group.WORLD
         if group is None and int(os.environ.get('WORLD_SIZE', '1')) > 1:
@@ -74,6 +74,14 @@ class World:
     # design/algorithm-sources.md#independent-native-queues
     def of(self, queue, members):
         return self.groups[(queue, tuple(sorted(members)))]
+
+    # design/algorithm-sources.md#mesherror
+    def revoke(self):
+        """Every communicator's work in flight ends with an error, here and at its peers, and none is issued after it
+        (torch_mesh ProcessGroupMesh.revoke: ncclCommRevoke)."""
+        groups = {g for g in self.groups.values() if g is not None} | ({self.group} if self.group is not None else set())
+        for group in groups:
+            group._get_backend(torch.device(self.device)).revoke()
 
     # design/algorithm-sources.md#program
     def close(self):

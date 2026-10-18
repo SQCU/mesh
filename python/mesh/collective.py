@@ -16,7 +16,7 @@ from . import BlockSpec, Program, ShapeDtypeStruct, _native
 
 __all__ = ['SUM', 'MAX', 'MIN', 'PARTIALS', 'send', 'recv', 'recv_like', 'broadcast', 'scatter', 'gather',
            'all_gather', 'all_to_all', 'reduce', 'reduce_scatter', 'sum_scatter',
-           'all_reduce', 'all_sum', 'all_max', 'all_min', 'sync_on_remote_fill']
+           'all_reduce', 'all_sum', 'all_max', 'all_min', 'sync_on_remote_fill', 'sync_on_some_remote_fill']
 
 SUM, MAX, MIN, PARTIALS = 'sum', 'max', 'min', 'partials'
 send = recv = Program.copy
@@ -268,11 +268,23 @@ all_min = partial(all_reduce, op=MIN)
 
 
 # design/algorithm-sources.md#collectivesync_on_remote_fill
-def sync_on_remote_fill(*results, timeout=None):
-    """Waits until every result is filled (or its program failed: MeshError), within the program's timeout or
-    `timeout` seconds (TimeoutError past it).  Explicit, diegetic and never a default: no verb calls it."""
+def sync_on_remote_fill(*results):
+    """Waits until every result is filled, or its program failed (MeshError); where a result is never filled it waits
+    forever (design/collective-goals-2026-09-14.md: slower, and it can deadlock forever).  Explicit, diegetic and never
+    a default: no verb calls it."""
     programs = {}
     for result in results:
         programs.setdefault(id(result.ref.program), (result.ref.program, []))[1].append(result)
     for program, waited in programs.values():
-        program._wait_results(waited, timeout)
+        program._wait_results(waited)
+
+
+# design/algorithm-sources.md#collectivesync_on_remote_fill
+def sync_on_some_remote_fill(*results):
+    """Waits until at least one of `results`, all of one program, is filled, or the program failed (MeshError): the
+    filled ones, in their order (MPI_Waitsome); where none is ever filled it waits forever.  Explicit as
+    sync_on_remote_fill is."""
+    programs = {result.ref.program for result in results}
+    if len(programs) != 1:
+        raise ValueError('sync_on_some_remote_fill waits on the results of one program')
+    return programs.pop()._wait_results(results, every=False)
