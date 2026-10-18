@@ -361,9 +361,8 @@ class Curriculum:
         self.observation_archive = None
         self.previous_checkpoints = {}
         self.initial_checkpoints = {}
-        self.artifact_cache = {}
         self.map_assets = MapAssets(self.basedir, self.entity_tool, args.python, self.progs,
-                                    self.csprogs, args.checkpoints_per_lane, args.dry_run, self.artifact_cache)
+                                    self.csprogs, args.checkpoints_per_lane, args.dry_run)
         self.next_ordinal = 0
         self.next_cycle = 0
         self.stopping = 0
@@ -951,18 +950,18 @@ class Curriculum:
             "realized": realized, "runtime_logs": runtime_logs,
             "realization_measures": realization_measures,
             "artifacts": {
-                "entity": artifact(entity["entity"], self.artifact_cache),
-                "measurements": artifact(entity["measurements_path"], self.artifact_cache),
-                "mapinfo": artifact(entity["mapinfo"], self.artifact_cache),
-                "telemetry": artifact(commands["telemetry"], self.artifact_cache),
-                "checkpoint_in": ({arm: artifact(path, self.artifact_cache) for arm, path in commands["checkpoint_in"].items()}
+                "entity": artifact(entity["entity"]),
+                "measurements": artifact(entity["measurements_path"]),
+                "mapinfo": artifact(entity["mapinfo"]),
+                "telemetry": artifact(commands["telemetry"]),
+                "checkpoint_in": ({arm: artifact(path) for arm, path in commands["checkpoint_in"].items()}
                                   if isinstance(commands["checkpoint_in"], dict)
-                                  else artifact(commands["checkpoint_in"], self.artifact_cache) if commands["checkpoint_in"] else None),
-                "checkpoint_out": artifact(commands["checkpoint_out"], self.artifact_cache),
-                "checkpoint_initial": artifact(commands["checkpoint_initial"], self.artifact_cache),
-                "policy_checkpoints": {arm: artifact(path, self.artifact_cache) for arm, path in commands["policy_checkpoints"].items()},
-                "server_log": artifact(os.path.join(directory, "server.log"), self.artifact_cache),
-                "responder_log": artifact(os.path.join(directory, "responder.log"), self.artifact_cache),
+                                  else artifact(commands["checkpoint_in"]) if commands["checkpoint_in"] else None),
+                "checkpoint_out": artifact(commands["checkpoint_out"]),
+                "checkpoint_initial": artifact(commands["checkpoint_initial"]),
+                "policy_checkpoints": {arm: artifact(path) for arm, path in commands["policy_checkpoints"].items()},
+                "server_log": artifact(os.path.join(directory, "server.log")),
+                "responder_log": artifact(os.path.join(directory, "responder.log")),
             },
             "port": commands["port"], "perturbation": commands["perturbation"],
         }
@@ -1072,7 +1071,7 @@ class Curriculum:
                                records=report.get("record_count"),
                                paired_blocks=report.get("paired_block_count"),
                                paired_rounds=report.get("paired_round_count"),
-                               artifact=artifact(report_path, self.artifact_cache))
+                               artifact=artifact(report_path))
                 except Exception as exc:
                     self.event("study_measurement_error", cycle=cycle,
                                error=f"{type(exc).__name__}: {exc}")
