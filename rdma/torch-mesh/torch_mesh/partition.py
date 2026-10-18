@@ -37,23 +37,34 @@ operation wherever its data could leak into valid results]:
   sharding gives any other Partial there (avg, the norms, embedding's mask), or a ragged output extent P does not
   divide (a view), and convolution, argmax, argmin and equal, get the dimension whole first, by the gather below, where
   only the valid elements remain; softmax, var, sort, top-k, scans and indexing need it whole by DTensor's own rules.
-- Attention: SDPA on query, key and value split along the sequence by one RaggedShard is ring attention, each
-  source's keys past its valid extents masked (score -inf); context parallelism's ring (ring_attention) masks the
-  same way over head-tail halves.
+- Attention: SDPA on query, key and value split along the sequence by one RaggedShard (on any mesh dimension) is ring
+  attention, each source's keys past its valid extents masked (score -inf); context parallelism's ring
+  (ring_attention) masks the same way over head-tail halves.  The softmax over the split is the library's partials
+  merge (below).
 No kernel changes: stock kernels compute garbage in padding that nothing reads unmasked.
 
 Redistribution, each block at its capacity (static counts, never padded to a common size): Shard to Replicate
 all-gathers the blocks and packs the valid elements into the logical tensor (torch_mesh::pack, a fixed-shape index from
 the parts); Replicate to Shard takes this rank's valid elements into its block (torch_mesh::unpack, then its static
 block); Partial to Shard unpacks with the identity and reduce-scatters the blocks; Shard to Partial places this rank's
-valid elements among zeros; Shard(d) to Shard(d') goes through Replicate.  Context parallelism's head-tail split keeps
-each half at its capacity: rank r's block is its head's valid positions, padding, its tail's, padding
-(context_parallel_buffers, context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its
-ring, called in their place).  On a group of the mesh backend the MPS buffers these collectives send from and land in
-are window tensors (torch_mesh.empty, mesh 5ff5d699 and f9898875): the all-gather's output, this rank's block copied
-into its place there and the call run in place; the reduce-scatter's input (where it does not lie in the window
-already, its copy) and its output; the ring's gathered keys and values, this rank's concatenated into its place; so the
-library reads what they send where it lies.  Elsewhere, and where the window refuses a lease, torch's own memory.
+valid elements among zeros; Shard(d) to Shard(d') goes through Replicate; Shard's scatter from a source rank is the
+rooted V (the backend's exchange, MPI_Scatterv).  Context parallelism's head-tail split keeps each half at its capacity:
+rank r's block is its head's valid positions, padding, its tail's, padding (context_parallel_buffers,
+context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its ring, called in their place).
+The ring is split-KV attention [Dao et al. 2023, Flash-Decoding]: every rank's query block gathered (one Allgatherv),
+each block's attention over this rank's own keys and values its partials (the row's logsumexp and output), and the
+partials reduce-scattered by the library's partials operator (ncclMeshRedOpCreatePartials in ncclMeshReduceScatterV),
+each block's merged at its owner by their log-sum-exp, so the crossing follows from the role of the split axis, a
+softmax over it, as a contraction's is a reduction.  On a group
+of the mesh backend the MPS buffers these collectives send from and land in are window tensors (torch_mesh.empty, mesh
+5ff5d699 and f9898875): the all-gather's output, this rank's block copied into its place there and the call run in
+place; the reduce-scatter's input (where it does not lie in the window already, its copy) and its output; the ring's
+gathered queries and its partials; so the library reads what they send where it lies.  Elsewhere, and where the window
+refuses a lease, torch's own memory.
+
+A routed partition (routed): a mixture of experts' experts as a partition's units, each token's rows sent to the ranks
+holding their experts and back by the counted all-to-all (torch_mesh.all_to_all_counted: the counts the GPU wrote move
+with the rows), the slots past a rank's part receiving none.
 
 Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
 - torch.library.custom_op with register_fake and register_autograd: torch_mesh::remask, pack, unpack, allgatherv,
@@ -78,15 +89,17 @@ Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with n
   capacity blocks, held here per mesh (torch's own tracker is never replaced).
 - ColwiseParallel, RowwiseParallel and SequenceParallel subclass torch.distributed.tensor.parallel's, overriding
   _partition_linear_fn, _partition_embedding_fn, _prepare_input_fn and _prepare_output_fn.
-- Context parallelism: torch's _SDPAMerger and _cp_options.convert_to_f32 (read); the blocks are torch_mesh._mps's.
+- Context parallelism: the blocks are _block's (MPS's SDPA returns no logsumexp), merged by the backend's partials
+  merge (the library's partials operator).
 All but custom_op, DTensor, Shard and the parallel styles are underscored: torch 2.14's internals, read again on an
 upgrade.
 
-Refused (on every rank alike): a mesh dimension of more than one coordinate before a partitioned one (ValueError at
-attach); _StridedShard (FSDP2 with TP, nested views), a flattened or unflattened partitioned dimension, a BlockMask
-(flex attention), from_local's run_check and LocalTensor's RNG tracker on a RaggedShard (NotImplementedError).  Left as
-they are: the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.  Under
-torch.compile the SDPA ring is a graph break (UnsupportedOperatorException on fake tensors).
+A partitioned dimension may be any of its mesh's (a RaggedShard on any mesh dimension: each placement's methods take
+their mesh dimension's group and coordinate, and the redistribution moves one mesh dimension a step).  Refused (on
+every rank alike): _StridedShard (FSDP2 with TP, nested views), a flattened or unflattened partitioned dimension, a
+BlockMask (flex attention), from_local's run_check and LocalTensor's RNG tracker on a RaggedShard (NotImplementedError).
+Left as they are: the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.
+Under torch.compile the SDPA ring is a graph break (UnsupportedOperatorException on fake tensors).
 
 rebalance(mesh, name, every) moves the parts by the evidence of the program's steps (allocate.Balancer)."""
 import contextlib
@@ -104,15 +117,12 @@ from torch.distributed.tensor import distribute_tensor as _distribute_tensor
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor._op_schema import OpSchema
 from torch.distributed.tensor._redistribute import _gen_transform_infos_non_cached
-from torch.distributed.tensor.experimental._context_parallel import _attention as _cp
 from torch.distributed.tensor.parallel import ColwiseParallel as _Colwise
 from torch.distributed.tensor.parallel import RowwiseParallel as _Rowwise
 from torch.distributed.tensor.parallel import SequenceParallel as _Sequence
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.utils import _pytree as pytree
 from torch.utils._python_dispatch import return_and_correct_aliasing
-
-from ._mps import mps_block
 
 aten = torch.ops.aten
 
@@ -269,8 +279,10 @@ def _lease(shape, like):
         return None
 
 
-def _empty(shape, like, group=None):
-    """A window tensor (_lease) where the buffer is _windowed and the window holds it, else torch.empty."""
+def _empty(shape, like, group=None, dtype=None):
+    """A window tensor (_lease) where the buffer is _windowed and the window holds it, else torch.empty; like `like`,
+    of `dtype` where given."""
+    like = like if dtype is None else like.new_empty(0, dtype=dtype)
     made = _lease(shape, like) if _windowed(like, group) else None
     return made if made is not None else torch.empty(shape, dtype=like.dtype, device=like.device)
 
@@ -435,11 +447,6 @@ def attach(mesh, **dims):
         if name not in (mesh.mesh_dim_names or ()) or len(capacity) != mesh.size(mesh.mesh_dim_names.index(name)):
             raise ValueError(f'mesh: partition {name}: {len(capacity)} capacities, one a coordinate of a mesh dimension of '
                              f'{mesh.mesh_dim_names}')
-        d = mesh.mesh_dim_names.index(name)
-        outer = [mesh.mesh_dim_names[j] for j in range(d) if mesh.size(j) > 1]
-        if outer:
-            raise ValueError(f'mesh: partition {name}: mesh dimensions {outer} precede it; a partitioned dimension is its '
-                             f'mesh\'s first of more than one coordinate')
         key = f'{name}#{next(_KEYS)}'
         _OPERANDS[key] = _Operand(key, capacity, parts)
         _NAMED[mesh, name] = key
@@ -949,22 +956,25 @@ def _spec_like(spec, shape, dtype):
 
 
 def _attention(op_call, args, kwargs):
-    """SDPA on query, key and value split along the sequence (dimension 2) by one RaggedShard of a 1-D mesh: ring
-    attention over their capacity blocks, contiguous shares (_ring_attention).  torch.compile's tracing runs ops on fake
-    tensors, and the ring (its collectives, the operand's host-side tables) runs only on real ones: under fake tensors
-    the op is refused as unsupported, which dynamo takes as a graph break."""
+    """SDPA on query, key and value split along the sequence (dimension 2) by one RaggedShard, on any mesh dimension
+    (its others replicated or splitting the batch or the heads, the three tensors placed alike): ring attention over
+    their capacity blocks, contiguous shares, along that dimension's group (_ring_attention).  torch.compile's tracing
+    runs ops on fake tensors, and the ring (its collectives, the operand's host-side tables) runs only on real ones:
+    under fake tensors the op is refused as unsupported, which dynamo takes as a graph break."""
     named = _named(op_call, args, kwargs)
     query, key, value = named['query'], named['key'], named['value']
     spec = query._spec
-    held = query.placements[0] if spec.mesh.ndim == 1 else None
-    if not (isinstance(held, RaggedShard) and held.dim == 2 and all(_same(t.placements, (held,)) for t in (key, value))):
+    ragged = [i for i, p in enumerate(query.placements) if isinstance(p, RaggedShard) and p.dim % query.ndim == 2]
+    if len(ragged) != 1 or not all(_same(t.placements, query.placements) for t in (key, value)) or any(
+            p.is_partial() or (p.is_shard() and p.dim % query.ndim > 1) for i, p in enumerate(query.placements) if i != ragged[0]):
         return _propagated(op_call, args, kwargs)
+    held = query.placements[ragged[0]]
     if any(isinstance(t._local_tensor, FakeTensor) for t in (query, key, value)):
         raise UnsupportedOperatorException(op_call)
     if (named.get('attn_mask') is not None or named.get('dropout_p', 0.0) or named.get('dropout_mask') is not None
             or named.get('enable_gqa', False)):
         raise NotImplementedError('mesh: ragged SDPA takes no attn_mask, dropout or enable_gqa')
-    out, lse = _ring_attention(spec.mesh.get_group(), held.key, query._local_tensor, key._local_tensor,
+    out, lse = _ring_attention(spec.mesh.get_group(ragged[0]), held.key, query._local_tensor, key._local_tensor,
                                value._local_tensor, named.get('is_causal', False), named.get('scale'), 1)
     out = RaggedTensor(out, _spec_like(spec, query.shape[:-1] + value.shape[-1:], out.dtype), requires_grad=False)
     if op_call is aten._scaled_dot_product_attention_math_for_mps.default:
@@ -1099,14 +1109,21 @@ def _positions(key, rank, S, halves, device):
     o = _OPERANDS[key]
 
     def build(p):
-        g, before = S // halves // o.units, sum(p[:rank])
-        a, h, H = g * p[rank], g * o.capacity[rank], g * before
-        spans = [(H, H + a)] if halves == 1 else [(H, H + a), (S - H - a, S - H)]
-        pad = torch.zeros(h - a, dtype=torch.int64)
-        index = torch.cat([t for lo, hi in spans for t in (torch.arange(lo, hi), pad)])
-        valid = torch.cat([t for _ in spans for t in (torch.ones(a, dtype=torch.bool), torch.zeros(h - a, dtype=torch.bool))])
+        h = S // halves // o.units * o.capacity[rank]
+        spans = _spans(o, rank, S, halves, p)
+        index = torch.cat([t for lo, hi in spans for t in (torch.arange(lo, hi), torch.zeros(h - hi + lo, dtype=torch.int64))])
+        valid = torch.cat([torch.arange(h) < hi - lo for lo, hi in spans])
         return index.to(device), valid.to(device)
     return o.cached(('positions', rank, S, halves, str(device)), build)
+
+
+def _spans(o, rank, S, halves, parts=None):
+    """The logical positions [lo, hi) rank `rank` holds in each half of its block (_positions), from `parts` (the
+    operand's own where None)."""
+    p = o.parts.tolist() if parts is None else parts
+    g = S // halves // o.units
+    H, a = g * sum(p[:rank]), g * p[rank]
+    return [(H, H + a)] if halves == 1 else [(H, H + a), (S - H - a, S - H)]
 
 
 def context_parallel_buffers(mesh, name, buffers, seq_dims, load_balance=True):
@@ -1158,58 +1175,124 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
     return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance))
 
 
-def _causal(rank, size, i, is_causal, balanced):
-    """torch's _is_causal_behavior with this ring's balance: True causal, False whole, None skipped."""
-    if not is_causal:
-        return False
-    if i == 0:
-        return True
-    return False if (rank - i) % size < rank or balanced else None
+SCORES = 1 << 26
+
+
+def _block(query, key, value, scale=None, queries=None, keys=None, valid=None):
+    """softmax(q k^T scale) v and each query row's logsumexp (MPS's SDPA returns none), the scores SCORES at a time: keys
+    where `valid` (a bool a key) is False masked, and where `queries` (each query's logical position) is given each key
+    past its query (`keys`: each key's)."""
+    scale = query.shape[-1] ** -0.5 if scale is None else scale
+    rows, n = query.shape[-2], key.shape[-2]
+    step = max(1, SCORES // (query[..., 0, 0].numel() * n))
+    out = query.new_empty(query.shape[:-1] + value.shape[-1:])
+    lse = query.new_empty(query.shape[:-1], dtype=torch.float32)
+    kt = key.transpose(-2, -1)
+    for at in range(0, rows, step):
+        scores = (query[..., at:at + step, :] @ kt).float() * scale
+        if queries is not None:
+            scores.masked_fill_(keys > queries[at:at + step, None], -math.inf)
+        if valid is not None:
+            scores.masked_fill_(~valid, -math.inf)
+        top = torch.logsumexp(scores, -1, keepdim=True)
+        lse[..., at:at + step] = top.squeeze(-1)
+        out[..., at:at + step, :] = torch.exp(scores - top).to(value.dtype) @ value
+    return out, lse
 
 
 def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1):
-    """torch's _templated_ring_attention forward (_attention.py) over capacity blocks: the rotation one Allgatherv of
-    every rank's keys and values (static counts) into one buffer (a window tensor on the mesh backend: _empty), this
-    rank's concatenated into its place there and the call run in place (mesh f9898875), the block of source j =
-    (rank - i) mod n viewed at its capacity and its keys past their valid extents masked (-inf scores); the rest is
-    torch's: the causal behavior, the head-tail halves (a block's halves are its head's and its tail's), _SDPAMerger.
-    Padded query rows compute garbage that the unshard drops."""
+    """Ring attention over capacity blocks as split-KV partials: every rank's query block gathered (one Allgatherv,
+    static counts, into a window tensor on the mesh backend: _empty, this rank's copied into its place there and the
+    call run in place, mesh f9898875); each block's attention over this rank's own keys and values written as its
+    owner's rows of the partials (backend.partial; keys past their valid extents masked, a causal one by the logical
+    positions of its queries and keys, a half of the block attending only to the halves of this rank's keys it can see,
+    none where it sees none); and the partials reduce-scattered by the library's partials operator, each owner's rows
+    merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV).  This rank's own block
+    is computed while the gather is in flight.  Padded query rows compute garbage that the unshard drops.  Forward
+    only."""
+    from .backend import ProcessGroupMesh, attention, partial
+    if not isinstance(group, ProcessGroupMesh):
+        raise TypeError('mesh: the ring\'s merge is the mesh backend\'s partials operator (torch_mesh::merge_partials)')
     o = _OPERANDS[key_name]
     if is_causal and query.size(2) != key.size(2):
         raise NotImplementedError('is_causal requires the same query and context sequence lengths')
-    balanced = halves == 2
-    if not is_causal and balanced:
+    if not is_causal and halves == 2:
         raise RuntimeError('Load balancing requires `is_causal=True`.')
     rank, size = dist.get_rank(group), dist.get_world_size(group)
     S = query.size(2) * o.units // o.capacity[rank]
-    lengths = _blocks(o, S)[0]
-    valid = [_positions(key_name, j, S, halves, query.device)[1] for j in range(size)]
-    key, value = key.contiguous(), value.contiguous()
-    row_k, row_v = key.numel() // key.size(2), value.numel() // value.size(2)
-    counts = [s * (row_k + row_v) for s in lengths]
-    blocks = list(_empty((sum(counts),), key, group).split(counts))
-    mine = torch.cat([key.flatten(), value.flatten()], out=blocks[rank])
-    gathered = dist.all_gather(blocks, mine, group=group, async_op=True)
-    merger = _cp._SDPAMerger(_cp._cp_options.convert_to_f32, seq_dim=2)
-    for i in range(size):
-        j = (rank - i) % size
-        if i > 0:
-            if i == 1:
-                gathered.wait()
-            key = blocks[j][:lengths[j] * row_k].view(key.shape[:2] + (lengths[j],) + key.shape[3:])
-            value = blocks[j][lengths[j] * row_k:].view(value.shape[:2] + (lengths[j],) + value.shape[3:])
-        behavior = _causal(rank, size, i, is_causal, balanced)
-        if behavior is None:
-            continue
-        if i == 0 or not balanced or not is_causal:
-            q, k, v, m, partial = query, key, value, valid[j], False
-        elif i <= rank:
-            q, k, v, m, partial = query, key.chunk(2, dim=2)[0], value.chunk(2, dim=2)[0], valid[j].chunk(2)[0], False
-        else:
-            q, k, v, m, partial = query.chunk(2, dim=2)[1], key, value, valid[j], True
-        out, logsumexp = mps_block(q, k, v, is_causal=behavior, scale=scale, key_valid=m)
-        merger.step(out, logsumexp, partial)
-    return merger.results()
+    lengths, lead, width = _blocks(o, S)[0], tuple(query.shape[:2]), 2 + value.size(-1)
+    row = query.numel() // query.size(2)
+    blocks = list(_empty((sum(lengths) * row,), query, group).split([s * row for s in lengths]))
+    blocks[rank].view(query.shape).copy_(query)
+    gathered = dist.all_gather(blocks, blocks[rank], group=group, async_op=True)
+    rows = [math.prod(lead) * s for s in lengths]
+    packed = _empty((sum(rows), width), query, group, torch.float32).zero_()
+    owners = list(packed.split(rows))
+    keys, valid = _positions(key_name, rank, S, halves, query.device)
+    mine, step = _spans(o, rank, S, halves), lengths[rank] // halves
+
+    def owned(j):
+        """Block j's queries' attention over this rank's keys, as owner j's rows of the partials."""
+        into, q = owners[j].view(lead + (lengths[j], width)), blocks[j].view(lead + (lengths[j],) + query.shape[3:])
+        queries, height = _positions(key_name, j, S, halves, query.device)[0], lengths[j] // halves
+        for a, (_, hi) in enumerate(_spans(o, j, S, halves)):
+            seen = [b for b, (lo, _) in enumerate(mine) if not is_causal or lo < hi]
+            if seen:
+                at, cols = slice(a * height, (a + 1) * height), slice(seen[0] * step, (seen[-1] + 1) * step)
+                into[:, :, at] = partial(*_block(q[:, :, at], key[:, :, cols], value[:, :, cols], scale,
+                                                 queries[at] if is_causal else None, keys[cols], valid[cols]))
+    owned(rank)
+    gathered.wait()
+    for j in range(size):
+        if j != rank:
+            owned(j)
+    merged = _empty((rows[rank], width), query, group, torch.float32)
+    group.merge_partials(merged, packed, rows)
+    out, lse = attention(merged.view(lead + (lengths[rank], width)))
+    return out.to(query.dtype), lse
+
+
+def routed(mesh, name, x, experts, slots):
+    """A routed range partition (a mixture of experts' expert parallelism): partitioned mesh dimension `name`'s units are
+    experts, rank r holding capacity[r] slots, the first parts[r] of them experts off_r.. (off_r the parts before it)
+    and the rest receiving no rows; `x` this rank's rows (T x D), `experts` each row's experts (T x K, int64), `slots`
+    this rank's capacity[r] callables, slot j's rows to it.  Each (row, k) crosses to its expert's rank and back by the
+    counted all-to-all (torch_mesh.all_to_all_counted: the counts the GPU wrote move with the rows, the received counts
+    read on the host as they land, no host read of the splits), every rank passing the same T K.  Returns each (row,
+    k)'s expert output (T x K x D), to be weighted and summed by the caller.  The rows it sends lie in window tensors
+    (torch_mesh.empty), made at their first use and kept (their shapes the capacities' and T K's)."""
+    from . import all_to_all_counted, counted
+    o, group = operand(mesh, name), mesh.get_group(name)
+    rank, world, capacity = mesh.get_local_rank(name), len(o.capacity), list(o.capacity)
+    n, flat = capacity[rank], experts.flatten()
+    order = flat.argsort(stable=True)
+    counts = torch.zeros(o.units, dtype=torch.int64, device=x.device).scatter_add_(0, flat, torch.ones_like(flat))
+    sent = torch.index_select(x, 0, order // experts.shape[1], out=_routing(o.key, 'dispatched', flat.numel(), x))
+    received, landed, handle, work = all_to_all_counted(sent, unpack(counts, 0, o.key, 0.0), capacity, [n] * world, world * flat.numel(), group)
+    theirs = counted(handle)
+    work.wait()
+    sizes = [sum(theirs[r * n + e] for r in range(world)) for e in range(n)]
+    regroup = torch.repeat_interleave(torch.arange(n, device=x.device).repeat(world), landed, output_size=sum(theirs)).argsort(stable=True)
+    results = _routing(o.key, 'results', received.shape[0], received)
+    for slot, rows in zip(slots, regroup.split(sizes)):
+        results[rows] = slot(received[rows])
+    back, _, _, work = all_to_all_counted(results, theirs, [n] * world, capacity, flat.numel(), group)
+    work.wait()
+    out = torch.empty_like(back)
+    out[order] = back
+    return out.view(*experts.shape, -1)
+
+
+_ROUTING = {}
+
+
+def _routing(key, what, rows, like):
+    """A routed partition's window tensor of `rows` rows like `like`, made at its first use (torch_mesh.empty)."""
+    from . import empty
+    at = (key, what, rows, like.shape[1:], like.dtype, like.device.type)
+    if at not in _ROUTING:
+        _ROUTING[at] = empty(rows, *like.shape[1:], dtype=like.dtype, device=like.device.type)
+    return _ROUTING[at]
 
 
 _BALANCING = {}

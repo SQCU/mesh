@@ -4,6 +4,15 @@ torch.distributed's `mesh` backend over [libnccl-mesh](../NCCL.md). MPS tensors 
 encoded on torch's MPS stream, each tensor passed as its storage's `MTLBuffer` and offset, no copies. CPU tensors
 run on the host path.
 
+Every collective takes one path: a group of calls issued by `_stream.mm`'s `issue` (the backend's methods, torch's
+functional collectives and the library's own calls alike), each call one kind of the library's set. An all-gather and a
+reduce-scatter are always the V calls (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`; the library takes equal
+segments as its equal program). `all_to_all`, `all_to_all_single`, `gather`, `scatter`, `send` and `recv` are one
+exchange, each peer's tensor sent and received in one group and nothing to or from a peer that has none (NCCL's own
+lowering of its all-to-all, gather and scatter; a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
+`Scatterv`). The counted all-to-all is the library's call of its own; the partials merge is a reduction by the library's
+partials operator.
+
 ## Install
 
 The user's mesh checkout holds the library and its Python bindings (`bin/mesh-user.sh`, rdma/NCCL.md "Build and run"),
@@ -60,15 +69,16 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | broadcast, reduce | |
 | all_gather (list and into a tensor) | a list of unequal sizes: one MPI_Allgatherv (Uneven nodes) |
 | reduce_scatter (list and tensor) | a list of unequal sizes: one MPI_Reduce_scatter (Uneven nodes) |
-| gather, scatter | any per-rank sizes |
-| all_to_all, all_to_all_single | uneven splits, empty inputs |
+| gather, scatter | any per-rank sizes: the rooted V (the exchange) |
+| all_to_all, all_to_all_single | uneven splits, empty inputs (the exchange) |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
 | functional collectives under torch.compile | one graph; `backend="mesh"` batches its collectives (Performance) |
 | DDP | |
-| ring attention | `torch_mesh._mps.ring(group, q, k, v)` on the sequence shards, forward only, in place of `context_parallel` |
+| ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
+| partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
-| expert parallelism | all_to_all_single; `torch_mesh.all_to_all_counted` with counts the GPU wrote (below) |
+| expert parallelism | all_to_all_single; `torch_mesh.all_to_all_counted` with counts the GPU wrote, and `partition.routed`, the experts a partition's units (below) |
 
 ### Counted all-to-all
 
@@ -85,6 +95,26 @@ ending at their arrival or the call's failure, never at a time. Its caller is me
 dimension, the counts made on the GPU and unpacked to each rank's slots, no `.tolist()` of the splits). Reproduction
 target (metal-microbench docs/measurement.md 2026-09-30, part B, mesh ab98765 and metal-microbench 31fed26): `ep.py`
 `COUNTED=1 PARTS="1,7 2,6" CAPACITY=2,7` on the pair, 27.5-27.7 ms a step, the counted call's overhead 473-480 us.
+
+`partition.routed(mesh, "ep", x, experts, slots)` is that dispatch and combine as a routed range partition: the
+partitioned mesh dimension's units are experts (rank r's capacity[r] slots, the first parts[r] of them its experts and
+the rest receiving no rows), each (token, k) row crosses to its expert's rank and back by the counted all-to-all, its
+send buffers window tensors made once, and it returns each row's expert output for the caller to weight and sum. Equal
+parts are the even split, so one form serves both of `ep.py`'s.
+
+### Partials merge
+
+Attention whose keys are split among members (split-KV, Flash-Decoding) leaves each member a partial: each query row's
+logsumexp and its attention over the member's keys. `torch_mesh.merge_partials(out, lse, group, root=-1)` merges them
+by the rows' logsumexp into the attention over every member's keys (and its logsumexp), on every member or at `root`:
+the operator `torch_mesh::merge_partials`, an all-reduce or reduce by libnccl-mesh's partials operator
+(`ncclMeshRedOpCreatePartials`, [NCCL.md](../NCCL.md)) over float32 rows of `[m, l, O]` (`backend.partial` and
+`backend.attention` make and read them). The backend's `merge_partials(out, partials, rows=None, root=-1)` also takes
+`rows`, each rank's rows of the operand: a reduce-scatter by the operator (`ncclMeshReduceScatterV`), each rank's rows
+merged at it. Like every other call it is one group of the one path, so it coalesces. `partition`'s ring attention is
+its caller: every rank's query block gathered, each block's attention over the rank's own keys written as its owner's
+rows (a half of a block that sees none of the rank's keys left at none), and one reduce-scatter, so each owner holds its
+rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 
 ### Record and replay
 
@@ -157,8 +187,13 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 - `partition.distribute_tensor`, `from_local` and `redistribute` are torch's with a `Shard` on an attached dimension
   its `RaggedShard`; `ColwiseParallel`, `RowwiseParallel` and `SequenceParallel` are torch's styles over them.
-- Context parallelism over capacity blocks: `context_parallel_buffers`, `ring_attention` (padded keys masked) and
-  `context_parallel_unshard`, called in place of torch's `context_parallel`.
+- Context parallelism over capacity blocks: `context_parallel_buffers`, `ring_attention` (padded keys masked, the
+  blocks merged by the partials merge) and `context_parallel_unshard`, called in place of torch's `context_parallel`.
+  Reproduction target (metal-microbench docs/measurement.md, 2026-09-30): `cp.py` `PARTS="10,22 11,21"
+  CAPACITY=11,22`, 501.6-505.3 ms a step on the pair.
+- A partitioned dimension may be any of its mesh's: a 2-D mesh's second dimension partitioned with its first
+  replicated or splitting another tensor dimension (SDPA's ring runs along the partitioned dimension's group, the
+  heads or batch split by the other).
 
 - A coordinate's capacity is the most it holds; a rank that keeps its share in a buffer of its capacity, its valid
   elements first, keeps its shapes while the parts move within the capacities. `partition.write(mesh, tp=parts)`

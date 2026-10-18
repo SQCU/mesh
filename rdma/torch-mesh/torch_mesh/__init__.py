@@ -12,7 +12,12 @@ outside it).
 
 all_to_all_counted() is MPI_Alltoallv whose counts the GPU wrote (the torch operator torch_mesh::all_to_all_counted over
 libnccl-mesh's ncclMeshAlltoAllCounted): a mixture of experts' dispatch and combine with no host sync, counted() its
-received counts on the host as they land.
+received counts on the host as they land; partition.routed is the expert-parallel range partition whose crossing it is.
+
+merge_partials() is the softmax over a split as the library's collective (the torch operator torch_mesh::merge_partials:
+an all-reduce or reduce by libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials): each member's attention over
+its own keys merged by the rows' logsumexp into the attention over all of them; partition's ring attention merges by it
+(a reduce-scatter by the operator).
 
 record() and replay() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
 compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its collectives batched."""
@@ -33,11 +38,9 @@ def compiler(gm, example_inputs):
 
     from torch._dynamo import lookup_backend
 
-    from . import backend
+    from . import _stream
     compiled = lookup_backend('inductor')(gm, example_inputs)
-    if backend._stream is None:
-        return compiled
-    batch = backend._stream.batch
+    batch = _stream.batch
 
     @functools.wraps(compiled)
     def run(*args):
@@ -55,33 +58,24 @@ def empty(*size, dtype=None, device='mps'):
     (ncclMeshMemBuffer), made through DLPack; it returns its lease once the GPU's work before its release is done."""
     import torch
 
-    from . import backend
+    from . import _stream
     sizes = list(size[0] if len(size) == 1 and isinstance(size[0], (list, tuple, torch.Size)) else size)
-    dtype = dtype or torch.get_default_dtype()
     kind = torch.device(device).type
     if kind not in ('cpu', 'mps'):
         raise ValueError(f'mesh: empty() makes cpu or mps tensors, not {device}')
-    if backend._stream is None:
-        if kind == 'mps':
-            raise RuntimeError('mesh: empty(device="mps") needs MPS')
-        return backend.blank(sizes, dtype, 'cpu')
-    return backend._stream.window_empty(sizes, torch.empty(0, dtype=dtype), kind == 'mps')
+    return _stream.window_empty(sizes, torch.empty(0, dtype=dtype or torch.get_default_dtype()), kind == 'mps')
 
 
 def records():
     """The window tensors empty() made that are live now: each {address, bytes} of its lease."""
-    from . import backend
-    return [{'address': a, 'bytes': b} for a, b in backend._stream.records()] if backend._stream is not None else []
+    from . import _stream
+    return [{'address': a, 'bytes': b} for a, b in _stream.records()]
 
 
 def address(tensor):
     """Where a tensor's bytes lie in the window (its first byte's address), 0 where they lie outside it."""
-    from . import backend
-    if backend._stream is not None:
-        return backend._stream.address(tensor)
-    held, offset = backend.ffi.new('void **'), backend.ffi.new('size_t *')
-    pointer = backend.ffi.cast('void *', tensor.data_ptr())
-    return tensor.data_ptr() if backend.LIB.ncclMeshMemBuffer(pointer, held, offset) == 0 else 0
+    from . import _stream
+    return _stream.address(tensor)
 
 
 class _Counted:
@@ -122,6 +116,21 @@ def counted(handle):
     landed: waited for on the host, not the GPU, until they arrive or the call fails (backend.counted)."""
     from . import backend
     return backend.counted(*handle)
+
+
+def merge_partials(out, lse, group=None, root=-1):
+    """Every member's attention over its own keys merged into the attention over all of them (split-KV attention's
+    merge: libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials, through the torch operator
+    torch_mesh::merge_partials): `out` (rows x dim, any leading shape) and `lse` (each row's logsumexp, -inf where it saw
+    no key), the same rows on every member.  Returns (the attention in out's dtype, each row's logsumexp), on every member
+    (`root` -1) or at `root`."""
+    import torch
+    import torch.distributed as dist
+
+    from . import backend
+    group = group or dist.distributed_c10d._get_default_group()
+    attended, lse = backend.attention(torch.ops.torch_mesh.merge_partials(backend.partial(out, lse), root, group.group_name))
+    return attended.to(out.dtype), lse
 
 
 class Recording:

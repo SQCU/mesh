@@ -12,8 +12,9 @@ complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast
 Reduce_scatter_block, Reduce_scatter, Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions
 pair), Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use
 (Gather's off the root, Scatter's send off it).  Allgatherv and Reduce_scatter take a count a rank, as mpi4py spells
-them (a receive buffer [array, counts], recvcounts): one program over unequal segments (ncclMeshAllGatherV,
-ncclMeshReduceScatterV), every rank passing the same counts.  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
+them (a receive buffer [array, counts], recvcounts): one program over the segments (ncclMeshAllGatherV,
+ncclMeshReduceScatterV), every rank passing the same counts; Allgather and Reduce_scatter_block are the same calls with
+equal counts (the library takes equal segments as its equal program).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
 for none), Shrink(exclude) (ncclCommShrink), Grow(size) and Comm.joining (ncclCommGrow), Revoke() (ncclCommRevoke), and
 a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
 each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
@@ -170,8 +171,7 @@ class Comm:
         check(lib.ncclBroadcast(at(buf), at(buf), buf.size, TYPES[buf.dtype], root, self.comm, ffi.NULL))
 
     def Allgather(self, sendbuf, recvbuf):
-        send = window(recvbuf[self.rank * (recvbuf.size // self.size):][:recvbuf.size // self.size] if sendbuf is IN_PLACE else sendbuf)
-        check(lib.ncclAllGather(at(send), at(recvbuf), recvbuf.size // self.size, TYPES[recvbuf.dtype], self.comm, ffi.NULL))
+        self.Allgatherv(sendbuf, [recvbuf, [recvbuf.size // self.size] * self.size])
 
     def Allgatherv(self, sendbuf, recvbuf):
         """Every rank's segment into recvbuf, given as [array, counts] (or [array, (counts, displacements)], the
@@ -185,14 +185,12 @@ class Comm:
         check(lib.ncclMeshAllGatherV(at(send), at(array), ffi.new('size_t[]', counts), TYPES[array.dtype], self.comm, ffi.NULL))
 
     def Reduce_scatter_block(self, sendbuf, recvbuf, op=SUM):
-        check(lib.ncclReduceScatter(at(sendbuf), at(recvbuf), recvbuf.size, TYPES[recvbuf.dtype], op, self.comm, ffi.NULL))
+        self.Reduce_scatter(sendbuf, recvbuf, None, op)
 
     def Reduce_scatter(self, sendbuf, recvbuf, recvcounts=None, op=SUM):
         """sendbuf's segments reduced by op, rank r's recvcounts[r] elements left in its recvbuf (packed in rank order in
-        sendbuf; ncclMeshReduceScatterV); recvcounts None: recvbuf's size each, Reduce_scatter_block."""
-        if recvcounts is None:
-            return self.Reduce_scatter_block(sendbuf, recvbuf, op)
-        counts = [int(c) for c in recvcounts]
+        sendbuf; ncclMeshReduceScatterV); recvcounts None: recvbuf's size each (Reduce_scatter_block)."""
+        counts = [int(c) for c in recvcounts] if recvcounts is not None else [recvbuf.size] * self.size
         if len(counts) != self.size or sum(counts) != sendbuf.size or recvbuf.size != counts[self.rank]:
             raise ValueError(f'recvcounts {counts}: one a rank of {self.size}, summing to the send buffer\'s {sendbuf.size}, '
                              f'this rank\'s its receive buffer\'s {recvbuf.size}')
