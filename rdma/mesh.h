@@ -13,9 +13,10 @@
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* 120: a flow's control frames the keepalive and FAIL alone, a lane rider's RELEASED (design/bridge-and-ipc.md#control),
-   no delivered or finalize words in a client's slot, and records ordered by their sequence alone (no boot) */
-#define MESH_VERSION 120u
+/* 121: a flow's control frames the keepalive and FAIL alone, a lane rider's RELEASED (design/bridge-and-ipc.md#control),
+   no delivered or finalize words in a client's slot, records ordered by their sequence alone (no boot), and the
+   region's `busy` alone (no wall clock beside it) */
+#define MESH_VERSION 121u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -124,9 +125,8 @@ struct mesh_client {
   struct mesh_tx tx[MESH_DESTINATIONS];
   struct mesh_port_info status[MESH_DESTINATIONS];
 };
-/* design/prepared-machine.md#M01, #M09; `busy`, design/bridge-and-ipc.md#region: the flows and awaiting programs the
-   bridge holds (0 between calls), and since when it has held none (`idle_since`, the wall clock in ns; 0 while it holds
-   any); `stopping`, design/bridge-and-ipc.md#region: nonzero once the bridge waits to stop (its binary changed) for the
+/* design/prepared-machine.md#M01, #M09; `busy`, design/bridge-and-ipc.md#region: the flows that carry a program and
+   the awaiting programs the bridge holds (0 between calls); `stopping`, design/bridge-and-ipc.md#region: nonzero once the bridge waits to stop (its binary changed) for the
    flows it holds to end, so a client holding flows past their execution (metal-microbench
    docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) releases them between executions and holds
    none after; `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a
@@ -134,7 +134,7 @@ struct mesh_client {
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,stopping;
   _Atomic uint64_t bell[MESH_PORTS];
   uint64_t rings_off;
 };
@@ -163,7 +163,7 @@ _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,cont
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
 /* design/prepared-machine.md#M12 */
 struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,padding[2]; };
-struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t cyclic,padding[6]; struct mesh_cancel_range ranges[]; };
+struct mesh_cancellation { _Alignas(32) uint32_t cyclic; uint32_t padding[7]; struct mesh_cancel_range ranges[]; };
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
 /* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M12: a destination's words are cancelled by the
    bridge alone, after the last landing its flow stores, and only at positions past its landed count

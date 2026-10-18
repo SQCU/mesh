@@ -21,10 +21,9 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 /* The node's bridge's window as its region holds it: its bytes (the arena its configuration registered at device up) and
    the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
 int mesh_window(uint64_t *bytes,uint64_t *unleased);
-/* The flows and awaiting programs the node's bridge holds (0 between calls) and the wall clock in ns at which it last
-   came to hold none (0 while it holds any; mesh.h struct hdr `busy`, `idle_since`, design/bridge-and-ipc.md#region; a
-   read that meets the bridge as it becomes busy is told busy, 1); 0, or -errno where the bridge is unreachable. */
-int mesh_busy(uint64_t *busy,uint64_t *idle_since);
+/* The flows that carry a program and the awaiting programs the node's bridge holds (0 between calls; mesh.h struct hdr
+   `busy`, design/bridge-and-ipc.md#region); 0, or -errno where the bridge is unreachable. */
+int mesh_busy(uint64_t *busy);
 /* The node's bridge's two lifecycle events a client blocks on, each with no bound: mesh_bridge_wait returns 0 once a
    bridge of this version holds the region, at once where one does, else at the notify(3) name a bridge posts once its
    sockets listen and its region is open (MESH_STARTED, a loop bridge's followed by its region's name), or an errno where
@@ -311,7 +310,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
    bytes to the service and the service's back, each direction ended by its writer's half close (shutdown SHUT_WR);
    a channel that fails anywhere resets the connection. A service registers its listening Unix socket
    (MESH_REQUEST_SERVE, its name and its socket's path) on a connection it holds open: the registration lasts while
-   that connection does, and a newer one of the same name replaces it. The bridge serves `hold` itself (#holds).
+   that connection does, and a newer one of the same name replaces it.
    MESH_REQUEST_LEDGER (#ledger, where the bridge's configuration keeps ledgers): `bytes` a program's key, `path` a file
    the bridge appends each running flow of that program's events to, those since the latest such request, each flow's
    after its header line; the answer 0, ENOENT where no running flow of the key keeps a ledger, ENOTSUP where the

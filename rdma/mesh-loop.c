@@ -581,8 +581,8 @@ static void logs_read(const char *directory, int n, const off_t *at, struct log_
 /* every bridge holding no flow and no awaiting program (mesh_busy), each looked at until it holds none; 0, or EINVAL */
 static int bridges_idle(const struct loop_map *map) {
   for (int i = 0; i < map->n;) {
-    uint64_t busy = 1, since = 0;
-    if (mesh_loop_bind(map->node[i].region, map->node[i].service) || mesh_busy(&busy, &since) < 0) return EINVAL;
+    uint64_t busy = 1;
+    if (mesh_loop_bind(map->node[i].region, map->node[i].service) || mesh_busy(&busy) < 0) return EINVAL;
     if (!busy) i++;
     else sched_yield();
   }

@@ -23,11 +23,11 @@ int main(void){
     count=mesh_map(NULL,0,nodes,NULL,&map);
     room=map.nodes;links=map.links;
   }
-  uint64_t window=0,unleased=0,busy=0,idle_since=0;
+  uint64_t window=0,unleased=0,busy=0;
   if(mesh_window(&window,&unleased))window=unleased=0;
-  const int carrying=mesh_busy(&busy,&idle_since);
+  const int carrying=mesh_busy(&busy);
   printf("{\"up\":true,\"node\":%u,\"window\":%llu,\"unleased\":%llu,",node,(unsigned long long)window,(unsigned long long)unleased);
-  if(!carrying)printf("\"idle\":%s,\"idle_since\":%llu,",busy?"false":"true",(unsigned long long)(idle_since/1000000000u));
+  if(!carrying)printf("\"idle\":%s,",busy?"false":"true");
   printf("\"peers\":[");
   for(int i=0;i<ports && i<MESH_PORTS;i++)
     printf("%s{\"port\":%d,\"node\":%u,\"phase\":%u,\"bandwidth\":%llu}",i?",":"",i,port[i].peer,port[i].phase,(unsigned long long)port[i].bandwidth);
