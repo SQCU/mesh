@@ -3,10 +3,12 @@
    configuration (a canonical property list this tool writes: its node, region, loopback service and cables), and the
    readings that exercise what two nodes cannot show: relays and forwarding on 3 to 8 node maps.
 
-     mesh-loop up FAMILY N WINDOW_MIB DIRECTORY
+     mesh-loop up FAMILY N WINDOW_MIB DIRECTORY [short]
        FAMILY one of line, ring, star, complete, torus (two rows of N/2); N bridges (.build/loop/mesh-flow-loop) of a
-       window of WINDOW_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
-       returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
+       window of WINDOW_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices,
+       and with `short` a provider whose move of a queue pair to the error state drops one of the flushed completions
+       (loopverbs.c loop_flush); returns once every bridge's map holds the N nodes and its own cables paired (a JSON line
+       a node)
      mesh-loop relay DIRECTORY BYTES
        every ordered pair of nodes, one after another: a program of one transfer of BYTES from the one to the other, the
        bridges routing it through the nodes between where the two are not cabled (relays, lanes); every word checked
@@ -22,8 +24,9 @@
        every value exact, and every rank's ncclCommDestroy right after its last group (design/bridge-and-ipc.md#control:
        each bridge posts what its rank released and releases its flows once those SENDs completed, telling no peer, so
        a landing is never cancelled); then every bridge holding no flow, and the bridges' logs read: the flows ended in
-       order, the relays released by both their ends, the flows failed, and each exclusive flow's flush (every work
-       request it held drained)
+       order, the relays released by both their ends, the flows failed, and each exclusive flow's flush (mesh-verbs.h
+       pair_flush: those that drained fewer work requests than they held, which their markers ended, and the markers a
+       provider refused)
      mesh-loop kill DIRECTORY COUNT host|walk [bridge]
        N ranks: an all-reduce, then the last rank waits while the others begin a second (of COUNT float32 each) and is
        killed (SIGKILL): each other rank's call fails as a value, and the time from the kill to its return is read; with
@@ -65,11 +68,12 @@ extern char **environ;
 
 struct loop_node { uint32_t node; char region[32]; uint16_t service; pid_t pid; };
 struct loop_cable { int a, b; uint16_t listen[2]; };
-struct loop_map { char family[16]; int n, cables; uint64_t window; struct loop_node node[LOOP_NODES]; struct loop_cable cable[LOOP_CABLES]; };
+struct loop_map { char family[16]; int n, cables; uint64_t window; struct loop_node node[LOOP_NODES]; struct loop_cable cable[LOOP_CABLES];
+  const char *flush; };
 
 static uint64_t clock_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int usage(void) {
-  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | relay DIRECTORY BYTES | stripes DIRECTORY BYTES | "
+  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY [short] | relay DIRECTORY BYTES | stripes DIRECTORY BYTES | "
                   "nccl DIRECTORY COUNT host|walk | destroy DIRECTORY COUNT RUNS host|walk | kill DIRECTORY COUNT host|walk [bridge] | down DIRECTORY\n");
   return 2;
 }
@@ -157,9 +161,10 @@ static int plist_write(const char *directory, const struct loop_map *map, int i)
              "<key>name</key><string>loop%d</string>\n<key>purpose</key><string>node %d of a %s of %d on the loopback fabric "
              "(mesh-loop)</string>\n<key>window</key><integer>%llu</integer>\n<key>exec</key><false/>\n<key>keepalive</key><integer>5000</integer>\n"
              "<key>hello</key><integer>1000000000</integer>\n"
-             "<key>loop</key><dict>\n<key>region</key><string>%s</string>\n<key>fabric</key><string>%s</string>\n"
+             "<key>loop</key><dict>\n<key>region</key><string>%s</string>\n<key>fabric</key><string>%s</string>\n%s%s%s"
              "<key>node</key><integer>%u</integer>\n<key>service</key><integer>%u</integer>\n<key>ports</key><array>\n",
-          i, i, map->family, map->n, (unsigned long long)map->window, map->node[i].region, LOOP_FABRIC, map->node[i].node,
+          i, i, map->family, map->n, (unsigned long long)map->window, map->node[i].region, LOOP_FABRIC,
+          map->flush ? "<key>flush</key><string>" : "", map->flush ? map->flush : "", map->flush ? "</string>\n" : "", map->node[i].node,
           map->node[i].service);
   for (int c = 0; c < map->cables; c++) {
     const struct loop_cable *k = map->cable + c;
@@ -224,8 +229,8 @@ static int converged(const struct loop_map *map) {
   return 0;
 }
 
-static int loop_up(const char *family, int n, uint64_t window_mib, const char *directory) {
-  struct loop_map map = {.n = n, .window = window_mib << 20};
+static int loop_up(const char *family, int n, uint64_t window_mib, const char *directory, const char *flush) {
+  struct loop_map map = {.n = n, .window = window_mib << 20, .flush = flush};
   snprintf(map.family, sizeof map.family, "%s", family);
   if (n < 2 || n > LOOP_NODES || !window_mib || family_cables(family, n, &map)) return usage();
   char binary[PATH_MAX];
@@ -555,10 +560,10 @@ static void logs_mark(const char *directory, int n, off_t *at) {
     at[i] = stat(path, &info) ? 0 : info.st_size;
   }
 }
-/* the bridges' lines past `at` (mesh-flow.c flow_released, relay_released, flow_fail, flow_release): flows ended in
-   order, relays released by both their ends, flows failed, exclusive flows flushed, and those of the flushes that
-   drained fewer completions than work requests held */
-struct log_counts { uint64_t ended, relays, failed, flushed, short_of; };
+/* the bridges' lines past `at` (mesh-flow.c flow_released, relay_released, flow_fail, flush_say): flows ended in order,
+   relays released by both their ends, flows failed, exclusive flows flushed, those of the flushes that drained fewer
+   completions than work requests held, those whose markers all came, and the markers refused */
+struct log_counts { uint64_t ended, relays, failed, flushed, short_of, marked, refused; };
 static void logs_read(const char *directory, int n, const off_t *at, struct log_counts *counts) {
   *counts = (struct log_counts){0};
   for (int i = 0; i < n; i++) {
@@ -570,10 +575,14 @@ static void logs_read(const char *directory, int n, const off_t *at, struct log_
     while (fgets(line, sizeof line, f)) {
       const char *c = strstr(line, " flushed ");
       unsigned long long drained, held;
+      unsigned seen, markers, refused;
       if (strstr(line, ") ended in order")) counts->ended++;
       else if (strstr(line, ") released by both its ends")) counts->relays++;
       else if (strstr(line, ") failed at node ")) counts->failed++;
-      else if (c && sscanf(c, " flushed %llu of %llu work requests", &drained, &held) == 2) { counts->flushed++; counts->short_of += drained != held; }
+      else if (c && sscanf(c, " flushed %llu of %llu work requests, markers %u of %u seen, %u refused", &drained, &held, &seen, &markers,
+                           &refused) == 5) {
+        counts->flushed++; counts->short_of += drained != held; counts->marked += markers && seen == markers; counts->refused += refused;
+      }
     }
     fclose(f);
   }
@@ -636,11 +645,12 @@ static int loop_destroy(const char *directory, uint64_t count, int runs, int wal
   struct log_counts counts;
   logs_read(directory, map.n, marks, &counts);
   printf("{\"loop\":\"destroy\",\"path\":\"%s\",\"family\":\"%s\",\"runs\":%d,\"runs_failed\":%d,\"cancelled\":%llu,\"bridges_idle\":%s,"
-         "\"flows_ended\":%llu,\"relays_released\":%llu,\"flows_failed\":%llu,\"flushed\":%llu,\"flushed_short\":%llu}\n",
-         walk ? "walk" : "host", map.family, runs, failed_runs, (unsigned long long)cancelled, idle ? "false" : "true",
-         (unsigned long long)counts.ended, (unsigned long long)counts.relays, (unsigned long long)counts.failed,
-         (unsigned long long)counts.flushed, (unsigned long long)counts.short_of);
-  return failed_runs || idle || counts.short_of || counts.failed;
+         "\"flows_ended\":%llu,\"relays_released\":%llu,\"flows_failed\":%llu,\"flushed\":%llu,\"flushed_short\":%llu,"
+         "\"ended_by_markers\":%llu,\"markers_refused\":%llu}\n", walk ? "walk" : "host", map.family, runs, failed_runs,
+         (unsigned long long)cancelled, idle ? "false" : "true", (unsigned long long)counts.ended, (unsigned long long)counts.relays,
+         (unsigned long long)counts.failed, (unsigned long long)counts.flushed, (unsigned long long)counts.short_of,
+         (unsigned long long)counts.marked, (unsigned long long)counts.refused);
+  return failed_runs || idle || counts.failed;
 }
 
 /* the kill reading's shared page: when the victim was killed, and each rank's return (its time and result) */
@@ -704,7 +714,8 @@ static int loop_kill(const char *directory, uint64_t count, int walk, int bridge
 
 int main(int argc, char **argv) {
   if (argc < 3) return usage();
-  if (!strcmp(argv[1], "up") && argc == 6) return loop_up(argv[2], atoi(argv[3]), strtoull(argv[4], NULL, 0), argv[5]);
+  if (!strcmp(argv[1], "up") && (argc == 6 || (argc == 7 && !strcmp(argv[6], "short"))))
+    return loop_up(argv[2], atoi(argv[3]), strtoull(argv[4], NULL, 0), argv[5], argc == 7 ? argv[6] : NULL);
   if (!strcmp(argv[1], "down") && argc == 3) return loop_down(argv[2]);
   if (!strcmp(argv[1], "relay") && argc == 4) return loop_relay(argv[2], strtoull(argv[3], NULL, 0));
   if (!strcmp(argv[1], "stripes") && argc == 4) return loop_stripes(argv[2], strtoull(argv[3], NULL, 0));

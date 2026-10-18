@@ -695,8 +695,9 @@ static uint64_t keepalive_ns,hello_ns,health_ns;
    its ports, each a loopverbs device and a cable: the loopback port this end listens on for it and the peer end's, the
    lower of the two dialing the higher (in place of a link's hello) */
 void loop_fabric(const char *name);
+void loop_flush(const char *mode);
 struct loop_port { char device[32]; uint16_t listen,peer; int fd; };
-static struct { char region[32],fabric[64]; uint32_t node,ports; uint16_t service; struct loop_port port[MESH_PORTS]; } loop_config;
+static struct { char region[32],fabric[64],flush[16]; uint32_t node,ports; uint16_t service; struct loop_port port[MESH_PORTS]; } loop_config;
 #endif
 /* a flow's ledger, made on its port's queue before either side is prepared or the flow listed, where the configuration
    keeps them; a flow whose ledger cannot be allocated runs without one, logged */
@@ -2091,6 +2092,14 @@ static void flow_job(struct flow *f,int job){
   });
 }
 
+/* design/RDMA-KERNEL-RECOVERY.md "Every teardown's flush": a provider's drain logged (mesh-verbs.h pair_flush): the
+   work requests it drained of those it held, the markers posted and seen, any the provider refused, and how long */
+static void flush_say(const struct port *port,const char *what,const struct mesh_flush *flush,uint64_t began){
+  if(!flush->moved){say("link %u (%s): %s: its move to the error state refused, nothing drained\n",port->index,port->name,what);return;}
+  say("link %u (%s): %s flushed %llu of %llu work requests, markers %u of %u seen, %u refused, in %.1f us\n",port->index,port->name,what,
+      (unsigned long long)flush->drained,(unsigned long long)flush->outstanding,flush->seen,flush->markers,flush->refused,
+      (double)(ledger_ns()-began)/1e3);
+}
 /* design/algorithm-sources.md#meshresult: a flow out of its port's table and its queue pairs destroyed, on its port's
    queue.  A flow on its port's lanes is released once its records posted on the lanes have landed (the last landing
    wakes the event loop, FLOW_RELEASING), or the lanes' queue pairs that held them are destroyed (their generation
@@ -2109,9 +2118,11 @@ static int flow_release(struct flow *flow){
      flow->port->lanes.generation==flow->lane_epoch)return 0;
   const int raised=flow->provider.queues?guard_raise(flow->port,1):0;
   if(flow->provider.queues && !flow->flushed){
-    const uint64_t began=ledger_ns(),outstanding=pair_outstanding(&flow->provider),drained=pair_flush(&flow->provider);
-    say("link %u flushed %llu of %llu work requests in %.1f us\n",flow->port->index,(unsigned long long)drained,
-        (unsigned long long)outstanding,(double)(ledger_ns()-began)/1e3);
+    char what[96];
+    snprintf(what,sizeof what,"program %016llx toward node %u",(unsigned long long)flow->key,flow->far);
+    const uint64_t began=ledger_ns();
+    const struct mesh_flush flush=pair_flush(&flow->provider);
+    flush_say(flow->port,what,&flush,began);
     flow->flushed=1;
   }
   const int down=down_pair(&flow->provider);
@@ -3160,7 +3171,13 @@ static void stripes_job(struct port *port,int job){
       if(!result)result=stripes_ready(port);
       if(!result)result=port_threads(port);
     }else{
-      s->flushed=s->provider.queues?(uint32_t)pair_flush(&s->provider):0;
+      s->flushed=0;
+      if(s->provider.queues){
+        const uint64_t began=ledger_ns();
+        const struct mesh_flush flush=pair_flush(&s->provider);
+        flush_say(port,"stripes",&flush,began);
+        s->flushed=(uint32_t)flush.drained;
+      }
       result=down_pair(&s->provider)?0:EBUSY;
     }
     port_guard(port,0);
@@ -3751,7 +3768,13 @@ static void streams_job(struct port *port,int job){
       if(!result && !s->sending)result=stream_post(port,MIN(s->window,s->count));
       if(!result)result=port_threads(port);
     }else{
-      s->flushed=s->provider.queues?pair_flush(&s->provider):0;
+      s->flushed=0;
+      if(s->provider.queues){
+        const uint64_t began=ledger_ns();
+        const struct mesh_flush flush=pair_flush(&s->provider);
+        flush_say(port,"stream",&flush,began);
+        s->flushed=flush.drained;
+      }
       result=down_pair(&s->provider)?0:EBUSY;
       free(s->spans);free(s->sends);free(s->receives);free(s->completions);
       s->spans=NULL;s->sends=NULL;s->receives=NULL;s->completions=NULL;
@@ -4477,7 +4500,9 @@ static void *control_watch(void *unused){
    (#keepalive); NULL, or why it is refused */
 #ifdef MESH_LOOP_FABRIC
 /* design/bridge-dataflow.md#the-loopback-fabric: a loop bridge's `loop` (a dictionary: `region`, `fabric`, `node`,
-   `service` and `ports`, each port a dictionary of `device`, `listen` and `peer`); NULL, or why it is refused */
+   `service` and `ports`, each port a dictionary of `device`, `listen` and `peer`, and where it states one the provider
+   loopverbs models at a queue pair's move to the error state, `flush`: "short", loopverbs.c loop_flush);
+   NULL, or why it is refused */
 static int loop_number(CFDictionaryRef d,CFStringRef key,int64_t most,int64_t *value){
   CFTypeRef v=CFDictionaryGetValue(d,key);
   return v && CFGetTypeID(v)==CFNumberGetTypeID() && CFNumberGetValue(v,kCFNumberSInt64Type,value) && *value>0 && *value<=most;
@@ -4495,6 +4520,8 @@ static const char *loop_read(CFPropertyListRef list){
   if(!loop_number(l,CFSTR("node"),0x7fffffff,&node))return "its loop's node, a positive 31-bit number";
   if(!loop_number(l,CFSTR("service"),65535,&service))return "its loop's service, a port";
   loop_config.node=(uint32_t)node;loop_config.service=(uint16_t)service;
+  if(CFDictionaryGetValue(l,CFSTR("flush")) && !loop_text(l,CFSTR("flush"),loop_config.flush,sizeof loop_config.flush))
+    return "its loop's flush, where stated, a provider's name (short)";
   CFTypeRef ports=CFDictionaryGetValue(l,CFSTR("ports"));
   if(!ports || CFGetTypeID(ports)!=CFArrayGetTypeID() || CFArrayGetCount(ports)>MESH_PORTS)return "its loop's ports, at most MESH_PORTS";
   loop_config.ports=(uint32_t)CFArrayGetCount(ports);
@@ -4611,6 +4638,7 @@ int main(int argc,char **argv){
   const char *region=loop_config.region;
   const uint16_t service=loop_config.service;
   loop_fabric(loop_config.fabric);
+  loop_flush(loop_config.flush);
 #else
   const char *region=MESH_NAME;
   const uint16_t service=(uint16_t)atoi(MESH_PORT);
@@ -4834,11 +4862,15 @@ int main(int argc,char **argv){
     dispatch_sync(port->work,^{
       /* design/bridge-dataflow.md#stripes: no progress thread runs: the stripe flow's queue pairs flushed and destroyed */
       if(port->stripes.provider.queues){
-        pair_flush(&port->stripes.provider);
+        const uint64_t began=ledger_ns();
+        const struct mesh_flush flush=pair_flush(&port->stripes.provider);
+        flush_say(port,"stripes",&flush,began);
         if(!down_pair(&port->stripes.provider))say("link %u (%s): stripes teardown: %s\n",port->index,port->name,strerror(errno));
       }
       if(port->stream.provider.queues){
-        pair_flush(&port->stream.provider);
+        const uint64_t began=ledger_ns();
+        const struct mesh_flush flush=pair_flush(&port->stream.provider);
+        flush_say(port,"stream",&flush,began);
         if(!down_pair(&port->stream.provider))say("link %u (%s): stream teardown: %s\n",port->index,port->name,strerror(errno));
       }
       if(port->stream.fd>=0){fd_answer(port->stream.fd,ESHUTDOWN);close(port->stream.fd);port->stream.fd=-1;}

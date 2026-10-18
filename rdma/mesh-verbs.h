@@ -113,31 +113,57 @@ static int down_pair(struct mesh_verbs *provider){
 static uint64_t pair_outstanding(const struct mesh_verbs *provider){
   return provider->sent_posted-provider->sent_polled+provider->received_posted-provider->received_polled;
 }
-/* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": each queue pair moved to the error state, so the
-   device ends its posted receives and SENDs (flushed, IBV_WC_WR_FLUSH_ERR) before it is destroyed, and its completion
-   queues drained of what that returns: every work request posted and not yet taken (pair_outstanding), each of which
-   the error state flushes to one completion, until they came or the device fails a poll; the completions drained.
-   Where a queue pair's move is refused, nothing is drained and the queue pairs are destroyed as down_pair destroys
-   them.  Every flow's, the stripe flow's and a stream's
+/* design/RDMA-KERNEL-RECOVERY.md "Every teardown's flush": a provider's queue pairs drained as Linux drains one
+   (ib_drain_qp: ib_drain_rq, ib_drain_sq): each moved to the error state, so the device ends its posted receives and
+   SENDs (flushed, IBV_WC_WR_FLUSH_ERR), what that returned taken, then, on each way whose count is not yet met, a
+   marker on each queue pair (a receive, a SEND: no scatter-gather entry, PAIR_MARKER their identity, a queue pair's
+   index and way), which the error state completes
+   behind every work request posted before them, since a queue's completions come in the order posted.  The drain takes
+   completions, counting the work requests' among them (pair_outstanding's counts), until on each completion queue
+   every marker posted on its way came, or its count is met; a way whose marker the provider refused (its post's error:
+   the count alone ends it) waits on its count.  A queue pair whose move to the error state is refused drains nothing,
+   and the queue pairs are destroyed as down_pair destroys them.  Every flow's, the stripe flow's and a stream's
    teardown takes it, from the port's queue once no progress thread serves the provider (mesh-flow.c flow_release,
-   stripes_job, streams_job: design/bridge-and-ipc.md#control). */
-static uint64_t pair_flush(struct mesh_verbs *provider){
-  int moved=1;
+   stripes_job, streams_job and the bridge's stop: design/bridge-and-ipc.md#control), and logs what it drained: of
+   how many work requests, the markers seen and refused */
+#define PAIR_MARKER (UINT64_C(0xfffd)<<48)
+struct mesh_flush { uint64_t outstanding,drained; uint32_t markers,seen,refused,moved; };
+static struct mesh_flush pair_flush(struct mesh_verbs *provider){
+  struct mesh_flush flush={.outstanding=pair_outstanding(provider),.moved=1};
   for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
     struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
-    if(ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE))moved=0;
+    if(ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE))flush.moved=0;
   }
-  uint64_t drained=0;
-  struct ibv_wc done[16];
+  if(!flush.moved)return flush;
   struct ibv_cq *queues[2]={provider->completion,provider->sent};
   uint64_t *polled[2]={&provider->received_polled,&provider->sent_polled};
   const uint64_t posted[2]={provider->received_posted,provider->sent_posted};
-  for(int c=0;moved && c<2;c++)while(queues[c] && *polled[c]<posted[c]){
-    const int n=ibv_poll_cq(queues[c],16,done);
-    if(n<0)break;
-    *polled[c]+=(uint64_t)n;drained+=(uint64_t)n;
+  uint32_t want[2]={0,0},seen[2]={0,0},refused[2]={0,0};
+  struct ibv_wc done[16];
+  int failed[2]={0,0};
+  /* what the move returned taken first, so the markers' completions find room in their queues */
+  for(int c=0;c<2;c++)for(int n=1;queues[c] && n>0;){
+    n=ibv_poll_cq(queues[c],16,done);
+    if(n<0)failed[c]=1;
+    for(int i=0;i<n;i++)if((done[i].wr_id&~UINT64_C(0xffff))!=PAIR_MARKER){(*polled[c])++;flush.drained++;}
   }
-  return drained;
+  for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
+    struct ibv_qp *pair=provider->queues[q].pair;
+    struct ibv_recv_wr marked={.wr_id=PAIR_MARKER|(uint64_t)q<<1},*bad_receive;
+    struct ibv_send_wr sent={.wr_id=PAIR_MARKER|(uint64_t)q<<1|1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad_send;
+    if(*polled[0]<posted[0]){if(provider->queues[q].receive(pair,&marked,&bad_receive))refused[0]++;else want[0]++;}
+    if(*polled[1]<posted[1]){if(provider->queues[q].send(pair,&sent,&bad_send))refused[1]++;else want[1]++;}
+  }
+  for(int c=0;c<2;c++)while(queues[c] && !failed[c] && *polled[c]<posted[c] && (refused[c] || seen[c]<want[c])){
+    const int n=ibv_poll_cq(queues[c],16,done);
+    if(n<0)failed[c]=1;
+    for(int i=0;i<n;i++){
+      if((done[i].wr_id&~UINT64_C(0xffff))==PAIR_MARKER)seen[c]++;
+      else{(*polled[c])++;flush.drained++;}
+    }
+  }
+  flush.markers=want[0]+want[1];flush.seen=seen[0]+seen[1];flush.refused=refused[0]+refused[1];
+  return flush;
 }
 /* design/RDMA-KERNEL-RECOVERY.md: registrations, protection domain, context, each kept where its release fails; a
    device's registrations go only here, at its retirement (design/prepared-machine.md#M09) */
