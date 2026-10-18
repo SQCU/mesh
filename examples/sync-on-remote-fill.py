@@ -3,14 +3,25 @@ import os
 from pathlib import Path
 import signal
 import sys
-from time import perf_counter, sleep
+from time import perf_counter
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
 
 import numpy as np  # noqa: E402
 import kernels  # noqa: E402
 from mesh import BlockSpec, Program, ShapeDtypeStruct  # noqa: E402
-from mesh.collective import send, sync_on_remote_fill  # noqa: E402
+from mesh.collective import send, sync_on_remote_fill, sync_on_some_remote_fill  # noqa: E402
+
+STOP = (signal.SIGTERM, signal.SIGINT)
+
+
+class Stopped(Exception):
+    pass
+
+
+# design/algorithm-sources.md#collectivesync_on_remote_fill
+def stop(*_):
+    raise Stopped
 
 
 # design/algorithm-sources.md#collectivesync_on_remote_fill
@@ -26,8 +37,9 @@ def main():
     args = parser.parse_args()
     if min(args.blocks, args.rounds, args.elements) < 1 or args.root == args.peer:
         parser.error('Use positive dimensions and two distinct participants')
-    stopped = []
-    signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
+    for number in STOP:
+        signal.signal(number, stop)
+    signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     with Program(backend=args.backend) as program:
         if program.size != 2:
             parser.error('two ranks (RANK, WORLD_SIZE=2, MASTER_ADDR, MASTER_PORT)')
@@ -47,56 +59,59 @@ def main():
             send(program, transformed[index, 0].on(args.peer), replies[index, 0].on(args.root), queue=3 if index == 0 else 1)
         outputs = [program.export(replies[i, 0]) for i in range(count)] if program.rank == args.root else []
         program.realize()
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
         print(f'participant={program.rank} pid={os.getpid()} mode={args.mode}', flush=True)
-        if program.rank == args.peer:
-            while not stopped and not program.report.code:
-                sleep(0.1)
-            return
-        if args.mode == 'independent':
-            for index in range(1, count):
-                with program.write(source[index, 0]) as target:
-                    target[...] = index
-            pending = set(range(1, count))
-            while pending:
-                for index in tuple(pending):
-                    if outputs[index].ready:
-                        print(f'published={index} retained={outputs[index].array[0, :4].tolist()}', flush=True)
-                        pending.remove(index)
-                if program.report.code:
-                    raise RuntimeError(f'Mesh execution error: {program.report}')
-                sleep(0.0001)
-            print(f'unpublished_source=0 reply_ready={outputs[0].ready} retained_results={count - 1}', flush=True)
-            return
-        if args.mode == 'deadlock':
-            print('WAIT reply[0] -> peer add -> source[0] -> write after this wait', flush=True)
-            sync_on_remote_fill(outputs[0])
-        with program.write(source[0, 0]) as target:
-            target[...] = 0
+        try:
+            run(args, program, source, outputs, count)
+        except Stopped:
+            pass
+
+
+# design/algorithm-sources.md#collectivesync_on_remote_fill
+def run(args, program, source, outputs, count):
+    if program.rank == args.peer:
+        while True:
+            signal.pause()
+    if args.mode == 'independent':
+        for index in range(1, count):
+            with program.write(source[index, 0]) as target:
+                target[...] = index
+        pending = {output: index for index, output in enumerate(outputs) if index}
+        while pending:
+            for output in sync_on_some_remote_fill(*pending):
+                print(f'published={pending.pop(output)} retained={output.array[0, :4].tolist()}', flush=True)
+        print(f'unpublished_source=0 reply_ready={outputs[0].ready} retained_results={count - 1}', flush=True)
+        return
+    if args.mode == 'deadlock':
+        print('WAIT reply[0] -> peer add -> source[0] -> write after this wait', flush=True)
         sync_on_remote_fill(outputs[0])
-        outputs[0].consume()
-        mean = moment = 0.0
-        for trial in range(args.rounds):
-            first = 1 + trial * args.blocks
-            pending = outputs[first:first + args.blocks]
-            start = perf_counter()
-            for offset, output in enumerate(pending):
-                with program.write(source[first + offset, 0]) as target:
-                    target[...] = first + offset
-                if args.mode == 'sync':
-                    sync_on_remote_fill(output)
-            sync_on_remote_fill(*pending)
-            elapsed = perf_counter() - start
-            for offset, output in enumerate(pending):
-                if not np.all(output.array == first + offset + 1):
-                    raise ArithmeticError('Remote addition result differs')
-                output.consume()
-            delta = elapsed - mean
-            mean += delta / (trial + 1)
-            moment += delta * (elapsed - mean)
-            variance = moment / trial if trial else 0.0
-            print(f'mode={args.mode} trial={trial + 1} seconds={elapsed:.9f} '
-                  f'n={trial + 1} mean_seconds={mean:.9f} sample_variance={variance:.12g}', flush=True)
-        print('DONE', flush=True)
+    with program.write(source[0, 0]) as target:
+        target[...] = 0
+    sync_on_remote_fill(outputs[0])
+    outputs[0].consume()
+    mean = moment = 0.0
+    for trial in range(args.rounds):
+        first = 1 + trial * args.blocks
+        pending = outputs[first:first + args.blocks]
+        start = perf_counter()
+        for offset, output in enumerate(pending):
+            with program.write(source[first + offset, 0]) as target:
+                target[...] = first + offset
+            if args.mode == 'sync':
+                sync_on_remote_fill(output)
+        sync_on_remote_fill(*pending)
+        elapsed = perf_counter() - start
+        for offset, output in enumerate(pending):
+            if not np.all(output.array == first + offset + 1):
+                raise ArithmeticError('Remote addition result differs')
+            output.consume()
+        delta = elapsed - mean
+        mean += delta / (trial + 1)
+        moment += delta * (elapsed - mean)
+        variance = moment / trial if trial else 0.0
+        print(f'mode={args.mode} trial={trial + 1} seconds={elapsed:.9f} '
+              f'n={trial + 1} mean_seconds={mean:.9f} sample_variance={variance:.12g}', flush=True)
+    print('DONE', flush=True)
 
 
 if __name__ == '__main__':

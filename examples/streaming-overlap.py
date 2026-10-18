@@ -11,6 +11,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
 import numpy as np  # noqa: E402
 import kernels  # noqa: E402
 from mesh import BlockSpec, Program, ShapeDtypeStruct  # noqa: E402
+from mesh.collective import sync_on_some_remote_fill  # noqa: E402
+
+STOP = (signal.SIGTERM, signal.SIGINT)
+
+
+class Stopped(Exception):
+    pass
+
+
+# design/algorithm-sources.md#streaming-overlap-measurement
+def stop(*_):
+    raise Stopped
 
 
 # design/algorithm-sources.md#streaming-overlap-measurement
@@ -38,15 +50,9 @@ def main():
     args = parser.parse_args()
     if min(args.rows, args.tile, args.trials, args.depth) < 1:
         parser.error('rows, tile, trials and depth must be positive')
-    running = True
-
-    # design/algorithm-sources.md#streaming-overlap-measurement
-    def stop(*unused):
-        nonlocal running
-        running = False
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+    for number in STOP:
+        signal.signal(number, stop)
+    signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     with Program(backend=args.backend, trace=bool(args.trace)) as program:
         if args.local and program.size != 1:
             parser.error('--local is world size 1: run one rank (WORLD_SIZE unset or 1)')
@@ -86,6 +92,7 @@ def main():
 
         slots = tuple(configure(slot) for slot in range(args.depth))
         program.realize()
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
         print(json.dumps(dict(event='realized', rank=program.rank, mode=args.mode,
             backend=args.backend, regions=count, depth=args.depth, local=args.local)), flush=True)
 
@@ -95,8 +102,11 @@ def main():
                 Path(args.trace).write_text(json.dumps(dict(rank=program.rank, trace=program.trace)) + '\n')
 
         if program.rank == 1:
-            while running and not program.report.code:
-                time.sleep(0.1)
+            try:
+                while True:
+                    signal.pause()
+            except Stopped:
+                pass
             write_trace()
             print(json.dumps(dict(rank=1, mode=args.mode, report=vars(program.report))), flush=True)
             return
@@ -109,10 +119,9 @@ def main():
             terminal = []
             latencies, first_sections = [], []
             began_batch = time.perf_counter()
-            deadline = began_batch + 60
-            while completed < total and running:
+            while completed < total:
                 for slot, (inputs, results) in enumerate(slots):
-                    if slot in outstanding or submitted == total or not all(ref.writable for ref in inputs):
+                    if slot in outstanding or submitted == total:
                         continue
                     began = time.perf_counter()
                     scale = 1 + (submitted % 17) / 32
@@ -122,6 +131,9 @@ def main():
                             np.multiply(data[start:start + ref.shape[0]], scale, out=buffer)
                     outstanding[slot] = (submitted, began, False)
                     submitted += 1
+                waiting = [result for slot in outstanding for result in slots[slot][1] if not result.ready]
+                if waiting:
+                    sync_on_some_remote_fill(*waiting)
                 for slot, (_, results) in enumerate(slots):
                     if slot not in outstanding:
                         continue
@@ -135,18 +147,12 @@ def main():
                     latencies.append(time.perf_counter() - began)
                     del outstanding[slot]
                     completed += 1
-                    deadline = time.perf_counter() + 60
                     if submitted < total:
                         for result in results:
                             result.consume()
                     else:
                         terminal.append((results, trial))
-                if time.perf_counter() > deadline:
-                    raise TimeoutError(f'Contraction pipeline stalled: {program.report}')
-                time.sleep(0.0001)
             ended_batch = time.perf_counter()
-            if not running:
-                raise InterruptedError('Contraction observation interrupted')
             maximum_error = 0.0
             for results, trial in terminal:
                 scale = 1 + (trial % 17) / 32
@@ -163,7 +169,6 @@ def main():
                 results_per_second=total / (ended_batch - began_batch),
                 max_absolute_error=maximum_error, checked_terminal_invocations=len(terminal))
 
-        run_batch(5 * args.depth)
         measured = run_batch(args.trials)
         write_trace()
         print(json.dumps(dict(rank=0, mode=args.mode, rows=rows, tile=tile, depth=args.depth, backend=args.backend,

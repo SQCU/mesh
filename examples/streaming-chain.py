@@ -11,8 +11,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
 import numpy as np  # noqa: E402
 import kernels  # noqa: E402
 from mesh import BlockSpec, Program, ShapeDtypeStruct  # noqa: E402
-from mesh.collective import reduce  # noqa: E402
+from mesh.collective import reduce, sync_on_remote_fill, sync_on_some_remote_fill  # noqa: E402
 from nn import ffn, linear, rmsnorm, summed_embedding  # noqa: E402
+
+STOP = (signal.SIGTERM, signal.SIGINT)
+
+
+class Stopped(Exception):
+    pass
+
+
+# design/algorithm-sources.md#streaming-overlap-measurement
+def stop(*_):
+    raise Stopped
 
 
 # design/algorithm-sources.md#nnffn
@@ -44,7 +55,7 @@ def overlap(trace):
 
 
 # design/algorithm-sources.md#nnffn
-def literature(args, program, running):
+def literature(args, program):
     rows, width, tile = 256, 128, 64
     rng = np.random.default_rng(701)
 
@@ -95,18 +106,18 @@ def literature(args, program, running):
                   for name, value in stages.items()}
         invocations.append((data, inputs, probes))
     program.realize()
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
     print(json.dumps(dict(event='realized', pid=os.getpid(), rank=program.rank, runs=args.runs, local=args.local)), flush=True)
     if program.rank == 1:
-        observed = set()
-        while running() and not program.report.code:
-            for run, (_, _, probes) in enumerate(invocations):
-                for name, results in probes.items():
-                    if (run, name) not in observed and results[1, 0].ready:
-                        observed.add((run, name))
-                        print(json.dumps(dict(event='section_ready', run=run, stage=name, local_monotonic_ns=time.monotonic_ns(),
-                                              section_zero_absent=not results[0, 0].ready)), flush=True)
-            time.sleep(0.0001)
-        return {}
+        watched = {results[1, 0]: (run, name, results[0, 0]) for run, (_, _, probes) in enumerate(invocations)
+                   for name, results in probes.items()}
+        while watched:
+            for result in sync_on_some_remote_fill(*watched):
+                run, name, first = watched.pop(result)
+                print(json.dumps(dict(event='section_ready', run=run, stage=name, local_monotonic_ns=time.monotonic_ns(),
+                                      section_zero_absent=not first.ready)), flush=True)
+        while True:
+            signal.pause()
 
     # design/algorithm-sources.md#streaming-overlap-measurement
     def publish(invocation, sections):
@@ -119,48 +130,35 @@ def literature(args, program, running):
                     r, c = section * tensor.block_shape[0], panel * tensor.block_shape[1]
                     target[...] = value[r:r + ref.shape[0], c:c + ref.shape[1]]
 
-    # design/algorithm-sources.md#streaming-overlap-measurement
-    def wait_for(results):
-        deadline = time.monotonic_ns() + 60_000_000_000
-        while running() and not all(result.ready for result in results):
-            if time.monotonic_ns() > deadline:
-                raise TimeoutError(f'Final sections stalled: {program.report}')
-            time.sleep(0.0001)
-        if not running():
-            raise InterruptedError('Gold observation interrupted')
-
     warm_started = time.monotonic_ns()
     warm = invocations[0]
     publish(warm, range(1, rows // tile))
     warm_results = warm[2]['rmsnorm2']
-    wait_for((warm_results[1, 0],))
+    sync_on_remote_fill(warm_results[1, 0])
     if any(result.ready for coordinate, result in warm_results.items() if coordinate[0] == 0):
         raise ArithmeticError('An unpublished input section produced an output')
     publish(warm, (0,))
-    wait_for(tuple(warm_results.values()))
+    sync_on_remote_fill(*warm_results.values())
     print(json.dumps(dict(event='warmup', elapsed_ms=(time.monotonic_ns() - warm_started) / 1e6)), flush=True)
 
     batch_started = time.monotonic_ns()
     for run, invocation in enumerate(invocations[1:], 1):
         publish(invocation, range(1 if run == 1 else 0, rows // tile))
     delayed = invocations[1][2]['rmsnorm2']
-    wait_for((delayed[1, 0],))
+    sync_on_remote_fill(delayed[1, 0])
     first_ms = (time.monotonic_ns() - batch_started) / 1e6
     if any(result.ready for coordinate, result in delayed.items() if coordinate[0] == 0):
         raise ArithmeticError('An unpublished input section produced an output')
     publish(invocations[1], (0,))
     completed = {}
-    deadline = time.monotonic_ns() + 60_000_000_000
-    while running() and len(completed) < args.runs:
-        for run, (_, _, probes) in enumerate(invocations[1:], 1):
-            if run not in completed and all(result.ready for result in probes['rmsnorm2'].values()):
+    waiting = {run: set(probes['rmsnorm2'].values()) for run, (_, _, probes) in enumerate(invocations[1:], 1)}
+    while waiting:
+        filled = set(sync_on_some_remote_fill(*(result for results in waiting.values() for result in results)))
+        for run in tuple(waiting):
+            waiting[run] -= filled
+            if not waiting[run]:
                 completed[run] = (time.monotonic_ns() - batch_started) / 1e6
-        if time.monotonic_ns() > deadline:
-            raise TimeoutError(f'Batch stalled: {program.report}')
-        if len(completed) < args.runs:
-            time.sleep(0.0001)
-    if not running():
-        return {}
+                del waiting[run]
     batch_ms = (time.monotonic_ns() - batch_started) / 1e6
     errors = []
     for run, (data, _, probes) in enumerate(invocations):
@@ -183,7 +181,7 @@ def literature(args, program, running):
 
 
 # design/algorithm-sources.md#nnffn
-def tensor_parallel(args, program, running):
+def tensor_parallel(args, program):
     values = np.load(args.input)
     up, down, consumer = (np.load(name, mmap_mode='r') for name in (args.up_weight, args.down_weight, args.consumer_weight))
     if up.shape[1] != down.shape[0] or not 0 < args.split <= up.shape[1]:
@@ -225,6 +223,7 @@ def tensor_parallel(args, program, running):
         if program.rank == args.root:
             outputs.update({(instance, *index): program.export(ref) for index, ref in consumed.blocks.items()})
     program.realize()
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
     began = time.monotonic_ns()
     for i, j in inputs[0].blocks:
         for x in inputs:
@@ -233,20 +232,14 @@ def tensor_parallel(args, program, running):
             with program.write(ref) as destination:
                 destination[...] = values[row:row + ref.shape[0], column:column + ref.shape[1]]
     if program.rank != args.root:
-        while running() and not program.report.code:
-            time.sleep(0.1)
-        return {}
-    deadline = time.monotonic_ns() + 60_000_000_000
+        while True:
+            signal.pause()
     count = len(outputs)
-    while outputs and running():
-        for index, output in tuple(outputs.items()):
-            if output.ready:
-                print(index, output.array.tolist(), flush=True)
-                output.consume()
-                del outputs[index]
-        if time.monotonic_ns() > deadline:
-            raise TimeoutError(f'Chain stalled: {program.report}')
-        time.sleep(0.0001)
+    indices = {output: index for index, output in outputs.items()}
+    while indices:
+        for output in sync_on_some_remote_fill(*indices):
+            print(indices.pop(output), output.array.tolist(), flush=True)
+            output.consume()
     return dict(instances=args.instances, regions=count, elapsed_ms=(time.monotonic_ns() - began) / 1e6)
 
 
@@ -281,16 +274,19 @@ def main():
         parser.error('--residual requires --normalize')
     if args.chain == 'tensor-parallel' and args.root == args.peer:
         parser.error('--root and --peer are two members')
-    stopped = []
-    signal.signal(signal.SIGTERM, lambda *_: stopped.append(True))
-    signal.signal(signal.SIGINT, lambda *_: stopped.append(True))
+    for number in STOP:
+        signal.signal(number, stop)
+    signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     with Program(backend=args.backend, trace=bool(args.trace)) as program:
         if args.local and program.size != 1:
             parser.error('--local is world size 1: run one rank (WORLD_SIZE unset or 1)')
         if not args.local and program.size != 2:
             parser.error('the paired chain runs on two ranks (RANK, WORLD_SIZE=2, MASTER_ADDR, MASTER_PORT)')
         chain = literature if args.chain == 'literature' else tensor_parallel
-        result = chain(args, program, lambda: not stopped)
+        try:
+            result = chain(args, program)
+        except Stopped:
+            result = {}
         if args.trace and program.trace is not None:
             Path(args.trace).write_text(json.dumps(dict(rank=program.rank, trace=program.trace)) + '\n')
         if result:
