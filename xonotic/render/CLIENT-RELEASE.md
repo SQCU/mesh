@@ -130,8 +130,8 @@ explicit measured state rather than being inferred from pixels.
 
 `cl_main.c` owns the remembered endpoint and retry schedule; `netconn.c` calls it
 every client frame. `Curriculum.reconcile_clients` owns process liveness and sends
-endpoint changes through the existing client stdin. A failed launch is reported and
-retried after three seconds. These owners separate network reconnection from process
+endpoint changes through the existing client stdin. A client whose process exits is
+relaunched when its exit arrives. These owners separate network reconnection from process
 replacement without requiring a viewer or shell keeper to reconnect the engine.
 
 A live UDP proxy withheld game packets for eight seconds while the real Mini server

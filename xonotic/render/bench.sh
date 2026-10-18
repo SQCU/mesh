@@ -10,24 +10,10 @@ W=${W:-1280}; H=${H:-720}
 mkdir -p "$HOME_DIR/data" "$OUT"
 
 run_dp() {
+	local log=$1; shift
 	"$DP" -xonotic -basedir "$BASE" -userdir "$HOME_DIR" \
-	      -window -width "$W" -height "$H" -nosound +exec "$1" \
-	      > "$OUT/$1.log" 2>&1 &
-	local pid=$!
-	local i=0
-	while kill -0 $pid 2>/dev/null; do
-		i=$((i+1)); [ $i -gt "$2" ] && { kill -TERM $pid 2>/dev/null || true; break; }
-		/bin/sleep 1
-	done
-	for _ in $(seq 1 120); do
-		kill -0 $pid 2>/dev/null || break
-		/bin/sleep 0.25
-	done
-	if kill -0 $pid 2>/dev/null; then
-		printf '{"event":"client_termination_pending","pid":%d}\n' "$pid" >&2
-	else
-		wait $pid 2>/dev/null || true
-	fi
+	      -window -width "$W" -height "$H" -nosound "$@" \
+	      > "$OUT/$log.log" 2>&1
 }
 
 cmd=$1; shift
@@ -39,37 +25,38 @@ cl_curl_enabled 0
 sv_autoscreenshot 0
 g_maplist_shufflenow 0
 bot_number 4
-defer 1 "record bench_$map $map"
-defer 9 "+forward"
-defer 12 "+right"
-defer 14 "-right"
-defer 16 "+moveleft"
-defer 18 "-moveleft; +left"
-defer 21 "-left"
-defer 24 "+right; +jump"
-defer 25 "-jump"
-defer 27 "-right"
-defer 30 "-forward; +back; +left"
-defer 34 "-back; -left"
-defer 36 "stop"
-defer 38 "quit"
+alias cl_hook_gamestart_all "exec walk.cfg"
+record bench_$map $map
 CFG
-	run_dp rec.cfg 70
+	cat > "$HOME_DIR/data/walk.cfg" <<CFG
+alias cl_hook_gamestart_all
++forward
+defer 3 "+right"
+defer 5 "-right"
+defer 7 "+moveleft"
+defer 9 "-moveleft; +left"
+defer 12 "-left"
+defer 15 "+right; +jump"
+defer 16 "-jump"
+defer 18 "-right"
+defer 21 "-forward; +back; +left"
+defer 25 "-back; -left"
+defer 27 "stop; quit"
+CFG
+	run_dp rec.cfg +exec rec.cfg
 	ls -la "$HOME_DIR/data/bench_$map.dem"
 	;;
 run)
-	map=$1; label=$2; shift 2
+	map=$1; label=$2; runs=$3; shift 3
 	{
 		echo "cl_curl_enabled 0"
 		echo "vid_vsync 0"
 		for kv in "$@"; do echo "${kv%%=*} ${kv#*=}"; done
-		for i in 1 2 3 4 5; do echo "defer $((i*8)) \"timedemo bench_$map\""; done
-		echo "defer 48 quit"
 	} > "$HOME_DIR/data/run_$label.cfg"
 	rm -f "$HOME_DIR/data/benchmark.log"
-	run_dp "run_$label.cfg" 240
+	run_dp "run_$label.cfg" +exec "run_$label.cfg" -benchmark "bench_$map" -benchmarkruns "$runs"
 	echo "=== $label ==="
-	grep -E "^[0-9]+ frames" "$OUT/run_$label.cfg.log" || tail -5 "$OUT/run_$label.cfg.log"
+	grep -E "^[0-9]+ frames|^(MIN|MED|MAX): " "$OUT/run_$label.cfg.log" || tail -5 "$OUT/run_$label.cfg.log"
 	;;
-*) echo "usage: bench.sh record <map> | run <map> <label> [cvar=value ...]"; exit 1;;
+*) echo "usage: bench.sh record <map> | run <map> <label> <runs> [cvar=value ...]"; exit 1;;
 esac

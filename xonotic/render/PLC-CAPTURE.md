@@ -19,11 +19,12 @@ emits independent `plc_team` declarations and scoring checkpoint chains; regener
 old entity files instead of carrying forward that capture's goal-entity workaround.
 The historical rendering timings below are not policy or game-objective evidence.
 
-## Frames — `plc-run.sh <label> <seconds> <steps.cfg>`
+## Frames — `plc-run.sh <label> <steps.cfg>`
 
 Runs the GL client windowed at 1280x720 against `plc-home`, execing `steps.cfg`, and
-kills it after `<seconds>`. `steps.cfg` is a list of `defer` lines; the deferred queue
-survives the map load, so one file scripts a whole match.
+returns when the client exits. `steps.cfg` is a list of `defer` lines at the match times
+the frames are wanted; the deferred queue survives the map load, so one file scripts a
+whole match, and its last line is `quit`.
 
 An early/late pair of the *same* scene needs the camera pinned, which is what
 `cl_artifact_camera 1` + `cl_artifact_cam_origin` / `cl_artifact_cam_angles` are for
@@ -90,8 +91,8 @@ doing its job against a 2 MB volume.
   carts. `g_payload 1; map dance` as a single deferred command is the form that
   actually starts `plc`.
 * A `defer` queue survives the map load, so one steps file scripts a whole match;
-  but two clients cannot share the userdir (session lock), so kill the previous
-  client before starting the next.
+  but two clients cannot share the userdir (session lock), so the next client starts
+  after the previous one's `quit` has ended it.
 * `cl_welcome 0` (welcome dialog), `hud_damage 0` (the full-screen red damage tint
   that otherwise washes every frame), `cl_deathscoreboard 0` (the scoreboard that
   covers the top half whenever the client dies) and `r_drawviewmodel 0` are all

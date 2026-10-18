@@ -9,25 +9,10 @@ BASE=${XONBASE:-$HOME/dox/xonotic/Xonotic}
 HOME_DIR=$here/plc-home
 OUT=$here/plc-out
 W=${W:-1280}; H=${H:-720}
-label=$1; secs=$2; steps=$3
+label=$1; steps=$2
 mkdir -p "$OUT" "$HOME_DIR/data"
 cp "$steps" "$HOME_DIR/data/plcsteps.cfg"
 "$DP" -xonotic -basedir "$BASE" -userdir "$HOME_DIR" \
       -window -width "$W" -height "$H" -nosound -condebug \
-      +"exec plcsteps.cfg" > "$OUT/$label.log" 2>&1 &
-pid=$!
-i=0
-while kill -0 $pid 2>/dev/null; do
-  i=$((i+1)); [ $i -gt "$secs" ] && { kill -TERM $pid 2>/dev/null || true; break; }
-  /bin/sleep 1
-done
-for _ in $(seq 1 120); do
-  kill -0 $pid 2>/dev/null || break
-  /bin/sleep 0.25
-done
-if kill -0 $pid 2>/dev/null; then
-  printf '{"event":"client_termination_pending","pid":%d}\n' "$pid" >&2
-else
-  wait $pid 2>/dev/null || true
-fi
+      +"exec plcsteps.cfg" > "$OUT/$label.log" 2>&1
 echo "--- $label done"
