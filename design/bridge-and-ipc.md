@@ -100,8 +100,11 @@ mesh-call.h `mesh_transfers_digest`, `#protocol`), and its programs by destinati
 (`mesh_destination`). Each is the destination's node, its `struct
 mesh_tx` (SEND cells, cancellation words, transfer lists of `MESH_QUEUES` queues each way, trace) and its status
 (`struct mesh_port_info`: phase, code, domain, `failed` the node where it failed, the destination or a relay on its
-route, and `prepared`). A client writes its own slot's other words and its own rows; the bridge writes the statuses,
-the ports and the map. No client reads, waits for or names another client's.
+route, and `prepared`), the SEND cells its program sent toward each destination on each queue that the peer's bridge
+reported landed (`delivered`, `mesh_delivered`: cumulative, summed over the flows' stripes and slots, `#control`), and
+`ending`, which the client sets to have its bridge close its program's flows in order while it keeps the slot
+(libnccl-mesh's `ncclCommFinalize`). A client writes its own slot's other words and its own rows; the bridge writes the
+statuses, `delivered`, the ports and the map. No client reads, waits for or names another client's.
 
 ## ports
 
@@ -170,7 +173,10 @@ each node it binds, over a port paired with that node or along the map's route t
 start returns once every destination is paired, or with the failure that destination's status names with its node
 (EHOSTUNREACH where the map has no route to the node; ETIMEDOUT past the bridge's own windows, design/recovery.md#first;
 the others mesh-call.h lists). A later loss fails the program alike, and the next start reads the map again.
-`mesh_detach`, or the client's process exiting, retires the slot (vacant at once, `mesh_retire`) and ends its program:
+`mesh_detach` retires the slot in order: its owner word is left `MESH_ORDERLY` until the bridge has read it (the turn
+after, when it vacates the slot), and each running flow of its program closes (`#control`: its released cells posted,
+then END, its peer's CLOSED awaited by the bridge alone). An abort (`mesh_retire`: a revoke, or the client's process
+exiting) vacates the slot at once and fails each flow (FAIL). Either ends its program:
 its rows (a program's, or the leases of a lease-owning slot) are closed; once no port holds a flow of the client the
 bridge releases them and returns their pages to the window in the same turn (`mesh_retired_release`, then
 `mesh_reclaim`'s `mesh_buffer_reclaim`), so the window's unleased bytes (`mesh_window`, node-info) count them free as
@@ -214,11 +220,11 @@ key:
 | READY (queues and slots, the route, the stripe of the program's stripes, whether the sender's end takes queue pairs of its own, the digest of what the sender's program is made from) | a program starts toward a node (a routed pair's lower end; its higher end once the lower's READY reached it); the route is the nodes from the receiver to it | where the route ends at the receiver, pairs with its client's program of the key toward the sender (one awaiting it is given it at once), else holds the flow (`#flows`), or, where that program names another digest, fails both (ESTALE, below); where the route goes on, makes a relay's two flows and sends READY on with the rest of the route; on a relay's existing flow (the far end's READY coming back), mirrors that direction and sends the READY on toward the route's start (`#routes`) |
 | PAIRS (an exclusive flow's queue pair numbers and sequence numbers; a lane rider's index and generation in its port's table) | the flow paired: an exclusive flow's queue pairs made (INIT) | its queue pairs ready to receive (RTR) and its receives posted; or its records taking its lanes' headers (`#lanes`) |
 | POSTED | its receives posted; a relay's once its partner heard the next hop's POSTED | its queue pairs ready to send (RTS), served by its port's progress threads: the flow runs |
-| END | the program ended on this side | its flow fails (ECONNRESET, domain 4); a relay's goes on |
-| FAIL (code, node) | a flow failed, at the node named | its flow fails (ECANCELED, domain 4) naming that node; a relay's goes on, its code kept; one of ESTALE fails the receiver's whole program alike (below) |
+| END | the program ended on this side while its flow was not yet running (a running flow's close is its control channel's, `#control`) | its flow fails (ECONNRESET, domain 4); a relay's goes on |
+| FAIL (code, node) | a flow failed, at the node named, before it ran (a running flow's FAIL is its control channel's) | its flow fails (ECANCELED, domain 4) naming that node; a relay's goes on, its code kept; one of ESTALE fails the receiver's whole program alike (below) |
 | RECORD (a node's record) | the sender's port table changed, a newer record reached it, or the port paired | takes it where it is newer than the newest heard of its node, and sends it on (`#records`) |
 | LANES (the port's lanes' queue pairs and the frames a header may name; none and a code where they failed) | the port's lanes made, once the link paired | its lanes ready to receive and send, each listening for its first header: the lanes are up (`#lanes`) |
-| FAREWELL | the bridge stops | the link's end is orderly |
+| FAREWELL | the bridge stops | every flow on the link is lost at once (its peer's bridge is going: ECONNRESET), as at the socket's end after it |
 
 Every message of a flow names its stripe beside its key and ends (`struct message` `stripe`), since several stripes of
 one routed program may share a port (`#cables`). No SEND of a program is posted before the peer's receives are (credit flow control holds a SEND until its receive is
@@ -382,10 +388,14 @@ Each port's verbs work (opening, querying and retiring its device, making and de
 registering memory) runs on that port's own thread, so a call blocked in the driver blocks that port alone, and the
 bridge's event loop, its other ports and its clients' starts go on (design/recovery.md Q14).
 
-A flow fails alone: its client's pending words toward the node cancelled (M12), its status `MESH_STOPPED` with the
-failure's code and domain and the node where it failed, its queue pairs destroyed (a lane rider's records posted on its
-lanes landed first, or the lanes gone), its peer told (FAIL), and on a relay the route's other flow failed with it. A
-failed flow is never resumed; the next program is a new flow, on the map as it is then.
+A flow that fails fails its client program's every flow, toward every node: each is muted first on the event loop
+(its port's progress threads settled, so no cell of the program is posted past this: `program_quiet`), then each has
+its client's words toward its node cancelled past the landed count (M12, `#control`), its status `MESH_STOPPED` with
+the failure's code and domain and the node where it failed, its peer told (FAIL, on its control channel where it ran),
+and its queue pairs moved to the error state, drained and destroyed under the port's guard (a lane rider's records
+posted on its lanes landed first, or the lanes gone); on a relay the route's other flow fails with it. A failed flow is
+never resumed; the next program is a new flow, on the map as it is then. A flow that ends in order closes
+(`#control`) and is not a failure.
 
 ## lanes
 
@@ -513,19 +523,110 @@ provider and a destruction of a queue whose events are not acknowledged blocks (
 measurement. A send thread tells it is parked, then looks once more before it waits, and `send_wake` orders its
 release before it reads that word, so one of the two sees the other.
 
+## control
+
+A flow's lifecycle travels on RDMA, never on the control socket once it runs (the operator, 2026-10-17: "it's easy to
+fix by remembering we're using rdma, not a hand-written sloplib breadboarding two cpus together"; metal-microbench
+output_data/dead-history-20261017 SESSION-DESIGN.md, lifecycle-requirements.md R1-R9). The socket keeps what no queue
+pair can carry yet: a link's bootstrap (HELLO, its lanes' and stripes' queue pair numbers) and a program's pairing
+(READY, PAIRS, POSTED), and END or FAIL of a flow not yet running.
+
+**The channel.** Each exclusive flow makes one queue pair past its data's, always (its keepalive pair, `#keepalive`):
+its control channel, its number last in PAIRS (count one past the data's), a page of the window its own (`flow_make`:
+`CONTROL_SENDS` 16-byte slots its SENDs read, then `CONTROL_RECEIVES` slots of 64 bytes its receives fill, posted at
+JOB_RECEIVE and each again as it lands). A device without room for the pair, or a window without the page, makes the
+flow a lane rider. A frame is `{kind, channel, count}`, 16 bytes, its channel a queue pair's index of the flow (a
+queue's slot), its count a cumulative number of SEND cells (a cell one transfer slot's invocation, a record a chunk of
+it at the peer):
+
+| frame | sent | the receiver |
+|---|---|---|
+| LANDED(q, n) | the periodic frame, at the configuration's keepalive interval, rotating over the channels (with none configured: each channel's as its count moves) | the channel's `delivered` = n, and its client program's delivered word moved by as much (`mesh_delivered`) |
+| END(q, n) | this end posted n cells on q and posts no more: its program retired in order or asked its close (every cell it released posted first), or the peer's END heard; a relay's once its partner heard END(q, n) and its own stream posted n | lands until the channel's landed count reaches n, then answers CLOSED |
+| CLOSED(q, n) | the channel landed n, at least the peer's END; a relay's its partner's CLOSED passed back | delivered = n; the channel's close each way once its END and CLOSED went and came |
+| FAIL(node, code) | the flow failed (its program aborted, lost a peer or a link) | the flow fails (ECANCELED, ESTALE or ECONNRESET kept) naming the node, a relay's partner telling its peer on |
+
+A lane rider's frames are entries of no chunks in its lanes' headers (lane 0: `ring` the kind and channel, `bytes` the
+count), END and CLOSED from the flow's state as for an exclusive flow (`control_close`), FAIL from a ring of the port's
+(`fails`), sent though its rider is gone; a lane rider sends no LANDED (its delivered words move at CLOSED). END and
+CLOSED repeat in the periodic rotation, so a frame lost does not stall a close.
+
+**Delivery.** Each receive thread counts a channel's cells landed as their last chunks land, after their words
+(`record_landed`), so a CLOSED never precedes a word it counts; the sending bridge keeps the peer's reports in each
+channel's `delivered` and adds to its client's delivered word. libnccl-mesh's `ncclCommFinalize` waits on those words.
+
+**The close** (R2-R4). A slot retired in order (`MESH_ORDERLY`) or asking its close (`ending`) closes each running
+flow: its streams post every cell their program released (a stream is idle once its next cell is not released: the
+client retired after its last publication), then END(sent) per channel, and post nothing after. The peer lands until
+it has n, answers CLOSED, and closes its own direction alike; a relay sends END(n) on only once its stream toward the
+far end posted n cells (each landed record of its partner releasing one), and passes each CLOSED back. A flow is
+released once, on every channel, its END went and the peer's CLOSED came, and the peer's END came and its CLOSED went
+(`flow_close_turn`): delivered equal sent both ways. The client never waits on it: its rows stay held by the bridge
+(its slot's retired rows, released once no flow of it remains) until then. A live program whose peer closed it sees its
+status `MESH_STOPPED` (ECONNRESET naming the peer) and its words past the peer's END cancelled, so a later wait on that
+peer fails as a value; one that asked the close keeps its words.
+
+**The release** (R6). A flow is released by the event that ends it, a close complete or a failure: out of its port's
+table, its queue pairs moved to the error state and drained until every work request it held posted completed
+(`pair_flush`, its expected count the flow's records posted and not landed, SENDs not completed, control frames in
+flight and control receives posted: `flow_outstanding`; `MESH_FLUSH_POLLS` polls of nothing the bound where the
+device returns fewer), then destroyed, all under the port's guard (`port_guard`, mesh 542d0bc7: no queue pair of the
+device is posted on meanwhile, design/RDMA-KERNEL-RECOVERY.md).
+
+**The cancel** (R9, M12). A failed flow's program's words are cancelled past each ring's landed count alone
+(`flow_cancel`): from its first record not landed, through the program's invocations less the ring's depth (a
+program's readers keep within the depth of the landings, so those records' words hold landings already read; at least
+the first, on which every reader waits before any later one), every record not landed in a one-pass program, after
+the last landing the flow stores (its port's threads settled first). A word that landed stays, so a call whose
+positions all landed completes. A GPU walk whose wait reads its word cancelled halts its later waits
+(nccl-mesh-metal.m `mesh_step_check`), and the program's every flow was muted before any word was cancelled
+(`program_quiet`), so a halted walk's later cells, computed without the lost peer's, are never posted: the peers fail
+on its FAIL. Through MESH_VERSION 118 the cancel overwrote every word of the destination (a cyclic program's landed
+ones too), END on the control socket raced the last SENDs on the queue pairs (a peer's cancel overwrote positions that
+had landed: on the loopback fabric's line of 4, 6 of 120 host-path runs whose members destroyed right after their last
+group, and a relay passed END on before posting what had landed at it), and a halted walk's later cells reached its
+peers, which returned success with wrong values in 3 of 9 of the walk's calls when a member was killed
+(metal-microbench output_data/dead-history-20261017/scratch-session run-base2, rdma/mesh-loop.c `destroy`, `kill`).
+
+**Loss** (R7, R8). By events: a link off (KEV_DL_LINK_OFF), the control socket's end, a peer's FAREWELL (its flows
+lost at once), a FAIL, and the missing-frame detector on each running exclusive flow (`control_gap`, `control_silent`):
+the receive thread measures the gaps between the peer's frames (their exponentially weighted mean and deviation over
+about the last 64, phi-accrual's fit of its window [Hayashibara et al. 2004], and the longest, decaying by a 1,024th a
+gap), and once 256 gaps were measured a silence past both the mean plus 8 deviations (a deviation at least half the
+mean: phi about 15 on a normal fit) and twice the longest gap, with nothing else of the peer's taken on the port
+meanwhile (`arrivals`: a peer busy sending is no lost one), is the peer's loss (EHOSTDOWN, domain 5), read once in 64
+of the receive thread's empty polls of the flow, so a frame that came while the thread was away is taken first. A
+peer's bridge sends a frame each interval while its flow runs, whatever its program does, so the detector reads its
+bridge's life, not its program's pace. On the loopback fabric (frames every 5 us configured, its progress threads sleeping
+20 us an empty poll) the gaps' mean read 30-40 us and the thresholds 0.15-0.4 ms; two 60 s soaks of one communicator's
+all-reduces (478,000 groups a rank, about 19 million frames heard on 12 flows) found no peer lost falsely, and a bridge
+stopped (SIGSTOP) was found 2.7-5.9 ms after its last frame, two or three of the detector's looks (scratch-session
+run6, run7). The data
+path keeps no silence bound (MESH_SILENT_NS's 10 s left it). Clocks kept: the detector's threshold, which turns frames
+that can no longer come into a failure; `MESH_PEER_NS`, `MESH_PAIR_NS` and the start's bound, for a peer whose program
+never starts or never pairs (no event says it never will); `MESH_PAUSE_NS`'s liveness turn, a backup to the exit watch;
+`MESH_FLUSH_POLLS`, a flush the device leaves short; the control socket's keepalive (a peer host gone with its link
+up). None orders two events the protocol orders.
+
+**What still rides the control socket**, and whether the lanes could carry it: HELLO (a link's bootstrap: before any
+queue pair, it cannot); READY with its program and route, PAIRS and POSTED (the pairing: an exclusive flow's queue
+pairs are not connected yet, and a lane rider's index and generation are what PAIRS tells, so the lanes could carry a
+lane rider's PAIRS and POSTED and an exclusive flow's READY, once the lanes are up); END and FAIL of a flow not yet
+running (as READY); LANES and STRIPES (their own queue pairs' numbers: bootstrap); RECORD (the map, every node's record
+flooded: the lanes could carry it, a header entry naming no flow, once up); FAREWELL (the lanes could, ahead of the
+socket's end); the requests' CHANNEL_* (services' byte streams, flow-controlled windows: the lanes could, as stripes do
+for bytes); STREAM (its own queue pair's bootstrap).
+
 ## keepalive
 
-A configuration's `keepalive_us` (etc/bridge/README.md; the bridge reads `keepalive`, nanoseconds) gives each exclusive
-flow a queue pair of its own past its data's, made, connected and destroyed with them, and bounds how long the flow's
-send side lets pass between frames on it while the flow progresses. The pair's number travels last in the flow's
-PAIRS, its count one past the data's (`flow_make` counts it against the device; a count of the data's alone, an end
-whose configuration states none, leaves the pair unconnected and unused at both ends). The receive side posts 256
-receives of one frame into the port's discard block on it once it is ready to receive (`flow_alive_listen`), and its
-receive thread posts each again as it lands (`flow_receive`, wr_id `FLOW_ALIVE_HEARD`); the send thread posts a
-16-byte SEND of the discard block on it once the interval passed since its last, one at a time (`flow_alive`, wr_id
-`FLOW_ALIVE_SENT`, taken by `send_retire`). Each flow's census at its release is followed by its keepalives posted and
-heard. The frames ride the flow's own queue pairs, whose posts the flow's quiescing stops before any of them is
-destroyed, as its data's.
+A configuration's `keepalive_us` (etc/bridge/README.md; the bridge reads `keepalive`, nanoseconds) bounds how long an
+exclusive flow's send side lets pass between frames on its control queue pair (`#control`) while the flow progresses:
+the periodic frame, one in flight at a time (`flow_control`, `control_report`: LANDED, or the close's END and CLOSED
+repeated), whose SENDs complete on the flow's SEND completion queue (`send_retire`, their wr_id tagged
+`CONTROL_SENT_TAG`) and whose receives its receive thread posts again as each lands (`frame_heard`, `CONTROL_HEARD_TAG`).
+Each flow's census at its release is followed by its control frames posted, heard and periodic, and its detector's
+gaps, mean, deviation, longest and threshold. The frames ride the flow's own queue pairs, whose posts the flow's
+quiescing stops before any of them is destroyed, as its data's.
 
 Why: on the pair (metal-microbench output_data/split-20261017, 2026-10-17) the Mac mini's Thunderbolt RDMA path, quiet
 for the 40-50 us of a layer's window, completed its next SEND 6.2 us after its post where the M5's took 2.5, and

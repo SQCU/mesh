@@ -20,9 +20,9 @@ Recovery is everything between a loss and the mesh doing its work again, at ever
 | layer | owns | where |
 |---|---|---|
 | bridge (link) | detection, failing the programs on a lost link, retiring a lost port's device, pairing again a pause apart; the mesh's map; forwarding programs along their routes | `rdma/mesh-flow.c`, `rdma/mesh-verbs.h` |
-| rank | no silent-link detector of its own: the library's bound ends its waits, and a failed window ends the call | metal-microbench `mesh_rank.m` |
+| rank | no silent-link detector of its own: its bridge's cancel ends its waits, and a failed window ends the call | metal-microbench `mesh_rank.m` |
 | driver (calls) | a call is a request to resident members, on the bridge's map taken at its start; a revoke is a cancel request; shrink and extend run on the bridges' map | metal-microbench `tools/mesh/grid.py`, `docs/elastic.md` |
-| collectives library (sessions) | mesh.h `MESH_SILENT_NS`, the library's one bound; a session retired and opened again | `rdma/nccl-mesh.c`, `rdma/NCCL.md` |
+| collectives library (sessions) | no clock of its own on the transport: the bridge's events end its waits (design/bridge-and-ipc.md#control); a session closed in order (Destroy, Finalize) or as an abort (Abort, Revoke, a failure), and opened again | `rdma/nccl-mesh.c`, `rdma/NCCL.md` |
 | port (physical) | a fabric port whose cable link is up with no RDMA peer: bounced with backoff, logged | `bin/mesh-fabric-init.sh` (every keeper pass) |
 
 ## Mandates
@@ -93,7 +93,7 @@ git's and output_data's to say (AGENTS.md: assignments expire), not this table's
 | Q3 | Recovery between executions only; none inside one | mandates 2, 3, 13 | a failed flow is never resumed; the next program is a new flow on the map as it is then (design/bridge-and-ipc.md#flows) |
 | Q4 | A link down when a program starts fails the program at once; the link pairs again on its own | mandates 1, 4 | `#first` (ENETDOWN, EHOSTUNREACH); the port's turns (`#pause`) |
 | Q5 | Peer identity independent of the link: the node, its bridge's boot, and the pairing's index | mandate 3 | the hello carries node and boot; the port table counts pairings (design/bridge-and-ipc.md#ports) |
-| Q6 | Loss is observed at the completion queue and the control socket, never by a data-path timer | mandates 3, 8 | open: the control socket's keepalive is a timer on the control path, and the library's silent bound (`#detection`) one on landed positions |
+| Q6 | Loss is observed at the completion queue and the control socket, never by a data-path timer | mandates 3, 8 | by events (`#detection`): link off, the socket's end, FAREWELL, FAIL, and each flow's control frames missing past what their measured gaps make likely (an accrual detector on RDMA, design/bridge-and-ipc.md#control); the library's silent bound is gone (MESH_VERSION 119); the control socket's keepalive stays for a peer host gone with its link up |
 | Q7 | A bounded loop pairs again while the bridge is up, whether or not a client is attached | mandates 3, 14 | every port's turn, a pause apart, for the bridge's life (`#pause`); no neighbour warm-up |
 | Q8 | A realized program survives link loss without being realized again | mandate 3 | dropped by mandate 13: the execution fails and is run again |
 | Q9 | A port move needs no configuration | mandates 3, 5, 11 | the bridge finds each port's peer itself (design/bridge-and-ipc.md#ports) |
@@ -103,24 +103,31 @@ git's and output_data's to say (AGENTS.md: assignments expire), not this table's
 | Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | the control socket carries a program's pairing messages and the map's records, nothing per transfer |
 | Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | the bridge's loop waits 250 ms at most; a port's progress threads park on their port's bell at most 1 ms at a time while anything is theirs to look for (3 s otherwise, design/bridge-and-ipc.md#progress); pairing has its windows; a control socket never blocks: a message queues behind what the socket has not taken and goes on at its write event (mesh-flow.c port_say, port_flush), and the keepalive (1 s idle, 1 s interval, 2 probes) ends a peer that takes none; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, each on that port's own thread, so one blocks only that port; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
 | Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | a link off or a detached interface retires the device, and no hello or connection reaches the port until its turn has retired the device and opened it again (design/bridge-and-ipc.md#ports) |
-| Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | a failed flow cancels its client's words toward the node (prepared-machine.md M12) |
-| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | open: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or the library's silent bound fails a paired one's (`#detection`); the bridge exchanges nothing of its own over RDMA to tell it |
+| Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | a failed flow cancels its client's words toward the node past their landed counts, after its last landing (prepared-machine.md M12, design/bridge-and-ipc.md#control); a GPU wait that reads a cancel halts its program's later waits, so no wait outlives a cancel and none is cancelled twice |
+| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | open: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or a paired one's flows find their control frames missing (`#detection`); lanes carry no frames of their own to tell it |
 | Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | the map is every algorithm's operand (mesh-plan.h `struct mesh_link_map`), and members its links leave apart are joined along routes the bridges forward (`mesh_map`) |
 
 ## The module
 
 ### detection
 
-A loss is a link-off or detach of the port's own interface (M24), the control socket ending (a farewell before its end
-makes it an orderly one), its keepalive failing, or a send on it failing. A failed completion, post or poll is its
-flow's alone. The control socket's keepalive (1 s idle, 1 s interval, 2 probes) tells a side whose own interface stays
-up (its peer's went down, its peer's host died): UC queue pairs report nothing. A destination with positions pending
-that lands none for `MESH_SILENT_NS` (mesh.h, 10 s) is cancelled (`mesh_cancel`), ending every wait on it: the
-library's one bound, its session's progress thread the watcher (rdma/nccl.h).
+A loss is an event (metal-microbench output_data/dead-history-20261017 SESSION-DESIGN.md item 5, R7, R8; design/bridge-and-ipc.md#control): a link-off or detach of the
+port's own interface (M24), the control socket ending, a peer's FAREWELL (its flows lost at once, before its socket's
+end), its keepalive failing, a send on it failing, a FAIL a flow's peer sends on its control channel, or an exclusive
+flow's control frames missing past what the measured gaps between them make likely (the missing-frame detector, an
+accrual detector over the 5 us keepalive frames: the mean plus 8 deviations and twice the longest gap, with nothing
+else of the peer's heard on the port meanwhile). A failed completion, post or poll is its flow's alone, and fails its
+client program's every flow. The control socket's keepalive (1 s idle, 1 s interval, 2 probes) tells a side whose own
+interface stays up (its peer's went down, its peer's host died) where no flow runs. A loss cancels the program's words
+past their landed counts (`#loss`), ending every wait on them. Through MESH_VERSION 118 a destination with positions
+pending that landed none for `MESH_SILENT_NS` (10 s) was cancelled by the library's progress thread: 2x10^6 keepalive
+periods, 2,500 decode steps; no transport decision reads a clock now but the detector's threshold, which turns frames
+that can no longer come into a failure.
 
 ### loss
 
-A link's loss fails every flow on it: its client's pending words on the link cancelled, its status the loss's code
+A link's loss fails every flow on it: its client's words on the link past their landed counts cancelled (its program's
+every flow muted first, design/bridge-and-ipc.md#control), its status the loss's code
 (ECONNRESET where the peer said farewell), its queue pairs destroyed, and then the link's lanes (design/bridge-and-ipc.md
 #lanes), once neither progress thread reads them. A lane's failure (a completion's error, a header out of step) is
 its lanes' alone, and so are lanes that could not be made or connected (a verbs call's error; their pages are leased
@@ -137,7 +144,21 @@ pass failed lanes stayed failed until the link itself went, and its second pass'
 and held its port for a pause doubling to 30 min, a demotion of an edge the mesh's contract forbids (AGENTS.md). A
 loss of the port itself (link off, interface detached) also retires the port's
 device: registrations, protection domain and context, once no flow and no lane holds a queue pair on it. A flow's own
-failure is told to the peer (FAIL), which fails its side.
+failure is told to the peer (FAIL: on its control channel where it ran, design/bridge-and-ipc.md#control), which fails
+its side. A flow's queue pairs are moved to the error state and drained before they are destroyed, under the port's
+guard, whether it failed or closed.
+
+### close
+
+A program that ends in order is not a failure (the same SESSION-DESIGN.md, items 2, 3; R2-R4): `mesh_detach` (libnccl-mesh's
+`ncclCommDestroy`, or its `ncclCommFinalize` keeping the slot) leaves its bridge to post every cell it released, end
+each flow with END(n) per channel, keep landing what the peer sends until the peer's own END is met, and release the
+flow at the peer's CLOSED, holding the program's rows until then; the client waits on none of it. Its peers land
+through n before they answer, so no landing is cancelled by a close; a peer whose program still runs then fails a
+later wait on the closed node as a value (ECONNRESET). A relay passes END on only once it has posted onward every cell
+below n (design/bridge-and-ipc.md#control). On the loopback fabric's line of 4 (rdma/mesh-loop.c `destroy`), members
+destroying right after their last group lost a landing in 6 of 120 host-path runs and 2 of 90 walk runs at
+MESH_VERSION 118, and in none of 120 and 90 since, every flow closing with each cell it sent reported landed.
 
 A port's stripe flow (design/bridge-dataflow.md#stripes) fails as its lanes do: alone (`stripes_reset`), the requests it
 held failing as values (each writer's word `UINT64_MAX`, its ring's code), the peer told (a STRIPES of none and why),
@@ -276,11 +297,11 @@ several queue pairs (the torch/NCCL sessions: four).
 |---|---|---|
 | F1 | a direct link down mid-call | the executions on it fail; the link pairs again a pause after it is back |
 | F3 | a link down when a program starts | the program fails at once (ENETDOWN) |
-| F6 | the peer bridge stops or crashes | its farewell or the keepalive: the executions fail; the link pairs again with the new bridge |
-| F7 | the peer's program fails or ends | END or FAIL: this side's program on the link fails |
+| F6 | the peer bridge stops or crashes | its farewell, the socket's end or its flows' missing frames: the executions fail; the link pairs again with the new bridge |
+| F7 | the peer's program fails or ends | FAIL fails this side's program (its words past their landed counts cancelled); an end in order closes its flows (`#close`) and fails only a later wait on it |
 | F8 | the peer node reboots or loses power | the keepalive or the link-off: the executions fail, the port's device retired on a link-off |
 | F9 | the control plane (LAN, ssh, mDNS) lost, the cable up | the bridges' links are unaffected; the driver's reach is |
-| F10 | the data path dead, the control socket alive | the library's silent bound (`MESH_SILENT_NS`) cancels the destination; the execution fails |
+| F10 | the data path dead, the control socket alive | an exclusive flow's control frames missing (the detector) fail its program; a path of lanes alone has no detector of its own (open) |
 | F11 | one direction lost | undefined |
 | F12 | a link degrades (speed, errors) | the Balancer on evidence |
 | F13 | one link of several drops | the executions on it fail; the others' links are untouched |

@@ -24,7 +24,7 @@ one block.
 | port p's two progress threads `mesh.rdma.receive` (side 0) and `mesh.rdma.send` (side 1), QoS user-interactive | `port_threads`, at the port's first listed flow or lanes connect; kept until `port_still` | side 1 polls SEND cells' `ready` words, posts SENDs and takes SEND completions; side 0 takes receive completions, stores landing words and reposts receives | spin while anything moves; parked on `hdr.bell[p]` (`port_progress`) |
 | finder queue `mesh.ports` | `main` | reads the device list (`ports_find`) and the host name (`host_read`) | — |
 | a client process (a rank, anything linked to libnccl-mesh or libmesh) | its user | attaches to the region, leases, binds, prepares, starts programs, publishes and consumes | its own landing words, `status[d].prepared` |
-| libnccl-mesh session progress thread | `nccl-mesh.c session_open` | the silent-link watcher: follows landings, cancels a silent or cancelled session | `pthread_cond_timedwait`, 1 ms (`WATCH_NS`) between scans |
+| libnccl-mesh session progress thread | `nccl-mesh.c session_open` | the watcher: follows landings and keeps the session's failure where one reads cancelled (it cancels nothing, and keeps no silence bound) | `pthread_cond_timedwait`, 1 ms (`WATCH_NS`) between scans |
 | the client's GPU work | the client's command buffers | publishes into SEND cells; spins on landing words | `mesh.metal mesh_wait` / `mesh_wait_bounded` |
 
 ### The shared region `/mesh0`
@@ -212,10 +212,10 @@ A flow is named by `(port, key, near, far, stripe)` (`flow_on`); a message names
 | READY (payload `struct ready`, route, transfer list) | `ready_say`: `program_take` (direct: both ends; routed: lower end, one per stripe), `program_await` and `ready_heard` (a higher end taking a held or awaited flow), a relay forwarding (`ready_heard`) | `ready_heard`: pairs an existing flow, holds a new flow, hands it to an awaiting program, refuses it (FAIL), or builds a relay (§3) |
 | PAIRS | `flow_done` after `JOB_PAIR`: an exclusive flow's `qp_num` and PSN per QP; a lane rider's count 0 and `code = generation<<32 \| slot` | `HEARD_PAIRS`; stores the peer QPs or the peer's table index and generation; `flow_mode` ANDs the exclusive choice (`EPROTO` if the flow had already decided otherwise) |
 | POSTED | `flow_tell`: once the flow's receives are posted (state `POSTING`); on a relay, also only after its partner heard the next hop's POSTED | `HEARD_POSTED`, which lets the flow run; on a relay, also tries `flow_tell(partner)` |
-| END | `flow_end`: the flow's client is gone or retired (`clients_turn`) | `flow_fail(ECONNRESET, domain 4, tell 0)`; a relay partner passes END on |
-| FAIL | `flow_fail` with a `tell`; `ready_refuse` (a READY refused, as a value) | `flow_fail(ESTALE` if the code is ESTALE, else `ECANCELED`, domain 4); with ESTALE on a non-relay flow, also `program_stale` |
+| END | `flow_end`: the flow's client ended in order before the flow ran (a running flow's END is a control frame, design/bridge-and-ipc.md#control) | `flow_fail(ECONNRESET, domain 4, tell 0)`; a relay partner passes END on |
+| FAIL | `flow_fail` with a `tell` on a flow not yet running (a running flow's FAIL is a control frame); `ready_refuse` (a READY refused, as a value) | `flow_fail(ESTALE` if the code is ESTALE, else `ECANCELED`, domain 4); with ESTALE on a non-relay flow, also `program_stale` |
 | LANES | `lanes_turn` once lanes are made (count 2, the peer QPs, `code` = header room); `lanes_reset` (count 0, `code` = why) | `lanes_heard`: stores the peer QPs and room, then connects; count 0, or new QPs while joined, resets this end's lanes (`lanes_reset`, untold) |
-| FAREWELL | `main` at stop, with `code` = the signal, or -1 for a binary change | `port.parted = 1`, after which loss is reported as `ECONNRESET` "parted" |
+| FAREWELL | `main` at stop, with `code` = the signal, or -1 for a binary change | `port.parted = 1` and `port_lost(ECONNRESET)` at once: every flow of the port lost, logged "parted" |
 | STREAM | the sender's bridge once its stream's QP is made (`count` OFFER, its QP, `code` = the bytes); the receiver's once its receives are posted (POSTED, its QP) and once every word is checked (RESULT, `struct stream_result`); either end's failure (FAILED, `code` = why) | `stream_heard` (#streams) |
 | STRIPES | `stripes_turn` once the stripe flow is made (count 2, the QPs, `code` = this end's largest piece); `stripes_reset` (count 0, `code` = why) | `stripes_heard`: stores the peer's QPs and piece, makes this end's (`wanted`), connects; count 0, or new QPs while joined, resets this end's (#stripes) |
 | CHANNEL_OPEN / CONFIRM / REFUSE / DATA / WINDOW / SHUT / CLOSE | requests (below) | `channel_heard` |
@@ -224,9 +224,12 @@ A flow is named by `(port, key, near, far, stripe)` (`flow_on`); a message names
 
 `clients_turn(liveness)` runs on every event-loop iteration. A liveness turn (`alive`) comes every 3 s.
 
-1. A flow whose client owner is no longer owned, or whose slot's `configured` is not that owner, gets
-   `flow_end(f)`: END to the peer, then `flow_stop(code 0)`. Relay flows are excluded: their owner pid is the
-   bridge's own.
+1. A flow whose client owner is no longer owned, whose slot's `configured` is not that owner, or whose slot asks its
+   close (`ending`, ncclCommFinalize) gets `flow_end(f)`: a slot retired in order (owner word `owner | MESH_RETIRING |
+   MESH_ORDERLY`) or asking its close closes each running flow (`closing`, design/bridge-and-ipc.md#control) and tells
+   END on the socket to one not yet running; an abort (the slot vacant or another's) mutes the program's flows and
+   fails each (FAIL); a retire under way (`MESH_RETIRING` alone) is taken the next turn. A slot left `MESH_ORDERLY` is
+   vacated the turn after the one that first saw it. Relay flows are excluded: their owner pid is the bridge's own.
 2. For each slot: on a liveness turn, an owner whose pid is gone (`mesh_gone`) is retired (`mesh_retire`). A new
    owner gets a kqueue `NOTE_EXIT` watch; if the pid is already gone (`ESRCH`), it is retired. In the event loop,
    `NOTE_EXIT` retires every slot of that pid.
@@ -363,12 +366,16 @@ once.
 ### Progress threads (`port_progress`, `port_pass`)
 
 **Passes.**
-- One pass of side 1 runs `flow_send` on every listed, progressing exclusive flow (its streams, then where the
-  configuration states `keepalive` its keepalive frame once that long passed, design/bridge-and-ipc.md#keepalive, then
-  its SEND completions); then, while a lane rider is listed or a lane SEND is in flight, `lane_send` for both lanes and
+- One pass of side 1 runs `flow_send` on every listed, progressing exclusive flow (its streams, none of a muted
+  program's and none past a channel's END; then its control frames, `flow_control`: a close's END and CLOSED, and
+  where the configuration states `keepalive` the periodic frame once that long passed, design/bridge-and-ipc.md#control;
+  then its SEND completions); then, while a lane rider is listed, a lane SEND is in flight or a FAIL of the port's is
+  queued, `lane_send` for both lanes (lane 0's header also carrying the riders' END, CLOSED and the port's FAILs) and
   `lane_retire`.
-- One pass of side 0 runs `flow_receive` on every listed exclusive flow (a keepalive frame's receive posted again as
-  it lands), then `lane_receive` while a lane rider is listed or a lane's records are posted and not landed.
+- One pass of side 0 runs `flow_receive` on every listed exclusive flow (a landing counting its channel's cells, a
+  control frame applied and its receive posted again, `frame_heard`; with nothing taken, the missing-frame detector
+  once in 64 such polls, `control_silent`), then `lane_receive` while a lane rider is listed or a lane's records are
+  posted and not landed; a pass that took anything counts the port's `arrivals`.
 
 **Parking.**
 - A thread with something to look for (`any`) that moves nothing for `MESH_IDLE_NS` (100 ms; counted in
@@ -493,63 +500,76 @@ exclusive flow. Each step names the word written, its writer and its reader. The
 
 ### The `~0` landing word
 
-`mesh.h mesh_cancel(m, cancel, d)` stores `UINT64_MAX` into every word of `cancel->ranges[d]` that is still 0. In a
-cyclic program it stores into every word that is not already `~0`, because a reader of a later cycle would wait past a
-landed `1 + c`. It also sets `cancel->requested = 1`. Every spin in `mesh.metal` and every host check treats `~0` as
-"cancelled". Two parties cancel:
-- **The bridge**: `flow_stop(code != 0)` while the owner is still owned, for the failed flow's destination only.
-- **libnccl-mesh**: `cancel_all`, for every destination of the session. This happens on a landing that reads `~0`,
-  on a destination silent for `MESH_SILENT_NS` (10 s) with positions pending (`progress_run`, the only user of
-  `MESH_SILENT_NS`; the bridge never reads it), on a GPU drain with nothing finishing for 10 s (`drain`), on a bounded
-  wait's violation, and on a revoke. While a session stays failed, its progress thread cancels again every 10 ms
-  (`RECANCEL_NS`).
+The bridge alone cancels a program's words, and only past each ring's landed count (`mesh-flow.c flow_cancel`,
+design/bridge-and-ipc.md#control): from the ring's first record not landed, through the program's invocations less the
+ring's least depth (at least one), every record not landed in a one-pass program; landed words stay. Every spin in
+`mesh.metal` and every host check treats `~0` as "cancelled"; a GPU walk's wait that reads it records it in the
+session's violation words, and every later wait of the program ends (nccl-mesh-metal.m `mesh_step_check`), so a cancel
+of the positions past the landed count ends every wait. It happens in `flow_stop(code != 0)` while the owner is still
+owned, after `port_unlist` settled the port's progress threads (no landing of the flow is stored after it), for a
+failure, or for a live program whose peer closed the flow (ECONNRESET). Through MESH_VERSION 118 the cancel was
+`mesh.h mesh_cancel` (a cyclic program's every word not already `~0`, landed ones too), and libnccl-mesh cancelled
+too (`cancel_all`: on a `~0` read, on a destination silent for `MESH_SILENT_NS` with positions pending, on a GPU drain
+with nothing finishing for 10 s, on a violation and on a revoke), again every 10 ms while a session stayed failed
+(`RECANCEL_NS`), to restore words a late lane landing overwrote. The library cancels nothing now.
 
-**Ambiguity: a late lane landing overwrites `~0`.** `lane_receive` (lines 1214-1218) stores a landed record's word
-through `record->link`, whether or not that flow is still in the port's table. `flow_stop` unlists the flow and then
-cancels its words (lines 1427-1430). A lane rider's records that were already posted can therefore land after the
-cancel and overwrite `~0` with `1 + cycle`. `flow_release` waits for those frames (`lane_frames`) before it frees
-anything. An exclusive flow cannot do this, because `flow_receive` runs only for listed flows. The library's
-10 ms re-cancel (design/recovery.md Q16) is what restores `~0`. The bridge itself does not cancel again.
+**A late lane landing.** `lane_receive` stores a landed record's word through `record->link`, whether or not that flow
+is still in the port's table, so a lane rider's records already posted can land after the cancel. Each is a record past
+the landed count at the cancel, and stores its own position's word: a reader waiting there sees a landing that came,
+and no reader waits on a later position of that word before passing it (in order; a GPU walk halts at the first
+cancel). `flow_release` waits for those frames (`lane_frames`) before it frees anything.
 
 ### `flow_fail` and `flow_stop`
 
 `flow_fail(f, code, domain, tell, where, origin)` (event loop):
 
-1. `state = FAILED`.
-2. If `tell` is set, send END or FAIL (`code`, `failed = origin`) to the flow's peer.
-3. `flow_stop`.
-4. Fail the relay partner, telling END if the code is `ECONNRESET`, otherwise FAIL.
-5. Fail every other flow of the same owner and destination (its other cables and stripes, and a relay lease's other
-   stripes) with FAIL.
-6. Drop the program's await.
+1. A client program's flow: every flow of the program is muted first (`program_quiet`: `ending |= FLOW_MUTED` on each,
+   its ports' progress threads settled), so no cell of it is posted past this.
+2. `state = FAILED`.
+3. If `tell` is set: a running flow's FAIL (`code`, the node `origin`) on its control channel (`control_tell`: an
+   exclusive flow's posted by `flow_stop`, a lane rider's queued for lane 0); a flow not yet running's END or FAIL on
+   the control socket.
+4. `flow_stop`.
+5. Fail the relay partner, telling END if the code is `ECONNRESET`, otherwise FAIL.
+6. Fail every other flow of the same client program (toward every node, its other cables and stripes) with FAIL; a
+   relay lease's, its other stripes.
+7. Drop the program's await.
 
 `flow_stop`, on the port's queue:
 
 1. `port_unlist`: the progress threads stop reading the flow.
-2. If `code != 0` and the owner is still owned: `mesh_cancel` that destination's words, then `status_failed` (phase
-   `MESH_STOPPED`, `code`, `domain`, `failed = where`, `prepared` woken).
-3. `flow_release`: print the census, wait for the lane frames, `down_pair`, `ledger_write`, free the rings and
-   streams.
-4. Set `stopped` to 1, or to 2 to retry 3 s later.
+2. If `code != 0` and the owner is still owned: `flow_cancel` (above), then `status_failed` (phase `MESH_STOPPED`,
+   `code`, `domain`, `failed = where`, `prepared` woken).
+3. A running exclusive flow told FAIL: `control_fail` posts it on the control queue pair and awaits its completion.
+4. `flow_release`: print the census (each channel's cells sent, delivered and landed, its END and CLOSED each way; the
+   control frames and the detector's gaps), wait for the lane frames, then under the port's guard `pair_flush` (until
+   every work request it held completed, `flow_outstanding`; "flushed N of M work requests in T us") and `down_pair`,
+   then `ledger_write`, free the rings and streams.
+5. Set `stopped` to 1, or to 2 to retry 3 s later.
+
+A close in order (design/bridge-and-ipc.md#control) ends in `flow_closed`: `state = FAILED`, a "closed" line with the
+cells sent, delivered and landed, then `flow_stop` (code ECONNRESET for a live program whose peer closed it, else 0).
 
 Domains: 1 = a post, ring or job error (`flow_lost(...,1)`, `flow_done`, lanes); 2 = an error completion status; 3 = a
-poll error; 4 = a protocol, timeout or program-level failure.
+poll error; 4 = a protocol, timeout or program-level failure; 5 = the missing-frame detector (EHOSTDOWN).
 
 ### How each failure reaches the clients
 
 | event | bridge path | what the local client sees | what the peer side sees |
 |---|---|---|---|
-| a data error on a flow (post, poll or completion) | progress thread `flow_lost` (CAS `failed`, `progressing = 0`, `wake`), then `flows_turn` → `flow_fail(..., FAIL)` | its words for that destination become `~0`; status `MESH_STOPPED`, code and domain, `failed` = this node | FAIL → `ECANCELED`; its words `~0`; status naming this node |
+| a data error on a flow (post, poll or completion) | progress thread `flow_lost` (CAS `failed`, `progressing = 0`, `wake`), then `flows_turn` → `flow_fail(..., FAIL)` | its words past their landed counts `~0`, every destination's; status `MESH_STOPPED`, code and domain, `failed` = this node | FAIL → `ECANCELED`; its words past landed `~0`; status naming this node |
 | a window passes (peer never started, QPs never paired, held flow never taken) | `flows_turn` → `flow_fail(ETIMEDOUT, 4, FAIL, far, far)` | start returns `ETIMEDOUT` naming `far` | FAIL → `ECANCELED` |
-| the peer's program ended (`mesh_detach`, exit, revoke) | peer: `clients_turn` → `flow_end`: END; here: `port_heard` → `flow_fail(ECONNRESET, 4, 0, origin)` | words `~0`, status `ECONNRESET` naming the peer; a relay forwards END | — |
+| the peer's program ended in order (`mesh_detach`, ncclCommDestroy, ncclCommFinalize) | peer: `clients_turn` → `flow_end`: its running flows close (its released cells posted, END per channel); here: the END closes this end too, CLOSED once landed, `flow_closed` → `flow_stop(ECONNRESET)`; a relay passes END on once it posted onward, and CLOSED back | its words past the peer's END `~0`, status `ECONNRESET` naming the peer; nothing that landed is cancelled | — |
+| the peer's program aborted (exit, revoke, its failure) | peer: `flow_end` / `flow_fail`: its program muted, FAIL on each running flow's control channel | its words past their landed counts `~0`, status `ECANCELED` naming the peer; its own program's other flows fail (FAIL) | — |
+| the peer's bridge stops answering (its frames missing past the threshold, nothing else heard on the port) | the receive thread's `control_silent` → `flow_lost(EHOSTDOWN, 5)` → `flow_fail` | words past landed `~0`, status `EHOSTDOWN`; the program's every flow fails (FAIL) | — |
 | digests differ (ESTALE) | `ready_heard` / `clients_turn`: `ready_refuse(ESTALE)` or `flow_fail(ESTALE)`, then `program_stale` → `program_end` for every destination with transfers | every destination `ESTALE`, naming the node whose program differs; start fails (`start_failure`) | FAIL with ESTALE → `program_stale` there too (not for relays) |
 | maps disagree on a cable or route; READY shape mismatch | `ready_heard` / `program_take` / `program_await`: `ready_refuse(EPROTO)` + `program_fail(EPROTO)` | `EPROTO` naming the refusing node | FAIL → `ECANCELED` |
 | a table or device full | `flow_make` NULL → `program_fail(E2BIG)` / `ready_refuse(E2BIG)`; `pair_up` `ENOSPC` → `flow_done` → `flow_fail(ENOSPC, 1)` | `E2BIG` / `ENOSPC` | FAIL |
-| a link lost (socket EOF or error, keepalive, send failure, `EPROTO`, pairing timeout, `KEV_DL_LINK_OFF` / `IF_DETACHED` → `ENETDOWN` with retire) | `port_lost`: close the socket; `lanes.up = 0`; `flow_fail(code` (`ECONNRESET` if parted), `4, tell 0, where = peer)` on every flow of the port; `requests_lost`; lanes CLOSING; `link_set(PAIRING` or `STOPPED)` → RECORD → map serial; on retire, `down_device` at a later `port_turn` once no flow or lane holds QPs | words `~0`; status naming the peer; libnccl-mesh fails `ncclRemoteError` ("the link to node N was lost") and cancels all its destinations; the next session reads the new map | the same, on the other end |
+| a link lost (socket EOF or error, keepalive, send failure, `EPROTO`, pairing timeout, `KEV_DL_LINK_OFF` / `IF_DETACHED` → `ENETDOWN` with retire) | `port_lost`: close the socket; `lanes.up = 0`; `flow_fail(code` (`ECONNRESET` if parted), `4, tell 0, where = peer)` on every flow of the port; `requests_lost`; lanes CLOSING; `link_set(PAIRING` or `STOPPED)` → RECORD → map serial; on retire, `down_device` at a later `port_turn` once no flow or lane holds QPs | words `~0`; status naming the peer; libnccl-mesh fails `ncclRemoteError` ("the link to node N was lost"); the next session reads the new map | the same, on the other end |
 | lanes fail (completion error, header out of step, make or connect refused) | `lanes_lost` → `lanes_turn` → `lanes_reset`: LANES of count 0 to the peer; `flow_fail(code, 1)` for every lane rider at `POSTING` or later or in a receive/run/change job; lanes rebuilt 3 s later; the link and its exclusive flows go on; a connect refused `MESH_REFUSED_RETIRE` (3) times in a row loses the link and retires the device (`port_lost(code, 1)`), which opens again | lane riders' words `~0` | LANES of 0 → its lanes reset, and its riders fail |
-| the peer's bridge stops | peer: FAREWELL, then close; here: `parted = 1`, then EOF → `port_lost(ECONNRESET)` | `ECONNRESET`, logged "parted" | — |
+| the peer's bridge stops | peer: FAREWELL, then close; here: `parted = 1` and `port_lost(ECONNRESET)` at the FAREWELL | `ECONNRESET`, logged "parted" | — |
 | this bridge stops (signal, or a rebuilt binary with `busy == 0`) | `main`: `requests_stop`; per port FAREWELL, a 200 ms flush, `parted = 1`, `port_lost(ESHUTDOWN, retire)`; on each port's queue `flow_release`, then `port_still`, `down_pair(lanes)`, `down_device`; `bridge_pid = 0`; `mesh_notify(control)`; `atexit` `shm_unlink` | flows that remain fail with status `ECONNRESET`, `failed` = the peer node (lines 3429-3433 set `parted` before `port_lost`, so line 2805 reports `ECONNRESET` rather than `ESHUTDOWN`). Later waits see `bridge_pid` 0 (`ESRCH`). A lease of the old region fails the next libnccl-mesh lease or session (`ncclMeshMemLive`, `attaches_stale`) | FAREWELL → `ECONNRESET` |
-| a client process dies | `NOTE_EXIT`, or the liveness `mesh_gone` → `mesh_retire` → next turn `flow_end` (END) | — | `ECONNRESET` |
+| a client process dies | `NOTE_EXIT`, or the liveness `mesh_gone` → `mesh_retire` (an abort) → next turn `flow_end`: the program muted, FAIL on each running flow | — | `ECANCELED`; on the loopback fabric its peers' calls failed 1.3-2.6 ms after the kill (rdma/mesh-loop.c `kill`) |
 
 **The `stopping` word.**
 1. On a liveness turn where the binary's inode or mtime changed (`stat(argv[0])`), `main` sets `hdr.stopping = 1`
@@ -636,7 +656,9 @@ change, so the binary-change stop (§5) applies.
 |---|---|---|---|
 | `MESH_PAUSE_NS` | 3 s | `mesh.h` | port turns, liveness turns, lanes retry, the 3 s timeout of a progress thread with nothing to look for |
 | `MESH_PEER_NS` / `MESH_PAIR_NS` | 600 s / 30 s | `mesh.h` | flow, await and channel deadlines; the client's start bound (with `MESH_PAUSE_NS`) |
-| `MESH_SILENT_NS` | 10 s | `mesh.h` | libnccl-mesh's silent-link cancel and drain bound only |
+| `MESH_SILENT_NS` | 10 s | `mesh.h` | libnccl-mesh's `lease_wait` alone (the caller's GPU work reaching a point it recorded); no transport decision |
+| `CONTROL_SENDS` / `CONTROL_RECEIVES` / `CONTROL_SLOT` | 64 / 192 / 64 B | `mesh-flow.c` | an exclusive flow's control frames in flight and receives posted, a receive slot (design/bridge-and-ipc.md#control) |
+| `CONTROL_SIGMAS` / `CONTROL_GAPS` / `CONTROL_WEIGHT` / `CONTROL_MEMORY` / `CONTROL_LOOKS` | 8 / 256 / 64 / 1024 / 64 | `mesh-flow.c` | the missing-frame detector: deviations past the mean, gaps before it arms, the fit's window, the longest gap's decay, empty polls a look |
 | `MESH_IDLE_NS` / `MESH_IDLE_POLL_NS` | 100 ms / 1 ms | `mesh-flow.c` | spin time before parking; poll period while parked |
 | `MESH_PAIRS` / `MESH_LANES` / `MESH_FLOWS` / `MESH_HEADERS` | 16 / 2 / 256 / 8 | `mesh-flow.c` | max exclusive QPs a flow; lanes a port; flows a port; send-header frames a lane |
 | `MESH_STRIPES` | 8 | `mesh-flow.c` | max stripes of a routed program |
@@ -676,7 +698,7 @@ change, so the binary-change stop (§5) applies.
 | How do lanes work? | `lane_send`, `lane_heard`, `lane_receive`, `lanes_turn`, `lanes_reset` |
 | When do progress threads sleep or wake? | `port_progress`, `port_pass`, `port_list`, `port_unlist`, `mesh-call.c mesh_transfers_wake` |
 | What happens on failure? | `flow_lost`, `flow_fail`, `flow_stop`, `flow_release`, `flow_free`, `port_lost` |
-| Cancellation? | `mesh.h mesh_cancel`; `nccl-mesh.c cancel_all`, `progress_run` |
+| Cancellation? The close? | `mesh-flow.c flow_cancel`, `program_quiet`, `flow_stop`; `control_close`, `flow_close_turn`, `flow_closed`, `control_silent` |
 | ESTALE? | `program_stale`, `program_end`, `digest_apart`, `program_runs` |
 | A client exits? | `clients_turn`, `flow_end`, `mesh-dataflow.c mesh_retire`, `mesh_retired_release` |
 | Upgrade or stop? | `main` (the liveness block and teardown), `nccl-mesh.c ncclMeshBridgeStopping` |

@@ -409,3 +409,18 @@ Mini's bridge stopped with a stripe flow up, then the M5's, apart, with each ext
 and no panic. If the flush is shown to work, the same flush before HEAD's other teardowns (the lanes' at every bridge
 stop, the October 16 and 17 condition) is a one-line change to `down_pair`'s callers, HEAD's default path, for the
 main line to decide.
+
+**Every flow's teardown, MESH_VERSION 119** (design/bridge-and-ipc.md#control). An exclusive flow is released only by
+the event that ends it (its close complete, both directions delivered, or its failure), out of its port's table, and
+then its queue pairs (data and control) are moved to the error state and drained before `down_pair`, the port's
+guard raised around both whatever the device holds (`flow_release`: `guard_raise(port, 1)`): no queue pair of the
+device, the lanes' included, is posted on while a flow's are flushed and destroyed, the hazard of October 16 and 17 and
+of the lanes' keepalive (bridge-and-ipc.md#keepalive). The drain ends at an event, not a count: the flushed
+completions of every work request the flow held posted (`flow_outstanding`: receives posted and not landed, SENDs not
+completed, control frames in flight, control receives posted), `MESH_FLUSH_POLLS` empty polls the bound only where the
+device returns fewer; each release logs "flushed N of M work requests in T us". On the loopback fabric (loopverbs
+flushes at the move, as the Apple provider is expected to) 198 releases of exclusive flows (closes in order, a client
+killed, a bridge stopped) each drained exactly its count, in 0.31 ms mean and 0.84 ms at most, the port's threads held
+by the guard as long (metal-microbench output_data/dead-history-20261017/scratch-session run8); on hardware it is
+unread: the pair's first held communicator's close (its census and "flushed" line, then "closed", and nothing in the
+kernel log) is the reading. The lanes' own teardown at a bridge's stop is unchanged.

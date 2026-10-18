@@ -183,9 +183,10 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     as the classic form's are, 0 leaving a wait to its landing or its cancellation ([Bounded waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such
     a group completes in its encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
-  - A wait is a kernel polling its position's completion word, a word of the session's that its canceller ends (a
-    link silent for `MESH_SILENT_NS`, a lost link, a revoke: design/recovery.md Q16), and the stream's `polls` bounds
-    it ([Bounded waits](#bounded-waits)).
+  - A wait is a kernel polling its position's completion word, a word of the session's that its bridge's cancel ends
+    (a lost link or peer, a peer's close past its END, a revoke: design/bridge-and-ipc.md#control, design/recovery.md
+    Q16; a wait that reads a cancel halts the program's later waits), and the stream's `polls` bounds it
+    ([Bounded waits](#bounded-waits)).
 
 ### Bounded waits
 
@@ -195,8 +196,8 @@ library's. A wait that reaches it records its position, its channel and the boun
 every later dispatch of the session does nothing, and the group fails as a value after its command buffer
 (`ncclCommGetAsyncError`, or the communicator's next group: "landed nothing within N polls"). 0, in either form,
 leaves a wait to its landing or its cancellation, as torch-mesh's waits are and the engine's encoded crossings are (a
-silent peer holds such a wait for at most `MESH_SILENT_NS`, when the canceller ends it; until a44b88e the Metal 4 form
-refused 0 with `ncclInvalidArgument`). `ncclMeshComplete` bounds the completion's waits by the stream it is given.
+lost peer's wait ends at its bridge's cancel, once the loss is an event; a peer that is alive and slow is waited for;
+until a44b88e the Metal 4 form refused 0 with `ncclInvalidArgument`). `ncclMeshComplete` bounds the completion's waits by the stream it is given.
 
 The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
 margin its plan names) over the period of one load on the node's GPU. That period, read on the idle Mini (M4 Pro,
@@ -210,7 +211,8 @@ both of the library's shapes, one thread and thread 0 of a 1,024-thread group, 2
 | M5 Max | not read (its GPU runs the operator's work) | |
 
 So a bound stands for at least polls x 251 ns on the Mini (the time past which a late peer fails the call) and holds
-the GPU at most about polls x 1.1 us (a wait that never lands, before the canceller's 10 s).
+the GPU at most about polls x 1.1 us (a wait that never lands and is never cancelled: a peer alive whose program never
+runs its side, the one case no transport event ends).
 
 Types: the Metal path moves the integer types, float16, float32, bfloat16 and fp8 (e4m3fn, e5m2: decoded, combined in
 float32 and encoded to nearest even as the host does, overflow to NaN or infinity; metal-microbench docs/kernels.md
@@ -284,7 +286,8 @@ Porting:
   all-reduce, the library's copies of the operand 16.78 MB to 0; tp 271.5-272.2 ms a step.
 - The host path copies every operand through the session's rings, a lease or not; `ncclMeshMemUse(ptr, bytes, event,
   value, write)` declares the caller's GPU work on a lease (an `MTLSharedEvent` and the value it reaches), which a
-  host-path group reading or writing that lease waits for (at most `MESH_SILENT_NS`). The window is where a program
+  host-path group reading or writing that lease waits for (at most `MESH_SILENT_NS`, the caller's own GPU work never
+  reaching its point being no event that can come). The window is where a program
   that binds its own section (`mesh-call.h` `mesh_transfer_bind`) crosses without the rings; `ncclCommRegister`
   refuses a buffer outside it.
 
@@ -311,9 +314,12 @@ programs'.
 
 ## Failures
 
-A destination with positions pending that lands nothing for `mesh.h` `MESH_SILENT_NS` (10 s, the library's one silent
-bound, with no setting) is cancelled: every wait on it ends, and a host-path group with nothing landing for as long
-fails. The failure is returned:
+A loss is an event its bridge sees (design/bridge-and-ipc.md#control, design/recovery.md#detection): a link off, the
+control socket's end, a peer's FAREWELL or FAIL, or a flow's control frames missing past what their measured gaps make
+likely. The bridge then mutes the program's flows and cancels its words past their landed counts: every wait on them
+ends, a word that landed stays (a group whose positions all landed completes), and no clock of the library's decides
+anything (through MESH_VERSION 118 a destination silent for `MESH_SILENT_NS`, 10 s, was cancelled whole). The failure
+is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued,
@@ -331,6 +337,21 @@ departed is left out with `ncclCommShrink`, a joining one taken in with `ncclCom
 session's waits end and its groups in flight fail, a session opening ends (a member waiting in its session's start for
 a peer that never comes, a member that failed to load, is ended at once) and none opens after it, and every later
 group on it fails at once (`ncclRemoteError`, "revoked") until `ncclCommDestroy` closes its session.
+
+### Finalize, Destroy, Abort
+
+NCCL's lifecycle (metal-microbench output_data/dead-history-20261017 SESSION-DESIGN.md item 3; R2, R3): only Abort and
+Revoke discard work. `ncclCommDestroy` hands the session's close to its bridge in order and returns once its own GPU
+programs have finished, waiting on no peer: the bridge posts every cell the session released, ends each flow with END
+carrying each channel's count, keeps landing what the peer sends, and holds the session's rows until each peer's
+CLOSED (the peer having landed every cell below the count), then reclaims them, as a kernel keeps a closed socket in
+FIN-WAIT. A peer whose program still runs then fails a later wait on the closed member as a value (ECONNRESET), and
+nothing that landed is cancelled. `ncclCommFinalize` asks the same close while it keeps the slot and waits for each
+channel's delivered word (its peers' LANDED and CLOSED reports) to reach the positions the session published, or for
+the failure that ended a channel first; no group runs on the communicator after it, and `ncclCommDestroy` then frees
+it. `ncclCommAbort` is `ncclCommRevoke` then `ncclCommDestroy`. On the loopback fabric's line of 4, members destroying
+right after their last group lost no landing in 210 runs (HEAD before it: 8 of 210), and a member killed mid-call
+failed every other member's call as a value in 1.3-2.6 ms (rdma/mesh-loop.c `destroy`, `kill`).
 
 A session's footprint in its node's window is `ncclMeshSessionBytes(peers, wire, &bytes)` (Python
 `mesh.session_bytes(peers)`): toward each other member its four rings (16 slots each way of each class) and its transfer
