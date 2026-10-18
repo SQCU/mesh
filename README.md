@@ -382,7 +382,7 @@ the node's uplink.
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, logs health warnings; loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
-| `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
+| `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, sampled by `io.mesh.nodeinfo` (`user/mesh-nodeinfod.py`) and served on 8099. |
 | `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` makes a launchd job's staged definition NEW the loaded one in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) under PLIST (default NEW without `.new`). A definition that names no digest of its own (an XML comment) is stamped with the digest of the files its program arguments name. It is kept, with no restart, where it equals PLIST and the loaded job runs its program arguments; a definition that does not parse is refused and the loaded one kept; otherwise it replaces the loaded job (`bootout`, then `bootstrap`; a failed load is reported, its definition in place, and the keeper loads an unloaded system daemon or background agent at its next pass). A running job that is not KeepAlive, or one that runs this install (an ancestor of the caller), has its new definition staged, which the keeper loads between its runs. A running job whose process holds an RDMA device (the IORegistry's user client) is never stopped by launchd, which follows its SIGTERM with SIGKILL: its new definition is put in place for its next load. Every resident job is KeepAlive with `ThrottleInterval` 1, so launchd starts it again at once after an exit, at most once a second (its default is 10); the bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. |
@@ -433,11 +433,11 @@ no longer means what it says.
 
 So every node takes a routable identity address and the fabric is routed:
 
-- **Identity**: a `/128` under `fd6d:6573:68::/48` on `lo0`, derived from the node's
-  `IOPlatformUUID`. On `lo0` because with no bridge there is no single segment for it
-  to live on, and it must not change when a cable moves to another port.
-- **Routing**: `babeld` on every fabric port, using the per-port link-locals as
-  next-hops. It is designed for topologies that churn, reconverges on replug with no
+- **Identity**: a `/128` under `fd6d:6573:68::/48` on each fabric port, derived from the node's
+  `IOPlatformUUID`, the same on every port, so it does not change when a cable moves to another port (Addressing,
+  above, says why not `lo0`).
+- **Routing**: `babeld` on every fabric port, each declared a wired link (`type wired`: a cable's fixed cost, no
+  wireless loss estimate), using the per-port link-locals as next-hops. It is designed for topologies that churn, reconverges on replug with no
   per-node configuration, and uses every link rather than blocking one the way a
   spanning tree would — which is the whole reason to cable a ring.
 - **Enumeration**: the bridges' map names every node on the fabric, `mesh-peers` adds the shared LAN's (above), and

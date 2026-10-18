@@ -26,7 +26,7 @@ for i in $ports; do
     ifconfig "$i" inet6 "$ULA" prefixlen 128 alias >/dev/null 2>&1; }
 done
 CONF=$MESH_ROOT/babeld.conf
-{ for p in $ports; do echo "interface $p"; done
+{ for p in $ports; do echo "interface $p type wired"; done
   echo "redistribute local ip ${ULA}/128 eq 128 allow"
   echo "redistribute deny"; } > "$CONF"
 pgrep -qf "$MESH_ROOT/bin/babeld" || echo "[$(ts)] starting babeld on $(echo $ports)"

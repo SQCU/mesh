@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tarfile
 
-SSH = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8']
+SSH = ['ssh', '-o', 'BatchMode=yes']
 ROOT = Path(__file__).resolve().parents[1]
 
 
