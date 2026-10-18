@@ -68,7 +68,7 @@ progress-versus-occupancy correlation, plus a small push-radius term. The
 solver emits strategy at the request rate; havocbot keeps all
 millisecond-scale motor control.
 """
-import argparse, json, os, signal, socket, sys, time
+import argparse, json, os, select, signal, socket, sys, time
 from pathlib import Path
 
 import numpy as np
@@ -79,7 +79,7 @@ sys.path.insert(0, str(ROOT / "xonotic"))
 
 from solver.xonwire import (Engine, RuntimeFrames, frames, kind_of, report,
                             OBSERVATION_KIND, CART_KIND, TEAM_KIND)
-from payload.tools.strategy_io_schema import CS, EVT, EVT_KIND, OBS
+from payload.tools.strategy_io_schema import CS, EVT, EVT_KIND, OBS, TS
 
 SEED, EXPERTS, FF, HID = 20260828, 8, 2048, 64
 CTX, RES = 4096, 2048
@@ -264,10 +264,10 @@ class CtxSolver:
     `world` (TorchWorld, MPIWorld or None for one process) and `columns` (the
     ranks' parts of FF, the Balancer's operand `balancer`) divide it."""
 
-    def __init__(self, T=CTX, backend="torch", device=None, world=None, columns=None, balancer=None, warmup=0):
+    def __init__(self, T=CTX, backend="torch", device=None, world=None, columns=None, balancer=None):
         self.T, self.backend = T, backend
         self.device = device or default_device()
-        self.world, self.balancer, self.warmup = world, balancer, warmup
+        self.world, self.balancer = world, balancer
         self.columns = list(columns) if columns else [FF]
         if world is not None and len(self.columns) != world.size:
             raise ValueError(f"columns {self.columns}: one part a rank of {world.size}")
@@ -459,7 +459,7 @@ class CtxSolver:
         return self.host(G)
 
     def observe(self, times):
-        if self.balancer is None or self.world is None or self.solves < self.warmup:
+        if self.balancer is None or self.world is None:
             return
         self.columns = self.balancer.observe({"tick": {"scales": {"columns": [1.0] * self.world.size},
                                                        "times": [[float(t) / 1e3] for t in times[:self.world.size]]}})["columns"]
@@ -673,13 +673,14 @@ class MatchMeter:
         self.push = np.zeros(TEAMS + 1)
         self.rows = np.zeros(TEAMS + 1)
 
-    def tick(self, X, ms):
+    def tick(self, X, ms, reset):
         prog = np.asarray(ms["prog"], np.float64)
         first = self.last_prog is None
         d = np.zeros(K_CARTS) if first else prog - self.last_prog
         for c in range(K_CARTS):
-            if first or d[c] < -0.5:
+            if first or reset[c]:
                 self.mark[c] = int(np.sum(self.cps <= prog[c] + 1e-9))
+                d[c] = 0.0
                 continue
             ctl = int(ms["controller"][c])
             while (ctl and self.mark[c] < len(self.cps)
@@ -688,7 +689,6 @@ class MatchMeter:
                 self.cum[ctl] += 1
                 self.mark[c] += 1
         self.last_prog = prog.copy()
-        d[np.abs(d) > 0.05] = 0.0
         team = X[:, 1].astype(np.int32)
         near = X[:, 11] < PUSH_RADIUS
         bc = np.asarray(ms["bot_cart"], np.int32)
@@ -1198,6 +1198,7 @@ class SynthEnv:
         self.mark = np.zeros(K_CARTS, np.int32)
         self.cps = np.array([0.2, 0.4, 0.6, 0.8, 1.0])
         self.regress = np.zeros(K_CARTS, bool)
+        self.reset = np.zeros(K_CARTS, bool)
         self.held = {}
         self.tick_n = 0
         self.posts = [
@@ -1276,8 +1277,9 @@ class SynthEnv:
                     for b, (j, cc, r, nd) in self.held.items():
                         if cc == inst and r == 3 and j == captor:
                             self.boost[b] = self.tick_n + 25
+        self.reset = self.prog >= 1.0
         for c in range(K_CARTS):
-            if self.prog[c] >= 1.0:
+            if self.reset[c]:
                 self.prog[c] = 0.1
                 self.controller[c] = 0
                 self.mark[c] = 0
@@ -1333,7 +1335,7 @@ def run_synth(episodes, T, seed, ep_ticks, hold, lr, theta_path, log=True,
             X = env.rows()
             ms = bind_match(X)
             itimer.tick(ms["posts"])
-            meter.tick(X, ms)
+            meter.tick(X, ms, env.reset)
             ms["score"] = meter.cum.copy()
             if t % hold == 0:
                 G = solver.solve(X)
@@ -1546,7 +1548,7 @@ def check(rows):
                              score=np.zeros(TEAMS + 1),
                              bot_cart=np.zeros(2, np.int32))
     for pv in (0.15, 0.25, 0.18, 0.26, 0.99, 1.0, 0.1, 0.25):
-        mt.tick(Xd, mk(pv, 1))
+        mt.tick(Xd, mk(pv, 1), np.full(K_CARTS, pv == 0.1))
     report_check("meter banks watermarked crossings", mt.cum[1] == 6.0,
                  f"0.15->0.25 (+1), regress-recross (+0), ->0.99 (+3), ->1.0 (+1), "
                  f"reset, ->0.25 (+1): cum {int(mt.cum[1])} == 6")
@@ -1661,11 +1663,8 @@ def bench(reps, rows, T):
     for backend in backends:
         s = CtxSolver(T, backend)
         n = reps if backend == "torch" else max(3, reps // 4)
-        stream = _ticks(rows, n + 2, seed=9)
-        for X in stream[:2]:
-            s.solve(X)
         times = []
-        for X in stream[2:]:
+        for X in _ticks(rows, n, seed=9):
             t0 = time.perf_counter()
             s.solve(X)
             times.append(time.perf_counter() - t0)
@@ -1683,7 +1682,7 @@ def attach(config):
     return MPIWorld()
 
 
-IDLE, REQUEST, STOP = 0, 1, 2
+REQUEST, STOP = 1, 2
 
 
 def serve(config):
@@ -1691,11 +1690,13 @@ def serve(config):
     world = attach(config)
     shares = config["columns"]
     balancer = Balancer({"columns": {"parts": list(shares["parts"]), "grain": shares["grain"], "low": shares["low"]}})
-    solver = CtxSolver(config["ctx"], config["backend"], config.get("device"), world, shares["parts"], balancer,
-                       shares.get("warmup", 0))
+    solver = CtxSolver(config["ctx"], config["backend"], config.get("device"), world, shares["parts"], balancer)
     header = world.host((4,), np.int64)
     rows = world.host((config["maxrows"], REQUEST_WIDTH), np.float32)
     stopping = {"signal": None}
+    wake, woken = os.pipe()
+    os.set_blocking(woken, False)
+    signal.set_wakeup_fd(woken)
 
     def stop(signum, frame):
         stopping["signal"] = signum
@@ -1706,7 +1707,7 @@ def serve(config):
            flops_per_solve=ctx_flops(config["ctx"], config["maxrows"]))
     try:
         if world.rank == 0:
-            relay(config, world, solver, header, rows, stopping)
+            relay(config, world, solver, header, rows, stopping, wake)
         else:
             while True:
                 world.bcast(header)
@@ -1722,7 +1723,7 @@ def serve(config):
         world.free()
 
 
-def relay(config, world, solver, header, rows, stopping):
+def relay(config, world, solver, header, rows, stopping, wake):
     trained = config["policy"] == "trained"
     pick_of = POLICIES.get(config["policy"], np.argmax)
     response = kind_of(config["response"])
@@ -1750,30 +1751,27 @@ def relay(config, world, solver, header, rows, stopping):
     if tr:
         tr.write("req,tick,live,prog,pick0,pick1,pick2,pick3,pick4,"
                  "held0,held1,held2,held3,held4,d1,d2,x1,x2,y1,y2\n")
-    t0, served, blocks, solve_s = time.monotonic(), 0, 0, 0.0
+    served, blocks, solve_s = 0, 0, 0.0
     tick_in_ep = 0
+    episode = None
     try:
-        while stopping["signal"] is None and (config.get("secs", 0) <= 0 or time.monotonic() - t0 < config["secs"]):
-            deadline = time.monotonic() + config["idle_s"]
-            ready = None
-            while ready is None and time.monotonic() < deadline and stopping["signal"] is None:
-                for node, address, frame in engine.receive():
-                    joined.feed(frame)
-                    route[OBSERVATION_KIND] = (node, address)
-                engine.progress()
-                ready = joined.take()
-                if ready is None:
-                    time.sleep(0.0002)
-            if ready is not None:
-                (session, tick), records, events = ready
-                done = records[OBSERVATION_KIND][0]
-                posts.observe(list(events.values()))
-                X = request_rows(records[OBSERVATION_KIND][1], records[CART_KIND][1], objective, posts)[:config["maxrows"]]
-                n = len(X)
-            if ready is None or not n:
-                header[...] = 0
-                header[0] = IDLE
-                world.bcast(header)
+        while stopping["signal"] is None:
+            readable, _, _ = select.select([engine, wake], [], [])
+            if wake in readable:
+                os.read(wake, 64)
+                continue
+            for node, address, frame in engine.receive():
+                joined.feed(frame)
+                route[OBSERVATION_KIND] = (node, address)
+            ready = joined.take()
+            if ready is None:
+                continue
+            (session, tick), records, events = ready
+            done = records[OBSERVATION_KIND][0]
+            posts.observe(list(events.values()))
+            X = request_rows(records[OBSERVATION_KIND][1], records[CART_KIND][1], objective, posts)[:config["maxrows"]]
+            n = len(X)
+            if not n:
                 continue
             header[0], header[1] = REQUEST, n
             world.bcast(header)
@@ -1785,7 +1783,9 @@ def relay(config, world, solver, header, rows, stopping):
             if trained:
                 ms = bind_match(X)
                 itimer.tick(ms.get("posts", []))
-                meter.tick(X, ms)
+                current = (session, int(records[TEAM_KIND][1][0, TS["EPISODE"]]))
+                meter.tick(X, ms, np.full(K_CARTS, episode is not None and current != episode))
+                episode = current
                 ms["score"] = meter.cum.copy()
                 boundary = tick_in_ep % config["hold"] == 0
                 pick, Wt, lead, inst = strat.tick(X, solver.G2, solver.mixes(), solver.kappa, ms, boundary,
@@ -1820,7 +1820,6 @@ def relay(config, world, solver, header, rows, stopping):
             if response is not None and OBSERVATION_KIND in route:
                 node, address = route[OBSERVATION_KIND]
                 engine.send(address, node, frames(response, done["req_id"], tick, out, config["framebytes"], session))
-                engine.progress()
             served += n
             blocks += 1
             if tr:
@@ -1856,8 +1855,8 @@ def main():
     ap.add_argument("--rows", type=int, default=64)
     ap.add_argument("--ctx", type=int, default=CTX)
     ap.add_argument("--synth", type=int, default=0)
-    ap.add_argument("--episode", type=int, default=300)
-    ap.add_argument("--hold", type=int, default=25)
+    ap.add_argument("--episode", type=int)
+    ap.add_argument("--hold", type=int)
     ap.add_argument("--lr", type=float, default=0.1)
     ap.add_argument("--train-seed", type=int, default=SEED)
     ap.add_argument("--theta", default=THETA_PATH)
@@ -1877,6 +1876,8 @@ def main():
         bench(a.bench, a.rows, a.ctx)
         return
     if a.synth:
+        if a.episode is None or a.hold is None:
+            ap.error("--synth takes its episode length and hold in ticks (--episode, --hold)")
         rets, banked, strat, stats = run_synth(
             a.synth, a.ctx, a.train_seed, a.episode, a.hold, a.lr,
             a.theta if a.theta != THETA_PATH else "",

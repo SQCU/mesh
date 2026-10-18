@@ -8,16 +8,14 @@ engine session and tick with EVENT optional and OUTCOME kept apart (design/TRAIN
 
 Engine is the local end the game's engine talks to (mesh_ipc.c meshx_relay_*; design/POLICY-TRANSPORT.md "local
 control envelope"): a datagram socket at MESH_EXPERT_SOCKET whose datagrams carry `<iII` (node, frame bytes, count)
-and count frames; zero frame bytes is a hello, answered with five `<Q` (slots, stride, usable, incarnation, queued).
-Between nodes the rows ride the library (solver/worker.py, solver/strat/strat_responder.py), never this socket."""
+and count frames.  The engine's address is the source of its datagrams.  Between nodes the rows ride the library
+(solver/worker.py, solver/strat/strat_responder.py), never this socket."""
 import errno
 import json
 import os
 import re
 import socket
 import struct
-import uuid
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -35,7 +33,6 @@ HDR = struct.Struct("<IHHQQIIIIII")
 HDRSZ = HDR.size
 assert HDRSZ == WIRE["HDRBYTES"]
 LOCAL_HDR = struct.Struct("<iII")
-LOCAL_STATUS = struct.Struct("<QQQQQ")
 LOCAL_SLOTS = 64
 
 
@@ -182,31 +179,21 @@ class Reassembler:
 
 
 class RuntimeFrames:
-    def __init__(self, usable, capacity=8):
-        self.usable, self.capacity = usable, capacity
-        self.receivers, self.pending, self.events, self.outcomes = {}, {}, {}, {}
-        self.event_seen = set()
-        self.watermarks = {}
-        self.active_session = None
-        self.retired_sessions = set()
-        self.dropped = self.duplicates = 0
+    """One engine's messages joined into snapshots: OBSERVATION, CART, TEAM and STATE of one (session, tick) make a
+    snapshot, and the latest complete snapshot is the one slot take() empties; EVENT rows and OUTCOME records
+    accumulate until taken (design/TRAINING-CONTINUATION.md)."""
+
+    def __init__(self, usable):
+        self.usable = usable
+        self.receivers, self.events, self.outcomes = {}, {}, {}
+        self.assembling, self.latest = None, None
 
     def feed(self, buffer):
         header = parse_hdr(buffer)
         if header is None or header["kind"] not in (OBSERVATION_KIND, CART_KIND, TEAM_KIND, STATE_KIND, EVENT_KIND, OUTCOME_KIND):
             return
-        kind, session, tick = (header[key] for key in ("kind", "session", "tick"))
-        if kind not in (OUTCOME_KIND, EVENT_KIND) and session in self.retired_sessions:
-            self.duplicates += 1
-            return
-        if kind not in (OUTCOME_KIND, EVENT_KIND) and tick <= self.watermarks.get(session, -1):
-            self.duplicates += 1
-            return
-        event_key = (session, tick, header['req_id'])
-        if kind == EVENT_KIND and event_key in self.event_seen:
-            self.duplicates += 1
-            return
-        assembly = (kind, header["width"], *event_key) if kind == EVENT_KIND else (kind, header["width"])
+        kind = header["kind"]
+        assembly = (kind, header["width"])
         if assembly not in self.receivers:
             self.receivers[assembly] = Reassembler(kind, header["width"], self.usable)
         receiver = self.receivers[assembly]
@@ -217,96 +204,44 @@ class RuntimeFrames:
             for row in receiver.stage:
                 identity = ":".join(str(int(value)) for value in row[:3])
                 self.outcomes[identity] = {"kind": "score_win" if row[3] > 0 else "tie", "actor_team": int(row[3]),
-                    "time": float(row[4]), "episode_id": identity, "source": "engine_durable_journal"}
+                    "time": float(row[4]), "episode_id": identity, "source": "engine_outcome"}
             return
-        key = (session, tick)
+        key = (complete["session"], complete["tick"])
         if kind == EVENT_KIND:
-            self.events[event_key] = receiver.stage.copy()
-            self.event_seen.add(event_key)
-            self.receivers.pop(assembly)
-        else:
-            self.pending.setdefault(key, {})[kind] = (complete, receiver.stage.copy())
-        if len(self.pending) > self.capacity:
-            terminals = {}
-            for key, records in self.pending.items():
-                terminals.setdefault(self.terminal_identity(key, records), key)
-            retained = {key for identity, key in terminals.items() if identity is not None}
-            disposable = [key for key in self.pending if key not in retained]
-            for key in disposable[:len(self.pending) - self.capacity]:
-                self.pending.pop(key)
-                self.dropped += 1
-
-    @staticmethod
-    def terminal_identity(key, records):
-        from payload.tools.strategy_io_schema import TS
-        if len(records) == 4 and records[TEAM_KIND][1][0, TS['FINISHED']]:
-            session, _ = key
-            return f"{session >> 24}:{session & 0xffffff}:{int(records[TEAM_KIND][1][0, TS['EPISODE']])}"
+            self.events[(*key, complete["req_id"])] = receiver.stage.copy()
+            return
+        if self.assembling is None or self.assembling[0] != key:
+            self.assembling = (key, {})
+        self.assembling[1][kind] = (complete, receiver.stage.copy())
+        if len(self.assembling[1]) == 4:
+            self.latest, self.assembling = self.assembling, None
 
     def take(self):
-        ready = [key for key, records in self.pending.items() if len(records) == 4]
-        if not ready:
+        if self.latest is None:
             return None
-        key = next((key for key in ready if self.terminal_identity(key, self.pending[key]) is not None), ready[-1])
-        records = self.pending[key]
-        terminal = self.terminal_identity(key, records)
-        if terminal is not None and terminal not in self.outcomes:
-            return None
-        self.accept_snapshot(key)
-        session, tick = key
+        (session, tick), records = self.latest
+        self.latest = None
         events = {entry: self.events.pop(entry) for entry in tuple(self.events)
-                  if (entry[0] == session and entry[1] <= tick) or entry[0] in self.retired_sessions}
-        return key, records, events
+                  if entry[0] != session or entry[1] <= tick}
+        return (session, tick), records, events
 
-    def accept_snapshot(self, key):
-        session, tick = key
-        if self.active_session is not None and self.active_session != session:
-            self.retired_sessions.add(self.active_session)
-        self.active_session = session
-        for entry in tuple(self.pending):
-            owner, stamp = entry
-            if (owner == session and stamp <= tick) or owner in self.retired_sessions:
-                self.pending.pop(entry)
-        self.watermarks[session] = tick
-
-    def replay_snapshot(self, key, event_frames, outcomes):
-        self.accept_snapshot(key)
+    def replay_snapshot(self, event_frames, outcomes):
         self.outcomes.update(outcomes)
-        self.event_seen.update(event_frames)
         for key in event_frames:
             self.events.pop(key, None)
-        for assembly in tuple(self.receivers):
-            if assembly[0] == EVENT_KIND and assembly[2:] in event_frames:
-                self.receivers.pop(assembly)
 
     def export_state(self):
-        return {**vars(self), 'receivers': {key: {**vars(receiver),
-            'seen': np.frombuffer(receiver.seen, dtype=np.uint8)}
-            for key, receiver in self.receivers.items()}}
+        return {'outcomes': self.outcomes, 'events': self.events}
 
     def restore_state(self, saved):
-        if 'transport' in saved:
-            state = dict(saved['transport'])
-            receivers = state.pop('receivers')
-            self.__dict__.update(state)
-            self.receivers = {}
-            for key, fields in receivers.items():
-                receiver = Reassembler(fields['kind'], fields['width'], self.usable)
-                receiver.__dict__.update(fields, seen=bytearray(fields['seen']))
-                self.receivers[key] = receiver
-        else:
-            self.watermarks, self.outcomes = saved['watermarks'], saved['outcomes']
-            self.events, self.event_seen = saved.get('pending_events', {}), saved.get('event_seen', set())
-            self.active_session = saved.get('active_session')
-            self.retired_sessions = saved.get('retired_sessions', set())
+        transport = saved.get('transport', saved)
+        self.outcomes = dict(transport.get('outcomes', {}))
+        self.events = dict(transport.get('events', transport.get('pending_events', {})))
 
     def report(self):
-        return {"pending_snapshots": len(self.pending), "dropped_frames": self.dropped,
-                "pending_event_frames": len(self.events), "pending_event_rows": sum(len(rows) for rows in self.events.values()),
-                "retained_event_identities": len(self.event_seen),
-                "duplicate_fragments": self.duplicates, "durable_outcomes": len(self.outcomes),
-                "pending_by_kind": {str(kind): sum(kind in records for records in self.pending.values())
-                                    for kind in (OBSERVATION_KIND, CART_KIND, TEAM_KIND, STATE_KIND)},
+        return {"snapshot_ready": self.latest is not None, "pending_event_frames": len(self.events),
+                "pending_event_rows": sum(len(rows) for rows in self.events.values()),
+                "outcomes": len(self.outcomes),
                 "assemblies": [{"kind": receiver.kind, "request": receiver.id, "session": receiver.session, "tick": receiver.tick,
                     "frames_received": receiver.have, "frames_expected": receiver.want,
                     "dropped_frames": receiver.dropped, "resynchronizations": receiver.resync}
@@ -315,16 +250,16 @@ class RuntimeFrames:
 
 class Engine:
     """The worker end of the engine's local socket (57628982^:xonotic/solver/strat/runtime_transport.py's local half,
-    matrix_worker.py's bind_service): every receive and send nonblocking, a bounded number a call, so a slow or departed
-    engine never holds the caller.  receive() answers hellos itself and returns the data frames it took as (node,
-    address, frame); send() queues a message's frames for an engine, cut into datagrams of at most LOCAL_SLOTS frames,
-    halving where the socket refuses a datagram's size (EMSGSIZE, as mesh_ipc.c does for its own)."""
+    matrix_worker.py's bind_service).  The caller waits for the socket to be readable (fileno(), select) and
+    receive() takes every datagram queued, returning the data frames as (node, address, frame); send() sends a
+    message's frames to an engine at once, cut into datagrams of at most `slots` frames, halving where the socket
+    refuses a datagram's size (EMSGSIZE, as mesh_ipc.c does for its own).  The engine reads the latest response it
+    holds, so a send the socket refuses is reported and the next response is the next send."""
 
     def __init__(self, path, usable, slots=LOCAL_SLOTS, buffer_bytes=16 << 20):
         self.path, self.usable, self.slots = str(path), int(usable), int(slots)
         if values_per_slot(self.usable) < 1:
             raise ValueError(f'a frame of {self.usable} bytes holds no value past its {HDRSZ}-byte header')
-        self.instance = uuid.uuid4().int & ((1 << 64) - 1)
         self.service = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.service.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_bytes)
         self.service.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buffer_bytes)
@@ -334,44 +269,28 @@ class Engine:
             pass
         self.service.bind(self.path)
         self.service.setblocking(False)
-        self.receive_buffer = bytearray(LOCAL_HDR.size + LOCAL_SLOTS * self.usable)
-        self.local = {}
-        self.clients = set()
+        self.receive_buffer = bytearray(self.service.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
         self.errors = {}
-        self.received = self.sent = self.hellos = self.invalid = 0
+        self.received = self.sent = self.invalid = 0
 
-    def queued(self):
-        return sum(len(pending) for pending in self.local.values())
+    def fileno(self):
+        return self.service.fileno()
 
-    def status(self, address):
-        self.local.setdefault(address, deque()).appendleft((LOCAL_HDR.pack(0, 0, WIRE['LOCAL_VERSION']), np.frombuffer(
-            LOCAL_STATUS.pack(self.slots, self.usable, self.usable, self.instance, self.queued()), np.uint8)))
-
-    def receive(self, budget=256):
+    def receive(self):
         taken = []
         view = memoryview(self.receive_buffer)
-        for _ in range(budget):
+        while True:
             try:
                 size, address = self.service.recvfrom_into(view)
             except BlockingIOError:
-                break
+                return taken
             except OSError as error:
                 self.error('local_receive', error)
-                break
+                return taken
             if size < LOCAL_HDR.size:
                 self.invalid += 1
                 continue
             node, framebytes, count = LOCAL_HDR.unpack_from(self.receive_buffer)
-            if address:
-                self.clients.add(address)
-            if not framebytes:
-                if count != WIRE['LOCAL_VERSION']:
-                    self.error('local_version', ValueError(f"local mesh protocol {count}, expected {WIRE['LOCAL_VERSION']}"))
-                    continue
-                self.hellos += 1
-                if address:
-                    self.status(address)
-                continue
             if framebytes < HDRSZ or framebytes * count != size - LOCAL_HDR.size:
                 self.invalid += 1
                 continue
@@ -379,46 +298,21 @@ class Engine:
             for frame in data:
                 taken.append((node, address, frame.copy()))
             self.received += count
-        return taken
 
     def send(self, address, node, framed):
-        pending = self.local.setdefault(address, deque())
-        for first in range(0, len(framed), self.slots):
+        first = 0
+        while first < len(framed):
             part = framed[first:first + self.slots]
-            pending.append((LOCAL_HDR.pack(node, part.shape[1], len(part)), part))
-
-    def progress(self, budget=256):
-        moved = 0
-        for address, pending in list(self.local.items()):
-            for _ in range(budget):
-                if not pending:
-                    break
-                envelope, part = pending[0]
-                try:
-                    self.service.sendmsg((envelope, part), (), socket.MSG_DONTWAIT, address)
-                except OSError as error:
-                    if error.errno == errno.EMSGSIZE and part.ndim == 2 and len(part) > 1:
-                        node = LOCAL_HDR.unpack(envelope)[0]
-                        half = (len(part) + 1) // 2
-                        pending.popleft()
-                        pending.appendleft((LOCAL_HDR.pack(node, part.shape[1], len(part) - half), part[half:]))
-                        pending.appendleft((LOCAL_HDR.pack(node, part.shape[1], half), part[:half]))
-                        self.slots = max(1, half)
-                        continue
-                    if error.errno in (errno.ENOENT, errno.ECONNREFUSED):
-                        report('runtime_game_departed', address=str(address), undeliverable_datagrams=len(pending))
-                        self.clients.discard(address)
-                        pending.clear()
-                        break
-                    if error.errno not in (errno.EAGAIN, errno.ENOBUFS):
-                        self.error(str(address), error)
-                    break
-                pending.popleft()
-                self.sent += len(part) if part.ndim == 2 else 0
-                moved += 1
-            if not pending:
-                del self.local[address]
-        return moved
+            try:
+                self.service.sendmsg((LOCAL_HDR.pack(node, part.shape[1], len(part)), part), (), socket.MSG_DONTWAIT, address)
+            except OSError as error:
+                if error.errno == errno.EMSGSIZE and len(part) > 1:
+                    self.slots = (len(part) + 1) // 2
+                    continue
+                self.error(str(address), error)
+                return
+            first += len(part)
+            self.sent += len(part)
 
     def error(self, operation, error):
         message = f'{type(error).__name__}: {error}'
@@ -427,11 +321,9 @@ class Engine:
             self.errors[operation] = message
 
     def report(self):
-        return {'received_frames': self.received, 'sent_frames': self.sent, 'hellos': self.hellos,
-                'invalid_datagrams': self.invalid, 'game_clients': len(self.clients), 'queued_datagrams': self.queued()}
+        return {'received_frames': self.received, 'sent_frames': self.sent, 'invalid_datagrams': self.invalid}
 
     def close(self):
-        self.local.clear()
         self.service.close()
         try:
             os.unlink(self.path)

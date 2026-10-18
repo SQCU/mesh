@@ -3,11 +3,11 @@ onto HEAD's wire).
 
     PYTHONPATH=xonotic:rdma bin/mesh-python -B -m solver.sendreq CONFIG.json [--bots 64] [--ticks 4] [--json]
 
-It speaks mesh_ipc.c's local protocol to the worker's socket (CONFIG's "socket", "response"): a hello, the status
-reply's frame size, then each tick the OBSERVATION, CART, TEAM and (empty) STATE messages of one session and tick,
-as payload_strategy_gather publishes them, and the response rows the worker frames back.  Rows come from a fixed seed
-so two runs against differently configured workers are comparable."""
-import argparse, json, os, socket, sys, time
+It speaks mesh_ipc.c's local protocol to the worker's socket (CONFIG's "socket", "framebytes", "response"): each
+tick the OBSERVATION, CART, TEAM and (empty) STATE messages of one session and tick, as payload_strategy_gather
+publishes them, then, where the response kind is defined, a blocking read of the rows the worker frames back.  Rows
+come from a fixed seed so two runs against differently configured workers are comparable."""
+import argparse, json, os, socket, sys
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +15,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "xonotic"))
 
-from solver.xonwire import (LOCAL_HDR, LOCAL_STATUS, WIRE, Reassembler, frames, kind_of, parse_hdr,
+from solver.xonwire import (LOCAL_HDR, Reassembler, frames, kind_of, parse_hdr,
                             OBSERVATION_KIND, CART_KIND, TEAM_KIND, STATE_KIND)
 from payload.tools.strategy_io_schema import CART_WIDTH, CS, OBS, OBS_WIDTH, TEAM_WIDTH, TS
 
@@ -59,7 +59,6 @@ def main():
     ap.add_argument("--node", type=int, default=1)
     ap.add_argument("--bots", type=int, default=64)
     ap.add_argument("--ticks", type=int, default=4)
-    ap.add_argument("--wait", type=float, default=2.0)
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
     config = json.loads(Path(a.config).read_text())
@@ -70,14 +69,10 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 << 20)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
     sock.bind(path)
-    sock.settimeout(a.wait)
-    buffer = bytearray(LOCAL_HDR.size + 64 * config["framebytes"])
+    buffer = bytearray(sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
+    usable = config["framebytes"]
     try:
-        sock.sendto(LOCAL_HDR.pack(0, 0, WIRE["LOCAL_VERSION"]), config["socket"])
-        size, _ = sock.recvfrom_into(buffer)
-        node, framebytes, count = LOCAL_HDR.unpack_from(buffer)
-        slots, stride, usable, instance, queued = LOCAL_STATUS.unpack_from(buffer, LOCAL_HDR.size)
-        session = (int.from_bytes(os.urandom(3), "little") << 24) | os.getpid() & 0xffffff
+        session = (os.getpid() & 0xffffff) << 24 | 1
         rng = np.random.default_rng(11)
         rx = Reassembler(response, 8, usable) if response is not None else None
         picks, replies = {}, 0
@@ -89,15 +84,9 @@ def main():
                 for first in range(0, len(framed), 16):
                     part = framed[first:first + 16]
                     sock.sendmsg((LOCAL_HDR.pack(a.node, usable, len(part)), part), (), 0, config["socket"])
-            started = time.monotonic()
-            while rx is not None and time.monotonic() - started < a.wait:
-                try:
-                    size, _ = sock.recvfrom_into(buffer)
-                except socket.timeout:
-                    break
+            while rx is not None:
+                sock.recvfrom_into(buffer)
                 node, framebytes, count = LOCAL_HDR.unpack_from(buffer)
-                if not framebytes:
-                    continue
                 done = None
                 for frame in np.frombuffer(buffer, np.uint8, framebytes * count, LOCAL_HDR.size).reshape(count, framebytes):
                     header = parse_hdr(frame)
@@ -112,8 +101,7 @@ def main():
                         print(f"recv: req {done['req_id']} tick {done['tick']} rows {done['rows']} node {node} "
                               f"picks {hist} first {R[:6, 1].astype(int).tolist()}", flush=True)
                     break
-        out = dict(sent=a.ticks, replies=replies, dropped=rx.dropped if rx else None,
-                   usable=usable, instance=instance, picks={str(k): v for k, v in picks.items()})
+        out = dict(sent=a.ticks, replies=replies, usable=usable, picks={str(k): v for k, v in picks.items()})
         print(json.dumps(out) if a.json else f"send: {replies}/{a.ticks} answered, frame {usable} bytes",
               flush=True)
     finally:

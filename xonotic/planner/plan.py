@@ -43,8 +43,8 @@ def solve(positions, route, up, down, out):
 def main():
     split = json.loads(SPLIT.read_text())
     parser = argparse.ArgumentParser()
-    parser.add_argument('ticks', type=int, nargs='?', default=2000)
-    parser.add_argument('bots', type=int, nargs='?', default=480)
+    parser.add_argument('ticks', type=int)
+    parser.add_argument('bots', type=int)
     parser.add_argument('--width', type=int, default=256)
     parser.add_argument('--columns', default=','.join(map(str, split['columns'])),
                         help="config_t0: each rank's expert columns, in rank order (default: split.json)")
@@ -86,9 +86,8 @@ def main():
         comm.Allreduce(local, total)
         ready = time.monotonic()
         collective += ready - began
-        if tick >= split['warmup']:
-            shares = balancer.observe({'tick': {'scales': {'columns': [1.0] * len(columns)},
-                                                'times': [[float(t) / 1e3] for t in total[args.bots, :len(columns)]]}})['columns']
+        shares = balancer.observe({'tick': {'scales': {'columns': [1.0] * len(columns)},
+                                            'times': [[float(t) / 1e3] for t in total[args.bots, :len(columns)]]}})['columns']
         experts = total[:args.bots]
         picks = np.argmax(experts @ objective, axis=1)
         switches += int(np.count_nonzero(objectives != picks))

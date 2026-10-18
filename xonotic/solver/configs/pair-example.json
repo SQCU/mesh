@@ -1,14 +1,13 @@
 {
-  "source": "A didactic configuration (xonotic/README.md, 'The solver'): two ranks, rank 0 the game's host, the columns split evenly for a first tick and moved by rdma/allocate.py's Balancer on the ticks' own times after `warmup` ticks, `grain` columns at a time, never below `low`. torch on the GPU through torch.distributed's mesh backend. The engine's socket is mesh_ipc.c's default; frames of 16 KiB as the 09-14 Frames ring had them. `response` names the wire kind the game reads the plans under; rdma/xonwire.def does not define PLAN at HEAD, so the worker solves and withholds its rows until the game side opens that handle.",
+  "source": "A didactic configuration (xonotic/README.md, 'The solver'): two ranks, rank 0 the game's host, the columns split evenly for a first tick and moved by rdma/allocate.py's Balancer on every tick's own times, `grain` columns at a time, never below `low`. torch on the GPU through torch.distributed's mesh backend. The engine's socket and frame bytes are the server's MESH_EXPERT_SOCKET and MESH_EXPERT_FRAMEBYTES; frames of 16 KiB as the 09-14 Frames ring had them. `response` names the wire kind the game reads the plans under; rdma/xonwire.def does not define PLAN at HEAD, so the worker solves and withholds its rows until the game side opens that handle.",
   "backend": "torch",
   "device": "mps",
   "ctx": 4096,
   "maxrows": 4032,
-  "columns": {"parts": [1024, 1024], "grain": 16, "low": [16, 16], "warmup": 4},
+  "columns": {"parts": [1024, 1024], "grain": 16, "low": [16, 16]},
   "socket": "/tmp/mesh-expert-worker.sock",
   "framebytes": 16384,
   "response": "PLAN",
-  "idle_s": 1.0,
   "policy": "trained",
   "episode": 300,
   "hold": 25,
@@ -20,6 +19,5 @@
   "theta": "~/.mesh-plc-strategy.npz",
   "train_seed": 20260828,
   "trace": "",
-  "quiet": false,
-  "secs": 0
+  "quiet": false
 }
