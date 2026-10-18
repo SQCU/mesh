@@ -1106,17 +1106,17 @@ program on the pair) is to be written against these calls; metal-microbench tool
 1. **Direct flows and the lanes.**
    - bridge-and-ipc.md#lanes (lines 452-454): "so a direct program's flows ride the lanes; the exclusive form stays
      in the code for a flow a READY asks it of".
-   - The code: `program_take` asks every direct flow for exclusive QPs (`flow_make(..., 1)`, line 3101; commit
+   - The code: `program_take` asks every direct flow for exclusive QPs (`flow_make(..., 1)`; commit
      921312ce). The paragraph above it in the same doc ("A program's operands ride exclusive flows alone") matches the
      code; this sentence is stale.
 2. **The FAIL message's code.**
    - The #protocol table (line 218) says "a relay's goes on, its code kept".
-   - `port_heard` fails the flow with `ECANCELED` unless the code is `ESTALE` (lines 2779-2781). `flow_fail` then
-     tells the relay partner the local code (line 1538), so past a relay the original code is replaced by `ECANCELED`.
+   - `port_heard` fails the flow with `ECANCELED` unless the code is `ESTALE`. `flow_fail` then
+     tells the relay partner the local code, so past a relay the original code is replaced by `ECANCELED`.
      Only `failed` (the node) and ESTALE survive.
 3. **"A flow fails alone."**
    - #flows (line 381) says a flow fails alone.
-   - `flow_fail` (lines 1539-1541) also fails every flow of the same owner and destination (the program's other
+   - `flow_fail` also fails every flow of the same owner and destination (the program's other
      cables and stripes; a relay lease's other stripes), and drops its await.
 4. **Who writes in a client's slot and rows.**
    - #region (lines 103-104) and `mesh.h` say the bridge writes only the statuses, the ports and the map.
