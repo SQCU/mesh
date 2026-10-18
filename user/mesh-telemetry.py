@@ -1,16 +1,16 @@
 #!/usr/bin/env mesh-python
-import collections, copy, ctypes, json, math, os, platform, plistlib, pwd, re, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
+import collections, copy, ctypes, json, math, os, platform, plistlib, pwd, re, select, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-RATE = max(100, int(os.environ.get("MESH_TELEMETRY_RATE", "1000")))
-BANDWIDTH_RATE = max(100, int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE))))
+RATE = int(os.environ.get("MESH_TELEMETRY_RATE", "1000"))
+BANDWIDTH_RATE = int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE)))
 PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 RING = max(2, int(os.environ.get("MESH_TELEMETRY_RING", "4096")))
 PRODUCERS = max(1, int(os.environ.get("MESH_TELEMETRY_PRODUCERS", "256")))
-LEASE = max(RATE / 1000 * 2, float(os.environ.get("MESH_WORKLOAD_LEASE", "10")))
 STOP = threading.Event()
+INGEST = None
 POWER = None
 BANDWIDTH = None
 CPU_TICKS = None
@@ -60,18 +60,13 @@ def account():
     except (OSError, KeyError): return {}
     return {"user": entry.pw_uid, "group": entry.pw_gid, "extra_groups": []}
 
-def run(command, timeout=3, text=False, **as_account):
+def run(command, text=False, **as_account):
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True, **as_account) as process:
-        try: return process.communicate(timeout=timeout)[0]
-        except BaseException:
-            try: os.killpg(process.pid, signal.SIGTERM)
-            except OSError: pass
-            process.wait()
-            raise
+        return process.communicate()[0]
 
-def output(command, timeout=3):
+def output(command):
     try:
-        return run(command, timeout, True).strip()
+        return run(command, True).strip()
     except Exception:
         return ""
 
@@ -133,7 +128,7 @@ def bandwidth():
         "/usr/local/mesh/bin/mesh-bandwidth",
     ])
     if path:
-        try: return json.loads(run([path, "-i", "200"], 3, True))
+        try: return json.loads(run([path, "-i", "200"], True))
         except Exception as error: return {"up": False, "error": f"memory bandwidth sampler: {type(error).__name__}: {error}"}
     return {"up": False, "error": "memory bandwidth sampler unavailable"}
 
@@ -145,17 +140,15 @@ def bridge():
         "/usr/local/mesh/bin/mesh-stat",
     ])
     if path:
-        try: return json.loads(run([path], 3, True, **account()).splitlines()[-1])
+        try: return json.loads(run([path], True, **account()).splitlines()[-1])
         except Exception as error: return {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
     return {"up": False, "error": "mesh-stat unavailable"}
 
 CENSUS = re.compile(r"link (\d+) census queue=(\d+) requests=(\d+) frames=(\d+) retired=(\d+) send_completions=(\d+) records=(\d+) posted=(\d+) landed=(\d+) bytes=(\d+)")
 INFO = ("bridge node ",)
 COUNTS = ("requests", "frames", "retired", "send_completions", "records", "posted", "landed", "bytes")
-FABRIC_KEEP = float(os.environ.get("MESH_FABRIC_KEEP", "600"))
 FABRIC_READ = int(os.environ.get("MESH_FABRIC_READ", str(16 << 20)))
 BRIDGES = {}
-SLOW = {}
 
 def bridge_log(entry, final=False):
     try:
@@ -210,15 +203,15 @@ def fabric_bridges(now):
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
             entry = BRIDGES[pid] = {"pid": pid, "log": log, "log_size": None, **bridge_counters()}
         entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
-        try: entry["stat"] = json.loads(run([stat], 3, True, **account()).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
+        try: entry["stat"] = json.loads(run([stat], True, **account()).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
         except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
         if entry["log"]: bridge_log(entry)
     for pid, entry in list(BRIDGES.items()):
-        if pid in table: continue
-        if entry["exited_at"] is None:
-            entry.update({"exited_at": now, "state": "exited"})
-            if entry["log"]: bridge_log(entry, True)
-        elif now - entry["exited_at"] > FABRIC_KEEP: BRIDGES.pop(pid)
+        if pid in table or entry["exited_at"] is not None: continue
+        entry.update({"exited_at": now, "state": "exited"})
+        if entry["log"]: bridge_log(entry, True)
+        for other, older in list(BRIDGES.items()):
+            if other != pid and older["exited_at"] is not None: BRIDGES.pop(other)
     return [copy.deepcopy(entry) for entry in BRIDGES.values()]
 
 def fabric_ports():
@@ -275,9 +268,7 @@ def fabric_services():
     return {"services": found, "keeper": keeper, "booted_at": number(output(["/usr/sbin/sysctl", "-n", "kern.boottime"]), r"sec = (\d+)")}
 
 def fabric(now):
-    if now - SLOW.get("ports_at", 0) >= 5: SLOW.update(ports_at=now, ports=fabric_ports())
-    if now - SLOW.get("services_at", 0) >= 10: SLOW.update(services_at=now, services=fabric_services())
-    return {"bridges": fabric_bridges(now), "ports": SLOW["ports"], "ports_at": SLOW["ports_at"], **SLOW["services"], "services_at": SLOW["services_at"]}
+    return {"bridges": fabric_bridges(now), "ports": fabric_ports(), **fabric_services()}
 
 class TelemetryRecord(dict):
     def __init__(self, value):
@@ -298,9 +289,9 @@ class TelemetryRecord(dict):
 
 
 class TelemetryRing:
-    def __init__(self, size=RING, lease=LEASE):
+    def __init__(self, size=RING):
         self.records = collections.deque(maxlen=size)
-        self.lease = lease
+        self.exits = select.kqueue()
         self.sequence = 0
         self.lock = threading.RLock()
         self.power = {"up": False, "sampled_at": None, "source": "powermetrics", "error": "sampler starting", "metrics": {}}
@@ -310,7 +301,7 @@ class TelemetryRing:
         self.unkeyed_producers = collections.deque(maxlen=size)
         self.protocol_events = collections.deque(maxlen=size)
         self.ingest_sequence = 0
-        self.expired_producers = 0
+        self.exited_producers = 0
         self.evicted_producers = 0
 
     def set_power(self, payload):
@@ -332,6 +323,11 @@ class TelemetryRing:
         with self.lock: return list(self.protocol_events)[-16:]
 
     def keep(self, key, row):
+        if key not in self.producers:
+            try: self.exits.control([select.kevent(key[0], select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)], 0)
+            except OSError:
+                self.exited_producers += 1
+                return
         self.producers.pop(key, None)
         self.producers[key] = row
         while len(self.producers) > self.capacity:
@@ -371,15 +367,19 @@ class TelemetryRing:
             self.keep(key, current)
             return sequence
 
-    def workload_sample(self, now=None):
-        now = time.time() if now is None else float(now)
+    def exited(self):
+        while True:
+            for event in self.exits.control(None, 64):
+                with self.lock:
+                    gone = [key for key in self.producers if key[0] == event.ident]
+                    for key in gone: self.producers.pop(key)
+                    self.exited_producers += len(gone)
+
+    def workload_sample(self):
         with self.lock:
-            expired = [key for key, row in self.producers.items() if now - float(row.get("sampled_at", 0)) > self.lease]
-            for key in expired: self.producers.pop(key, None)
-            self.expired_producers += len(expired)
             active = [dict(row) for row in self.producers.values()]
             unkeyed = [dict(row) for row in self.unkeyed_producers]
-            expired_total, evicted_total = self.expired_producers, self.evicted_producers
+            exited_total, evicted_total = self.exited_producers, self.evicted_producers
         for row in active:
             measures = row.get("measures", {})
             artifacts = measures.get("artifacts", {}) if isinstance(measures, dict) else {}
@@ -396,7 +396,7 @@ class TelemetryRing:
             "up": bool(active),
             "sampled_at": max([row.get("sampled_at", 0) for row in active], default=None),
             "active_producers": len(active),
-            "expired_producers": expired_total,
+            "exited_producers": exited_total,
             "evicted_producers": evicted_total,
             "unkeyed_producers": unkeyed,
             "rows": numeric_sum(row.get("rows") for row in active),
@@ -559,7 +559,7 @@ def power_loop(store):
                 store.set_power({"schema": 1, "up": False, "sampled_at": time.time(), "source": "powermetrics", "error": error, "metrics": {}})
         except Exception as error:
             store.set_power({"schema": 1, "up": False, "sampled_at": time.time(), "source": "powermetrics", "error": type(error).__name__, "metrics": {}})
-        STOP.wait(2)
+        STOP.wait(RATE / 1000)
 
 def bandwidth_loop(store):
     global BANDWIDTH
@@ -572,7 +572,7 @@ def bandwidth_loop(store):
         ])
         if not path:
             store.set_bandwidth({"up": False, "source": "IOReport", "error": "memory bandwidth sampler unavailable"})
-            STOP.wait(2)
+            STOP.wait(BANDWIDTH_RATE / 1000)
             continue
         try:
             BANDWIDTH = subprocess.Popen([path, "-s", str(BANDWIDTH_RATE)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -583,7 +583,7 @@ def bandwidth_loop(store):
             if not STOP.is_set(): store.set_bandwidth({"up": False, "source": "IOReport", "error": "sampler exited"})
         except Exception as error:
             store.set_bandwidth({"up": False, "source": "IOReport", "error": type(error).__name__})
-        STOP.wait(2)
+        STOP.wait(BANDWIDTH_RATE / 1000)
 
 def sample_loop(store):
     facts = host_facts()
@@ -595,23 +595,19 @@ def sample_loop(store):
         except Exception as error:
             store.publish_protocol({"event": "sample_error", "error": f"{type(error).__name__}: {error}", "at": time.time()})
             print(f"telemetry sample: {type(error).__name__}: {error}", flush=True)
-        STOP.wait(max(0.01, period - (time.monotonic() - started)))
+        STOP.wait(max(0.0, period - (time.monotonic() - started)))
 
 def ingest_loop(store):
-    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("127.0.0.1", PORT))
-    server.settimeout(1)
+    global INGEST
+    INGEST = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    INGEST.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    INGEST.bind(("127.0.0.1", PORT))
     while not STOP.is_set():
         payload = b""
-        try:
-            payload, _ = server.recvfrom(65535)
-            store.publish_workload(json.loads(payload))
-        except socket.timeout:
-            continue
-        except Exception:
-            store.publish_workload({"source": "udp", "received_at": time.time(), "payload_bytes": len(payload)})
-    server.close()
+        try: payload, _ = INGEST.recvfrom(65535)
+        except OSError: break
+        try: store.publish_workload(json.loads(payload))
+        except Exception: store.publish_workload({"source": "udp", "received_at": time.time(), "payload_bytes": len(payload)})
 
 class TelemetryHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -708,16 +704,17 @@ def stop(*_):
     STOP.set()
     if POWER and POWER.poll() is None: POWER.terminate()
     if BANDWIDTH and BANDWIDTH.poll() is None: BANDWIDTH.terminate()
+    if INGEST: INGEST.close()
 
 def serve():
     store = TelemetryRing()
+    threading.Thread(target=store.exited, daemon=True).start()
     for target in (power_loop, bandwidth_loop, sample_loop, ingest_loop): threading.Thread(target=target, args=(store,), daemon=True).start()
     host = os.environ.get("MESH_TELEMETRY_HOST", "::")
     server_class = TelemetryHTTPServer6 if ":" in host else TelemetryHTTPServer
     server = server_class((host, PORT), TelemetryHandler, store)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    while not STOP.is_set():
-        STOP.wait(1)
+    STOP.wait()
     server.shutdown()
     server.server_close()
 
