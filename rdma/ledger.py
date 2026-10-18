@@ -77,11 +77,13 @@ def read(paths):
 
 
 def peer_of(flow, flows):
-    """The path at the other end of `flow`'s link: the same execution, the two nodes and the path's two ends each the
-    other's; of several (an execution's key run again), the one sharing the most cell names."""
+    """The path at the other end of `flow`'s link: the same execution, the two nodes each the other's, and the one's
+    destination the other's node (a member's path toward a member across the link, or a relay's toward the member its
+    relayed route ends at); of several (a relay's paths and a member's own toward the same node, an execution's key run
+    again), the one sharing the most cell names."""
     h = flow['header']
     candidates = [g for g in flows.values() if g['header']['key'] == h['key'] and g['header']['node'] == h['peer'] and
-                  g['header']['peer'] == h['node'] and g['header']['near'] == h['far'] and g['header']['far'] == h['near']]
+                  g['header']['peer'] == h['node'] and (g['header']['far'] == h['near'] or g['header']['near'] == h['far'])]
     names = {name(s) for s in flow['sends']} | {name(r) for r in flow['landings']}
     return max(candidates, key=lambda g: len(names & ({name(s) for s in g['sends']} | {name(r) for r in g['landings']})),
                default=None)
