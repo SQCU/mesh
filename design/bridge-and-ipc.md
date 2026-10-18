@@ -648,8 +648,9 @@ direction's seen to first post (the send thread's pass and gate), first to last 
 hop with the clocks' offset cancelled: each crossing paired with one the other way, of the same name where the program
 crosses back there, else the nearest in time, hop = ((landed_B - seen_A) + (landed_A - seen_B)) / 2, as Q5P's analysis
 took it (an offset so taken holds the two directions' hops alike). On a line of three with ledgers kept (mesh-loop's
-`nccl`, the walk, every rank's cut) every path paired, the end members' hops to the middle node 20 crossings each way
-over its two paths, 17 by name and 3 by time: a relay's forwarded cells carry its own program's names. Not kept: Q5P's third time of a landing (after its ring's next records were posted) and its layout lines
+`nccl`, the walk, every rank's cut) every path paired: an end member's hop toward the middle node 20 crossings over
+its two paths, 17 paired by name and 3 by time, and the middle node's toward it 17, all by name; the relay's 3
+forwarded cells carry its own program's names and pair with no landing by name. Not kept: Q5P's third time of a landing (after its ring's next records were posted) and its layout lines
 (`trace_layout`, `trace_binding`), whose work the names do.
 
 ## keepalive
