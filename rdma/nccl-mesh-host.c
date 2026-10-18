@@ -3,13 +3,13 @@
    path runs on host threads: N ranks on one host over mesh-flow-loop's bridges, with no GPU kernel anywhere (several
    ranks' spinning kernels on one GPU have no forward-progress guarantee: the no-cross-queue-spin rule).  Each kernel
    runs as the walk encodes it, in the walk's order, its body transcribed from nccl-mesh-metal.m's: copies and combines
-   in host memory (the host path's arithmetic, nccl-mesh.c combine_into, premultiply and truncdiv, which nccl-mesh.c
-   exports hidden to this file where MESH_HOST_EXECUTOR is defined), publications release-stored, a wait for a landing a
-   poll of its word (mesh.metal mesh_remote_wait: until it reaches 1 + the cycle or the session's canceller stores ~0;
-   bounded by the program's polls where it has violation words, mesh_remote_wait_bounded, past which the position, the
-   channel and the bound go to violation words [2], [3] and [4] and every later step of the program does nothing), a
-   landed wait's positions checked against the filler protocol (violation words [0] and [1]).  An unbounded wait that
-   sees nothing for twice MESH_SILENT_NS (the session's canceller ends it first) fails ETIMEDOUT.  A buffer is a host
+   in host memory (the host path's arithmetic, nccl-mesh.c combine_into, premultiply, truncdiv and partials_layout, which
+   nccl-mesh.c exports hidden to this file where MESH_HOST_EXECUTOR is defined), publications release-stored, a wait for
+   a landing a poll of its word (mesh.metal mesh_remote_wait: until it reaches 1 + the cycle or the session's canceller
+   stores ~0; bounded by the program's polls where it has violation words, mesh_remote_wait_bounded, past which the
+   position, the channel and the bound go to violation words [2], [3] and [4] and every later step of the program does
+   nothing), a landed wait's positions checked against the filler protocol (violation words [0] and [1]).  An unbounded
+   wait that sees nothing for twice MESH_SILENT_NS (the session's canceller ends it first) fails ETIMEDOUT.  A buffer is a host
    address (metal_wrap returns its address; metal_contents it); what metal_scratch and metal_event made is counted and
    freed with its last release.  The Metal 4 form's own steps (a caller's kernel running a step: metal_send_deferred,
    metal_land_deferred) are refused as the classic form refuses them.  Built as .build/host/libnccl-mesh.dylib (make
@@ -18,7 +18,6 @@
 #include "mesh-collective.h"
 #include "nccl-mesh-metal.h"
 #include <errno.h>
-#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -31,11 +30,12 @@
 void nccl_mesh_combine(int t, int combine, void *dst, const void *src, size_t n);
 void nccl_mesh_premultiply(int t, void *dst, const void *src, uint64_t bits, size_t n);
 void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t divisor);
+void nccl_mesh_partials(int rows_out, float *dst, const float *src, size_t rows, size_t dim);
 
 /* ncclDataType_t's order and sizes: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2; the
-   walk takes every type but float64, as the kernels do */
+   walk takes every type but float64, as the kernels do, and the partials merge's rows (METAL_MERGE) */
 static const size_t SIZE[12] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
-static int walked(int type) { return type >= 0 && type < 12 && type != 8; }
+static int walked(int type) { return type >= 0 && type <= METAL_MERGE && type != 8; }
 
 static char error_[512];
 static pthread_mutex_t owned_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -206,7 +206,7 @@ int metal_combine3(struct metal_program *program, int type, int op, void *dst, s
                    size_t with_offset, size_t n) {
   uint32_t polls;
   _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (!walked(type)) return EINVAL;
+  if (!walked(type) || type == METAL_MERGE) return EINVAL;
   if (halted(v, polls) || !n) return 0;
   atomic_thread_fence(memory_order_acquire);
   memmove(at(dst, dst_offset), at(with, with_offset), n * SIZE[type]);
@@ -349,27 +349,12 @@ int metal_counted(struct metal_program *program, int kind, const struct metal_co
   return 0;
 }
 
-/* nccl-mesh-metal.m's partials_prepare and partials_rescale */
-int metal_partials(struct metal_program *program, int rescale, void *piece, size_t piece_offset, void *scratch, size_t scratch_offset, uint64_t rows,
+/* nccl-mesh-metal.m's partials_rows and partials_columns: nccl-mesh.c's partials_layout */
+int metal_partials(struct metal_program *program, int rows_out, void *dst, size_t dst_offset, void *src, size_t src_offset, uint64_t rows,
                    uint64_t dim) {
   uint32_t polls;
   _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (halted(v, polls) || !rows) return 0;
-  const float none = -3.4028234663852886e38f;
-  if (!rescale) {
-    float *x = (float *)at(scratch, scratch_offset);
-    const float *m = (const float *)at(piece, piece_offset);
-    for (uint64_t k = 0; k < rows; k++) x[k] = m[rows + k] > 0.0f ? m[k] : none;
-    return 0;
-  }
-  float *x = (float *)at(piece, piece_offset);
-  const float *e = (const float *)at(scratch, scratch_offset);
-  const uint64_t n = rows * (2 + dim), slot = dim ? dim : 1;
-  for (uint64_t k = 0; k < n; k++) {
-    const uint64_t row = k < rows ? k : k < 2 * rows ? k - rows : (k - 2 * rows) / slot;
-    const float mine = e[row], top = e[rows + row], w = mine == none ? 0.0f : expf(mine - top);
-    x[k] = k < rows ? top : w > 0.0f ? x[k] * w : 0.0f;
-  }
+  if (!halted(v, polls)) nccl_mesh_partials(rows_out, (float *)at(dst, dst_offset), (const float *)at(src, src_offset), rows, dim);
   return 0;
 }
 

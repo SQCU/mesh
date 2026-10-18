@@ -80,7 +80,8 @@ in-tree of the bridges' routes, its parents among equals spread over the links):
 - the reduce-scatter and the all-gather, segment s up and down s's trees;
 - each root's reduce and broadcast, up and down the root's trees.
 
-Each is uncut: a step's piece is cut on the wire into slots of its class (`mesh_wire_pieces`). A call runs its table's
+Each is uncut: a step's piece is cut on the wire into slots of its class, each carrying whole elements of the operand
+(`mesh_wire_pieces`: no element is split, so a combine of a slot's piece combines whole ones). A call runs its table's
 first program of its collective (and root) whose size bound its operand is under. Nothing about a program is decided
 where a call runs.
 
@@ -97,16 +98,25 @@ that layout fail as a value with `*arrived` 2. Reproduction target (metal-microb
 part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
 473-480 us, the host idle 7.4-7.9 ms.
 
-**Split-KV partials.** `ncclMeshAllReducePartials(send, recv, rows, dim, comm, stream)` and
-`ncclMeshReducePartials(send, recv, rows, dim, root, comm, stream)` merge split-KV attention partials, each member's
-float32 `[m: rows][l: rows][O: rows x dim]` (a row's maximum, its sum of exponentials, its unnormalized output; the
-engine's partial piece), by their log-sum-exp: the rows' maxima over the members by an all-reduce of max, each member's
-(l, O) rescaled to them on its own GPU (`partials_rescale`), then summed by the communicator's all-reduce or reduce
-[Dao et al. 2023, Flash-Decoding]. The result is the merged partial (M, L, O), the attention O / L. This is the
+**The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
+`ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
+log-sum-exp [Dao et al. 2023, Flash-Decoding; FlashInfer's state merge]. The operand is rows of `2 + dim` float32,
+each row `[m, l, O: dim]` (a row's maximum score, its sum of exponentials, its unnormalized output); two rows merge to
+the greater m, each one's l and O rescaled by e^(its m - that) and summed, a row with no positions (l not above 0)
+counting for none. The result is the merged partial, its O / l the attention over every member's positions. Every
+reducing collective takes it (`ncclAllReduce`, `ncclReduce`, `ncclReduceScatter`, `ncclMeshReduceScatterV`, counts in
+whole rows), inside a group or not: one group, the communicator's program of that collective with a row for an
+element, each row merged up its tree where a sum adds an element, the wire's positions carrying whole rows. This is the
 planner's `reduce` form for partials (metal-microbench docs/placement.md Crossings), until now only the engine's own
-kernels and torch-mesh's single-GPU merge. Three groups in sequence on the stream, so not inside a group. Reproduction
-target: never measured; the planner's pricing of it at 3, 4 and 6 members of a full mesh was 331, 331 and 226 us
-against the gather's 534 a chunk's layer (metal-microbench output_data/planner-20261015/pass2 engine2-after.json).
+kernels and torch-mesh's single-GPU merge. `ncclMeshAllReducePartials(send, recv, rows, dim, comm, stream)` and
+`ncclMeshReducePartials(send, recv, rows, dim, root, comm, stream)` take the engine's own layout,
+`[m: rows][l: rows][O: rows x dim]`: the piece laid as rows into a scratch, merged there with the operator and laid
+back, so not inside a group (until their caller lays rows; a member off a reduce's root gets its own partial back).
+Reproduction target: never measured; the planner's pricing of the three-group form it replaces at 3, 4 and 6 members
+of a full mesh was 331, 331 and 226 us against the gather's 534 a chunk's layer (metal-microbench
+output_data/planner-20261015/pass2 engine2-after.json); on the loopback fabric (a line of 4) every rank's merge exact
+to 1e-5 against double arithmetic, host path and walk, 3 to 2,100 rows of 64, one and two positions a message on
+either channel.
 
 **Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
 list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, compiled ahead of the

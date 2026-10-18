@@ -47,6 +47,11 @@ int metal_metal4(const struct metal_program *);
 /* A buffer of the program's made resident (the Metal 4 form; the classic form needs none). */
 void metal_resident(struct metal_program *, void *buffer);
 int metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
+/* dst = dst op src, n elements of an ncclDataType_t (op as nccl-mesh.c combine_into: 0 sum, 1 product, 2 max, 3 min), or,
+   `type` METAL_MERGE, the partials merge (nccl.h ncclMeshRedOpCreatePartials) of n rows of `op` float32 [m, l, O]: a
+   row with l > 0 rescaled to the greater m and summed into dst's, one with none counting for none (two such the row
+   [the least float, 0, 0]); metal_land's landed piece the same way */
+#define METAL_MERGE 12
 int metal_combine(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n);
 /* dst = with op src, n elements of an ncclDataType_t: a landed slot (src, loaded system-coherent) combined with an operand
    read in place (`with`: a lease's send buffer, nccl.h ncclMeshMemBuffer), the first combine of a range no step wrote */
@@ -106,12 +111,10 @@ enum { METAL_COUNTED_START, METAL_COUNTED_CHECK, METAL_COUNTED_ARRIVED, METAL_CO
 struct metal_counted { void *d, *s, *a; size_t dst, src, aux; uint64_t bytes, scalar, first, row, limit; uint32_t entries; };
 int metal_counted(struct metal_program *, int kind, const struct metal_counted *);
 void *metal_contents(void *buffer);
-/* A split-KV merge's two local steps (nccl.h ncclMeshAllReducePartials): float32 partials of `rows` rows at piece +
-   piece_offset, [m: rows][l: rows][O: rows x dim], O unnormalized.  rescale 0: scratch[0, rows) the rows' maxima to
-   merge, m where l > 0, else the least float (a part with no positions counts for none); rescale 1, once
-   scratch[rows, 2 rows) holds their maxima over the members M: w = e^(m - M) (0 for a part with none), m = M, l = w l,
-   O = w O (0 where w is), so the (l, O) sums are the merge [Dao et al. 2023, Flash-Decoding; FlashInfer's state merge]. */
-int metal_partials(struct metal_program *, int rescale, void *piece, size_t piece_offset, void *scratch, size_t scratch_offset, uint64_t rows,
+/* The engine's float32 partial piece [m: rows][l: rows][O: rows x dim] (nccl.h ncclMeshAllReducePartials) laid as the
+   merge's rows [m, l, O] (`rows_out` 1; a row with l not above 0 the row [the least float, 0, 0]), or rows laid back
+   (0), from src to dst */
+int metal_partials(struct metal_program *, int rows_out, void *dst, size_t dst_offset, void *src, size_t src_offset, uint64_t rows,
                    uint64_t dim);
 /* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
 const char *metal_steps(void);

@@ -112,7 +112,7 @@ There are no other library threads. Client-side threads that drive the library: 
 | `session`, `opening` | the open session; a session between its start and its agreement | `session_open` |
 | `revoked` | set by `ncclCommRevoke`, kept until destroy | `ncclCommRevoke` |
 | `async` | the last failed group's result; never cleared | `launch_metal`, `ncclGroupEnd` |
-| `ops[64]` | PreMulSum scalars | `ncclRedOpCreatePreMulSum` |
+| `ops[64]` | operators made on it: PreMulSum's scalar, or the partials merge's row (`unit`) | `ncclRedOpCreatePreMulSum`, `ncclMeshRedOpCreatePartials` |
 | `scratch`, `spent` | the Metal 4 form's scratch when the caller gives no workspace | `workspace` |
 
 **`comm_read` (line 567)** runs at every `session_open` and once in `ncclMeshFusableRooted` if no session has read
@@ -295,8 +295,12 @@ A session is a communicator's program on its node's bridge. It opens at the firs
   carries); 0 gives one block.
 - `slot` is `ceil(NCCL_BUFFSIZE / LAG / block) x block`, at least a block.
 - `lag = MESH_LAG = 8` (NCCL_STEPS).
-- A piece takes the large channel if its bytes exceed `lag x small`. It is cut into `ceil(bytes / slot of its class)`
-  positions.
+- A piece takes the large channel if its bytes exceed `lag x small`, or its element is wider than a small slot. It is
+  cut into positions of whole elements: `ceil(bytes / carried)`, `carried` its class's slot less the remainder over its
+  element (`mesh_wire_pieces`; `struct message` `carried`, `piece_at`), so a combine of a position's piece combines
+  whole elements: a typed element of 1 to 8 bytes on slots of whole blocks (or the pair's 3,072-byte small slot)
+  carries the whole slot, as before; a counted all-to-all's rows message is laid in its type's elements, as before;
+  the partials merge's element is its row.
 - Every position is its slot's bytes on the wire: TN3205 pairs a SEND with a receive of the same 4 KiB frames, and a
   ring's receives are posted ahead at the slot's bytes, so a position's frames are the slot's (bridge-and-ipc.md,
   lanes). A small slot of 3,072 bytes (the pair's one-row decode crossing) is one frame; one block is four.
@@ -357,7 +361,7 @@ A change of the map never closes a session.
 program". The table is the caller's programs, or the configured forms' entries followed by the structural table
 (`comm_routes`), so a call no form fits runs the default. No price, timing or cache chooses: mesh cc8a6f8e deleted
 `mesh_choose`, `mesh_program_time`, the size classes and `kept`, and the forms they chose among are entries a
-configuration names (`ncclMeshCommForms`). `MESH_PLAN_VERSION` (4) enters both the digest and the agreement, so members
+configuration names (`ncclMeshCommForms`). `MESH_PLAN_VERSION` (5: positions carry whole elements) enters both the digest and the agreement, so members
 whose planning rules differ fail at the session instead of mismatching later; the digest covers every entry's program,
 so members configured with different forms fail there too.
 
@@ -368,7 +372,7 @@ so members configured with different forms fail there too.
 | `program_of` | the table's order: the configured forms (the caller's configuration), then the structural defaults |
 | `mesh_map` link bandwidths | the port's nominal speed, read by the routes (ties among routes of equally few links) and by `mesh_trees_pack` |
 | `compile_form` | packing `eps` and `most`, and every other form field, are the configuration's (`ncclMeshForm`) |
-| wire (`mesh_wire_of`, `mesh_wire_large`) | `lag = 8`; the large/small split at `lag x block`; slot = `NCCL_BUFFSIZE / 8` rounded to a block |
+| wire (`mesh_wire_of`, `mesh_wire_large`) | `lag = 8`; the large/small split at `lag x block` (or an element wider than a small slot); slot = `NCCL_BUFFSIZE / 8` rounded to a block, carrying whole elements |
 | `nccl-mesh-metal.m:dispatch` | 256 threads a pointwise kernel, at most 1,024 threads in one threadgroup for a block's piece, at most 2^20 units a grid |
 | `ncclMeshFusableRooted` | fusable only at 2 ranks, one small slot, float16 sum (or a broadcast of any type), at most 1 scratch |
 
@@ -424,14 +428,24 @@ every counts receive (`mesh_steps_before`), its rows (buffer 3, the receive buff
 - `received` and `arrived` on the Metal path are host memory in leases; `lease_buffer` gives the lease's Metal buffer,
   made at its first use and released by `ncclMemFree`.
 
-**Split-KV partials** (`ncclMeshAllReducePartials`, `ncclMeshReducePartials`: `partials`) are three groups on one
-stream, not a program of their own: the operand staged into `recv` and each row's maximum to merge written into a
-scratch (`partials_prepare`: m where l > 0, else the least float), an all-reduce of max over the scratch (completed in
-the stream: its stream copy has no issue), the rescale (`partials_rescale`: w = e^(m - M), m = M, (l, O) times w), then
-the (l, O) sums by the communicator's all-reduce or reduce (the caller's stream, issued where it says). The prepare and
-rescale are the library's own programs on the stream (`metal_begin`/`metal_begin4`, `program_end`, under
-`session_lock`); the scratch is the stream's workspace, else the communicator's `merge` (grown, the replaced one kept
-on `spent`). The host path does the same with `expf` on the host.
+**The partials merge** (`ncclMeshRedOpCreatePartials`) is an operator of the communicator's table (`struct redop`
+`unit` = 2 + dim), as PreMulSum's is. `reduction` gives the call `combine = COMBINE_MERGE` and its `unit`, and from
+there the call is its collective with a row for an element:
+
+- `admit` refuses counts that are not whole rows; `plan_calls` makes the operand `{float32, 4 unit bytes, elements /
+  unit}` and cuts an uneven call's steps by its counts over the unit (`struct steps` `cut`), so every program, cut,
+  chunk and tree moves whole rows, and the wire's positions carry whole rows (`mesh_wire_pieces`).
+- A piece's combine is `combine_into` / `metal_combine` / `metal_land` with type `METAL_MERGE` and the row's floats for
+  the operator (`ktype`, `kop`, `kcount`): `merge_rows` on the host, `merge_row` in `combine_merge` and `land_merge` on
+  the GPU, a thread a row.
+- It reads no send buffer in place (`plan_direct`): the operand is staged.
+
+`ncclMeshAllReducePartials` and `ncclMeshReducePartials` (`partials`) take the engine's `[m: rows][l: rows][O: rows x
+dim]`: the piece laid as rows into a scratch (`partials_layout` on the host, `partials_rows` on the GPU, a row with no
+positions written as the merge's none), the all-reduce or reduce with the merge on it (completed in the stream: its
+stream copy has no issue), then laid back into `recv` (`partials_columns`). The layouts are the library's own programs
+on the stream (`layout_on`: `metal_begin`/`metal_begin4`, `program_end`, under `session_lock`); the scratch is the
+stream's workspace, else the communicator's `merge` (grown, the replaced one kept on `spent`).
 
 **Roots.**
 
@@ -673,8 +687,8 @@ Compile-time constants that shape the flow, none of them settable:
 | `WATCH_NS` / `RECANCEL_NS` | 1 ms / 10 ms | watcher scan and re-cancel periods |
 | `DEADLINE_S` | 120 s | bootstrap |
 | `MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS` | 600 + 30 + 3 s | the start's bound |
-| `MESH_PLAN_VERSION` | 4 | planning rules, in digest and agreement |
-| `OPS` | 64 | PreMulSum operators a communicator |
+| `MESH_PLAN_VERSION` | 5 | planning rules, in digest and agreement |
+| `OPS` | 64 | operators made on a communicator (PreMulSum, the partials merge) |
 | `MAX_RANKS` | 64 | the Metal lowering of all-to-all, gather, scatter |
 | `RECORDS` x `RECORD` | 65,536 x 128 B | the Metal 4 argument ring; overflow is `EOVERFLOW` |
 | `MESH_CLIENTS` / `MESH_DESTINATIONS` / `MESH_QUEUES` | 64 / 64 / 4 | region limits |

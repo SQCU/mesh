@@ -897,10 +897,12 @@ void mesh_wire_of(uint64_t block,uint64_t buffsize,uint64_t small,struct mesh_wi
   *wire=(struct mesh_wire){slot>b?slot:b,!small?b:small<MESH_SMALL_LEAST?MESH_SMALL_LEAST:small,b,MESH_LAG,0};
 }
 uint64_t mesh_wire_pitch(const struct mesh_wire *wire,uint64_t bytes){ return (bytes+wire->block-1)/wire->block*wire->block; }
-int mesh_wire_large(const struct mesh_wire *wire,uint64_t bytes){ return bytes>(uint64_t)wire->lag*wire->small; }
-uint64_t mesh_wire_pieces(const struct mesh_wire *wire,uint64_t bytes){
-  const uint64_t slot=mesh_wire_large(wire,bytes)?wire->slot:wire->small;
-  return (bytes+slot-1)/slot;
+int mesh_wire_large(const struct mesh_wire *wire,uint64_t bytes,uint64_t element){
+  return bytes>(uint64_t)wire->lag*wire->small || element>wire->small;
+}
+uint64_t mesh_wire_pieces(const struct mesh_wire *wire,uint64_t bytes,uint64_t element){
+  const uint64_t slot=mesh_wire_large(wire,bytes,element)?wire->slot:wire->small,carried=element && element<=slot?slot-slot%element:slot;
+  return (bytes+carried-1)/carried;
 }
 static uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
 
@@ -915,10 +917,11 @@ uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int
   const int sorted=mesh_rounds_sorted(steps,count);
   uint32_t rounds=0,round=UINT32_MAX;
   uint64_t out=at,in=at;
-#define MESH_LAID(k) (steps[k].peer==peer && mesh_step_bytes(steps+(k)) && mesh_wire_large(wire,mesh_step_bytes(steps+(k)))==large)
+#define MESH_LAID(k) (steps[k].peer==peer && mesh_step_bytes(steps+(k)) && \
+                      mesh_wire_large(wire,mesh_step_bytes(steps+(k)),steps[k].piece.element_bytes)==large)
 #define MESH_PLACE(k) do { \
     uint64_t *cursor=steps[k].op==MESH_STEP_SEND?&out:&in; \
-    const uint64_t pieces=mesh_wire_pieces(wire,mesh_step_bytes(steps+(k))); \
+    const uint64_t pieces=mesh_wire_pieces(wire,mesh_step_bytes(steps+(k)),steps[k].piece.element_bytes); \
     made[(*placed)++]=(struct mesh_place){(k),steps[k].op==MESH_STEP_SEND,*cursor,pieces}; \
     *cursor+=pieces; } while(0)
   for(uint32_t k=0;!sorted && k<count;k++)if(MESH_LAID(k) && steps[k].round+1>rounds)rounds=steps[k].round+1;

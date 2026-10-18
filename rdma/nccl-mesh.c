@@ -28,7 +28,7 @@
 #include <netinet/in.h>
 
 enum { WHAT_SEND = 16, WHAT_RECV, WHAT_COUNTED };
-enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
+enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
 #define DEADLINE_S 120.0
 #define SILENT_S (MESH_SILENT_NS * 1e-9)
 #define OPS 64
@@ -127,8 +127,38 @@ static double arithmetic(ncclDataType_t t, double a, double b, int combine) {
       case COMBINE_MAX: if (x[i] > d[i]) d[i] = x[i]; break; \
       default: if (x[i] < d[i]) d[i] = x[i]; break; } } while (0)
 
-/* dst[i] = dst[i] combine src[i] */
+/* the partials merge (nccl.h ncclMeshRedOpCreatePartials) of `rows` rows of `unit` float32 [m, l, O], y into x: a row
+   with l > 0 rescaled to the greater m and summed, one with none counting for none, two such the row [PARTIAL_NONE, 0,
+   0] (nccl-mesh-metal.m merge_row) */
+static const float PARTIAL_NONE = -3.4028234663852886e38f;
+static void merge_rows(float *x, const float *y, size_t rows, size_t unit) {
+  for (size_t r = 0; r < rows; r++, x += unit, y += unit) {
+    const int mine = x[1] > 0, theirs = y[1] > 0;
+    if (mine && !theirs) continue;
+    if (!mine || !theirs) {
+      for (size_t j = 0; j < unit; j++) x[j] = theirs ? y[j] : j ? 0.0f : PARTIAL_NONE;
+      continue;
+    }
+    const float top = x[0] > y[0] ? x[0] : y[0], a = expf(x[0] - top), b = expf(y[0] - top);
+    x[0] = top;
+    for (size_t j = 1; j < unit; j++) x[j] = (a > 0 ? x[j] * a : 0.0f) + (b > 0 ? y[j] * b : 0.0f);
+  }
+}
+
+/* the engine's partial piece [m: rows][l: rows][O: rows x dim] laid as the merge's rows (to_rows; a row with l not above
+   0 the row [PARTIAL_NONE, 0, 0]), or rows laid back (nccl-mesh-metal.m partials_rows, partials_columns) */
+static void partials_layout(int to_rows, float *dst, const float *src, size_t rows, size_t dim) {
+  const size_t u = 2 + dim;
+  for (size_t k = 0; k < rows * u; k++) {
+    const size_t r = k / u, j = k % u, at = j == 0 ? r : j == 1 ? rows + r : 2 * rows + r * dim + j - 2;
+    if (to_rows) dst[k] = src[rows + r] > 0 ? src[at] : j ? 0.0f : PARTIAL_NONE;
+    else dst[at] = src[k];
+  }
+}
+
+/* dst[i] = dst[i] combine src[i]; the partials merge's n rows of `combine` floats where t is METAL_MERGE */
 static void combine_into(ncclDataType_t t, int combine, void *dst, const void *src, size_t n) {
+  if ((int)t == METAL_MERGE) { merge_rows(dst, src, n, (size_t)combine); return; }
   switch (t) {
   case ncclInt8: INTEGER_LOOP(int8_t, uint8_t); return;
   case ncclUint8: INTEGER_LOOP(uint8_t, uint8_t); return;
@@ -201,12 +231,16 @@ __attribute__((visibility("hidden"))) void nccl_mesh_premultiply(int t, void *ds
 __attribute__((visibility("hidden"))) void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t divisor) {
   truncdiv((ncclDataType_t)t, dst, src, n, divisor);
 }
+__attribute__((visibility("hidden"))) void nccl_mesh_partials(int rows_out, float *dst, const float *src, size_t rows, size_t dim) {
+  partials_layout(rows_out, dst, src, rows, dim);
+}
 #endif
 
 
 /* -- communicators -------------------------------------------------------------------------------- */
 
-struct premul { int used; ncclDataType_t type; unsigned char value[8]; };
+/* an operator made on the communicator: PreMulSum's scalar (`value`), or the partials merge's row of `unit` elements */
+struct redop { int used; ncclDataType_t type; unsigned char value[8]; uint32_t unit; };
 /* a compiled collective the communicator runs for the calls it fits (ncclMeshProgram), its own copy */
 struct entry { uint64_t below; struct mesh_program program; };
 struct session;
@@ -233,7 +267,7 @@ struct ncclComm {
   uint32_t programs, splits, *members, form_count;
   int nranks, rank, listed;
   char name[NCCL_UNIQUE_ID_BYTES + 1];
-  struct premul ops[OPS];
+  struct redop ops[OPS];
   ncclResult_t async;
   struct session *session, *opening;
   pthread_mutex_t guard;
@@ -1093,18 +1127,31 @@ ncclResult_t ncclMeshMemLive(void) {
   return stale ? attach_fail(stale, "ncclMeshMemLive") : ncclSuccess;
 }
 
+/* an operator made into the communicator's table, its handle past ncclNumOps */
+static ncclResult_t op_make(ncclComm_t comm, struct redop made, ncclRedOp_t *op) {
+  for (int k = 0; k < OPS; k++)
+    if (!comm->ops[k].used) {
+      comm->ops[k] = made;
+      *op = (ncclRedOp_t)(ncclNumOps + k);
+      return ncclSuccess;
+    }
+  return fail(ncclInvalidUsage, "%d operators made on one communicator", OPS);
+}
+
 ncclResult_t ncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataType_t datatype, ncclScalarResidence_t residence,
                                       ncclComm_t comm) {
   if (!op || !scalar || !comm || (unsigned)datatype >= ncclNumTypes) return fail(ncclInvalidArgument, "PreMulSum's arguments");
   if (residence != ncclScalarHostImmediate) return fail(ncclInvalidArgument, "the host path reads the scalar when the operator is made (ncclScalarHostImmediate)");
-  for (int k = 0; k < OPS; k++)
-    if (!comm->ops[k].used) {
-      comm->ops[k].used = 1; comm->ops[k].type = datatype;
-      memcpy(comm->ops[k].value, scalar, SIZE[datatype]);
-      *op = (ncclRedOp_t)(ncclNumOps + k);
-      return ncclSuccess;
-    }
-  return fail(ncclInvalidUsage, "%d PreMulSum operators on one communicator", OPS);
+  struct redop made = {1, datatype, {0}, 0};
+  memcpy(made.value, scalar, SIZE[datatype]);
+  return op_make(comm, made, op);
+}
+
+/* nccl.h ncclMeshRedOpCreatePartials: an operator of the communicator's, as PreMulSum's, its row 2 + dim floats */
+ncclResult_t ncclMeshRedOpCreatePartials(ncclRedOp_t *op, size_t dim, ncclDataType_t datatype, ncclComm_t comm) {
+  if (!op || !comm || datatype != ncclFloat32 || dim > UINT32_MAX - 2)
+    return fail(ncclInvalidArgument, "the partials merge's arguments: its operator, its communicator, float32 and a row's dim");
+  return op_make(comm, (struct redop){1, datatype, {0}, (uint32_t)(2 + dim)}, op);
 }
 
 ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
@@ -1765,7 +1812,9 @@ struct steps {
   struct where *gpu;
   const struct mesh_program *program;
   struct mesh_operand operand;
+  /* an uneven call's segments in operand elements: its counts, or (`cut`, owned) its counts over a merge's row */
   const uint64_t *segments;
+  uint64_t *cut;
   /* each step's positions as schedule_group places them (its channel, first position, pieces), and the receive before
      it (by round, then plan order) that has any, or -1 */
   uint32_t *channel;
@@ -1778,7 +1827,9 @@ struct steps {
    call's own copy, `total` their sum; NULL: `count` each), a counted all-to-all's sendsegs then recvsegs; a counted
    all-to-all's (WHAT_COUNTED, ncclMeshAlltoAllCounted) counts, the host's copy of the landed counts and its word, the
    GPU's copy, its rows, the most it receives and a row's elements, its landed counts (`got`: the host path's own, the
-   Metal path's a scratch, `got_at`), the counts receives not yet consumed (`counting`) and whether its end is encoded */
+   Metal path's a scratch, `got_at`), the counts receives not yet consumed (`counting`) and whether its end is encoded;
+   a reduction's operator as the host runs it (reduction: `combine`, `post`, `pre`; the partials merge's row of `unit`
+   elements) */
 struct call {
   int what, root, peer;
   const void *send;
@@ -1801,6 +1852,7 @@ struct call {
   ncclRedOp_t op;
   ncclComm_t comm;
   int combine, post;
+  uint32_t unit;
   unsigned char pre[8];
   int premultiplied;
   struct steps *bound;
@@ -1819,6 +1871,13 @@ static _Thread_local struct call *calls;
 static _Thread_local size_t call_count, call_capacity;
 
 static int reducing(int what) { return what == MESH_ALLREDUCE || what == MESH_REDUCE || what == MESH_REDUCE_SCATTER; }
+/* a reduction's operand element in the call's elements (the partials merge's row, else one), and a piece of `bytes` as
+   combine_into and the kernels take it: its type and operator (the merge's METAL_MERGE and its row's floats) and its
+   elements (the merge's rows) */
+static uint32_t unit_of(const struct call *c) { return c->combine == COMBINE_MERGE ? c->unit : 1; }
+static int ktype(const struct call *c) { return c->combine == COMBINE_MERGE ? METAL_MERGE : (int)c->type; }
+static int kop(const struct call *c) { return c->combine == COMBINE_MERGE ? (int)c->unit : c->combine; }
+static size_t kcount(const struct call *c, size_t bytes) { return bytes / (SIZE[c->type] * unit_of(c)); }
 static int p2p(const struct call *c) { return c->what == WHAT_SEND || c->what == WHAT_RECV; }
 static int counted(const struct call *c) { return c->what == WHAT_COUNTED; }
 static size_t elements(const struct call *c) {
@@ -1877,6 +1936,7 @@ static void steps_free(struct steps *s) {
   for (uint32_t b = 1; s->host && !s->borrowed && b < s->buffers; b++) free(s->host[b]);
   free(s->host); free(s->gpu);
   free(s->steps); free(s->done); free(s->channel); free(s->first); free(s->pieces); free(s->before); free(s->read); free(s->fresh); free(s->needed);
+  free(s->cut);
   free(s);
 }
 
@@ -1890,7 +1950,7 @@ static void steps_free(struct steps *s) {
 static uint32_t counted_steps(ncclComm_t comm, struct call *c, struct mesh_step *steps) {
   const int n = comm->nranks, me = comm->rank;
   const uint64_t *sseg = c->segments, *rseg = c->segments + n, bound = counted_bound(c);
-  const struct mesh_operand counts = {(uint32_t)ncclInt64 + 1, 8, 0}, rows = {(uint32_t)c->type + 1, (uint32_t)row_bytes(c), bound};
+  const struct mesh_operand counts = {(uint32_t)ncclInt64 + 1, 8, 0}, rows = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], bound * c->row};
   uint32_t k = 0;
   for (int q = 0; q < n; q++) {
     if (q == me || !sseg[q]) continue;
@@ -1909,7 +1969,8 @@ static uint32_t counted_steps(ncclComm_t comm, struct call *c, struct mesh_step 
 }
 
 /* every call that crosses a link planned: a collective along the communicator's trees (an uneven one's segments its counts,
-   mesh_program_steps_cut: its program's segments must be the ranks), a point-to-point call one SEND or COPY step */
+   mesh_program_steps_cut: its program's segments must be the ranks), its operand's element a merge's row where it
+   merges, a point-to-point call one SEND or COPY step */
 static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     struct call *c = list + i;
@@ -1933,33 +1994,42 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       return fail(ncclSystemError, "out of memory");
     }
     c->bound = s;
-    const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], elements(c)};
+    const uint32_t u = unit_of(c);
+    const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     s->operand = operand;
     s->program = program;
     s->segments = c->segments;
+    if (operand.element_bytes > comm->wire.slot)
+      return fail(ncclInvalidUsage, "a row of the partials merge of %u bytes, past a large slot's %llu", operand.element_bytes,
+                  (unsigned long long)comm->wire.slot);
+    if (c->segments && u > 1 && !(s->segments = s->cut = malloc((size_t)comm->nranks * sizeof *s->cut))) return fail(ncclSystemError, "out of memory");
+    for (int r = 0; s->cut && r < comm->nranks; r++) s->cut[r] = c->segments[r] / u;
     if (p2p(c)) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1;
       continue;
     }
     if (counted(c)) { s->count = counted_steps(comm, c, s->steps); s->borrowed = 1; continue; }
-    s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, c->segments, s->steps);
+    s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->segments, s->steps);
   }
   return ncclSuccess;
 }
 
-/* a step's piece on one channel: its positions [first, first + pieces), at byte offset of its operand */
-struct message { struct call *c; uint32_t step; uint64_t first, pieces; size_t offset, bytes; };
+/* a step's piece on one channel: its positions [first, first + pieces), at byte offset of its operand, a position
+   carrying `carried` bytes of it (its slot's whole elements, mesh-plan.h mesh_wire_pieces) */
+struct message { struct call *c; uint32_t step; uint64_t first, pieces; size_t offset, bytes, carried; };
 /* message m's piece at position `at` of its channel: its byte offset in the message, and *length its bytes */
-static size_t piece_at(const struct message *m, size_t slot, uint64_t at, size_t *length) {
-  const size_t offset = (at - m->first) * slot;
-  *length = m->bytes - offset < slot ? m->bytes - offset : slot;
+static size_t piece_at(const struct message *m, uint64_t at, size_t *length) {
+  const size_t offset = (at - m->first) * m->carried;
+  *length = m->bytes - offset < m->carried ? m->bytes - offset : m->carried;
   return offset;
 }
 struct schedule { struct message *out, *in; size_t outs, ins, out_at, in_at; };
 
 static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
-static int in_class(const struct session *s, const struct mesh_step *step, int large) { return mesh_wire_large(&s->comm->wire, piece_bytes(step)) == large; }
+static int in_class(const struct session *s, const struct mesh_step *step, int large) {
+  return mesh_wire_large(&s->comm->wire, piece_bytes(step), step->piece.element_bytes) == large;
+}
 
 /* the comm's rank on a channel's node (-1: none) */
 static int rank_of(ncclComm_t comm, uint32_t node) {
@@ -1998,8 +2068,10 @@ static uint64_t lay(const struct session *ses, const struct call *list, size_t n
     while (r < n && !(p2p(list + r) && counts[r] && list[r].what == WHAT_RECV && (int)steps[r][0].peer == peer && in_class(ses, steps[r], large))) r++;
     if (s >= n && r >= n) break;
     uint64_t out = at, in = at;
-    if (s < n && piece_bytes(steps[s])) { made[(*count)++] = (struct placing){(uint32_t)s, 0, 1, out, mesh_wire_pieces(wire, piece_bytes(steps[s]))}; out += made[*count - 1].pieces; }
-    if (r < n && piece_bytes(steps[r])) { made[(*count)++] = (struct placing){(uint32_t)r, 0, 0, in, mesh_wire_pieces(wire, piece_bytes(steps[r]))}; in += made[*count - 1].pieces; }
+    if (s < n && piece_bytes(steps[s]))
+      out += (made[(*count)++] = (struct placing){(uint32_t)s, 0, 1, out, mesh_wire_pieces(wire, piece_bytes(steps[s]), steps[s]->piece.element_bytes)}).pieces;
+    if (r < n && piece_bytes(steps[r]))
+      in += (made[(*count)++] = (struct placing){(uint32_t)r, 0, 0, in, mesh_wire_pieces(wire, piece_bytes(steps[r]), steps[r]->piece.element_bytes)}).pieces;
     at = out > in ? out : in;
   }
   return at;
@@ -2031,7 +2103,8 @@ static ncclResult_t schedule_group(struct session *s, struct call *list, size_t 
     for (size_t k = 0; k < count; k++) {
       struct call *c = list + made[k].call;
       const struct mesh_step *step = c->bound->steps + made[k].step;
-      const struct message m = {c, made[k].step, ch->end + made[k].first, made[k].pieces, step->first * step->piece.element_bytes, piece_bytes(step)};
+      const struct message m = {c, made[k].step, ch->end + made[k].first, made[k].pieces, step->first * step->piece.element_bytes, piece_bytes(step),
+                                ch->slot - ch->slot % step->piece.element_bytes};
       if (made[k].send) p->out[p->outs++] = m; else p->in[p->ins++] = m;
       c->bound->channel[m.step] = h; c->bound->first[m.step] = m.first; c->bound->pieces[m.step] = m.pieces;
     }
@@ -2080,14 +2153,14 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
         if (data) {
           struct steps *s = m->c->bound;
           if (at == m->first && !ready(s, m->step)) break;
-          size_t length, offset = piece_at(m, ch->slot, at, &length);
+          size_t length, offset = piece_at(m, at, &length);
           const unsigned char *from = ch->receiving + (at % DEPTH) * ch->pitch;
           unsigned char *to = s->host[s->steps[m->step].buffer] + m->offset + offset;
           if (counted(m->c) && s->steps[m->step].buffer == 3) {
             size_t valid;
             const size_t place = counted_place(m->c, (int)s->steps[m->step].peer, 1, offset, length, &valid);
             memcpy((unsigned char *)m->c->recv + place, from, valid);
-          } else if (s->steps[m->step].op == MESH_STEP_REDUCE) combine_into(m->c->type, m->c->combine, to, from, length / SIZE[m->c->type]);
+          } else if (s->steps[m->step].op == MESH_STEP_REDUCE) combine_into(ktype(m->c), kop(m->c), to, from, kcount(m->c, length));
           else memcpy(to, from, length);
           if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
         }
@@ -2098,7 +2171,7 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
         struct message *m = p->out_at < p->outs ? p->out + p->out_at : NULL;
         if (m && at >= m->first) {
           if (at == m->first && !ready(m->c->bound, m->step)) break;
-          size_t length, offset = piece_at(m, ch->slot, at, &length);
+          size_t length, offset = piece_at(m, at, &length);
           if (counted(m->c) && m->c->bound->steps[m->step].buffer == 1) {
             size_t valid;
             const size_t place = counted_place(m->c, (int)m->c->bound->steps[m->step].peer, 0, offset, length, &valid);
@@ -2209,7 +2282,7 @@ static void finish(const struct call *c) {
     memmove(c->recv, c->result, elements(c) * z);
 }
 
-/* an operator as the host runs it (premultiplier, combine, postoperation) */
+/* an operator as the host runs it (premultiplier, combine, postoperation; the partials merge's row) */
 static ncclResult_t reduction(struct call *c) {
   const ncclComm_t comm = c->comm;
   c->premultiplied = 0; c->post = 0;
@@ -2220,8 +2293,9 @@ static ncclResult_t reduction(struct call *c) {
     else { store(c->type, c->pre, 1.0 / comm->nranks); c->premultiplied = 1; }
     return ncclSuccess;
   }
-  const struct premul *made = comm->ops + ((int)c->op - ncclNumOps);
-  if (made->type != c->type) return fail(ncclInvalidArgument, "a PreMulSum operator reduces the datatype it was made for");
+  const struct redop *made = comm->ops + ((int)c->op - ncclNumOps);
+  if (made->type != c->type) return fail(ncclInvalidArgument, "an operator made on the communicator reduces the datatype it was made for");
+  if (made->unit) { c->combine = COMBINE_MERGE; c->unit = made->unit; return ncclSuccess; }
   memcpy(c->pre, made->value, SIZE[c->type]);
   c->premultiplied = 1;
   return ncclSuccess;
@@ -2703,7 +2777,7 @@ static ncclResult_t consume(struct metal_program *program, struct session *s, ui
     }
     if (m) {
       struct steps *st = m->c->bound;
-      size_t length, offset = piece_at(m, ch->slot, at, &length);
+      size_t length, offset = piece_at(m, at, &length);
       const size_t from = (at % DEPTH) * ch->pitch;
       const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
       const struct where to = st->gpu[st->steps[m->step].buffer];
@@ -2731,15 +2805,15 @@ static ncclResult_t consume(struct metal_program *program, struct session *s, ui
                                            fusing.out->land), "a fused landing's record");
           fusing.landed = !result;
         } else
-          result = gpu(metal_land(program, reduce ? (int)m->c->type : -1, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
-                                  reduce ? length / SIZE[m->c->type] : length, s->transport.inputs,
+          result = gpu(metal_land(program, reduce ? ktype(m->c) : -1, kop(m->c), to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
+                                  reduce ? kcount(m->c, length) : length, s->transport.inputs,
                                   ch->word + (at % POSITIONS) * ch->word_stride, cycle_of(at), &check), "a landing");
         if (at + 1 > ch->waited) ch->waited = at + 1;
       } else {
         result = arrive(program, s, ch, at + 1);
         if (!result && reduce)
-          result = gpu(metal_combine(program, m->c->type, m->c->combine, to.buffer, to.offset + m->offset + offset,
-                                     ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
+          result = gpu(metal_combine(program, ktype(m->c), kop(m->c), to.buffer, to.offset + m->offset + offset,
+                                     ch->ring_in, from, kcount(m->c, length)), "a combine");
         else if (!result)
           result = gpu(metal_copy(program, METAL_LAND, to.buffer, to.offset + m->offset + offset, ch->ring_in, from, length), "a landing");
       }
@@ -2770,7 +2844,7 @@ static ncclResult_t publish(struct metal_program *program, struct session *s, ui
   int released = 0;
   if (m && !result) {
     const struct steps *st = m->c->bound;
-    size_t length, offset = piece_at(m, ch->slot, at, &length);
+    size_t length, offset = piece_at(m, at, &length);
     if (counted(m->c) && st->steps[m->step].buffer == 1) {
       const uint64_t *sseg = m->c->segments;
       const int q = (int)st->steps[m->step].peer;
@@ -2946,9 +3020,10 @@ static int spans_add(struct spans *w, uint64_t lo, uint64_t hi) {
 /* whether a call reads its send buffer in place on the Metal path (mesh 95967e6; rdma/NCCL.md Memory), planned into its
    steps (struct steps read, fresh, needed) and its complement: a collective that crosses a link, not issued (every read
    of the send buffer then in its own command buffer or encoder, so once that completes nothing reads it: the caller may
-   free its lease), fused or premultiplied, whose send buffer is a lease's Metal buffer (nccl.h ncclMeshMemBuffer) apart
-   from its result `own`, every step's range in its buffer wholly written or wholly unwritten by the rank's steps before it
-   (by round, then order: the order its walk encodes a receive before the SEND after it, mesh_steps_before).  Then a SEND
+   free its lease), fused, premultiplied or merging rows, whose send buffer is a lease's Metal buffer (nccl.h
+   ncclMeshMemBuffer) apart from its result `own`, every step's range in its buffer wholly written or wholly unwritten by
+   the rank's steps before it (by round, then order: the order its walk encodes a receive before the SEND after it,
+   mesh_steps_before).  Then a SEND
    of a range no earlier step wrote reads the send buffer, a receive's first combine of such a range writes buffer = send
    op piece, a scratch buffer no step writes is never made and none is copied, and the ranges of buffer 0 no step writes
    are copied from the send buffer after the publications (`complement`); else (0) the operand is staged as ever */
@@ -2956,7 +3031,8 @@ static int plan_direct(struct call *c, struct where own, int issued) {
   struct steps *st = c->bound;
   const size_t z = SIZE[c->type];
   uint64_t lo = 0, hi = elements(c);
-  if (!st || p2p(c) || counted(c) || c->fused || c->premultiplied || issued || !st->count || !lease_of_buffer(c->send_at.buffer)) return 0;
+  if (!st || p2p(c) || counted(c) || c->fused || c->premultiplied || unit_of(c) > 1 || issued || !st->count || !lease_of_buffer(c->send_at.buffer))
+    return 0;
   if (c->what == MESH_BROADCAST && c->root != c->comm->rank) return 0;
   if (c->what == MESH_ALLGATHER) { size_t length; lo = segment_at(c, c->comm->rank, &length); hi = lo + length; }
   const struct where send = c->send_at;
@@ -3329,7 +3405,7 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
      in place; its fused steps send from the producer's own store and land into the consumer's, so neither reads it; a
      configured form that cuts the operand (two-phase, chunked) moves it in several pieces and is not fusable */
   const int fusable = program && program->scratch <= (what == MESH_ALLREDUCE ? 1u : 0u) && bytes <= comm->wire.small &&
-                     !mesh_wire_large(&comm->wire, bytes) && whole_moves(program, (uint32_t)comm->rank);
+                     !mesh_wire_large(&comm->wire, bytes, SIZE[type]) && whole_moves(program, (uint32_t)comm->rank);
   pthread_mutex_unlock(&session_lock);
   if (!fusable) return ncclSuccess;
   const int rooted = comm->rank == root;
@@ -3387,6 +3463,10 @@ static ncclResult_t admit(struct call *made) {
   if (reducing(c.what)) {
     const int k = (int)c.op - ncclNumOps;
     if ((int)c.op < 0 || (k >= 0 && (k >= OPS || !comm->ops[k].used))) return fail(ncclInvalidArgument, "operator %d", (int)c.op);
+    const uint32_t u = k >= 0 ? comm->ops[k].unit : 0;
+    int rows = !u || !(c.count % u);
+    for (int r = 0; u && c.segments && r < comm->nranks; r++) rows &= !(c.segments[r] % u);
+    if (!rows) return fail(ncclInvalidArgument, "the partials merge's counts are whole rows of %u elements", u);
   }
   if ((c.what == MESH_REDUCE || c.what == MESH_BROADCAST) && (c.root < 0 || c.root >= comm->nranks))
     return fail(ncclInvalidArgument, "root %d of %d ranks", c.root, comm->nranks);
@@ -3533,78 +3613,62 @@ ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff, size_t sendrows, cons
   return enqueue(c);
 }
 
-/* nccl.h ncclMeshAllReducePartials, ncclMeshReducePartials: split-KV attention partials merged by their log-sum-exp
-   (the planner's `reduce` form for partials, metal-microbench docs/placement.md Crossings; the engine's
-   decode_attention_partial/rescale/reduced, metal-microbench metal/layers.metal, and torch-mesh's mesh_merge, moved into
-   the library): the operand staged into recvbuff, each row's maximum to merge (m where l > 0) all-reduced by max into
-   the scratch, the rows rescaled to it, then their (l, O) summed by the communicator's all-reduce (root -1) or reduce
-   to root; three groups in sequence on the stream, the last the caller's (issued where its stream says), so not inside
-   ncclGroupStart/End.  The Metal path's scratch is the stream's workspace, else the communicator's own (`merge`, grown,
-   its last one released at its end) */
-static const float PARTIAL_NONE = -3.4028234663852886e38f;
+/* nccl.h ncclMeshAllReducePartials, ncclMeshReducePartials: the engine's piece laid as the merge's rows into a scratch
+   (partials_layout; the Metal path's partials_rows), merged there by the communicator's all-reduce (root -1) or reduce
+   to root with the partials merge (ncclMeshRedOpCreatePartials), then laid back into recvbuff (partials_columns), the
+   group completed in the stream between the two layouts, so not inside ncclGroupStart/End.  The Metal path's scratch is
+   the stream's workspace, else the communicator's own (`merge`, grown, the one it replaces kept until its end), each
+   layout a program of the library's on the stream under session_lock */
+static ncclResult_t layout_on(const ncclMeshStream *given, int to_rows, struct where dst, struct where src, size_t rows, size_t dim) {
+  if (!given) {
+    partials_layout(to_rows, (float *)((char *)dst.buffer + dst.offset), (const float *)((const char *)src.buffer + src.offset), rows, dim);
+    return ncclSuccess;
+  }
+  pthread_mutex_lock(&session_lock);
+  struct metal_program *program = given->argumentTable ? metal_begin4(given->commandEncoder, given->argumentTable, given->residencySet, NULL, given->polls)
+                                                       : metal_begin(given->commandBuffer, given->commandEncoder, NULL, given->polls);
+  const ncclResult_t result = !program ? fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory")
+                                       : gpu(metal_partials(program, to_rows, dst.buffer, dst.offset, src.buffer, src.offset, rows, dim), "the partials' rows");
+  if (program) program_end(program, given->commandEncoder != NULL);
+  pthread_mutex_unlock(&session_lock);
+  return result;
+}
 static ncclResult_t partials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream) {
   if (!comm || !sendbuff || !recvbuff) return fail(ncclInvalidArgument, "a partials merge's comm, sendbuff or recvbuff is NULL");
   if (root < -1 || root >= comm->nranks) return fail(ncclInvalidArgument, "root %d of %d ranks", root, comm->nranks);
-  if (depth) return fail(ncclInvalidUsage, "a partials merge is three groups in sequence (the maxima, the rescale, the sums): not inside a group");
-  const size_t bytes = rows * (2 + dim) * sizeof(float), sums = rows * (1 + dim);
-  if (!rows) return ncclSuccess;
-  ncclResult_t result = ncclSuccess;
-  if (!stream) {
-    float *piece = recvbuff, *scratch = malloc(2 * rows * sizeof *scratch);
-    if (!scratch) return fail(ncclSystemError, "out of memory");
-    if (sendbuff != recvbuff) memmove(recvbuff, sendbuff, bytes);
-    for (size_t i = 0; i < rows; i++) scratch[i] = piece[rows + i] > 0 ? piece[i] : PARTIAL_NONE;
-    result = ncclAllReduce(scratch, scratch + rows, rows, ncclFloat32, ncclMax, comm, NULL);
-    for (size_t k = 0; !result && k < rows * (2 + dim); k++) {
-      const size_t row = k < rows ? k : k < 2 * rows ? k - rows : (k - 2 * rows) / (dim ? dim : 1);
-      const float mine = scratch[row], top = scratch[rows + row], w = mine == PARTIAL_NONE ? 0.0f : expf(mine - top);
-      piece[k] = k < rows ? top : w > 0.0f ? piece[k] * w : 0.0f;
-    }
-    free(scratch);
-    if (!result) result = root < 0 ? ncclAllReduce(piece + rows, piece + rows, sums, ncclFloat32, ncclSum, comm, NULL)
-                                    : ncclReduce(piece + rows, piece + rows, sums, ncclFloat32, ncclSum, root, comm, NULL);
-    return result;
-  }
+  if (depth) return fail(ncclInvalidUsage, "a partials merge of the engine's piece lays its rows back after its group: not inside a group");
   const ncclMeshStream *given = stream;
-  if (given->fused) return fail(ncclInvalidUsage, "a partials merge is no fused crossing");
-  const struct where send = where_of(sendbuff), recv = where_of(recvbuff);
-  ncclMeshStream inner = *given;
-  inner.issue = NULL; inner.fused = NULL;
-  void *scratch = NULL;
-  for (int step = 0; step < 2 && !result; step++) {
-    pthread_mutex_lock(&session_lock);
-    if (!scratch && given->workspace) scratch = given->workspace(2 * rows * sizeof(float), given->context);
-    else if (!scratch) {
-      if (comm->merge_bytes < 2 * rows * sizeof(float)) {
-        void **spent = comm->merge ? realloc(comm->spent, (comm->spents + 1) * sizeof *spent) : comm->spent;
-        void *made = (comm->merge && !spent) ? NULL : metal_scratch(2 * rows * sizeof(float));
-        if (made) {
-          if (comm->merge) { comm->spent = spent; comm->spent[comm->spents++] = comm->merge; }
-          comm->merge = made; comm->merge_bytes = 2 * rows * sizeof(float);
-        }
-      }
-      scratch = comm->merge_bytes >= 2 * rows * sizeof(float) ? comm->merge : NULL;
-    }
-    struct metal_program *program = !scratch ? NULL
-      : given->argumentTable ? metal_begin4(given->commandEncoder, given->argumentTable, given->residencySet, NULL, given->polls)
-      : metal_begin(given->commandBuffer, given->commandEncoder, NULL, given->polls);
-    if (!scratch) result = fail(ncclSystemError, "out of GPU memory");
-    else if (!program) result = fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
-    else {
-      if (!step && !same(send, recv)) result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, send.buffer, send.offset, bytes), "the partials");
-      if (!result) result = gpu(metal_partials(program, step, recv.buffer, recv.offset, scratch, 0, rows, dim), step ? "the rescale" : "the rows' maxima");
-      program_end(program, given->commandEncoder != NULL);
-    }
-    pthread_mutex_unlock(&session_lock);
-    if (!result && !step) {
-      ncclMeshBuffer mine = {scratch, 0}, most = {scratch, rows * sizeof(float)};
-      result = ncclAllReduce(&mine, &most, rows, ncclFloat32, ncclMax, comm, &inner);
-    }
+  if (given && given->fused) return fail(ncclInvalidUsage, "a partials merge is no fused crossing");
+  if (!rows) return ncclSuccess;
+  const size_t n = rows * (2 + dim), bytes = n * sizeof(float);
+  void *scratch = given ? NULL : malloc(bytes);
+  pthread_mutex_lock(&session_lock);
+  if (given && given->workspace) scratch = given->workspace(bytes, given->context);
+  else if (given && comm->merge_bytes < bytes) {
+    void **spent = comm->merge ? realloc(comm->spent, (comm->spents + 1) * sizeof *spent) : comm->spent;
+    void *made = (comm->merge && !spent) ? NULL : metal_scratch(bytes);
+    if (made && comm->merge) { comm->spent = spent; comm->spent[comm->spents++] = comm->merge; }
+    if (made) { comm->merge = made; comm->merge_bytes = bytes; }
   }
-  if (result) return result;
-  ncclMeshBuffer sum = {recv.buffer, recv.offset + rows * sizeof(float)};
-  return root < 0 ? ncclAllReduce(&sum, &sum, sums, ncclFloat32, ncclSum, comm, stream)
-                  : ncclReduce(&sum, &sum, sums, ncclFloat32, ncclSum, root, comm, stream);
+  if (given && !given->workspace && comm->merge_bytes >= bytes) scratch = comm->merge;
+  pthread_mutex_unlock(&session_lock);
+  ncclRedOp_t op;
+  ncclResult_t result = scratch ? ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm) : fail(ncclSystemError, "out of memory");
+  ncclMeshStream inner = given ? *given : (ncclMeshStream){0};
+  inner.issue = NULL;
+  ncclMeshBuffer merged = {scratch, 0};
+  void *x = given ? (void *)&merged : scratch;
+  const struct where at = {scratch, 0};
+  if (!result) {
+    result = layout_on(given, 1, at, given ? where_of(sendbuff) : (struct where){(void *)(uintptr_t)sendbuff, 0}, rows, dim);
+    if (!result) result = root < 0 ? ncclAllReduce(x, x, n, ncclFloat32, op, comm, given ? &inner : NULL)
+                                   : ncclReduce(x, x, n, ncclFloat32, op, root, comm, given ? &inner : NULL);
+    if (!result) result = layout_on(given, 0, given ? where_of(recvbuff) : (struct where){recvbuff, 0}, at, rows, dim);
+    if (!result && given && given->issue) *given->issue = (ncclMeshIssue){0, 1};
+    ncclRedOpDestroy(op, comm);
+  }
+  if (!given) free(scratch);
+  return result;
 }
 ncclResult_t ncclMeshAllReducePartials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, ncclComm_t comm, cudaStream_t stream) {
   return partials(sendbuff, recvbuff, rows, dim, -1, comm, stream);

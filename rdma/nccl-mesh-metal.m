@@ -53,10 +53,10 @@ static NSString *const STEPS =
   "static inline half4 mesh_step_read(constant mesh_args &p, device uchar *slot, ulong k) { "
   "return mesh_payload((volatile coherent(system) device const half4 *)(slot + p.src) + k); }\n";
 
-/* the kernels, after STEPS: each operator's arithmetic is written once (op_int, op_float, op_f8), a landing being the
-   wait and then the combine's body; it is the host's (nccl-mesh.c combine_into, premultiply, truncdiv): the small
-   floating types in float32 rounded to nearest even, float8 decoded and encoded by mesh.metal's f8_to and f8_from,
-   integers wrapping */
+/* the kernels, after STEPS: each operator's arithmetic is written once (op_int, op_float, op_f8, merge_row: the partials
+   merge, a thread a row), a landing being the wait and then the combine's body; it is the host's (nccl-mesh.c
+   combine_into, merge_rows, premultiply, truncdiv, partials_layout): the small floating types in float32 rounded to
+   nearest even, float8 decoded and encoded by mesh.metal's f8_to and f8_from, integers wrapping */
 static NSString *const KERNELS =
   @"\n"
   "#define ENTER(first) if (!mesh_step_enter(p, vb, progress, first)) return;\n"
@@ -137,15 +137,23 @@ static NSString *const KERNELS =
   "COUNTED(4, uint)\n"
   "COUNTED(1, uchar)\n"
   "constant float PARTIAL_NONE = -3.4028234663852886e38f;\n"
-  "HEAD(partials_prepare) { ENTER(i == 0) device float *x = (device float *)(d + p.dst); device const float *m = (device const float *)(s + p.src); "
-  "LOOP x[k] = m[p.n + k] > 0.0f ? m[k] : PARTIAL_NONE; }\n"
-  "HEAD(partials_rescale) { ENTER(i == 0) device float *x = (device float *)(d + p.dst); device const float *e = (device const float *)(s + p.src); "
-  "for (ulong k = i; k < p.n; k += g) { const ulong rows = p.first, row = k < rows ? k : k < 2 * rows ? k - rows : (k - 2 * rows) / p.slot; "
-  "const float mine = e[row], top = e[rows + row], w = mine == PARTIAL_NONE ? 0.0f : exp(mine - top); "
-  "x[k] = k < rows ? top : w > 0.0f ? x[k] * w : 0.0f; } }\n";
+  "static inline void merge_row(device float *x, volatile coherent(system) device const float *y, uint u) { "
+  "const float m = mesh_payload(y), l = mesh_payload(y + 1); const bool mine = x[1] > 0.0f, theirs = l > 0.0f; "
+  "if (mine && !theirs) return; "
+  "if (!mine || !theirs) { for (uint j = 0; j < u; j++) x[j] = theirs ? mesh_payload(y + j) : j ? 0.0f : PARTIAL_NONE; return; } "
+  "const float top = max(x[0], m), a = exp(x[0] - top), b = exp(m - top); x[0] = top; "
+  "for (uint j = 1; j < u; j++) x[j] = (a > 0.0f ? x[j] * a : 0.0f) + (b > 0.0f ? mesh_payload(y + j) * b : 0.0f); }\n"
+  "#define MERGE device float *x = (device float *)(d + p.dst); volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
+  "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
+  "HEAD(combine_merge) { ENTER(i == 0) MERGE } GROUP(land_merge) { ENTER(i == 0) AWAIT MERGE }\n"
+  "#define LAYOUT(name, TO) HEAD(name) { ENTER(i == 0) device float *x = (device float *)(d + p.dst); device const float *e = (device const float *)(s + p.src); "
+  "LOOP { const ulong u = p.slot + 2, r = k / u, j = k % u, at = j == 0 ? r : j == 1 ? p.first + r : 2 * p.first + r * p.slot + j - 2; TO } }\n"
+  "LAYOUT(partials_rows, x[k] = e[p.first + r] > 0.0f ? e[at] : j ? 0.0f : PARTIAL_NONE;)\n"
+  "LAYOUT(partials_columns, x[at] = e[k];)\n";
 
-/* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2 */
-static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2"};
+/* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2, then the
+   partials merge's rows (METAL_MERGE) */
+static const char *const TYPE[METAL_MERGE + 1] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2", "merge"};
 static const char *const MODE[3] = {"plain", "land", "send"};
 
 ARGS(args, uint64_t, uint32_t);
@@ -385,7 +393,7 @@ int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_of
 }
 
 static NSString *typed(const char *what, int type) {
-  return (unsigned)type < 12 && TYPE[type] ? [NSString stringWithFormat:@"%s_%s", what, TYPE[type]] : nil;
+  return (unsigned)type <= METAL_MERGE && TYPE[type] ? [NSString stringWithFormat:@"%s_%s", what, TYPE[type]] : nil;
 }
 
 int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
@@ -483,14 +491,10 @@ int metal_counted(struct metal_program *program, int kind, const struct metal_co
 
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
 
-int metal_partials(struct metal_program *program, int rescale, void *piece, size_t piece_offset, void *scratch, size_t scratch_offset, uint64_t rows,
+int metal_partials(struct metal_program *program, int rows_out, void *dst, size_t dst_offset, void *src, size_t src_offset, uint64_t rows,
                    uint64_t dim) {
-  if (!rescale)
-    return dispatch(program, @"partials_prepare", scratch, piece, NULL, NULL, (struct args){.dst = scratch_offset, .src = piece_offset, .n = rows},
-                    rows);
-  return dispatch(program, @"partials_rescale", piece, scratch, NULL, NULL,
-                  (struct args){.dst = piece_offset, .src = scratch_offset, .n = rows * (2 + dim), .first = rows, .slot = dim ? dim : 1},
-                  rows * (2 + dim));
+  return dispatch(program, rows_out ? @"partials_rows" : @"partials_columns", dst, src, NULL, NULL,
+                  (struct args){.dst = dst_offset, .src = src_offset, .n = rows * (2 + dim), .first = rows, .slot = dim}, rows * (2 + dim));
 }
 
 const char *metal_steps(void) { return STEPS.UTF8String; }

@@ -1060,23 +1060,29 @@ ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, 
    count), and received and arrived host pointers in this process's leases (ncclMemAlloc), which the GPU writes
    (system-coherent, the word last); its waits are the session's in-stream waits on the bridge's completion words
    (rdma/mesh.metal mesh_remote_wait, ended by the canceller), as every Metal-path group's.  A word a call in flight. */
-/* Split-KV attention partials merged by their log-sum-exp [Dao et al. 2023, Flash-Decoding; FlashInfer's state merge]:
-   each member's float32 partials of `rows` rows, [m: rows][l: rows][O: rows x dim] (a row's maximum score, its sum of
-   exponentials and its unnormalized output, metal-microbench decode_attention_partial's piece), merged into recvbuff as
-   the members' together: M = the rows' maximum over the members (over the parts with l > 0), and each member's (l, O)
-   rescaled by e^(m - M) and summed, so recvbuff holds (M, L, O) with O / L the attention over every member's positions
-   (0 where L is 0) and is itself a partial a later merge takes.  The planner's `reduce` form for partials
-   (metal-microbench docs/placement.md Crossings): the maxima by an all-reduce of max into a scratch, the rescale on this
-   rank, then the (l, O) sums by the communicator's all-reduce (ncclMeshAllReducePartials) or reduce to `root`
-   (ncclMeshReducePartials: a member off the root keeps its rescaled partial).  Three groups in sequence on the stream,
-   the last of them the stream's (issued where its issue is set), the first two completed in it: not inside
-   ncclGroupStart/End (ncclInvalidUsage).  Both paths; the Metal path's buffers ncclMeshBuffers, its scratch (2 x rows
-   floats) the stream's workspace, else the communicator's own. */
-ncclResult_t ncclMeshAllReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclMeshReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
                                      size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,
                                      ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+/* The partials merge, a reduction operator made as ncclRedOpCreatePreMulSum makes one (an operator of comm's, freed by
+   ncclRedOpDestroy): split-KV attention partials merged by their log-sum-exp [Dao et al. 2023, Flash-Decoding;
+   FlashInfer's state merge].  Its operand is rows of 2 + `dim` elements of `datatype` (ncclFloat32), a row [m, l, O:
+   dim] (a row's maximum score, its sum of exponentials and its unnormalized output); two rows merge to the greater m,
+   with each one's l and O rescaled by e^(its m - that) and summed, a row whose l is not above 0 counting for none (two
+   such merge to [the least float, 0, 0]), so the result's O / l is the attention over every member's positions and the
+   result is itself a partial a later merge takes.  Every reducing collective takes it, on either path, inside a group
+   or not, each count (a reduce-scatter's, each of ncclMeshReduceScatterV's) whole rows (ncclInvalidArgument else): it
+   runs the communicator's program of that collective (its table's, by the operand's bytes) with a row for an element,
+   one group, each row merged up its tree where a sum adds an element, the wire's positions carrying whole rows
+   (mesh-plan.h mesh_wire_pieces), a row at most a large slot (ncclInvalidUsage else). */
+ncclResult_t ncclMeshRedOpCreatePartials(ncclRedOp_t* op, size_t dim, ncclDataType_t datatype, ncclComm_t comm);
+/* The same merge of the engine's piece as it lays it, each member's float32 [m: rows][l: rows][O: rows x dim]
+   (metal-microbench decode_attention_partial's), until its caller lays rows: the piece laid as rows into a scratch (the
+   Metal path's the stream's workspace, else the communicator's own), merged there by an all-reduce
+   (ncclMeshAllReducePartials) or a reduce to `root` (ncclMeshReducePartials: a member off the root gets its own
+   partial back) with the partials merge, and laid back into recvbuff; the group completed in the stream (an issue's
+   ticket 0), so not inside ncclGroupStart/End (ncclInvalidUsage).  Both paths. */
+ncclResult_t ncclMeshAllReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream);
 
 #ifdef __cplusplus
 } // end extern "C"
