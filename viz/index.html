@@ -154,7 +154,7 @@ function hud(){
   const f=S.fabric||{}, fe=f.estimates||{}, ff=fe.fp32||{}, fm=fe.memory||{}, fwm=fe.workload_memory||{}, fw=f.workload||{}, fd=fw.deadlines||{};
   h+=`<div class="node"><div class="name">ENTIRE MESH / ${f.connected?.length||0} connected / ${f.nodes||0} inventoried</div><table>`;
   if(S.connectionError) h+=`<tr><td class="k">observer</td><td class="v down">${esc(S.connectionError)}</td></tr>`;
-  h+=`<tr><td class="k">nodes</td><td class="v exact">bridges ${(f.active||[]).length}  telemetry ${(f.reachable||[]).length}  stale ${esc((f.stale||[]).join(', ')||'none')}</td></tr>`;
+  h+=`<tr><td class="k">nodes</td><td class="v exact">bridges ${(f.active||[]).length}  telemetry ${(f.reachable||[]).length}  outside the map ${esc((f.unmapped||[]).join(', ')||'none')}</td></tr>`;
   h+=`<tr><td class="k">fabric tx/rx</td><td class="v exact">${rate(f.rates?.tx_gbps)} / ${rate(f.rates?.rx_gbps)} Gbit/s</td></tr>`;
   h+=`<tr><td class="k">phase</td><td class="v exact">free ${fmt(f.phase?.free)}  posted ${fmt(f.phase?.recv)}  forward ${fmt(f.phase?.send)}  app ${fmt(f.phase?.app)}</td></tr>`;
   h+=`<tr><td class="k">FP32 envelope</td><td class="v capacity">${Number.isFinite(ff.upper_gflops)?num(ff.lower_gflops/1000)+'–'+num(ff.upper_gflops/1000)+' TF/s across '+ff.nodes+' nodes':'unavailable'}</td></tr>`;
@@ -166,7 +166,7 @@ function hud(){
     const member=s.membership||{}, present=member.present??s.reachable;
     const tint='#'+new THREE.Color(colorOf(name)).getHexString();
     h+=`<div class="node" style="border-color:${tint}55"><div class="name" style="color:${tint}">${esc(name)}${s.host?.model?' / '+esc(s.host.model):''}</div><table>`;
-    if(!present){ h+=`<tr><td class="k">membership</td><td class="v down">${esc(member.state||'unreachable')}${Number.isFinite(member.age_s)?' / last beacon '+num(member.age_s,1)+'s ago':''}</td></tr>`; }
+    if(!present){ h+=`<tr><td class="k">membership</td><td class="v down">${esc(member.state||'roster')}: this node's bridge holds no record of it</td></tr>`; }
     else{
       h+=`<tr><td class="k">membership</td><td class="v exact">${esc(member.state||'connected')} / ${esc(member.source||'observer')}</td></tr>`;
       if(!s.reachable) h+=`<tr><td class="k">telemetry</td><td class="v down">unavailable: ${esc(s.error||'poll failed')}</td></tr>`;
@@ -251,11 +251,13 @@ function apply(){
   activeLinks=topologyLinks(names).filter(([a,b])=>tracks[a]?.head.visible&&tracks[b]?.head.visible);
   topologyG.setDrawRange(0,activeLinks.length*2);
   for(const st of Object.values(streams)) st.g.setDrawRange(0,0);
+  flowing=false;
   for(const [a,b] of activeLinks) for(const [src,dst] of [[a,b],[b,a]]){
     const key=src+'>'+dst, st=streams[key]??(streams[key]=stream()), hs=S.nodes[src].filter(x=>x.up), current=S.nodes[src].at(-1);
     if(hs.length<2||!current?.reachable||!current?.up) continue;
     const latest=hs.at(-1), d=Math.max(0,(latest.sent||0)-(hs.at(-2).sent||0));
     const util=Math.max(0,Math.min(1,(latest.rates?.tx_fabric_pct||0)/100)), moving=(latest.rates?.tx_bytes_s||0)>0||d>0;
+    flowing=flowing||moving;
     st.m.uniforms.uC.value.setHex(colorOf(src)); st.m.uniforms.uLoad.value=moving?Math.max(.05,Math.sqrt(util)):0;
     st.g.setDrawRange(0,moving?Math.min(PARTICLE_CAP,Math.max(8,Math.round(PARTICLE_CAP*Math.sqrt(util)))):0);
   }
@@ -263,23 +265,22 @@ function apply(){
   wakeRenderer();
 }
 
-let pollTimer=0,renderTimer=0,lastRender=performance.now(),animationDeadline=0;
-const FRAME_PERIOD=50,TWEEN_RATE=7,TWEEN_EPSILON=1e-7;
+let pollTimer=0,frame=0,lastRender=performance.now(),flowing=false;
+const TWEEN_RATE=7,TWEEN_EPSILON=1e-7;
 async function poll(){
   pollTimer=0;
   try{ const r=await fetch('/v1/visualization'); if(!r.ok) throw new Error(`HTTP ${r.status}`); const j=await r.json(); S.nodes=j.nodes; S.inventory=j.inventory||{}; S.fabric=j.fabric||{}; S.period=j.period; S.connectionError=''; apply(); }
   catch(e){ S.connectionError=`telemetry unavailable: ${e?.message||e}`; hud(); wakeRenderer(); }
-  pollTimer=setTimeout(poll,Math.max(document.hidden?10000:1000,Number(S.period||1)*1000));
+  if(!document.hidden) pollTimer=setTimeout(poll,Number(S.period||1)*1000);
 }
 
 function wakeRenderer(){
-  animationDeadline=performance.now()+Math.min(1000,Math.max(250,Number(S.period||1)*500));
-  if(!document.hidden&&!renderTimer) renderTimer=setTimeout(renderFrame,0);
+  if(!document.hidden&&!frame) frame=requestAnimationFrame(renderFrame);
 }
-function renderFrame(){
-  renderTimer=0;
+function renderFrame(now){
+  frame=0;
   if(document.hidden) return;
-  const now=performance.now(),dt=Math.min(.25,Math.max(0,(now-lastRender)/1000)),alpha=1-Math.exp(-TWEEN_RATE*dt);
+  const dt=Math.max(0,(now-lastRender)/1000),alpha=1-Math.exp(-TWEEN_RATE*dt);
   lastRender=now;
   let moving=false;
   for(const t of Object.values(tracks)){
@@ -302,10 +303,10 @@ function renderFrame(){
     st.m.uniforms.uT.value=now*.001;
   }
   R.render(scene,cam);
-  if(moving||now<animationDeadline) renderTimer=setTimeout(renderFrame,FRAME_PERIOD);
+  if(moving||flowing) frame=requestAnimationFrame(renderFrame);
 }
 document.addEventListener('visibilitychange',()=>{
-  if(document.hidden){ clearTimeout(renderTimer); renderTimer=0; }
+  if(document.hidden){ cancelAnimationFrame(frame); frame=0; clearTimeout(pollTimer); pollTimer=0; }
   else{ clearTimeout(pollTimer); lastRender=performance.now(); poll(); wakeRenderer(); }
 });
 poll(); wakeRenderer();

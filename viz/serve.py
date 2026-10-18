@@ -1,184 +1,89 @@
 #!/usr/bin/env mesh-python
-import concurrent.futures, glob, http.client, http.server, json, math, os, shlex, socket, socketserver, subprocess, sys, threading, time
+import concurrent.futures, http.server, json, math, os, socketserver, subprocess, sys, threading, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-OBSERVE = os.path.join(ROOT, "bin", "mesh-observe.py")
-PEERS = os.path.join(ROOT, "bin", "mesh-peers.sh")
+STAT = os.path.join(ROOT, "bin", "mesh-stat")
 PERIOD = float(os.environ.get("MESH_POLL", "2"))
-DISCOVER = float(os.environ.get("MESH_DISCOVER", "15"))
-LEASE = float(os.environ.get("MESH_LEASE", str(max(45, DISCOVER * 3))))
-REMOTE_RETRY = float(os.environ.get("MESH_REMOTE_RETRY", str(DISCOVER)))
 NODE_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 KEEP = int(os.environ.get("MESH_KEEP", "600"))
 ESTIMATE = int(os.environ.get("MESH_ESTIMATE_WINDOW", "60"))
-REMOTE = os.environ.get("MESH_REMOTE_OBSERVE", "/usr/local/bin/mesh-observe")
+ASK = "import sys; sys.path.insert(0, sys.argv[1]); import mesh; code, out = mesh.run(int(sys.argv[2]), \"curl -fsS '\" + sys.argv[3] + \"'\"); sys.stdout.buffer.write(out); raise SystemExit(code)"
 
-def ssh_identities():
-    trusted = set()
-    roster = os.path.join(ROOT, "keys", "authorized_keys")
-    if not os.path.isfile(roster): roster = os.path.join(ROOT, "etc", "authorized_keys")
-    try:
-        trusted.update(line.split()[1] for line in open(roster) if len(line.split()) >= 2 and not line.lstrip().startswith("#"))
-    except Exception as error:
-        print(json.dumps({"event":"ssh_roster_read_error","path":roster,"error":f"{type(error).__name__}: {error}"}), file=sys.stderr, flush=True)
-    configured = [os.path.expanduser(path) for path in os.environ.get("MESH_SSH_IDENTITY", "").split(":") if path]
-    matched = []
-    for path in glob.glob(os.path.expanduser("~/.ssh/*.pub")):
-        try:
-            fields = open(path).read().split()
-            if os.path.isfile(path[:-4]) and len(fields) >= 2 and fields[1] in trusted: matched.append(path[:-4])
-        except Exception as error:
-            print(json.dumps({"event":"ssh_identity_read_error","path":path,"error":f"{type(error).__name__}: {error}"}), file=sys.stderr, flush=True)
-    return list(dict.fromkeys(configured + matched))
-
-SSH_IDENTITIES = [part for path in ssh_identities() for part in ("-i", path)]
 with open(os.path.join(ROOT, "etc", "mesh-capacity.json")) as f: CAPACITY = json.load(f)
 with open(os.environ.get("MESH_NODES", os.path.join(ROOT, "etc", "mesh-nodes.json"))) as f: ROSTER = json.load(f)
 nodes = {name:dict(node) for name, node in ROSTER.get("nodes", {}).items()}
 hist = {name:[] for name in nodes}
 previous = {}
-retry = {}
-connections = {}
 stream_sequences = {}
 http_events = []
 lock = threading.Lock()
 
-def local_name():
-    try: return subprocess.run(["/usr/sbin/scutil", "--get", "LocalHostName"], capture_output=True, text=True, timeout=2).stdout.strip()
-    except Exception: return "self"
+def output(command):
+    return subprocess.run(command, capture_output=True, text=True).stdout.strip()
 
-_self = local_name()
-nodes.setdefault(_self, {}).update({"self":True,"via":"127.0.0.1"})
+_self = output(["/usr/sbin/scutil", "--get", "LocalHostName"]) or "self"
+nodes.setdefault(_self, {}).update({"self":True})
 hist.setdefault(_self, [])
 
-def discover():
-    me = local_name()
-    while True:
-        found = {me:{"self":True,"via":"127.0.0.1","seen":time.time()}}
-        try:
-            text = subprocess.run([PEERS], capture_output=True, text=True, timeout=12).stdout
-            found[me]["discovery_error"] = None
-            for line in text.splitlines():
-                fields = line.split()
-                if len(fields) >= 3 and fields[0] == "node":
-                    found.setdefault(fields[1], {}).update({"self":fields[2] == "self","seen":time.time()})
-                if len(fields) >= 4 and fields[0] == "path":
-                    facts = dict(x.split("=", 1) for x in fields[2:] if "=" in x)
-                    path = {"kind":facts.get("kind"),"addr":facts.get("addr")}
-                    paths = found.setdefault(fields[1], {}).setdefault("paths", [])
-                    if path not in paths: paths.append(path)
-                if len(fields) >= 3 and fields[0] == "info":
-                    facts = {}
-                    for field in fields[2:]:
-                        if "=" in field:
-                            key, value = field.split("=", 1)
-                            if key not in facts: facts[key] = value
-                    found.setdefault(fields[1], {}).update({"via":facts.get("via"),"model":facts.get("model"),"seen":time.time()})
-        except Exception as error:
-            found[me]["discovery_error"] = f"{type(error).__name__}: {error}"
-        with lock:
-            for name, node in found.items():
-                nodes.setdefault(name, {}).update(node)
+def members():
+    """The nodes this node's bridge holds a record of (mesh-stat's `nodes`, design/bridge-and-ipc.md#records): each one's
+    bridge number and its record, this node's own marked; the roster's other nodes stay its inventory."""
+    try: stat = json.loads(output([STAT]).splitlines()[-1])
+    except (OSError, ValueError, IndexError) as error: stat = {"up": False, "error": f"{type(error).__name__}: {error}"}
+    held = {record["name"]: record for record in stat.get("nodes") or [] if record.get("name")}
+    with lock:
+        for name, node in nodes.items():
+            record = held.get(name)
+            node.update({"member": record is not None, "number": (record or {}).get("node"), "record": record})
+        for name, record in held.items():
+            if name not in nodes:
+                nodes[name] = {"member": True, "number": record.get("node"), "record": record}
                 hist.setdefault(name, [])
-        time.sleep(DISCOVER)
+            if record.get("node") == stat.get("node") and name != _self:
+                nodes[name]["self"] = True
+        nodes[_self]["bridge"] = {key: stat.get(key) for key in ("up", "errno", "error", "node") if key in stat}
 
-def hosts(name, node):
-    order = {"fabric-adjacent":0,"fabric-v4ll":1,"fabric-routed":2,"lan":3,"lan-v6":4}
-    paths = sorted(node.get("paths", []), key=lambda x:order.get(x.get("kind"), 9))
-    return list(dict.fromkeys([x.get("addr") for x in paths] + [node.get("via")] + list(node.get("aliases") or ()) + [name]))
-
-def tunnel_hosts(name, node):
-    return list(dict.fromkeys(list(node.get("aliases") or ()) + [name] + hosts(name, node)))
-
-def membership(node, now=None):
-    now = time.time() if now is None else now
-    discovered = float(node.get("seen") or 0)
-    telemetry = float(node.get("telemetry_seen") or 0)
-    seen = max(discovered, telemetry)
-    age = max(0.0, now - seen) if seen else None
-    present = bool(node.get("self")) or age is not None and age <= LEASE
-    state = "local" if node.get("self") else "connected" if present else "stale" if seen else "roster"
-    source = "local" if node.get("self") else "telemetry" if telemetry >= discovered and telemetry else "dnssd-nodeinfo" if discovered else "roster"
-    return {"state":state,"present":present,"source":source,"last_seen":seen or None,"age_s":round(age, 3) if age is not None else None,"lease_s":LEASE}
+def membership(node):
+    state = "local" if node.get("self") else "member" if node.get("member") else "roster"
+    return {"state":state, "present":state != "roster", "source":"bridge records" if node.get("member") else "local" if node.get("self") else "roster"}
 
 def unavailable(name, node, error):
-    model = node.get("model")
+    model = node.get("model") or (node.get("record") or {}).get("model")
     return {"schema":1,"up":False,"reachable":False,"name":name,"host":{"model":model},"capacity":{"kind":"characterized","source":CAPACITY.get("source"),"metrics":CAPACITY.get("models", {}).get(model)},"error":error}
 
-class SSHHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, ssh_host, port, timeout):
-        super().__init__("127.0.0.1", port, timeout=timeout)
-        self.ssh_host = ssh_host
-        self.process = None
+def bridge_rdma():
+    """The directory of this user's running bridge, whose library a request through it loads (as bin/mesh-stat runs the
+    reader beside it), else None."""
+    pid = output(["/usr/bin/pgrep", "-nx", "-U", str(os.getuid()), "mesh-flow"])
+    return os.path.dirname(output(["/bin/ps", "-o", "comm=", "-p", pid])) or None if pid else None
 
-    def connect(self):
-        left, right = socket.socketpair()
-        try:
-            self.process = subprocess.Popen(
-                ["ssh", *SSH_IDENTITIES, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3",
-                 "-o", "ConnectionAttempts=1", "-o", "ServerAliveInterval=5",
-                 "-o", "ServerAliveCountMax=2", self.ssh_host,
-                 "-W", f"127.0.0.1:{self.port}"],
-                stdin=right, stdout=right, stderr=subprocess.DEVNULL,
-            )
-        finally:
-            right.close()
-        left.settimeout(self.timeout)
-        self.sock = left
-
-    def close(self):
-        super().close()
-        process, self.process = self.process, None
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=1)
-            except subprocess.TimeoutExpired as error:
-                print(json.dumps({"event":"ssh_transport_termination_pending","pid":process.pid,"error":f"{type(error).__name__}: {error}"}), file=sys.stderr, flush=True)
-
-def node_sample(name, host, tunneled=False):
-    key = (name, "ssh" if tunneled else "direct", host)
-    connection = connections.get(key)
-    if connection is None:
-        connection = SSHHTTPConnection(host, NODE_PORT, 3) if tunneled else http.client.HTTPConnection(host, NODE_PORT, timeout=3)
-        connections[key] = connection
-    try:
-        sequence = stream_sequences.get(name)
-        path = "/v1/latest?measures=scalars" if sequence is None else f"/v1/history?since={sequence}&measures=scalars"
-        connection.request("GET", path, headers={"Accept":"application/json","Connection":"keep-alive"})
-        response = connection.getresponse()
-        payload = json.loads(response.read())
-        if response.status >= 400: raise RuntimeError(f"HTTP {response.status}")
-        if payload.get("reset"):
-            stream_sequences.pop(name, None)
-            return node_sample(name, host, tunneled)
-        records = payload.get("records") if sequence is not None else [payload.get("record")]
-        records = [record for record in records or [] if record and record.get("sample")]
-        if not records: return []
-        stream_sequences[name] = int(records[-1]["sequence"])
-        return [record["sample"] for record in records]
-    except Exception as error:
-        try:
-            connection.close()
-        except Exception as close_error:
-            connections.pop(key, None)
-            raise RuntimeError(f"{error}; connection close: {type(close_error).__name__}: {close_error}") from error
-        connections.pop(key, None)
-        raise
-
-def legacy_sample(name, node, attempts):
+def telemetry(node, path):
+    """A node's telemetry at `path`: this node's over loopback, another's through its bridge's exec (curl there, at
+    127.0.0.1), a process of its own each time so its library is the running bridge's."""
+    url = f"http://127.0.0.1:{NODE_PORT}{path}"
     if node.get("self"):
-        result = subprocess.run([OBSERVE], capture_output=True, text=True, timeout=7)
-        if result.returncode: raise RuntimeError(result.stderr.strip() or f"exit {result.returncode}")
-        return json.loads(result.stdout.strip().splitlines()[-1]), "127.0.0.1"
-    script = f'for p in {shlex.quote(REMOTE)} /usr/local/mesh/bin/mesh-observe.py ~/mesh/bin/mesh-observe.py ~/mesh/rdma/mesh-stat; do [ -x "$p" ] && exec "$p"; done; exit 127'
-    for host in hosts(name, node):
-        if not host: continue
-        result = subprocess.run(["ssh", *SSH_IDENTITIES, "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ConnectionAttempts=1", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", host, script], capture_output=True, text=True, timeout=7)
-        if result.returncode == 0: return json.loads(result.stdout.strip().splitlines()[-1]), host
-        attempts.append(result.stderr.strip().splitlines()[-1] if result.stderr.strip() else f"{host}: exit {result.returncode}")
-    raise RuntimeError(attempts[-1] if attempts else "node telemetry unavailable")
+        with urllib.request.urlopen(url) as response: return json.load(response), "127.0.0.1"
+    rdma = bridge_rdma()
+    if not rdma: raise RuntimeError("no bridge of this user runs here to ask through")
+    if node.get("number") is None: raise RuntimeError("this node's bridge holds no record of it")
+    result = subprocess.run([sys.executable, "-c", ASK, rdma, str(node["number"]), url], capture_output=True)
+    if result.returncode:
+        said = (result.stderr or result.stdout).decode(errors="replace").strip().splitlines()
+        raise RuntimeError(said[-1] if said else f"exit {result.returncode}")
+    return json.loads(result.stdout), f"bridge node {node['number']}"
+
+def node_sample(name, node):
+    sequence = stream_sequences.get(name)
+    path = "/v1/latest?measures=scalars" if sequence is None else f"/v1/history?since={sequence}&measures=scalars"
+    payload, connected = telemetry(node, path)
+    if payload.get("reset"):
+        stream_sequences.pop(name, None)
+        return node_sample(name, node)
+    records = payload.get("records") if sequence is not None else [payload.get("record")]
+    records = [record for record in records or [] if record and record.get("sample")]
+    if records: stream_sequences[name] = int(records[-1]["sequence"])
+    return [record["sample"] for record in records], connected
 
 def decorate_sample(sample, node, connected):
     sample["reachable"] = True
@@ -192,46 +97,16 @@ def decorate_sample(sample, node, connected):
     return sample
 
 def sample(name, node):
-    attempts = []
-    connected = None
     try:
-        direct_hosts = ["127.0.0.1"] if node.get("self") else hosts(name, node)
-        s = None
-        for host in direct_hosts:
-            if not host: continue
-            try:
-                samples = node_sample(name, host)
-                with lock: prior = hist.get(name, [])[-1] if hist.get(name) else None
-                s = dict(samples[-1] if samples else prior or {})
-                if not s: raise RuntimeError("telemetry ring has no sample")
-                s["_stream_samples"] = samples
-                connected = host
-                break
-            except Exception as error:
-                attempts.append(f"{host}:{NODE_PORT}: {error}")
-        if s is None and not node.get("self"):
-            for host in tunnel_hosts(name, node):
-                if not host: continue
-                try:
-                    samples = node_sample(name, host, True)
-                    with lock: prior = hist.get(name, [])[-1] if hist.get(name) else None
-                    s = dict(samples[-1] if samples else prior or {})
-                    if not s: raise RuntimeError("telemetry ring has no sample")
-                    s["_stream_samples"] = samples
-                    connected = f"ssh:{host}"
-                    break
-                except Exception as error:
-                    attempts.append(f"ssh:{host}->{NODE_PORT}: {error}")
-        if s is None:
-            if not node.get("self") and time.time() < retry.get(name, 0): raise RuntimeError(attempts[-1] if attempts else "telemetry stream awaiting reconnect")
-            s, connected = legacy_sample(name, node, attempts)
+        samples, connected = node_sample(name, node)
+        with lock: prior = hist.get(name, [])[-1] if hist.get(name) else None
+        s = dict(samples[-1] if samples else prior or {})
+        if not s: raise RuntimeError("telemetry ring has no sample")
         decorate_sample(s, node, connected)
-        for streamed in s.get("_stream_samples") or ():
-            decorate_sample(streamed, node, connected)
-        retry.pop(name, None)
+        for streamed in samples: decorate_sample(streamed, node, connected)
+        s["_stream_samples"] = samples
         return s
     except Exception as e:
-        if not node.get("self"): retry[name] = time.time() + REMOTE_RETRY
         return unavailable(name, node, str(e) or type(e).__name__)
 
 def rates(s, old):
@@ -363,7 +238,7 @@ def fabric_snapshot():
     return {
         "observed_at":time.time(), "nodes":len(nodes), "sampled":len(latest),
         "connected":connected, "reachable":reachable, "active":active,
-        "stale":sorted(set(nodes) - set(connected)),
+        "unmapped":sorted(set(nodes) - set(connected)),
         "telemetry_unavailable":sorted(set(connected) - set(reachable)),
         "phase":phase,
         "capacity":capacity_aggregate(capacity),
@@ -400,41 +275,44 @@ def visualization_snapshot():
         out[name] = compact
     return out
 
+def record(name, node, started):
+    result = sample(name, node)
+    batch = result.pop("_stream_samples", None)
+    batch = [result] if batch is None else batch
+    for s in batch:
+        s["t"] = s.get("observed_at", started)
+        s["name"] = name
+        with lock:
+            s["membership"] = membership(nodes.setdefault(name, {}))
+            rates(s, previous.get(name))
+            if s.get("up"): previous[name] = s
+            h = hist.setdefault(name, [])
+            estimate(s, h)
+            if h:
+                workload = h[-1].get("workload", {})
+                h[-1] = {**h[-1], "workload": {**workload, "measures_retention": "latest_sample", "producers": [{**row, "measures": {}} for row in workload.get("producers", [])]}}
+            h.append(s)
+            del h[:-KEEP]
+
 def poll():
-    while True:
-        started = time.time()
-        with lock: current = [(name, dict(node)) for name, node in nodes.items()]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(current))) as pool:
-            futures = {pool.submit(sample, name, node):name for name, node in current}
-            for future in concurrent.futures.as_completed(futures):
-                name = futures[future]
-                result = future.result()
-                batch = result.pop("_stream_samples", None)
-                batch = [result] if batch is None else batch
-                for s in batch:
-                    s["t"] = s.get("observed_at", started)
-                    s["name"] = name
-                    with lock:
-                        node = nodes.setdefault(name, {})
-                        if s.get("reachable"): node["telemetry_seen"] = started
-                        s["membership"] = membership(node, started)
-                        rates(s, previous.get(name))
-                        if s.get("up"): previous[name] = s
-                        h = hist.setdefault(name, [])
-                        estimate(s, h)
-                        if h:
-                            workload = h[-1].get("workload", {})
-                            h[-1] = {**h[-1], "workload": {**workload, "measures_retention": "latest_sample", "producers": [{**row, "measures": {}} for row in workload.get("producers", [])]}}
-                        h.append(s)
-                        del h[:-KEEP]
-        time.sleep(max(0.05, PERIOD - (time.time() - started)))
+    """Every PERIOD: the bridge's records read, and each node's telemetry asked for where no ask of it is under way, so a
+    node that answers slowly delays only its own samples."""
+    asked = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+        while True:
+            started = time.time()
+            members()
+            with lock: current = [(name, dict(node)) for name, node in nodes.items()]
+            for name, node in current:
+                if name not in asked or asked[name].done(): asked[name] = pool.submit(record, name, node, started)
+            time.sleep(max(0.0, PERIOD - (time.time() - started)))
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs): super().__init__(*args, directory=HERE, **kwargs)
     def do_GET(self):
         if self.path.startswith("/data.json") or self.path.startswith("/latest.json") or self.path.startswith("/v1/visualization"):
             with lock:
-                payload = {"period":PERIOD,"discovery":DISCOVER,"lease":LEASE,"inventory":nodes,"fabric":fabric_snapshot(),"service":{"http_events":list(http_events)}}
+                payload = {"period":PERIOD,"inventory":nodes,"fabric":fabric_snapshot(),"service":{"http_events":list(http_events)}}
                 if self.path.startswith("/latest.json"):
                     payload["latest"] = {name: rows[-1] for name, rows in hist.items() if rows}
                 elif self.path.startswith("/v1/visualization"):
@@ -455,11 +333,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             del http_events[:-16]
 
 if __name__ == "__main__":
-    threading.Thread(target=discover, daemon=True).start()
-    time.sleep(0.1)
     threading.Thread(target=poll, daemon=True).start()
     port = int(os.environ.get("MESH_PORT", "8787"))
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler) as server:
-        print(f"mesh observer http://localhost:{port} every {PERIOD:g}s, discovery {DISCOVER:g}s")
+        print(f"mesh observer http://localhost:{port} every {PERIOD:g}s")
         server.serve_forever()

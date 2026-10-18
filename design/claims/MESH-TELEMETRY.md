@@ -8,13 +8,15 @@ Implementation surfaces:
 
 - `user/mesh-telemetry.py` owns each node's in-memory telemetry stream, a workload producer's rows kept until its
   process exits.
-- `viz/serve.py` owns discovery, membership, live whole-fabric aggregation, and the
-  page-table visualization feed.
+- `viz/serve.py` owns membership (the nodes its bridge holds a record of, the roster's others its inventory), live
+  whole-fabric aggregation, and the page-table visualization feed; another node's telemetry is read through its
+  bridge's exec.
 - `rdma/workload.py` owns workload-independent operation envelopes and measures.
 - `xonotic/solver/strat/strat_responder.py` owns distributed Gram placement and counterfactual measures.
 
 The claims are substantiated only when active aggregates have the same support as the
-reachable lease, stale capacity is reported only as inventory, missing objective
+nodes in the bridge's records whose telemetry answered, the capacity of nodes outside the map is reported only as
+inventory, missing objective
 coordinates retain their own support measures, and both forward and optimization work
 are observed on distinct mesh hosts.
 

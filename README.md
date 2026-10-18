@@ -105,38 +105,27 @@ was actually asked for. Each of these is open to revisiting:
 - **The provisioning source is a public repo**, so a node reaches a consistent
   definition with no credentials.
 
-> `nc -w` does not bound the connect on macOS. Probing an unreachable node with
-> `nc -w 2` blocks for **75 seconds**; `nc -G 2 -w 2` returns immediately. Anything
-> that enumerates the fabric must use `-G`, or one dead node stalls the whole report
-> and the cost grows with the fleet.
-
 ## Traversal is a stream, and nodes patch themselves
 
-`mesh-peers` emits facts as it learns them and never waits to prove a negative:
+`mesh-peers` emits facts as they arrive and never waits to prove a negative; it runs until it is stopped:
 
 ```
-node <name> self|peer               every node advertising _meshnode._tcp (Bonjour), at the browse's end
+node <name> self|peer               each node this node's bridge holds a record of (its map), at once; then each node
+                                    that announces _meshnode._tcp (Bonjour) on the shared LAN, as it announces
+info <name> via=bridge node=... model=... memory=... window=...   its bridge's record of the node
+info <name> via=mdns model=... rdma=...                           the node's announcement, as it is resolved
 path <name> kind=<kind> addr=<a>    each address the node advertises: lan, lan-v6, fabric-adjacent (a link-local
                                     on one of this node's RDMA ports), fabric-routed (its fd6d:6573:68:: identity),
                                     fabric-v4ll
-info <name> via=<a> name=... ...    its record from io.mesh.nodeinfo (port 8099, else the user shim's 8100),
-                                    in arrival order; partial where the record came short
+gone <name>                         an announcement withdrawn
 ```
 
-Discovery is the shared LAN's mDNS (git 1587656: control traffic needs no fabric, and discovery that waited on
-fabric convergence was a regression), so it is not limited to one cable hop; a node on no shared LAN is found only
-over its own cables. A node's record is read along its cable first (fabric-adjacent, then its fabric-routed ULA) and
-over a LAN only where no fabric path names it: a node cabled to this one is never reached over Wi-Fi (the operator,
-2026-10-16). The `info` lines are best-effort enrichment that streams in unordered. A node that never
-answers simply has no `info` line; its absence is the signal, and observing it costs nothing.
-
-`MESH_DEADLINE` (default 3 s) is the browse's horizon and `MESH_PROBE_DEADLINE` (default 4 s) bounds each record's
-connect; neither is a per-node timeout. It does not grow
-with the fleet: a hundred nodes still finish in one deadline, and one dead node slows
-nothing. The consumer reads a stream and deals with out-of-order arrival. There is no
-mode that buffers into an aligned table, because aligning columns means waiting for
-the slowest row, which means one unreachable node delays the report on every
-reachable one.
+The fabric's nodes are the bridge's map, so a node cabled to this one is known along its cable and never asked over
+Wi-Fi (the operator, 2026-10-16); its facts are node-info's, which a client reads through its own bridge
+(`mesh.ask(node, 'nodeinfo', b'')`, rdma/mesh.py). Discovery on the shared LAN is its mDNS (git 1587656: control
+traffic needs no fabric), so it is not limited to one cable hop; a node on no shared LAN is found only over its own
+cables. Every line arrives when its event does: a slow node delays only its own lines, and a node that is not there
+is simply absent. The consumer reads a stream and deals with out-of-order arrival.
 
 `mesh-run` follows the same shape: every node runs in parallel and each output line is
 prefixed with its node, streaming as it arrives.
@@ -169,7 +158,7 @@ It installs a node-identity responder as a **user LaunchAgent** on port 8100 and
 
 Port 8100 rather than 8099 because the system `io.mesh.nodeinfo` holds 8099 in the
 root domain; a node with no root install is identified by its userspace responder alone.
-`mesh-peers` probes both.
+The bridge's `nodeinfo` service and `mesh-run` ask both.
 
 `inetdCompatibility` does **not** work in the GUI/user domain — launchd accepts the
 connection, closes it, and never runs the program (`runs = 0`), while the socket looks
@@ -178,7 +167,9 @@ perfectly healthy. Hence a plain listener under `KeepAlive` instead.
 ### Reaching a node does not require routing
 
 `mesh-run` takes its targets from the routing table (each `fd6d:6573:68::` identity babeld learned) and from `ndp`'s
-neighbours on each fabric port, and probes each for its record.
+neighbours on each fabric port, and asks each for its record, for as long as it takes to answer; an address that gives
+none is named on standard error and the command is not run there. Its ssh is the one job ssh keeps: administering the
+substrate (metal-microbench docs/principles.md section 4); a node asks its own bridge for everything else.
 
 Adjacency is knowable from the kernel with no protocol involved, so a node is findable
 over a cable even if it never advertises a routable address. Relaying is independent of
@@ -270,7 +261,7 @@ position does not matter and nothing records it. Then verify, from either end:
 
 ```
 mesh-status                     # rdma_enX PORT_ACTIVE, io.mesh.* all loaded
-mesh-peers                      # the new node appears, with a name and a VIA
+mesh-peers                      # the new node appears: in its bridge's map, and its announcement
 mesh-run all 'sysctl -n hw.model'
 ```
 
@@ -281,7 +272,7 @@ What each step proves, in order, so a failure tells you where to look:
 | `rdma_ctl status` = enabled | the Recovery visit happened | needs a physical 1TR visit; nothing remote fixes it |
 | some `rdma_enX` is `PORT_ACTIVE` | a cable is in, both ends RDMA-enabled | cable, or the far end never had `rdma_ctl enable` |
 | `ifconfig <port>` has an `fe80::` address | `mesh-fabric-init` ran | check `/usr/local/mesh/log/fabric.log` |
-| the peer appears in `mesh-peers` | babeld exchanged routes | check `/usr/local/mesh/log/router.log`; confirm both nodes advertise |
+| the peer appears in `mesh-peers` | its bridge's record reached this one, or its beacon announced it | check `~/Library/Logs/io.mesh.bridge.log`, `/usr/local/mesh/log/router.log`; confirm both nodes advertise |
 | `mesh-run <name> true` succeeds | the roster reached the node | re-run `install.sh`; keys merge, they never truncate |
 
 A node that answers `mesh-peers` and `mesh-run` is administrable and workloadable.
@@ -290,7 +281,7 @@ Nothing else is required of it.
 ## Is anything missing?
 
 ```
-mesh-peers        # every node announcing on the fabric right now
+mesh-peers        # every node in the bridge's map, then every node announcing, as it announces
 mesh-status       # this node's power, lifelines, RDMA, daemons, and peers
 ```
 
@@ -386,7 +377,7 @@ the node's uplink.
 | `AGENTS.md` | **the contract.** Accessibility is required; rejection filtering is banned. Read before changing anything. |
 | `THREAT-MODEL.md` | why several settings here look wrong under a normal hardening model. |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
-| `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
+| `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, logs health warnings; loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
@@ -449,8 +440,8 @@ So every node takes a routable identity address and the fabric is routed:
   next-hops. It is designed for topologies that churn, reconverges on replug with no
   per-node configuration, and uses every link rather than blocking one the way a
   spanning tree would — which is the whole reason to cable a ring.
-- **Enumeration**: `mesh-peers` browses the shared LAN (above), and each node's record lists its routes, so the
-  fabric's graph is reconstructed from what every node reports; `mesh-run` reaches a node over the LAN or its
+- **Enumeration**: the bridges' map names every node on the fabric, `mesh-peers` adds the shared LAN's (above), and
+  each node's record lists its routes; `mesh-run` reaches a node over the LAN or its
   routed identity address, at any hop count.
 
 babeld is vendored as a prebuilt arm64 binary — see [vendor/PROVENANCE.md](vendor/PROVENANCE.md)
@@ -469,13 +460,14 @@ cables directly, point to point.
 ```
 node <self> self
 node <peer> peer
+info <peer> via=bridge node=<n> model=Mac16,11 memory=... window=...
 path <peer> kind=lan addr=<a>
 path <peer> kind=fabric-adjacent addr=fe80::<b>%<port>
 path <self> kind=fabric-routed addr=fd6d:6573:68:<c>
-info <peer> via=<a> name=<peer> node_id=... boot_id=... ula=fd6d:6573:68:<d>
 ```
 
-That comes from `io.mesh.nodeinfo`, a Python service on port 8099 (8100 for the user
+A node's own facts (`name=<peer> node_id=... boot_id=... ula=fd6d:6573:68:<d>` and the rest below) come from
+`io.mesh.nodeinfo`, read through the asking node's bridge (its `nodeinfo` service), a Python service on port 8099 (8100 for the user
 service). One sampler runs `mesh-nodeinfo.sh`, at its start and again after each request it has not yet sampled for,
 never two at once, as the admin user (the system responder on 8099 is that user's, launchd `UserName`), so no root process runs the user's
 checkouts or bridge reader. Every value is one token (a space in it is written `_`: `chip=Apple_M4_Pro`), so a reader
@@ -510,8 +502,8 @@ mesh-run <name>   'ls /usr/local/mesh'
 ```
 
 Job submission needs no new machinery. Every node already runs sshd and trusts the
-operator roster; the only missing piece was knowing which nodes exist, which `mesh-peers` (the LAN) and `mesh-run`
-(the routing table and the neighbour cache) answer.
+operator roster; the only missing piece was knowing which nodes exist, which the bridge's map, `mesh-peers` (the LAN)
+and `mesh-run` (the routing table and the neighbour cache) answer.
 
 > If you write a plist to `/Library/LaunchDaemons` with `inetdCompatibility`, do not
 > also set `StandardOutPath`. It overrides the socket launchd dups onto stdout, and
@@ -534,11 +526,10 @@ branch it converged from and when:
 
 ```
 mesh-status         branch main converged 2026-08-28T00:56:27Z
-mesh-peers          BRANCH / CONVERGED columns across the whole fabric
+node-info           branch=main converged=2026-08-28T00:56:27Z, every node's through its bridge
 ```
 
-A node that has not converged recently is the thing worth noticing, and now you can
-see it from any machine.
+A node that has not converged since a push is the thing worth noticing, and you can see it from any machine.
 
 ## Convergence
 

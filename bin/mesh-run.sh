@@ -1,7 +1,6 @@
 #!/bin/bash
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 PREFIX=fd6d:6573:68
-D=${MESH_DEADLINE:-2}
 SSHID=()
 MESHROOT=$(cd "$(dirname "$0")/.." && pwd)
 KEYROSTER="$MESHROOT/keys/authorized_keys"
@@ -16,9 +15,9 @@ done
 [ "$#" -ge 2 ] || { echo "usage: mesh-run [<name>|all|others] <command...>" >&2; exit 1; }
 target=$1; shift
 probe(){ t=$(mktemp "$T/.probe.XXXXXX")
-  { printf x | nc -G "$D" -w "$D" "$1" 8099 2>/dev/null | tr '
+  { printf x | nc "$1" 8099 2>/dev/null | tr '
 ' ' ' > "$t.a"; } &
-  { printf x | nc -G "$D" -w "$D" "$1" 8100 2>/dev/null | tr '
+  { printf x | nc "$1" 8100 2>/dev/null | tr '
 ' ' ' > "$t.b"; } &
   wait
   i=$(cat "$t.a" 2>/dev/null); [ -n "$i" ] || i=$(cat "$t.b" 2>/dev/null)
@@ -40,7 +39,8 @@ IFS='
 for a in $cand; do
   [ -n "$a" ] || continue
   k=$((k+1))
-  { i=$(probe "$a"); [ -n "$i" ] && printf '%s\t%s\t%s\t%s\n' "$(f ula "$i")" "$(f name "$i")" "$(f account "$i")" "$a" > "$T/$k"; } &
+  { i=$(probe "$a"); if [ -n "$i" ]; then printf '%s\t%s\t%s\t%s\n' "$(f ula "$i")" "$(f name "$i")" "$(f account "$i")" "$a" > "$T/$k"
+    else printf '%s no node record (nothing answered on 8099 or 8100): not run there\n' "$a" >&2; fi; } &
 done
 wait
 for row in $(cat "$T"/* 2>/dev/null | sort -u -k1,1); do
@@ -52,7 +52,7 @@ for row in $(cat "$T"/* 2>/dev/null | sort -u -k1,1); do
   esac
   tag=${name:-$addr}
   if [ "$ula" = "$self" ]; then bash -c "$*" 2>&1 | sed "s|^|$tag |" &
-  else ssh "${SSHID[@]}" -o BatchMode=yes -o ConnectTimeout="$D" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  else ssh "${SSHID[@]}" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
          "${MESH_SSH_USER:-${account:-$(id -un)}}@$addr" "$@" 2>&1 | sed "s|^|$tag |" & fi
 done
 wait

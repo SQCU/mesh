@@ -1,12 +1,12 @@
 #!/bin/bash
-HERE="$(cd "$(dirname "$0")" && pwd)"
+s=$0; [ -L "$s" ] && s=$(readlink "$s"); HERE="$(cd "$(dirname "$s")" && pwd)"
 b(){ printf '\n\033[1m%s\033[0m\n' "$*"; }
 b "NODE"; printf "  branch %s converged %s\n" "$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null || echo unknown)" "$(awk '{print $2}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"; echo "  $(scutil --get ComputerName) / $(scutil --get LocalHostName).local  up $(uptime | sed 's/.*up //;s/,.*users.*//')"
 b "POWER"; pmset -g custom | awk '/^ (sleep|displaysleep|disksleep|standby|autorestart|womp|powermode)/{printf "  %-22s %s\n",$1,$2}'
 b "ASSERTIONS"; pmset -g assertions | awk '/UserIsActive|PreventUserIdleDisplaySleep|PreventUserIdleSystemSleep|PreventSystemSleep/ && NF==2 {printf "  %-30s %s\n",$1,$2}'
 b "HEALTH"; [ -f /var/run/mesh-health ] && sed -e 's/^warn=/WARN /' -e 's/^/  /' /var/run/mesh-health || echo "  no report: /var/run/mesh-health is written by the keeper (mesh-health.sh)"
 b "REMOTE"; for p in 22:ssh 5900:screensharing; do
-  nc -z -G 2 127.0.0.1 "${p%%:*}" >/dev/null 2>&1 && echo "  ${p##*:} (${p%%:*}): OPEN" || echo "  ${p##*:} (${p%%:*}): CLOSED"
+  nc -z 127.0.0.1 "${p%%:*}" >/dev/null 2>&1 && echo "  ${p##*:} (${p%%:*}): OPEN" || echo "  ${p##*:} (${p%%:*}): CLOSED"
 done
 b "NETWORK"; for i in en0 en1 bridge0; do echo "  $i: $(ipconfig getifaddr $i 2>/dev/null || echo '<none>')"; done
 b "LINKS"
@@ -39,5 +39,10 @@ b "DAEMONS"; for spec in io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh
   [ "$kind" = resident ] && [ -z "$pid" ] && { printf '  %-22s %-9s \033[31mDOWN\033[0m\n' "$L" "$kind"; continue; }
   printf '  %-22s %-9s %s\n' "$L" "$kind" "${pid:+pid $pid}"
 done
-b "FABRIC PEERS"; MESH_DEADLINE=3 "$HERE/mesh-peers.sh" 2>/dev/null | sed '/^$/d'
+b "FABRIC PEERS"; st=$("$HERE/mesh-stat" 2>/dev/null | tail -1); own=$(printf '%s' "$st" | plutil -extract node raw -o - - 2>/dev/null); i=0
+while name=$(printf '%s' "$st" | plutil -extract "nodes.$i.name" raw -o - - 2>/dev/null); do
+  n=$(printf '%s' "$st" | plutil -extract "nodes.$i.node" raw -o - - 2>/dev/null); i=$((i+1))
+  printf '  %-24s node %-10s %s%s\n' "$name" "$n" "$(printf '%s' "$st" | plutil -extract "nodes.$((i-1)).model" raw -o - - 2>/dev/null)" "$([ "$n" = "$own" ] && echo '  (this node)')"
+done
+[ "$i" -gt 0 ] || echo "  this node's bridge holds no record (mesh-stat errno $(printf '%s' "$st" | plutil -extract errno raw -o - - 2>/dev/null || echo unread))"
 echo
