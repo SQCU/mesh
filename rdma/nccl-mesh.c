@@ -1298,11 +1298,21 @@ static void violated(struct session *s) {
 
 /* the session's landings read where a call asks for its state (a group's opening, ncclCommGetAsyncError): each
    channel's from the last seen up to its target, a word that reads ~0 (its bridge cancelled it: the link or the peer's
-   program lost, design/bridge-and-ipc.md#control) kept as the session's failure, with what the walk recorded
-   (violated); nothing waits here (a GPU wait on a cancelled word ends there and halts its program, nccl-mesh-metal.m
-   mesh_step_check) */
+   program lost, design/bridge-and-ipc.md#programs) kept as the session's failure, with what the walk recorded
+   (violated), and, with no position outstanding, a destination whose status its bridge stopped (the peer's program
+   ended in order, or failed: design/bridge-and-ipc.md#leases); nothing waits here (a GPU wait on a cancelled word ends
+   there and halts its program, nccl-mesh-metal.m mesh_step_check) */
 static void session_watch(struct session *s) {
   violated(s);
+  if (!atomic_load(&s->failed) && !outstanding(s)) {
+    const struct mesh_client *client = mesh_client_at(s->header, s->context.client);
+    for (uint32_t d = 0; d < MESH_DESTINATIONS && client->tx[d].node; d++)
+      if (atomic_load(&client->status[d].phase) == MESH_STOPPED) {
+        release_all(s, ncclRemoteError, "node %u's program of %s ended or failed (code %lld at node %u): the session opens again at the next group",
+                    client->tx[d].node, s->comm->name, (long long)atomic_load(&client->status[d].code), atomic_load(&client->status[d].failed));
+        break;
+      }
+  }
   for (uint32_t h = 0; h < s->count && !atomic_load(&s->failed); h++) {
     struct channel *ch = s->channels + h;
     uint64_t at = ch->signaled;
@@ -1369,7 +1379,7 @@ static void session_close(struct session *s, int orderly) {
 /* the session's program's slot retired as an abort (mesh-dataflow.c mesh_retire, once whoever calls it): its start's
    wait ends (mesh-call.c mesh_transfers_start: ECANCELED), and its bridge fails its flows (FAIL to its peers) and
    cancels its words past their landed counts */
-static void session_retire(struct session *s) { mesh_retire(s->header, s->context.client); }
+static void session_retire(struct session *s) { mesh_retire(s->header, s->context.client); mesh_transfers_interrupt(&s->context); }
 
 /* the process's exit: every session closed in order (its GPU work finished, then its bridge posts what it released) */
 static void session_exit(void) {
@@ -1664,7 +1674,6 @@ static ncclResult_t session_open(ncclComm_t comm) {
       if (!status) status = ring_bind(s, ch->node, !large, 1, IDENTITY + 2 * r + large, ch->in, ch->pitch);
     }
   if (!status) status = mesh_transfers_prepare(&s->context, 1, POSITIONS, DEPTH);
-  if (!status) status = mesh_transfers_digest(&s->context, comm->digest);
   if (!status) status = mesh_transfers_cyclic(&s->context);
   if (!status) status = mesh_metal_transport_create(&s->context, metal_device(), &s->transport);
   for (uint32_t h = 0; h < s->count && !status; h++) status = channel_metal(s, s->channels + h);
@@ -1688,7 +1697,10 @@ static ncclResult_t session_open(ncclComm_t comm) {
   if (before) { session_close(s, 0); return revoked_fail(comm); }
   pthread_mutex_unlock(&session_lock);
   const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  if ((status = mesh_transfers_start(&s->context))) result = start_failure(s, status);
+  if ((status = mesh_transfers_agree(&s->context, comm->members, N, me)))
+    result = fail(status == ECANCELED || status == ECONNRESET ? ncclRemoteError : ncclSystemError,
+                  "the members of %s did not agree on their leases at node %u's bridge: %s", comm->name, comm->members[0], strerror(status));
+  else if ((status = mesh_transfers_start(&s->context))) result = start_failure(s, status);
   if (!result) result = session_agree(s, serial);
   atomic_fetch_add(&session_waits, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began);
   pthread_mutex_lock(&session_lock);
@@ -2164,14 +2176,12 @@ static ncclResult_t session_schedule(struct session *s, struct call *list, size_
   return ncclSuccess;
 }
 
-/* the group on the host, the bridge's progress threads woken (mesh-call.h mesh_transfers_wake: they park after a while
-   of nothing); its positions then count as landed */
+/* the group on the host; its positions then count as landed */
 static ncclResult_t session_run(struct session *s, struct call *list, size_t n) {
   struct schedule *plans;
   ncclResult_t result = session_schedule(s, list, n, &plans);
   if (result) return result;
   session_targets(s);
-  mesh_transfers_wake(&s->context);
   result = run(s, plans);
   schedules_free(s, plans);
   if (result) { session_close(s, 0); return result; }
@@ -3236,7 +3246,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
         scheduled = 1;
         result = order_group(comm, g);
         session_targets(s);
-        mesh_transfers_wake(&s->context);
         if (list[0].fused) {
           const int what = list[0].what, rooted = comm->rank == list[0].root;
           fusing = (typeof(fusing)){list[0].fused, list, 0, 0, what == MESH_ALLREDUCE || (what == MESH_BROADCAST) == rooted,
@@ -3280,7 +3289,6 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
       : metal_begin(stream->commandBuffer, stream->commandEncoder, inflight->session->violation_buffer);
     if (!program) result = fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
     else {
-      mesh_transfers_wake(&inflight->session->context);
       result = walk(program, NULL, through, &any);
       if (!result) result = retire(program);
       program_end(program, stream->commandEncoder != NULL);

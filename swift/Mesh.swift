@@ -355,11 +355,9 @@ public struct MeshInvocation {
 
     // design/algorithm-sources.md#program
     // design/prepared-machine.md#M41
-    // design/bridge-and-ipc.md#progress: the ports' progress threads woken as the generation is about to publish
     @inlinable @discardableResult
     public func submit() -> UInt32 {
-        owner.wake()
-        return mesh_submit(publication)
+        mesh_submit(publication)
     }
 
     // design/algorithm-sources.md#meshresult
@@ -387,7 +385,6 @@ public final class Mesh {
     private var finalizations: [() throws -> Void] = []
     private var routes: [Placement.Edge: [Int]]
     private var forests: [[Int]: MeshForest] = [:]
-    private var digest: UInt64 = 0xcbf29ce484222325
 
     // design/algorithm-sources.md#program
     // `region`: the execution's name, the same on every member (its programs pair with theirs on the node's bridge);
@@ -686,8 +683,7 @@ public final class Mesh {
 
     // design/algorithm-sources.md#collective-movement: the members' trees, mesh_trees_shortest over the bridges' map of
     // them (mesh_map: two members linked where their route crosses no other member), libnccl-mesh's own rule for a
-    // communicator given no paths (nccl.h ncclMeshCommInitRank); read once a member set and folded into the digest
-    // start() names, so members that read other maps fail as values (ESTALE) rather than pair other transfers
+    // communicator given no paths (nccl.h ncclMeshCommInitRank); read once a member set
     private func forest(of members: [Int]) throws -> MeshForest {
         if let made = forests[members] { return made }
         let n = members.count, forest = MeshForest(), bridges = members.map { UInt32(nodes[$0]) }
@@ -695,9 +691,6 @@ public final class Mesh {
         let count = try Mesh.withMap(bridges) { map, _, _ in mesh_trees_shortest(map, root, parent, weight) }
         if count == 0 { throw POSIXError(.EHOSTUNREACH) }
         forest.trees = mesh_trees(nodes: UInt32(n), count: count, root: root, parent: parent, log_weight: weight)
-        for word in bridges.map(UInt64.init) + (0..<n).map({ UInt64(root[$0]) }) + (0..<n * n).map({ UInt64(parent[$0]) }) {
-            digest = (digest ^ word) &* 0x100000001b3
-        }
         forests[members] = forest
         return forest
     }
@@ -719,10 +712,10 @@ public final class Mesh {
             try check(mesh_transfers_prepare(memory.constants, 1, 1, 1))
             try check(mesh_host_inputs(memory.constants))
         }
-        if !forests.isEmpty {
-            if bound.program { try check(mesh_transfers_digest(memory.context, digest)) }
-            if bound.constants { try check(mesh_transfers_digest(memory.constants, digest)) }
-        }
+        // design/bridge-and-ipc.md#leases: the members' agreement on each program's leases and relays
+        let members = nodes.map(UInt32.init)
+        if bound.program { try check(members.withUnsafeBufferPointer { mesh_transfers_agree(memory.context, $0.baseAddress, UInt32(size), UInt32(rank)) }) }
+        if bound.constants { try check(members.withUnsafeBufferPointer { mesh_transfers_agree(memory.constants, $0.baseAddress, UInt32(size), UInt32(rank)) }) }
         for prepare in preparations { try prepare() }
         preparations.removeAll()
         deliveries.removeAll()
@@ -743,11 +736,6 @@ public final class Mesh {
         var instance: OpaquePointer?
         let publication = mesh_submission_at(calls, UInt32(slot), &instance)!
         return MeshInvocation(self, publication, instance!)
-    }
-
-    // design/bridge-and-ipc.md#progress
-    @usableFromInline func wake() {
-        if bound.program { mesh_transfers_wake(memory.context) }
     }
 
     // design/algorithm-sources.md#meshresult

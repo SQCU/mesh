@@ -192,17 +192,8 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
   munmap(m,length);return result;
 }
 
-/* design/bridge-and-ipc.md#region: the flows that carry a program and the awaiting programs the bridge holds */
-int mesh_busy(uint64_t *busy){
-  struct hdr *m;size_t length;
-  int error=mesh_open(0,&m,&length,NULL);
-  if(error)return -error;
-  *busy=atomic_load_explicit(&m->busy,memory_order_acquire);
-  munmap(m,length);return 0;
-}
-
 /* design/bridge-and-ipc.md#region: the bridge's start (its notify name watched before the region is read, so a start
-   between the two is not missed) and its exit */
+   between the two is not missed) */
 int mesh_bridge_wait(void){
   char name[96];
 #ifdef MESH_LOOP_FABRIC
@@ -222,22 +213,6 @@ int mesh_bridge_wait(void){
   notify_cancel(token);
   return error;
 }
-int mesh_exit_wait(void){
-  struct hdr *m;size_t length;
-  const int error=mesh_open(0,&m,&length,NULL);
-  if(error)return error==ESRCH || error==ENOENT?0:error;
-  const pid_t pid=(pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire);
-  munmap(m,length);
-  const int queue=kqueue();
-  if(queue<0)return errno;
-  struct kevent64_s watch;EV_SET64(&watch,(uint64_t)pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
-  int result=0;
-  if(kevent64(queue,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))result=errno==ESRCH?0:errno;
-  else for(struct kevent64_s exited;kevent64(queue,NULL,0,&exited,1,0,NULL)<1 && errno==EINTR;){}
-  close(queue);
-  return result;
-}
-
 /* design/bridge-and-ipc.md#region */
 int mesh_window(uint64_t *bytes,uint64_t *unleased){
   struct hdr *m;size_t length;
@@ -276,10 +251,10 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   }
 }
 
-/* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records: the cables between them, the ports each
-   end's record holds paired with the other (the fewer of the two ends' counts), and *slowest the least bandwidth any
-   of those ports at either end reports (0: none reports one): the bridge stripes a program between the two over every
-   cable, a routed one too (mesh-flow.c route_stripes), so they carry it at their count times the slowest */
+/* design/bridge-and-ipc.md#ports: the one join of two nodes' records: the cables between them, the ports each end's
+   record holds paired with the other (the fewer of the two ends' counts), and *slowest the least bandwidth any of those
+   ports at either end reports (0: none reports one); the bridges carry the two's programs over one of them (mesh-flow.c
+   cable_to), so the map joins them by one link at the slowest's bandwidth */
 static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *slowest){
   uint32_t cables=0;
   for(uint32_t i=0;i<record->ports && i<MESH_PORTS;i++)
@@ -305,8 +280,8 @@ int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
   return (int)cables;
 }
 
-/* The records' whole map, its nodes ascending (the records sorted by node), a link a cable where two join, each at the
-   join's bandwidth, and its routing table (mesh-collective.c mesh_routes, each node marked by its bridge's number, so
+/* The records' whole map, its nodes ascending (the records sorted by node), a link where two join, at the join's
+   bandwidth, and its routing table (mesh-collective.c mesh_routes, each node marked by its bridge's number, so
    every bridge and member that holds the same records makes the same routes) */
 struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
@@ -326,9 +301,7 @@ static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w
   for(uint32_t a=0;a<n;a++){
     w->mark[a]=r[a].node;
     for(uint32_t b=a+1;b<n;b++)
-      for(uint32_t k=0,joined=mesh_join(r+a,r+b,&bandwidth);k<joined;k++){
-        w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=bandwidth;links++;
-      }
+      if(mesh_join(r+a,r+b,&bandwidth)){w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=bandwidth;links++;}
   }
   w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.bandwidth=w->bandwidth,.relays=0,.next=NULL,.mark=w->mark};
   const int error=n?mesh_routes(&w->map,w->next):0;
@@ -443,12 +416,11 @@ uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path){
   return hops;
 }
 
-/* design/algorithm-sources.md#programtensor */
-/* design/bridge-and-ipc.md#clients, #control: a client's slot given up, its program stopped, its rows closed for the
-   bridge to release once its programs left the ports: by an abort (mesh_retire: a revoke, or the bridge where its
-   process is gone), the slot vacant at once and its flows failed (FAIL), or in order (mesh_detach), the slot left
-   MESH_ORDERLY for the bridge, which posts every cell its program released, takes those SENDs' completions, releases
-   its flows and vacates it */
+/* design/algorithm-sources.md#programtensor; design/bridge-and-ipc.md#clients, #programs: a client's slot given up, its
+   program stopped, its rows closed for the bridge to release once no program holds a lease over them: by an abort
+   (mesh_retire: a revoke, or the bridge where its process is gone), the slot vacant at once and its program failed (its
+   leases made again, its peers told), or in order (mesh_detach), the slot left MESH_ORDERLY for the bridge, which posts
+   every cell its program released, takes those SENDs' completions, lets go of its leases and vacates it */
 static void mesh_retire_as(struct hdr *m,uint64_t client,int orderly){
   struct mesh_client *slot=mesh_client_at(m,client);
   if(!client || (client&(MESH_RETIRING|MESH_ORDERLY)) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
@@ -460,13 +432,6 @@ static void mesh_retire_as(struct hdr *m,uint64_t client,int orderly){
       if(buffer->pages)atomic_store_explicit(&buffer->closed,1,memory_order_release);
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
-  }
-  /* design/bridge-dataflow.md#stripes: its request rings deregistered (the bridge takes none of them past here) */
-  _Atomic uint64_t *rings=mesh_rings(m);
-  for(uint32_t r=0;r<MESH_RINGS;r++){
-    uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
-    if(at && at>=m->data_off && at<=m->length-sizeof(struct mesh_requests) && ((const struct mesh_requests *)((char *)m+at))->owner==client)
-      atomic_compare_exchange_strong(rings+r,&at,0);
   }
   atomic_store_explicit(&slot->owner,orderly?client|MESH_RETIRING|MESH_ORDERLY:0,memory_order_release);
   /* a start waiting on its destinations' status (mesh-call.c mesh_transfers_start) reads the slot gone at once: a
@@ -494,7 +459,7 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
     atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);
     slot->targets=0;slot->target_count=0;
     memset(slot->tx,0,sizeof slot->tx);memset(slot->status,0,sizeof slot->status);
-    *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
+    *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd,.agreeing=-1};
     return 0;
   }
   return EBUSY;
@@ -505,14 +470,14 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   struct hdr *m;size_t length;int file;
   int error=mesh_open(1,&m,&length,&file);
   if(error)return error;
-  *c=(struct mesh_ctx){.len=length,.fd=file};
+  *c=(struct mesh_ctx){.len=length,.fd=file,.agreeing=-1};
   error=mesh_slot_take(c,m,mesh_key(name));
   if(error){munmap(m,length);close(file);*c=(struct mesh_ctx){0};}
   return error;
 }
 
 int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,const char *name){
-  *program=(struct mesh_ctx){.fd=-1};
+  *program=(struct mesh_ctx){.fd=-1,.agreeing=-1};
   int error=mesh_gone((pid_t)atomic_load(&client->M->bridge_pid))?ESRCH:mesh_slot_take(program,client->M,mesh_key(name));
   if(error)*program=(struct mesh_ctx){0};
   return error;
@@ -520,7 +485,13 @@ int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,c
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
+  const int orderly=atomic_load(&mesh_client_at(c->M,c->client)->owner)==c->client;
   mesh_retire_as(c->M,c->client,1);
+  for(uint32_t i=0;i<c->relay_count;i++){
+    if(orderly && send(c->relays[i],"e",1,0)!=1){}
+    close(c->relays[i]);
+  }
+  free(c->relays);
   int error=(c->fd>=0 && munmap(c->M,c->len))?errno:0;
   if(c->fd>=0 && close(c->fd) && !error) error=errno;
   *c=(struct mesh_ctx){0};
@@ -601,19 +572,6 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
   return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
-}
-
-/* design/bridge-dataflow.md#stripes: the exact pages a stripe's two ends place alike, claimed as a scan's are; a range a
-   returned lease still holds hot is reclaimed first, as mesh_allocate's last scan does */
-uint32_t mesh_arena_claim(struct mesh_ctx *c,uint32_t first,uint32_t pages){
-  const uint32_t arena=mesh_arena_pages(c->M);
-  if(!pages || first>arena || pages>arena-first){ errno=EINVAL; return MESH_ABSENT; }
-  _Atomic uint64_t *bits=mesh_arena_bits(c->M);
-  if(mesh_claim(bits,bits,first,pages))return first;
-  mesh_reclaim(c->M);
-  if(mesh_claim(bits,bits,first,pages))return first;
-  errno=ENOMEM;
-  return MESH_ABSENT;
 }
 
 /* design/prepared-machine.md#M09 */
@@ -741,22 +699,6 @@ int mesh_ledger(const char *name,const char *path){
   strcpy(request.service,"ledger");strcpy(request.path,path);
   const int fd=bridge_ask(&request);
   if(fd<0)return fd;
-  close(fd);
-  return 0;
-}
-int mesh_stream(uint32_t node,uint64_t bytes,char *result,size_t room){
-  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_STREAM,.node=node,.bytes=bytes};
-  if(!result || !room)return -EINVAL;
-  strcpy(request.service,"stream");
-  const int fd=bridge_ask(&request);
-  if(fd<0)return fd;
-  size_t got=0;
-  for(ssize_t n;got+1<room && (n=recv(fd,result+got,room-1-got,0))!=0;){
-    if(n<0 && errno==EINTR)continue;
-    if(n<0){const int error=errno;close(fd);return -error;}
-    got+=(size_t)n;
-  }
-  result[got]=0;
   close(fd);
   return 0;
 }

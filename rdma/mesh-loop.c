@@ -8,21 +8,19 @@
        window of WINDOW_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
        returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
      mesh-loop relay DIRECTORY BYTES
-       every ordered pair of nodes, one after another: a program of one transfer of BYTES from the one to the other, the
-       bridges routing it through the nodes between where the two are not cabled (relays, lanes); every word checked
-     mesh-loop stripes DIRECTORY BYTES
-       every cable, each way: a stripe of BYTES written at the same offset of the far window (mesh-call.h mesh_write) with
-       no program at the far end but a reader of its word; every word checked
+       every ordered pair of nodes, one after another: a program of one transfer of BYTES from the one to the other, its
+       two ends agreeing their leases and the relays of their route (mesh-call.h mesh_transfers_agree), the bridges
+       between forwarding it where the two are not cabled; every word checked
      mesh-loop nccl DIRECTORY COUNT host|walk
        N ranks, one a node: all-reduce, all-gather, reduce-scatter, broadcast and reduce from each root, and a send and
        receive around the ring, of COUNT float32 each, every value exact; `host` the host path (a NULL stream), `walk`
        the Metal path's walk with its kernels on the CPU (nccl-mesh-host.c), never a GPU
      mesh-loop destroy DIRECTORY COUNT RUNS host|walk
        RUNS times, N ranks: an all-reduce, then a last group (a send and receive around the ring) of COUNT float32 each,
-       every value exact, and every rank's ncclCommDestroy right after its last group (design/bridge-and-ipc.md#control:
-       each bridge posts what its rank released and releases its flows once those SENDs completed, telling no peer, so
-       a landing is never cancelled); then every bridge holding no flow, and the bridges' logs read: the flows ended in
-       order, the relays released by both their ends, and the flows failed
+       every value exact, and every rank's ncclCommDestroy right after its last group (design/bridge-and-ipc.md#programs:
+       each bridge posts what its rank released and lets go of its leases once those SENDs completed, so a landing is
+       never cancelled); then every bridge's leases free and client slots vacant, and the bridges' logs read: the
+       programs and relays ended in order, and the programs failed
      mesh-loop kill DIRECTORY COUNT host|walk [bridge|binary]
        N ranks: an all-reduce, then the last rank waits while the others begin a second (of COUNT float32 each) and is
        killed (SIGKILL): each other rank's call fails as a value, and the time from the kill to its return is read; with
@@ -72,7 +70,7 @@ struct loop_map { char family[16]; int n, cables; uint64_t window; struct loop_n
 
 static uint64_t clock_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int usage(void) {
-  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | relay DIRECTORY BYTES | stripes DIRECTORY BYTES | "
+  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | relay DIRECTORY BYTES | "
                   "nccl DIRECTORY COUNT host|walk | destroy DIRECTORY COUNT RUNS host|walk | kill DIRECTORY COUNT host|walk [bridge|binary] | down DIRECTORY\n");
   return 2;
 }
@@ -314,15 +312,14 @@ static int relay_end(const struct loop_map *map, int self, int peer, int receive
   if (!status) status = mesh_transfer_bind(&context, map->node[peer].node, 0, receive ? MESH_RECEIVE : MESH_SEND, 1, section, section.pages, 0, 1, 1);
   if (!status) status = mesh_transfers_prepare(&context, 1, 1, 1);
   if (!status && receive) status = mesh_host_inputs(&context);
+  const uint32_t members[2] = {map->node[receive ? peer : self].node, map->node[receive ? self : peer].node};
   unsigned char *data = status ? NULL : mesh_section_address(&context, section, 0);
   for (uint64_t p = 0; data && p < blocks; p++)
     for (uint64_t w = 0; w < words; w++) ((uint64_t *)(data + p * block))[w] = receive ? 0 : pattern(p, w);
   if (ready >= 0) { if (write(ready, "r", 1) != 1) status = status ? status : EPIPE; close(ready); }
+  if (!status) status = mesh_transfers_agree(&context, members, 2, receive ? 1 : 0);
   if (!status) status = mesh_transfers_start(&context);
-  if (!status && !receive) {
-    mesh_host_publish(&context, section, 0);
-    mesh_transfers_wake(&context);
-  }
+  if (!status && !receive) mesh_host_publish(&context, section, 0);
   uint64_t completed = 0, mismatches = 0;
   if (!status && receive) {
     while (completed < blocks) {
@@ -384,72 +381,6 @@ static int loop_relay(const char *directory, uint64_t bytes) {
   return failed != 0;
 }
 
-/* one end of a stripe across cable a-b: the writer at `self` toward `peer`, or the reader at `self`; both lease the same
-   exact pages near their windows' tops (mesh_section_at), the stripe's bytes then a block holding the word */
-static int stripe_end(const struct loop_map *map, int self, int peer, int writer, uint64_t bytes, int ready) {
-  struct mesh_ctx context = {0};
-  char name[64];
-  snprintf(name, sizeof name, "loop-stripe-%d-%d", writer ? self : peer, writer ? peer : self);
-  int status = mesh_loop_bind(map->node[self].region, map->node[self].service);
-  if (!status) status = mesh_attach(&context, name);
-  if (status) { if (ready >= 0) close(ready); return status; }
-  struct hdr *m = context.M;
-  const uint64_t block = (uint64_t)m->block * m->pgsz, blocks = bytes / block, words = block / sizeof(uint64_t);
-  const uint32_t pages = (uint32_t)((bytes + block) / m->pgsz), arena = mesh_arena_pages(m);
-  const uint32_t page = arena > pages + m->block ? (arena - pages - m->block) / m->block * m->block : 0;
-  struct mesh_section section;
-  if (!blocks || bytes % block || !page) status = EINVAL;
-  if (!status) status = mesh_section_at(&context, page, bytes + block, &section);
-  unsigned char *data = status ? NULL : mesh_section_address(&context, section, 0);
-  _Atomic uint64_t *word = data ? (_Atomic uint64_t *)(data + bytes) : NULL;
-  if (word) atomic_store_explicit(word, 0, memory_order_release);
-  for (uint64_t p = 0; data && p < blocks; p++)
-    for (uint64_t w = 0; w < words; w++) ((uint64_t *)(data + p * block))[w] = writer ? pattern(p, w) : 0;
-  if (ready >= 0) { if (write(ready, "r", 1) != 1) status = status ? status : EPIPE; close(ready); }
-  const uint64_t offset = (uint64_t)page * m->pgsz, at = (uint64_t)((char *)word - (char *)m);
-  if (!status && writer) {
-    struct mesh_requests *ring = NULL;
-    status = mesh_requests_create(&context, 16, &ring);
-    if (!status) status = mesh_write(ring, map->node[peer].node, offset, bytes, at, LOOP_MAGIC);
-  }
-  while (!status && atomic_load_explicit(word, memory_order_acquire) != LOOP_MAGIC) {
-    if (atomic_load_explicit(word, memory_order_acquire) == UINT64_MAX) { status = ECANCELED; break; }
-    sched_yield();
-  }
-  uint64_t mismatches = 0;
-  for (uint64_t p = 0; !status && !writer && p < blocks; p++)
-    for (uint64_t w = 0; w < words; w++) mismatches += ((const uint64_t *)(data + p * block))[w] != pattern(p, w);
-  if (mismatches) status = EIO;
-  mesh_detach(&context);
-  return status;
-}
-
-static int loop_stripes(const char *directory, uint64_t bytes) {
-  struct loop_map map;
-  if (map_read(directory, &map) || !bytes) return usage();
-  int failed = 0;
-  for (int c = 0; c < map.cables; c++) for (int way = 0; way < 2; way++) {
-    const int a = way ? map.cable[c].b : map.cable[c].a, b = way ? map.cable[c].a : map.cable[c].b;
-    int ready[2];
-    if (pipe(ready)) return 1;
-    const int heard = ready[0], told = ready[1];
-    const uint64_t begin = clock_ns();
-    const int bad = children(2, ^(int i) {
-      if (i == 0) { close(heard); return stripe_end(&map, b, a, 0, bytes, told); }
-      close(told);
-      char r;
-      if (read(heard, &r, 1) != 1) return EPIPE;
-      close(heard);
-      return stripe_end(&map, a, b, 1, bytes, -1);
-    }, ^{ close(heard); close(told); });
-    failed += bad != 0;
-    printf("{\"loop\":\"stripes\",\"family\":\"%s\",\"from\":%d,\"to\":%d,\"bytes\":%llu,\"seconds\":%.6f,\"status\":\"%s\"}\n", map.family, a, b,
-           (unsigned long long)bytes, (double)(clock_ns() - begin) / 1e9, bad ? "failed" : "ok");
-    fflush(stdout);
-  }
-  return failed != 0;
-}
-
 /* a rank's NCCL calls, each checked exactly (every value an integer a float32 holds): rank r's element k is r + k mod 97 */
 static float value_of(int rank, uint64_t k) { return (float)(rank + (int)(k % 97)); }
 static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int walk, ncclUniqueId id) {
@@ -493,8 +424,8 @@ static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int 
     }
     failed += result || wrong;
     printf("{\"loop\":\"nccl\",\"path\":\"%s\",\"rank\":%d,\"ranks\":%d,\"call\":\"%s\",\"root\":%d,\"count\":%llu,\"result\":\"%s\","
-           "\"wrong\":%llu}\n", walk ? "walk" : "host", rank, n, names[call], root, (unsigned long long)count,
-           result ? ncclGetErrorString(result) : "ok", (unsigned long long)wrong);
+           "\"wrong\":%llu,\"said\":\"%.160s\"}\n", walk ? "walk" : "host", rank, n, names[call], root, (unsigned long long)count,
+           result ? ncclGetErrorString(result) : "ok", (unsigned long long)wrong, result ? ncclGetLastError(NULL) : "");
     fflush(stdout);
   }
   ncclCommDestroy(comm);
@@ -568,8 +499,8 @@ static void logs_mark(const char *directory, int n, off_t *at) {
     at[i] = stat(path, &info) ? 0 : info.st_size;
   }
 }
-/* the bridges' lines past `at` (mesh-flow.c flow_released, relay_released, flow_fail): flows ended in order, relays
-   released by both their ends, flows failed */
+/* the bridges' lines past `at` (mesh-flow.c program_ended, program_fail): programs and relays ended in order, and
+   programs failed */
 struct log_counts { uint64_t ended, relays, failed; };
 static void logs_read(const char *directory, int n, const off_t *at, struct log_counts *counts) {
   *counts = (struct log_counts){0};
@@ -580,18 +511,35 @@ static void logs_read(const char *directory, int n, const off_t *at, struct log_
     if (!f) continue;
     fseeko(f, at[i], SEEK_SET);
     while (fgets(line, sizeof line, f)) {
-      if (strstr(line, ") ended in order")) counts->ended++;
-      else if (strstr(line, ") released by both its ends")) counts->relays++;
+      if (strstr(line, ", a relay) ended in order")) counts->relays++;
+      else if (strstr(line, ") ended in order")) counts->ended++;
       else if (strstr(line, ") failed at node ")) counts->failed++;
     }
     fclose(f);
   }
 }
-/* every bridge holding no flow and no awaiting program (mesh_busy), each looked at until it holds none; 0, or EINVAL */
+/* every bridge's leases free and its client slots vacant but the bridge's own (its map's lease), its region read until
+   they are (a program ending in order lets go of its leases once its SENDs completed); 0, or the error */
 static int bridges_idle(const struct loop_map *map) {
   for (int i = 0; i < map->n;) {
-    uint64_t busy = 1;
-    if (mesh_loop_bind(map->node[i].region, map->node[i].service) || mesh_busy(&busy) < 0) return EINVAL;
+    const int fd = shm_open(map->node[i].region, O_RDONLY, 0);
+    struct stat info;
+    if (fd < 0 || fstat(fd, &info)) { if (fd >= 0) close(fd); return errno; }
+    struct hdr *m = mmap(NULL, (size_t)info.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) return errno;
+    int busy = 0;
+    const pid_t bridge = (pid_t)atomic_load(&m->bridge_pid);
+    for (uint32_t p = 0; p < MESH_PORTS; p++)
+      for (uint32_t l = 0; l < MESH_LEASES; l++) {
+        const uint64_t held = atomic_load(mesh_leases(m, p) + l);
+        busy |= held && held != MESH_LEASE_DOWN;
+      }
+    for (uint32_t s = 0; s < MESH_CLIENTS; s++) {
+      const uint64_t owner = atomic_load(&((struct mesh_client *)((char *)m + m->client_off))[s].owner);
+      busy |= owner && (pid_t)(uint32_t)owner != bridge;
+    }
+    munmap(m, (size_t)info.st_size);
     if (!busy) i++;
     else sched_yield();
   }
@@ -645,7 +593,7 @@ static int loop_destroy(const char *directory, uint64_t count, int runs, int wal
   struct log_counts counts;
   logs_read(directory, map.n, marks, &counts);
   printf("{\"loop\":\"destroy\",\"path\":\"%s\",\"family\":\"%s\",\"runs\":%d,\"runs_failed\":%d,\"cancelled\":%llu,\"bridges_idle\":%s,"
-         "\"flows_ended\":%llu,\"relays_released\":%llu,\"flows_failed\":%llu}\n", walk ? "walk" : "host", map.family, runs,
+         "\"programs_ended\":%llu,\"relays_ended\":%llu,\"programs_failed\":%llu}\n", walk ? "walk" : "host", map.family, runs,
          failed_runs, (unsigned long long)cancelled, idle ? "false" : "true", (unsigned long long)counts.ended,
          (unsigned long long)counts.relays, (unsigned long long)counts.failed);
   return failed_runs || idle || counts.failed;
@@ -750,7 +698,6 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "up") && argc == 6) return loop_up(argv[2], atoi(argv[3]), strtoull(argv[4], NULL, 0), argv[5]);
   if (!strcmp(argv[1], "down") && argc == 3) return loop_down(argv[2]);
   if (!strcmp(argv[1], "relay") && argc == 4) return loop_relay(argv[2], strtoull(argv[3], NULL, 0));
-  if (!strcmp(argv[1], "stripes") && argc == 4) return loop_stripes(argv[2], strtoull(argv[3], NULL, 0));
   if (!strcmp(argv[1], "nccl") && argc == 5 && (!strcmp(argv[4], "host") || !strcmp(argv[4], "walk")))
     return loop_nccl(argv[2], strtoull(argv[3], NULL, 0), !strcmp(argv[4], "walk"));
   if (!strcmp(argv[1], "destroy") && argc == 6 && (!strcmp(argv[5], "host") || !strcmp(argv[5], "walk")))

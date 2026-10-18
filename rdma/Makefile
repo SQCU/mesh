@@ -24,13 +24,6 @@ mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h mesh-plan.h libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stat.c $(LIBMESH)
-# the one-way stream readings (design/transport-one-gib-2026-09-10.md): the bridge's raw stream and its own path, a
-# client of libmesh, at .build/mesh-stream (it finds libmesh at ../rdma from there); built on its own, not in `all`
-mesh-stream: .build/mesh-stream
-.build/mesh-stream: mesh-stream.c mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h mesh-collective.h libmesh.dylib Makefile
-	mkdir -p .build
-	cc -O2 $(WARN) -o $@ mesh-stream.c $(LIBMESH)
-.PHONY: mesh-stream
 # design/bridge-dataflow.md#the-loopback-fabric: N bridges on one host over loopverbs.c (shared memory in place of RDMA),
 # each its configuration's node, region and loopback ports: never a production bridge (no RDMA, ad-hoc signed); the
 # deployed mesh-flow is built from the same source without MESH_LOOP_FABRIC and stays as it is

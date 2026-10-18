@@ -21,19 +21,12 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 /* The node's bridge's window as its region holds it: its bytes (the arena its configuration registered at device up) and
    the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
 int mesh_window(uint64_t *bytes,uint64_t *unleased);
-/* The flows that carry a program and the awaiting programs the node's bridge holds (0 between calls; mesh.h struct hdr
-   `busy`, design/bridge-and-ipc.md#region); 0, or -errno where the bridge is unreachable. */
-int mesh_busy(uint64_t *busy);
-/* The node's bridge's two lifecycle events a client blocks on, each with no bound: mesh_bridge_wait returns 0 once a
-   bridge of this version holds the region, at once where one does, else at the notify(3) name a bridge posts once its
-   sockets listen and its region is open (MESH_STARTED, a loop bridge's followed by its region's name), or an errno where
-   the name cannot be watched; mesh_exit_wait returns 0 once the bridge that holds the region now has exited (its
-   process's exit, EVFILT_PROC: a signal, or its binary changed, which ends it at once), at once where none runs, or the
-   errno where its region is of another version or its exit cannot be watched.  A client that keeps serving across
-   bridges waits on the one, then the other. */
+/* The node's bridge's start, the event a client blocks on with no bound: mesh_bridge_wait returns 0 once a bridge of this
+   version holds the region, at once where one does, else at the notify(3) name a bridge posts once its sockets listen and
+   its region is open (MESH_STARTED, a loop bridge's followed by its region's name), or an errno where the name cannot
+   be watched. */
 #define MESH_STARTED "io.mesh.bridge.started"
 int mesh_bridge_wait(void);
-int mesh_exit_wait(void);
 
 /* A link map, an operand: `nodes` nodes and `links` links of a kind.
      MESH_LINKS_MESH   every pair is linked (`link` lists only the pairs given bandwidths, if any)
@@ -313,16 +306,27 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
    (MESH_REQUEST_SERVE, its name and its socket's path) on a connection it holds open: the registration lasts while
    that connection does, and a newer one of the same name replaces it.
    MESH_REQUEST_LEDGER (#ledger, where the bridge's configuration keeps ledgers): `bytes` a program's key, `path` a file
-   the bridge appends each running flow of that program's events to, those since the latest such request, each flow's
-   after its header line; the answer 0, ENOENT where no running flow of the key keeps a ledger, ENOTSUP where the
-   configuration keeps none, EINVAL for a path not absolute; the connection then closed. */
+   the bridge appends each running program of that key's events to, those since the latest such request, each path's
+   after its header line; the answer 0, ENOENT where no running program of the key keeps a ledger, ENOTSUP where the
+   configuration keeps none, EINVAL for a path not absolute; the connection then closed.
+   Two services are the bridge's own (design/bridge-and-ipc.md#meet, #relays): `meet`, where a key's `n` members each
+   send a struct mesh_meet and its report and half close, held until every rank of the key has sent one, each then
+   answered with them all: a uint32 n, n uint32 byte counts, the reports in rank order; and `relay`, where a requester
+   sends a struct mesh_relay_request and its entries, each a struct mesh_relay_entry and its transfers (the far end's
+   SENDs through neighbour `a` toward `b` queue by queue, then the other way's), and reads an int32 answer: 0 once the
+   bridge forwards each pair of directions over the leases named, its rows received into from one neighbour and sent
+   from to the other, while the channel stays open; a byte past the request says the requester ends in order, and the
+   channel's close ends them. */
 #define MESH_SERVICE_BYTES 48
 #define MESH_SERVICE_PATH 104
-/* MESH_REQUEST_STREAM: a raw one-way stream to a neighbour inside the bridge (design/bridge-dataflow.md#streams;
-   mesh-dataflow.h mesh_stream) */
-enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3, MESH_REQUEST_STREAM=4 };
+enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3 };
 struct mesh_request { uint32_t magic,kind,node,reserved; uint64_t bytes; char service[MESH_SERVICE_BYTES]; char path[MESH_SERVICE_PATH]; };
 #define MESH_REQUEST_MAGIC 0x4d524551u
+#define MESH_MEET_RANKS 256
+#define MESH_MEET_BYTES 1048576
+struct mesh_meet { uint64_t key; uint32_t n,rank,bytes,reserved; };
+struct mesh_relay_request { uint64_t key; uint32_t count,bytes; };
+struct mesh_relay_entry { uint32_t a,b; uint8_t lease_a[4],lease_b[4]; uint32_t slots,invocations,depth,cyclic,sends[4],receives[4]; };
 /* a channel to `service` at `node`, admitted for `bytes` there, open: its connection's descriptor, or -errno */
 int mesh_request(uint32_t node,const char *service,uint64_t bytes);
 /* `service` registered as the Unix socket at `path`: the descriptor of the connection whose life the registration
