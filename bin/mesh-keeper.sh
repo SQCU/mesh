@@ -83,7 +83,7 @@ if [ -n "$_uid" ]; then
   done
 fi
 /usr/local/mesh/bin/mesh-health.sh 2>/dev/null | sed -n 's/^warn=//p' > /var/run/mesh-health.warn
-if ! cmp -s /var/run/mesh-health.warn /var/run/mesh-health.warned || [ $(( $(date +%s) - $(stat -f %m /var/run/mesh-health.warned 2>/dev/null || echo 0) )) -gt 3600 ]; then
+if ! cmp -s /var/run/mesh-health.warn /var/run/mesh-health.warned; then
   while read -r w; do echo "[$(ts)] WARN $w"; logger -p user.warning -t io.mesh.keeper "$w"; done < /var/run/mesh-health.warn
   [ -s /var/run/mesh-health.warn ] || [ ! -s /var/run/mesh-health.warned ] || { echo "[$(ts)] health clear"; logger -t io.mesh.keeper "health clear"; }
   cp /var/run/mesh-health.warn /var/run/mesh-health.warned

@@ -27,15 +27,15 @@ times in two weeks on "Device Activity Policy"), grew to about 390 GB of a 460 G
 negative this fleet exists to prevent; the display sleeps after 10 minutes so the node can be idle by macOS's
 definition while it keeps computing.
 
-Each keeper pass runs `bin/mesh-health.sh`, which writes `/var/run/mesh-health`: disk free, used and floor, the trend of
-free space over the last day, any process holding a user-activity or display assertion for over an hour (what keeps
-`dasd` from finding the node idle), and when aned's cache GC last completed and how often `dasd` refused it. Below
-twice the floor those two become warnings (an attended machine may keep its display on for good, and starved
-housekeeping only matters once space runs short), and it also measures what `du` can read against what is used (the rest is space only the OS accounts
-for) and the largest directories under /Users. Each condition worth attention is a `warn=` line; the keeper writes
-new or changed warnings, and every warning again each hour, to `keeper.log` and to the unified log (`log show --last
-1d --predicate 'process == "logger"'`, which is written even when the disk is under the floor and the keeper's own log
-is not). `mesh-status` prints the report, and the node-info responder carries its numbers and `health_warnings`.
+Each keeper pass runs `bin/mesh-health.sh`, which writes `/var/run/mesh-health`: disk free, used and floor, and every
+process holding a user-activity or display assertion now, with how long it has held it (what keeps `dasd` from finding
+the node idle). Below twice the floor those holders become a warning (an attended machine may keep its display on for
+good, and starved housekeeping only matters once space runs short), and the report also measures what `du` can read
+against what is used (the rest is space only the OS accounts for) and the largest directories under /Users, once each
+time the disk enters that state. Each condition worth attention is a `warn=` line; the keeper writes the warnings
+whenever they change to `keeper.log` and to the unified log (`log show --last 1d --predicate 'process == "logger"'`,
+which is written even when the disk is under the floor and the keeper's own log is not). `mesh-status` prints the
+report, and the node-info responder carries its numbers and `health_warnings`.
 
 ## The one step that cannot be automated
 
@@ -389,7 +389,7 @@ the node's uplink.
 | `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, logs health warnings; loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
-| `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, aned's cache GC. |
+| `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
