@@ -398,8 +398,8 @@ the node's uplink.
 | `bin/mesh-converge.sh` | the node's convergence (Convergence, below): with no argument the mesh checkout's pass (`io.mesh.converge`); `held`, `idle`, `quiet`, `begin`/`end` and `stamp` are the node's convergence for any consumer's layer. |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION. It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
 | `bin/mesh-run.sh` | run a command on one node, `all`, or `others`. Installed as `mesh-run`. |
-| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer (design/recovery.md, port). Idempotent; run at boot and every keeper pass. |
-| `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
+| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer, at each run, unless its link is the node's only one (design/recovery.md, port). Idempotent; run at boot and every keeper pass. |
+| `bin/mesh-rdma-init.sh` | boot-time fabric record: RDMA enablement and each device's link, as boot found them. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
