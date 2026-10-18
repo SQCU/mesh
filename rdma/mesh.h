@@ -13,9 +13,10 @@
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* 118: the stripe request rings (`rings_off`, struct mesh_requests) and the STRIPES and STREAM messages
-   (design/bridge-dataflow.md#stripes, #streams) */
-#define MESH_VERSION 118u
+/* 119: each exclusive flow's control channel and a lane rider's control entries (design/bridge-and-ipc.md#control:
+   LANDED, END, CLOSED and FAIL frames), a client's delivered words and its finalize word (`delivered`, `ending`), and
+   the orderly retire (MESH_ORDERLY) */
+#define MESH_VERSION 119u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -24,13 +25,18 @@
 #define MESH_QUEUES 4
 #define MESH_ORDERS 4096
 #define MESH_RETIRING (UINT64_C(1)<<63)
+/* design/bridge-and-ipc.md#control: a slot retired in order (mesh-dataflow.c mesh_detach), held by the bridge until it
+   has taken its flows' close (their released cells posted, then END), which then vacates it */
+#define MESH_ORDERLY (UINT64_C(1)<<62)
 /* design/recovery.md#pause, #first: the pause between a port's pairings, how long a program waits for its peer's to
    start, and how long the queue pairs of two started programs take to pair; a client's start waits on its bridge at
    most the three together */
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 #define MESH_PEER_NS UINT64_C(600000000000)
 #define MESH_PAIR_NS UINT64_C(30000000000)
-/* design/recovery.md#detection: a destination with positions pending that lands none for this long is cancelled (mesh_cancel) */
+/* nccl-mesh.c lease_wait: how long a host-path group waits for the caller's own GPU work to reach a point it recorded on
+   a lease (ncclMeshMemUse), a command buffer the caller never commits being no event that can ever come; no transport
+   completion or teardown reads it (design/recovery.md#detection) */
 #define MESH_SILENT_NS UINT64_C(10000000000)
 /* A prepared transfer: `count` slots of `bytes` from `local_row`, bound for the invocations [begin, end)
    that use it (end past the call's invocations: every one), invocation t addressing its ring slot
@@ -115,8 +121,13 @@ struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH
    in their lease, sorted by row: mesh_row_targets), the ports its program's flows ride (`ports`, a bit a port index:
    the bells mesh_transfers_wake rings), the digest of what its program is made from (`digest`, 0 for none:
    mesh-call.h mesh_transfers_digest; design/bridge-and-ipc.md#protocol, a peer's READY naming another fails both ends'
-   programs, ESTALE), and its program to each destination and that destination's status.  A client writes its own slot's other
-   words and its leased rows alone; the bridge writes `ports`, the statuses, the ports and the map */
+   programs, ESTALE), and its program to each destination and that destination's status; `delivered`, its program's
+   SEND cells toward each destination on each queue (channel = destination x MESH_QUEUES + queue, as mesh_transfers
+   names it) that the peer's bridge reported landed (design/bridge-and-ipc.md#control: an exclusive flow's LANDED
+   frames, every flow's CLOSED), a cumulative count over the program's cycles summed over its flows' stripes and slots;
+   `ending`, nonzero once the client asks its bridge to close its program's flows in order and keeps its slot (nccl-mesh.c
+   ncclCommFinalize).  A client writes its own slot's other words and its leased rows alone; the bridge writes `ports`,
+   the statuses, `delivered`, the ports and the map */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
   _Atomic uint64_t configured;
@@ -128,6 +139,8 @@ struct mesh_client {
   _Atomic uint64_t digest;
   struct mesh_tx tx[MESH_DESTINATIONS];
   struct mesh_port_info status[MESH_DESTINATIONS];
+  _Atomic uint64_t delivered[MESH_DESTINATIONS*MESH_QUEUES];
+  _Atomic uint32_t ending;
 };
 /* design/prepared-machine.md#M01, #M09; `busy`, design/bridge-and-ipc.md#region: the flows and awaiting programs the
    bridge holds (0 between calls), and since when it has held none (`idle_since`, the wall clock in ns; 0 while it holds
@@ -172,7 +185,8 @@ struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t cyc
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
 /* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M12 */
 /* design/prepared-machine.md#M30: a cyclic program's landed word holds 1 plus its cycle, which a reader of a later
-   cycle still waits past, so every word of the destination is cancelled */
+   cycle still waits past, so every word of the destination is cancelled (libnccl-mesh's own cancel; the bridge's
+   cancels past a channel's landed count alone: mesh-flow.c flow_cancel) */
 static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t destination){
   _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[destination].offset);
   for(uint64_t j=0;j<cancel->ranges[destination].count;j++){
@@ -249,6 +263,8 @@ static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,
   return (struct mesh_transfer*)((unsigned char*)m+tx->orders)+((size_t)(channel%MESH_QUEUES)*2+(uint32_t)direction)*tx->room;
 }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t channel,int direction){ return mesh_client_at(m,owner)->tx[channel/MESH_QUEUES].length+(channel%MESH_QUEUES)*2+(uint32_t)direction; }
+/* design/bridge-and-ipc.md#control: the SEND cells of a client's program on `channel` the peer's bridge reported landed */
+static inline _Atomic uint64_t *mesh_delivered(struct hdr *m,uint64_t owner,uint32_t channel){ return mesh_client_at(m,owner)->delivered+channel; }
 static inline uint32_t mesh_destination_transfers(struct hdr *m,uint64_t owner,uint32_t destination){
   uint32_t transfers=0;
   for(uint32_t q=0;q<MESH_QUEUES*2;q++)transfers+=atomic_load_explicit(mesh_client_at(m,owner)->tx[destination].length+q,memory_order_acquire);

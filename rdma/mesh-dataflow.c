@@ -275,11 +275,13 @@ uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path){
 }
 
 /* design/algorithm-sources.md#programtensor */
-/* design/bridge-and-ipc.md#clients: a client's slot given up (by its detach, or by the bridge where its process is
-   gone): its program stopped, its rows closed for the bridge to release once its programs left the ports */
-void mesh_retire(struct hdr *m,uint64_t client){
+/* design/bridge-and-ipc.md#clients, #control: a client's slot given up, its program stopped, its rows closed for the
+   bridge to release once its programs left the ports: by an abort (mesh_retire: a revoke, or the bridge where its
+   process is gone), the slot vacant at once and its flows failed (FAIL), or in order (mesh_detach), the slot left
+   MESH_ORDERLY for the bridge, which closes its flows (their released cells posted, then END) and vacates it */
+static void mesh_retire_as(struct hdr *m,uint64_t client,int orderly){
   struct mesh_client *slot=mesh_client_at(m,client);
-  if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
+  if(!client || (client&(MESH_RETIRING|MESH_ORDERLY)) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
   atomic_store_explicit(&slot->configured,0,memory_order_release);
   for(uint32_t d=0;d<MESH_DESTINATIONS;d++)for(uint32_t q=0;q<MESH_QUEUES*2;q++)atomic_store_explicit(slot->tx[d].length+q,0,memory_order_release);
   for(uint32_t row=0;row<mesh_rows(m);row++){
@@ -296,7 +298,7 @@ void mesh_retire(struct hdr *m,uint64_t client){
     if(at && at>=m->data_off && at<=m->length-sizeof(struct mesh_requests) && ((const struct mesh_requests *)((char *)m+at))->owner==client)
       atomic_compare_exchange_strong(rings+r,&at,0);
   }
-  atomic_store_explicit(&slot->owner,0,memory_order_release);
+  atomic_store_explicit(&slot->owner,orderly?client|MESH_RETIRING|MESH_ORDERLY:0,memory_order_release);
   /* a start waiting on its destinations' status (mesh-call.c mesh_transfers_start) reads the slot gone at once: a
      revoke from another thread of its process retires the program it waits for (nccl-mesh.c ncclCommRevoke) */
   for(uint32_t d=0;d<MESH_DESTINATIONS && slot->tx[d].node;d++)
@@ -304,6 +306,7 @@ void mesh_retire(struct hdr *m,uint64_t client){
   /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
 }
+void mesh_retire(struct hdr *m,uint64_t client){ mesh_retire_as(m,client,0); }
 
 static uint64_t mesh_key(const char *name){
   uint64_t key=UINT64_C(0xcbf29ce484222325);
@@ -312,7 +315,7 @@ static uint64_t mesh_key(const char *name){
 }
 
 int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
-  uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1);
+  uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<24)-1);
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
     uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
@@ -321,6 +324,8 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
     atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);
     slot->targets=0;slot->target_count=0;
     memset(slot->tx,0,sizeof slot->tx);memset(slot->status,0,sizeof slot->status);
+    for(uint32_t k=0;k<MESH_DESTINATIONS*MESH_QUEUES;k++)atomic_store_explicit(slot->delivered+k,0,memory_order_relaxed);
+    atomic_store_explicit(&slot->ending,0,memory_order_relaxed);
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     return 0;
   }
@@ -347,7 +352,7 @@ int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,c
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
-  mesh_retire(c->M,c->client);
+  mesh_retire_as(c->M,c->client,1);
   int error=(c->fd>=0 && munmap(c->M,c->len))?errno:0;
   if(c->fd>=0 && close(c->fd) && !error) error=errno;
   *c=(struct mesh_ctx){0};

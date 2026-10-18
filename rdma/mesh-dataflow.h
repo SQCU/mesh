@@ -17,8 +17,10 @@ int mesh_slot_take(struct mesh_ctx *,struct hdr *,uint64_t key);
    mesh_attach's), sharing its mapping: a slot is one execution's program, so a client running several takes one each
    on its one attach.  0, EBUSY where none is vacant, ESRCH where the client's bridge is gone */
 int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,const char *name);
-/* the slot retired (mesh_retire), and the region unmapped where the context mapped it (mesh_attach's; a program's slot
-   leaves its client's mapping alone) */
+/* the slot retired in order (design/bridge-and-ipc.md#control: its bridge posts what its program released, ends its
+   flows with END and their peers' CLOSED, and holds its rows until then; the caller waits on none of it), and the region
+   unmapped where the context mapped it (mesh_attach's; a program's slot leaves its client's mapping alone); an abort
+   calls mesh_retire first */
 int mesh_detach(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#region: a process gone (its slot's or the bridge's pid; 0: none) */
 static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
@@ -31,7 +33,8 @@ static inline uint64_t mesh_transfer_frames(struct hdr *m,const struct mesh_tran
 static inline uint64_t mesh_transfer_cells(const struct mesh_transfer *out,uint32_t invocations){
   return (uint64_t)out->count*(mesh_transfer_active(out,invocations)+1);
 }
-/* design/algorithm-sources.md#programtensor */
+/* design/algorithm-sources.md#programtensor: a slot retired as an abort (its bridge fails its flows, FAIL; a revoke, or
+   the bridge where its process is gone): vacant at once */
 void mesh_retire(struct hdr *,uint64_t client);
 /* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records, the count of cables between them (0:
    none; the ports each one's record holds paired with the other, the fewer of the two ends' counts), *beta 8e9 over

@@ -107,17 +107,19 @@ static int down_pair(struct mesh_verbs *provider){
 }
 /* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": each queue pair moved to the error state, so the
    device ends its posted receives and SENDs (flushed, IBV_WC_WR_FLUSH_ERR) before it is destroyed, and its completion
-   queues drained of what that returns until `polls` polls in a row take none; the completions drained.  A queue pair
-   whose move is refused is destroyed as down_pair destroys it.  The stripe flow's teardown takes it (mesh-flow.c
-   stripes_job); every other teardown destroys its queue pairs as they stand. */
-static uint32_t pair_flush(struct mesh_verbs *provider,uint32_t polls){
+   queues drained of what that returns: until `expected` completions came (the work requests the caller holds posted
+   and not taken, each flushed to one: an event, mesh-flow.c flow_outstanding; UINT64_MAX where the caller keeps no
+   count), or, where the device returns fewer, until `polls` polls in a row take none; the completions drained.  A queue pair whose move is refused is
+   destroyed as down_pair destroys it.  Every flow's and the stripe flow's teardown takes it (mesh-flow.c flow_release,
+   stripes_job: design/bridge-and-ipc.md#control). */
+static uint32_t pair_flush(struct mesh_verbs *provider,uint64_t expected,uint32_t polls){
   for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
     struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
     ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE);
   }
   uint32_t drained=0,empty=0;
   struct ibv_wc done[16];
-  while(empty<polls){
+  while(empty<polls && drained<expected){
     int taken=0;
     struct ibv_cq *queues[2]={provider->completion,provider->sent};
     for(int c=0;c<2;c++)if(queues[c]){const int n=ibv_poll_cq(queues[c],16,done);if(n>0)taken+=n;}
