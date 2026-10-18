@@ -282,7 +282,7 @@ struct lanes {
    closing), the peer's queue pairs and its largest piece (`peer_piece`), the piece both ends cut by (`piece`, the
    lesser of the two), its pages (MESH_DESCRIPTORS descriptors received, then as many sent), why it last could not be
    made (`code`, cleared once up or once a request failed by it), the peer's window (its record's: no request passes it)
-   and the census (requests written and landed, completions a teardown's flush drained).  The send
+   and the census (requests written and landed).  The send
    thread's: the stripes' pieces posted on the data pair and not completed (a ring: frames, and for a stripe's last its
    word, value, writer and ring), their frames, the descriptors sent and completed, the stripe being cut (`out`) and the
    ring it looks at next; the receive thread's: the descriptors landed, by their slot in arrival order, the pieces
@@ -4441,15 +4441,16 @@ static void flows_turn(void){
   }
 }
 
-/* design/prepared-machine.md#M26: the clients' control word, watched for the event loop */
+/* design/prepared-machine.md#M26: the clients' control word, watched for the event loop until the stop's own bump of
+   it (the word read before `stop`, so a value past that bump finds `stop` set) */
 static void *control_watch(void *unused){
   (void)unused;
-  while(!stop){
+  for(;;){
     uint64_t seen=atomic_load_explicit(&M->control,memory_order_acquire);
+    if(stop)return NULL;
     wake();
     os_sync_wait_on_address(&M->control,seen,sizeof M->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
   }
-  return NULL;
 }
 
 /* design/prepared-machine.md#M09: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
@@ -4791,37 +4792,34 @@ int main(int argc,char **argv){
   /* design/bridge-and-ipc.md: a stop (a signal, or the binary changed) ends what the bridge carries at once: each
      awaiting program fails as a value (ESHUTDOWN), each port tells its peer FAREWELL and is lost, so every program on it
      fails (its words past their landed counts cancelled, its status ESHUTDOWN) and the peers' fail at the FAREWELL or
-     the socket's end; then every flow, the stripe flow, a stream and the lanes are torn down (mesh-verbs.h down_pair) and
-     the devices retired */
+     the socket's end; the region tells the bridge gone (`bridge_pid` 0), so no client opens on it; then each port's
+     teardown runs on its own queue, the ports' side by side, after the jobs queued there: every flow released, the
+     progress threads stopped, the stripe flow's, the stream's and the lanes' queue pairs moved to the error state and
+     destroyed (mesh-verbs.h down_pair), the device retired */
   for(struct await *a=awaits,*next;a;a=next){next=a->next;program_fail(a->owner,a->destination,ESHUTDOWN,M->node);}
   for(uint32_t p=0;p<port_count;p++){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
     port_lost(ports+p,ESHUTDOWN,1);
   }
+  atomic_store(&M->bridge_pid,0);
+  mesh_notify(&M->control);
+  dispatch_group_t teardown=dispatch_group_create();
   for(uint32_t p=0;p<port_count;p++){
     struct port *port=ports+p;
-    dispatch_sync(port->work,^{
+    dispatch_group_async(teardown,port->work,^{
       for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_release(f);
       atomic_store_explicit(&port->lanes.up,0,memory_order_release);
       port_settle(port);
-    });
-    port_still(port);
-    dispatch_sync(port->work,^{
-      /* design/bridge-dataflow.md#stripes: no progress thread runs: the stripe flow's and the stream's queue pairs moved to
-         the error state and destroyed, then the lanes', then the device */
-      if(port->stripes.provider.queues){
-        port_down(port,&port->stripes.provider);
-      }
-      if(port->stream.provider.queues){
-        port_down(port,&port->stream.provider);
-      }
+      port_still(port);
+      if(port->stripes.provider.queues)port_down(port,&port->stripes.provider);
+      if(port->stream.provider.queues)port_down(port,&port->stream.provider);
       if(port->stream.fd>=0){fd_answer(port->stream.fd,ESHUTDOWN);close(port->stream.fd);port->stream.fd=-1;}
       port_down(port,&port->lanes.provider);
       if(!down_device(&port->device))say("link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno));
     });
   }
-  atomic_store(&M->bridge_pid,0);
-  mesh_notify(&M->control);
+  dispatch_group_wait(teardown,DISPATCH_TIME_FOREVER);
+  dispatch_release(teardown);
   pthread_join(watcher,NULL);
   munmap(wire.data,wire.length);munmap(M,length);
   return 0;

@@ -37,8 +37,9 @@ int mesh_loop_bind(const char *region,uint16_t service){
    mapping of its region the watcher keeps.  At its exit the region tells it gone (`bridge_pid` 0); each slot this
    process owns has its programs' words cancelled (UINT64_MAX where none landed, every one of a cyclic program's, as
    mesh-flow.c flow_cancel cancels a flow that never landed) and each destination's status failed (ESRCH) with its start
-   woken; and the waiters on the map, health and control words are woken: no wait of this process, a GPU program's on
-   its landing words among them, outlives its bridge */
+   woken; the map's and the health's serials are moved by 2 (their parity kept), so a waiter that read its bridge alive
+   and had not yet slept finds its word changed and does not sleep; and the waiters on the map, health and control words
+   are woken: no wait of this process, a GPU program's on its landing words among them, outlives its bridge */
 struct mesh_watched { pid_t pid; int writable; struct hdr *m; size_t length; };
 static pthread_mutex_t mesh_watch_lock=PTHREAD_MUTEX_INITIALIZER;
 static struct mesh_watched *mesh_watched;
@@ -78,6 +79,8 @@ static void mesh_watch_exit(const struct mesh_watched *w){
         os_sync_wake_by_address_all(&status->prepared,sizeof status->prepared,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
       }
     }
+    atomic_fetch_add_explicit(&m->map,2,memory_order_release);
+    atomic_fetch_add_explicit(&m->health,2,memory_order_release);
   }
   atomic_thread_fence(memory_order_seq_cst);
   mesh_wake(&m->map);mesh_wake(&m->health);mesh_wake(&m->control);
@@ -415,6 +418,7 @@ int mesh_map_wait(uint64_t *serial){
     else os_sync_wait_on_address(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
     seen=atomic_load_explicit(&m->map,memory_order_acquire);
   }
+  if(!error && mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire)))error=ESRCH;
   if(!error)*serial=seen;
   munmap(m,length);
   return error;
