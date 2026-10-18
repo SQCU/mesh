@@ -56,7 +56,7 @@ typedef struct meshxhandle_s
 	uint32_t req_id;
 	uint32_t inflight_id;
 	uint64_t session;
-	uint64_t inflight_session, done_session;
+	uint64_t inflight_session;
 	uint32_t inflight_tick;
 	size_t inflight_frame_mass;
 	size_t inflight_received_frame_mass;
@@ -89,28 +89,37 @@ meshxpacket_t;
 static meshxpacket_t *meshx_pending, *meshx_pending_tail, *meshx_spare;
 static size_t meshx_pending_frames;
 static size_t meshx_local_slots = 64;
-static size_t meshx_nslots, meshx_stride, meshx_usable;
-static uint64_t meshx_instance, meshx_remote_queued;
-static double meshx_hello_at, meshx_status_at;
+static size_t meshx_usable;
 static int meshx_relay_fd = -1;
 static struct sockaddr_un meshx_relay_worker;
 static int meshx_relay_send_error;
 
 static int meshx_slot(meshxhandle_t *m, const unsigned char *q, size_t b, int from);
 
-static void meshx_relay_init(void)
+int MeshX_Descriptor(void)
+{
+	return meshx_relay_fd;
+}
+
+static int meshx_relay_init(void)
 {
 	struct sockaddr_un local;
-	const char *worker_path;
+	const char *worker_path = getenv("MESH_EXPERT_SOCKET"), *framebytes = getenv("MESH_EXPERT_FRAMEBYTES");
 	int socket_buffer = 8 * 1024 * 1024;
 
 	if (meshx_relay_fd >= 0)
-		return;
+		return 0;
+	if (!worker_path || !worker_path[0] || !framebytes || strtoul(framebytes, NULL, 10) <= MESH_XON_HDRBYTES)
+	{
+		Con_Printf("mesh runtime needs MESH_EXPERT_SOCKET and MESH_EXPERT_FRAMEBYTES (more than %d bytes)\n", MESH_XON_HDRBYTES);
+		return -1;
+	}
+	meshx_usable = strtoul(framebytes, NULL, 10);
 	meshx_relay_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
 	if (meshx_relay_fd < 0)
 	{
 		Con_Printf("mesh runtime socket failed: %s\n", strerror(errno));
-		return;
+		return -1;
 	}
 	setsockopt(meshx_relay_fd, SOL_SOCKET, SO_SNDBUF, &socket_buffer, sizeof(socket_buffer));
 	setsockopt(meshx_relay_fd, SOL_SOCKET, SO_RCVBUF, &socket_buffer, sizeof(socket_buffer));
@@ -124,14 +133,13 @@ static void meshx_relay_init(void)
 		Con_Printf("mesh runtime bind failed: %s\n", strerror(errno));
 		close(meshx_relay_fd);
 		meshx_relay_fd = -1;
-		return;
+		return -1;
 	}
 	memset(&meshx_relay_worker, 0, sizeof(meshx_relay_worker));
 	meshx_relay_worker.sun_family = AF_UNIX;
-	worker_path = getenv("MESH_EXPERT_SOCKET");
-	strlcpy(meshx_relay_worker.sun_path,
-		worker_path && worker_path[0] ? worker_path : "/tmp/mesh-expert-worker.sock",
-		sizeof(meshx_relay_worker.sun_path));
+	strlcpy(meshx_relay_worker.sun_path, worker_path, sizeof(meshx_relay_worker.sun_path));
+	Con_Printf("mesh runtime %s: frames of %zu bytes\n", meshx_relay_worker.sun_path, meshx_usable);
+	return 0;
 }
 
 static void meshx_reframe(meshxpacket_t *packet)
@@ -187,6 +195,16 @@ static int meshx_local_send(const meshxrelay_t *relay, const void *data, size_t 
 	return !error;
 }
 
+static void meshx_pending_release(void)
+{
+	meshxpacket_t *packet = meshx_pending;
+	meshx_pending = packet->next;
+	if (!meshx_pending)
+		meshx_pending_tail = NULL;
+	packet->next = meshx_spare;
+	meshx_spare = packet;
+}
+
 static void meshx_relay_pump(void)
 {
 	static unsigned char *frame;
@@ -195,18 +213,10 @@ static void meshx_relay_pump(void)
 	struct iovec iov[2];
 	struct msghdr message;
 	int available;
-	double now = Sys_DirtyTime();
 
-	meshx_relay_init();
 	if (meshx_relay_fd < 0)
 		return;
-	if (now >= meshx_hello_at)
-	{
-		meshxrelay_t hello = {0, 0, MESH_XON_LOCAL_VERSION};
-		meshx_local_send(&hello, NULL, 0);
-		meshx_hello_at = now + 1;
-	}
-	for (int turn = 0; turn < 256 && !ioctl(meshx_relay_fd, FIONREAD, &available) && available > 0; turn++)
+	while (!ioctl(meshx_relay_fd, FIONREAD, &available) && available > 0)
 	{
 		ssize_t n;
 		size_t b;
@@ -233,24 +243,6 @@ static void meshx_relay_pump(void)
 			break;
 		}
 		b = (size_t)n - sizeof(relay);
-		if (!relay.framebytes && relay.count == MESH_XON_LOCAL_VERSION && b == 5 * sizeof(uint64_t))
-		{
-			uint64_t status[5];
-			memcpy(status, frame, sizeof(status));
-			if (status[2] != meshx_usable && meshx_usable)
-				Con_Printf("mesh runtime payload changed: %zu to %llu; pending packets retain their original framing\n", meshx_usable, (unsigned long long)status[2]);
-			if (status[3] != meshx_instance)
-				Con_Printf("mesh runtime attached: %s instance %llu slots %llu stride %llu usable %llu\n",
-					meshx_relay_worker.sun_path, (unsigned long long)status[3],
-					(unsigned long long)status[0], (unsigned long long)status[1], (unsigned long long)status[2]);
-			meshx_nslots = status[0];
-			meshx_stride = status[1];
-			meshx_usable = status[2];
-			meshx_instance = status[3];
-			meshx_remote_queued = status[4];
-			meshx_status_at = now;
-			continue;
-		}
 		if (!relay.framebytes || !relay.count || (uint64_t)relay.framebytes * relay.count != b)
 		{
 			Con_Printf("mesh local framing mismatch: %zu bytes, %u frames of %u\n", b, relay.count, relay.framebytes);
@@ -261,7 +253,7 @@ static void meshx_relay_pump(void)
 				if (meshx_h[h].used && meshx_slot(&meshx_h[h], frame + (size_t)i * relay.framebytes, relay.framebytes, relay.node))
 					break;
 	}
-	for (int turn = 0; turn < 256 && meshx_pending; turn++)
+	while (meshx_pending)
 	{
 		meshxpacket_t *packet = meshx_pending;
 		size_t bytes = packet->framebytes;
@@ -277,25 +269,19 @@ static void meshx_relay_pump(void)
 					meshx_reframe(packet);
 				continue;
 			}
+			if (meshx_relay_send_error == ENOENT || meshx_relay_send_error == ECONNREFUSED)
+				while (meshx_pending)
+				{
+					meshx_pending_frames -= meshx_pending->count - meshx_pending->first;
+					meshx_pending_release();
+				}
 			break;
 		}
 		packet->first += count;
 		meshx_pending_frames -= count;
 		if (packet->first == packet->count)
-		{
-			meshx_pending = packet->next;
-			if (!meshx_pending)
-				meshx_pending_tail = NULL;
-			packet->next = meshx_spare;
-			meshx_spare = packet;
-		}
+			meshx_pending_release();
 	}
-}
-
-static int meshx_attach(void)
-{
-	meshx_relay_pump();
-	return meshx_usable ? 0 : -1;
 }
 
 static meshxhandle_t *meshx_get(int h)
@@ -373,7 +359,7 @@ static int meshx_open(int node, uint16_t request_kind, uint16_t response_kind, u
 
 	if (width < 1 || maxrows < 1)
 		return -1;
-	if (meshx_attach())
+	if (meshx_relay_init())
 		return -1;
 
 	values_per_page = meshx_usable > MESH_XON_HDRBYTES
@@ -542,8 +528,6 @@ static int meshx_slot(meshxhandle_t *m, const unsigned char *q, size_t b, int fr
 		m->receipt_word_mass = words;
 	}
 
-	if (session == m->done_session && w.req_id <= m->done_id)
-		return 1;
 	if (w.req_id != m->inflight_id || w.tick != m->inflight_tick || session != m->inflight_session)
 	{
 		if (m->inflight_id && m->inflight_received_frame_mass != m->inflight_frame_mass && w.offset)
@@ -580,16 +564,10 @@ static int meshx_slot(meshxhandle_t *m, const unsigned char *q, size_t b, int fr
 		m->resp = m->incoming;
 		m->incoming = previous;
 		m->done_id = w.req_id;
-		m->done_session = session;
 		m->done_rows = (uint32_t)rows;
 		m->done_tick = w.tick;
 	}
 	return 1;
-}
-
-static void meshx_dispatch(void)
-{
-	meshx_relay_pump();
 }
 
 #ifndef MESH_XON_CORE_ONLY
@@ -598,7 +576,7 @@ static void MeshX_ViewConsume(prvm_prog_t *prog);
 
 void MeshX_Pump(void)
 {
-	meshx_dispatch();
+	meshx_relay_pump();
 #ifndef MESH_XON_CORE_ONLY
 	if (SVVM_prog->loaded)
 		MeshX_ViewConsume(SVVM_prog);
@@ -607,7 +585,7 @@ void MeshX_Pump(void)
 
 static uint32_t meshx_poll(meshxhandle_t *m)
 {
-	meshx_dispatch();
+	meshx_relay_pump();
 	return m->done_id;
 }
 
@@ -620,20 +598,17 @@ static double meshx_stat(meshxhandle_t *m, int sel)
 	case 2: return (double)m->req_id - (double)m->done_id;
 	case 3: return m->width;
 	case 4: return m->maxrows;
-	case 5: return meshx_usable && Sys_DirtyTime() - meshx_status_at < 3 ? 1 : 0;
 	case 6: return m->dropped;
 	case 7: return m->reqrows;
-	case 8: return (double)meshx_nslots;
 	case 9: return m->shortwrites;
 	case 10: return m->done_rows;
 	case 11: return m->response_frame_mass;
 	case 12: return m->done_tick;
-	case 13: return (double)meshx_nslots;
 	case 14: return (double)meshx_usable;
 	case 15: return m->node;
 	case 16: return (double)m->scatter_barriers;
 	case 17: return (double)m->scatter_rows;
-	case 18: return (double)(meshx_pending_frames + meshx_remote_queued);
+	case 18: return (double)meshx_pending_frames;
 	default: return m->node;
 	}
 }
@@ -909,8 +884,7 @@ static void MeshX_ViewConsume(prvm_prog_t *prog)
 				goto invalid;
 		if (data[0] < 0 || data[0] >= prog->num_edicts || data[5] < -1 || data[5] >= prog->num_edicts ||
 			data[6] < 0 || data[6] >= (data[5] < 0 ? prog->numglobals : prog->entityfields) ||
-			data[9] != (prog->view_session >> 24) || data[10] != (prog->view_session & 0xffffff) ||
-			data[1] != MeshX_ViewSchema(prog) || data[3] < 0 || data[4] <= 0)
+			data[1] != MeshX_ViewSchema(prog))
 			goto invalid;
 		owner = data[0]; entity = data[5]; offset = data[6];
 		width = entity < 0 ? prog->numglobals : prog->entityfields;
@@ -966,88 +940,25 @@ static void MeshX_ViewConsume(prvm_prog_t *prog)
 	Mem_Free(headers);
 	return;
 invalid:
-	Con_Printf("mesh view response %u row %u has an invalid numeric, memory, session or snapshot extent; entire previous view continues\n", m->done_id, row);
+	Con_Printf("mesh view response %u row %u has an invalid numeric, memory or snapshot extent; entire previous view continues\n", m->done_id, row);
 	Mem_Free(headers);
-}
-
-static float (*meshx_outcomes)[5];
-static size_t meshx_outcome_count, meshx_outcome_cursor;
-static char meshx_outcome_path[MAX_OSPATH];
-
-static void meshx_outcome_add(const float *row)
-{
-	float (*records)[5];
-	for (size_t i = 0; i < meshx_outcome_count; ++i)
-		if (!memcmp(meshx_outcomes[i], row, 3 * sizeof(float)))
-			return;
-	records = realloc(meshx_outcomes, (meshx_outcome_count + 1) * sizeof(*records));
-	if (!records)
-	{
-		Con_Printf("mesh outcome allocation failed; durable journal remains available\n");
-		return;
-	}
-	meshx_outcomes = records;
-	memcpy(meshx_outcomes[meshx_outcome_count++], row, sizeof(*records));
-}
-
-static void meshx_outcome_load(void)
-{
-	FILE *file;
-	char line[256];
-	float row[5];
-	if (meshx_outcome_path[0])
-		return;
-	dpsnprintf(meshx_outcome_path, sizeof(meshx_outcome_path), "%smesh-outcomes.tsv", fs_userdir);
-	FS_CreatePath(meshx_outcome_path);
-	file = fopen(meshx_outcome_path, "r");
-	if (file)
-	{
-		while (fgets(line, sizeof(line), file))
-			if (strchr(line, '\n') && sscanf(line, "%f %f %f %f %f", row, row+1, row+2, row+3, row+4) == 5)
-				meshx_outcome_add(row);
-		fclose(file);
-	}
 }
 
 void VM_mesh_round_outcome(prvm_prog_t *prog)
 {
-	FILE *file;
-	float row[5];
-	VM_SAFEPARMCOUNT(2, VM_mesh_round_outcome);
-	PRVM_ViewFor(prog, 0);
-	meshx_outcome_load();
-	row[0] = prog->view_session >> 24;
-	row[1] = prog->view_session & 0xffffff;
-	row[2] = PRVM_G_READFLOAT(OFS_PARM0);
-	row[3] = PRVM_G_READFLOAT(OFS_PARM1);
-	row[4] = PRVM_serverglobalfloat(time);
-	file = fopen(meshx_outcome_path, "a");
-	if (file)
-	{
-		if (fprintf(file, "\n%.9g\t%.9g\t%.9g\t%.9g\t%.9g\n", row[0], row[1], row[2], row[3], row[4]) < 0 ||
-			fflush(file) || fsync(fileno(file)))
-			Con_Printf("mesh outcome journal write failed: %s; outcome continues on transport\n", strerror(errno));
-		fclose(file);
-	}
-	else
-		Con_Printf("mesh outcome journal open failed: %s; outcome continues on transport\n", strerror(errno));
-	meshx_outcome_add(row);
-}
-
-static void meshx_outcome_publish(prvm_prog_t *prog, int node, uint32_t tick)
-{
 	meshxhandle_t *m;
-	size_t count;
-	meshx_outcome_load();
-	count = min(64, meshx_outcome_count);
-	m = meshx_get(meshx_open(node, MESH_XON_OUTCOME, 0, 5, 64));
+	VM_SAFEPARMCOUNT(3, VM_mesh_round_outcome);
+	PRVM_ViewFor(prog, 0);
+	m = meshx_get(meshx_open((int)PRVM_G_READFLOAT(OFS_PARM0), MESH_XON_OUTCOME, 0, 5, 1));
 	if (!m)
 		return;
 	m->session = prog->view_session;
-	for (size_t i = 0; i < count; ++i)
-		memcpy(m->req + i * 5, meshx_outcomes[i ? (meshx_outcome_cursor + i - 1) % (meshx_outcome_count - 1) : meshx_outcome_count - 1], 5 * sizeof(float));
-	meshx_outcome_cursor = meshx_outcome_count > 1 ? (meshx_outcome_cursor + count - 1) % (meshx_outcome_count - 1) : 0;
-	meshx_publish(m, tick, count);
+	m->req[0] = prog->view_session >> 24;
+	m->req[1] = prog->view_session & 0xffffff;
+	m->req[2] = PRVM_G_READFLOAT(OFS_PARM1);
+	m->req[3] = PRVM_G_READFLOAT(OFS_PARM2);
+	m->req[4] = PRVM_serverglobalfloat(time);
+	meshx_publish(m, 0, 1);
 }
 
 void VM_mesh_view_publish(prvm_prog_t *prog)
@@ -1059,17 +970,13 @@ void VM_mesh_view_publish(prvm_prog_t *prog)
 	uint32_t rows = 0;
 	VM_SAFEPARMCOUNT(2, VM_mesh_view_publish);
 	PRVM_ViewFor(prog, 0);
-	meshx_outcome_publish(prog, node, tick);
 	if (!prog->view_state_handle)
 		prog->view_state_handle = meshx_open(node, MESH_XON_STATE, 0, PRVM_VIEW_STATE_WIDTH, 1) + 1;
 	if (!prog->view_response_handle)
 		prog->view_response_handle = meshx_open(node, 0, MESH_XON_STRATEGY, PRVM_VIEW_RESPONSE_WIDTH, 1) + 1;
 	m = meshx_get(prog->view_state_handle - 1);
 	if (!m)
-	{
-		VM_Warning(prog, "mesh_view_publish: transport is reconnecting; bot execution continues\n");
 		return;
-	}
 	MeshX_ViewConsume(prog);
 	m->session = prog->view_session;
 	for (view = prog->views; view; view = view->next)
@@ -1112,7 +1019,7 @@ void VM_mesh_view_publish(prvm_prog_t *prog)
 				int encoded = type && (type != ev_float || !isfinite(page->state[i]));
 				PRVM_ViewMask(view, page, i);
 				data[PRVM_VIEW_STATE_HEADER + i] = encoded ? bits & 0xffff : page->state[i];
-				data[PRVM_VIEW_STATE_HEADER + PRVM_VIEW_PAGE + i] = view->decay * page->residual[i] + view->gain * page->velocity[i];
+				data[PRVM_VIEW_STATE_HEADER + PRVM_VIEW_PAGE + i] = page->forcing ? view->decay * page->residual[i] + view->gain * page->velocity[i] : 0;
 				data[PRVM_VIEW_STATE_HEADER + 2 * PRVM_VIEW_PAGE + i] = (encoded ? (1u << 20) | ((bits >> 16) << 3) | type : type) |
 					(type && PRVM_ViewReadOnly(view, page->entity, page->offset + i) ? PRVM_VIEW_READONLY : 0);
 				data[PRVM_VIEW_STATE_HEADER + 3 * PRVM_VIEW_PAGE + i] = page->read_time[i];

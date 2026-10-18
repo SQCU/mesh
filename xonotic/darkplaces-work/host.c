@@ -615,7 +615,7 @@ void Host_Main(void)
 				wait = 1;
 
 			time0 = Sys_DirtyTime();
-			if (sv_checkforpacketsduringsleep.integer && !sys_usenoclockbutbenchmark.integer && !svs.threaded) {
+			if ((sv_checkforpacketsduringsleep.integer || MeshX_Descriptor() >= 0) && !sys_usenoclockbutbenchmark.integer && !svs.threaded) {
 				NetConn_SleepMicroseconds((int)wait);
 				if (cls.state != ca_dedicated)
 					NetConn_ClientFrame();

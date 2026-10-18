@@ -1,7 +1,6 @@
 #pragma once
 #include "mesh_ipc.qh"
 
-const float PLC_STRAT_TICK = 0.4;
 float plc_str_next_step;
 
 #define PLC_STR_NODE cvar("g_payload_mesh_node")
@@ -318,6 +317,7 @@ entity plc_nav_targets;
 
 #define autocvar_g_payload_strategy_log cvar("g_payload_strategy_log")
 #define autocvar_g_payload_vcell_log cvar("g_payload_vcell_log")
+#define autocvar_g_payload_strategy_interval cvar("g_payload_strategy_interval")
 
 void payload_strategy_attach();
 float payload_str_cart_pool_run();

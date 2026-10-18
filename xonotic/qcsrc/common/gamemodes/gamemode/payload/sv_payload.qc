@@ -442,7 +442,7 @@ void payload_think(entity this)
 
 		if(time >= plc_str_next_step)
 		{
-			plc_str_next_step = time + PLC_STRAT_TICK;
+			plc_str_next_step = time + autocvar_g_payload_strategy_interval;
 			payload_strategy_step(this);
 		}
 	}
@@ -617,7 +617,7 @@ bool payload_cart_supports_player(entity cart)
 
 void payload_RoundEnd(int winner_team)
 {
-	mesh_round_outcome(payload_episode, payload_score_winner);
+	mesh_round_outcome(PLC_STR_NODE, payload_episode, payload_score_winner);
 	string outcome = sprintf("{\"event\":\"server_outcome\",\"contract\":\"checkpoint-control-integral-v1\",\"map\":\"%s\",\"episode\":%d,\"time\":%.9g,\"actor_team\":%d,\"score_limit\":%.9g,\"scores\":[", mapname, payload_episode, time, payload_score_winner, autocvar_g_payload_point_limit);
 	for(int j = 1; j <= payload_teams; ++j)
 		outcome = strcat(outcome, (j > 1 ? "," : ""), sprintf("%.9g", payload_score[j]));

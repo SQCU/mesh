@@ -14,19 +14,17 @@ float(float h, .float firstfield, entity first, .entity nextfield, float numedic
 #define MESH_STAT_INFLIGHT 2
 #define MESH_STAT_WIDTH 3
 #define MESH_STAT_MAXROWS 4
-#define MESH_STAT_ATTACHED 5
 #define MESH_STAT_DROPPED 6
 #define MESH_STAT_REQROWS 7
-#define MESH_STAT_TXSLOTS 8
 #define MESH_STAT_SHORTWRITES 9
 #define MESH_STAT_ROWS 10
 #define MESH_STAT_RESPONSE_FRAMES 11
 #define MESH_STAT_TICK 12
-#define MESH_STAT_ARENA 13
 #define MESH_STAT_USABLE 14
 #define MESH_STAT_PEER 15
 #define MESH_STAT_BARRIERS 16
 #define MESH_STAT_SCATTER_ROWS 17
+#define MESH_STAT_PENDING 18
 
 #define MESH_KIND_NONE 0
 #define MESH_KIND_OBSERVATION 1
@@ -39,5 +37,5 @@ void(entity bot, void(entity) callback) mesh_view_run = #659;
 void(entity bot, float target, float offset, float residual, float velocity, float source_time, float duration, float tau) mesh_view_set = #660;
 float(entity bot, float selector) mesh_view_stat = #661;
 float(float node, float tick) mesh_view_publish = #662;
-void(float episode, float winner) mesh_round_outcome = #663;
+void(float node, float episode, float winner) mesh_round_outcome = #663;
 #define MESH_KIND_STATE 6

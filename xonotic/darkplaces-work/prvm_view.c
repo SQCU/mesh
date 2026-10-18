@@ -1,7 +1,9 @@
 #include <setjmp.h>
+#include <unistd.h>
 
 static int PRVM_LeaveFunction(prvm_prog_t *prog);
 static jmp_buf *prvm_view_recovery;
+static uint64_t prvm_view_sessions;
 
 static int PRVM_ViewSkill(const char *name)
 {
@@ -55,7 +57,7 @@ prvm_view_t *PRVM_ViewFor(prvm_prog_t *prog, int owner)
 	if (owner < 0 || owner >= prog->num_edicts)
 		prog->error_cmd("bot view owner %i outside %i edicts", owner, prog->num_edicts);
 	if (!prog->view_session)
-		prog->view_session = ((uint64_t)(Sys_DirtyTime() * 1000000) & 0xffffffffffffULL) | 1;
+		prog->view_session = ((uint64_t)getpid() & 0xffffff) << 24 | (++prvm_view_sessions & 0xffffff);
 	for (view = prog->views; view && view->owner != owner; view = view->next) {}
 	if (!view)
 	{
@@ -86,7 +88,6 @@ prvm_view_t *PRVM_ViewFor(prvm_prog_t *prog, int owner)
 			for (int j = 0; j < prvm_type_size[d->type & ~DEF_SAVEGLOBAL]; ++j)
 				view->field_readonly[d->ofs + j] |= PRVM_ViewSkill(PRVM_GetString(prog, d->s_name));
 		}
-		view->tau = 1;
 		view->records = Mem_Alloc(prog->progs_mempool, (prog->limit_edicts + 1) * sizeof(*view->records));
 		view->tail = &view->pages;
 		view->next = prog->views;
@@ -396,10 +397,9 @@ void VM_mesh_view_set(prvm_prog_t *prog)
 		PRVM_G_FLOAT(OFS_PARM2) != floor(PRVM_G_FLOAT(OFS_PARM2)) ||
 		PRVM_G_FLOAT(OFS_PARM1) < -1 || PRVM_G_FLOAT(OFS_PARM1) >= prog->num_edicts ||
 		PRVM_G_FLOAT(OFS_PARM2) < 0 || PRVM_G_FLOAT(OFS_PARM2) >=
-		(PRVM_G_FLOAT(OFS_PARM1) < 0 ? prog->numglobals : prog->entityfields) ||
-		PRVM_G_FLOAT(OFS_PARM6) < 0 || PRVM_G_FLOAT(OFS_PARM7) <= 0)
+		(PRVM_G_FLOAT(OFS_PARM1) < 0 ? prog->numglobals : prog->entityfields))
 	{
-		VM_Warning(prog, "mesh_view_set: invalid memory extent or interval; current view continues\n");
+		VM_Warning(prog, "mesh_view_set: invalid memory extent; current view continues\n");
 		return;
 	}
 	view = PRVM_ViewFor(prog, PRVM_G_INT(OFS_PARM0));

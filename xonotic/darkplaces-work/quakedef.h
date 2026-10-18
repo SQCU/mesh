@@ -32,6 +32,7 @@
 extern const char *buildstring;
 extern char engineversion[128];
 void MeshX_Pump(void);
+int MeshX_Descriptor(void);
 
 #define GAMENAME "id1"
 

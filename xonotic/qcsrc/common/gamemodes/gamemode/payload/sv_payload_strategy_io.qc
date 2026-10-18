@@ -151,16 +151,17 @@ void payload_strategy_cart_pool()
 	}
 }
 
+float plc_str_opened;
 void payload_strategy_attach()
 {
-	if (plc_str_h_obs < 0)
+	if (!plc_str_opened)
+	{
+		plc_str_opened = 1;
 		plc_str_h_obs  = mesh_open(PLC_STR_NODE, MESH_KIND_OBSERVATION, MESH_KIND_NONE, PLC_STR_OBS_W, maxclients);
-	if (plc_str_h_cart < 0)
 		plc_str_h_cart = mesh_open(PLC_STR_NODE, MESH_KIND_CART, MESH_KIND_NONE, PLC_STR_CART_W, PLC_MAX_CARTS);
-	if (plc_str_h_team < 0)
 		plc_str_h_team = mesh_open(PLC_STR_NODE, MESH_KIND_TEAM, MESH_KIND_NONE, PLC_STR_TEAM_W, NUM_TEAMS);
-	if (plc_str_h_evt < 0)
 		plc_str_h_evt  = mesh_open(PLC_STR_NODE, MESH_KIND_EVENT, MESH_KIND_NONE, PLC_STR_EVT_W, max(1, maxclients));
+	}
 
 	payload_strategy_cart_pool();
 }
@@ -580,10 +581,12 @@ void payload_strategy_gather(float nclients)
 void payload_strategy_step(entity leadcart)
 {
 	payload_strategy_attach();
+	if (plc_str_h_obs < 0 || plc_str_h_cart < 0 || plc_str_h_team < 0 || plc_str_h_evt < 0)
+		return;
 
 	float nclients = maxclients;
 	FOREACH_CLIENT(IS_PLAYER(it), { payload_perceive(it); });
-	if (mesh_stat(plc_str_h_obs, 18) == 0)
+	if (mesh_stat(plc_str_h_obs, MESH_STAT_PENDING) == 0)
 	{
 		payload_emit_cell_links();
 		payload_strategy_gather(nclients);

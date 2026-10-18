@@ -845,6 +845,14 @@ void LHNET_SleepUntilPacket_Microseconds(int microseconds)
 #endif
 		}
 	}
+#ifndef WIN32
+	if (MeshX_Descriptor() >= 0)
+	{
+		FD_SET(MeshX_Descriptor(), &fdreadset);
+		if (lastfd < MeshX_Descriptor())
+			lastfd = MeshX_Descriptor();
+	}
+#endif
 	tv.tv_sec = microseconds / 1000000;
 	tv.tv_usec = microseconds % 1000000;
 	select(lastfd + 1, &fdreadset, NULL, NULL, &tv);
