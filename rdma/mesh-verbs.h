@@ -76,19 +76,6 @@ static int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   return 0;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
-/* design/RDMA-KERNEL-RECOVERY.md: registrations, protection domain, context, each kept where its release fails; a
-   device's registrations go only here, at its retirement (design/prepared-machine.md#M09) */
-static int down_device(struct mesh_device *device){
-  for(uint32_t e=0;e<device->extents;e++){
-    if(device->regions[e] && ibv_dereg_mr(device->regions[e]))return 0;
-    device->regions[e]=NULL;
-  }
-  free(device->regions);device->regions=NULL;device->extents=0;
-  if(device->domain){if(ibv_dealloc_pd(device->domain))return 0;device->domain=NULL;}
-  if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
-  device->frame_capacity=0;
-  return 1;
-}
 static void down(void){ if(shm)shm_unlink(shm); }
 /* design/recovery.md#diagnosis: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
@@ -157,14 +144,15 @@ static int device_up(struct mesh_device *device,struct wire_mapping *wire,int *r
   return 0;
 }
 /* design/bridge-and-ipc.md#links: a link's two completion queues, its SENDs' and its receives', which every queue pair
-   of the link shares; 0, or the errno */
+   of the link shares, each made where it is not yet (made once a device context, never destroyed: the kernel reclaims
+   them at the bridge's exit, design/RDMA-KERNEL-RECOVERY.md); 0, or the errno */
 static int link_cqs(struct mesh_device *device,uint32_t entries,struct ibv_cq **sent,struct ibv_cq **received){
-  if(!(*sent=ibv_create_cq(device->context,(int)entries,NULL,NULL,0)))return errno?errno:EIO;
-  if(!(*received=ibv_create_cq(device->context,(int)entries,NULL,NULL,0))){const int error=errno?errno:EIO;ibv_destroy_cq(*sent);*sent=NULL;return error;}
+  if(!*sent && !(*sent=ibv_create_cq(device->context,(int)entries,NULL,NULL,0)))return errno?errno:EIO;
+  if(!*received && !(*received=ibv_create_cq(device->context,(int)entries,NULL,NULL,0)))return errno?errno:EIO;
   return 0;
 }
 /* design/bridge-and-ipc.md#links: a UC queue pair on the link's completion queues, in INIT, its capacities read; 0, or
-   the errno (ENOSPC: the device holds no more) */
+   the errno (ENOSPC: the device holds no more; a pair made and then refused INIT is kept in *made, never destroyed) */
 static int pair_make(struct mesh_device *device,struct ibv_cq *sent,struct ibv_cq *received,struct ibv_qp **made,uint32_t *sends,uint32_t *receives){
   if(device->pairs>=device->max_pairs)return ENOSPC;
   struct ibv_qp_init_attr qi={.send_cq=sent,.recv_cq=received,.qp_type=IBV_QPT_UC,
@@ -175,9 +163,8 @@ static int pair_make(struct mesh_device *device,struct ibv_cq *sent,struct ibv_c
   struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   if(ibv_query_qp(qp,&queried,IBV_QP_CAP,&actual) || ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){
-    const int error=errno?errno:EIO;
-    if(!ibv_destroy_qp(qp))device->pairs--;
-    return error;
+    *made=qp;
+    return errno?errno:EIO;
   }
   *sends=actual.cap.max_send_wr;*receives=actual.cap.max_recv_wr;*made=qp;
   return 0;
@@ -193,24 +180,14 @@ static int pair_connect(struct mesh_device *device,struct ibv_qp *qp,uint32_t re
   if(ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
   return 0;
 }
-/* design/bridge-and-ipc.md#links: a queue pair made again in place, its number kept, while the link's other pairs run (no
-   pair is destroyed while the link is up: RDMA-KERNEL-RECOVERY.md): the error state (its posted receives and SENDs end,
-   flushed), the reset state, then INIT as pair_make leaves one, for pair_connect; 0, or the errno */
+/* design/bridge-and-ipc.md#links: a queue pair made again in place, its number kept, at a lease's release and at the
+   link's pairing again (the bridge destroys no verbs object: design/RDMA-KERNEL-RECOVERY.md): the error state (its
+   posted receives and SENDs end, flushed), the reset state, then INIT as pair_make leaves one, for pair_connect; 0, or
+   the errno */
 static int pair_reset(struct ibv_qp *qp){
   struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR},reset={.qp_state=IBV_QPS_RESET},init={.qp_state=IBV_QPS_INIT,.port_num=1};
   if(ibv_modify_qp(qp,&error,IBV_QP_STATE) || ibv_modify_qp(qp,&reset,IBV_QP_STATE) ||
      ibv_modify_qp(qp,&init,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
-  return 0;
-}
-/* design/RDMA-KERNEL-RECOVERY.md "Every teardown": a queue pair moved to the error state (its posted receives and SENDs
-   end; the move returns, and nothing waits on what it flushes), then destroyed; 0, or the destruction's errno, its
-   handle let go either way */
-static int pair_destroy(struct mesh_device *device,struct ibv_qp *qp){
-  if(!qp)return 0;
-  struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
-  ibv_modify_qp(qp,&error,IBV_QP_STATE);
-  if(ibv_destroy_qp(qp))return errno?errno:EIO;
-  device->pairs--;
   return 0;
 }
 /* design/algorithm-sources.md#link */

@@ -158,7 +158,7 @@ struct program {
    `quiet` the guard value it holds at; `bell` the word they wait on while the link is down or the guard stands) */
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,retiring,open,wanted;
+  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,wanted;
   int64_t farewell;
   char name[IFNAMSIZ];
   int control,job,result,refused;
@@ -224,11 +224,13 @@ static uint64_t available_now(void){
 /* design/recovery.md#diagnosis: why this bridge stops, the code its FAREWELL carries (a signal's number; its binary
    changed) */
 #define MESH_STOP_BINARY INT64_C(-1)
+#define MESH_STOP_DEVICE INT64_C(-2)
 static int64_t stop_reason;
 static void farewell_text(int64_t code,char *out,size_t room){
   if(code==SIGTERM)snprintf(out,room,"SIGTERM: its agent was unloaded or restarted");
   else if(code>0)snprintf(out,room,"signal %lld",(long long)code);
   else if(code==MESH_STOP_BINARY)snprintf(out,room,"its binary changed");
+  else if(code==MESH_STOP_DEVICE)snprintf(out,room,"a verbs call of its device was refused");
   else snprintf(out,room,"no reason given");
 }
 
@@ -850,16 +852,26 @@ static int pair_join(struct port *port,uint32_t k){
   if(!error)pair->connected=1;
   return error;
 }
-static void port_lost(struct port *port,int64_t code,int retire);
+static void port_lost(struct port *port,int64_t code);
+/* design/RDMA-KERNEL-RECOVERY.md: a verbs call of a port's device refused: the bridge stops, every verbs object it made
+   left to the kernel's reclaim at its exit, and launchd starts it again on a fresh device context.  The bridge never
+   tears a verbs object down itself: ibv_dealloc_pd while the device's service terminates (its link's peer gone, a
+   shutdown) deadlocks Apple's driver (09-05, and 10-18 23:04:33 on the M5 as the Mini lost power) */
+static void device_lost(struct port *port,int64_t code){
+  if(stop)return;
+  say("link %u (%s): a verbs call of its device refused (%s): the bridge stops, and starts again on a fresh device context\n",
+      port->index,port->name,code>0?strerror((int)code):"no errno");
+  stop_reason=MESH_STOP_DEVICE;stop=1;
+}
 /* design/bridge-and-ipc.md#leases: lease pair k made again in place, joined where the peer's newer making was told, and
-   told the peer with `code`; a failure of the verbs is the link's loss, its device retired */
+   told the peer with `code`; a refused verbs call stops the bridge (device_lost) */
 static void lease_remake(struct port *port,uint32_t k,int64_t code){
   guard_raise(port);
   const uint64_t sent=port->pair[k].completions;
   int error=pair_new(port,k);
   if(!error)error=pair_join(port,k);
   guard_lower(port);
-  if(error){port_lost(port,error,1);return;}
+  if(error){device_lost(port,error);return;}
   pairs_tell(port,k,code,sent);
 }
 
@@ -918,7 +930,7 @@ static void path_release(struct path *path,int64_t code,int cancel,uint32_t only
     if(!error)told[n++]=k;
   }
   guard_lower(port);
-  if(error){port_lost(port,error,1);return;}
+  if(error){device_lost(port,error);return;}
   for(uint32_t i=0;i<n;i++)pairs_tell(port,told[i],code,sent[i]);
 }
 /* design/bridge-and-ipc.md#programs: a path's rings attached to their leases on its port, under the guard: each record
@@ -1056,7 +1068,7 @@ static void pairs_turn(void){
       const int64_t failed=atomic_exchange(&pair->failed,0);
       if(!failed)continue;
       say("link %u (%s): pair %u failed: code %lld\n",port->index,port->name,k,(long long)failed);
-      if(!k)port_lost(port,failed,0);
+      if(!k)port_lost(port,failed);
       else if(port->pair[k].path)program_fail(port->pair[k].path->program,failed,2,M->node);
       else lease_remake(port,k,failed);
     }
@@ -2088,7 +2100,7 @@ static void host_taken(void){
    that fails is the link's loss */
 static void port_watch(struct port *port,int filter){
   struct kevent64_s event;EV_SET64(&event,(uint64_t)port->control,filter,EV_ADD|(filter==EVFILT_WRITE?EV_ONESHOT:0),0,0,port->index,0,0);
-  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))port_lost(port,errno,0);
+  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))port_lost(port,errno);
 }
 static void port_flush(struct port *port){
   while(port->control>=0 && port->out_sent<port->out_length){
@@ -2097,7 +2109,7 @@ static void port_flush(struct port *port){
       if(!port->writing){port->writing=1;port_watch(port,EVFILT_WRITE);}
       return;
     }
-    if(sent<=0){port_lost(port,sent?errno:EIO,0);return;}
+    if(sent<=0){port_lost(port,sent?errno:EIO);return;}
     port->out_sent+=(size_t)sent;
   }
   port->out_sent=port->out_length=0;
@@ -2109,7 +2121,7 @@ static void port_say(struct port *port,struct message said,const void *payload,u
   size_t length=port->out_length+sizeof said+bytes;
   if(length>port->out_room){
     unsigned char *grown=realloc(port->out,length*2);
-    if(!grown){port_lost(port,ENOMEM,0);return;}
+    if(!grown){port_lost(port,ENOMEM);return;}
     port->out=grown;port->out_room=length*2;
   }
   memcpy(port->out+port->out_length,&said,sizeof said);
@@ -2118,9 +2130,13 @@ static void port_say(struct port *port,struct message said,const void *payload,u
   port_flush(port);
 }
 
-/* design/bridge-and-ipc.md#links: the link's queue pairs made once at its pairing: its two completion queues and its
-   device's usable queue pairs (at most LINK_PAIRS), each its share of the completion queues' entries, every pair's
-   number told the peer (PAIRS); 0, or the errno */
+/* design/bridge-and-ipc.md#links: the link's queue pairs at its pairing: its two completion queues and its device's
+   usable queue pairs (at most LINK_PAIRS), made at the device context's first pairing and made again in place at each
+   pairing after (pair_new: reset, their numbers kept; none destroyed), each its share of the completion queues' entries,
+   the completion queues' entries of the link's last pairing taken and dropped, every pair's number told the peer
+   (PAIRS); at the link's first PAIRS each pair takes the higher of the two ends' rounds (pairs_heard: an end whose pairs
+   were kept is rounds ahead of one that started again), so its completions of a round before stay skipped; 0, or the
+   errno */
 static int link_make(struct port *port){
   struct mesh_device *device=&port->device;
   const uint32_t n=device->max_pairs<LINK_PAIRS?device->max_pairs:LINK_PAIRS;
@@ -2132,24 +2148,29 @@ static int link_make(struct port *port){
   port->share=(uint32_t)(entries/n);
   guard_raise(port);
   for(uint32_t k=0;k<n && !error;k++){
-    port->pair[k]=(struct pair){.round=UINT32_MAX};
+    const struct pair kept=port->pair[k];
+    port->pair[k]=(struct pair){.qp=kept.qp,.round=kept.qp?kept.round:UINT32_MAX,.sends=kept.sends,.receives=kept.receives};
     if(!(error=pair_new(port,k)))port->made=k+1;
+  }
+  if(!error){
+    struct ibv_wc stale[32];
+    while(port->sent->context->ops.poll_cq(port->sent,32,stale)>0){}
+    while(port->received->context->ops.poll_cq(port->received,32,stale)>0){}
   }
   guard_lower(port);
   if(!error)pairs_tell(port,LINK_PAIRS,0,0);
   return error;
 }
-/* the link's queue pairs and completion queues destroyed (the error state, then destroy), under the guard */
-static void link_unmake(struct port *port){
+/* the link's pairs let go of, under the guard, with no verbs call: each pair's queue pair, round and capacities kept for
+   its making again in place at the next pairing (link_make), nothing else of the link's kept; its completion queues
+   kept, a completion of a round before skipped (receive_pass, send_pass) */
+static void link_quiet(struct port *port){
   guard_raise(port);
   for(uint32_t k=0;k<port->made;k++){
-    const int error=pair_destroy(&port->device,port->pair[k].qp);
-    if(error)say("link %u (%s): pair %u's destruction refused: %s\n",port->index,port->name,k,strerror(error));
-    port->pair[k]=(struct pair){.round=UINT32_MAX};
+    const struct pair kept=port->pair[k];
+    port->pair[k]=(struct pair){.qp=kept.qp,.round=kept.round,.sends=kept.sends,.receives=kept.receives};
   }
-  if(port->sent && ibv_destroy_cq(port->sent))say("link %u (%s): a completion queue's destruction refused\n",port->index,port->name);
-  if(port->received && ibv_destroy_cq(port->received))say("link %u (%s): a completion queue's destruction refused\n",port->index,port->name);
-  port->sent=port->received=NULL;port->made=port->count=port->holding=0;
+  port->count=port->holding=0;
   guard_lower(port);
 }
 /* design/bridge-and-ipc.md#links: the peer's PAIRS.  At the link's pairing, each pair joined to the peer's of its index
@@ -2158,28 +2179,29 @@ static void link_unmake(struct port *port){
    (the peer's lost its holder with `code`) or, the peer having let go in order, taken up once its holder's `sent` SENDs
    have landed here (pairs_turn); else this end's made again */
 static void pairs_heard(struct port *port,const struct message *heard,const unsigned char *payload){
-  if(heard->bytes%sizeof(struct pairs_entry)){port_lost(port,EPROTO,0);return;}
+  if(heard->bytes%sizeof(struct pairs_entry)){port_lost(port,EPROTO);return;}
   const uint32_t n=heard->bytes/(uint32_t)sizeof(struct pairs_entry);
   struct pairs_entry entry[LINK_PAIRS];
-  if(n>LINK_PAIRS){port_lost(port,EPROTO,0);return;}
+  if(n>LINK_PAIRS){port_lost(port,EPROTO);return;}
   memcpy(entry,payload,n*sizeof *entry);
   if(!port->count){
     const uint32_t count=port->made<heard->count?port->made:heard->count;
     for(uint32_t i=0;i<n;i++)if(entry[i].index<count){
       struct pair *pair=port->pair+entry[i].index;
-      pair->peer_qpn=entry[i].qpn;pair->peer_psn=entry[i].psn;pair->peer_round=entry[i].round;pair->heard=1;
+      if(entry[i].round>pair->round)pair->round=entry[i].round;
+      pair->peer_qpn=entry[i].qpn;pair->peer_psn=entry[i].psn;pair->peer_round=pair->round;pair->heard=1;
     }
     int error=count<2?ENOSPC:0;
     guard_raise(port);
     for(uint32_t k=0;k<count && !error;k++)error=pair_join(port,k);
     guard_lower(port);
-    if(error){port_lost(port,error,error!=ENOSPC);return;}
+    if(error){if(error==ENOSPC)port_lost(port,error);else device_lost(port,error);return;}
     port->count=count;
     for(uint32_t l=0;l<MESH_LEASES;l++)atomic_store(mesh_leases(M,port->index)+l,l+1<count?0:MESH_LEASE_DOWN);
     atomic_store_explicit(&mesh_links(M)[port->index].pairs,count,memory_order_relaxed);
     atomic_store_explicit(&mesh_links(M)[port->index].leases,count-1,memory_order_relaxed);
     record_changed();
-    if((error=port_threads(port))){port_lost(port,error,0);return;}
+    if((error=port_threads(port))){port_lost(port,error);return;}
     atomic_store_explicit(&port->up,1,memory_order_release);
     bell_ring(&port->bell);
     say("link %u (%s): node %u paired: %u queue pairs, %u leases, %u frames a pair\n",port->index,port->name,port->peer,count,count-1,
@@ -2197,10 +2219,10 @@ static void pairs_heard(struct port *port,const struct message *heard,const unsi
       guard_raise(port);
       const int error=pair_join(port,k);
       guard_lower(port);
-      if(error)port_lost(port,error,1);
+      if(error)device_lost(port,error);
       continue;
     }
-    if(!k){port_lost(port,EPROTO,0);return;}
+    if(!k){port_lost(port,EPROTO);return;}
     if(pair->path && entry[i].code)program_fail(pair->path->program,entry[i].code,4,port->peer);
     else if(pair->path){pair->peer_gone=1;atomic_store(&pair->peer_sent,entry[i].sent);}
     else lease_remake(port,k,0);
@@ -2212,14 +2234,14 @@ static void record_heard(struct port *from,const unsigned char *payload,uint32_t
 static void channel_heard(struct port *port,const struct message *heard,const unsigned char *payload);
 static void port_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(!port->greeted){
-    if(heard->kind!=HELLO || heard->block!=M->block*M->pgsz || (port->peer && heard->node!=port->peer)){port_lost(port,EPROTO,0);return;}
+    if(heard->kind!=HELLO || heard->block!=M->block*M->pgsz || (port->peer && heard->node!=port->peer)){port_lost(port,EPROTO);return;}
     port->peer=heard->node;port->peer_port=heard->port;port->heard=*heard;port->greeted=1;
     struct mesh_link_info *link=&mesh_links(M)[port->index];
     atomic_store_explicit(&link->bandwidth,port->bandwidth,memory_order_relaxed);
     atomic_store_explicit(&link->peer_port,heard->port,memory_order_relaxed);
     atomic_fetch_add_explicit(&link->pairings,1,memory_order_relaxed);
     const int error=link_make(port);
-    if(error){port_lost(port,error,1);return;}
+    if(error){device_lost(port,error);return;}
     link_set(port,port->peer,MESH_PAIRED,0);
     for(uint64_t i=0;port->greeted && i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node!=M->node)
       port_say(port,(struct message){.kind=RECORD},mesh_records(M)+i,sizeof(struct mesh_record));
@@ -2228,26 +2250,25 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
   if(heard->kind==RECORD){record_heard(port,payload,heard->bytes);return;}
   if(heard->kind==PAIRS){pairs_heard(port,heard,payload);return;}
   /* design/recovery.md#detection: a peer's FAREWELL is its bridge's stop: the link is lost now */
-  if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET,0);return;}
+  if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);return;}
   if(heard->kind>=CHANNEL_OPEN && heard->kind<=CHANNEL_CLOSE){channel_heard(port,heard,payload);return;}
-  port_lost(port,EPROTO,0);
+  port_lost(port,EPROTO);
 }
 
 /* design/recovery.md#detection, #loss: a link lost: the link down, every program holding a lease of it failed as a value
-   naming its peer (their other leases made again, their peers told), the link's queue pairs and completion queues
-   destroyed, its leases down; a port that went away retires its device (design/RDMA-KERNEL-RECOVERY.md); a link that
-   had paired says HELLO again at once, one that never paired at the next event */
+   naming its peer (their other leases made again, their peers told), the link's pairs let go of with no verbs call
+   (link_quiet), its leases down; the port turns again (its device's port read: a refused read stops the bridge,
+   device_lost), and a link that had paired says HELLO again */
 static void requests_lost(struct port *port,int64_t code);
-static void port_lost(struct port *port,int64_t code,int retire){
+static void port_lost(struct port *port,int64_t code){
   if(port->control>=0){close(port->control);port->control=-1;}
   if(port->greeted||port->connecting){
-    const char *retired=retire?", device retired":"";
     char reason[96];farewell_text(port->farewell,reason,sizeof reason);
-    if(stop)say("link %u (%s): closed toward node %u: this bridge is stopping%s\n",port->index,port->name,port->peer,retired);
-    else if(port->peer && port->parted)say("link %u (%s): node %u parted, its bridge stopping (%s): code %lld%s\n",port->index,port->name,
-                                            port->peer,reason,(long long)code,retired);
-    else if(port->peer)say("link %u (%s): node %u lost: code %lld%s\n",port->index,port->name,port->peer,(long long)code,retired);
-    else say("link %u (%s): lost: code %lld%s\n",port->index,port->name,(long long)code,retired);
+    if(stop)say("link %u (%s): closed toward node %u: this bridge is stopping\n",port->index,port->name,port->peer);
+    else if(port->peer && port->parted)say("link %u (%s): node %u parted, its bridge stopping (%s): code %lld\n",port->index,port->name,
+                                            port->peer,reason,(long long)code);
+    else if(port->peer)say("link %u (%s): node %u lost: code %lld\n",port->index,port->name,port->peer,(long long)code);
+    else say("link %u (%s): lost: code %lld\n",port->index,port->name,(long long)code);
   }
   atomic_store_explicit(&port->up,0,memory_order_release);
   for(uint32_t l=0;l<MESH_LEASES;l++)atomic_store(mesh_leases(M,port->index)+l,MESH_LEASE_DOWN);
@@ -2259,59 +2280,54 @@ static void port_lost(struct port *port,int64_t code,int retire){
         program_fail(prog,port->parted?ECONNRESET:code,4,port->peer);
         break;
       }
-  if(port->made)link_unmake(port);
+  if(port->made)link_quiet(port);
   requests_lost(port,port->parted?ECONNRESET:code);
-  port->wanted|=port->greeted || retire;
+  port->wanted=1;
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
-  port->retiring|=retire;port->open&=!retire;
-  link_set(port,0,retire?MESH_STOPPED:MESH_PAIRING,code);
+  link_set(port,0,stop?MESH_STOPPED:MESH_PAIRING,code);
 }
 /* design/bridge-and-ipc.md#ports: a control socket taken (dialed or accepted): non-blocking, its sends queued, its HELLO
    said */
 static void port_greet(struct port *port){
   int on=1,flags=fcntl(port->control,F_GETFL);
   if(flags<0 || fcntl(port->control,F_SETFL,flags|O_NONBLOCK) || setsockopt(port->control,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on)){
-    port_lost(port,errno?errno:EIO,0);return;
+    port_lost(port,errno?errno:EIO);return;
   }
   port_watch(port,EVFILT_READ);
   port_say(port,(struct message){.kind=HELLO},NULL,0);
 }
 static struct port *port_at(uint32_t interface){
-  for(uint32_t p=0;interface && p<port_count;p++)if(ports[p].interface==interface)return ports[p].retiring?NULL:ports+p;
+  for(uint32_t p=0;interface && p<port_count;p++)if(ports[p].interface==interface)return ports+p;
   return NULL;
 }
-/* design/bridge-and-ipc.md#ports: a port's turn, where an event asked it: on its own queue, its device retired where its
-   port went away, else opened and the window registered on it (it stops between extents at `stop`) */
+/* design/bridge-and-ipc.md#ports: a port's turn, where an event asked it: on its own queue, its device opened and the
+   window registered on it once (it stops between extents at `stop`), its port read at every turn */
 static void port_turn(struct port *port){
-  if(!port->wanted || port->job || port->control>=0 || port->made)return;
+  if(!port->wanted || port->job || port->control>=0)return;
   port->wanted=0;
   port->interface=if_nametoindex(port->name);
-  const int retire=port->retiring;
   port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
     int result=0,refused=0;
-    if(retire && !down_device(&port->device))result=-(errno?errno:EBUSY);
-    else if(!(result=device_up(&port->device,&wire,&refused)))result=device_gid(&port->device);
+    if(!(result=device_up(&port->device,&wire,&refused)))result=device_gid(&port->device);
     port->result=result;port->refused=refused;
     atomic_store_explicit(&port->done,1,memory_order_release);
     wake();
   });
 }
 /* design/recovery.md#registration: a port's turn taken: a registration refused turns again at the next memory-pressure
-   change or link event; a device that failed otherwise is retired and opened again; an open port with no peer says
-   HELLO to every node on its link (a loop port's lower end dials the higher's listener) */
+   change or link event; a device opened that failed otherwise stops the bridge (device_lost); an open port with no peer
+   says HELLO to every node on its link (a loop port's lower end dials the higher's listener) */
 static void port_opened(struct port *port){
-  const int result=port->result,retired=port->retiring;
+  const int result=port->result;
   port->job=0;
-  if(result<0){say("link %u (%s): device retirement: %s\n",port->index,port->name,strerror(-result));return;}
   if(port->refused){
     say("link %u (%s): the window's registration refused (%s): the port turns again at its next memory-pressure change or link event\n",
         port->index,port->name,strerror(port->refused));
     port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);
     return;
   }
-  port->retiring=result && port->device.context && result!=ENETDOWN && result!=ECANCELED;
-  port->wanted|=port->retiring && !retired;
+  if(result && port->device.context && result!=ENETDOWN && result!=ECANCELED){device_lost(port,result);return;}
   if(result){port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);return;}
   atomic_store_explicit(&mesh_links(M)[port->index].max_pairs,port->device.max_pairs,memory_order_relaxed);
   port->open=1;port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
@@ -2323,7 +2339,7 @@ static void port_opened(struct port *port){
     struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(loop_config.port[k].peer),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
     port->control=socket(AF_INET6,SOCK_STREAM,0);
     if(port->control<0 || fcntl(port->control,F_SETFL,O_NONBLOCK) || (connect(port->control,(struct sockaddr *)&to,sizeof to) && errno!=EINPROGRESS)){
-      port_lost(port,errno,0);return;
+      port_lost(port,errno);return;
     }
     port->peer=0;port->connecting=1;
     port_watch(port,EVFILT_WRITE);
@@ -2353,7 +2369,7 @@ static void hello_heard(void){
     from.sin6_port=htons((uint16_t)atoi(MESH_PORT));
     port->control=socket(AF_INET6,SOCK_STREAM,0);
     if(port->control<0 || fcntl(port->control,F_SETFL,O_NONBLOCK) ||
-       (connect(port->control,(struct sockaddr *)&from,sizeof from) && errno!=EINPROGRESS)){port_lost(port,errno,0);continue;}
+       (connect(port->control,(struct sockaddr *)&from,sizeof from) && errno!=EINPROGRESS)){port_lost(port,errno);continue;}
     port->peer=heard.node;port->connecting=1;
     port_watch(port,EVFILT_WRITE);
   }
@@ -2364,18 +2380,18 @@ static void control_heard(struct port *port){
     size_t need=sizeof(struct message);
     if(port->held>=need){
       const struct message *header=(const void *)port->in;
-      if(header->magic!=XMAGIC || header->bytes>(UINT32_C(64)<<20)){port_lost(port,EPROTO,0);return;}
+      if(header->magic!=XMAGIC || header->bytes>(UINT32_C(64)<<20)){port_lost(port,EPROTO);return;}
       need+=header->bytes;
     }
     if(need>port->in_room){
       unsigned char *grown=realloc(port->in,need);
-      if(!grown){port_lost(port,ENOMEM,0);return;}
+      if(!grown){port_lost(port,ENOMEM);return;}
       port->in=grown;port->in_room=need;
     }
     if(port->held<need){
       ssize_t got=recv(port->control,port->in+port->held,need-port->held,0);
       if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-      if(got<=0){port_lost(port,got?errno:(port->parted?ECONNRESET:ENETRESET),0);return;}
+      if(got<=0){port_lost(port,got?errno:(port->parted?ECONNRESET:ENETRESET));return;}
       port->held+=(size_t)got;
       if(port->held<need || need==sizeof(struct message))continue;
     }
@@ -2436,7 +2452,7 @@ static void network_heard(void){
     int known=0;
     for(uint32_t p=0;p<port_count;p++)if(!strcmp(name,ports[p].name)){
       known=1;
-      if(code==KEV_DL_LINK_OFF || code==KEV_DL_IF_DETACHED)port_lost(ports+p,ENETDOWN,1);
+      if(code==KEV_DL_LINK_OFF || code==KEV_DL_IF_DETACHED)port_lost(ports+p,ENETDOWN);
       else if(code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED)ports[p].wanted=1;
     }
     unknown|=!known && (code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED);
@@ -2696,7 +2712,7 @@ int main(int argc,char **argv){
         if(e->filter==EVFILT_WRITE && port->connecting){
           int error=0;socklen_t error_size=sizeof error;
           if(getsockopt(port->control,SOL_SOCKET,SO_ERROR,&error,&error_size))error=errno;
-          if(error)port_lost(port,error,0);
+          if(error)port_lost(port,error);
           else {port->connecting=0;port_greet(port);}
         }
         else if(e->filter==EVFILT_WRITE){port->writing=0;port_flush(port);}
@@ -2706,9 +2722,9 @@ int main(int argc,char **argv){
   }
   /* design/bridge-and-ipc.md#stop: `stop` read by every loop: the progress threads return at their next pass and are
      joined; then the request channels ended, each peer told FAREWELL and each link lost (every program on it failed as
-     a value, ESHUTDOWN, its queue pairs moved to the error state and destroyed), the programs freed, the region told
-     the bridge gone, the watcher joined, each device retired on its port's queue (behind a registration under way,
-     which returns at `stop` between extents), the region unmapped */
+     a value, ESHUTDOWN), the programs freed, the region told the bridge gone, the watcher joined, and the process
+     exits with no verbs call and no wait on a port's queue: every verbs object it made is the kernel's to reclaim at
+     its exit (design/RDMA-KERNEL-RECOVERY.md), and a registration under way returns at `stop` between extents */
   char why[96];farewell_text(stop_reason,why,sizeof why);
   say("bridge node %u: stopping (%s)\n",node,why);
   for(uint32_t p=0;p<port_count;p++){bell_ring(&ports[p].bell);for(int side=0;side<ports[p].threads;side++)pthread_join(ports[p].thread[side],NULL);ports[p].threads=0;}
@@ -2717,19 +2733,12 @@ int main(int argc,char **argv){
   for(uint32_t p=0;p<port_count;p++){
     pairs+=ports[p].made;
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
-    port_lost(ports+p,ESHUTDOWN,1);
+    port_lost(ports+p,ESHUTDOWN);
   }
   for(struct program *prog=programs,*next;prog;prog=next){next=prog->next;program_free(prog);}
   atomic_store(&M->bridge_pid,0);
   mesh_notify(&M->control);
   pthread_join(watcher,NULL);
-  int retired=1;
-  for(uint32_t p=0;p<port_count;p++){
-    struct port *port=ports+p;
-    dispatch_sync(port->work,^{ if(!down_device(&port->device))say("link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno)); });
-    retired&=!port->device.context;
-  }
-  say("bridge node %u: stopped: %u queue pairs destroyed, %u ports' devices %s\n",node,pairs,port_count,retired?"closed":"not all closed");
-  munmap(wire.data,wire.length);munmap(M,length);
+  say("bridge node %u: stopped: %u queue pairs on %u ports left to the kernel's reclaim at its exit\n",node,pairs,port_count);
   return 0;
 }

@@ -10,8 +10,9 @@
    a SEND waiting for its receive as TB5's credit flow control holds it (TN3205), and completes each receive with its
    byte count, or IBV_WC_LOC_LEN_ERR where the SEND is longer than the receive.  A queue pair moved to the error state
    flushes its posted receives and pending SENDs (IBV_WC_WR_FLUSH_ERR), as the move to the error state before every
-   teardown and reset (mesh-verbs.h pair_destroy, pair_reset) has them flushed; one moved to the reset state moves its
-   ring's generation.  A device holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: RDMA-FIRST.md), a
+   reset (mesh-verbs.h pair_reset) has them flushed; one moved to the reset state moves its ring's generation.  A ring
+   is held by the process whose queue pair holds it (`used` its pid) and is free again once that process has exited, as
+   the kernel reclaims a process's verbs objects at its exit (the bridge destroys none).  A device holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: RDMA-FIRST.md), a
    SEND at most half a ring (the port's max_msg_sz).  Pairing is the bridges' own (their control sockets on the loopback
    interface).  Only the bridge's verbs are provided: one scatter-gather entry a request, SEND and RECV on
    unreliable-connected queue pairs, one port. */
@@ -19,6 +20,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -32,7 +34,7 @@ enum { LOOP_QPS = 1024, LOOP_DEVICES = 64, LOOP_DEVICE_QPS = 10 };
 #define LOOP_RING ((uint64_t)8 << 20)
 
 /* a queue pair's incoming SENDs: `head` the bytes written, `tail` the bytes consumed, each record an 8-byte length then
-   the payload rounded up to 8 bytes; `used` nonzero while a queue pair holds the ring, `generation` moved at each
+   the payload rounded up to 8 bytes; `used` the pid of the process whose queue pair holds the ring, `generation` moved at each
    making */
 struct loop_ring {
   _Alignas(128) _Atomic uint64_t head;
@@ -381,8 +383,9 @@ struct ibv_qp *ibv_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *init) {
   uint32_t number = LOOP_QPS;
   for (uint32_t k = 0; held && *held < LOOP_DEVICE_QPS && k < LOOP_QPS && number == LOOP_QPS; k++) {
     const uint32_t at = (atomic_fetch_add(&fabric_->next, 1)) % LOOP_QPS;
-    uint32_t vacant = 0;
-    if (atomic_compare_exchange_strong(&fabric_->rings[at].used, &vacant, 1)) number = at;
+    uint32_t holder = atomic_load(&fabric_->rings[at].used);
+    if (holder && (kill((pid_t)holder, 0) == 0 || errno != ESRCH)) continue;
+    if (atomic_compare_exchange_strong(&fabric_->rings[at].used, &holder, (uint32_t)getpid())) number = at;
   }
   if (number == LOOP_QPS) {
     pthread_mutex_unlock(&lock_);

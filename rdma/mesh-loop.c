@@ -38,7 +38,7 @@
        program in a loop, stopped once one landed); `linkloss` (the last bridge stopped and the others at once, as its
        loss reaches them); `client` (the last rank killed in a call and every bridge stopped at once); `peer` (the last
        bridge stopped and exited, then the others): each bridge's exit status, its last log line, its region unlinked,
-       and the fabric's queue pairs left (every one of them destroyed: 0)
+       and the fabric's queue pairs held by a live process (every one reclaimed at its process's exit: 0)
      mesh-loop hop DIRECTORY ROUNDS
        nodes 0 and 1 (a cable): ROUNDS round trips of one float32 each way between two ranks (ncclSend, ncclRecv on the
        host path), the median one-way time of a round in microseconds
@@ -722,7 +722,7 @@ static int loop_kill(const char *directory, uint64_t count, int walk, int bridge
   return failed != 0;
 }
 
-/* the loopverbs fabric as loopverbs.c lays it out: a ring a queue pair, `used` while one holds it */
+/* the loopverbs fabric as loopverbs.c lays it out: a ring a queue pair, `used` the pid of the process holding it */
 #define LOOP_QPS 1024
 #define LOOP_RING ((uint64_t)8 << 20)
 struct loop_ring { _Alignas(128) _Atomic uint64_t head; _Alignas(128) _Atomic uint64_t tail; _Atomic uint32_t used, generation; unsigned char data[LOOP_RING]; };
@@ -735,7 +735,10 @@ static int fabric_held(void) {
   close(fd);
   if (f == MAP_FAILED) return -1;
   int held = 0;
-  for (int k = 0; k < LOOP_QPS; k++) held += atomic_load(&f->rings[k].used) != 0;
+  for (int k = 0; k < LOOP_QPS; k++) {
+    const uint32_t holder = atomic_load(&f->rings[k].used);
+    held += holder && (kill((pid_t)holder, 0) == 0 || errno != ESRCH);
+  }
   munmap(f, sizeof *f);
   return held;
 }
@@ -771,8 +774,9 @@ static int stop_all(const char *directory, const struct loop_map *map, const cha
     FILE *f = fopen(path, "r");
     while (f && fgets(line, sizeof line, f)) memcpy(last, line, sizeof last);
     if (f) fclose(f);
-    stopped += strstr(last, "stopped:") && strstr(last, "devices closed") != NULL;
+    stopped += strstr(last, "stopped:") && strstr(last, "left to the kernel's reclaim at its exit") != NULL;
   }
+  while (waitpid(-1, NULL, WNOHANG) > 0) {}
   const int held = fabric_held();
   shm_unlink(LOOP_FABRIC);
   printf("{\"loop\":\"sigterm\",\"state\":\"%s\",\"family\":\"%s\",\"bridges\":%d,\"exited\":%d,\"exited_zero\":%d,\"stopped_lines\":%d,"
