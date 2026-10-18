@@ -1,21 +1,22 @@
 # Collectives data flow (libnccl-mesh)
 
 What happens when a rank calls a collective: which thread, process and GPU does the work, and which words and
-buffers it reads and writes. This is accurate to mesh `725a3dfb` and metal-microbench `6b1ea2b`; the bridge's stop, the
-cancel (`ncclMeshCommCancel`) and the held flows to mesh `0fb8eb54` and metal-microbench `b181d45`. Citations are
-`file:function` (line numbers at that HEAD); a bare function name is in `rdma/nccl-mesh.c`.
+buffers it reads and writes. This is accurate to mesh `725a3dfb` and metal-microbench `6b1ea2b`; the session's opening
+and agreement, its failures and its end, the bridge's stop, the cancel (`ncclMeshCommCancel`) and the held communicators
+to mesh `2594a087` and metal-microbench `b181d45`. Citations are `file:function` (line numbers at the first HEAD); a
+bare function name is in `rdma/nccl-mesh.c`.
 
 - Usage, build, rules a program keeps: [rdma/NCCL.md](../rdma/NCCL.md). The API contract: `rdma/nccl.h`'s header
   comment. Neither is repeated here.
-- Everything inside the bridge process (pairing a program, posting a released SEND cell, writing a landing's
-  completion word, cancelling words, relaying, retiring a dead process's slot, its stop): `design/bridge-dataflow.md`.
-  This page describes only the library's side of the region and its words.
+- Everything inside the bridge process (starting a program on its leases, posting a released SEND cell, writing a
+  landing's completion word, cancelling words, relaying, retiring a dead process's slot, its stop):
+  `design/bridge-dataflow.md`. This page describes only the library's side of the region and its words.
 
 ## 1. Layers and threads
 
 `libnccl-mesh.dylib` is `nccl-mesh.c` + `nccl-mesh-metal.m` + `mesh-metal.m` (rdma/Makefile, target
 `libnccl-mesh.dylib`), linked against `libmesh.dylib` (`mesh-dataflow.c`: attach, slots, map, leases; `mesh-call.c`:
-sections, transfer binding, start, wake; `mesh-collective.c`: trees, compile, choose, wire, host publish/arrive). The
+sections, transfer binding, agreement, start; `mesh-collective.c`: trees, compile, choose, wire, host publish/arrive). The
 GPU code is `rdma/mesh.metal` (embedded as `.build/mesh_metal.h`) followed by `nccl-mesh-metal.m`'s `STEPS` and
 `KERNELS` text, compiled once per device at first use (`nccl-mesh-metal.m:kernels_of`, `MTLMathModeSafe`).
 
@@ -34,8 +35,8 @@ GPU code is `rdma/mesh.metal` (embedded as `.build/mesh_metal.h`) followed by `n
                │ shared memory: region "/mesh0" (shm_open, mmap MAP_SHARED; mesh_open)         │
                │ ready words, slots ──►    ◄── completion words (1+cycle, or ~0)               │
  ┌─────────────▼───────────────────────────────────────────────────────────────────────────────┴──────────────────┐
- │ node N's bridge, mesh-flow (design/bridge-dataflow.md): pairs the session's program, posts each released slot  │
- │ over TB5 RDMA, writes the receiver's completion word on landing, relays, cancels, retires dead clients' slots  │
+ │ node N's bridge, mesh-flow (design/bridge-dataflow.md): starts the session's program on its leases, posts      │
+ │ each released cell over TB5 RDMA, writes completion words on landing, relays, cancels, retires dead slots      │
  └──────────────────────────────────────────── RDMA ──► peer node's bridge ──► peer rank's ring slot + word ──────┘
 ```
 
@@ -55,14 +56,16 @@ their statuses (`ESRCH`), so no wait of the library outlives its bridge. Client-
 
 - **Header** (`mesh.h` `struct hdr`). The library reads `bridge_pid` (`attach_live`), `node` (`session_open` checks it
   is the rank's member), `pgsz` and `block` (the wire), `data_off` and `length` (`ncclCommRegister`'s window bounds) and the
-  map serial `map` (`mesh_map_serial`). It rings `control`
-  (`mesh_transfers_start`, `mesh_retire`) and `bell[p]` (`mesh_transfers_wake`).
+  map serial `map` (`mesh_map_serial`). It rings `control` (`mesh_transfers_start`, `mesh_retire`).
+- **The links and their leases** (`mesh_links`, `mesh_leases(m, port)`): `mesh_transfers_agree` reads each paired
+  link's peer and lease count and claims free lease words (0) with the slot's owner word, letting go of those the plan
+  did not assign.
 - **The process's client slot** (`mesh_attach`, key 0). Its rows own the leases (`ncclMemAlloc`).
 - **One program slot per open session** (`mesh_program_attach`, key = FNV-1a of the communicator's name,
   `mesh-dataflow.c:mesh_key`).
-  - The library writes: `owner`, `configured`, `depth`, `cyclic`, `digest`, `tx[d]` (the transfer lists, cells and
-    cancel offset), `targets`.
-  - It reads: `status[d]` (`prepared`, `phase`, `code`, `failed`) and `ports`.
+  - The library writes: `owner`, `configured`, `key`, `depth`, `cyclic`, `tx[d]` (the transfer lists, cells, cancel
+    offset, and the port and each queue's lease the agreement assigned), `targets`.
+  - It reads: `status[d]` (`prepared`, `phase`, `code`, `failed`).
 - **The session's own leases** (`mesh_section_create`, whole blocks of the window): four rings toward each peer, the
   SEND cells and targets, the completion words, the cancellation ranges and a violation page.
 
@@ -107,7 +110,7 @@ their statuses (`ESRCH`), so no wait of the library outlives its bridge. Client-
 | `trees` | the map's shortest-path trees (`mesh_trees_shortest`), where the caller gave no paths | `comm_routes` |
 | `forms`, `form_count` | the configured forms (`ncclMeshForm`) with their shares (one allocation, `forms_copy`), compiled ahead of the structural table; kept by splits and shrinks | `ncclMeshCommForms`, `comm_sub` |
 | `entries`, `programs`, `listed` | the table of programs: the caller's (`listed`, kept for its life), else the forms' and then the structural one, compiled at each `comm_read` | `ncclMeshCommInitRank`, `comm_routes` |
-| `session`, `opening` | the open session; a session between its start and its agreement | `session_open` |
+| `session`, `opening` | the open session; a session while its agreements and its start wait | `session_open` |
 | `revoked` | set by `ncclCommRevoke`, kept until destroy | `ncclCommRevoke` |
 | `async` | the last failed group's result; never cleared | `launch_metal`, `ncclGroupEnd` |
 | `ops[64]` | operators made on it: PreMulSum's scalar, or the partials merge's row (`unit`) | `ncclRedOpCreatePreMulSum`, `ncclMeshRedOpCreatePartials` |
@@ -154,8 +157,8 @@ sets (`MeshRankGroup`, line 207).
   - An adopted communicator is taken up only where every member takes it up for this call (`agreed`, line 195:
     `ncclMeshCommAgree` on a ticket of the call's name), else destroyed.
   - Without an adopted communicator, `ncclMeshCommInitRank` makes one.
-- **What adoption keeps.** An adopted communicator keeps its open session: its program stays paired, its rings posted,
-  its positions continue from the last call's.
+- **What adoption keeps.** An adopted communicator keeps its open session: its program keeps its leases and relays,
+  its rings posted, its positions continue from the last call's.
 - **`MeshRankDetach`** (line 664) holds a communicator only if:
   - its flow has `hold`;
   - the call was not cancelled;
@@ -172,24 +175,27 @@ another thread's group.
 
 - It sets `revoked`.
 - A session that is opening (`comm->opening`) is retired: `session_retire` → `mesh_retire` clears the slot's `owner`
-  and wakes `status[d].prepared`. The start's wait returns `ECANCELED`, and the bridge fails the peers' programs toward
-  it.
+  and wakes `status[d].prepared`, and `mesh_transfers_interrupt` shuts the agreement's meeting socket. The agreement's
+  wait returns at once, the start's returns `ECANCELED`, and the position-0 agreement reads the revoke.
 - An open session's failure is kept (`release_all`: `failed`, `signaled = target` on every channel) and its program
-  retired as an abort (`session_retire`): its bridge mutes the program's flows, tells each peer FAIL and cancels its
-  words past their landed counts, so every GPU and host wait ends (design/bridge-and-ipc.md#control).
+  retired as an abort (`session_retire`): its bridge fails the program, makes its leases again with the code each
+  peer's program fails by (its `PAIRS` entry), and cancels its words past their landed counts, so every GPU and host
+  wait ends (design/bridge-and-ipc.md#programs, #leases).
 - Every later group fails at `launch`/`launch_metal`'s `revoked()` check.
 
 **`ncclMeshCommCancel`** (line 931) does what the revoke does to a call in flight, under `comm->guard` alone, and
 keeps the communicator: for a caller whose requester went away (its request's channel closed) and that holds the
 communicator for the next request.
 
-- A session that is opening is retired (`session_retire`): its start returns `ECANCELED` and the group fails.
+- A session that is opening is retired (`session_retire`): its agreement or its start returns (`ECANCELED`) and the
+  group fails.
 - An open session sets `cancelled`, keeps the failure (`release_all`, "its call on communicator ... was cancelled") and
-  is retired as an abort (`session_retire`): its bridge tells each peer FAIL and cancels its words past their landed
-  counts, so every GPU and host wait of the call ends and the call fails as a value.
+  is retired as an abort (`session_retire`): its bridge fails its program, makes its leases again with the code each
+  peer's program fails by, and cancels its words past their landed counts, so every GPU and host wait of the call ends
+  and the call fails as a value.
 - `revoked` is not set. The next group's `session_ensure` reads `cancelled` (and clears it), closes the cancelled
-  session as an abort without failing that group, and opens a new one; the peers' sessions fail at the FAIL and open
-  again at their next groups.
+  session as an abort without failing that group, and opens a new one; the peers' programs fail at the code (their
+  words past the landed counts `~0`), and their sessions open again at their next groups.
 
 **The close** (NCCL's Finalize, Destroy and Abort): nothing of it goes on the wire.
 
@@ -198,19 +204,22 @@ communicator for the next request.
   runs on comm after it.
 - **`ncclCommDestroy`** takes `session_lock`, waits for any opening, runs `session_close(s, orderly = !revoked)` and
   frees the communicator. It waits on no peer: the bridge posts every cell the session released, takes those SENDs'
-  completions, then releases the session's flows and rows; no peer is told.
+  completions, then lets go of the session's leases, telling each peer the count of SENDs completed on its lease
+  (design/bridge-and-ipc.md#leases), and releases its rows. The peer's program toward it reads that release as its
+  status `ECONNRESET` once those SENDs have landed there (section 6).
 - **`ncclCommAbort`** is `ncclCommRevoke` then `ncclCommDestroy`.
 
 **`session_close(s, orderly)`**, in order:
 
-1. Where not `orderly`, or the session failed: `session_retire` (an abort, before anything else, so the bridge mutes
-   and fails its flows and every wait on its words ends).
+1. Where not `orderly`, or the session failed: `session_retire` (an abort, before anything else, so the bridge fails
+   its program, makes its leases again with the code, and every wait on its words ends).
 2. Loses the groups in flight (`inflight_lose` records each as a `losses` entry for the next completion).
 3. `drain`: waits for library-made GPU programs; see section 6.
 4. Releases the ring and violation `MTLBuffer`s.
 5. Destroys the transport.
-6. `mesh_detach`: the slot retired in order (`MESH_ORDERLY`), its rows the bridge's until it has released its flows
-   (a no-op where the abort retired it).
+6. `mesh_detach`: the slot retired in order (`MESH_ORDERLY`), its rows the bridge's until it has let go of its leases
+   (a no-op where the abort retired it); the relay channels the agreement holds closed, each first told `e` (ended in
+   order) where the slot was still the session's, so each relay ends as its neighbours let go of their leases.
 7. Decrements and prunes the attach.
 
 Its caller must have completed every window that waits on the session's words. The Metal 4 form signals nothing to the
@@ -219,29 +228,35 @@ waits for every submitted window before the detach.
 
 **`ncclCommGetAsyncError`** returns `comm->async` if set. Otherwise it calls `session_async` under `session_lock`:
 
-- `session_watch(s)`: `violated(s)`, which turns violation words [0..3] and [5] into the session's failure, then each
-  channel's completion words from `signaled` up to `target` (a `~0` the session's failure; `signaled` moved past those
-  landed);
+- `session_watch(s)`: `violated(s)`, which turns violation words [0..3] and [5] into the session's failure; with
+  nothing outstanding, each destination's `status[d]`: `phase == MESH_STOPPED` is the peer's program ended in order
+  (code `ECONNRESET`) or failed (its code and the node where it failed); then each channel's completion words from
+  `signaled` up to `target` (a `~0` the session's failure; `signaled` moved past those landed);
 - for an idle session (nothing outstanding), each channel's word at `end`: `~0` is the peer's program ended while the
   session was idle;
 - returns `s->failed`.
 
 What it detects: a launch of this communicator that failed (`comm->async`; never cleared); a cancelled GPU wait or a
 position whose filler stamp disagrees with its role (violation page); a landing cancelled while positions were pending
-or at an idle session's next position; a revoke or a cancel. This node's bridge's stop is found as the words it
-cancels: its own teardown cancels them past their landed counts as its ports are lost, and at its exit libmesh's
-watch cancels the rest, so the next read finds `~0`; the next group's `session_ensure` and `ncclMeshMemLive` then see
-the bridge gone.
+or at an idle session's next position; an idle session's peer program ended or failed (its status); a revoke or a
+cancel. This node's bridge's stop is found as the words it cancels: its own teardown cancels them past their landed
+counts as its ports are lost, and at its exit libmesh's watch cancels the rest, so the next read finds `~0`; the next
+group's `session_ensure` and `ncclMeshMemLive` then see the bridge gone.
 
-**An idle held communicator learns that its peer process exited** at `ncclCommGetAsyncError` (its next position's word
-reads `~0`) or at its next group:
+**An idle held communicator learns that its peer's program ended** at `ncclCommGetAsyncError` or at its next group
+(`session_ensure` runs `session_watch`):
 
-- Host path: `run()` reads `~0` (the bridge cancelled the positions past the landed count: the peer's FAIL, its link
-  or its bridge lost) and the group fails.
-- Metal path: the GPU wait that reads `~0` records it in the session's violation words ([2] and [3]) and every later
-  wait of the program ends; the land kernels after it combine whatever their slots hold, and none of the program's
-  cells is posted after the cancel (the bridge muted its flows first). The session fails as a value (`violated`), and
-  the caller sees the failure after the window (`ncclCommGetAsyncError`) or at the next group.
+- The peer destroyed its communicator in order: once every SEND it completed has landed here, the bridge stops this
+  program's status toward it with `ECONNRESET` naming the peer's node, and keeps its words; `session_watch` reads the
+  status, the group fails, and the next one opens a new session.
+- The peer's program failed (its process exited, a revoke, a cancel, its link or its bridge lost): the bridge fails
+  this program at the code its lease's `PAIRS` entry carries, or at the link's loss, and cancels its words past the
+  landed counts.
+  - Host path: `run()` reads `~0` and the group fails.
+  - Metal path: the GPU wait that reads `~0` records it in the session's violation words ([2] and [3]) and every later
+    wait of the program ends; the land kernels after it combine whatever their slots hold, and none of the program's
+    cells is posted after the cancel (the bridge lets go of its leases as it cancels). The session fails as a value (`violated`), and
+    the caller sees the failure after the window (`ncclCommGetAsyncError`) or at the next group.
 
 ## 3. Sessions
 
@@ -257,7 +272,7 @@ A session is a communicator's program on its node's bridge. It opens at the firs
 4. Checks `hdr->node == members[rank]`.
 5. The wire: `mesh_wire_of(pgsz x block, NCCL_BUFFSIZE or MESH_BUFFSIZE, comm->small)`. Then `digest = map_digest`, which covers
    `MESH_PLAN_VERSION`, the wire, the members, every member pair's route marks and its links' costs, the tree sets, and
-   the caller's paths and programs.
+   the caller's paths and programs; the position-0 agreement (step 11) compares it.
 6. Two channels toward every other member, whatever the map. `ring_make` leases `DEPTH x slot` bytes each way.
    `ring_bind` binds them:
 
@@ -269,7 +284,6 @@ A session is a communicator's program on its node's bridge. It opens at the firs
    Each class has its own queue because one queue's receives are posted invocation-major across its transfers.
 7. `mesh_transfers_prepare(1 slot, POSITIONS invocations, DEPTH)` lays out the SEND cells (each cell's request
    `wr_id = 1`, the "argument") and the targets. Then:
-   - `mesh_transfers_digest(digest)`: the bridge compares digests on READY; a mismatch is `ESTALE`;
    - `mesh_transfers_cyclic`: invocation T is cell/word T mod 32, cycle T / 32;
    - `mesh_metal_transport_create`: the `publication` `MTLBuffer` wraps the SEND-cell lease, `mesh_host_inputs` leases
      the completion words and cancellation ranges, and `inputs` wraps the words;
@@ -279,14 +293,35 @@ A session is a communicator's program on its node's bridge. It opens at the firs
    - a one-page violation lease (`violation`, wrapped as `violation_buffer`);
    - the process-wide `finished` `MTLSharedEvent`.
 8. Sets `comm->opening = s` and **unlocks `session_lock`**.
-9. `mesh_transfers_start` (`mesh-call.c` line 199) compare-exchanges `configured`, rings `control`, and waits on each
-   destination's `status[d].prepared` until the bridge has paired the program toward it, directly or along its route.
-   The wait has no bound: it ends at the pairing, a failure the bridge tells, `ESRCH` (the bridge gone: libmesh's
-   watch fails the statuses and wakes it) or `ECANCELED` (the slot was retired: a cancel or a revoke). A peer whose
-   program never starts is waited for until the caller's cancel (`ncclMeshCommCancel`) or revoke. A failure goes through `start_failure` and names the destination,
-   the node where it failed and `strerror(code)`.
-10. `session_agree`, then the wait time is added to `session_waits` (`ncclMeshSessionWaits`, a measure).
-11. Relocks, clears `opening`, broadcasts `opened`, links `s` into `sessions` and sets `comm->session`.
+9. `mesh_transfers_agree(&s->context, members, N, rank)` (`mesh-call.c`; design/bridge-and-ipc.md#leases, #meet,
+   #relays), the members' agreement on their leases and relays:
+   - each member claims every free lease word (0) of each paired link with its slot's owner word, and reports at
+     `members[0]`'s bridge (a `meet` request, `mesh_request`): its node, each paired port (its peer, the index the peer
+     gave the cable, the link's lease count, the mask it claimed) and each destination's transfer lists;
+   - rank 0, once every member reported, plans: each member pair that binds is routed on its map (`mesh_route`), and
+     each hop takes, for each queue the pair uses, the lowest lease that the hop's member ends claimed and no other
+     pair of the plan holds on that link (a pair of nodes is one link: the cable whose index the lower node gave is
+     lowest, `agree_port_to`); each relay node of a route is sent a `relay` request with the transfers it forwards and
+     its leases on the hops either side (its bridge answers once its relay program has started; the channel stays open
+     in the session's context);
+   - a second meeting hands every member the assignment. Each member writes `tx[d].port` and `tx[d].lease[q]` and lets
+     go of the claims it was not assigned.
+
+   The wait has no clock: it ends at the assignment, a refusal (`EHOSTUNREACH` no route, `EBUSY` no lease free on a
+   link: openings at once on the same link that claim every free lease, the later one's group failing as a value and
+   the next group opening again; a relay's code), or `mesh_transfers_interrupt` (a cancel or a revoke shuts the
+   meeting's socket). A failure is `ncclRemoteError` (`ECANCELED`, `ECONNRESET`) else `ncclSystemError`, naming
+   `members[0]`'s node. A communicator with nothing to bind agrees at once.
+10. `mesh_transfers_start` (`mesh-call.c`) compare-exchanges `configured`, rings `control`, and waits on each
+   destination's `status[d].prepared` until its bridge has compiled the program's chains toward it on the leases the
+   slot names and posted its first receives, or failed it. It waits on its bridge alone, never on a peer: a peer's
+   SENDs to receives not yet posted wait in hardware (TN3205's credit). The wait ends at the start, a failure the bridge
+   tells (`EINVAL` a list or lease it cannot carry, `ENETDOWN` the port not paired, `ENETRESET` a lease no longer the
+   slot's: the link paired again since), `ESRCH` (the bridge gone: libmesh's watch fails the statuses and wakes it) or
+   `ECANCELED` (the slot was retired: a cancel or a revoke). A failure goes through `start_failure` and names the
+   destination, the node where it failed and `strerror(code)`.
+11. `session_agree`, then the wait time is added to `session_waits` (`ncclMeshSessionWaits`, a measure).
+12. Relocks, clears `opening`, broadcasts `opened`, links `s` into `sessions` and sets `comm->session`.
 
 **The agreement (`session_agree`, line 1290)** is position 0 of every channel.
 
@@ -330,8 +365,9 @@ A session is a communicator's program on its node's bridge. It opens at the firs
   carries the whole slot, as before; a counted all-to-all's rows message is laid in its type's elements, as before;
   the partials merge's element is its row.
 - Every position is its slot's bytes on the wire: TN3205 pairs a SEND with a receive of the same 4 KiB frames, and a
-  ring's receives are posted ahead at the slot's bytes, so a position's frames are the slot's (bridge-and-ipc.md,
-  lanes). A small slot of 3,072 bytes (the pair's one-row decode crossing) is one frame; one block is four.
+  ring's receives are posted ahead at the slot's bytes, so a position's frames are the slot's
+  (design/bridge-and-ipc.md#programs). A small slot of 3,072 bytes (the pair's one-row decode crossing) is one frame;
+  one block is four.
 - On a 16 KiB block with the default 4 MiB and no small given: small 16 KiB, slot 512 KiB, large above 128 KiB.
 
 **A position t on a channel:**
@@ -352,10 +388,14 @@ its own role: host in `run()`, GPU in `mesh_step_check`. A mismatch is `MISMATCH
 
 - Window bytes: `ncclMeshSessionBytes` → `session_bytes` (line 1350): for each peer, four rings and its lists; plus the
   SEND cells, completion words, cancellation ranges and a violation page.
-  - A relay's bridge leases `ncclMeshRelayBytes` per routed direction.
-- Slots: one of the bridge's `MESH_CLIENTS` (64) client slots, plus one on each relay per direction.
+  - A relay's bridge leases `ncclMeshRelayBytes` per routed direction: the rows it receives into and sends from.
+- Slots: one of the bridge's `MESH_CLIENTS` (64) client slots, plus one on each relay node for each member pair routed
+  through it (its relay program, both directions).
+- Leases: on each link a route to a peer crosses, one lease for each of its two queues (the large channel's and the
+  small's; a TB5 link has at most 9), held until the session closes.
 - Threads: none of its own.
-- Time: the start (the peer's program's start plus pairing) and the agreement; `ncclMeshSessionWaits` sums them.
+- Time: the agreement on leases and relays (two meetings at `members[0]`'s bridge and each relay's start), the start
+  (its bridge alone) and the position-0 agreement; `ncclMeshSessionWaits` sums them.
 
 **`session_ensure` (line 1744)** decides when a session is reopened:
 
@@ -518,7 +558,6 @@ stream's workspace, else the communicator's `merge` (grown, the replaced one kep
      receives side by side), then point-to-point calls with the j-th send beside the j-th receive.
      `mesh_steps_before` gives each step's prior receive. `ch->end` advances.
    - `session_targets`: `target = end`.
-   - `mesh_transfers_wake` rings the bells of the bridge's ports.
 5. **`run()`** (line 1680) spins on the caller's thread, still holding `session_lock`, until every channel has
    `sent == consumed == end`. Per channel:
    - **Consume.** While `mesh_host_arrived(in, consumed)` has landed:
@@ -559,7 +598,7 @@ The call is the same with an `ncclMeshStream` whose buffers are `ncclMeshBuffer`
      MSCCLang-style topological order). Each end's publication and consumption of each position is a node. A
      publication's level is 1 + its predecessors' maximum; a consumption's is that maximum. This rank's publications
      are sorted by `(level, channel, position)`, which every rank's walk keeps.
-   - `session_targets`, `mesh_transfers_wake`.
+   - `session_targets`.
 5. **`walk(program, NULL, g)`.** `complete_group` (line 2263) runs for every group up to `g`; for each publication in
    order:
    - `consume` up to t − LAG + 1, and the SEND's prior receive;
@@ -663,33 +702,39 @@ stamps) is the same in both forms, so two members may encode the same crossing d
 
 **Who writes `~0` into a completion word:**
 
-- the bridge, past each channel's landed count, after the last landing it stores (design/bridge-and-ipc.md#control):
-  when a link, a relay or the peer's bridge is lost (link off, its control socket's end, its FAREWELL, an error
-  completion), the peer's program fails or aborts (FAIL), this session's program is retired as an abort (a revoke, a
-  cancel, a failed session's close), or the bridge stops (its ports lost: a signal or a change of its binary). A GPU wait that reads a cancel halts the program's later waits.
+- the bridge, past each channel's landed count, after the last landing it stores (design/bridge-and-ipc.md#programs,
+  #leases): when the link is lost (link off, its control socket's end, the peer bridge's FAREWELL, an error completion
+  on the link's keepalive or completion queues), the peer's or a relay's program fails (the lease's `PAIRS` entry
+  carries its code; a failure cascades this way along every lease the failed program held), this session's program is
+  retired as an abort (a revoke, a cancel, a failed session's close, its process gone), or the bridge stops (its ports
+  lost: a signal or a change of its binary). A GPU wait that reads a cancel halts the program's later waits.
+- not on the peer's in-order end: its bridge lets go of its leases telling the count of SENDs it completed, and this
+  bridge, once those have landed, stops the destination's status with `ECONNRESET` and keeps the words.
 - the process itself where its bridge exits (libmesh's watch, `mesh-dataflow.c` `mesh_watch`): every word of its own
   slots' programs not yet landed (every one of a cyclic program's), its destinations' statuses failed `ESRCH`.
 
 | Event | Detected by | State written | What the caller sees |
 |---|---|---|---|
-| Link or relay lost, peer's bridge lost, peer program failed or aborted, this node's bridge exited | bridge (or libmesh's watch) → words past landed `~0`; then whichever reads first: `run()`, `session_agree`, a GPU wait, `session_watch` (`ncclCommGetAsyncError`, the next group, Finalize) | `s->failed = ncclRemoteError` ("link to node N was lost") | host: the group fails. GPU: the wait records the cancel (violation [2], [3]) and later waits end; failure after the window or at the next group |
+| Link lost, peer's bridge lost, the peer's or a relay's program failed (its process gone, an abort, a cascade), this node's bridge exited | bridge (a lease's `PAIRS` code, the link's loss) or libmesh's watch → words past landed `~0`; then whichever reads first: `run()`, `session_agree`, a GPU wait, `session_watch` (`ncclCommGetAsyncError`, the next group, Finalize) | `s->failed = ncclRemoteError` ("link to node N was lost") | host: the group fails. GPU: the wait records the cancel (violation [2], [3]) and later waits end; failure after the window or at the next group |
+| Peer ended in order (`ncclCommDestroy`) | bridge, once the SENDs the peer completed on the lease have landed → `status[d]` `MESH_STOPPED`, code `ECONNRESET` naming the peer's node, words kept; `session_watch` with nothing outstanding (`ncclCommGetAsyncError`, the next group) | `release_all` | `ncclRemoteError` "node N's program of C ended or failed"; the group after it opens a new session |
 | GPU wait read a cancel | `mesh_step_check` → violation [2], [3]; later waits end at [2] (read once in 64 looks while spinning) | `violated` → `release_all` | async error / next group: "was cancelled under a GPU wait" |
 | Calls that do not pair | host `run()` stamp check; GPU `mesh_step_check` → violation [0], [1] | host: `ncclInvalidUsage` at once; GPU: `s->failed` via `violated` | `MISMATCH` text |
 | Cancel | `ncclMeshCommCancel` | `cancelled`; retire the opening slot, or the open session's program (an abort); `release_all`; the next group's `session_ensure` closes it and opens a new session | `ncclRemoteError` "was cancelled", the call in flight alone |
 | Revoke | `ncclCommRevoke` | `revoked`; retire the opening slot, or the open session's program (an abort); `release_all` | `ncclRemoteError` "revoked", every later group |
-| Map disagreement | bridge compares the READY digests (`mesh_transfers_digest`) → start fails with `ESTALE`; else `session_agree` compares | `start_failure` / agreement failure; `session_close` | `ncclRemoteError` naming nodes, serials, digests; the next group reopens on the map then |
+| Map disagreement | `session_agree` compares version and digest at position 0 | agreement failure; `session_close` | `ncclRemoteError` naming nodes, serials, digests; the next group reopens on the map then |
+| Leases refused | `mesh_transfers_agree`: the root's plan finds no free lease on a link (`EBUSY`: openings at once that claimed them all), no route (`EHOSTUNREACH`), or a relay's refusal | none; the claims let go | `ncclSystemError` naming `members[0]`'s node; the next group opens again |
 | No route between members | `comm_read` (`mesh_link_map_joined`) | none | `ncclRemoteError` "has no route" |
 | Stale leases (`ESTALE`): this process holds a lease of a stopped bridge | `attach_current` → `attaches_stale` | none | `ncclMemAlloc`, communicator, session, `ncclCommRegister`, `ncclMeshMemLive` fail with `ncclRemoteError` until every such lease is freed |
 | Local bridge gone | libmesh's watch (`NOTE_EXIT`): the process's words cancelled, statuses `ESRCH`; `attach_live` | `session_ensure` closes and reopens (no group in flight); `mesh_transfers_start` `ESRCH` | reopen, or `ncclRemoteError` |
-| Peer never starts its program | none (no event says so) | none | the start waits until the caller's cancel (`ncclMeshCommCancel`) or revoke (`ECANCELED`) |
+| Peer never opens its session, or never joins a group | none (no event says so) | none | the agreement's meeting, the position-0 agreement or the group's waits last until the caller's cancel (`ncclMeshCommCancel`) or revoke (`ECANCELED`) |
 | Encode failure mid-walk (e.g. `EOVERFLOW` argument ring) | `launch_metal` / `ncclMeshComplete` | `walk_failed`: `release_all` and `inflight_lose` on each session through the ticket | the group's result; the later completion's loss |
 
 **The bridge's stop.** The library reads no stop word. A bridge stops at once at a signal or a change of its binary
 (design/bridge-dataflow.md#5-failure-cancellation-and-release), and every session on it fails as a value: the peers'
 at its FAREWELL, this process's as its own teardown cancels the words past their landed counts and, at its exit, as
 libmesh's watch cancels the rest (statuses `ESRCH`). The next group's `session_ensure` closes the session and opens
-one on the bridge started again (`attach_live`, `attach_current`); libmesh's `mesh_exit_wait` and `mesh_bridge_wait`
-tell a caller the old bridge's exit and the new one's start. metal-microbench and torch-mesh read no stop either.
+one on the bridge started again (`attach_live`, `attach_current`); libmesh's `mesh_bridge_wait` tells a caller the new
+one's start. metal-microbench and torch-mesh read no stop either.
 
 **`drain`** applies before a host-path group, in `ncclCommFinalize` and in `session_close`.
 
@@ -737,7 +782,7 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
 | When and how is the map read? | `session_open` → `comm_read` → `map_read` (`mesh-dataflow.c:mesh_map`) |
 | Which trees? | `comm_routes`, `compile_form` (`mesh_trees_shortest`, `mesh_trees_pack`, `mesh_trees_check`) |
 | Which program runs a call? | `program_of`, `comm_routes`, `ncclMeshCommForms` |
-| What do members compare before running? | `map_digest`, `session_agree`, `mesh-call.c:mesh_transfers_digest` |
+| What do members agree on before running? | `mesh-call.c:mesh_transfers_agree` (`agree_meet`, `agree_plan`: leases and relays), `map_digest`, `session_agree` |
 | When is a session opened or reopened? | `session_ensure`, `session_open` |
 | What does a session lease, and how much? | `ring_make`, `ring_bind`, `mesh-call.c:mesh_transfers_prepare`, `mesh-collective.c:mesh_host_inputs`, `session_bytes` |
 | Where is position t's slot, cell, word? | `publish`, `consume`, `channel_metal`, `cycle_of`, `landed` |
@@ -746,13 +791,13 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
 | Which kernel does what? | `nccl-mesh-metal.m` `STEPS`/`KERNELS`, `dispatch`, `dispatch4`, `record4` |
 | The host path's loop? | `launch`, `session_run`, `run` |
 | Fused crossings? | `ncclMeshFusableRooted`, `launch_metal` (`fusing`), `fused_piece`, `metal_send_deferred`, `metal_land_deferred`; mb `mesh_rank.m:window_submit`, `metal_recording.m:MetalReplaySubmit`, `metal/layers.metal:streamed_finish_publish`, `streamed_finish_norm_add` |
-| Who reads the landings, and who finds a loss? | `session_watch`, `session_targets`, `release_all`; the bridge's events (design/bridge-and-ipc.md#control) and libmesh's watch of the bridge (`mesh-dataflow.c:mesh_watch`) |
+| Who reads the landings, and who finds a loss? | `session_watch`, `session_targets`, `release_all`; the bridge's cancels and statuses (design/bridge-and-ipc.md#programs, #leases) and libmesh's watch of the bridge (`mesh-dataflow.c:mesh_watch`) |
 | How does a GPU-side failure reach the host? | `mesh_step_check` → violation page → `violated` → `session_async` / `session_ensure` |
 | What does async-error report? | `ncclCommGetAsyncError`, `session_async` |
 | Revoke, cancel, finalize, destroy, abort, exit? | `ncclCommRevoke`, `ncclMeshCommCancel`, `session_retire`, `ncclCommFinalize`, `session_kept`, `ncclCommDestroy`, `ncclCommAbort`, `session_close`, `drain`, `session_exit` |
 | Issue / complete / tickets? | `launch_metal` (`issue`), `ncclMeshComplete`, `retire`, `losses_through`, `ncclMeshRetired` |
-| Held flows across calls? | mb `mesh_rank.m`: `MeshRankFlows`, `adopted`, `healthy`, `MeshRankGroup`, `agreed`, `MeshRankDetach`; `tools/mesh/flows.py:plan`, `observed` |
-| Bridge upgrade? | its stop (design/bridge-dataflow.md#5-failure-cancellation-and-release); `session_ensure`, `attach_live`; `mesh-dataflow.c mesh_exit_wait`, `mesh_bridge_wait` |
+| Held communicators across calls? | mb `mesh_rank.m`: `MeshRankFlows`, `adopted`, `healthy`, `MeshRankGroup`, `agreed`, `MeshRankDetach`; `tools/mesh/flows.py:plan`, `observed` |
+| Bridge upgrade? | its stop (design/bridge-dataflow.md#5-failure-cancellation-and-release); `session_ensure`, `attach_live`; `mesh-dataflow.c mesh_bridge_wait` |
 | torch's use? | `torch_mesh/backend.py:ProcessGroupMesh`, `_stream.mm:on_stream`, `complete`, `MeshWork`, `functional` |
 
 ## Ambiguities and hazards in the code at this HEAD
@@ -771,12 +816,12 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
    - `tools/mesh/flows.py:plan` keeps a name across committed calls without consulting each member's reported
      `held` (131-138, 145-155).
    - So one member can adopt a session at position N while its peer makes a new communicator of the same name (same
-     slot key), opens at position 0 and waits for an agreement the adopter published long ago (`session_agree`, until a
-     cancel or a revoke).
-     Or the maker waits in `mesh_transfers_start` (with no bound, until a cancel or a revoke), depending on how the bridge pairs a
-     new program against a running one of the same key (design/bridge-dataflow.md).
+     slot key) and opens a session: the adopter's `ncclMeshCommAgree` (mb `agreed`) waits for the maker's position on
+     the held session, and the maker's agreement waits at `members[0]`'s bridge for a report the adopter never sends
+     (`mesh_transfers_agree`); both until a cancel or a revoke (`agreed` registers the communicator in the call's
+     groups, so the call's cancellation revokes it).
 5. **A peer's skew is no failure.** A slow peer is waited for; a dead one is found by events
-   (design/bridge-and-ipc.md#control). A caller that encodes and never commits holds `drain` (ncclCommDestroy,
+   (design/bridge-and-ipc.md#leases, #links). A caller that encodes and never commits holds `drain` (ncclCommDestroy,
    ncclCommFinalize, a host-path group) until it commits: its own program's fault, no transport event.
 6. **A fused answer before the session.** `ncclMeshFusableRooted` reads the map and compiles the table before any
    session (`comm_read`); the session reads them again, so a map that moved between the two can make a fused answer
