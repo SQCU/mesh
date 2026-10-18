@@ -521,9 +521,12 @@ class Balancer:
         return next((p for p, g in zip(d['parts'], self._groups(d)) if i in g), 0)
 
     def _floor(self, d):
-        """Each part's least: its `low`, and a grain where its `high` holds one, wherever the total gives each such part
-        a grain (else its `low`), so no member's part goes to none by its times (class docstring)."""
-        low = [max(lo, d['grain']) if hi >= d['grain'] else lo for lo, hi in zip(d['low'], d['high'])]
+        """Each part's least: its `low`, and a grain where its `high` holds one and no call failed at a grain
+        (`failed`), wherever the total gives each such part a grain (else its `low`), so no member's part goes to none
+        by its times (class docstring)."""
+        failed = d.get('failed') or [None] * len(d['parts'])
+        low = [max(lo, d['grain']) if (hi if f is None else min(hi, f - d['grain'])) >= d['grain'] else lo
+               for lo, hi, f in zip(d['low'], d['high'], failed)]
         return low if sum(low) <= sum(d['parts']) else list(d['low'])
 
     def observe(self, stretches, prepare=False):
