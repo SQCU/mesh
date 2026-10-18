@@ -14,8 +14,9 @@
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
 /* 118: the stripe request rings (`rings_off`, struct mesh_requests) and the STRIPES and STREAM messages
-   (design/bridge-dataflow.md#stripes, #streams) */
-#define MESH_VERSION 118u
+   (design/bridge-dataflow.md#stripes, #streams); 124: the link lanes' words declared (struct hdr `lanes`, struct
+   mesh_tx `lane`, struct mesh_link_info `lanes`; design/bridge-and-ipc.md#files), read and written by nothing yet */
+#define MESH_VERSION 124u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -24,6 +25,20 @@
 #define MESH_QUEUES 4
 #define MESH_ORDERS 4096
 #define MESH_RETIRING (UINT64_C(1)<<63)
+/* design/bridge-and-ipc.md#files, the link lanes (declared at 124): a link's queue pairs, made once at its pairing, are
+   its MESH_LINK_LANES lanes: lane MESH_LANE_KEEPALIVE the keepalive's, MESH_LANE_STRIPES the stripe writes', and from
+   MESH_LANE_FIRST communicators' pairs, a pair's large class's lane and its small class's.  A lane's lease word (struct
+   hdr `lanes`) is 0 free, else the owner word of the communicator's session slot that holds it, claimed and released by
+   that client with a compare-exchange (wait-free), with MESH_LANE_DIRTY set by the bridge where the lane's posted
+   receives were never consumed (a loss, a revoke) and cleared once it has made the lane again; an owner word leaves bit
+   63 clear (its generation is 25 bits, mesh-dataflow.c mesh_slot_take) */
+#define MESH_LINK_LANES 10u
+#define MESH_LANE_KEEPALIVE 0u
+#define MESH_LANE_STRIPES 1u
+#define MESH_LANE_FIRST 2u
+#define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
+#define MESH_LANE_DIRTY (UINT64_C(1)<<63)
+_Static_assert(38+25<=63 && MESH_LANE_FIRST+2*MESH_LANE_PAIRS==MESH_LINK_LANES,"a lease word's owner and dirty bit; the lanes' pairs");
 /* design/recovery.md#pause, #first: the pause between a port's pairings, how long a program waits for its peer's to
    start, and how long the queue pairs of two started programs take to pair; a client's start waits on its bridge at
    most the three together */
@@ -76,13 +91,16 @@ struct mesh_send {
 /* design/bridge-and-ipc.md#region: a client's program to one destination node (`node`, 0 while the slot is vacant),
    which the bridge carries over its ports to that node or along a route through others: its SEND cells, its
    cancellation words and its transfer lists (MESH_QUEUES queues each way, `length` entries in each, `room` entries a
-   list in the lease headed at row `lists`, which grows by doubling to MESH_ORDERS: mesh-call.c mesh_transfer_bind) */
+   list in the lease headed at row `lists`, which grows by doubling to MESH_ORDERS: mesh-call.c mesh_transfer_bind), and
+   the link lanes it rides toward the destination (`lane`, its large class's and its small class's, MESH_LANE_FIRST and
+   above; 0 none: declared at 124, design/bridge-and-ipc.md#files) */
 struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders; uint32_t node; _Atomic uint32_t length[MESH_QUEUES*2];
-  uint32_t room,lists; };
+  uint32_t room,lists,lane[2]; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
   offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,port)+4<=256 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
-_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==88,"M04/M12");
+_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && offsetof(struct mesh_tx,lane)==84 &&
+  sizeof(struct mesh_tx)==96,"M04/M12");
 /* design/algorithm-sources.md#index-hand-off; design/prepared-machine.md#M10: a program's publication of `row` toward
    one destination, `cells` the region offset of its column of SEND cells (invocation u's at 256 u past it) */
 struct mesh_target { uint64_t cells; uint32_t row,padding; };
@@ -97,16 +115,18 @@ struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argume
 _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
 /* design/bridge-and-ipc.md#region: a client's program to one destination as the bridge tells it (its phase, the
    failure's code and domain, `failed` the node where it failed: the destination's, or the relay's on its route, and
-   `prepared` the owner once the bridge paired or failed it); a port of the node, by the index the bridge gave it (its
+   `prepared` the owner once the bridge paired or failed it, to be deleted: TN3205's credit holds a SEND until its
+   receive is posted, so a client's first wait is its first landing); a port of the node, by the index the bridge gave it (its
    peer node while paired, its phase, MESH_UNKNOWN where the bridge has no such port, the code it last stopped with, its
    bandwidth, the pairings it made, and the queue pairs its device holds against those it can use, `pairs` of
-   `max_pairs`, its max_qp less one);
+   `max_pairs`, its max_qp less one, and the link lanes made at its pairing, `lanes`, 0 none: declared at 124);
    and a node's record, the newest of which every bridge floods to the mesh (its node, name and boot, the record's
    sequence in that boot, its bridge's window and the node's memory in bytes and hardware model (hw.model,
    mesh-plan.h MESH_MODEL_BYTES with its NUL), and its `ports` ports by index) */
 struct mesh_port_info { _Atomic uint32_t phase,domain,failed; _Atomic int64_t code; _Atomic uint64_t prepared; };
-struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; _Atomic uint32_t pairs,max_pairs; };
-_Static_assert(sizeof(struct mesh_link_info)==40,"mesh_link_info");
+struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; _Atomic uint32_t pairs,max_pairs;
+  _Atomic uint32_t lanes,padding; };
+_Static_assert(sizeof(struct mesh_link_info)==48 && offsetof(struct mesh_link_info,lanes)==40,"mesh_link_info");
 struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t window,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_link_info port[MESH_PORTS]; struct mesh_health health; };
 /* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program once started
@@ -134,15 +154,19 @@ struct mesh_client {
    any); `stopping`, design/bridge-and-ipc.md#region: nonzero once the bridge waits to stop (its binary changed) for the
    flows it holds to end, so a client holding flows past their execution (metal-microbench
    docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) releases them between executions and holds
-   none after; `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a
-   client rings (mesh_notify) as a group of a program riding that port starts */
+   none after (to be deleted: a changed binary stops the bridge at once, mesh 0fb8eb54's rule); `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a
+   client rings (mesh_notify) as a group of a program riding that port starts; `lanes`, each port's link lanes' lease
+   words (MESH_LANE_DIRTY above; declared at 124) */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length,boot;
   _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
   _Atomic uint64_t bell[MESH_PORTS];
   uint64_t rings_off;
+  _Atomic uint64_t lanes[MESH_PORTS][MESH_LINK_LANES];
 };
+/* the header, its lease words among it, within its own first page at any page size (mesh_layout) */
+_Static_assert(offsetof(struct hdr,lanes)==264 && sizeof(struct hdr)<=4096,"struct hdr");
 /* design/bridge-dataflow.md#stripes (mesh 8fc27cbe's request rings, on the resident bridge): the rings of stripe
    requests the node's clients registered (mesh-call.h mesh_requests_create), MESH_RINGS region offsets at `rings_off`,
    each a client's struct mesh_requests, 0 vacant.  A stripe request writes the `bytes` bytes at byte `offset` of this
@@ -172,7 +196,9 @@ struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t cyc
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
 /* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M12 */
 /* design/prepared-machine.md#M30: a cyclic program's landed word holds 1 plus its cycle, which a reader of a later
-   cycle still waits past, so every word of the destination is cancelled */
+   cycle still waits past, so every word of the destination is cancelled.  The done words' rule from the link lanes on
+   (design/bridge-and-ipc.md#files): a done word is never lowered, a landing storing its word only where it is greater
+   (a compare-exchange, a max register), so a cancellation's ~0 stands against a landing that comes after it */
 static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t destination){
   _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[destination].offset);
   for(uint64_t j=0;j<cancel->ranges[destination].count;j++){
@@ -210,9 +236,9 @@ static inline uint32_t mesh_destination(const struct mesh_client *client,uint32_
   while(d<MESH_DESTINATIONS && client->tx[d].node && client->tx[d].node!=node)d++;
   return d;
 }
-/* design/bridge-and-ipc.md#routes: the bytes a relay leases a slot of a transfer it mirrors (mesh-flow.c mirror), before
-   the window's block rounds them: its ring's slots of `invocation_pages` pages but the last, and the last its bytes or
-   its pages, whichever is more, at its own depth, else the program's `depth` */
+/* design/bridge-and-ipc.md#routes: the bytes a relay leases a slot of a transfer it mirrors (mesh-program.c mirror),
+   before the window's block rounds them: its ring's slots of `invocation_pages` pages but the last, and the last its
+   bytes or its pages, whichever is more, at its own depth, else the program's `depth` */
 static inline uint64_t mesh_relay_slot(const struct mesh_transfer *x,uint32_t depth,uint32_t pgsz){
   const uint32_t slots=x->depth?x->depth:depth;
   const uint64_t tail=(uint64_t)x->invocation_pages*pgsz;

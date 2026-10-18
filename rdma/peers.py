@@ -19,7 +19,7 @@ def sample(data: bytes, limit: int) -> str:
     return body.decode()
 
 def node_number(node_id: str) -> int:
-    """The bridge node number of the host whose IOPlatformUUID is `node_id` (node-info's node_id): mesh-flow.c main's
+    """The bridge node number of the host whose IOPlatformUUID is `node_id` (node-info's node_id): mesh-link.c main's
     FNV-1 of the host UUID's 16 bytes (gethostuuid), its low 31 bits, 1 for 0."""
     number = 0
     for byte in uuid.UUID(node_id).bytes:

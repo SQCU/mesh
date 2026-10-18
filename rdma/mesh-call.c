@@ -92,7 +92,7 @@ static int mesh_target_order(const void *a,const void *b){
    target of the row its slot sends (mesh.h mesh_row_targets: the program's targets, after its SEND
    cells in their lease, sorted by row).  Each cell's
    request carries the producer's argument (1: a nonzero ready word); the bridge prepares the chains,
-   each cell's successor and the queue gates (mesh-flow.c sends_configure).  Each destination's completion
+   each cell's successor and the queue gates (mesh-program.c sends_configure).  Each destination's completion
    words: every receive transfer's slots and chunks an invocation of its range, transfer by transfer
    in the same order; the transfer's `first` is its first word (mesh-metal.m, mesh_host_inputs). */
 int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invocations,uint32_t depth){

@@ -44,7 +44,7 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
    no route reaches b).  The route between a and b is the path up the in-tree of the one of the higher mark from the
    other, so the route from b to a is the one from a to b reversed (mesh_route_path), as the bridges forward it.  With
    a table, two of the map's nodes are linked where the route between them crosses no other of them (relays alone),
-   and that hop's bytes cross every link of it (a relay forwards each slot as it lands, mesh-flow.c receive_input;
+   and that hop's bytes cross every link of it (a relay forwards each slot as it lands, mesh-program.c receive_input;
    mesh_trees_pack).  Without one, two nodes are linked where a link joins them.  Several links between one pair are
    its cables, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is striped over
    them, position t on cable t mod n, so the pair carries n times its slowest cable's bandwidth.  `link`, `bandwidth`,

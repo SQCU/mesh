@@ -1,7 +1,8 @@
 /* loopverbs (mesh 800fe6bc^, on the resident bridge; design/bridge-dataflow.md#the-loopback-fabric): the ibverbs entry
-   points the bridge uses (mesh-verbs.h, mesh-flow.c), over shared memory between the processes of one machine, so N
-   bridges on one host are N nodes (make mesh-flow-loop: mesh-flow.c built with MESH_LOOP_FABRIC and linked with this in
-   place of -lrdma; the deployed bridge is built from the same source without either).  Every queue pair has, in a
+   points the bridge uses (mesh-verbs.h, mesh-link.c, mesh-program.c), over shared memory between the processes of
+   one machine, so N bridges on one host are N nodes (make mesh-flow-loop: the bridge's sources built with
+   MESH_LOOP_FABRIC and linked with this in place of -lrdma; the deployed bridge is built from the same source without
+   either).  Every queue pair has, in a
    shared fabric segment (its name the bridge's configuration's, loop_fabric), a byte ring of the SENDs addressed to it,
    one producer (its peer's process) and one consumer (its owner).  A SEND is copied into its destination's ring and
    completes on the sender as it is delivered there (a SEND to a queue pair gone or made again since its peer connected
@@ -69,7 +70,7 @@ static struct loop_qp *qps_;
 static struct ibv_device devices_[LOOP_DEVICES], *list_[LOOP_DEVICES + 1];
 static uint32_t keys_ = 1;
 
-/* the fabric segment's name, the bridge's configuration's (mesh-flow.c configuration_read, its `loop` `fabric`), before
+/* the fabric segment's name, the bridge's configuration's (mesh-link.c configuration_read, its `loop` `fabric`), before
    any device is opened */
 void loop_fabric(const char *name) { snprintf(fabric_name_, sizeof fabric_name_, "%s", name ? name : ""); }
 

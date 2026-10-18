@@ -127,7 +127,7 @@ static int map_read(const char *directory, struct loop_map *map) {
   return ok ? 0 : EINVAL;
 }
 
-/* node i's canonical configuration (bridge_configuration.py's form, and its `loop`: mesh-flow.c loop_read) */
+/* node i's canonical configuration (bridge_configuration.py's form, and its `loop`: mesh-link.c loop_read) */
 static int plist_write(const char *directory, const struct loop_map *map, int i) {
   char path[PATH_MAX];
   if (snprintf(path, sizeof path, "%s/node%d.plist", directory, i) >= (int)sizeof path) return ENAMETOOLONG;

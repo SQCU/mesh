@@ -38,7 +38,7 @@ struct mesh_device {
 /* the port's own address (its GID) and its index in the port's GID table, the first entry the table holds: a Thunderbolt
    port's table does not always begin at index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and
    index 0's empty address failed every queue pair's connection with EIO) */
-static int device_gid(struct mesh_device *device){
+static __attribute__((unused)) int device_gid(struct mesh_device *device){
   for(int i=0;i<device->port.gid_tbl_len && i<256;i++){
     union ibv_gid g;
     if(ibv_query_gid(device->context,1,i,&g))continue;
@@ -76,7 +76,7 @@ struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int q
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
-static int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
+static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   wire->length=(size_t)mesh_arena_pages(m)*m->pgsz;
   wire->data=NULL;
   char *reserved=mmap(NULL,wire->length+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
@@ -89,11 +89,12 @@ static int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   return 0;
 }
-static const char *shm; static _Atomic sig_atomic_t stop;
+/* the region's name and the stop flag, defined once in mesh-link.c (design/bridge-and-ipc.md#files) */
+extern const char *shm; extern _Atomic sig_atomic_t stop;
 /* design/prepared-machine.md#M11 */
 /* design/RDMA-KERNEL-RECOVERY.md: queue pairs, then completion queues; a failed destruction keeps its handle for the
    next retirement turn.  1 once nothing is held. */
-static int down_pair(struct mesh_verbs *provider){
+static __attribute__((unused)) int down_pair(struct mesh_verbs *provider){
   while(provider->qp_count){
     struct ibv_qp *q=provider->queues[provider->qp_count-1].pair;
     if(q && ibv_destroy_qp(q))return 0;
@@ -108,9 +109,9 @@ static int down_pair(struct mesh_verbs *provider){
 /* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": each queue pair moved to the error state, so the
    device ends its posted receives and SENDs (flushed, IBV_WC_WR_FLUSH_ERR) before it is destroyed, and its completion
    queues drained of what that returns until `polls` polls in a row take none; the completions drained.  A queue pair
-   whose move is refused is destroyed as down_pair destroys it.  The stripe flow's teardown takes it (mesh-flow.c
+   whose move is refused is destroyed as down_pair destroys it.  The stripe flow's teardown takes it (mesh-program.c
    stripes_job); every other teardown destroys its queue pairs as they stand. */
-static uint32_t pair_flush(struct mesh_verbs *provider,uint32_t polls){
+static __attribute__((unused)) uint32_t pair_flush(struct mesh_verbs *provider,uint32_t polls){
   for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
     struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
     ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE);
@@ -129,17 +130,17 @@ static uint32_t pair_flush(struct mesh_verbs *provider,uint32_t polls){
 /* design/RDMA-KERNEL-RECOVERY.md "October 18": a retired device's registrations, protection domain and context
    forgotten with no verbs call (ibv_dealloc_pd during the device's termination deadlocks Apple's driver, 09-05 and
    10-18); the kernel releases them at the process's exit */
-static int down_device(struct mesh_device *device){
+static __attribute__((unused)) int down_device(struct mesh_device *device){
   free(device->regions);device->regions=NULL;device->extents=0;
   device->domain=NULL;
   device->context=NULL;
   device->frame_capacity=0;
   return 1;
 }
-static void down(void){ if(shm)shm_unlink(shm); }
+static __attribute__((unused)) void down(void){ if(shm)shm_unlink(shm); }
 /* design/recovery.md#diagnosis: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
-static void say(const char *format,...){
+static __attribute__((unused)) void say(const char *format,...){
   struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
   struct tm utc;gmtime_r(&t.tv_sec,&utc);
   char line[2048];
@@ -148,7 +149,7 @@ static void say(const char *format,...){
   va_list arguments;va_start(arguments,format);vsnprintf(line+n,sizeof line-n,format,arguments);va_end(arguments);
   fputs(line,stderr);
 }
-static void die(const char*m){ say("%s\n",m); exit(1); }
+static __attribute__((unused)) void die(const char*m){ say("%s\n",m); exit(1); }
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M09 */
@@ -159,7 +160,7 @@ static void die(const char*m){ say("%s\n",m); exit(1); }
    *refused to its code (EFBIG: the window's extents past the device's max_mr; else ibv_reg_mr's errno), logged with
    the extent, and keeps the device and the extents it registered, so its next turn registers the rest
    (design/recovery.md#registration). */
-static int device_up(struct mesh_device *device,struct wire_mapping *wire,int *refused){
+static __attribute__((unused)) int device_up(struct mesh_device *device,struct wire_mapping *wire,int *refused){
   *refused=0;
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
@@ -204,7 +205,7 @@ static int device_up(struct mesh_device *device,struct wire_mapping *wire,int *r
 /* design/prepared-machine.md#M11 */
 /* `count` UC queue pairs and their two completion queues, in INIT, against the device's usable queue pairs.  0, or the
    error (ENOSPC: the device holds no more queue pairs). */
-static int pair_up(struct mesh_verbs *provider,int count){
+static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,int count){
   struct mesh_device *device=provider->device;
   if(device->pairs+(uint32_t)count>device->max_pairs)return ENOSPC;
   uint32_t frames=device->frame_capacity;
@@ -233,7 +234,7 @@ static int pair_up(struct mesh_verbs *provider,int count){
 /* design/algorithm-sources.md#programcopy */
 /* each queue pair ready to receive from the peer's (`remote`: its queue pair numbers and first sequence numbers), the
    peer's port at `lid` and `gid` */
-static int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],uint16_t lid,const uint8_t *gid){
+static __attribute__((unused)) int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],uint16_t lid,const uint8_t *gid){
   for(int q=0;q<provider->count;q++){
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[q][1],.dest_qp_num=remote[q][0],
       .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=provider->device->gid_index}}};
@@ -242,7 +243,7 @@ static int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],
   }
   return 0;
 }
-static int pair_send(struct mesh_verbs *provider){
+static __attribute__((unused)) int pair_send(struct mesh_verbs *provider){
   for(int q=0;q<provider->count;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
     if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
@@ -250,7 +251,7 @@ static int pair_send(struct mesh_verbs *provider){
   return 0;
 }
 /* design/algorithm-sources.md#link */
-static uint64_t port_bandwidth(const struct ibv_port_attr *port){
+static __attribute__((unused)) uint64_t port_bandwidth(const struct ibv_port_attr *port){
   static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
   static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
   return speeds[port->active_speed]*widths[port->active_width];

@@ -1258,8 +1258,8 @@ done:
    (16-word aligned), one per received chunk an invocation of each receive transfer's range, in the frame order
    mesh_transfers_prepare assigned (a chunk's word for the transfer's invocation u is first + (u*count + slot)*chunks
    + chunk, its stride count*chunks words; a row's delivery names its slot's chunk word of invocation 0, slot 0's
-   where every slot lands on the same rows, the bridge adding slot*chunks words, mesh-flow.c receive_input); the words
-   in context->inputs_off, inputs_bytes. */
+   where every slot lands on the same rows, the bridge adding slot*chunks words, mesh-program.c receive_input); the
+   words in context->inputs_off, inputs_bytes. */
 int mesh_host_inputs(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);

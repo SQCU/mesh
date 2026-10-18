@@ -915,7 +915,7 @@ uint64_t ncclMeshRetired(void);
    sharing none with its parent's.  What a relay's bridge leases for a route it forwards is ncclMeshRelayBytes's. */
 ncclResult_t ncclMeshSessionBytes(int peers, const struct mesh_wire* wire, uint64_t* bytes);
 /* The bytes of its node's window a relay's bridge leases for one direction of a session on `wire` that its route
-   crosses (mesh-flow.c mirror, design/bridge-and-ipc.md#routes): the direction's two rings mirrored (mesh.h
+   crosses (mesh-program.c mirror, design/bridge-and-ipc.md#routes): the direction's two rings mirrored (mesh.h
    mesh_relay_slot), the lists of its two destinations and its SEND cells and targets, each a lease of whole blocks;
    one such lease, and one client slot of the relay's bridge (mesh.h MESH_CLIENTS), a direction a route crosses, both
    directions of every two members of a session whose route crosses the node, whatever their stripes. */

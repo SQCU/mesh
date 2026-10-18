@@ -34,6 +34,35 @@ failing as values and each flow released as at its end. A bridge never receives 
 its lanes', stripes', stream's and devices' verbs objects are released by the kernel at its exit, never by a call
 (design/RDMA-KERNEL-RECOVERY.md "October 18").
 
+## files
+
+The bridge, `rdma/mesh-flow`, is built from two translation units over one internal header. They are MESH_VERSION
+118's mesh-flow.c split in two, with no behaviour changed:
+
+- `rdma/mesh-link.c`: the ports, links and lanes, the progress threads, the event loop and the stop.
+- `rdma/mesh-program.c`: programs and their flows, relays, stripes, streams, the records and the services.
+- `rdma/mesh-bridge.h`: their types, the state both read (defined in mesh-link.c) and the functions each calls of the
+  other's.
+
+The link lanes are declared at MESH_VERSION 124, and nothing reads or writes them yet:
+
+- **Lanes.** A link's queue pairs are made once at its pairing as its `MESH_LINK_LANES` lanes. Lane 0 is the
+  keepalive's and lane 1 the stripe writes'. From lane 2 the lanes are communicators' pairs, one lane for the large
+  class and one for the small.
+- **Lease words** (struct hdr `lanes[port][lane]`). A word is 0 when the lane is free. Otherwise it holds the owner
+  word of the communicator's session slot, which its client claims and releases with a compare-exchange. The bridge
+  sets `MESH_LANE_DIRTY` where the lane's posted receives were never consumed, and clears it once the lane is made
+  again.
+- **A program's lanes** toward a destination: struct mesh_tx `lane`.
+- **A link's lanes made at its pairing:** struct mesh_link_info `lanes`.
+- **Choosing lanes at a communicator's init** (mesh-call.h). `mesh_lanes_free` gives a rank's report of the pairs free
+  toward each peer. `mesh_lanes_choose` is the rule every rank applies to the gathered reports: for each link, the
+  lowest pair free at both ends. `mesh_lanes_claim` and `mesh_lanes_release` take and give back a rank's chosen pairs.
+- **Done words** are never lowered (a max register), so a cancellation's `~0` stands against a landing that comes after
+  it.
+
+`status[d].prepared` and `stopping` are deleted along with their users.
+
 ## region
 
 The node's one region is the shared memory object `/mesh0` (mesh.h `MESH_NAME`), made by the bridge at its start and

@@ -8,18 +8,19 @@ MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 all: $(BINS)
 examples: $(EXAMPLES)
-native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s .build/Mesh.s
+native-audit: .build/mesh-link.s .build/mesh-program.s .build/mesh-call.s .build/mesh-dataflow.s .build/Mesh.s
 .build/Mesh.s: $(SWIFT) mesh.h mesh-plan.h mesh-call.h mesh-collective.h mesh-dataflow.h module.modulemap Makefile
 	mkdir -p .build
 	swiftc -O -whole-module-optimization -parse-as-library -emit-assembly -module-name Mesh -I . $(SWIFT) -o $@
-.build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
+.build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-bridge.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
 # the bridge and mesh-stat read the region through libmesh: beside them here, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L. -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
-mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h libmesh.dylib Makefile
+# design/bridge-and-ipc.md#files: the bridge, mesh-link.c and mesh-program.c over mesh-bridge.h
+mesh-flow: mesh-link.c mesh-program.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h libmesh.dylib Makefile
 	mkdir -p .build
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o .build/$@ mesh-flow.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation -framework IOKit
+	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o .build/$@ mesh-link.c mesh-program.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h mesh-plan.h libmesh.dylib Makefile
@@ -43,10 +44,10 @@ mesh-advise: .build/mesh-advise
 # deployed mesh-flow is built from the same source without MESH_LOOP_FABRIC and stays as it is
 LOOP = .build/loop
 mesh-flow-loop: $(LOOP)/mesh-flow-loop
-$(LOOP)/mesh-flow-loop: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-dataflow.c mesh-call.h mesh-call.c mesh-collective.h \
+$(LOOP)/mesh-flow-loop: mesh-link.c mesh-program.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-dataflow.c mesh-call.h mesh-call.c mesh-collective.h \
   mesh-collective.c loopverbs.c Makefile
 	mkdir -p $(LOOP)
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -DMESH_LOOP_FABRIC -o $@ mesh-flow.c mesh-dataflow.c mesh-call.c mesh-collective.c loopverbs.c \
+	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -DMESH_LOOP_FABRIC -o $@ mesh-link.c mesh-program.c mesh-dataflow.c mesh-call.c mesh-collective.c loopverbs.c \
 	  -framework SystemConfiguration -framework CoreFoundation -framework IOKit
 	codesign --force --sign - --identifier io.mesh.bridge.loop $@
 # host: the loop's clients: libmesh bound to a loop bridge (mesh_loop_bind), libnccl-mesh with the walk's kernels on the

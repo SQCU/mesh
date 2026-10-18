@@ -51,6 +51,22 @@ int mesh_transfers_start(struct mesh_ctx *);
    bell), a group of it about to publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks
    again within 1 ms anyway while a flow is its port's) */
 void mesh_transfers_wake(struct mesh_ctx *);
+/* design/bridge-and-ipc.md#files, the link lanes (declared at MESH_VERSION 124, defined with the communicators' lanes):
+   a rank's report, gathered at a communicator's init through NCCL's bootstrap, of its bridge's node and, toward the peer
+   node of each of its paired ports, the lane pairs free there (`free`, a bit a pair: pair p is lanes MESH_LANE_FIRST +
+   2 p and + 2 p + 1), read wait-free from the region's lease words (mesh_lanes_free; 0, or EINVAL); the rule every rank
+   applies alike to the gathered reports (mesh_lanes_choose): for each rank r's link k, the lowest pair free at both of
+   its ends, into chosen[r * MESH_PORTS + k] (UINT32_MAX where the rank has no such link), 0, or ENOSPC where a link of
+   the communicator has none free at both ends (its init fails as a value; the next init reads the words as they then
+   stand); a rank's claim of its chosen pairs (its row of `chosen`) at its own bridge, each lane's word 0 to `owner` by
+   compare-exchange (0, or EAGAIN where a word was taken first: its claims released and the init failed as a value),
+   and their release, each word `owner` to 0 */
+struct mesh_lane_link { uint32_t peer,port,free,padding; };
+struct mesh_lane_report { uint32_t node,count; struct mesh_lane_link link[MESH_PORTS]; };
+int mesh_lanes_free(struct hdr *,struct mesh_lane_report *);
+int mesh_lanes_choose(const struct mesh_lane_report *reports,uint32_t ranks,uint32_t *chosen);
+int mesh_lanes_claim(struct hdr *,uint64_t owner,const struct mesh_lane_report *mine,const uint32_t *chosen);
+void mesh_lanes_release(struct hdr *,uint64_t owner);
 
 /* ---- The numerical executor (mesh 2b49f3c6^, restored on the resident bridge's substrate) -----------------------
    Worker threads fire a function when its inputs' arrivals reach its pending count, then publish its outputs by

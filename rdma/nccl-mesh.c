@@ -1695,7 +1695,7 @@ static uint64_t session_bytes(uint64_t peers, const struct mesh_wire *wire) {
          WHOLE(sizeof(struct mesh_cancellation) + (peers ? peers : 1) * sizeof(struct mesh_cancel_range), block) + WHOLE(page, block);
 }
 
-/* one direction of a session a relay's bridge forwards (ncclMeshRelayBytes; mesh-flow.c mirror): the direction's
+/* one direction of a session a relay's bridge forwards (ncclMeshRelayBytes; mesh-program.c mirror): the direction's
    transfers, a ring of each class, mirrored; the lists of its two destinations, the sender and the receiver; and the
    SEND cells and targets of its two transfers */
 static uint64_t relay_bytes(const struct mesh_wire *wire) {

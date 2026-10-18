@@ -74,7 +74,7 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
 }
 
 /* design/bridge-and-ipc.md#region: the flows and awaiting programs the bridge holds and the wall clock (ns) at which it
-   last held none (0 while it holds any).  The bridge stores idle_since before busy (mesh-flow.c busy_tell), and
+   last held none (0 while it holds any).  The bridge stores idle_since before busy (mesh-program.c busy_tell), and
    idle_since is never 0 while it holds none (the region's boot from its start), so a read that meets it as it becomes
    busy (busy 0 and idle_since 0: the old count, the new time) is a busy one and is told as one */
 int mesh_busy(uint64_t *busy,uint64_t *idle_since){
@@ -120,7 +120,7 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
 /* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records: the cables between them, the ports each
    end's record holds paired with the other (the fewer of the two ends' counts), and *slowest the least bandwidth any
    of those ports at either end reports (0: none reports one): the bridge stripes a program between the two over every
-   cable, a routed one too (mesh-flow.c route_stripes), so they carry it at their count times the slowest */
+   cable, a routed one too (mesh-program.c route_stripes), so they carry it at their count times the slowest */
 static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *slowest){
   uint32_t cables=0;
   for(uint32_t i=0;i<record->ports && i<MESH_PORTS;i++)
@@ -217,7 +217,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
   /* the records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
-     (mesh-flow.c health_put); a read that a health write overlapped is read again, at most 1024 times */
+     (mesh-program.c health_put); a read that a health write overlapped is read again, at most 1024 times */
   int count=-EAGAIN;
   for(int tries=0;tries<1024;tries++){
     const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
