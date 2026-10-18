@@ -1,11 +1,12 @@
 """The mesh from Python: mesh-plan.h through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
-node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
-the header's own: link maps, the trees every collective and message take, operands, collectives (compile: a program,
-the operand libnccl-mesh's ncclMeshCommInitRank takes), steps, the wire libnccl-mesh's sessions run (wire()), and the
-window a session takes on each member and on each relay its routes cross (session_bytes, relay_bytes).  Collectives
-run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the memory they move
-taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
+node's bridge's: current() is the map it keeps (mesh_map), serial() the map's serial as it is (mesh_map_serial) and
+wait() its next change (mesh_map_wait).  The planner is the header's own: link maps, the trees every collective and
+message take, operands, collectives (compile: a program, the operand libnccl-mesh's ncclMeshCommInitRank takes), steps,
+the wire libnccl-mesh's sessions run (wire()), and the window a session takes on each member and on each relay its
+routes cross (session_bytes, relay_bytes).  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for
+torch); lease() is its ncclMemAlloc, the memory they move taken from the node's bridge's window (rdma/NCCL.md
+"Memory")."""
 import errno
 import os
 import re
@@ -152,18 +153,24 @@ def members(whole, among, marks=None):
     return lmap
 
 
-def wait(serial=0, seconds=0.0):
-    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), else
-    `serial` when `seconds` pass first.  OSError naming the bridge where it is unreachable."""
+def serial():
+    """mesh_map_serial: the serial of the map this node's bridge keeps, as it is now."""
+    return lib.mesh_map_serial()
+
+
+def wait(serial):
+    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial`, waited for on the
+    serial's word, which the bridge wakes when it moves the map (no bound: a map that never changes is waited on for as
+    long).  OSError naming the bridge where it is unreachable."""
     made = ffi.new('uint64_t *', serial)
-    status = lib.mesh_map_wait(made, int(seconds * 1e9))
-    if status and status != errno.ETIMEDOUT:
+    status = lib.mesh_map_wait(made)
+    if status:
         raise OSError(status, f"this node's bridge is unreachable: {os.strerror(status)}")
     return made[0]
 
 
 def current(members=None):
-    """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
+    """mesh_map: the map this node's bridge keeps as of `serial` (serial()'s), over `members` (bridge node numbers, map
     node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
     `map` the members' map as libnccl-mesh reads it (its relays, a link a cable, at its bandwidth, `mark` each node's
     bridge node number, `next` the routing table the bridges forward along; members(map, ...) of the whole map is the
@@ -172,14 +179,14 @@ def current(members=None):
     a node no cable joins among its nodes (joined() names two it leaves apart).  OSError naming the bridge where it is
     unreachable; ValueError naming two members no route joins, where `members` are given and the map leaves them apart
     (no session runs on it: nccl-mesh.c comm_read)."""
-    serial, own = wait(), ffi.new('uint32_t *')
+    now, own = serial(), ffi.new('uint32_t *')
     lib.mesh_observe(ffi.NULL, 0, own)
     count, lmap, nodes, names = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
     if members:
         _apart(lmap, f"the bridges' map over {list(members)}", [f'node {v} ({names[i] or "no record"})' for i, v in enumerate(nodes)])
-    return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
+    return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=now)
 
 
 def nodes():
@@ -219,10 +226,10 @@ def request(node, service, need=0):
     return socket.socket(fileno=fd)
 
 
-def ask(node, service, data, timeout=None, need=0):
-    """request(node, service, need) given `data` whole and half closed, the service's answer read to its end: bytes."""
+def ask(node, service, data, *, need=0):
+    """request(node, service, need) given `data` whole and half closed, the service's answer read to its end (the
+    channel's end of file, or its reset where it fails: OSError): bytes."""
     with request(node, service, need) as channel:
-        channel.settimeout(timeout)
         channel.sendall(data)
         channel.shutdown(1)
         out = bytearray()
@@ -231,12 +238,12 @@ def ask(node, service, data, timeout=None, need=0):
         return bytes(out)
 
 
-def run(node, command, data=b'', timeout=None):
+def run(node, command, data=b''):
     """`command` run by the user's shell at `node` through its bridge's service `exec` (design/bridge-and-ipc.md#exec,
     where the node's bridge configuration serves it), `data` its standard input: (its exit code, or -signal where a
     signal ended it; its standard output and error, bytes).  OSError where no channel opened (EACCES: the node serves no
-    exec) or it failed, TimeoutError past `timeout`."""
-    out = ask(node, 'exec', command.encode() + b'\n' + data, timeout)
+    exec) or it failed."""
+    out = ask(node, 'exec', command.encode() + b'\n' + data)
     if len(out) < 4:
         raise OSError(errno.EPROTO, f"node {node}'s exec ended without its status")
     return os.waitstatus_to_exitcode(int.from_bytes(out[-4:], 'little', signed=True)), out[:-4]
