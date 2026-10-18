@@ -1,92 +1,50 @@
 #!/usr/bin/env mesh-python
-import argparse, collections, concurrent.futures, curses, html, json, os, signal, socket, subprocess, sys, time
+import argparse, collections, concurrent.futures, curses, html, json, os, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path[:0] = [HERE, os.path.join(HERE, "..", "rdma")]
 import mesh, mesh_disk, peers
 
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
+LATEST = "/v1/latest?measures=scalars"
 RESIDENT = ("beacon", "bridge", "router", "nodeinfo", "telemetry", "observer")
 SPARK = " ▁▂▃▄▅▆▇█"
 PHASES = {getattr(mesh.lib, "MESH_" + name): name for name in ("UNKNOWN", "PAIRING", "PAIRED", "STOPPED")}
-NODEINFO_OVER_SSH = "python3 - nodeinfo ::1 <<'PEERS'\n" + open(peers.__file__).read() + "\nPEERS"
 USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html FILE]   keys: q quit, j/k scroll"
 
-def run(command, timeout):
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True) as process:
-        try: stdout, stderr = process.communicate(timeout=timeout)
-        except BaseException:
-            try: os.killpg(process.pid, signal.SIGTERM)
-            except OSError: pass
-            process.wait()
-            raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-
 class Node:
-    def __init__(self, name, me):
-        self.name, self.me = name, me
-        self.sample, self.info, self.info_at, self.error, self.transport, self.rtt = None, {}, 0.0, None, None, None
-        self.sequence, self.previous, self.retry_at, self.address = None, None, 0.0, None
-
-    def hosts(self):
-        return ["127.0.0.1"] if self.me else [self.name + ".local"]
-
-def bracket(host):
-    return f"[{host}]" if ":" in host else host
-
-def ssh(host, command, timeout):
-    return run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, command], timeout)
-
-def connect(address, port, timeout):
-    family, sockaddr, _ = address
-    connection = socket.socket(family, socket.SOCK_STREAM)
-    connection.settimeout(timeout)
-    try: connection.connect((sockaddr[0], port) + tuple(sockaddr[2:]))
-    except Exception:
-        connection.close()
-        raise
-    return connection
-
-def exchange(address, port, request, timeout=2):
-    with connect(address, port, min(timeout, 0.7)) as connection:
-        connection.settimeout(timeout)
-        connection.sendall(request)
-        data = b""
-        while chunk := connection.recv(1 << 20): data += chunk
-    return data
-
-def addresses(host):
-    try: return [(family, sockaddr, host) for family, _, _, _, sockaddr in socket.getaddrinfo(host, TELEMETRY_PORT, type=socket.SOCK_STREAM)]
-    except Exception: return []
+    def __init__(self, name, number, me):
+        self.name, self.number, self.me = name, number, me
+        self.sample, self.info, self.error, self.transport, self.rtt = None, {}, None, None, None
+        self.sequence, self.previous, self.asked = None, None, None
 
 def fetch(node):
-    if node.error and time.monotonic() < node.retry_at: return
+    """The node's telemetry, its own over loopback and another's through its bridge's exec (curl there, at 127.0.0.1),
+    and its node-info through its bridge, read once."""
     started = time.monotonic()
-    path = f"/v1/latest?measures=scalars"
-    attempts = []
-    for address in ([node.address] if node.address else []) + [a for host in node.hosts() for a in addresses(host)]:
-        try:
-            data = exchange(address, TELEMETRY_PORT, f"GET {path} HTTP/1.1\r\nHost: {bracket(address[2])}\r\nConnection: close\r\n\r\n".encode())
-            envelope = json.loads(data.partition(b"\r\n\r\n")[2])
-            node.transport, node.address = ("http", address[2]), address
-            break
-        except Exception as error: attempts.append(f"http {address[2]} {address[1][0]}: {type(error).__name__}")
-    else:
-        envelope, host = None, node.name + ".local"
-        try: envelope, node.transport = json.loads(ssh(host, f"curl -s -m 2 'http://127.0.0.1:{TELEMETRY_PORT}{path}'", 8).stdout), ("ssh", host)
-        except Exception as error: attempts.append(f"ssh {host}: {type(error).__name__}")
-    node.rtt = time.monotonic() - started
+    try:
+        if node.me:
+            with urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}") as response: envelope = json.load(response)
+            node.transport = ("loopback", "127.0.0.1")
+        else:
+            code, out = mesh.run(node.number, f"curl -fsS 'http://127.0.0.1:{TELEMETRY_PORT}{LATEST}'")
+            if code: raise OSError(f"curl exited {code}: {out.decode(errors='replace').strip()[:160]}")
+            envelope = json.loads(out)
+            node.transport = ("bridge", f"node {node.number}")
+        node.rtt = time.monotonic() - started
+    except (OSError, ValueError) as error:
+        node.error, node.transport = f"{type(error).__name__}: {error}", None
+        return
     record = (envelope or {}).get("record") or {}
     if not record.get("sample"):
-        node.error, node.transport, node.retry_at = "; ".join(attempts) or f"no address or ssh host answered for {node.name}", None, time.monotonic() + 10
+        node.error = "its telemetry ring has no sample"
         return
     node.error = None
     if record.get("sequence") != node.sequence:
         node.previous, node.sample, node.sequence = node.sample, record["sample"], record.get("sequence")
-    if time.time() - node.info_at > 10:
-        try: text = peers.nodeinfo(node.address[2])[0] if node.transport[0] == "http" else ssh(node.transport[1], NODEINFO_OVER_SSH, 8).stdout
-        except (OSError, ValueError): text = ""
-        if text: node.info, node.info_at = peers.observation(text), time.time()
+    if not node.info and node.number is not None:
+        try: node.info = peers.observation(peers.sample(mesh.ask(node.number, "nodeinfo", b""), 1 << 20))
+        except (OSError, ValueError) as error: node.info = {"error": f"{type(error).__name__}: {error}"}
 
 def fabric(node):
     return (node.sample or {}).get("fabric") or {}
@@ -120,24 +78,28 @@ def shape(nodes, edges):
 
 class Top:
     def __init__(self, args):
-        self.args, self.me, self.nodes, self.seen = args, peers.local_name(), {}, set()
+        self.args, self.nodes = args, {}
+        self.me = subprocess.run(["/usr/sbin/scutil", "--get", "LocalHostName"], capture_output=True, text=True).stdout.strip() or "self"
         self.series = collections.defaultdict(lambda: collections.deque(maxlen=240))
         self.pool = concurrent.futures.ThreadPoolExecutor()
-        self.browsing = self.pool.submit(peers.browse)
         self.names, self.paired, self.unmapped = {}, set(), None
 
-    def refresh(self):
-        """The map of this node's bridge (mesh.current: mesh_map), naming each bridge node; then every node the beacon
-        announces (peers.browse) or the map names, this one's own included, and each one's telemetry."""
-        if self.browsing.done(): self.seen, self.browsing = self.seen | set(self.browsing.result()), self.pool.submit(peers.browse)
+    def refresh(self, wait=False):
+        """The map of this node's bridge (mesh.current: mesh_map), naming each bridge node; then every node it names, this
+        one's own among them, each one's telemetry asked for where no ask of it is under way (`wait`: until each answers)."""
+        own = None
         try:
             now = mesh.current()
-            self.names, self.unmapped = dict(zip(now.nodes, now.names)), None
+            self.names, self.unmapped, own = dict(zip(now.nodes, now.names)), None, now.node
             self.paired = {frozenset((now.names[a], now.names[b])) for a, b in now.map.pairs}
         except (OSError, ValueError) as error: self.paired, self.unmapped = set(), str(error)
-        for name in self.seen | set(self.names.values()) | {self.me}:
-            if name not in self.nodes and (not self.args.nodes or name in self.args.nodes): self.nodes[name] = Node(name, name == self.me)
-        list(self.pool.map(fetch, self.nodes.values()))
+        self.me = self.names.get(own) or self.me
+        for number, name in [(own, self.me)] + list(self.names.items()):
+            if name not in self.nodes and (not self.args.nodes or name in self.args.nodes or number == own):
+                self.nodes[name] = Node(name, number, number == own)
+        for node in self.nodes.values():
+            if node.asked is None or node.asked.done(): node.asked = self.pool.submit(fetch, node)
+        if wait: concurrent.futures.wait([node.asked for node in self.nodes.values()])
         for node in self.nodes.values(): self.account(node)
 
     def owner(self, address):
@@ -223,7 +185,7 @@ class Top:
                 b = max(f["bridges"], key=lambda x: x["exited_at"])
                 bridge = (f"none (last exited {duration(now - b['exited_at'])} ago)", "bad")
             else: bridge = ("none", "bad")
-            transport = f"{node.transport[0]} {node.transport[1]} {node.rtt * 1000:.0f}ms" if node.transport else "unreachable"
+            transport = f"{node.transport[0]} {node.transport[1]} {node.rtt * 1000:.0f}ms" if node.transport else "no telemetry" if node.error else "asking"
             add("  ", (f"{node.name:<17} ", "bold"), f"{chip:<14} {info.get('cores', '?'):>5}  {(str(round(mem / 2**30)) + 'G') if mem else '?':<6} {up:<9} ",
                 (f"{bridge[0][:36]:<37}", bridge[1]), (transport, "dim" if node.transport else "bad"))
             services, groups = f.get("services") or {}, collections.defaultdict(list)
@@ -243,8 +205,7 @@ class Top:
                     (f"   keeper: {keeper['last'][:48]}" if keeper.get("last") else "", "dim"))
             if node.error: hints.append(("bad", f"{node.name}: no telemetry ({node.error})"))
             if f.get("error"): hints.append(("warn", f"{node.name}: telemetry fabric section failed: {f['error']}"))
-            for alarm in keeper.get("alarms") or []:
-                if now - (keeper.get("modified") or 0) < 3600: hints.append(("warn", f"{node.name}: keeper {alarm}"))
+            for alarm in keeper.get("alarms") or []: hints.append(("warn", f"{node.name}: keeper {alarm}"))
             for b in f.get("bridges") or []:
                 if str(b.get("state", "")).startswith("U"): hints.append(("bad", f"{node.name}: bridge pid {b['pid']} is in U (uninterruptible, blocked in a verbs call); never SIGKILL it and do not launch ibv_devinfo there (RDMA-RULES.md)"))
                 if b.get("log_error") and not b.get("exited_at"): hints.append(("warn", f"{node.name}: bridge log unreadable by telemetry ({b['log_error']}); no census"))
@@ -330,7 +291,6 @@ def interactive(screen, top):
     for index, (name, color) in enumerate((("ok", curses.COLOR_GREEN), ("warn", curses.COLOR_YELLOW), ("bad", curses.COLOR_RED), ("head", curses.COLOR_CYAN), ("accent", curses.COLOR_MAGENTA)), 1):
         curses.init_pair(index, color, -1)
         styles[name] = curses.color_pair(index) | (curses.A_BOLD if name in ("bad", "head") else 0)
-    screen.timeout(100)
     offset, due, lines = 0, 0.0, []
     while True:
         if time.monotonic() >= due:
@@ -346,13 +306,14 @@ def interactive(screen, top):
                     column += len(text)
             screen.addnstr(height - 1, 0, USAGE[USAGE.index("keys:"):], width - 1, curses.A_DIM)
             screen.refresh()
+        screen.timeout(max(0, int((due - time.monotonic()) * 1000)))
         key = screen.getch()
         if key in (ord("q"), 27): return
         if key == ord("j"): offset, due = min(offset + 1, max(0, len(lines) - 2)), 0
         if key == ord("k"): offset, due = max(0, offset - 1), 0
 
 def main():
-    parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth between mesh nodes: the nodes the beacon announces and this node's bridge's map names, each read from its io.mesh.telemetry (:8788) and io.mesh.nodeinfo; sends no RDMA traffic of its own.")
+    parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth between mesh nodes: the nodes this node's bridge's map names, each read from its io.mesh.telemetry (:8788), another node's through its bridge's exec, and its io.mesh.nodeinfo through its bridge; sends no RDMA traffic of its own.")
     parser.add_argument("-n", "--interval", type=float, default=1.0)
     parser.add_argument("--window", type=float, default=5.0)
     parser.add_argument("--nodes", type=lambda text: [x for x in text.split(",") if x], default=None)
@@ -361,10 +322,10 @@ def main():
     args = parser.parse_args()
     top = Top(args)
     if args.once or args.html:
-        top.refresh()
+        top.refresh(True)
         for _ in range(max(2, int(args.window / args.interval) + 1)):
             time.sleep(args.interval)
-            top.refresh()
+            top.refresh(True)
         lines = top.frame()
         if args.html: mesh_disk.write(args.html, page(lines), f"mesh-top's page {args.html}")
         if args.once or not args.html: print(ansi(lines, sys.stdout.isatty()))

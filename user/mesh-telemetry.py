@@ -663,17 +663,15 @@ class TelemetryHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        if urllib.parse.urlsplit(self.path).path != "/v1/workload-measures":
+            self.send_json({"schema": 1, "error": "unknown endpoint", "measures": "/v1/workload-measures"}, 404)
+            return
         try:
             payload = json.loads(body)
         except Exception as error:
             payload = {"source": "http", "body": body.decode(errors="replace"),
                        "parse_error": type(error).__name__}
-        sequence = (
-            self.server.store.publish_measures(payload)
-            if urllib.parse.urlsplit(self.path).path == "/v1/workload-measures"
-            else self.server.store.publish_workload(payload)
-        )
-        self.send_json({"schema": 1, "ingest_sequence": sequence}, 202)
+        self.send_json({"schema": 1, "ingest_sequence": self.server.store.publish_measures(payload)}, 202)
 
     def log_message(self, *args):
         self.server.store.publish_protocol({"at":time.time(),"client":self.client_address[0],"message":args[0] % args[1:]})

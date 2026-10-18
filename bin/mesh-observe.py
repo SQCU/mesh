@@ -5,7 +5,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.environ.get("MESH_TELEMETRY_URL", "http://127.0.0.1:8788")
 
 def fetch(path):
-    with urllib.request.urlopen(BASE.rstrip("/") + path, timeout=3) as response:
+    with urllib.request.urlopen(BASE.rstrip("/") + path) as response:
         return json.load(response)
 
 def direct():
@@ -18,7 +18,7 @@ def direct():
     for path in candidates:
         if not os.path.isfile(path): continue
         try:
-            result = subprocess.run([sys.executable, path, "--once"], capture_output=True, text=True, timeout=7)
+            result = subprocess.run([sys.executable, path, "--once"], capture_output=True, text=True)
             if result.returncode == 0: return json.loads(result.stdout.strip().splitlines()[-1])
             attempts.append({"path": path, "returncode": result.returncode, "error": result.stderr.strip()})
         except Exception as error:
