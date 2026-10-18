@@ -887,21 +887,27 @@ The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-
 and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
 associate QPs and registered memory with a protection domain. The bridge keeps
 those device resources once per port it found (design/bridge-and-ipc.md#ports) and
-realizes a separate flow, with its own queue pairs and progress threads, for every
-program on a paired port. A peer is the node a port found; a program's destination
-nodes, queues and operand row ranges are resolved at setup. Publication scatters its
-row index to those flows' queues through a precomputed membership bitset, independent
-of collective verb and peer count. Several ports register the same canonical
-payload backing through their own devices; they do not create operand copies.
+makes a link's queue pairs once, at its pairing: the keepalive's and its leases' (at
+most 9 leases on a TB5 link), all on the link's two completion queues and served by
+the port's two progress threads (design/bridge-and-ipc.md#links, #leases, #loops). A
+program rides, toward each destination, one lease of each queue it uses, the leases
+its members' agreement assigned (design/bridge-and-ipc.md#meet). A peer is the node a
+port found; a program's destination nodes, queues and operand row ranges are resolved
+at setup. Publication releases its row's SEND cells through the program's prepared
+targets (`mesh_row_targets`, prepared-machine.md M10), independent of collective verb
+and peer count. Several ports register the same canonical payload backing through
+their own devices; they do not create operand copies.
 
-A program's pairing on a port waits on events alone: its peer's READY, PAIRS and
-POSTED, a FAIL, the link's loss, its own program's revoke (design/recovery.md#first).
+A link's pairing waits on events alone: its peer's HELLO and PAIRS, the link's loss
+(design/recovery.md#first). A program's start waits on its own bridge alone, which
+compiles its chains on its leases and posts its first receives; a peer's SEND to a
+receive not yet posted waits in the hardware (TN3205's credit).
 A port's control connection is dialed nonblocking to the link-local address its peer's
 hello came from, so pairing performs no host or service lookup. Apple's BSD
 [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
 and [accept](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html)
 contracts supply the nonblocking socket mechanism; a connection that fails is the
-link's loss, which fails the flows on it and does not end the bridge. TX, RX, numerical
+link's loss, which fails the programs holding its leases and does not end the bridge. TX, RX, numerical
 publication and consumer completion contain no clock check. As
 [RDMA-RULES.md](../RDMA-RULES.md) explains, a driver call blocked in kernel sleep
 cannot be unwound from user space: it blocks only its port's queue.
@@ -931,119 +937,63 @@ native queue ownership and completion lifetime. Mesh retains the registered
 SEND/RECV operations described under [transport](#programcopy); it adds no native
 transport implementation.
 
-`link_send_completions` owns all SEND CQs for its link and directly publishes
-completed indices to the existing retirement ring. `link_send_progress` owns
-SEND posting and its native-refusal cursors. It discovers a new publication,
-posts its requests directly, and visits each nonempty refusal queue for one
-native attempt before inspecting publications again. Successful attempts advance
-the existing cursor; a native refusal preserves it. The next transfer boundary
-is prepared in each SEND record, so successful posting walks native records
-without loading/reconstructing a separate chunk loop. The retirement chunk count
-remains beside the other cold fields. Continuous publication cannot suppress CQ
-polling, and a CQ sweep cannot precede discovery in the posting thread.
+A port's two progress threads own its link's native queues (`mesh-flow.c`
+`port_progress`). The receive thread is the one reader of the link's receive
+completion queue and the one poster of its receives: a landing stores its word and
+posts its ring's next records (`receive_pass`, `ring_advance`). The send thread is
+the one reader of the link's SEND completion queue and the one poster of its SENDs:
+each pass retires completed frames, then walks every held lease's stream and posts
+each released cell's chain while the pair's gate holds its frames (`send_pass`,
+`stream_post`); a refused post fails that lease's holder as a value. The next cell is
+prepared in each SEND cell (`successor`), so posting walks native records without
+reconstructing a separate chunk loop, and a stream whose next cell is not released
+holds only its own lease: every other lease's stream is posted in the same pass.
+Continuous publication cannot suppress completion polling.
 
-`link_receive_progress` owns all RECV CQs and publishes received operands.
-`link_receive_posting` owns the existing returned-page ring's head and posts its
-prepared requests. It attempts one available receive per QP on each continuous
-sweep, so a batch returned to one QP does not have to finish before another QP is
-visited. Initial configuration still fills native receive queues before pairing
-completes. Runtime reposting no longer executes in the CQ-consumption path.
-
-Each CQ has one reader, each native send/receive queue one posting thread, and
-each software ring retains its existing single writer and reader. Completion
-scratch is a native record on its CQ reader's stack. The shared heap allocation
-and its provider pointer are deleted. This adds two threads per link, from three
-to five including retirement, and zero per-event handoffs, queues, counters,
-locks or payload copies. All progress loops spin; there is no timer, task queue
-or wakeup protocol. The extra threads consume CPU resources; no claim of free
-scheduling or measured latency follows from their separation.
-
-The startup order is retirement, SEND CQ, RECV CQ, receive posting, SEND posting.
-Teardown stops and joins all four native-queue workers before stopping retirement
-and destroying native queues. A partially completed startup uses the same join
-order. Operand references, frame reuse, page return and native-error reporting
-retain their existing mechanisms. The remaining metadata loads and measured
-native bodies are recorded in the
+Each completion queue has one reader, each native send or receive queue one posting
+thread. Completion scratch is a native record on its reader's stack. Both threads
+spin without pause while the link is up; there is no timer, task queue or wakeup on
+the data path. They start once, at the port's first pairing (`port_threads`), hold
+while the event loop changes the link's verbs objects (the port's guard), and return
+at the bridge's stop. The threads consume CPU resources; no claim of free scheduling
+or measured latency follows from their separation. Measured native bodies of queue
+progress (2026-09-17) are in the
 [structural follow-up](e2b-structural-latency-2026-09-17.md#follow-up-independent-native-queue-progress).
 
 ## Transport retirement
 
 George E. Collins's [reference-counting mechanism](#programtensor) supplies the
-existing buffer lifetimes. Thompson, Farley, Barker, Gee and Stewart's
-[preallocated ring representation](#programcopy) supplies the index storage.
-`link_retire_progress` moves native completion retirement onto a dedicated
-thread per link; it does not change the declared references or require callers
-to release operands.
+existing buffer lifetimes, and Thompson, Farley, Barker, Gee and Stewart's
+[preallocated ring representation](#programcopy) the rings a program's transfers
+cycle through. The bridge retires native completions on the threads that poll them:
+the send thread retires each SEND completion's frames from its pair's gate as it
+polls, and the receive thread posts a ring's next records as each landing stores its
+word, a record posted again only once the record a ring's span behind it has landed
+(prepared-machine.md M08, M30). No other thread, index ring or returned-page array
+lies between polling and posting.
 
-TX publishes the completed SEND index. RX publishes the completed section's
-logical row after publishing its value to consumers. Each direction has one
-writer and a private ring of 32-bit indices; zero denotes an empty slot. The
-retirement thread consumes both rings independently, clears each slot, and
-performs the existing chunk countdown, buffer release and instance accounting.
-The RX record stores its logical row at setup, avoiding another publication
-record load merely to construct the retirement event.
-
-Setup sizes the TX ring for all chunks in all resident SEND frames and the RX
-ring for all resident received sections, rounded up to powers of two. A queued
-event retains the source use or received section's initial reference until this
-thread consumes it. Its frame therefore cannot be recycled while that event is
-queued. Clearing the slot precedes releasing that reference. This is the bound
-that permits unconditional producer stores without a fullness query, retry,
-reservation or shared producer cursor. The cold thread polls for available work;
-its empty RX ring does not withhold TX retirement, or vice versa.
-
-Teardown joins TX and RX before stopping retirement. The retirement thread reads
-the shutdown flag before reading the slots and drains their final publications
-before queue-pair and registered-memory destruction. The thread-start order also
-allows this teardown after a partially successful startup.
-
-The same retirement thread now owns the existing receive-return reader. It
-collects a returned section's physical page indices into the existing pending
-RECV array, clears its old mappings, resets its initial references and presence,
-and finishes the old frame's accounting. Only then does one release store publish
-the array's new tail. RX acquires that tail and posts the already prepared native
-requests. A native capacity refusal leaves the head unchanged. The former
-`link_receive` bookkeeping function is deleted; no replacement call lies between
-RX polling and reposting.
-
-The array still has power-of-two capacity covering every registered page in its
-queue. A page is pending for posting, held by the NIC, or retained by a received
-value; it cannot occupy two pending entries. Thus no producer fullness query is
-needed. RX owns the head and retirement owns the tail, on separate 128-byte
-lines. Setup initially fills the array and preposts receives before either
-thread starts. This introduces a release/acquire queue boundary, not another
-queue or thread. Instance accounting and row reset precede publication to RX,
-preserving their order before the next completion can reuse the returned page.
-
-The retirement change adds one thread per link and one index publication per
-completion. It removes reference/instance bookkeeping and buffer reset from the
-spinners, not from the program. RX publication, address binding and forwarding
-updates remain. The
+A program's rows outlive its native requests. A program that ends in order has every
+released cell posted and completed before its bridge lets go of its leases
+(design/bridge-and-ipc.md#programs); a failed one's rings are detached from their
+leases under the port's guard before each lease is made again; and its slot's rows
+are released only once no program holds a lease over them (`mesh_retired_release`,
+then `mesh_reclaim`), so no queue pair still bound to a row writes it after its
+pages return to the window. The
 [native assembly account](h-audit-2026-09-16.md#follow-up--transport-retirement)
-records the local change without claiming the H budgets or measured latency.
-
-ABI 79 deletes `mesh_buffer.invocation`. The canonical presence stamp already
-contains `invocation + 1`; the retirement thread reads it after the final use
-returns and before clearing it in `mesh_buffer_reset`. The retained RX reference
-prevents reuse while publication is still issuing its declared notifications.
-The return event's release/acquire handoff follows the final reference decrement,
-so retirement can use the existing stamp without another publisher store.
-Local GPU publishers already wrote only that stamp. CPU/RX publication now accepts
-the page entry already held by its completion operand or receive record, eliminating
-the row-to-page lookup inside `mesh_publish` as well.
+records a dated audit of retirement (2026-09-16).
 
 ## Placement
 
 Pitch Patarasuk and Xin Yuan,
 [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
 (2009), motivate sparse connected topologies. A route is the map's: `mesh_map` (mesh-plan.h) links members the
-links leave apart along the routing table's route between them ([Topology](#topology)), and the bridges forward a
-program along it (design/bridge-and-ipc.md#flows). No route is chosen by a caller or guessed from rank count.
+links leave apart along the routing table's route between them ([Topology](#topology)), and the bridges carry a
+program along it (design/bridge-and-ipc.md#relays). No route is chosen by a caller or guessed from rank count.
 
-For a section s on `v0 → v1 → … → vk`, each intermediate node's bridge holds a relay's two flows, the one's receive
-rows the other's SEND rows: a record landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)`
-(prepared-machine.md M08), with no numerical function, consumer stamp or payload copy, and no process of that node
-takes part. For the distinct realized legs E and a cut C, payload traffic is
+For a section s on `v0 → v1 → … → vk`, each intermediate node's bridge runs a relay program the members' agreement
+started (one for both directions of the pair, on the bridge's own slot), whose receive rows are its SEND rows: a record
+landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)` (prepared-machine.md M08), with no numerical
+function, consumer stamp or payload copy, and no process of that node takes part. For the distinct realized legs E and a cut C, payload traffic is
 `B(C) = sum(bytes(s) * count(s) for (u,v,s) in E crossing C)`.
 
 ## Topology
@@ -1062,26 +1012,24 @@ each node's mark (its bridge's node number) and the routing table, an operand: e
 (fewest links, then the least sum of betas). Two members are linked where their route crosses relays alone, that hop
 costed as the relayed path it is: its links' α summed and the greatest β, a relay forwarding each slot as it lands
 (mesh-flow.c receive_input), not the betas summed; and its bytes charged to every link it crosses, in the tree packing
-(a port's capacity shared by the hops whose routes cross it) and in `mesh_program_time` (a position crossing each port
-of its route once that port is free), so hops that share a cable share its time. Several cables between one pair are
-links of their own, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is striped
-over them, position t on cable t mod n, so the hop runs at n times the slowest cable's bandwidth (round robin waits on
-the slowest), not at their bandwidths summed; a routed program is striped end to end (mesh-flow.c route_stripes: the
-least common multiple of its segments' cable counts, past a node's ports the fewest; stripe j on cable (h + j) mod c of
-each segment), each segment carrying it over min(stripes, c) of its cables at the pace of the slowest
-(`mesh_link_cost`, `mesh_program_time`, which puts each position on the cable the bridges would). The bridges' map
-lists a pair's cables as such, each at the slowest port's bandwidth at either end (mesh-dataflow.c mesh_joined).
+(a port's capacity shared by the hops whose routes cross it), so hops that share a link share its capacity. Two nodes
+the bridges pair over several cables are one link in the bridges' map, at the slowest bandwidth any port either end
+paired with the other reports (mesh-dataflow.c mesh_join), and the bridges carry the pair's programs over one cable,
+the lowest index the pair's lower node gave one of its cables to the other (mesh-flow.c cable_to;
+design/bridge-and-ipc.md#ports), so a hop is priced at its slowest cable's bandwidth (mesh-collective.c
+mesh_hop_inverse). A map a caller makes may list several links of one pair: a hop over them is priced alike, and the
+tree packing counts them in a port's capacity (`mesh_trees_pack`).
 
 The table (`mesh_routes`): Dijkstra [1959] toward each node in its dense form, every length an exact integer (a
-pair's cables striped) so every bridge and member that holds the same records makes
+hop's inverse bandwidth in whole fs a byte) so every bridge and member that holds the same records makes
 the same table, each node's parent among its equals the least hash of its mark, the parent's and the root's
 [splitmix64's finalizer: Steele, Lea & Flood, OOPSLA 2014], equal-cost multipath by a hash as ECMP spreads flows
 [Hopps, RFC 2992]. A node's parent reads its own candidates alone, so the route between two nodes is a function of the
 shortest routes between them: it moves only where those change (a link or node one of them crosses lost or its cost
 changed, a link joining or a cost falling that makes another as short), never for a link lost elsewhere or a node
 joining by its own cables. The route between two nodes is the path up the higher-marked one's in-tree, so a route and
-its reverse are one path, as the bridges need (a READY carries its route, and each relay mirrors the far end's
-direction). It replaces the lowest-numbered parent among equals, which sent the ring of six's three antipodal routes
+its reverse are one path, as the bridges need (a member pair's relay programs carry both its directions over
+the one path, mesh-call.c agree_plan, and a request channel hops along it, mesh-flow.c channel_hop). It replaces the lowest-numbered parent among equals, which sent the ring of six's three antipodal routes
 through nodes 0 and 1, and the round's first pass's global search on link loads, which balanced the table better (the
 ring of six's busiest link 5 routes in every numbering, 5 or 6 by the hash) but moved a membership's routes for a link
 lost elsewhere in up to 35 % of cases and for a node joining by one cable in up to 45 % (metal-microbench
@@ -1244,9 +1192,9 @@ compiled programs, as the verbs' movement is: the members' trees (`mesh_trees_sh
 (`mesh_program_steps_cut`) over an operand whose element is a part, index i in owners[i]'s segment: in round order a
 COPY step a `send` of the peer's part, a REDUCE step the same and the supplied combine's `call` into the member's (a
 member holding none takes it as it comes, the compile's COPY of a first child; a peer holding none sends none). A rank's
-own terms are combined first. Every rank records the same steps, so the transfers' identities pair; the trees of every
-member set are folded into the digest `start()` names (`mesh_transfers_digest`), so members that read other maps fail
-as values (ESTALE). The walk was checked offline against the compiled programs (every kind, on full-mesh, ring, line
+own terms are combined first. Every rank records the same steps from the same trees, so the transfers' identities pair; `start()` agrees each
+program's leases and relays (`mesh_transfers_agree`) and compares no digest of the trees, so members that read other
+maps of the bridges make other trees and their transfers do not pair. The walk was checked offline against the compiled programs (every kind, on full-mesh, ring, line
 and star maps of 2 to 7 members, random contributors and segments: each member holds what the verb defines, each term
 once).
 
