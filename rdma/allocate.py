@@ -8,8 +8,8 @@ call's configuration is one more value in the dataflow: no root, no lock.
 `min_max` divides units among ranks whose times are given nondecreasing functions of their units, each grain to the
 rank finishing earliest with it [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  `time` and `Points` are a
 rank's measured points (units, seconds) as DFPA reads them [Lastovetsky & Reddy 2010, partial estimation of functional
-performance models]: nondecreasing, interpolated between the points, each point a filter of its calls with a change
-test.  `least` minimises a call's value over the lattice of parts (`min_max` for one stretch, a pairwise descent and a
+performance models]: nondecreasing, interpolated between the points, each point a filter of its calls.  `least`
+minimises a call's value over the lattice of parts (`min_max` for one stretch, a pairwise descent and a
 branch and bound for more), and `_path` is a call's time from its stretches as a longest path.
 
 `Balancer` is DFPA over a program's measured stretches (design/heterogeneity.md R3, R5, R10, R11); `pareto` keeps
@@ -127,44 +127,33 @@ class Points:
     1960], so the model has a posterior and not only a value.  A call at u units observes its time t with its own
     standard error `se` (the call's invocations') and the variance between calls `r` (the innovations' excess over
     the filters' and the calls' own, estimated as they come [Mehra 1970]); every point's variance grows by 1 / `forget`
-    a call (the drift the forgetting factor states [Haykin 2014]); a two-sided cumulative sum of its standardised
-    innovations past 5, each less a slack of 0.5 [Page 1954; Basseville & Nikiforov 1993], drops the other points (its
-    holder's performance changed [Clarke, Lastovetsky & Rychkov 2011]): a shift that persists, not one call's outlier,
-    which a single innovation's chi-square took for one (metal-microbench docs/placement.md#moves).  The
-    `keep` latest parts are held.  The model is `time` over the points' means (more units never take less time,
-    interpolated between them)."""
+    a call (the drift the forgetting factor states [Haykin 2014]), so a holder whose performance changed moves its
+    points by its calls' own evidence, every call kept.  The `keep` latest parts are held.  The model is `time` over the
+    points' means (more units never take less time, interpolated between them)."""
 
     def __init__(self, forget, keep=8):
         self.forget, self.keep, self.r, self.seen, self.at = float(forget), int(keep), 0.0, 0, {}
-        self.cusum, self._made = [0.0, 0.0], None
+        self._made = None
 
     def update(self, u, t, se=0.0):
-        """One call: `t` seconds at `u` units, its standard error `se`; whether it found the holder changed."""
+        """One call: `t` seconds at `u` units, its standard error `se`."""
         u, t = int(u), float(t)
         if u <= 0 or t <= 0:
-            return False
+            return
         self.seen, self._made = self.seen + 1, None
         for point in self.at.values():
             point[1] /= self.forget
         own = max(se * se, (RESOLUTION * t) ** 2)
-        changed = False
         if u in self.at:
             m, v = self.at.pop(u)
             e, spread = t - m, v + own + self.r
-            z = e / math.sqrt(spread)
-            self.cusum = [max(0.0, self.cusum[0] + z - 0.5), max(0.0, self.cusum[1] - z - 0.5)]
-            if max(self.cusum) > 5.0:
-                self.at, self.cusum, changed = {}, [0.0, 0.0], True
-                self.at[u] = [t, own + self.r]
-            else:
-                self.r += (1 - self.forget) * (max(0.0, e * e - v - own) - self.r)
-                k = v / spread
-                self.at[u] = [m + k * e, (1 - k) * v]
+            self.r += (1 - self.forget) * (max(0.0, e * e - v - own) - self.r)
+            k = v / spread
+            self.at[u] = [m + k * e, (1 - k) * v]
         else:
             self.at[u] = [t, own + self.r]
         while len(self.at) > self.keep:
             self.at.pop(next(iter(self.at)))
-        return changed
 
     def _model(self):
         if self._made is None:
@@ -179,14 +168,13 @@ class Points:
         return self._model().knots
 
     def state(self):
-        return {'forget': self.forget, 'keep': self.keep, 'r': self.r, 'seen': self.seen, 'cusum': self.cusum,
+        return {'forget': self.forget, 'keep': self.keep, 'r': self.r, 'seen': self.seen,
                 'at': [[u, m, v] for u, (m, v) in self.at.items()]}
 
     @classmethod
     def of(cls, state):
         model = cls(state['forget'], state['keep'])
         model.r, model.seen, model.at = state['r'], state['seen'], {int(u): [m, v] for u, m, v in state['at']}
-        model.cusum = list(state.get('cusum') or [0.0, 0.0])
         return model
 
 
@@ -423,11 +411,6 @@ def _path(rows):
     return total
 
 
-# The rule a vertex is priced within (Balancer._vertex), part of a weighed decision's key, so a decision weighed under
-# another rule is weighed again at its parts.
-VERTEX_RULE = 'joined+unattributed'
-
-
 class Balancer:
     """A program's partitioned dimensions (`decisions`) balanced on its own evidence (design/heterogeneity.md R3,
     R5, R10, R11), whatever the program computes.
@@ -462,63 +445,60 @@ class Balancer:
     stood without a step) [Conn, Gould & Toint 2000]; a rank with none at a stretch read at the measured ranks' median
     time a unit.  Every stretch a decision observes is remembered (its count, each holder's remainder and the outside
     ranks' time), the call a move is rejected at too, so a move measured worse is evaluated by what it measured once its
-    stretches are no longer run.  A model's median at a part moving by more than the resolution drops its other points
-    (its performance changed [Clarke, Lastovetsky & Rychkov 2011]).  A move is judged by the models, every member's
-    measured within the same call, never by comparing one call's measured time with another's: two calls run under
+    stretches are no longer run.  A move is judged by the models, every member's measured within the same call, never
+    by comparing one call's measured time with another's: two calls run under
     whatever load their nodes' users put on them, so a comparison across calls charges a slower call to its placement,
     and a member made slower by its own load would see the split charged and its work handed back to it, the reverse of
     balancing (metal-microbench output_data/monotone-20261016: a one-row split returned to its first member alone after
     a call 0.611 s against an earlier 0.407 s; the operator, 2026-10-16: a loaded member must lead to more work on an
     unloaded one, never a zero share).  The parts go back only where the call failed (`reject`).  The trust region
-    doubles, to twice, after a move.  `measured`, the call's own time where the caller gives it (`measure_name` its kind:
-    a new kind starts the decisions' histories again, as a new measure does; else every stretch's slowest rank on the
-    models' path), is kept as each placement's history, which names the vertices measured.  Of the decisions sharing a
-    stretch one moves a call, the one whose models promise the most (block coordinate descent [Tseng 2001]): another's
-    move would change the stretches its models read; one that waits is weighed again at the next call, not read as
-    standing.  A move left pending (below) changes no stretch the call reads, so it holds no other decision back: a
-    ragged decision moves while a prepared one waits for its preparation.  A decision's parts stand where the models' unbounded optimum promises less than its resolution under the
-    measured sum [DFPA; Meta-Balancer 2012], and stay standing while none of its models changed; once a part moves back
-    the way it came, every part of the decision moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the
-    measured sum's relative standard error (each stretch's slowest rank's median's, from its invocations, in
-    quadrature), at least 1 %; a model changed where its window's median moved past that and past three of its own
-    standard errors.  Every rank given the same evidence gets the same
-    parts (R4).
+    doubles, to twice, after a move.  Of the decisions sharing a stretch one moves a call, the one whose models promise
+    the most (block coordinate descent [Tseng 2001]): another's move would change the stretches its models read; one
+    that waits is weighed again at the next call, not read as standing.  A move left pending (below) changes no stretch
+    the call reads, so it holds no other decision back: a ragged decision moves while a prepared one waits for its
+    preparation.  A decision's parts stand at a call where the
+    models' unbounded optimum promises less than its resolution under the measured sum [DFPA; Meta-Balancer 2012], and
+    are weighed again at every call on every call's evidence; once a part moves back the way it came, every part of the
+    decision moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the measured sum's relative standard
+    error (each stretch's slowest rank's median's, from its invocations, in quadrature), at least 1 %.  Every rank
+    given the same evidence gets the same parts (R4).
 
     A move takes, in the call that takes it, its members' preparation of the placement it makes (metal-microbench
     docs/placement.md#moves: S), unless they prepared it before or the decision is `ragged` (its parts the calls' data,
     which no preparation reads: taken at once, whatever `prepare`): with `prepare`, a move observe takes waits as `pending`
-    until every member has prepared the placement it makes, when `prepared` takes it, a move measured worse going back
-    the same way (make before break [RFC 3209]: the placement it returns to need not be prepared still, its nested
-    divisions moved to its parts, and a call never runs one that is not, which had taken a call 19.7 s of Neural Engine
-    shares built inside it); without it a move, and its return, is taken at once.  Every move the models propose is
-    taken, and a pending move is a commitment: a later proposal waits until it is taken or its preparation fails
-    (`unprepared`), so a decision proposing at every call never outruns its own preparation (docs/placement.md#moves).
+    until every member has prepared the placement it makes, when `prepared` takes it (make before break [RFC 3209]: a
+    call never runs a placement that is not prepared, which had taken a call 19.7 s of Neural Engine shares built inside
+    it); without it a move is taken at once.  Every move the models propose is taken, and a pending move is a
+    commitment: a later proposal waits until it is taken or its preparation fails (`unprepared`), so a decision
+    proposing at every call never outruns its own preparation (docs/placement.md#moves).
 
       Balancer({'tp': {'parts': [8, 8], 'grain': 1, 'low': [1, 1], 'high': [15, 15]}})
       .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'fixed': [0.2, 0.1], 'times': [[s, ...], [s, ...]]}, ...})
       -> {'tp': [5, 11]}
 
     What a decision keeps is bounded, so nothing a call does grows with the calls before it (metal-microbench
-    docs/acceptance-20261014.md A37): with `memory`, each model's points at its `memory` latest parts and the
-    measured calls of the `memory` latest placements (every decision's parts: the ratio test's spread, one for the
-    program) and each decision's measured parts (its vertices' history), the older dropped; with `budget`,
-    each search (least) makes at most that many boxes, past which it takes the best parts it found.
+    docs/acceptance-20261014.md A37): with `memory`, each model's points at its `memory` latest parts, the older
+    dropped; with `budget`, each search (least) makes at most that many boxes, past which it takes the best parts it
+    found.
 
     Of the moves reaching the models' least, the one of fewest moved parts (_fewest: a neighbouring pair's split where
-    it reaches it).  A rank whose whole work at a stretch is a decision's (no other decision it holds weighs there and
-    no fixed work, its joined work leaving with its units) publishes nothing there at none of it, so the crossing after it, where its latency is a function of
-    the ranks publishing (_path), is evaluated without it: a rank whose crossings take longer than its work saves moves to
-    none on the calls' evidence.
+    it reaches it).  No member's part goes to none by its times: every part whose `high` holds a grain holds at least
+    one (_floor), wherever the total gives each such part a grain, whatever its `low` (metal-microbench
+    docs/principles.md §3: the second computer is a resource, and refusing to use it is never correct); a part below
+    that is moved up at the call that reads it.  A rank whose whole work at a stretch is a decision's (no other decision
+    it holds weighs there and no fixed work, its joined work leaving with its units) publishes nothing there at none of
+    it, so where a part holds none by its bounds the crossing after it, its latency a function of the ranks publishing
+    (_path), is evaluated without it.
 
     `state()` and `Balancer.of(state)` carry it between processes."""
 
     def __init__(self, decisions, window=3, memory=None, budget=None):
         self.window, self.memory, self.decisions, self.lines = int(window), memory and int(memory), {}, {}
-        self.budget, self.measure = budget and int(budget), 'sum'
+        self.budget = budget and int(budget)
         for name, d in decisions.items():
             parts = [int(p) for p in d['parts']]
             n, grain = len(parts), int(d.get('grain', 1))
-            low = [int(v) for v in d.get('low') or [0] * n]
+            low = [int(v) for v in d.get('low') or [grain] * n]
             high = [int(v) for v in d.get('high') or [sum(parts)] * n]
             groups = [[int(i) for i in g] for g in d.get('groups') or [[i] for i in range(n)]]
             if len(groups) != n or any(p % grain or not lo <= p <= hi for p, lo, hi in zip(parts, low, high)):
@@ -540,7 +520,13 @@ class Balancer:
         d = self.decisions[e]
         return next((p for p, g in zip(d['parts'], self._groups(d)) if i in g), 0)
 
-    def observe(self, stretches, measured=None, measure_name='measured', prepare=False):
+    def _floor(self, d):
+        """Each part's least: its `low`, and a grain where its `high` holds one, wherever the total gives each such part
+        a grain (else its `low`), so no member's part goes to none by its times (class docstring)."""
+        low = [max(lo, d['grain']) if hi >= d['grain'] else lo for lo, hi in zip(d['low'], d['high'])]
+        return low if sum(low) <= sum(d['parts']) else list(d['low'])
+
+    def observe(self, stretches, prepare=False):
         seen = {}
         for s, obs in stretches.items():
             scales = {d: w for d, w in (obs.get('scales') or {}).items() if d in self.decisions}
@@ -554,19 +540,12 @@ class Balancer:
                 seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, fixed, order,
                            latency if callable(latency) else float(latency or 0.0), len(obs['times']), standing)
         ordered = any(v[4] is not None for v in seen.values())
-        measure = ('path' if ordered else 'sum') + (' joined' if any(any(v[3][i] != (v[7][i] if i < len(v[7]) else 0.0) for i in range(len(v[3])))
-                                                                  for v in seen.values()) else '') + (f' {measure_name}' if measured is not None else '')
-        if not seen and measured is not None:
-            measure = self.measure
 
         def rows(times, keep=None):
             return [(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n, _) in seen.items()
                     if keep is None or s in keep]
 
         medians = lambda s, ranks, n: [ranks[i][0] if i in ranks else None for i in range(n)]
-        tested = float(measured) if measured is not None else _path(rows(medians))
-        moved = self.measure != measure
-        self.measure = measure
         proposals, runs = [], {}
         for name, d in self.decisions.items():
             groups = self._groups(d)
@@ -584,15 +563,6 @@ class Balancer:
                 if view:
                     mine[s] = (c, ranks, scales, fixed, view, max(outside, default=0.0))
             if not mine:
-                if measured is not None:
-                    history, key = d.setdefault('history', {}), ','.join(map(str, d['parts']))
-                    if moved:
-                        history.clear()
-                        d['last'] = None
-                    history[key] = (history.pop(key, []) + [tested])[-5:]
-                    while self.memory and len(history) > self.memory:
-                        history.pop(next(iter(history)))
-                    d['last'] = [list(d['parts']), tested]
                 continue
             path = {s for s, v in seen.items() if ordered and v[4] is not None and any(seen[t][4] and seen[t][4][0] == v[4][0] for t in mine)}
             counted = runs[name] = set(mine) | path
@@ -600,16 +570,7 @@ class Balancer:
             slowest = [(c, max(r.values())) for c, r, *_ in mine.values()]
             within = max(RESOLUTION, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / summed if summed else 0.0)
             base = _path(rows(medians, counted)) if path else summed
-            history, changed = d.setdefault('history', {}), moved
-            if moved:
-                history.clear()
-                d['last'] = None
-            key = ','.join(map(str, d['parts']))
-            history[key] = (history.pop(key, []) + [tested])[-5:]
-            while self.memory and len(history) > self.memory:
-                history.pop(next(iter(history)))
-            epsilon = within
-            last, d['last'] = d.get('last'), [list(d['parts']), tested]
+            last, d['last'] = d.get('last'), [list(d['parts'])]
             for s, (c, ranks, scales, fixed, view, _) in mine.items():
                 for g, ((med, se), i) in view.items():
                     units = d['parts'][g]
@@ -619,15 +580,12 @@ class Balancer:
                     total = sum(weights.values()) + max(0.0, float(fixed[i] if i < len(fixed) else 0.0))
                     share = med * (weights[name] / total if total else 1.0 / len(weights))
                     line = self.lines.setdefault((name, s, g), Points(self.forget, self.memory or 8))
-                    changed = line.update(units, share, se * share / med if med > 0 else 0.0) or changed
+                    line.update(units, share, se * share / med if med > 0 else 0.0)
             remembered = d.setdefault('seen', {})
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
                 remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
             if last and last[0] != d['parts']:
                 d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
-            if d['before'] is not None and d['before'] == d['parts'] and not changed and (d.get('weighed') == f'{key} {VERTEX_RULE}' or not self._vertices(d, history)):
-                d['stands'] = True
-                continue
             n = len(d['parts'])
             kept, ranked = [], {}
             for s, (c, rests, other) in remembered.items():
@@ -672,22 +630,14 @@ class Balancer:
                                 for i in range(n)]
                     return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
                 value = _remembered(value)
-            total = sum(d['parts'])
+            total, low = sum(d['parts']), self._floor(d)
             knots = [sorted({int(k) for (e, s, h), line in self.lines.items() if e == name and h == g for k in line.knots})
                      for g in range(n)]
-            target = base - epsilon * summed
-            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots, stop=target,
-                     budget=self.budget)[1] >= target:
-                joined = [sum(c * sum(med * max(0.0, fixed[i] - (seen[s][7][i] if i < len(seen[s][7]) else 0.0)) / total_i
-                                      for i, (med, _) in ranks.items() if i < len(fixed) and i in groups[g]
-                                      for total_i in [sum(max(0.0, float(w[i] or 0.0)) for w in scales.values()) + max(0.0, fixed[i])] if total_i)
-                              for s, (c, ranks, scales, fixed, _, _) in mine.items()) for g in range(n)]
-                vertex = self._vertex(d, history, value or (lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs))
-                                                                                     for c, fs in built)), joined)
-                if vertex:
-                    proposals.append(((base - vertex[1]) / summed if summed else 0.0, name, vertex[0]))
-                    continue
-                d['before'], d['stands'], d['weighed'] = list(d['parts']), True, f'{key} {VERTEX_RULE}'
+            target = base - within * summed
+            if all(p >= lo for p, lo in zip(d['parts'], low)) and least(
+                    total, d['grain'], low, d['high'], [] if value else built, value, knots, stop=target,
+                    budget=self.budget)[1] >= target:
+                d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
             failed = d.get('failed') or [None] * n
@@ -700,36 +650,29 @@ class Balancer:
             reach = [min(d['high'][g], max(d['parts'][g], d['grain'] * math.ceil(grow * u / d['grain']), u + d['grain']))
                      for g, u in enumerate(measured_)]
             reach = [r if f is None else max(min(r, f - d['grain']), d['parts'][g]) for g, (r, f) in enumerate(zip(reach, failed))]
-            nxt, promise, _ = least(total, d['grain'], d['low'], reach, [] if value else built, value, knots, budget=self.budget)
+            nxt, promise, _ = least(total, d['grain'], low, reach, [] if value else built, value, knots, budget=self.budget)
             if sum(nxt) < total:
                 reach = [d['high'][g] if f is None else max(f - d['grain'], d['parts'][g]) for g, f in enumerate(failed)]
-                nxt, promise, _ = least(total, d['grain'], d['low'], reach, [] if value else built, value, knots, budget=self.budget)
-            nxt, promise = self._fewest(d, nxt, promise, value or (
+                nxt, promise, _ = least(total, d['grain'], low, reach, [] if value else built, value, knots, budget=self.budget)
+            nxt, promise = self._fewest(d, low, nxt, promise, value or (
                 lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in built)), reach, knots)
             if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
-                nxt, promise, _ = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
-                                        [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value, knots,
-                                        budget=self.budget)
+                nxt, promise, _ = least(total, d['grain'], [max(lo, math.floor(h / d['grain']) * d['grain']) for lo, h in zip(low, half)],
+                                        [max(lo, math.ceil(h / d['grain']) * d['grain']) for lo, h in zip(low, half)],
+                                        [] if value else built, value, knots, budget=self.budget)
             proposals.append(((base - promise) / summed if summed else 0.0, name, nxt))
         taken = set()
-        for gain, name, value in sorted(proposals, key=lambda p: -p[0]):
-            d, reverting = self.decisions[name], gain == math.inf
-            if runs[name] & taken and not reverting:
+        for _, name, value in sorted(proposals, key=lambda p: -p[0]):
+            d = self.decisions[name]
+            if runs[name] & taken:
                 d['before'], d['stands'] = None, False
                 continue
             # metal-microbench docs/placement.md#ragged-shares-a-move-is-data: a ragged decision's parts are each call's data,
             # so its move prepares nothing and is taken at once; a move left pending changes no stretch this call, so it
             # holds no other decision back
             prepare_ = prepare and not d.get('ragged')
-            if reverting and prepare_:
-                d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
-                d['stands'], d['last'], d['pending'], d['reverting'] = False, value, list(value[0]), True
-            elif reverting:
-                taken |= runs[name]
-                d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
-                d['before'], d['parts'], d['stands'], d['last'], d['pending'] = None, list(value[0]), False, value, None
-            elif not prepare_ or list(value) == d['parts'] and not d.get('pending'):
+            if not prepare_ or list(value) == d['parts'] and not d.get('pending'):
                 taken |= runs[name]
                 d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
             elif not d.get('pending'):
@@ -753,7 +696,6 @@ class Balancer:
         for name, d in self.decisions.items():
             if d.get('pending') and (expected is None or expected.get(name) == d['pending']):
                 d['pending'] = None
-                d.pop('reverting', None)
         return self.parts
 
     def prepared(self, expected=None):
@@ -761,15 +703,15 @@ class Balancer:
         those still pending as prepared): the parts become the pending ones, as observe's move made them."""
         for name, d in self.decisions.items():
             if d.get('pending') and (expected is None or expected.get(name) == d['pending']):
-                d['before'] = None if d.pop('reverting', False) else list(d['parts'])
+                d['before'] = list(d['parts'])
                 d['parts'], d['stands'], d['pending'] = list(d['pending']), False, None
         return self.parts
 
     def reject(self):
         """The call at the current parts did not complete (a placement a program cannot run): every decision that moved
-        goes back to its last measured parts and its trust region halves, as a move measured worse does, and each
-        part that grew past its last measured one is held below where it failed (`failed`), which the region's grain
-        past the measured parts would otherwise propose again."""
+        goes back to its last measured parts and its trust region halves, and each part that grew past its last measured
+        one is held below where it failed (`failed`), which the region's grain past the measured parts would otherwise
+        propose again."""
         for d in self.decisions.values():
             last = d.get('last')
             if last and last[0] != d['parts']:
@@ -778,49 +720,19 @@ class Balancer:
                 d['before'], d['parts'], d['stands'] = None, list(last[0]), False
         return self.parts
 
-    def _vertex(self, d, history, value, joined):
-        """A decision about to stand: the vertex where one group g leaves it (its units to the others in proportion to
-        theirs) that no call at these parts' history measured, where the models price it within joined[g] of the
-        parts' (the measured time they attribute to g's own joined work, which g takes with it when it leaves: never
-        another group's work, nor the call's time the models do not explain, which would credit a group's leaving with
-        the load the others carry), else None; a group whose bounds keep it holding a part (its `low`) never leaves.  A
-        stretch's work changes in kind where a group leaves it (its crossing goes), so the vertex is a design point of
-        its own [Box, Hunter & Hunter 2005, the factorial's corner points].  (parts, value.)"""
-        best, parts = None, value(d['parts'])
-        for g, moved in self._vertices(d, history):
-            v = value(moved)
-            if v <= parts + joined[g] and (best is None or v < best[1]):
-                best = (moved, v)
-        return best
-
-    @staticmethod
-    def _vertices(d, history):
-        """The decision's vertices no call at its history measured: (g, parts) of each group g's leaving it, its units
-        to the others in proportion to theirs on the grain, within the bounds."""
-        parts, grain, n, out = d['parts'], d['grain'], len(d['parts']), []
-        for g in range(n):
-            others = sum(p for h, p in enumerate(parts) if h != g)
-            if not parts[g] or d['low'][g] > 0 or not others:
-                continue
-            moved = [0 if h == g else (p + parts[g] * p // others) // grain * grain for h, p in enumerate(parts)]
-            moved[max(range(n), key=lambda h: moved[h])] += sum(parts) - sum(moved)
-            if not any(m > hi or m < lo for m, lo, hi in zip(moved, d['low'], d['high'])) and ','.join(map(str, moved)) not in history:
-                out.append((g, moved))
-        return out
-
-    def _fewest(self, d, nxt, promise, value, reach, knots):
-        """Of the decision's moves whose value is the models' least within `reach` (nxt, its value `promise`), the one
-        that moves fewest parts: nxt, or a neighbouring pair's least split with the others held (_split, exact for the
-        two) where it reaches the same value, so where the least is not one point (a holder whose time is flat in its
-        part, a share whose slowest holder alone sets it) the move leaves the other parts where they are (a part a
-        member holds as a range of an axis, its run's start the parts before it: a move between neighbours moves no
-        other member's range, and a member whose range moves reloads it; metal-microbench docs/elastic.md The engine's
-        calls).  A move of fewer parts at a worse value is not taken: it reaches the least in more calls, each a
+    def _fewest(self, d, low, nxt, promise, value, reach, knots):
+        """Of the decision's moves whose value is the models' least within `low` and `reach` (nxt, its value
+        `promise`), the one that moves fewest parts: nxt, or a neighbouring pair's least split with the others held
+        (_split, exact for the two) where it reaches the same value, so where the least is not one point (a holder whose
+        time is flat in its part, a share whose slowest holder alone sets it) the move leaves the other parts where they
+        are (a part a member holds as a range of an axis, its run's start the parts before it: a move between neighbours
+        moves no other member's range, and a member whose range moves reloads it; metal-microbench docs/elastic.md The
+        engine's calls).  A move of fewer parts at a worse value is not taken: it reaches the least in more calls, each a
         reload of its own (metal-microbench output_data/planner-20261015/pass2 allocate2-after.json moves_neighbours:
         8 reloads in 3 moves after a holder slowed 30 %, where the least's one move reloaded 3).  (parts, value.)"""
         parts, grain, moves = d['parts'], d['grain'], [(nxt, promise)]
         for g in range(len(parts) - 1):
-            pair, _ = _split(parts[g] + parts[g + 1], grain, d['low'][g:g + 2], [max(parts[g], reach[g]), max(parts[g + 1], reach[g + 1])],
+            pair, _ = _split(parts[g] + parts[g + 1], grain, low[g:g + 2], [max(parts[g], reach[g]), max(parts[g + 1], reach[g + 1])],
                              lambda p, g=g: value(parts[:g] + list(p) + parts[g + 2:]), knots[g:g + 2])
             moved = parts[:g] + pair + parts[g + 2:]
             moves.append((moved, value(moved)))
@@ -836,17 +748,16 @@ class Balancer:
 
     def state(self):
         return {'window': self.window, 'memory': self.memory, 'budget': self.budget, 'decisions': self.decisions,
-                'lines': [[d, s, i, line.state()] for (d, s, i), line in self.lines.items()], 'measure': self.measure}
+                'lines': [[d, s, i, line.state()] for (d, s, i), line in self.lines.items()]}
 
     @classmethod
     def of(cls, state):
         b = cls({}, state.get('window', 3), state.get('memory'), state.get('budget'))
-        b.decisions = {name: {'grain': 1, 'low': [0] * len(d['parts']), 'high': [sum(d['parts'])] * len(d['parts']), 'before': None,
-                              'stands': False, **{k: v for k, v in d.items() if k != 'measure'},
+        b.decisions = {name: {'grain': 1, 'low': [int(d.get('grain', 1))] * len(d['parts']),
+                              'high': [sum(d['parts'])] * len(d['parts']), 'before': None, 'stands': False, **d,
                               'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
                        for name, d in state['decisions'].items()}
         b.lines = {(d, s, int(i)): Points.of(line) for d, s, i, line in state.get('lines', [])}
-        b.measure = state.get('measure') or next((d['measure'] for d in state['decisions'].values() if d.get('measure')), 'sum')
         return b
 
 
@@ -900,22 +811,25 @@ class Coupled:
     counts; the centre moves to the one measured fastest where it beats the centre by more than the resolution (twice
     the larger of the two call times' relative standard errors, at least 1 %), else the step halves, from the largest
     power-of-two count of grains the total holds down to one grain, where the parts stand at the centre.  No allocation
-    is chosen before it is measured, and none by a time it was not measured at.  A standing allocation whose last
-    window's median call time moves past the resolution from the median it stood at starts the search again from it at
-    the largest step, every other allocation's calls dropped (its performance changed [Clarke, Lastovetsky & Rychkov
-    2011]).
+    is chosen before it is measured, and none by a time it was not measured at.  A standing centre is weighed again at
+    every call against the allocations measured around it, every call each allocation ran kept, so it moves where its
+    own calls come to measure it slower than one of them by more than the resolution.  A step never leaves a member
+    that holds units with none (a member gives a step only while it keeps a grain): no member's share goes to none by
+    its times (metal-microbench docs/principles.md §3).
 
     Occupancy.  Members that occupy one physical unit are forbidden to hold units together (`forbid`: two engines on
     the CPU's cores, two programs on one GPU, which running at once would time-share rather than add capacity), so no
     allocation the search runs or moves to gives both units; the rule is the members' data (torch_mesh/engines.py
-    `Engine.occupies`), applied before any allocation is measured, never a measurement's or a model's conclusion.
+    `Engine.occupies`), applied before any allocation is measured, never a measurement's or a model's conclusion.  Of
+    two members forbidden together the one holding units may give them all to the other (_around), so the unit they
+    occupy keeps its work.
 
     The total.  A decision whose total is another decision's part (a member's units of a decision among members,
     divided among the member's engines) follows it (`resize`): the search starts again at the old parts scaled to the
     new total, or, where members are `kept` (those whose units are built per range, a Neural Engine's compiled shares:
     metal-microbench docs/placement.md#moves), with their units kept where those still fit and the others taking the
-    difference, so a move of the total rebuilds nothing of theirs.  The calls are kept by allocation, so a return to a
-    total runs again none of the allocations measured there.
+    difference in proportion to their units, so a move of the total rebuilds nothing of theirs.  The calls are kept by
+    allocation, so a return to a total runs again none of the allocations measured there.
 
       c = Coupled(3456, 128, [0, 0, 0], [3456, 3456, 3456], [1152, 1152, 1152])
       c.observe([[t, ...], [t, ...], [t, ...]], [call, ...])   # each member's seconds, the calls' seconds
@@ -928,7 +842,7 @@ class Coupled:
         self.low, self.high = [int(v) for v in low], [int(v) for v in high]
         self.parts = self.centre = tuple(int(p) for p in parts)
         self.able = [i for i, h in enumerate(self.high) if h > 0]
-        self.seen, self.stands, self.stood, self.pending, self.kept = {}, False, None, None, []
+        self.seen, self.stands, self.pending, self.kept = {}, False, None, []
         self.forbidden = set()
         self.step = self._widest()
 
@@ -936,7 +850,7 @@ class Coupled:
         """The search as JSON data (Coupled.of)."""
         return {'total': self.total, 'grain': self.grain, 'window': self.window, 'low': self.low, 'high': self.high,
                 'parts': list(self.parts), 'centre': list(self.centre), 'step': self.step, 'able': self.able,
-                'stands': self.stands, 'stood': self.stood, 'pending': list(self.pending) if self.pending else None,
+                'stands': self.stands, 'pending': list(self.pending) if self.pending else None,
                 'kept': list(self.kept), 'forbidden': sorted(self.forbidden), 'seen': [[list(p), e] for p, e in self.seen.items()]}
 
     @classmethod
@@ -949,7 +863,7 @@ class Coupled:
         c.centre = tuple(state.get('centre') or state['parts'])
         c.pending = tuple(state['pending']) if state.get('pending') else None
         c.kept = list(state.get('kept') or [])
-        c.stands, c.stood = state['stands'], state['stood']
+        c.stands = state['stands']
         c.seen = {tuple(p): e for p, e in state['seen']}
         c.forbidden = {tuple(f) for f in state.get('forbidden') or []}
         c.step = int(state.get('step') or c._widest())
@@ -980,10 +894,10 @@ class Coupled:
         held = sum(self.parts[i] for i in kept)
         parts = None
         if kept and others and held <= total - sum(self.low[i] for i in others):
-            parts = list(self.parts)
+            parts, rest, had = list(self.parts), total - held, sum(self.parts[i] for i in others)
             for i in others:
-                parts[i] = 0
-            parts[max(others, key=lambda i: (self.parts[i], -i))] = total - held
+                parts[i] = self.parts[i] * rest // had // self.grain * self.grain if had else 0
+            parts[max(others, key=lambda i: (self.parts[i], -i))] += rest - sum(parts[i] for i in others)
             if not all(self.low[i] <= parts[i] <= self.high[i] for i in range(len(parts))) or not self.allowed(parts):
                 parts = None
         if parts is None:
@@ -992,26 +906,6 @@ class Coupled:
             for i in self.able:
                 parts = self._give(parts, i)
         return self._restart(parts)
-
-    def bound(self, i, high):
-        """Member i holds at most `high` units from now on (an allocation giving it more failed a requirement the times
-        do not show: an operation's accuracy, a share that overran its wait, either growing with its units): the
-        allocations past it leave the evidence, the current parts give their excess to the others (_give), and the
-        search starts again there; a bound of none excludes it."""
-        high = int(high) // self.grain * self.grain
-        if high <= 0:
-            return self.exclude(i)
-        self.high[i] = min(self.high[i], high)
-        self.seen = {p: e for p, e in self.seen.items() if p[i] <= self.high[i]}
-        return self._restart(self._give(self.parts, i))
-
-    def exclude(self, i):
-        """Member i holds no units from now on (it failed a requirement the times do not show: an operation's
-        accuracy): its bound goes to 0, its units to the others (_give), the allocations it held leave the evidence,
-        and the search starts again there."""
-        self.high[i], self.able = 0, [j for j in self.able if j != i]
-        self.seen = {p: e for p, e in self.seen.items() if p[i] == 0}
-        return self._restart(self._give(self.parts, i))
 
     def _give(self, parts, i):
         """`parts` with member i's units past its bound given to the other able members, each up to its own bound, the
@@ -1055,7 +949,7 @@ class Coupled:
 
     def _restart(self, parts):
         self.parts = self.centre = tuple(parts)
-        self.step, self.stands, self.stood = self._widest(), False, None
+        self.step, self.stands = self._widest(), False
         return list(self.parts)
 
     def observe(self, times, calls, prepare=False):
@@ -1107,13 +1001,14 @@ class Coupled:
 
     def _around(self, centre):
         """The allocations a step from `centre`: member i given it and member j giving it, every ordered pair of able
-        members, within the bounds; and of two members forbidden together, the one holding units giving them all to the
-        other (fa36bea6^'s design base: a member with its forbidden partners' units given to it), which no step reaches;
-        none giving units to two members forbidden together."""
+        members, within the bounds, j keeping at least a grain; and of two members forbidden together, the one holding
+        units giving them all to the other (fa36bea6^'s design base: a member with its forbidden partners' units given
+        to it), which no step reaches; none giving units to two members forbidden together."""
         out = []
         for i in self.able:
             for j in self.able:
-                if i != j and centre[i] + self.step <= self.high[i] and centre[j] - self.step >= self.low[j]:
+                if i != j and centre[i] + self.step <= self.high[i] and centre[j] - self.step >= max(self.low[j],
+                                                                                                    self.grain):
                     out.append(tuple(v + self.step if k == i else v - self.step if k == j else v for k, v in enumerate(centre)))
         for a, b in sorted(self.forbidden):
             for i, j in ((a, b), (b, a)):
@@ -1130,15 +1025,6 @@ class Coupled:
         measured = self._measured()
         if self.parts not in measured:
             return self.parts
-        if self.stands:
-            calls = measured[self.centre]['calls'] if self.centre in measured else []
-            now = self._median(calls[-self.window:])
-            if now is not None and abs(now - self.stood) <= max(RESOLUTION, 2 * self._error(calls)) * self.stood:
-                return self.centre
-            e = self.seen.get(self.centre)
-            self.seen = {self.centre: {'members': [m[-self.window:] for m in e['members']], 'calls': e['calls'][-self.window:]}} if e else {}
-            self.stands, self.step = False, self._widest()
-            measured = self._measured()
         while True:
             if self.centre not in measured:
                 return self.centre
@@ -1148,9 +1034,9 @@ class Coupled:
                 return waiting[0]
             best = min(around, key=lambda p: (self._median(measured[p]['calls']), p), default=None)
             if best is not None and self._faster(measured[best]['calls'], measured[self.centre]['calls']):
-                self.centre = best
+                self.centre, self.stands = best, False
             elif self.step > self.grain:
                 self.step //= 2
             else:
-                self.stands, self.stood = True, self._median(measured[self.centre]['calls'])
+                self.stands = True
                 return self.centre
