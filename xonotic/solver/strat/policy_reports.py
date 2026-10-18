@@ -11,7 +11,8 @@ import numpy as np
 def publish_active_run(telemetry):
     run = Path(telemetry).resolve().parent.parent
     active = run.parent / "active"
-    temporary = run.parent / f".active-{os.getpid()}-{time.time_ns()}"
+    temporary = run.parent / f".active-{os.getpid()}"
+    temporary.unlink(missing_ok=True)
     temporary.symlink_to(run)
     os.replace(temporary, active)
     registry = Path.home() / '.local/share/mesh/xonotic-active.json'
