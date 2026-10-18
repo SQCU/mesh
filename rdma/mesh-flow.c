@@ -2664,8 +2664,9 @@ static struct port *stripe_cable(struct port **next,uint32_t n,uint64_t key,uint
   return next[(pair_hash(key,a,b)+stripe)%n];
 }
 
-/* design/bridge-and-ipc.md#protocol, #routes: a READY.  Its flow here pairs (its `exclusive` ANDed into the flow's,
-   #lanes); one heard by a relay's flow (the far end's program telling its direction) is mirrored and sent on by the
+/* design/bridge-and-ipc.md#protocol, #routes: a READY.  One heard by a flow that heard its READY already is the peer's
+   program made again: that flow fails (ECONNRESET) and the READY is taken as a new one.  Its flow here pairs (its
+   `exclusive` ANDed into the flow's, #lanes); one heard by a relay's flow (the far end's program telling its direction) is mirrored and sent on by the
    relay's other flow toward the route's start, so every relay of the route carries both directions; a program whose
    route goes on past this node is relayed toward the route's next node, over rows the bridge leases (no client of this
    node takes part, its stripes sharing them), each stripe on the lanes of the cable of the next hop it rides
@@ -2693,8 +2694,11 @@ static void ready_heard(struct port *port,const struct message *heard,const unsi
   const uint64_t shape=ready_shape(&ready,list,transfers);
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from,ready.stripe);
   uint64_t owner=0;uint32_t d=0;
-  if(f && (f->heard&HEARD_READY)){}
-  else if(f && !f->partner && digest_apart(program_digest(f->owner),ready.digest)){
+  /* the peer's program of this execution made again (a flow says READY once): its earlier one ended and released its
+     flows, so this end's flow of it fails as the peer's end (ECONNRESET naming it, the words past its landed counts
+     cancelled: a session on it reopens at its next group) and the READY is taken anew */
+  if(f && (f->heard&HEARD_READY)){flow_fail(f,ECONNRESET,4,0,heard->from,heard->from);f=NULL;}
+  if(f && !f->partner && digest_apart(program_digest(f->owner),ready.digest)){
     flow_fail(f,ESTALE,4,FAIL,heard->from,M->node);
     program_stale(f->owner,heard->from);
   }
