@@ -476,13 +476,13 @@ info <peer> via=<a> name=<peer> node_id=... boot_id=... ula=fd6d:6573:68:<d>
 ```
 
 That comes from `io.mesh.nodeinfo`, a Python service on port 8099 (8100 for the user
-service). One sampler runs `mesh-nodeinfo.sh` independently of incoming requests, as the
-admin user (the system responder on 8099 is that user's, launchd `UserName`), so no root process runs the user's
+service). One sampler runs `mesh-nodeinfo.sh`, at its start and again after each request it has not yet sampled for,
+never two at once, as the admin user (the system responder on 8099 is that user's, launchd `UserName`), so no root process runs the user's
 checkouts or bridge reader. Every value is one token (a space in it is written `_`: `chip=Apple_M4_Pro`), so a reader
 that splits a line on whitespace reads it whole; `rdma/peers.py` `fields` reads a value to the next `key=` of its line
 and takes either form.
-Clients receive its current output with `sample_status` and `sample_updated`, even
-while sampling is incomplete. Requests never start or kill device probes.
+Clients receive its latest completed output at once, each in a connection of its own, with `sample_status` and
+`sample_updated`; a request asks for the next sample but never waits for it, and the sampler opens no device.
 Each node reports its name, hardware (its chip and GPU core count among it), macOS, RDMA enablement and SDK state, its
 bridge's window (`window`, mesh-stat's own top-level figure: since mesh-stat prints every node's record, the last
 `"window"` of its line was another node's, and from 67d50f2 each of the pair published the other's), its admin account,
