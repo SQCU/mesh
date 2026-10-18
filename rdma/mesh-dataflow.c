@@ -36,8 +36,8 @@ int mesh_loop_bind(const char *region,uint16_t service){
    bridge a process opens is watched (EVFILT_PROC NOTE_EXIT on its pid; one kqueue and one thread a process) over a
    mapping of its region the watcher keeps.  At its exit the region tells it gone (`bridge_pid` 0); each slot this
    process owns has its programs' words cancelled (UINT64_MAX where none landed, every one of a cyclic program's, as
-   mesh-flow.c flow_cancel cancels a flow that never landed) and each destination's status failed (ESRCH) with its start
-   woken; the map's and the health's serials are moved by 2 (their parity kept), so a waiter that read its bridge alive
+   mesh-flow.c words_cancel cancels a program's rings never attached) and each destination's status failed (ESRCH) with
+   its start woken; the map's and the health's serials are moved by 2 (their parity kept), so a waiter that read its bridge alive
    and had not yet slept finds its word changed and does not sleep; and the waiters on the map, health and control words
    are woken: no wait of this process, a GPU program's on its landing words among them, outlives its bridge */
 struct mesh_watched { pid_t pid; int writable; struct hdr *m; size_t length; };

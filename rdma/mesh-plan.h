@@ -136,12 +136,12 @@ uint32_t mesh_trees_path(const struct mesh_trees *,uint32_t from,uint32_t to,uin
    along minimum-length arborescences [Chu & Liu 1965; Edmonds 1967] of the map's hops, a hop's length the sum of its
    ports' lengths.  A port is a link one way: with a table every link a hop's route crosses, so the hops of a tree that
    cross one link charge it each (relayed hops share the links they cross); its length grows by (1 + eps x flow/capacity)
-   and its capacity is its hop's cables' count times the slowest one's bandwidth (where the map gives some hop no
-   bandwidth, its cables' count: every cable alike).  A root's equal trees merged, its `most` heaviest kept and their
-   flows' shares their log weights (the packing's description: libnccl-mesh cuts a configured form's segments among
-   them by the form's shares, nccl.h ncclMeshForm, never by these).  Writes root, parent (nodes a tree) and log_weight
-   for at most nodes x most trees, each root's heaviest first; returns the count, 0 where the map does not join its
-   nodes (mesh_link_map_joined).  At two nodes, each node's one tree. */
+   and its capacity is its hop's one link's bandwidth, the slowest the map gives the pair (the bridges carry a node pair
+   over one link; where the map gives some hop no bandwidth, every hop alike).  A root's equal trees merged, its `most`
+   heaviest kept and their flows' shares their log weights (the packing's description: libnccl-mesh cuts a configured
+   form's segments among them by the form's shares, nccl.h ncclMeshForm, never by these).  Writes root, parent (nodes a
+   tree) and log_weight for at most nodes x most trees, each root's heaviest first; returns the count, 0 where the map
+   does not join its nodes (mesh_link_map_joined).  At two nodes, each node's one tree. */
 uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */

@@ -29,7 +29,9 @@ _Static_assert(MESH_QUEUES==sizeof(((struct mesh_relay_entry *)0)->lease_a),"mes
    has posted every cell its program released and taken those SENDs' completions, which then vacates it */
 #define MESH_ORDERLY (UINT64_C(1)<<62)
 /* design/bridge-and-ipc.md#leases: a port's lease words, one a lease queue pair of its link: 0 free, a client slot's
-   owner word while that program holds it, MESH_LEASE_DOWN while the link is down or the queue pair is being made again */
+   owner word while that program holds it (claimed by its client's compare-exchange in the agreement, which frees the
+   claims its plan did not give it: mesh-call.h mesh_transfers_agree; freed by the bridge as the program lets go of
+   it), MESH_LEASE_DOWN while the link is down */
 #define MESH_LEASES 16
 #define MESH_LEASE_DOWN UINT64_MAX
 /* A prepared transfer: `count` slots of `bytes` from `local_row`, bound for the invocations [begin, end)

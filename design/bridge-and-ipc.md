@@ -167,20 +167,25 @@ sets every lease word below the count free (0) and the others `MESH_LEASE_DOWN`,
 p paired: n queue pairs, n-1 leases, f frames a pair`. A count under two loses the link (ENOSPC). A Thunderbolt 5
 device gives 10: 9 leases a link, and the loopback fabric's devices as many.
 
-The link's queue pairs are made again only at its loss (all of them, at its next pairing) or one at a time as a lease's
-holder lets go of it (`#leases`): `pair_new` moves the pair to the error state and destroys it (mesh-verbs.h
-`pair_destroy`: the move ends the device's posted receives and SENDs, and nothing waits on what it flushes), makes it
-again, its round one more, and tells the peer its new number (a PAIRS of that one pair); each end connects its pair to
-the peer's once the peer's told round is its own (`pair_join`), so two ends that made one pair again in either order
-meet at the same round. A completion's work request id names its pair's index, the low 16 bits of its round and its
-record or gate position (`wr_id`: round << 48 | index << 40 | 40 bits), so a progress thread skips a completion of a
-pair made again since (`#loops`). Every making, connecting and destroying is under the port's guard (`#loops`).
+The link's queue pairs are destroyed only at its loss, all of them together (`link_unmake`), and made at its next
+pairing: no queue pair of a device is destroyed while another of it runs (`#loops`, RDMA-KERNEL-RECOVERY.md "October
+16 and 17"). As a lease's holder lets go of it (`#leases`) its pair is made again in place (`pair_new`, mesh-verbs.h
+`pair_reset`): moved to the error state (its posted receives and SENDs end, and nothing waits on what the move
+flushes), to the reset state and to INIT, its number kept and its round one more, and the peer told its new first
+sequence number and round (a PAIRS of that one pair); each end connects its pair to the peer's once the peer's told
+round is its own (`pair_join`), so two ends that made one pair again in either order meet at the same round, and a
+pair waits in INIT, taking nothing, until they do. A completion's work request id names its pair's index, the low 16
+bits of its round and its record or gate position (`wr_id`: round << 48 | index << 40 | 40 bits), so a progress
+thread skips a completion of a pair made again since, the flushed ones among them (`#loops`). Every making,
+resetting, connecting and destroying is under the port's guard (`#loops`).
 
 A link is lost (`port_lost`, design/recovery.md#detection) by events alone: its link off or its interface detached
 (KEV_DL_LINK_OFF, KEV_DL_IF_DETACHED), its control socket's end or reset or a send the socket refused, the peer's
 FAREWELL (`#stop`), a message of another magic or kind or a malformed PAIRS (EPROTO), an error completion on the
-keepalive pair or a completion queue's poll that fails, and a verbs call of a pair's making or connecting that fails.
-The loss: the link down (`up` 0, its threads parked), every lease word `MESH_LEASE_DOWN` and the region's leases 0,
+keepalive pair or a completion queue's poll that fails, and a verbs call of a pair's making, resetting or connecting
+that fails, which also retires the port's device (closed, and opened again with the window registered on it before the
+port pairs again: a device that refused every connect after the Mini's October 17 panic connected once a new process
+opened it, RDMA-KERNEL-RECOVERY.md). The loss: the link down (`up` 0, its threads parked), every lease word `MESH_LEASE_DOWN` and the region's leases 0,
 every program holding a lease of it failed as a value naming the peer (ECONNRESET where the peer said FAREWELL, else
 the loss's code; `#programs`), the link's queue pairs and completion queues destroyed under the guard (`link_unmake`),
 every request channel crossing it failed (`#requests`), and the port's phase `MESH_PAIRING`, so it says HELLO again at
@@ -203,8 +208,8 @@ other than as suggestive metadata?" A lease is that exclusive, pre-posted crossi
 is its one state in the region, its pair's round its one state on the link.
 
 A lease is let go when its holder's path ends (`path_release`), under the port's guard: the ring's words past its
-landed count cancelled where the program failed (`#programs`), the pair made again and joined where the peer's newer
-making was told, the peer told the new number with a code, and the word free. The code is what the peer's holder
+landed count cancelled where the program failed (`#programs`), the pair made again in place (`#links`) and joined
+where the peer's newer making was told, the peer told the new number with a code, and the word free. The code is what the peer's holder
 does:
 
 - **0**: the holder ended in order, or held nothing. The PAIRS carries `sent`, the SENDs the holder completed on the
@@ -272,8 +277,9 @@ leases and relays, `#meet`) and started (`mesh_transfers_start`, `#programs`). I
   vacates the slot. `mesh_detach` writes one byte on each relay channel the agreement opened, which tells the relay
   that the route ends in order, and closes them (`#relays`).
 - **An abort** (`mesh_retire`: a revoke, nccl.h `ncclMeshCommCancel`, or the client's process exiting) vacates the
-  slot at once; the bridge fails the program at its next turn (ECANCELED) and lets go of its every lease with that
-  code, so its peers' programs fail too (`#leases`).
+  slot at once; the bridge fails the program at its next turn (ECANCELED), cancels its words (a revoking process's
+  waits on them end there, a GPU walk's among them) and lets go of its every lease with that code, so its peers'
+  programs fail too (`#leases`).
 
 Either way its rows (a program's, or the leases of a lease-owning slot) are closed; once no program the bridge holds
 belongs to a retired slot, the bridge releases them and returns their pages to the window in the same turn
@@ -343,11 +349,13 @@ left.
 an abort of its slot (ECANCELED, this node), at an error completion or a refused post on one of its leases (that code,
 this node), at a lease its peer let go of with a code (that code, the node across the link), at the loss of a link it
 holds a lease of (ECONNRESET where the peer said FAREWELL, else the loss's code; the peer), and at the stop (ESHUTDOWN).
-Each path's leases are let go with the code (`#leases`), so its peers fail alike. Where its slot is still its client's,
-its words past each ring's landed count are cancelled (`ring_cancel`: `UINT64_MAX` from the first record not landed,
+Each path's leases are let go with the code (`#leases`), so its peers fail alike. Its words past each ring's landed
+count are cancelled, whether or not its client still holds its slot (an abort gives the slot up first, and the
+program's rows stay its own until it is freed) (`ring_cancel`: `UINT64_MAX` from the first record not landed,
 through the program's invocations less the ring's depth in a cyclic program, whose readers keep within the depth of
 the landings, and every record not landed in a one-pass program; a landed word stays, so a call whose positions all
-landed completes), the words of a destination never attached are cancelled whole, and each destination's status is
+landed completes), the words of a destination never attached are cancelled whole (by the cancellation table its slot
+named when the program was taken), and, where its slot is still its client's, each destination's status is
 `MESH_STOPPED` with the code, the domain and the node. A GPU walk whose wait reads its word cancelled halts its later
 waits (nccl-mesh-metal.m `mesh_step_check`), so a halted walk's later cells, computed without the lost peer's, are
 never released. A failed program is freed once its slot retires. Where the bridge itself stops, its clients cancel
@@ -390,7 +398,7 @@ completed (`#leases`), and the send thread when a ring drains. The threads take 
 While the link is down or a guard stands, a thread tells the guard value it holds at (`quiet`) and waits on the port's
 `bell` (an address wait), which every change of either rings; at the stop it tells it holds no more (`UINT64_MAX`)
 and returns. The guard (`guard_raise`, `guard_lower`) is the event loop's, raised around every change of the link's
-verbs objects (a queue pair made, connected or destroyed, the completion queues destroyed) and of what holds its pairs
+verbs objects (a queue pair made, reset, connected or destroyed, the completion queues destroyed) and of what holds its pairs
 (a path attached or let go): it makes the guard odd, rings the bell, and returns once each thread holds at that value,
 so no queue pair of the device is posted on or polled while another changes. Posting on one queue pair of a device
 while another of the same device was destroyed crashed a bridge in the provider's `tbt_post_recv` (a store to an

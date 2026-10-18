@@ -25,8 +25,9 @@ int mesh_transfers_cyclic(struct mesh_ctx *);
    tells every member the leases it takes, which its slot then names (mesh.h mesh_tx `port` and `lease`); a member's
    other claims are freed.  0, or the refusal as a value: EINVAL (a list of more than one slot a queue, this node not
    nodes[rank]), EHOSTUNREACH (no route), EBUSY (no lease free on a hop, or a relay's taken), ECONNRESET (a member's
-   meeting cut short), a relay's refusal; every member returns the same where the root's plan refused.  It waits on its
-   sockets alone: mesh_transfers_interrupt from another thread ends the wait */
+   meeting cut short), a relay's refusal; every member returns the same where the root's plan refused.  Every member of
+   several meets, whether or not its program binds a destination (a lone member binding none returns 0 at once).  It
+   waits on its sockets alone: mesh_transfers_interrupt from another thread ends the wait */
 int mesh_transfers_agree(struct mesh_ctx *,const uint32_t *nodes,uint32_t n,uint32_t rank);
 void mesh_transfers_interrupt(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#programs, design/recovery.md#first: 0 once the node's bridge has compiled the program's chains

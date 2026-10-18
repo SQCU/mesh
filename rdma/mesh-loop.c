@@ -45,10 +45,17 @@
      mesh-loop share DIRECTORY COUNT
        two communicators over nodes 0 and 1 at once, each its own processes, their sessions opened one after the other,
        then both running the NCCL calls of `nccl` (COUNT float32) at once: both hold leases of the one cable
+     mesh-loop revoke DIRECTORY COUNT host|walk
+       N ranks: the last rank makes its communicator and never calls; each other rank begins an all-reduce of COUNT
+       float32, which waits for the last rank's part, and revokes its communicator from another thread once the call has
+       waited 100 ms (ncclCommRevoke, as metal-microbench's rank cancels a call): its own wait ends at the words its
+       bridge cancels (design/bridge-and-ipc.md#programs), the call returns an error and ncclCommDestroy returns; the
+       time from the revoke to the call's return is read (a call not returned 10 s after its revoke reads `hung`)
      mesh-loop down DIRECTORY
        every bridge stopped (SIGTERM, as launchd stops one) and its exit awaited, the fabric unlinked
 
-   Every wait is on an event (a map's serial, a process's exit, a landing word, a pipe), none bounded by a clock.  A
+   Every wait is on an event (a map's serial, a process's exit, a landing word, a pipe), none bounded by a clock but
+   `revoke`'s, which places its revoke inside the wait and reads a wait the revoke does not end.  A
    JSON line a reading, with its status; the exit status is nonzero where any failed. */
 #include "nccl.h"
 #include "mesh-collective.h"
@@ -58,7 +65,9 @@
 #include <copyfile.h>
 #include <mach-o/dyld.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -86,7 +95,8 @@ static uint64_t clock_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 static int usage(void) {
   fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | relay DIRECTORY BYTES | "
                   "nccl DIRECTORY COUNT host|walk | destroy DIRECTORY COUNT RUNS host|walk | kill DIRECTORY COUNT host|walk [bridge|binary] | "
-                  "sigterm DIRECTORY idle|pairing|host|walk|relay|linkloss|client|peer [COUNT] | hop DIRECTORY ROUNDS | share DIRECTORY COUNT | down DIRECTORY\n");
+                  "sigterm DIRECTORY idle|pairing|host|walk|relay|linkloss|client|peer [COUNT] | hop DIRECTORY ROUNDS | share DIRECTORY COUNT | "
+                  "revoke DIRECTORY COUNT host|walk | down DIRECTORY\n");
   return 2;
 }
 
@@ -865,6 +875,62 @@ static int loop_hop(const char *directory, int rounds) {
    own process: the first's session opened (one all-reduce), then the second's, then both communicators' calls at once
    (two openings at one instant may leave the later one no lease free on the cable: its group fails as a value, EBUSY,
    and its next opens: design/bridge-and-ipc.md#leases) */
+/* a revoke placed inside a rank's waiting call: `comm` revoked once the call has waited 100 ms, then the call's return
+   awaited for 10 s (`returned`, the main thread's) before the reading names it hung */
+struct revoking { ncclComm_t comm; _Atomic uint64_t revoked, returned; };
+static void *revoke_later(void *argument) {
+  struct revoking *r = argument;
+  struct timespec wait = {0, 100000000};
+  nanosleep(&wait, NULL);
+  atomic_store(&r->revoked, clock_ns());
+  ncclCommRevoke(r->comm, NCCL_REVOKE_DEFAULT);
+  for (int i = 0; i < 100 && !atomic_load(&r->returned); i++) { wait.tv_nsec = 100000000; nanosleep(&wait, NULL); }
+  if (!atomic_load(&r->returned)) {
+    printf("{\"loop\":\"revoke\",\"status\":\"hung\"}\n");
+    fflush(stdout);
+    _exit(3);
+  }
+  return NULL;
+}
+static int loop_revoke(const char *directory, uint64_t count, int walk) {
+  struct loop_map map;
+  ncclUniqueId root;
+  int gone[2];
+  if (map_read(directory, &map) || !count) return usage();
+  if (unique_id(&root) || pipe(gone)) return 1;
+  const int absent = map.n - 1, reader = gone[0], writer = gone[1];
+  const int failed = children(map.n, ^(int i) {
+    ncclComm_t comm;
+    if (rank_comm(&map, i, root, &comm)) { fprintf(stderr, "rank %d: %s\n", i, ncclGetLastError(NULL)); return 1; }
+    if (i == absent) {
+      close(writer);
+      char byte;
+      while (read(reader, &byte, 1) > 0) {}
+      return ncclCommDestroy(comm) ? 1 : 0;
+    }
+    close(reader);
+    struct revoking r = {.comm = comm};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, revoke_later, &r)) return 1;
+    uint64_t wrong = 0;
+    const ncclResult_t result = rank_group(comm, i, map.n, count, walk, 0, &wrong);
+    const uint64_t returned = clock_ns();
+    atomic_store(&r.returned, returned);
+    pthread_join(thread, NULL);
+    const ncclResult_t destroyed = ncclCommDestroy(comm);
+    const uint64_t revoked = atomic_load(&r.revoked);
+    printf("{\"loop\":\"revoke\",\"path\":\"%s\",\"rank\":%d,\"ranks\":%d,\"result\":\"%s\",\"after_revoke_ms\":%.3f,\"destroyed\":%s,"
+           "\"said\":\"%.160s\"}\n", walk ? "walk" : "host", i, map.n, result ? ncclGetErrorString(result) : "ok",
+           revoked && returned > revoked ? (double)(returned - revoked) / 1e6 : 0.0, destroyed ? "false" : "true",
+           result ? ncclGetLastError(NULL) : "");
+    fflush(stdout);
+    return result && revoked && returned >= revoked && !destroyed ? 0 : 1;
+  }, ^{ close(reader); close(writer); });
+  printf("{\"loop\":\"revoke\",\"path\":\"%s\",\"family\":\"%s\",\"ranks\":%d,\"count\":%llu,\"ranks_failed\":%d}\n", walk ? "walk" : "host",
+         map.family, map.n, (unsigned long long)count, failed);
+  return failed != 0;
+}
+
 static int loop_share(const char *directory, uint64_t count) {
   struct loop_map map;
   int opened[2];
@@ -895,6 +961,8 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "sigterm") && (argc == 4 || argc == 5)) return loop_sigterm(argv[2], argv[3], argc == 5 ? strtoull(argv[4], NULL, 0) : 0);
   if (!strcmp(argv[1], "hop") && argc == 4) return loop_hop(argv[2], atoi(argv[3]));
   if (!strcmp(argv[1], "share") && argc == 4) return loop_share(argv[2], strtoull(argv[3], NULL, 0));
+  if (!strcmp(argv[1], "revoke") && argc == 5 && (!strcmp(argv[4], "host") || !strcmp(argv[4], "walk")))
+    return loop_revoke(argv[2], strtoull(argv[3], NULL, 0), !strcmp(argv[4], "walk"));
   if (!strcmp(argv[1], "relay") && argc == 4) return loop_relay(argv[2], strtoull(argv[3], NULL, 0));
   if (!strcmp(argv[1], "nccl") && argc == 5 && (!strcmp(argv[4], "host") || !strcmp(argv[4], "walk")))
     return loop_nccl(argv[2], strtoull(argv[3], NULL, 0), !strcmp(argv[4], "walk"));

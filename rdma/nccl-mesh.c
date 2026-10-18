@@ -1327,6 +1327,15 @@ static void session_watch(struct session *s) {
   }
 }
 
+/* whether node `node`'s program of the session ended or failed (its destination's status its bridge stopped,
+   design/bridge-and-ipc.md#leases) */
+static int peer_stopped(struct session *s, uint32_t node) {
+  const struct mesh_client *client = mesh_client_at(s->header, s->context.client);
+  for (uint32_t d = 0; d < MESH_DESTINATIONS && client->tx[d].node; d++)
+    if (client->tx[d].node == node) return atomic_load(&client->status[d].phase) == MESH_STOPPED;
+  return 0;
+}
+
 /* the session's failure as session_watch finds it (ncclSuccess: none) */
 static ncclResult_t session_kept(struct session *s) {
   session_watch(s);
@@ -1552,7 +1561,12 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
     if (arrived == UINT64_MAX)
       return fail(ncclRemoteError, "node %u's program of %s ended while it was held (its landings cancelled): the communicator is made again",
                   ch->node, comm->name);
-    if (!landed(arrived, at)) { sched_yield(); continue; }
+    if (!landed(arrived, at)) {
+      if (peer_stopped(s, ch->node) && !landed(mesh_host_arrived(&s->context, ch->in, (uint32_t)at), at))
+        return fail(ncclRemoteError, "node %u's program of %s ended while it was held: the communicator is made again", ch->node, comm->name);
+      sched_yield();
+      continue;
+    }
     struct taken theirs;
     memcpy(&theirs, ch->receiving + (at % DEPTH) * ch->pitch, sizeof theirs);
     if (theirs.version != mine.version || theirs.digest != mine.digest || theirs.ticket != ticket)
@@ -1631,8 +1645,9 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire *wire, uint64_t *bytes) {
    serial read before it), its wire the bridge's block's (mesh_wire_of, NCCL_BUFFSIZE) and its digest (map_digest), a
    channel of each class to every other member (a point-to-point call may name any, and every member binds the same
    channels whatever map it read, so the agreement below meets on them), its transfers prepared; then, with the
-   sessions' lock released (and `opening` the session, which a revoke ends), its transfers started (the wait for every
-   peer's program) and the members' agreement on their programs (session_agree).  Called and returning with the lock
+   sessions' lock released (and `opening` the session, which a revoke ends), the members' agreement on their leases and
+   relays (mesh_transfers_agree: the meeting at the first member's bridge), its transfers started (the wait on this
+   node's bridge alone) and the members' agreement on their programs (session_agree).  Called and returning with the lock
    held. */
 static ncclResult_t session_open(ncclComm_t comm) {
   if (revoked(comm)) return revoked_fail(comm);

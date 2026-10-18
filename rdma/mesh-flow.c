@@ -128,6 +128,7 @@ struct program;
 struct path {
   struct program *program;
   uint32_t destination,node,port,rings;
+  uint64_t cancel;
   uint32_t pair[MESH_QUEUES];
   struct ring ring[MESH_QUEUES];
   struct stream stream[MESH_QUEUES];
@@ -821,17 +822,12 @@ static void pairs_tell(struct port *port,uint32_t index,int64_t code,uint64_t se
     entry[n++]=(struct pairs_entry){k,port->pair[k].qp->qp_num,port->pair[k].psn,port->pair[k].round,code,sent};
   port_say(port,(struct message){.kind=PAIRS,.count=port->made},entry,n*(uint32_t)sizeof *entry);
 }
-/* pair k made again (its last making destroyed: the error state, then destroy), its round one more; under the guard;
-   0, or the errno */
+/* design/bridge-and-ipc.md#links: pair k made, or made again in place (its number kept: reset, never destroyed while
+   the link is up, RDMA-KERNEL-RECOVERY.md), its round one more; under the guard; 0, or the errno */
 static int pair_new(struct port *port,uint32_t k){
   struct pair *pair=port->pair+k;
-  if(pair->qp){
-    const int error=pair_destroy(&port->device,pair->qp);
-    if(error)say("link %u (%s): pair %u's destruction refused: %s; its handle let go\n",port->index,port->name,k,strerror(error));
-    pair->qp=NULL;
-  }
-  uint32_t sends=0,receives=0;
-  const int error=pair_make(&port->device,port->sent,port->received,&pair->qp,&sends,&receives);
+  uint32_t sends=pair->sends,receives=pair->receives;
+  const int error=pair->qp?pair_reset(pair->qp):pair_make(&port->device,port->sent,port->received,&pair->qp,&sends,&receives);
   if(error)return error;
   pair->round++;pair->psn=arc4random()&0xffffff;pair->sends=sends;pair->receives=receives;pair->connected=0;
   pair->posted=pair->retired=pair->requests=pair->completions=0;pair->gate=MIN(sends,port->share);
@@ -855,15 +851,15 @@ static int pair_join(struct port *port,uint32_t k){
   return error;
 }
 static void port_lost(struct port *port,int64_t code,int retire);
-/* design/bridge-and-ipc.md#leases: lease pair k made again, joined where the peer's newer making was told, and told the
-   peer with `code`; a failure of the verbs is the link's loss */
+/* design/bridge-and-ipc.md#leases: lease pair k made again in place, joined where the peer's newer making was told, and
+   told the peer with `code`; a failure of the verbs is the link's loss, its device retired */
 static void lease_remake(struct port *port,uint32_t k,int64_t code){
   guard_raise(port);
   const uint64_t sent=port->pair[k].completions;
   int error=pair_new(port,k);
   if(!error)error=pair_join(port,k);
   guard_lower(port);
-  if(error){port_lost(port,error,0);return;}
+  if(error){port_lost(port,error,1);return;}
   pairs_tell(port,k,code,sent);
 }
 
@@ -883,12 +879,13 @@ static void ring_cancel(struct path *path,uint32_t r){
     if(record->input!=&record->sink && !record->release)atomic_store_explicit(record->input,UINT64_MAX,memory_order_release);
   }
 }
-/* design/prepared-machine.md#M12: every word of a program toward a destination whose rings were never attached */
-static void words_cancel(uint64_t owner,uint32_t d){
-  const struct mesh_tx *tx=&mesh_client_at(M,owner)->tx[d];
+/* design/prepared-machine.md#M12: every word of a path whose rings were never attached, by its program's cancellation
+   table as its slot named it at the take (its rows the program's until it is freed, whoever holds the slot since) */
+static void words_cancel(const struct path *path){
+  const uint32_t d=path->destination;
   const uint64_t range=sizeof(struct mesh_cancellation)+sizeof(struct mesh_cancel_range)*((uint64_t)d+1);
-  if(!tx->cancel || tx->cancel<M->data_off || tx->cancel>M->length-range)return;
-  const struct mesh_cancellation *c=(const void *)((char *)M+tx->cancel);
+  if(!path->cancel || path->cancel<M->data_off || path->cancel>M->length-range)return;
+  const struct mesh_cancellation *c=(const void *)((char *)M+path->cancel);
   const uint64_t offset=c->ranges[d].offset,count=c->ranges[d].count;
   if(offset<M->data_off || offset>M->length || count>(M->length-offset)/sizeof(uint64_t))return;
   _Atomic uint64_t *words=(void *)((char *)M+offset);
@@ -921,7 +918,7 @@ static void path_release(struct path *path,int64_t code,int cancel,uint32_t only
     if(!error)told[n++]=k;
   }
   guard_lower(port);
-  if(error){port_lost(port,error,0);return;}
+  if(error){port_lost(port,error,1);return;}
   for(uint32_t i=0;i<n;i++)pairs_tell(port,told[i],code,sent[i]);
 }
 /* design/bridge-and-ipc.md#programs: a path's rings attached to their leases on its port, under the guard: each record
@@ -954,7 +951,8 @@ static void program_free(struct program *prog){
 }
 /* design/algorithm-sources.md#meshresult: a program failed as a value naming the node `where`: every path's leases let
    go, their words past their landed counts cancelled and their peers told `code` (their programs fail alike), the words
-   of destinations never attached cancelled, and each destination's status the failure */
+   of destinations never attached cancelled, whether or not its client still holds its slot (a revoke gives the slot up
+   first, and its process's waits end at these words), and each destination's status the failure where it does */
 static void program_fail(struct program *prog,int64_t code,uint32_t domain,uint32_t where){
   if(atomic_load(&prog->state)==FAILED)return;
   atomic_store(&prog->state,FAILED);
@@ -965,8 +963,8 @@ static void program_fail(struct program *prog,int64_t code,uint32_t domain,uint3
     struct path *path=prog->paths+p;
     int attached=0;
     for(uint32_t r=0;r<MESH_QUEUES;r++)attached|=path->pair[r]!=0;
-    if(attached)path_release(path,code?code:ECANCELED,own,0);
-    else if(own)words_cancel(prog->owner,path->destination);
+    if(attached)path_release(path,code?code:ECANCELED,1,0);
+    else words_cancel(path);
     if(own)status_failed(&mesh_client_at(M,prog->owner)->status[path->destination],prog->owner,code,domain,where);
   }
 }
@@ -1008,7 +1006,7 @@ static struct program *program_take(uint64_t owner,int relay){
     if(!mesh_destination_transfers(M,owner,d))continue;
     const struct mesh_tx *tx=&client->tx[d];
     struct path *path=paths+prog->path_count++;
-    *path=(struct path){.program=prog,.destination=d,.node=tx->node,.port=tx->port?tx->port-1u:MESH_PORTS};
+    *path=(struct path){.program=prog,.destination=d,.node=tx->node,.port=tx->port?tx->port-1u:MESH_PORTS,.cancel=tx->cancel};
     if(ledger_kept && (path->ledger=calloc(1,sizeof *path->ledger))){
       path->ledger->id=atomic_fetch_add(&ledger_ids,1)+1;path->ledger->started=now_ns();
       path->ledger->send=calloc(MESH_LEDGER_EVENTS,sizeof *path->ledger->send);
@@ -1588,8 +1586,8 @@ static void child_heard(pid_t pid){
     if(channels[i].used && channels[i].pid==pid && !channels[i].exited)child_ended(channels+i);
   }
 }
-/* a client's request read whole: a channel opened toward its node's service (here, or its CHANNEL_OPEN sent to the next hop),
-   a service registered, a ledger cut, or a raw stream (design/bridge-dataflow.md#streams) */
+/* design/bridge-and-ipc.md#requests: a client's request read whole: a channel opened toward its node's service (here, or
+   its CHANNEL_OPEN sent to the next hop), a service registered, or a ledger cut */
 static void asked(struct asking *a){
   struct mesh_request *r=&a->request;
   const int fd=a->fd;a->fd=-1;
@@ -2175,10 +2173,12 @@ static void pairs_heard(struct port *port,const struct message *heard,const unsi
     guard_raise(port);
     for(uint32_t k=0;k<count && !error;k++)error=pair_join(port,k);
     guard_lower(port);
-    if(error){port_lost(port,error,0);return;}
+    if(error){port_lost(port,error,error!=ENOSPC);return;}
     port->count=count;
     for(uint32_t l=0;l<MESH_LEASES;l++)atomic_store(mesh_leases(M,port->index)+l,l+1<count?0:MESH_LEASE_DOWN);
+    atomic_store_explicit(&mesh_links(M)[port->index].pairs,count,memory_order_relaxed);
     atomic_store_explicit(&mesh_links(M)[port->index].leases,count-1,memory_order_relaxed);
+    record_changed();
     if((error=port_threads(port))){port_lost(port,error,0);return;}
     atomic_store_explicit(&port->up,1,memory_order_release);
     bell_ring(&port->bell);
@@ -2197,7 +2197,7 @@ static void pairs_heard(struct port *port,const struct message *heard,const unsi
       guard_raise(port);
       const int error=pair_join(port,k);
       guard_lower(port);
-      if(error)port_lost(port,error,0);
+      if(error)port_lost(port,error,1);
       continue;
     }
     if(!k){port_lost(port,EPROTO,0);return;}
@@ -2219,7 +2219,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
     atomic_store_explicit(&link->peer_port,heard->port,memory_order_relaxed);
     atomic_fetch_add_explicit(&link->pairings,1,memory_order_relaxed);
     const int error=link_make(port);
-    if(error){port_lost(port,error,0);return;}
+    if(error){port_lost(port,error,1);return;}
     link_set(port,port->peer,MESH_PAIRED,0);
     for(uint64_t i=0;port->greeted && i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node!=M->node)
       port_say(port,(struct message){.kind=RECORD},mesh_records(M)+i,sizeof(struct mesh_record));
@@ -2252,6 +2252,7 @@ static void port_lost(struct port *port,int64_t code,int retire){
   atomic_store_explicit(&port->up,0,memory_order_release);
   for(uint32_t l=0;l<MESH_LEASES;l++)atomic_store(mesh_leases(M,port->index)+l,MESH_LEASE_DOWN);
   atomic_store_explicit(&mesh_links(M)[port->index].leases,0,memory_order_relaxed);
+  atomic_store_explicit(&mesh_links(M)[port->index].pairs,0,memory_order_relaxed);
   for(struct program *prog=programs;prog;prog=prog->next)
     for(uint32_t p=0;p<prog->path_count;p++)
       if(prog->paths[p].port==port->index && atomic_load(&prog->state)!=FAILED){
@@ -2703,10 +2704,11 @@ int main(int argc,char **argv){
       }
     }
   }
-  /* design/bridge-and-ipc.md#stop: `stop` read by every loop: the progress threads return at their next pass; then each
-     peer told FAREWELL and each link lost (every program on it failed as a value, ESHUTDOWN, its queue pairs moved to
-     the error state and destroyed), the region told the bridge gone, each device retired on its port's queue (behind a
-     registration under way, which returns at `stop` between extents), the threads joined, the region unmapped */
+  /* design/bridge-and-ipc.md#stop: `stop` read by every loop: the progress threads return at their next pass and are
+     joined; then the request channels ended, each peer told FAREWELL and each link lost (every program on it failed as
+     a value, ESHUTDOWN, its queue pairs moved to the error state and destroyed), the programs freed, the region told
+     the bridge gone, the watcher joined, each device retired on its port's queue (behind a registration under way,
+     which returns at `stop` between extents), the region unmapped */
   char why[96];farewell_text(stop_reason,why,sizeof why);
   say("bridge node %u: stopping (%s)\n",node,why);
   for(uint32_t p=0;p<port_count;p++){bell_ring(&ports[p].bell);for(int side=0;side<ports[p].threads;side++)pthread_join(ports[p].thread[side],NULL);ports[p].threads=0;}

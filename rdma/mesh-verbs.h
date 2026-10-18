@@ -15,7 +15,7 @@
 #include <time.h>
 
 #define QD 4095
-/* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
+/* design/RDMA-KERNEL-RECOVERY.md#september-5-authorized-recovery-and-receive-address-repair */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
    virtual-address boundary.  The window is mapped at a bank-aligned base and registered in extents of
    MESH_REGION bytes, which divides the bank: every extent lies inside one bank, however many banks the
@@ -61,7 +61,7 @@ static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
-/* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
+/* design/RDMA-KERNEL-RECOVERY.md#september-5-authorized-recovery-and-receive-address-repair */
 static int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   wire->length=(size_t)mesh_arena_pages(m)*m->pgsz;
   wire->data=NULL;
@@ -191,6 +191,15 @@ static int pair_connect(struct mesh_device *device,struct ibv_qp *qp,uint32_t re
   if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
   if(ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
+  return 0;
+}
+/* design/bridge-and-ipc.md#links: a queue pair made again in place, its number kept, while the link's other pairs run (no
+   pair is destroyed while the link is up: RDMA-KERNEL-RECOVERY.md): the error state (its posted receives and SENDs end,
+   flushed), the reset state, then INIT as pair_make leaves one, for pair_connect; 0, or the errno */
+static int pair_reset(struct ibv_qp *qp){
+  struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR},reset={.qp_state=IBV_QPS_RESET},init={.qp_state=IBV_QPS_INIT,.port_num=1};
+  if(ibv_modify_qp(qp,&error,IBV_QP_STATE) || ibv_modify_qp(qp,&reset,IBV_QP_STATE) ||
+     ibv_modify_qp(qp,&init,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   return 0;
 }
 /* design/RDMA-KERNEL-RECOVERY.md "Every teardown": a queue pair moved to the error state (its posted receives and SENDs

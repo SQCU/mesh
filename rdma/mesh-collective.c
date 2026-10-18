@@ -21,25 +21,22 @@ static int mesh_joins(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   return 0;
 }
 
-/* The links joining u and x (either way), a pair's cables (design/bridge-and-ipc.md#ports): their count, and *slowest
-   the least bandwidth the map gives any of them (0: none given) */
-static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t x,uint64_t *slowest){
-  uint32_t count=0;
-  *slowest=0;
+/* The least bandwidth the map gives a link joining u and x (either way; 0: none given): the pair's hop, which the
+   bridges carry over one link whatever cables join the two (design/bridge-and-ipc.md#links) */
+static uint64_t mesh_slowest(const struct mesh_link_map *map,uint32_t u,uint32_t x){
+  uint64_t slowest=0;
   for(uint32_t l=0;l<map->links;l++)
     if((map->link[l][0]==u && map->link[l][1]==x) || (map->link[l][0]==x && map->link[l][1]==u)){
       const uint64_t b=map->bandwidth?map->bandwidth[l]:0;
-      if(b && (!*slowest || b<*slowest))*slowest=b;
-      count++;
+      if(b && (!slowest || b<slowest))slowest=b;
     }
-  return count;
+  return slowest;
 }
-/* A pair's hop, carried over one of its cables (design/bridge-and-ipc.md#ports: the bridges take one cable a pair), its
+/* A pair's hop, carried over one of its cables (design/bridge-and-ipc.md#links: the bridges take one cable a pair), its
    inverse bandwidth in whole fs a byte: 8e15 over its slowest cable's bits a second; 0 where the map gives none of them
    a bandwidth */
 static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
-  uint64_t slowest;
-  mesh_cables(map,u,x,&slowest);
+  const uint64_t slowest=mesh_slowest(map,u,x);
   if(!slowest)return 0;
   return (uint64_t)llround(8e9/(double)slowest*1e6);
 }
@@ -793,18 +790,17 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
   uint32_t m=0,P=0;
   for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)m+=mesh_link_between(map,a,b);
   /* hop v -> w (v's parent w): edge e, from[e] = w, to[e] = v, the ports its route crosses crossing[through[e] ..
-     through[e + 1]); port k (one way of a link, u to x, numbered as first met) its pair's cables and their least
-     bandwidth */
+     through[e + 1]); port k (one way of a link, u to x, numbered as first met) the least bandwidth the map gives
+     its pair */
   uint32_t *from=malloc((m+1)*sizeof *from),*to=malloc((m+1)*sizeof *to),*through=malloc((m+2)*sizeof *through);
   uint32_t *crossing=malloc(((size_t)m*N+1)*sizeof *crossing),*port=malloc((size_t)N*N*sizeof *port),*uses=calloc((size_t)m*N+1,sizeof *uses);
   double *capacity=malloc(((size_t)m*N+1)*sizeof *capacity),*length=malloc(((size_t)m*N+1)*sizeof *length),*weight=malloc((m+1)*sizeof *weight);
-  uint32_t *cables=malloc(((size_t)m*N+1)*sizeof *cables);
   uint64_t *slowest=malloc(((size_t)m*N+1)*sizeof *slowest);
   int32_t *chosen=malloc(n*sizeof *chosen);
   struct mesh_packed *packed=NULL;
   size_t trees=0,room=0;
   uint32_t written=0,path[N+1];
-  if(!from || !to || !through || !crossing || !port || !uses || !capacity || !length || !weight || !chosen || !cables || !slowest)goto done;
+  if(!from || !to || !through || !crossing || !port || !uses || !capacity || !length || !weight || !chosen || !slowest)goto done;
   for(size_t k=0;k<(size_t)N*N;k++)port[k]=UINT32_MAX;
   m=0;through[0]=0;
   for(uint32_t v=0;v<n;v++)for(uint32_t w=0;w<n;w++)if(mesh_link_between(map,v,w)){
@@ -813,21 +809,18 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
     for(uint32_t i=0;i+1<hops;i++){
       uint32_t *k=port+(size_t)path[i]*N+path[i+1];
       if(*k==UINT32_MAX){
-        const uint32_t c=mesh_cables(map,path[i],path[i+1],slowest+P);
-        cables[P]=c?c:1;*k=P++;
+        slowest[P]=mesh_slowest(map,path[i],path[i+1]);*k=P++;
       }
       crossing[through[m+1]++]=*k;
     }
     from[m]=w;to[m]=v;m++;
   }
-  /* a port's capacity in bytes a ns: its cables' count times the slowest one's bandwidth where the map gives every
-     port one, else its cables' count (every cable alike) */
+  /* a port's capacity in bytes a ns: its one link's bandwidth (the slowest the map gives its pair) where the map gives
+     every port one, else 1 (every link alike) */
   int known=P>0;
   for(uint32_t k=0;k<P;k++)known=known && slowest[k];
   for(uint32_t k=0;k<P;k++){
-    double inverse=known?8e9/(double)slowest[k]:1;
-    if(cables[k]>1)inverse/=cables[k];
-    capacity[k]=1/inverse;
+    capacity[k]=known?(double)slowest[k]/8e9:1;
   }
   const double delta=mesh_exp(-mesh_log(P/(1-eps))/eps);
   double D=0;
@@ -885,7 +878,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
 done:
   for(size_t t=0;t<trees;t++)free(packed[t].parent);
   free(packed);free(from);free(to);free(through);free(crossing);free(port);free(uses);free(capacity);free(length);free(weight);free(chosen);
-  free(cables);free(slowest);
+  free(slowest);
   return written;
 }
 

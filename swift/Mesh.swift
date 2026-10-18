@@ -526,7 +526,7 @@ public final class Mesh {
     }
 
     // design/algorithm-sources.md#programcopy
-    // a hop toward a node no cable joins is carried by the bridges along their map's route (design/bridge-and-ipc.md#flows)
+    // a hop toward a node no cable joins is carried by the bridges along their map's route (design/bridge-and-ipc.md#relays)
     public func send(_ part: TensorPart, to destination: Int, queue: Int = 0) throws -> TensorPart {
         if part.rank == destination { return part }
         let path = routes[Placement.Edge(part.rank, destination)] ?? [destination]

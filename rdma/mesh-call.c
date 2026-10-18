@@ -504,7 +504,7 @@ int mesh_transfers_agree(struct mesh_ctx *context,const uint32_t *nodes,uint32_t
   const uint32_t destinations=mesh_destination(client,0);
   int bound=0;
   for(uint32_t d=0;d<destinations;d++)bound|=mesh_destination_transfers(m,context->client,d)!=0;
-  if(!bound)return 0;
+  if(n==1 && !bound)return 0;
   size_t bytes=sizeof(struct agree_head)+MESH_PORTS*sizeof(struct agree_port);
   for(uint32_t d=0;d<destinations;d++){
     bytes+=sizeof(struct agree_destination);
