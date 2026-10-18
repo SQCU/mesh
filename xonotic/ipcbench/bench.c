@@ -29,7 +29,7 @@ static int rdall(int fd,void*b,size_t n){size_t g=0;while(g<n){ssize_t r=read(fd
 static int wrall(int fd,const void*b,size_t n){size_t g=0;while(g<n){ssize_t r=write(fd,(const char*)b+g,n-g);if(r<=0)return -1;g+=r;}return 0;}
 
 static void *sockserver(void *a){int fd=*(int*)a;char *buf=malloc(NB);
- for(int i=0;i<ITER+50;i++){if(rdall(fd,buf,NB))break;for(int j=0;j<NF;j++)((float*)buf)[j]*=2.0f;if(wrall(fd,buf,NB))break;}
+ for(int i=0;i<ITER;i++){if(rdall(fd,buf,NB))break;for(int j=0;j<NF;j++)((float*)buf)[j]*=2.0f;if(wrall(fd,buf,NB))break;}
  free(buf);return 0;}
 
 struct shmring{_Atomic unsigned req,resp;float a[NF],b[NF];};
@@ -47,7 +47,6 @@ int main(void){
  double *s=malloc(sizeof(double)*ITER);
 
  {int sv[2];socketpair(AF_UNIX,SOCK_STREAM,0,sv);pthread_t t;pthread_create(&t,0,sockserver,&sv[1]);
-  for(int i=0;i<50;i++){wrall(sv[0],out,NB);rdall(sv[0],in,NB);}
   for(int i=0;i<ITER;i++){double t0=now();wrall(sv[0],out,NB);rdall(sv[0],in,NB);s[i]=now()-t0;}
   report("unix socketpair 16KiB RT",s,ITER);close(sv[0]);pthread_join(t,0);close(sv[1]);}
 
@@ -55,10 +54,9 @@ int main(void){
   int ls=socket(AF_UNIX,SOCK_STREAM,0);struct sockaddr_un un={0};un.sun_family=AF_UNIX;strcpy(un.sun_path,p);
   bind(ls,(struct sockaddr*)&un,sizeof un);listen(ls,1);
   pid_t pid=fork();
-  if(pid==0){int c=socket(AF_UNIX,SOCK_STREAM,0);while(connect(c,(struct sockaddr*)&un,sizeof un)<0)usleep(1000);
-   char*buf=malloc(NB);for(int i=0;i<ITER+50;i++){if(rdall(c,buf,NB))break;for(int j=0;j<NF;j++)((float*)buf)[j]*=2.0f;if(wrall(c,buf,NB))break;}_exit(0);}
+  if(pid==0){int c=socket(AF_UNIX,SOCK_STREAM,0);if(connect(c,(struct sockaddr*)&un,sizeof un)<0)_exit(1);
+   char*buf=malloc(NB);for(int i=0;i<ITER;i++){if(rdall(c,buf,NB))break;for(int j=0;j<NF;j++)((float*)buf)[j]*=2.0f;if(wrall(c,buf,NB))break;}_exit(0);}
   int c=accept(ls,0,0);
-  for(int i=0;i<50;i++){wrall(c,out,NB);rdall(c,in,NB);}
   for(int i=0;i<ITER;i++){double t0=now();wrall(c,out,NB);rdall(c,in,NB);s[i]=now()-t0;}
   report("AF_UNIX 2-process 16KiB RT",s,ITER);close(c);close(ls);unlink(p);}
 
@@ -66,8 +64,6 @@ int main(void){
   ring=mmap(0,sizeof(struct shmring),PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   memset(ring,0,sizeof *ring);pthread_t t;pthread_create(&t,0,shmserver,0);
   unsigned seq=0;
-  for(int i=0;i<200;i++){memcpy((void*)ring->a,out,NB);seq++;atomic_store_explicit(&ring->req,seq,memory_order_release);
-   while(atomic_load_explicit(&ring->resp,memory_order_acquire)!=seq);memcpy(in,(void*)ring->b,NB);}
   for(int i=0;i<ITER;i++){double t0=now();
    memcpy((void*)ring->a,out,NB);seq++;atomic_store_explicit(&ring->req,seq,memory_order_release);
    while(atomic_load_explicit(&ring->resp,memory_order_acquire)!=seq);memcpy(in,(void*)ring->b,NB);

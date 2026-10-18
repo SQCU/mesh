@@ -40,7 +40,6 @@ int main(void){
  CURL *h=curl_easy_init();
  curl_easy_setopt(h,CURLOPT_URL,url);curl_easy_setopt(h,CURLOPT_POSTFIELDS,post);
  curl_easy_setopt(h,CURLOPT_POSTFIELDSIZE,(long)NB);curl_easy_setopt(h,CURLOPT_WRITEFUNCTION,sink);
- for(int i=0;i<20;i++)curl_easy_perform(h);
  for(int i=0;i<ITER;i++){double t0=now();curl_easy_perform(h);s[i]=now()-t0;}
  report("curl POST reused handle 16KiB",s,ITER);
  curl_easy_cleanup(h);
