@@ -99,7 +99,7 @@ current frame. Hitscan interpolation and finite-charge volumetric attacks requir
 own explicit server-rule and network contracts before they can enter this implementation;
 they are not implicit properties of the controller batch.
 
-## Measures and operating-point search
+## Measures
 
 The engine publishes, per frame and cumulatively:
 
@@ -113,15 +113,8 @@ The engine publishes, per frame and cumulatively:
 
 The mesh telemetry layer joins those measures with host CPU/GPU residency, achieved
 FLOP/s bounds, memory-byte/s bounds, renderer frame time, audio health, and live fabric
-traffic. Operating-point search samples ranges of current player, team, and cart counts.
-It selects from observed roofline distance and coexistence measures; it does not encode a
-population target in the algorithm.
-
-The desired study region reaches the Mini's measured FLOP roofline while using roughly
-half of the MacBook's measured CPU/GPU memory bandwidth without violating the game,
-renderer, or audio deadlines. These are measured coordinates with variance and support,
-not prewritten workload sizes. Missing coordinates remain missing-measure mass and cause
-the sampler to schedule observations rather than push population upward.
+traffic. Player, team, and cart counts are measured coordinates with variance and
+support, not prewritten workload sizes.
 
 ## Demonstrated relation to the mesh
 

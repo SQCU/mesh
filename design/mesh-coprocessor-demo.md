@@ -58,28 +58,6 @@ whole-fabric observer on port 8787. System and user launch domains realize the s
 interfaces. Handoff measures the listening socket and response before the prior
 provider exits, and restores the reachable provider when handoff does not complete.
 
-## Hardware-derived operating point
-
-Player, team, and cart counts are coordinates, not constants hidden in the algorithm.
-The runtime may add or remove players while a server continues. The operating-profile
-search changes the live player population, samples the whole-mesh telemetry ring, and
-records every `(players, teams, carts)` point separately.
-
-The target combines:
-
-- a roofline interval containing saturation on every producer node;
-- approximately half of the MacBook's measured memory-bandwidth capacity;
-- the live strategy deadline;
-- a local-only counterfactual whose lower time bound reaches that deadline;
-- responder and expert roles observed on distinct live hosts.
-
-Only observed coordinates contribute numerical distance. Missing coordinates retain
-their own mass and cause further acquisition at the same population, not an increase
-toward the engine ceiling. Search boundaries and capacity exhaustion are measures.
-After a center is observed, team and cart schedules take below, center, and above
-coordinates from the measured point while preserving the measured total player
-population. No relationship between client count and hardware saturation is prescribed.
-
 ## Policy compute placed on the fabric
 
 The matrix-fusion policy projects complete native observation, cart, team, event,

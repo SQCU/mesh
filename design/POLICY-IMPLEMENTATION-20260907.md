@@ -90,7 +90,7 @@ source becomes stale. The source file accepts the same selector. Discovery error
 and candidates appear in replication status; no candidate leaves the last complete
 replica intact. `--replicate-from host:path` continues to select an explicit source.
 
-## 4. Configuration, exposure and conditional ratings
+## 4. Configuration and exposure
 
 The engine exports actual bot-definition traits, including random fallback
 realizations, and the actual global skill setting. The values enter the common
@@ -99,29 +99,7 @@ available configurations from missing data. Edict, spawn time, native episode,
 producer UUID, request sequence, seed metadata, acknowledged controller lineage
 and exact update version accompany the observation.
 
-`ratings.py` owns realized configuration identities, composition identities,
-controller identities, per-player exposure intervals and outcome joins in the
-same durable store. It records counter deltas, source/version changes and missing
-attribution. Interval attribution means the same observed source at both ends;
-it does not reconstruct unseen intermediate invocations. Intervals stop at the
-observed terminal time. Human or missing configurations remain unclassified.
-
-The rating fit is regularized Bradley–Terry, stratified by recorded match context.
-Bot-configuration and controller-trajectory factors compose team strength through
-their observed exposure. Winner/other-team comparisons carry one total likelihood
-weight per completed round. The estimator does not invent rankings between losing
-teams. Declared draws supply pairwise half outcomes. It pools retained outcomes
-without recency weighting and reports rounds excluded for incomplete attribution.
-
-A unit Gaussian prior on log-worth fixes the reference; team ratings use a 1500
-center and `400/log(10)` conversion. The SVD reports identified rank. Posterior
-uncertainty includes unobserved directions rather than assigning them zero
-variance. Controller factors describe a recorded learning trajectory; exact
-versions remain in the exposure ledger. These are conditional associations, not
-causal separation of bot capability and controller contribution.
-
-`/policy` presents the team ratings, factor offsets, uncertainty, rank, observation
-counts and fit status. Historical paired-study Elo remains a separate report.
+Historical paired-study Elo is a separate report.
 
 ## Skill parameters are percepts, not actions
 

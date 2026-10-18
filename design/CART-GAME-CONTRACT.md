@@ -100,7 +100,6 @@ Auxiliary W/L probes are fitted only on the role where their source value is tra
 axes. `--checkpoints-per-lane`, `--score-limit`, and `--checkpoint-score-rate` realize
 the scoring configuration. The initial defaults are four, 1,200, and one respectively:
 two fully controlled lanes need 150 seconds of accrual, in addition to acquisition.
-The selected axes and roster are not rewritten by hardware operating-point search.
 Capacity telemetry measures the requested workload without changing its population.
 
 The supervisor retains a server at one endpoint and retains native clients across

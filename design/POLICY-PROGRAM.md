@@ -202,14 +202,11 @@ by actual session and episode; selecting the current episode does not assign old
 or future rows to it. Checkpoints and action journals carry that ownership. Late
 rows remain attributed to their original episode in reports as well.
 
-`RuntimeFrames` owns transport serialization too: pending synchronized snapshots,
-completed events, partial reassemblers and their received-fragment bitmaps, outcome
-records, deduplication identities and session watermarks. Runstate also retains
-game packets queued during RPC waits. Live consumption and journal recovery call
-the same snapshot-acceptance operation. Restored snapshots already consumed by the
-journal cannot become new observations a second time. This preserves received
-transport state at a checkpoint; it does not recover packets never received or
-uncheckpointed fragments lost in a crash.
+`RuntimeFrames` owns the transport state a checkpoint keeps: the outcome records
+received and the completed EVENT rows not yet consumed. Journal recovery removes the
+events its records consumed, so a restored event cannot become a new observation a
+second time. Snapshots and partial assemblies are not kept: the engine's next
+snapshot follows.
 
 ## Optimization and execution
 

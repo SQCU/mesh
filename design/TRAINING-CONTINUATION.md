@@ -10,8 +10,8 @@ first applied are separate quantities in both viewers.
 
 | Owner | Durable state or operation |
 | --- | --- |
-| `mesh_ipc.c` | Complete native response staging; session identity; append-only engine `mesh-outcomes.tsv`; repeated OUTCOME frames |
-| `xonwire.py::RuntimeFrames` | Session/tick joins for OBS, CART, TEAM and STATE; optional EVENT; duplicate watermarks and independent outcomes |
+| `mesh_ipc.c` | Complete native response staging; session identity (process id and program-load count); one OUTCOME row a round end |
+| `xonwire.py::RuntimeFrames` | Session/tick joins for OBS, CART, TEAM and STATE into one latest-snapshot slot; accumulated EVENT rows and outcomes |
 | `action_history.py::ActionHistory` | Issued frames, rates, behavior likelihoods and versions; accumulated returns; per-player application consumption |
 | `online.py::OnlineLearner` | Model, optimizer, RNG, replay, current and suspended episode pools, idempotent outcome labels |
 | `array_tree.py`, `checkpoint_state.py`, `journal.py` | Shared lossless array/string encoding, checkpoint schema, atomic replacement and checksummed write-ahead records |
@@ -31,8 +31,11 @@ including its sampled vector and behavior likelihood. Recovery replays complete
 post-checkpoint records through the learner using those exact samples. It does not
 resend obsolete vectors or duplicate telemetry. Checksums and lengths identify an
 incomplete last record; recovery reports and preserves its bytes separately before
-repairing the tail. A completed checkpoint switches to a new empty journal, then
-removes the old journal. An interrupted step cannot save a half-updated bundle.
+repairing the tail. A completed checkpoint switches to a new empty journal, named
+by the runstate's journal generation count, then removes the old journal. An
+interrupted step cannot save a half-updated bundle. The responder checkpoints at a
+terminal outcome, every `--save-every` responses, on a schema change, when an
+awaited outcome is resolved and at exit.
 
 This establishes process-interruption recovery. Power loss, disk failure and
 filesystem durability beyond the completed fsync/rename operations have not been
@@ -43,35 +46,31 @@ fault-injected by the current validation.
 Pending requests are independent of the telemetry row window. A request remains
 until each observed participant has moved past its sequence or departed. When
 memory exceeds the history budget, inactive request payloads spill into
-`<online-checkpoint>.actions/`; attribution metadata stays resident. A delayed
+`<online-checkpoint>.actions/<request sequence>.npz`; attribution metadata stays resident. A delayed
 acknowledgement restores the exact source frame, vector and likelihood. Referenced
 spill files remain until a newer authoritative checkpoint no longer needs them.
 Current and applied source records may exceed the soft memory budget; that amount
 is reported. Disk use follows outstanding execution, rather than silently losing
 training sources.
 
-An episode is `(engine session high, engine session low, episode number)`. The
-engine records its actual winner or tie in `mesh-outcomes.tsv` before repeatedly
-publishing OUTCOME kind 7: five floats for that identity, winner and engine time.
-Each publication includes the newest outcome and cycles older entries. Engine
-startup reloads the journal. The learner labels each identity once, including a
-suspended prior episode. Rounded scores and transient EVENT packets are not the
-terminal authority. `outcome.json` acknowledges closure only after checkpointing.
-
-A completed snapshot whose TEAM rows mark the episode finished joins its OUTCOME
-before consumption. The pending window retains one such snapshot per episode and
-consumes it before later snapshots. An early outcome cannot close the active
-episode or label a preterminal transition; a late outcome releases the retained
-finished snapshot. Attribution and optimization run before episode closure. The
-idle path resolves only suspended prior episodes. Pending snapshots and outcomes
-share the existing checkpoint representation.
+An episode is `(engine session high, engine session low, episode number)`. At a
+round's end the engine sends one OUTCOME kind 7 row: five floats for that identity,
+winner and engine time. It leaves before the round's terminal snapshot, so a finished
+snapshot is consumed with its outcome already received. The learner labels each
+identity once, including a suspended prior episode. Rounded scores and transient
+EVENT packets are not the terminal authority. `outcome.json` acknowledges closure
+only after checkpointing, and the responder prints an `outcome_acknowledged` line
+when it writes it; a responder with no learner prints that line once it has recorded
+a terminal snapshot with its outcome. An early outcome cannot close the active
+episode or label a preterminal transition. Attribution and optimization run before
+episode closure. The idle path resolves only suspended prior episodes. Outcomes and
+unconsumed EVENT rows share the existing checkpoint representation.
 
 Native receive fragments accumulate separately from the last completed response.
 Session, request and tick identify a group; only completion swaps the buffers.
-The engine coalesces snapshot opportunities while the preceding transport group
-drains, retaining events and sampling current state next. Bot and game execution
-continue, and OBS 28 reports the coalesced opportunities. This prevents an
-ever-growing queue of obsolete state snapshots.
+While the preceding snapshot has not left the engine's socket the game makes no new
+one, retaining events and sampling current state next. Bot and game execution
+continue, and OBS 28 counts those strategy ticks.
 
 ## Reporting and failures found by the actual match
 
@@ -143,16 +142,15 @@ the same evidence directory, independently of graph-reuse/allocation qualificati
 ## Raw observation history continuation
 
 The [feature-integration follow-up](FEATURE-GRAM-PROVENANCE.md) preserves raw
-EVENT history before learned embedding. Complete EVENT frames are not subject
-to the snapshot queue's capacity limit or its latest-snapshot watermark. A
-separate `(session,tick,request)` set deduplicates actual retransmissions while
-allowing the first arrival of an older observation. Identical payloads in different
-native frames remain distinct observations.
+EVENT history before learned embedding. Complete EVENT messages accumulate apart
+from the snapshot slot, keyed by `(session, tick, request)`, until the snapshot of
+their tick is taken. Identical payloads in different native frames remain distinct
+observations.
 
 `ObservationMemory` appends literal rows and retains immutable prefix views for
 past source frames. Episode changes reset this history. Ownerless snapshots add
 events before output production resumes. Runstate saves history, coverage status,
-pending complete event frames and their receipt identities. Each durable action
+pending complete event frames and the outcomes received. Each durable action
 journal record contains only its new event rows and consumed frame identities;
 replay consumes the corresponding pending frames without duplicating history.
 Realized-event reports consume only fresh rows.

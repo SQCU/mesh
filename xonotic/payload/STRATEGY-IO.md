@@ -12,13 +12,17 @@ The operator's clarification in [SPECIFICATION §19](../../design/SPECIFICATION.
 requires residuals on bot reads, with authoritative game state retained by the
 engine. The old target/goal/spawn decoder has been deleted.
 
-OBSERVATION, CART, TEAM and STATE join by engine session and snapshot tick; EVENT
-is optional and does not block that join.
+The server publishes one snapshot each `g_payload_strategy_interval` game seconds
+(the strategy cadence; the cvar has no default). OBSERVATION, CART, TEAM and STATE
+join by engine session and snapshot tick; EVENT is optional and does not block that
+join. The engine session is the server's process id (high 24 bits) and a count of the
+program loads in that process (low 24 bits).
 STATE adds typed 256-word pages of the bot's global and entity views. STRATEGY returns
 residual/rate pages to the native view consumer. Actual bot execution acknowledges
 the sequence; observation slots 39–42 expose receipt/source/application timing.
-Slots 26–27 report view faults and their policy sequence; slot 28 counts coalesced
-snapshot opportunities under transport backpressure. Slot 29 is literal native
+Slots 26–27 report view faults and their policy sequence; slot 28 counts the
+strategy ticks at which the previous snapshot had not yet left the engine's socket,
+so no new one was made (its events wait for the next). Slot 29 is literal native
 player occupancy, populated for every client slot; absent slots are structural
 padding. Slots 30–38 and 43–46 are
 reserved. `strategy_io_schema.py` names the observation
@@ -51,7 +55,7 @@ EVENT has 18 columns. Column17 is the literal episode number at event deposit
 time; the earlier 17 columns retain their order. Delayed events retain their
 producer episode even when transport delivers them after a later round begins.
 
-OUTCOME kind 7 repeatedly publishes five-column rows: engine session high/low,
-episode, winner and engine time. These come from the engine's durable outcome
-journal and survive loss of EVENT frames. The learner consumes episode identities
-once; see [training continuation](../../design/TRAINING-CONTINUATION.md).
+OUTCOME kind 7 is one five-column row a round end (`mesh_round_outcome(node, episode,
+winner)`): engine session high/low, episode, winner and engine time, sent when the
+round ends and so ahead of the round's terminal snapshot. The learner consumes episode
+identities once; see [training continuation](../../design/TRAINING-CONTINUATION.md).

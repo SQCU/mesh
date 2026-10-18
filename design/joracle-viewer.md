@@ -79,15 +79,9 @@ Same-input policy comparisons distinguish output distributions, sampled rates an
 integrated residuals. A deterministic stock policy and a Gaussian policy have
 mutually singular distributions; their KL is not assigned a fabricated finite value.
 The full-vector endpoint retains the sampled comparison data independently of the
-compact tables. `ratings.py` joins literal bot configurations, acknowledged
-controller exposure and completed outcomes in the durable report store. Its
-regularized Bradley–Terry estimates report conditional team/factor ratings,
-posterior uncertainty, identified rank and excluded rounds. These estimates do
-not establish causal separation between bot capabilities and their controllers.
-The estimator is described in the
-[implementation ledger](POLICY-IMPLEMENTATION-20260907.md#4-configuration-exposure-and-conditional-ratings).
+compact tables.
 
-The viewer retains reports, optimizer history, source contexts and rating inputs in
+The viewer retains reports, optimizer history and source contexts in
 SQLite under `.joracle`, or `--state-directory`. Journal identities survive rsync
 replacement and incomplete tails. A producer publishes
 `~/.local/share/mesh/xonotic-active.json` after its first measured frame. With

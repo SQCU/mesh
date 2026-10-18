@@ -9,7 +9,7 @@ from the ranks' bridges. Each node's bridge is its resident service. The planner
 node's rank and rank 0's address,
 
     RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 \
-        PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan [ticks] [bots]
+        PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan TICKS BOTS
 
 This directory also holds the game engine, payload and rendering source. Build the
 payload from it with `payload/build.sh`. The engine's side of the fabric is
@@ -39,14 +39,14 @@ times. The torch backend computes on the GPU with torch.distributed's `mesh` bac
 `CONFIG.json` is the call's operand; `solver/configs/pair-example.json` is didactic (an
 even split, the GPU, 16 KiB frames) and names every field. Rank 0 is the game's host:
 it serves the engine's local socket (`MESH_EXPERT_SOCKET`, `solver/xonwire.py`
-`Engine`: mesh_ipc.c's hello, status and frames), joins each tick's OBSERVATION, CART,
-TEAM and STATE by session and tick (`xonwire.RuntimeFrames`), binds them to the 72-column
+`Engine`: mesh_ipc.c's frames, read when the socket is readable), keeps the latest
+complete OBSERVATION, CART, TEAM and STATE snapshot of a session and tick
+(`xonwire.RuntimeFrames`, one slot), takes it whenever the solve is free, binds it to the 72-column
 request of 08-29 (`request_rows`: the held objective is the team's vote over the
 worker's own last answer; item posts are the items the bots perceived, each at class
 rank 1, since the wire carries no item class), and frames one 8-column row a bot back
-(id, pick, five node weights, leader) under the configured `response` kind. Rank 0
-broadcasts an idle tick every `idle_s` without a request, so the other ranks never wait
-past the library's silent-link bound. `rdma/xonwire.def` defines no plan kind at HEAD
+(id, pick, five node weights, leader) under the configured `response` kind. The other
+ranks wait in the broadcast of the next request. `rdma/xonwire.def` defines no plan kind at HEAD
 and the game opens no handle for one: until the game side restores sv_payload_mesh.qc's
 consumer (a `PLAN` entry in xonwire.def, `mesh_open(node, NONE, PLAN, 8, maxclients)`,
 `mesh_scatter_rows` into the pick, weights and leader fields, the per-team vote), the
@@ -70,15 +70,15 @@ heads), its learner (`online.OnlineLearner`: decoupled PPO with rollout importan
 weights, winner and loser values, replay), the responder that answers the game
 (`strat_responder.py`: STATE pages in, STRATEGY residual/rate pages out through
 `xonwire.Engine`), the match supervisor (`curriculum.py`) and the analyses (`study.py`,
-`roofline.py`, `joracle/`). Evaluation and training are queries of one torch program
+`joracle/`). Evaluation and training are queries of one torch program
 (`execution.PolicyProgram`); autograd derives every backward. The 09-14 graph compiler
 and Metal executor are not restored.
 
 The learner is one program on every rank of a world (`products.World`, torch.distributed's
 `mesh` backend): rank 0 is the game's host, serves the engine's socket and runs the
 responder; it announces each model call with its operands in one broadcast and every
-other rank runs the same call (`execution.serve`), with an empty announcement every
-`heartbeat_s` between calls. The placement document's `products` divide the remote
+other rank runs the same call (`execution.serve`), waiting in the broadcast of the next
+announcement. The placement document's `products` divide the remote
 products as Megatron-LM divides a block (`products.py` copy/reduce, `scale_rpc.py`):
 `cross`, the row-Gram contraction Rᵀ V, by rows; `scale`, the routed experts, by hidden
 columns, each rank keeping and updating its columns (saved as `<checkpoint>.rank<r>.npz`
@@ -86,7 +86,9 @@ beside rank 0's checkpoint). A rank updates only what it holds and reads the rep
 parameters from rank 0 after each update. Parts are relative; `[0, 1]` places the whole
 product on rank 1 (09-06's RDMA cross). `anticipatory_lead` imposes z = w_next + lead·dw/dt
 on the residual pages (9855a829^'s anticipatory update, AGENDA C6; 0 is the plain
-integrator). `solver/strat/placements/` holds didactic placements.
+integrator). `strategy_interval` is the strategy cadence in game seconds (the game's
+`g_payload_strategy_interval`, the integrator's Δt) and `relaxation_time` the exponential
+relaxation's τ; neither has a default. `solver/strat/placements/` holds didactic placements.
 
     RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 PYTHONPATH=xonotic:rdma \
         bin/mesh-python -B -m solver.strat.strat_responder --placement PLACEMENT.json --train ...
@@ -97,7 +99,9 @@ integrator). `solver/strat/placements/` holds didactic placements.
 are started on their nodes with the same responder arguments, as any world's ranks
 are. `jspace_probe.py` probes the trained IR against random-init and projection
 controls over a responder journal (9855a829^'s instrument, X5). The worker and the
-responder each serve `MESH_EXPERT_SOCKET`; a game talks to one of them.
+responder each serve `MESH_EXPERT_SOCKET`; a game talks to one of them, its engine started
+with `MESH_EXPERT_SOCKET` and `MESH_EXPERT_FRAMEBYTES` (the placement's `socket` and
+`framebytes`) and `g_payload_strategy_interval`, as `curriculum.py` starts it.
 
 Reproduction targets (the learner, measurements/policy-feature-integration-20260906):
 the RDMA cross test, `solver.strat.cross` on the pair with `placements/pair-cross.json`:

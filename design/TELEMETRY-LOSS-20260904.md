@@ -40,21 +40,13 @@ distributed optimization, with no progress boundary or independent outcome journ
   does not interrupt work. No bridge header, verbs registration or device is changed.
 - A full release ring yields to the caller and retains its pending page; it no
   longer spins forever before the replacement check can run.
-- Remote operations have a five-second transaction budget, separate from the
-  0.4-second strategy deadline and retransmit interval. Failure reports contain
-  request identity, frame offers/replays, partial assembly, queue depths and elapsed
-  time. The **same** Gram operation or VJP completes locally on an incomplete remote
-  transaction. Every subsequent operation still attempts the remote worker; no
-  permanent feature disable or reduced matrix/population configuration is introduced.
 - The engine emits `MESH_OUTCOME` JSON containing map, episode, engine time, winner,
-  threshold and all scores. The supervisor journals it independently of the learner,
-  flushes/fsyncs `server-outcomes.jsonl`, and gives the learner its drain grace to
-  acknowledge the outcome. Missing acknowledgement is reported, not called a learned
-  terminal result. A source loop also reads the engine journal before checking the
-  learner's acknowledgement, so that acknowledgement cannot skip the final read.
+  threshold and all scores. The supervisor reads it as a line of the server's output,
+  journals it independently of the learner and flushes/fsyncs `server-outcomes.jsonl`.
+  The match ends on the learner's own acknowledgement line; an engine outcome is not
+  called a learned terminal result.
 - Process logs and telemetry append. Per-match server extracts use the actual
-  append offset. The shared incremental JSONL reader handles incomplete trailing
-  lines. Application pages distinguish producer quietness from HTTP-cache freshness
+  append offset. Application pages distinguish producer quietness from HTTP-cache freshness
   and read durable outcomes as well as observed learning frames.
 - Responder restart prefers its current output checkpoint over the prior match's
   input, and does not overwrite the original initial snapshot. The first recovery
@@ -62,7 +54,7 @@ distributed optimization, with no progress boundary or independent outcome journ
   current snapshots, strategy update 270 and terminal update 4, supplied deployment.
 
 The added branches preserve reachability: retain pending work, retry the named
-region, complete an equivalent operation, or report missing evidence. They do not
+region, or report missing evidence. They do not
 gate a capability by node class, invent a terminal reward, reduce configured capacity,
 or operate on a verbs owner. One controlled userspace deployment applied the statically
 linked engine and supervisor changes. Normal match/map transitions retain clients.
@@ -93,8 +85,8 @@ This does not claim a deliberately induced bridge-replacement experiment.
 
 At 19:20 the deployed runtime resumed remote forward/backward computation, learner
 frames and native off-policy gameplay. Both existing bridge PIDs remained unchanged
-during deployment, with `up=true`, attached live clients and `bad=0`. A real five-second
-remote timeout then logged local completion, and later learning frames continued.
+during deployment, with `up=true`, attached live clients and `bad=0`. Later learning
+frames continued.
 The corrected rank implementation matched all 273 pre-deployment recorded frames.
 The first 123 post-deployment frames had zero game-coordinate/checkpoint residuals
 and no score decreases in 484 same-episode comparisons. These are implementation
