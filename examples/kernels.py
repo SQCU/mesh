@@ -1,14 +1,17 @@
-"""Kernels a program's kernel_call takes (design/algorithm-sources.md#kernelsexpression): a supplied function
-`kernel(program, inputs, outputs)` over Refs, or an expression of the inputs evaluated by torch over each output block
-(no source is generated, no second executor: the values, indices and masks of Pallas's indexing).  `matmul` and `dot`
-contract on the program's engines (torch_mesh.engines over its Engines operand, else torch's own product); `add`,
-`maximum` and `minimum` are the combines the collectives know (libnccl-mesh's sum, max and min)."""
+"""Kernels a program's kernel_call takes (design/algorithm-sources.md#kernelsexpression; design/deliverables.md
+section 5, program type C: the library, python/mesh, holds none): a function `kernel(program, inputs, outputs,
+coordinate)` over Refs, or an expression of the inputs evaluated by torch over each output block (no source is
+generated, no second executor: the values, indices and masks of Pallas's indexing).  `matmul` and `dot` contract by
+torch's own product, `on_engines(engines)` by torch_mesh.engines' Linear over an MPS program's Engines operand (bound
+as Program(functions={matmul: on_engines(engines)})); `add` declares itself a combine, so it takes Partial operands
+and is a supplied combine of mesh.collective's reductions, whose SUM, MAX and MIN are libnccl-mesh's own."""
+import math
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
-from . import _native
+from mesh._native import dtype as _dtype
 
 _REDUCTIONS = ('sum',)
 _REAL_FUNCTIONS = ('exp', 'rsqrt')
@@ -89,7 +92,7 @@ class _Expression:
 
     # design/algorithm-sources.md#kernelsdot
     def astype(self, dtype):
-        return _Expression('cast', (self,), _native.dtype(dtype))
+        return _Expression('cast', (self,), _dtype(dtype))
 
     # design/algorithm-sources.md#kernelsadd
     def sum(self, axis=1):
@@ -154,8 +157,8 @@ def arguments(count):
 
 
 # design/algorithm-sources.md#kernelsexpression
-def expression(value, *outputs):
-    return _ExpressionKernel(tuple(map(_literal, (value, *outputs))))
+def expression(value, *outputs, combine=False):
+    return _ExpressionKernel(tuple(map(_literal, (value, *outputs))), combine)
 
 
 # design/algorithm-sources.md#kernelsdot
@@ -163,6 +166,16 @@ def dot(left, right, *, tile_k=128):
     if tile_k < 1:
         raise ValueError('Contraction K tiles must be positive')
     return _Expression('dot', tuple(map(_literal, (left, right))), tile_k)
+
+
+# design/algorithm-sources.md#kernelsdot
+def _operands(left, right):
+    return (left.float(), right.float()) if left.dtype != right.dtype or not left.dtype.is_floating_point else (left, right)
+
+
+# design/algorithm-sources.md#kernelsdot
+def _contract(left, right):
+    return torch.mm(*_operands(left, right))
 
 
 # design/algorithm-sources.md#programtensor
@@ -208,7 +221,7 @@ def _evaluate(program, node, inputs, output, coordinate):
             left, right = map(visit, part.operands)
             left = left.expand(rows, left.shape[1]) if left.shape[0] == 1 else left
             right = right.expand(right.shape[0], columns) if right.shape[1] == 1 else right
-            value = _native.contract(None, None, left, right).float()
+            value = _contract(left, right).float()
         elif operation == 'transpose':
             value = visit(part.operands[0]).T
         elif operation == 'sum':
@@ -240,6 +253,7 @@ def _evaluate(program, node, inputs, output, coordinate):
 @dataclass(frozen=True)
 class _ExpressionKernel:
     values: tuple
+    combine: bool = False
 
     # design/algorithm-sources.md#kernelsexpression
     def __call__(self, program, inputs, outputs, coordinate=()):
@@ -251,15 +265,31 @@ class _ExpressionKernel:
 
 
 # design/algorithm-sources.md#kernelsdot
-def matmul(program, inputs, outputs):
+def matmul(program, inputs, outputs, coordinate=()):
     x, w = inputs
     output, = outputs
-    key = w.key if not hasattr(w, 'blocks') and program._is_constant(w) else None
-    output.tensor.copy_(program._contract(_dense(x), _dense(w), key))
+    output.tensor.copy_(_contract(_dense(x), _dense(w)))
+
+
+# design/algorithm-sources.md#kernelsdot
+def on_engines(engines):
+    from torch_mesh import engines as shared
+    operations = {}
+
+    # design/algorithm-sources.md#kernelsdot
+    def contract(program, inputs, outputs, coordinate=()):
+        x, w = inputs
+        if hasattr(w, 'blocks') or not program.is_constant(w):
+            return matmul(program, inputs, outputs, coordinate)
+        left, right = _operands(_dense(x), _dense(w))
+        if w.key not in operations:
+            operations[w.key] = shared.Linear(right.T, engines=engines, name=f'mesh{w.key}', grain=math.gcd(right.shape[1], 64))
+        outputs[0].tensor.copy_(operations[w.key](left))
+    return contract
 
 
 # design/algorithm-sources.md#nnembedding
-def gather(program, inputs, outputs):
+def gather(program, inputs, outputs, coordinate=()):
     table, selected = inputs
     output, = outputs
     source, index = _dense(table), _dense(selected)[:, 0].long()
@@ -268,7 +298,7 @@ def gather(program, inputs, outputs):
 
 
 _left, _right = arguments(2)
-add = expression(_left + _right)
+add = expression(_left + _right, combine=True)
 maximum = expression(select(_left.equal(_left), select(_right.equal(_right), select(_left >= _right, _left, _right), _right), _left))
 minimum = expression(select(_left.equal(_left), select(_right.equal(_right), select(_left <= _right, _left, _right), _right), _left))
 swish = expression(_left / (1 + (0 - _left).exp()))

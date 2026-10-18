@@ -1,15 +1,16 @@
-"""The partial-tensor library's Python surface (design/deliverables.md section 2; design/algorithm-sources.md#program):
-higher-order functions over partial tensors, the partial tensors' collectives, zero-copy and asynchronous once the
-call graph is known.  The same contract as swift/Mesh.swift, spelled as Pallas spells it: Program.kernel_call over a
-grid with BlockSpecs, Refs to sections, Partial contribution sets that refuse a nonlinear function before their sum
-completes, the collective verbs (mesh.collective) and the nn compositions (mesh.nn) of K-split partials published
-section by section.
+"""The partial-tensor library's Python surface (design/algorithm-sources.md#program; design/deliverables.md section 5,
+program type B): higher-order functions over partial tensors and the partial tensors' collectives, zero-copy and
+asynchronous once the call graph is known.  The same contract as swift/Mesh.swift, spelled as Pallas spells it:
+Program.kernel_call over a grid with BlockSpecs, Refs to sections, Partial contribution sets that a function refuses
+before their sum completes unless it declares itself their combine, and the collective verbs (mesh.collective).  It
+holds no numerics: every kernel and combine is a supplied callable (examples/kernels.py and examples/nn.py, program
+type C, are compositions of it).
 
 A program is SPMD: every member records the same calls; `peer=` places a kernel, a copy's two ends and a collective's
 members place its crossings.  Recording builds the graph; realize() (start(), Swift's name) prepares it; then the
 host writes its inputs (write), each publication firing what it completes (a pending count reaching zero, the old
 executor's rule, design/deliverables.md L3), and reads its results (export, Result.ready, consume).  Kernels run
-on torch on one compute thread; crossings and collectives are libnccl-mesh's (mesh._native), issued in one order every
+on one compute thread; crossings and collectives are libnccl-mesh's (mesh._native), issued in one order every
 member computes from the graph (each queue its own communicator), so their positions pair (rdma/NCCL.md "Rules a
 program keeps").  Every wait is bounded by the program's `timeout`; a failure is a value (Program.report, MeshError).
 
@@ -462,19 +463,17 @@ class _Order:
 
 class Program:
     # design/algorithm-sources.md#program
-    def __init__(self, backend='cpu', *, functions=None, engines=None, group=None, timeout=10.0, trace=False):
+    def __init__(self, backend='cpu', *, functions=None, group=None, timeout=10.0, trace=False):
         if timeout is None or not timeout > 0:
             raise ValueError('A program bounds every wait: timeout is a positive number of seconds')
         self.device = _native.DEVICES[backend]
-        if engines is not None and self.device != 'mps':
-            raise ValueError("torch_mesh's engines share an MPS program's contractions; this program is on the CPU")
-        self.engines, self.timeout = engines, float(timeout)
+        self.timeout = float(timeout)
         self._functions = dict(functions or {})
         self._world = _native.World(self.device, group)
         self.node = self.rank = self._world.rank
         self.size = self._world.size
         self._backings, self._blocks, self._constants = [], defaultdict(list), set()
-        self._replicated, self._operations = {}, {}
+        self._replicated = {}
         self._tasks, self._exports = [], []
         self._cond = threading.Condition()
         self._threads, self._published, self._sources = [], set(), defaultdict(list)
@@ -515,12 +514,11 @@ class Program:
 
         # design/algorithm-sources.md#programkernel_call
         def configure(*operands):
-            from . import kernels
             if len(operands) != len(inputs):
                 raise ValueError('Each input requires one BlockSpec')
             partial = next((ref for operand in operands for ref in _refs(operand) if ref.partial is not None), None)
-            if partial is not None and kernel is not kernels.add:
-                raise TypeError(f'Partial input {partial!r} requires addition or reduce_scatter before this kernel')
+            if partial is not None and not getattr(kernel, 'combine', False):
+                raise TypeError(f'Partial input {partial!r} requires a combine (a kernel declaring combine) or a reduction first')
             outputs = tuple(self.tensor(shape.shape, block_shape=spec.block_shape, dtype=shape.dtype)
                             for shape, spec in zip(shapes, specs))
             self._call(kernel, grid=grid, peer=peer,
@@ -676,12 +674,8 @@ class Program:
         self._constants.add(key)
 
     # design/algorithm-sources.md#kernelsdot
-    def _is_constant(self, ref):
+    def is_constant(self, ref):
         return any(block.key in self._constants and block._overlaps(ref) for block in self._blocks[ref.backing.index])
-
-    # design/algorithm-sources.md#kernelsdot
-    def _contract(self, left, right, key=None):
-        return _native.contract(self.engines, self._operations, left, right, key)
 
     # design/algorithm-sources.md#programkernel_call
     def _roles(self, task, rank):
@@ -795,8 +789,6 @@ class Program:
                 queues[task.queue].append(task)
         self._orders = [_Order(queues[queue]) for queue in sorted(queues)]
         self._candidates = set(self._compute)
-        from .kernels import _ExpressionKernel
-        self._expression = _ExpressionKernel
         self._realized = True
         if self.device == 'mps':
             self._threads = [threading.Thread(target=self._serve, args=(self._orders,), daemon=True)]
@@ -884,11 +876,7 @@ class Program:
         what, works = task.run, ()
         if task.kind == 'kernel':
             kernel, sources, targets, coordinate = what
-            binding = self._functions.get(kernel, kernel)
-            if isinstance(binding, self._expression):
-                binding(self, sources, targets, coordinate)
-            else:
-                binding(self, sources, targets)
+            self._functions.get(kernel, kernel)(self, sources, targets, coordinate)
             self.report.kernels += 1
         elif what[0] == 'materialize':
             _, regions, target = what
@@ -991,7 +979,6 @@ class Program:
             thread.join(max(0.0, deadline - time.monotonic()))
         if not any(thread.is_alive() for thread in self._threads):
             self._world.close()
-        self._operations.clear()
         self._replicated.clear()
 
     # design/algorithm-sources.md#program

@@ -9,7 +9,8 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
 
 import numpy as np  # noqa: E402
-from mesh import BlockSpec, Program, ShapeDtypeStruct, kernels  # noqa: E402
+import kernels  # noqa: E402
+from mesh import BlockSpec, Program, ShapeDtypeStruct  # noqa: E402
 
 
 # design/algorithm-sources.md#streaming-overlap-measurement

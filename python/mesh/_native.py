@@ -1,9 +1,10 @@
 """The partial-tensor library's binding to the mesh's own (design/algorithm-sources.md#program): operands are torch
 tensors, the window's where they cross (torch_mesh.backend.blank over mesh.lease: rdma/NCCL.md "Memory"); every
 crossing and collective is libnccl-mesh's, through torch.distributed's "mesh" backend (rdma/torch-mesh/README.md):
-host-path calls complete where they return, MPS ones are encoded on torch's stream and waited where their consumer
-runs; contractions are torch_mesh.engines' Linear over a program's Engines operand, else torch's own product."""
-import math
+point to point, MPI_Allgatherv and MPI_Reduce_scatter (ncclMeshAllGatherV, ncclMeshReduceScatterV), the all-reduce,
+the all-to-all and the split-KV partials merge (ncclMeshAllReducePartials, ncclMeshReducePartials).  Host-path calls
+complete where they return, MPS ones are encoded on torch's stream and waited where their consumer runs.  It computes
+nothing: a program's numerics are its supplied kernels'."""
 import os
 
 import numpy as np
@@ -15,6 +16,7 @@ _TORCH = {'float16': torch.float16, 'float32': torch.float32, 'float64': torch.f
           'uint64': torch.uint64, 'bool': torch.bool}
 _NUMPY = {value: np.dtype(name) for name, value in _TORCH.items() if name != 'bfloat16'}
 DEVICES = {'cpu': 'cpu', 'metal': 'mps', 'mps': 'mps'}
+OPS = {'sum': dist.ReduceOp.SUM, 'max': dist.ReduceOp.MAX, 'min': dist.ReduceOp.MIN}
 
 
 # design/algorithm-sources.md#programtensor
@@ -102,29 +104,35 @@ def recv(tensor, peer, group):
 
 
 # design/algorithm-sources.md#collective-movement
-def broadcast(tensor, root, group):
-    return dist.broadcast(tensor, group=group, group_src=root, async_op=True)
+def all_gather(blocks, mine, group):
+    return dist.all_gather(blocks, mine, group=group, async_op=True)
+
+
+# design/algorithm-sources.md#collective-movement
+def all_to_all(received, sent, receives, sends, group):
+    return dist.all_to_all_single(received, sent, receives, sends, group=group, async_op=True)
 
 
 # design/algorithm-sources.md#collectivereduce_scatter
-def reduce(tensor, root, op, group):
-    return dist.reduce(tensor, group=group, group_dst=root, op=op, async_op=True)
+def reduce_scatter(out, pieces, op, group):
+    return dist.reduce_scatter(out, pieces, op=OPS[op], group=group, async_op=True)
 
 
 # design/algorithm-sources.md#collectivereduce_scatter
 def all_reduce(tensor, op, group):
-    return dist.all_reduce(tensor, op=op, group=group, async_op=True)
+    return dist.all_reduce(tensor, op=OPS[op], group=group, async_op=True)
 
 
-# design/algorithm-sources.md#kernelsdot
-def contract(engines, operations, left, right, key=None):
-    if left.dtype != right.dtype or not left.dtype.is_floating_point:
-        left, right = left.float(), right.float()
-    if engines is None or key is None:
-        return torch.mm(left, right)
-    operation = operations.get(key)
-    if operation is None:
-        from torch_mesh import engines as shared
-        operation = operations[key] = shared.Linear(right.T, engines=engines, name=f'mesh{key}',
-                                                    grain=math.gcd(right.shape[1], 64))
-    return operation(left)
+# design/algorithm-sources.md#collectivereduce_scatter
+def partials(tensor, root, group):
+    """nccl.h's log-sum-exp merge of a (rows, 2 + dim) float32 operand laid out [m: rows][l: rows][O: rows x dim], in
+    place, toward every member (root None) or `root`: its host path (three groups of its own, never inside one); the
+    MPS path is the backend's to bind (its stream, _stream.mm), not yet made."""
+    from torch_mesh import backend
+    if tensor.device.type != 'cpu':
+        raise NotImplementedError('mesh: torch_mesh binds no partials merge on MPS yet (ncclMeshAllReducePartials on torch\'s stream)')
+    held, comm = backend.operand(tensor), group._get_backend(tensor.device).comm
+    rows, dim = tensor.shape[0], tensor.shape[1] - 2
+    backend.check(backend.LIB.ncclMeshAllReducePartials(held.at(), held.at(), rows, dim, comm, backend.ffi.NULL) if root is None
+                  else backend.LIB.ncclMeshReducePartials(held.at(), held.at(), rows, dim, root, comm, backend.ffi.NULL))
+    held.back()

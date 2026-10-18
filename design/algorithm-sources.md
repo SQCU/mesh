@@ -17,9 +17,10 @@ while consumers are indexed by operand publication. No function scan or repeated
 realization is required. The [execution description](async-collectives.md#execution-and-ownership)
 separates shared function metadata from each value's operands and uses.
 
-**The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library): the
-same contract as `swift/Mesh.swift`, spelled as Pallas spells it. A `Program(backend, *, functions, engines, group,
-timeout, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
+**The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
+type B, the library, its kernels and layers `examples/kernels.py` and `examples/nn.py` type C, design/deliverables.md
+section 5): the same contract as `swift/Mesh.swift`, spelled as Pallas spells it. A `Program(backend, *, functions,
+group, timeout, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
 collective's members place the work. Recording builds the graph; `realize()` (`start()`, Swift's name) prepares it;
 the host then writes its inputs (`write`) and reads its results (`export`, `Result.ready`, `consume`). The firing
 rule is the old executor's (design/deliverables.md L3): an edge per (writer, reader) pair of overlapping regions on a
@@ -646,10 +647,12 @@ not X5's unfinished instance-admission rings or R2 failure cancellation.
 call a grid coordinate: each `BlockSpec(block_shape, index_map, region_map)` resolves an operand's block at the
 coordinate (`index_map` its block indices, `region_map(ref, *coordinate)` a region within it; `block_shape` None the
 whole operand), outputs are fresh tensors of the out specs' blocks, and the call runs on member `peer` (every member
-where None). A kernel is a supplied function `kernel(program, inputs, outputs)` over Refs (a program's `functions`
-maps a kernel to another binding) or a `kernels.expression`. An input carrying a `Partial` (an unfinished sum: some of
-its contribution set) is refused by any kernel but `kernels.add` (TypeError): a nonlinear function of a sum waits for
-the sum (design/deliverables.md, Definition, consequence 3); `Partial.merge` refuses a contribution counted twice.
+where None). A kernel is any callable `kernel(program, inputs, outputs, coordinate)` over Refs and its grid coordinate
+(a program's `functions` maps a kernel to another binding); the library calls it and computes nothing itself. An input
+carrying a `Partial` (an unfinished sum: some of its contribution set) is refused (TypeError) by a kernel that does not
+declare `combine` (an attribute true of the sum's combine, examples/kernels.py `add`): a nonlinear function of a sum
+waits for the sum (design/deliverables.md, Definition, consequence 3); `Partial.merge` refuses a contribution counted
+twice.
 
 ## Program.map
 
@@ -1174,10 +1177,11 @@ its read-only values, `Result.consume()` releases it, so its writers may run aga
 The JAX authors' [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs):
 values, indices and masks. This is not a requirement for a general expression compiler.
 
-The Python surface's expressions (`kernels.arguments`, `indices`, `program_id`, `select`, `.at(row, column, mask,
-other)`, `.astype`, `.sum(axis)`, `.T`, `.exp`, `.rsqrt`, the arithmetic and comparison operators) are evaluated by
-torch over each output block: no source is generated. `row` and `column` are the output block's own indices,
-`program_id(axis)` the grid coordinate; floating values are computed in FP32 and stored in the output's type.
+The Python surface's examples' expressions (`examples/kernels.py`, program type C: `arguments`, `indices`,
+`program_id`, `select`, `.at(row, column, mask, other)`, `.astype`, `.sum(axis)`, `.T`, `.exp`, `.rsqrt`, the
+arithmetic and comparison operators) are kernels evaluated by torch over each output block: no source is generated.
+`row` and `column` are the output block's own indices, `program_id(axis)` the grid coordinate; floating values are
+computed in FP32 and stored in the output's type.
 
 ## kernels.dot
 
@@ -1188,9 +1192,11 @@ and [Core ML MIL operations](https://apple.github.io/coremltools/source/coremlto
 existing contractions. The [reduction algebra](distributed-reduce.md) describes
 contributions without prescribing intermediate-buffer or launch counts.
 
-In the Python surface `kernels.matmul` (a supplied kernel over a (rows, K) and a (K, columns) Ref) and an expression's
-`dot` contract on the program's engines: `torch_mesh.engines.Linear` over the program's `Engines` operand (MPS
-programs; a constant right operand, its shards resident), else torch's own product.
+In the Python surface's examples `kernels.matmul` (a kernel over a (rows, K) and a (K, columns) Ref) and an
+expression's `dot` contract by torch's own product; `kernels.on_engines(engines)` is a contraction on
+`torch_mesh.engines.Linear` over an MPS program's `Engines` operand (a constant right operand, `Program.is_constant`,
+its shards resident), bound in its place by `Program(functions={kernels.matmul: kernels.on_engines(engines)})`: the
+contraction a supplied function, the library importing no engine.
 
 ## kernels.add
 
@@ -1206,8 +1212,10 @@ is the existing float32 vector sum supplied to reduce-scatter by the configured
 Core ML caller. It receives resolved input/output pointers and introduces no
 payload allocation, copy, or replacement sum implementation in Mesh.
 
-`kernels.add`, `maximum` and `minimum` (NaN-ignoring), `swish` and `identity` are expressions; `add`, `maximum` and
-`minimum` are also the combines the Python surface's reductions hand libnccl-mesh (`ncclSum`, `ncclMax`, `ncclMin`).
+The examples' `kernels.add`, `maximum` and `minimum` (NaN-ignoring), `swish` and `identity` are expressions; `add`
+declares `combine`, so it takes `Partial` operands and is a supplied combine a reduction takes. The Python surface's
+own reductions are libnccl-mesh's operators, `collective.SUM`, `MAX` and `MIN` (`ncclSum`, `ncclMax`, `ncclMin`), and
+its partials merge, `PARTIALS`.
 
 ## collective.reduce_scatter
 
@@ -1216,13 +1224,18 @@ MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/no
 reduction semantics and decompositions. A source does not mandate one decomposition
 for every collective or caller placement.
 
-The Python surface's `reduce_scatter(program, value, *, peers, owners, op=kernels.add, queue=0)` (also `sum_scatter`),
-`reduce(..., root, peers)` and `all_reduce(..., peers, owners=None)` (`all_sum`, `all_max`, `all_min`) reduce each
-block in place by libnccl-mesh's own reduce or all-reduce where `op` is `add`, `maximum` or `minimum` (its owner's
-contribution counted where the owner is a peer, else its block filled with the combine's identity first): an update
-of the block, its readers taking the reduced value. Any other associative combine is the old form: each peer's term
-copied to the owner and combined there by a tree of the combine's kernel (`kernel_call(op, peer=owner)`), into fresh
-blocks; `all_reduce` of such a combine is that `reduce_scatter`, then `all_gather`.
+The Python surface's `reduce_scatter(program, value, *, peers, owners, op=SUM, queue=0)` (also `sum_scatter`),
+`reduce(..., root, peers)` (`reduce_scatter` with every block owned by `root`) and `all_reduce(..., peers,
+owners=None)` (`all_sum`, `all_max`, `all_min`) reduce a block row in one libnccl-mesh call over its members where
+`op` is `SUM`, `MAX` or `MIN`: `reduce_scatter` MPI_Reduce_scatter (`ncclMeshReduceScatterV`, member m's segment the
+row's blocks m owns, every member's terms packed in member order; an owner off the peers contributes the operator's
+identity), `all_reduce` the row's all-reduce; an update of each block, its readers taking the reduced value. `PARTIALS`
+merges each block by its log-sum-exp (nccl.h `ncclMeshReducePartials` toward its owner, `ncclMeshAllReducePartials`
+toward every peer; the block read in row order as nccl.h's [m: rows][l: rows][O: rows x dim], a member off the peers
+an empty partial; the host path, torch_mesh binding none on MPS yet). Any other associative combine is a supplied
+kernel declaring `combine` (Swift's `using combine:`): each peer's term moved to the owner by one all-to-all a row
+and combined there by a tree of the combine's kernel (`kernel_call(op, peer=owner)`), into fresh blocks; `all_reduce`
+of such a combine is that `reduce_scatter`, then `all_gather`.
 
 ## Collective movement
 
@@ -1230,9 +1243,13 @@ The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-repor
 and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp):
 [distinct communication relations](collective-verbs.md).
 
-In the Python surface `broadcast(program, value, *, root, peers)` and `all_gather(..., peers, owners)` are a
-libnccl-mesh broadcast of each block rooted at its owner over a communicator of its members; `scatter`, `gather` and
-`all_to_all` copy each block along its route (`send`/`recv`). Each defines the block on its receivers in place.
+In the Python surface each verb is one libnccl-mesh call a block row over the communicator of its members (a row
+crosses once its own blocks are ready): `all_gather(program, value, *, peers, owners)` is MPI_Allgatherv
+(`ncclMeshAllGatherV`, member m's segment the row's blocks m owns, every member, the peers and the owners, receiving
+every block) and `broadcast(..., root, peers)` the same with every block `root`'s; `all_to_all(..., owners,
+destinations)` is MPI_Alltoallv (`torch.distributed.all_to_all_single` on the "mesh" backend), and `scatter` and
+`gather` the same with every block's sender or receiver `root`. Each defines the block on its receivers in place, its
+blocks packed into one window tensor and back.
 
 ## Vocabulary projection
 
@@ -1319,10 +1336,10 @@ mechanism to account for; a timestamp alone is not evidence that payload stores
 are visible. Mesh has not yet integrated this mechanism, and its latency is not
 established by the engine's direct-send graph.
 
-The Python surface's `nn.linear(program, x, w, *, tile_rows, tile_k, tile_columns, peer, output_dtype)` cuts K into
-panels at `tile_k` (and at the operands' block edges): each panel a grid of `kernels.matmul` calls whose products are
-`Partial`s of one contribution set, summed by a tree of `kernels.add` calls tile by tile, so a tile's sum is published
-as its panels finish (SUMMA's K-panel rank-k updates, van de Geijn and Watts 1997). `nn.ffn(program, inputs,
+The Python surface's examples' `nn.linear(program, x, w, *, tile_rows, tile_k, tile_columns, peer, output_dtype)`
+(`examples/nn.py`, program type C) cuts K into panels at `tile_k` (and at the operands' block edges): each panel a
+grid of `kernels.matmul` calls whose products are `Partial`s of one contribution set, summed by a tree of
+`kernels.add` calls tile by tile, so a tile's sum is published as its panels finish (SUMMA's K-panel rank-k updates, van de Geijn and Watts 1997). `nn.ffn(program, inputs,
 up_weights, down_weights, *, tile_rows, tile_k, tile_columns, exchange=None, peer=None)` sums each hidden section's
 input partitions, applies swish to the completed hidden tiles, hands each to `exchange` (a caller's crossing) and
 contracts it with the section's down projection, the sections' products summed.
@@ -1332,8 +1349,9 @@ contracts it with the section's down projection, the sections' products summed.
 Zhang and Sennrich, [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
 (2019): normalization used by the existing numerical implementation.
 
-The Python surface's `nn.rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6, peer=None)`: each column panel's sum
-of squares a `Partial` of the row statistic, the panels summed, then each tile normalized by the completed statistic.
+The Python surface's examples' `nn.rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6, peer=None)`: each column
+panel's sum of squares a `Partial` of the row statistic, the panels summed, then each tile normalized by the completed
+statistic.
 
 ## nn.embedding
 
@@ -1353,8 +1371,8 @@ reads the second operand at its own row stride. The
 account for all row counts and the removed 34 projection launches on E2B.
 Mesh gains no arithmetic kernel or transport behavior from this engine change.
 
-The Python surface's `nn.embedding(program, table, indices, *, tile_rows, tile_columns, peer)` gathers each (row,
-column) tile of the table's rows by `kernels.gather` (a negative index counts from the end); `nn.summed_embedding`
+The Python surface's examples' `nn.embedding(program, table, indices, *, tile_rows, tile_columns, peer)` gathers each
+(row, column) tile of the table's rows by `kernels.gather` (a negative index counts from the end); `nn.summed_embedding`
 adds tables' embeddings to an input, tile by tile.
 
 ## collective.sync_on_remote_fill

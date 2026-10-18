@@ -1,11 +1,14 @@
-"""Compositions of kernel_call (design/algorithm-sources.md#nnffn, #nnrmsnorm, #nnembedding): each contraction cut
-into K panels whose products are partials (Partial: a nonlinear kernel refuses them until their sum completes),
-summed by a tree of adds, every product and sum a grid of row and column tiles, so each tile is published as it
-finishes and its consumers fire on it.  The numerics are the kernels' (mesh.kernels: torch, contractions on the
-program's engines); placement is the caller's (`peer`, `exchange`)."""
+"""Compositions of kernel_call (design/algorithm-sources.md#nnffn, #nnrmsnorm, #nnembedding; design/deliverables.md
+section 5, program type C: a layer API over the library, never in it): each contraction cut into K panels whose
+products are partials (Partial: a kernel that declares no combine refuses them until their sum completes), summed by
+a tree of adds, every product and sum a grid of row and column tiles, so each tile is published as it finishes and its
+consumers fire on it.  The numerics are the kernels' (kernels.py: torch's); placement is the caller's (`peer`,
+`exchange`)."""
 from math import gcd
 
-from . import BlockSpec, Partial, ShapeDtypeStruct, kernels
+import kernels
+from mesh import BlockSpec, Partial, ShapeDtypeStruct
+from mesh._native import dtype as _dtype
 
 
 # design/algorithm-sources.md#nnffn
@@ -53,12 +56,6 @@ def _sum(program, terms, tile_rows, *, peer=None, output_dtype=None):
                                  output_dtype=output_dtype if last else None)
                       if i + 1 < len(terms) else terms[i] for i in range(0, len(terms), 2))
     return terms[0]
-
-
-# design/algorithm-sources.md#programtensor
-def _dtype(value):
-    from . import _native
-    return _native.dtype(value)
 
 
 # design/algorithm-sources.md#kernelsdot
