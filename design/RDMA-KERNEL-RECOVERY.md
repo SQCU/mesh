@@ -309,9 +309,9 @@ error state; every teardown moves them there first and then destroys them, under
 
 After the 10-17 panic the Mini's bridge, started 11 s after boot, failed every queue pair's INIT to RTR ("Failed
 INIT→RTR kernel transition" in the provider's log; its lanes every 3 s, every program `code 5 domain 1`) for five
-minutes, until its binary was touched and a new bridge process connected at once. A queue pair that fails to connect
-at a link's pairing loses the link with the device kept, and the port pairs again on the same context; a device is
-retired only at a link-off or detach, or where opening or querying it fails (design/recovery.md#loss, Risk 7).
+minutes, until its binary was touched and a new bridge process connected at once. A verbs call refused while a queue
+pair is made, made again in place or connected loses the link with the port's device retired: closed, and opened again
+by the same bridge process with the window registered before the port pairs again (design/recovery.md#loss, Risk 7).
 
 Until the trigger is known, a substrate upgrade restarts the Mini's bridge with no program running and well apart
 from the M5's.
@@ -322,10 +322,10 @@ write at 0x100840008 (8 bytes into a 16 KiB page no longer mapped, beside a 16 K
 1.5 s after the previous call's flow was destroyed. Its bridge posted then on its lanes' long-lived queue pairs every
 5 us (mesh b21ced65, a keepalive); the call after the next teardown failed its first SENDs with IBV_WC_LOC_PROT_ERR
 (9e0b3a4a, kb1). Without posts on the lanes, hundreds of calls with the same teardowns ran clean. The keepalive rides
-a link's queue pair 0, made at the link's pairing and posted on for the link's life (design/bridge-and-ipc.md#keepalive),
-and a link's lease queue pairs are posted on while another of them is made again: a post on a queue pair that outlives
-another's teardown is the bridge's ordinary course, kept apart from the teardown in time by the port's guard alone
-(design/recovery.md, Risk 6).
+a link's queue pair 0, made at the link's pairing and posted on for the link's life (design/bridge-and-ipc.md#keepalive).
+No queue pair of a link is destroyed while the link is up: a lease's pair is made again in place (mesh-verbs.h
+`pair_reset`: the error state, the reset state, INIT, its number kept) while the link's other pairs run, and the
+link's pairs are destroyed only together, at its loss or the bridge's stop (design/recovery.md, Risk 6).
 
 ## The stripe writes of October 1
 
@@ -393,33 +393,38 @@ receives in RTS queue pairs as the device closed (2).
 ### The bridge's answer to each
 
 The bridge answers each of the three (2, 3, 4) as follows:
-- **One owner of every teardown.** A link's queue pairs and completion queues are made, connected, made again and
-  destroyed by the event loop alone (`link_make`, `pairs_heard`, `lease_remake`, `path_release`, `link_unmake`); its
+- **One owner of every teardown.** A link's queue pairs and completion queues are made, connected, made again in place
+  and destroyed by the event loop alone (`link_make`, `pairs_heard`, `lease_remake`, `path_release`, `link_unmake`); its
   device is opened, registered and retired on the port's serial queue alone, and only while the port holds no queue
   pair (`port_turn`); the posts and polls run on the port's two progress threads, and on the event loop only under the
   guard (a ring's first receives at its attach, the keepalive pair's receive slots at its join); the device's
-  registrations go only at its retirement (`down_device`: a link-off or detach, a device that failed, the stop).
+  registrations go only at its retirement (`down_device`: a link-off or detach, a device that failed, a verbs call
+  refused while a pair is made, made again or connected, the stop).
 - **A guard, the operator's "nodeguard".** Every change of a device's queue pairs or completion queues, and of what
   holds a pair, runs with the port's guard raised: both progress threads stop passing and tell that they hold, so no
   queue pair of the device is posted on or polled, and they go on once the change returns (mesh-flow.c `guard_raise`,
-  `guard_lower`). No post crosses another queue pair's making, connection or destruction; posts after another queue
-  pair's destruction are the ordinary course (October 16 and 17, above; design/recovery.md, Risk 6).
-- **The error state before destruction.** Every teardown moves its queue pairs to the error state and then destroys
-  them (mesh-verbs.h `pair_destroy`), at a lease's remaking, a link's loss and the bridge's stop alike, and the stop
-  retires the device only after; nothing waits on what the move flushes. A link's queue pairs live for the link's life
-  with receives posted, as (2) found the stripe service's did.
+  `guard_lower`). No post crosses another queue pair's making, reset, connection or destruction, and no queue pair of a
+  link is destroyed while the link is up, so no post follows another queue pair's destruction on its device (October
+  16 and 17, above; design/recovery.md, Risk 6).
+- **The error state before destruction.** Every teardown moves the link's queue pairs to the error state and then
+  destroys them all (mesh-verbs.h `pair_destroy`), at a link's loss and the bridge's stop alike, and the stop retires
+  the device only after; a lease's pair made again in place moves to the error state too (`pair_reset`) before its
+  reset; nothing waits on what either move flushes. A link's queue pairs live for the link's life with receives
+  posted, as (2) found the stripe service's did.
 
-What integration testing reads first: a lease made again under a running keepalive, with receives posted on the
-link's other queue pairs, crashing nothing; a link's loss and a bridge's stop with leases held, each extent
+What integration testing reads first: a lease's pair made again in place (error, reset, INIT, reconnected) under a
+running keepalive, with receives posted on the link's other queue pairs, crashing nothing; a link's loss and a bridge's stop with leases held, each extent
 deregistered once in the kernel log and no panic; the Mini's bridge stopped with programs running, then the M5's,
 apart.
 
-**Every teardown.** A link's queue pairs are destroyed at three events: a lease's remaking (`pair_new`: its holder let
-go of it in order, failed or was aborted, the peer's newer making answered, or the pair failed with no holder), the
-link's loss (`link_unmake`, from `port_lost`) and the bridge's stop (`port_lost` for every port, after its progress
-threads are joined). Each runs on the event loop with the port's guard raised: every queue pair moved to the error
-state, then destroyed, and at a link's loss and the stop its two completion queues destroyed; no queue pair of the
-device is posted on while another's are moved and destroyed. A teardown never drains its queue pairs: an end in order
+**Every teardown.** A link's queue pairs are destroyed, all of them together, at two events: the link's loss
+(`link_unmake`, from `port_lost`) and the bridge's stop (`port_lost` for every port, after its progress threads are
+joined). Each runs on the event loop with the port's guard raised: every queue pair moved to the error state, then
+destroyed, and its two completion queues destroyed; no queue pair of the device is posted on while they are moved and
+destroyed. A lease's pair is never destroyed while its link is up: where its holder let go of it in order, failed or
+was aborted, the peer's newer making was answered, or the pair failed with no holder, `pair_new` makes it again in
+place (mesh-verbs.h `pair_reset`: the error state, the reset state, INIT, its number kept, its round one more) under the
+guard, and it waits in INIT, taking nothing, until the peer tells the same round. A teardown never drains its queue pairs: an end in order
 has its SENDs' completions before it lets go of its leases (design/bridge-dataflow.md#ends), and the teardown waits on
 nothing the move flushes, so a provider that flushes fewer completions than a pair held (on the pair, the bounded flush
 of mesh 2e02569a took 687 of 688 on the M5, 687 of 687 on the Mini) holds no teardown. A destruction the driver refuses
@@ -427,13 +432,14 @@ is logged and its handle let go; its queue pair stays in the error state, so not
 registrations, protection domain and context go at its retirement, on the port's queue (`down_device`), each kept where
 its release fails.
 
-On the loopback fabric (loopverbs flushes at the move, as the Apple provider is expected to; metal-microbench
-output_data/dead-history-20261017/scratch-rewrite, a line of 4 and a torus of 6 at mesh 2594a087): 20 runs of the
+On the loopback fabric (loopverbs flushes at the move to the error state, as the Apple provider is expected to, and a
+reset drops what was delivered to the pair before it; metal-microbench output_data/dead-history-20261017/scratch-rewrite,
+a line of 4 and a torus of 6 at mesh 2594a087, and again at mesh 0b330488 with every lease's pair made again in place): 20 runs of the
 `destroy` reading on the host path and 20 on the walk, every rank's ncclCommDestroy right after its last group: 0
 landings cancelled, every program and relay ended in order (80 and 80 a path on the line, 120 and 120 on the torus), 0
 failed; `kill` (a client killed mid-call) 3 of 3 and 5 of 5 survivor calls failed as values on each path; `kill ...
 bridge` (a bridge stopped under ranks waiting) 4 of 4 and 6 of 6; `kill ... binary` (a node's binary replaced by rename
 under a call) 4 of 4 and 6 of 6, the bridge started again and the map converged, and the NCCL matrix 48 of 48 and 96 of
 96 after; `sigterm` in eight states, 32 of 32 readings with every bridge exited 0, no region left and no queue pair held
-in the fabric. On hardware it is unread: the pair's first program's end in order (its "ended in order" lines, and
+in the fabric (24 of 24 at mesh 0b330488). On hardware it is unread: the pair's first program's end in order (its "ended in order" lines, and
 nothing in the kernel log) is the reading.

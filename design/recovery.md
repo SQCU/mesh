@@ -23,7 +23,7 @@ Recovery is everything between a loss and the mesh doing its work again, at ever
 | client (libmesh) | its bridge's exit watched: its own words cancelled and its starts failed (ESRCH) when the bridge process exits | `rdma/mesh-dataflow.c` `mesh_watch` |
 | rank | no detector of its own: its bridge's cancel ends its waits, and a failed window ends the call | metal-microbench `mesh_rank.m` |
 | driver (calls) | a call is a request to resident members, on the bridge's map taken at its start; a revoke is a cancel request; shrink and extend run on the bridges' map | metal-microbench `tools/mesh/grid.py`, `docs/elastic.md` |
-| collectives library (sessions) | no clock of its own: the bridge's events end its waits (design/bridge-and-ipc.md#control); a session finished (Finalize), closed in order (Destroy) or as an abort (Abort, Revoke, a failure), and opened again | `rdma/nccl-mesh.c`, `rdma/NCCL.md` |
+| collectives library (sessions) | no clock of its own: the bridge's events end its waits (design/bridge-and-ipc.md#programs); a session finished (Finalize), closed in order (Destroy) or as an abort (Abort, Revoke, a failure), and opened again | `rdma/nccl-mesh.c`, `rdma/NCCL.md` |
 | port (physical) | a fabric port whose cable link is up with no RDMA peer: bounced at each keeper pass unless its link is the node's only one, logged | `bin/mesh-fabric-init.sh` (every keeper pass) |
 
 ## Mandates
@@ -119,7 +119,7 @@ entry that carries a code (the peer's program on that lease lost), a client's pr
 retired as an abort), and a revoke or cancel (the program's slot retired). An error on a lease's queue pair is that
 lease's program's: the program fails as a value, its other leases told the code. An error on the keepalive's queue
 pair, or a completion queue's poll failing, is the link's loss. A loss cancels the words past their landed counts of
-every program it fails whose client still holds its slot (`#loss`), ending every wait on them. Where the bridge process
+every program it fails (`#loss`), ending every wait on them. Where the bridge process
 itself exits, each client process's own watch of it (mesh-dataflow.c `mesh_watch`, EVFILT_PROC on the bridge's pid)
 cancels that process's words, fails its programs' statuses (ESRCH) and wakes its waits, so no GPU program spins on a
 word nobody can store.
@@ -136,29 +136,34 @@ pair 0 keep its Thunderbolt from going quiet under a program, and detect nothing
 
 A link's loss (mesh-flow.c `port_lost`) fails every program holding one of its leases: the link down and every lease
 word `MESH_LEASE_DOWN`; each such program failed as a value naming the peer (ECONNRESET where the peer said farewell,
-else the loss's code), its words past their landed counts cancelled where its client still holds its slot, and its
-leases on other links made again with the code told their peers, whose programs fail alike; the link's queue pairs
-moved to the error state and destroyed and its two completion queues destroyed, under the port's guard
+else the loss's code), its words past their landed counts cancelled whether or not its client still holds its slot
+(its rows stay the program's until it is freed), and its leases on other links made again in place with the code told
+their peers, whose programs fail alike; the link's queue pairs, all of them together, moved to the error state and
+destroyed and its two completion queues destroyed, under the port's guard
 (`link_unmake`); its request channels ended (`requests_lost`), and the relays and meetings riding them with them. A
 loss of the port itself (link off, interface detached) also retires the port's device (registrations, protection domain
 and context) on its queue at the port's next turn, which opens it again, as a new bridge would open it, once its link
-is on. A queue pair that fails to be made or connected at the link's pairing, or a lease that fails to be made again,
-is the link's loss with the device kept: the port says HELLO again at its next turn, on the same context (Risk 7). A
-device that fails otherwise with its link active is retired and opened again at once (`port_opened`).
+is on. A verbs call that fails while a queue pair is made at the link's pairing, made again in place or connected is
+the link's loss with the port's device retired too (closed, and opened again with the window registered on it before
+the port pairs again); a PAIRS whose count is under two (ENOSPC) loses the link with the device kept. A device that
+fails otherwise with its link active is retired and opened again at once (`port_opened`).
 
 A lease's own failure (an error completion or a refused post on its queue pair) is its program's: the program fails as
-a value (domain 2, naming this node), every lease it holds is made again and the code told to the peer (PAIRS), which
-fails the peer's program on that lease; the link stays paired and its other leases run on. A lease that fails with no
-program on it is made again and told with the code. Every queue pair a link's loss, a lease's remaking or the stop
-destroys is moved to the error state and then destroyed, under the port's guard (mesh-verbs.h `pair_destroy`): nothing
-waits on what the move flushes, and a destruction the driver refuses is logged and its handle let go.
+a value (domain 2, naming this node), every lease it holds is made again in place and the code told to the peer
+(PAIRS), which fails the peer's program on that lease; the link stays paired and its other leases run on. A lease that
+fails with no program on it is made again in place and told with the code. A lease's pair is never destroyed while its
+link is up: it is made again in place (mesh-verbs.h `pair_reset`: the error state, which flushes its posted receives and
+SENDs, then the reset state and INIT, its number kept and its round one more), and waits in INIT, taking nothing, until
+the peer tells the same round. The link's queue pairs are destroyed only all together, at its loss or the stop, each
+moved to the error state and then destroyed under the port's guard (mesh-verbs.h `pair_destroy`): nothing waits on what
+the move flushes, and a destruction the driver refuses is logged and its handle let go.
 
 ### close
 
 A program that ends in order is not a failure: `mesh_detach` (libnccl-mesh's `ncclCommDestroy`, after
 `ncclCommFinalize` finished its GPU work) leaves its slot to its bridge, which posts every cell the program released and
 takes those SENDs' completions (RDMA's own report that they were sent), then lets go of each lease: its queue pair made
-again and told to the peer with code 0 and `sent`, the SENDs completed on its making before. The bridge holds the
+again in place and told to the peer with code 0 and `sent`, the SENDs completed on its making before. The bridge holds the
 program's rows until then, and the client waits on none of it. The peer's program holding that lease lets go of it once
 its ring has landed `sent` (mesh-flow.c `peer_released`): its status toward that destination stopped, ECONNRESET naming
 the far node, its words kept, so the client reads the end before its next group (a held session fails that group as a
@@ -254,8 +259,8 @@ with no peer (a HELLO lost on its link has no other event; a paced emission, etc
 socket the two ends' HELLOs pair the link: each end makes the link's two completion queues and its queue pairs (as many
 as its device allows, at most 17: 10 on TB5, the keepalive's and nine leases) and tells the peer their numbers (PAIRS,
 TN3205's one out-of-band step); at the peer's PAIRS each pair is joined to the peer's of its index, the leases are free,
-and the link is up. Those queue pairs live for the link's life; a lease's is made again only where its holder lets go
-of it or fails, the peer told its new number. A port whose device failed with its link active is retired and opened
+and the link is up. Those queue pairs live for the link's life; a lease's is made again in place (reset, its number
+kept) only where its holder lets go of it or fails, the peer told its new round. A port whose device failed with its link active is retired and opened
 again at once, and where that fails too, at the next of those events. A connection that never completed ends at the
 kernel's own connect error.
 
@@ -320,8 +325,8 @@ with its duration and count, goes to `fabric.log` and the unified log, and `mesh
 
 1. **Immediate re-pairing and the September panic.** mesh be9731b (2026-09-28): "A lost session waits 3 s before
    pairing again: failed completions, queue-pair teardown and immediate re-pairing preceded the Sep 5 kernel panic."
-   A paired link lost pairs again at once; a link's loss, a lease's remaking and the stop move their queue pairs to the
-   error state and then destroy them under the port's guard; the cause of the panic itself is not established.
+   A paired link lost pairs again at once; a link's loss and the stop move all its queue pairs to the error state and
+   then destroy them under the port's guard; the cause of the panic itself is not established.
 2. **Neighbour cache after a replug.** RDMA-RULES.md: after any replug both sides fail RTR unless the neighbour cache
    is warmed. Not done; the hellos on the link may warm it; a pull may show otherwise.
 3. **Arrival counts reset by their last arriver** (mb docs/kernels.md#decode-attention, 2026-10-08): the last-arrival
@@ -333,29 +338,26 @@ with its duration and count, goes to `fabric.log` and the unified log, and `mesh
    provider flushes fewer completions than a pair held: 687 of 688 on the M5 at mesh 2e02569a), so no provider holds a
    port's queue at a teardown; whether a destruction right after the move leaves the device clean on hardware is
    unread, and a destruction the driver refuses is logged and its handle let go. The guard's pause of a port's progress
-   threads during a lease's remaking is unmeasured. Integration reads both first (RDMA-KERNEL-RECOVERY.md).
+   threads while a lease's pair is made again in place is unmeasured. Integration reads both first
+   (RDMA-KERNEL-RECOVERY.md).
 5. **A peer silent with its link up.** A peer whose client never runs its side, or whose bridge is stopped by a signal
    with its link and socket up, is no event: the waits on it end at the caller's revoke (`#detection`).
-6. **Posts across another queue pair's teardown.** The M5 bridge's crash of 2026-10-17 (RDMA-KERNEL-RECOVERY.md
-   "October 16 and 17") was a post on a long-lived queue pair 1.5 s after another queue pair of its device was
-   destroyed. A link's keepalive pair lives for the link's life, and its lease pairs are made again one at a time while
-   the others run, so a post after another queue pair's destruction is the ordinary course; the port's guard keeps posts
-   and verbs changes apart in time alone. Unread on hardware.
-7. **A context that refuses every connection.** A queue pair refused at the link's pairing loses the link with the
-   device kept, and the port pairs again on the same context. After the Mac mini's kernel panic of 2026-10-17 its
-   device refused every INIT to RTR until a new process opened it (RDMA-KERNEL-RECOVERY.md); such a context would refuse
-   each pairing in turn, the device retired only at a link-off or detach, or where opening or querying it fails.
+6. **A pair made again in place while the link's others run.** The M5 bridge's crash of 2026-10-17
+   (RDMA-KERNEL-RECOVERY.md "October 16 and 17") was a post on a long-lived queue pair 1.5 s after another queue pair of
+   its device was destroyed. No queue pair of a link is destroyed while the link is up: a lease's pair is made again in
+   place (mesh-verbs.h `pair_reset`: the error state, the reset state, INIT, its number kept) while the keepalive pair
+   and the other leases run, and the link's pairs are destroyed only together, at its loss or the stop. Whether Apple's
+   provider takes a reset and a reconnection of one pair while the others post is unread on hardware.
+7. **A context that refuses every connection.** After the Mac mini's kernel panic of 2026-10-17 its device refused
+   every INIT to RTR until a new process opened it (RDMA-KERNEL-RECOVERY.md). A verbs call refused while a pair is made,
+   made again in place or connected loses the link with the port's device retired: closed, and opened again by the same
+   process before the port pairs again. Whether a context opened again within the bridge's process connects where the
+   refusing one did not is unread on hardware.
 8. **An orderly end toward a program that never received.** A program ending in order waits for its SENDs'
    completions, and TB5 holds a SEND until the peer's receive is posted. A peer that agreed and never attached its
    receives (its start refused before attaching, its process gone between the agreement and its start) tells nothing on
    the lease, so the ending program holds its leases and its slot until the link's loss or the stop
    (design/bridge-dataflow.md#waits-and-their-ends); the root's plans meanwhile skip those leases.
-9. **A revoked session's own words.** The bridge cancels a failed program's words only while its client holds its slot
-   (mesh-flow.c `program_fail`, `owned`), and a revoke or a cancel vacates the slot first (mesh-dataflow.c
-   `mesh_retire`). A revoked or cancelled session's GPU waits on landings that will not come then end at nothing, and
-   `ncclCommDestroy`'s `drain`, or the next group's close of a cancelled session, waits on them; nccl-mesh.c's
-   `ncclCommRevoke` and Q16 state that the bridge cancels them. Found in review of mesh 2594a087, not run: the loopback
-   readings revoke no session under a GPU wait.
 
 ## Failures by kind and topology
 
@@ -378,7 +380,7 @@ of several queues (a lease each, up to four a destination).
 | F15 | a cable moved to another port or peer | the old port's programs fail; the new port pairs with whatever node it reaches |
 | F18 | the driver's own node fails | the stream stops (one driver) |
 | F19 | a node of several cables stops in a mesh whose survivors hold a cycle | its last record ends at the first bridge that has heard it (`#records`) |
-| F20 | a lease's queue pair fails (an error completion, a refused post) | its program's alone (`#loss`): the program fails, the lease is made again and its code told, the link and its other leases run on; the keepalive pair's failure, or a completion queue's, loses the link |
+| F20 | a lease's queue pair fails (an error completion, a refused post) | its program's alone (`#loss`): the program fails, the lease is made again in place and its code told, the link and its other leases run on; the keepalive pair's failure, or a completion queue's, loses the link; a verbs call refused while a pair is made again or connected loses the link and retires its device (Risk 7) |
 | F21 | a device refuses the window's registration | logged with the extent; the port turns again at its next memory-pressure change or link event (`#registration`) |
 | F22 | two ends of a routed pair whose maps differ | one route, the root's (`#first`); a relay on it with no paired cable to a neighbour refuses (EHOSTUNREACH), and every member's agreement fails as a value |
 | F23 | members' programs of one execution made from maps a change apart | the session's first position carries each rank's digest: the session fails at once on every member ("the members' maps differ", `#first`) |
@@ -392,4 +394,4 @@ of several queues (a lease each, up to four a destination).
 1. The device-state rules and the immediate re-pairing (Risks 1, 2, 4, 6, 7) checked with a pull and replug on
    hardware, once runtime is allowed.
 2. Q2 and Q19 decided, or dropped; Q11 and F1-F15 run where they can be.
-3. Risks 8 and 9 decided: the waits they leave end at nothing a caller does.
+3. Risk 8 decided: the wait it leaves ends at nothing a caller does.
