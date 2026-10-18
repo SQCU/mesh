@@ -1,5 +1,5 @@
 #!/usr/bin/env mesh-python
-import os, sys, json, math, struct, zipfile, shutil, subprocess, argparse, tempfile, time
+import os, sys, json, math, signal, struct, zipfile, shutil, subprocess, argparse, tempfile, time
 
 EYE = 40.0
 BACK = 176.0
@@ -300,22 +300,11 @@ def write_base_cfg(path, mapname, w, h):
     for p in HUD_OFF:
         L.append('hud_panel_%s 0' % p)
     L.append('map %s' % mapname)
-
-    L.append('alias js_poll "exec js_step.cfg; defer 1 js_poll"')
-    L.append('defer 6 js_poll')
     open(path, 'w').write('\n'.join(L) + '\n')
 
-def build_step(shots, step):
-    L = ['alias js_poll ""', 'togglemenu 0', 'god', 'noclip']
-    t = 1.5
-    for name in shots:
-        L.append('defer %.1f "impulse 143"' % t)
-        L.append('defer %.1f "togglemenu 0"' % (t + 0.4))
-        L.append('defer %.1f "screenshot %s.png"' % (t + step - 0.4, name))
-        t += step
-    L.append('defer %.1f "echo JOINSHOT_DONE"' % (t + 0.2))
-    L.append('defer %.1f "quit"' % (t + 1.0))
-    return '\n'.join(L) + '\n', t + 2.0
+def shot_commands(name, frames):
+    return ('impulse 143\ntogglemenu 0\n' + 'wait\n' * frames
+            + 'screenshot %s.png\necho JOINSHOT_SHOT %s\n' % (name, name))
 
 def main():
     ap = argparse.ArgumentParser()
@@ -323,9 +312,8 @@ def main():
     ap.add_argument('--out', default=None)
     ap.add_argument('--width', type=int, default=320)
     ap.add_argument('--height', type=int, default=200)
-    ap.add_argument('--settle', type=float, default=300.0,
-                    help='max seconds to wait for the player to spawn (map load; raise under load)')
-    ap.add_argument('--step', type=float, default=2.6, help='seconds between shots')
+    ap.add_argument('--settle-frames', type=int,
+                    help='rendered frames between a camera move and its screenshot')
     ap.add_argument('--xonotic', default=os.path.expanduser('~/dox/xonotic/Xonotic'))
     ap.add_argument('--keep', action='store_true', help='keep the temp run dir')
     ap.add_argument('--regions', action='store_true',
@@ -373,6 +361,8 @@ def main():
         frame_visual_measures(out, shots)
         return 0
 
+    if args.settle_frames is None:
+        ap.error('--settle-frames is required to run the engine')
     bin_ = os.environ.get('JOINSHOT_CLIENT') or os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         '..', '..', 'darkplaces-work', 'darkplaces-sdl')
@@ -402,13 +392,8 @@ def main():
                 zout.writestr(n, zin.read(n))
         zout.writestr('maps/%s.ent' % mapname, ent)
     write_base_cfg(os.path.join(rundir, 'data', 'joinshot.cfg'), mapname, args.width, args.height)
-    step_path = os.path.join(rundir, 'data', 'js_step.cfg')
-    open(step_path, 'w').write('')
-    step_seq, shot_budget = build_step(shots, args.step)
 
     log = os.path.join(rundir, 'run.log')
-    hard = int(args.settle + shot_budget + 30)
-
     cmd = [bin_, '-xonotic', '-basedir', args.xonotic, '-userdir', rundir, '-nosound', '-noconfig',
            '+vid_width', str(args.width), '+vid_height', str(args.height),
            '+vid_fullscreen', '0',
@@ -419,62 +404,39 @@ def main():
         env['SDL_VIDEODRIVER'] = 'dummy'
     print('booting client (software rasterizer, windowless); waiting for spawn...')
     t0 = time.time()
-    lf = open(log, 'w')
-    proc = subprocess.Popen(cmd, env=env, stdout=lf, stderr=subprocess.STDOUT,
-                            preexec_fn=os.setsid)
+    proc = subprocess.Popen(cmd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, preexec_fn=os.setsid)
 
-    def logtext():
+    def send(text):
         try:
-            return open(log, 'r', errors='replace').read()
-        except OSError:
-            return ''
+            for line in text.splitlines():
+                proc.stdin.write((line + '\n').encode())
+                proc.stdin.flush()
+        except BrokenPipeError:
+            pass
 
-    def terminate():
-        import signal as _sig
-        try:
-            os.killpg(os.getpgid(proc.pid), _sig.SIGTERM)
-        except Exception as error:
-            print(json.dumps({"event":"client_signal_error","pid":proc.pid,"signal":int(_sig.SIGTERM),"error":f"{type(error).__name__}: {error}"}), file=sys.stderr)
-        for _ in range(120):
-            if proc.poll() is not None:
-                break
-            time.sleep(0.25)
+    pending = list(shots)
+    joined = armed = False
+    try:
+        with open(log, 'wb') as lf:
+            for raw in proc.stdout:
+                lf.write(raw)
+                line = raw.decode('latin-1')
+                if not armed and 'is now playing' in line:
+                    armed = True
+                    print('spawned after %.0fs; capturing %d frames...' % (time.time() - t0, len(shots)))
+                    send('togglemenu 0\ngod\nnoclip\n'
+                         + (shot_commands(pending[0], args.settle_frames) if pending else 'quit\n'))
+                elif not armed and not joined and 'connected' in line:
+                    joined = True
+                    send('togglemenu 0\ncmd join\n')
+                elif armed and line.lstrip().startswith('JOINSHOT_SHOT ') and pending:
+                    pending.pop(0)
+                    send(shot_commands(pending[0], args.settle_frames) if pending else 'quit\n')
+    finally:
         if proc.poll() is None:
-            print(json.dumps({"event":"client_termination_pending","pid":proc.pid}), file=sys.stderr)
-
-    armed = False
-    join_nudged_at = None
-    while True:
-        if proc.poll() is not None:
-            break
-        txt = logtext()
-
-        if (not armed and join_nudged_at is None and 'is now playing' not in txt
-                and ('changed name to' in txt or ') connected' in txt or ' connected\x1b' in txt
-                     or 'connected' in txt)):
-            join_nudged_at = time.time()
-            open(step_path, 'w').write('togglemenu 0\ncmd join\n')
-        if join_nudged_at and not armed and time.time() - join_nudged_at > 3:
-            open(step_path, 'w').write('')
-            join_nudged_at = -1
-        if not armed and 'is now playing' in txt:
-            armed = True
-            open(step_path, 'w').write(step_seq)
-            print('spawned after %.0fs; capturing %d frames...' % (time.time() - t0, len(shots)))
-        if armed and 'JOINSHOT_DONE' in txt:
-            for _ in range(30):
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-            break
-        if not armed and time.time() - t0 > args.settle:
-            print('ERROR: player never spawned within %.0fs (map load too slow?)' % args.settle)
-            break
-        if time.time() - t0 > hard:
-            print('ERROR: hard timeout'); break
-        time.sleep(0.5)
-    terminate()
-    lf.close()
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait()
     print('engine ran %.0fs' % (time.time() - t0))
 
     found = 0

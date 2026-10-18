@@ -49,12 +49,14 @@ ordered camera list. `joinshot.py`:
 3. Boots the client, joins as a player, `god; noclip`, then fires
    `impulse 143` + `screenshot <name>.png` once per camera.
 
-Because first-map-load time on a shared machine is wildly variable, the driver does
-**not** guess a delay: the boot config starts a 1 Hz loop that re-execs an initially
-empty `js_step.cfg`, and the Python side writes the real shot sequence into it the
-instant the log shows the player spawned (`is now playing`). The join request is
-retried on a deliberately slow 6 s cadence — hammering `cmd join` faster than a
-spawn completes just resets the player back to observer.
+The driver speaks to the client through its console on stdin and reads the client's
+console on stdout; every step waits on a line, never on a delay. The first line that
+shows a connection sends `cmd join` once; `is now playing` sends `god; noclip` and the
+first camera. Each camera is `impulse 143`, `--settle-frames` console `wait`s (each
+defers the rest of the commands by one rendered frame), `screenshot <name>.png` and
+`echo JOINSHOT_SHOT <name>`; that echo sends the next camera, and the last one sends
+`quit`. The driver then waits for the client to exit, however long the first map load
+takes.
 
 ### Camera geometry per join kind
 
@@ -70,8 +72,8 @@ Frames are named `j<NN>_<kind>_<a|b>_<through|approach|landing>.png`.
 ## Usage
 
 ```
-tools/joinshot.py <fused_map_dir> [--out DIR] [--width W] [--height H]
-                  [--step SEC] [--settle SEC] [--xonotic DIR] [--keep]
+tools/joinshot.py <fused_map_dir> --settle-frames N [--out DIR] [--width W] [--height H]
+                  [--xonotic DIR] [--keep]
 ```
 
 * `<fused_map_dir>` — a `mapfuse.py` output dir containing `fused.pk3` and
@@ -79,15 +81,15 @@ tools/joinshot.py <fused_map_dir> [--out DIR] [--width W] [--height H]
 * `--out` — where PNGs land (default `<dir>/joinshots`).
 * `--width/--height` — framebuffer size (default 320x200; keep it small, this is CPU
   rasterization).
-* `--settle` — max seconds to wait for the player to spawn (default 300; **raise it
-  when the box is under load** — a full first-map-load of a 3-way fusion can take a
-  few minutes when the CPU is contended).
+* `--settle-frames` — rendered frames between a camera move and its screenshot (the
+  impulse reaches the local server and the moved view is drawn); required whenever the
+  engine runs.
 * `--keep` — keep the temp run dir (with `run.log`) for debugging.
 
 Example:
 
 ```
-tools/joinshot.py /tmp/fuse_v7/data/maps --out /tmp/fuse_v7/data/maps/joinshots
+tools/joinshot.py /tmp/fuse_v7/data/maps --settle-frames 4 --out /tmp/fuse_v7/data/maps/joinshots
 ```
 
 ## Sample output
@@ -105,8 +107,7 @@ survive in a corner; it does not obstruct the geometry the frames are for.
   pixel-accurate beauty shot.
 * **Slow, and load-sensitive.** Each run boots a full client and loads every texture
   of every fused sub-map once. On a busy shared machine expect single-digit minutes
-  per run; if `--settle` is too low for the current load you get a loud
-  `player never spawned` error, not a silent black frame — raise `--settle`.
+  per run; the driver waits for the spawn as long as the load takes.
 * **Camera points are the join endpoints from `fused.joins.json`.** If mapfuse placed
   an endpoint awkwardly (e.g. a teleporter pad tight against a wall), the approach
   frame will show that wall — which is exactly the kind of thing this tool exists to
