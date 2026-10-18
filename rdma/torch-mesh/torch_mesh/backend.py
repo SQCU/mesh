@@ -7,13 +7,14 @@ work is ordered with torch's own and the call returns at once (an async op issue
 completes it on torch's stream).  CPU tensors take the host path, complete where the call returns.  A non-contiguous
 tensor is staged through a contiguous copy.
 
-One form a collective.  An all-gather and a reduce-scatter are the V calls (ncclMeshAllGatherV, ncclMeshReduceScatterV;
-the library takes equal segments as its equal program), a list that is not the pieces of one tensor staged through one
-flat tensor.  all_to_all, all_to_all_single, gather, scatter, send and recv are one exchange: each peer's tensor sent and
-each peer's received in one group, nothing to or from a peer that has none (NCCL's own lowering of its all-to-all,
-gather and scatter; a gather and a scatter of any sizes the rooted V, MPI's Gatherv and Scatterv).  The counted
-all-to-all (all_to_all_counted) is the library's own call; the partials merge (merge_partials) is an all-reduce, reduce
-or V reduce-scatter by the library's partials operator.
+One form a collective, the library's V call where it has one (the library takes equal segments as its equal
+program): an all-gather and a reduce-scatter are ncclMeshAllGatherV and ncclMeshReduceScatterV; all_to_all,
+all_to_all_single, gather and scatter are ncclMeshAlltoAllV, MPI_Alltoallv with its counts on the host (a gather and a
+scatter of any sizes the rooted V, MPI's Gatherv and Scatterv: every count 0 but toward or from the root, as NCCL's
+gather and scatter are its forms); a list that is not the pieces of one tensor is staged through one flat tensor
+(packed).  send and recv are the library's point to point.  The counted all-to-all (all_to_all_counted) is the
+library's own call; the partials merge (merge_partials) is an all-reduce, reduce or V reduce-scatter by the library's
+partials operator.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
 store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; it takes no pg_options.
@@ -34,7 +35,7 @@ ffi, LIB = mesh.ffi, mesh.lib
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
 # a call's kind (_stream.mm Kind)
-ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, EXCHANGE, COUNTED = range(7)
+ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, COUNTED = range(9)
 
 
 def check(result):
@@ -70,6 +71,21 @@ def span(tensors):
             return None
         at += t.numel()
     return first.as_strided((at - first.storage_offset(),), (1,))
+
+
+def packed(tensors, read):
+    """The one tensor `tensors` lie in end to end (span), else a flat one they are copied into where it is `read`, with
+    the copy back to them where it is written: (it, that copy or None); (None, None) where there are none."""
+    tensors = [t for t in tensors if t is not None]
+    if not tensors:
+        return None, None
+    whole = span(tensors)
+    if whole is not None:
+        return whole, None
+    whole = blank((sum(t.numel() for t in tensors),), tensors[0].dtype, tensors[0].device)
+    if read:
+        return torch.cat([t.detach().reshape(-1) for t in tensors], out=whole), None
+    return whole, lambda: [t.copy_(p.view(t.shape)) for t, p in zip(tensors, whole.split([t.numel() for t in tensors]))]
 
 
 def asynchronous(opts):
@@ -183,11 +199,15 @@ class ProcessGroupMesh(dist.ProcessGroup):
             _register_work(registered, work)
         return work
 
-    def _one(self, peer, tensor):
-        """An exchange's list with `tensor` to or from `peer` alone."""
-        made = [None] * self._size
-        made[peer] = tensor
-        return made
+    def _alltoall(self, sends, receives, result, opts):
+        """MPI_Alltoallv (ncclMeshAlltoAllV): sends[q] to rank q and receives[q] from it, None moving none."""
+        (send, _), (receive, back) = packed(sends, True), packed(receives, False)
+        counts = [0 if t is None else t.numel() for t in (*sends, *receives)]
+        return self._issue([(ALLTOALL, [send], [receive], counts, 0, 0)], result, asynchronous(opts), [back] if back else ())
+
+    def _rooted(self, root, tensor):
+        """A rooted all-to-all's list: `tensor` to or from `root` alone."""
+        return [tensor if q == root else None for q in range(self._size)]
 
     def start_coalescing(self, device):
         self._pending = []
@@ -224,15 +244,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def allgather(self, outputs, inputs, opts=None):
         """Each input gathered into its list of outputs, of any sizes (MPI_Allgatherv in torch's spelling): into the
         outputs in place where they lie end to end in one contiguous tensor (a split's pieces: torch_mesh.partition's
-        allgatherv), else into one flat tensor copied out to them."""
-        calls, backs = [], []
-        for out, i in zip(outputs, inputs):
-            sizes, whole = [t.numel() for t in out], span(out)
-            if whole is None:
-                whole = blank((sum(sizes),), i.dtype, i.device)
-                backs.append(lambda out=out, whole=whole, sizes=sizes: [t.copy_(p.view(t.shape)) for t, p in zip(out, whole.split(sizes))])
-            calls.append((ALLGATHER, [i], [whole], sizes, 0, 0))
-        return self._issue(calls, outputs, asynchronous(opts), backs)
+        allgatherv), else into one flat tensor copied out to them (packed)."""
+        wholes = [packed(out, False) for out in outputs]
+        return self._issue([(ALLGATHER, [i], [whole], [t.numel() for t in out], 0, 0) for (whole, _), out, i in zip(wholes, outputs, inputs)],
+                           outputs, asynchronous(opts), [back for _, back in wholes if back])
 
     def reduce_scatter_single_coalesced(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
         return self._issue([(REDUCE_SCATTER, [i], [o], [o.numel()] * self._size, op(opts.reduceOp), 0) for o, i in zip(outputs, inputs)],
@@ -246,39 +261,33 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def reduce_scatter(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
         """Each list of inputs reduced, rank r's block left at rank r, of any sizes (MPI_Reduce_scatter in torch's
         spelling): read in place where the inputs lie end to end in one contiguous tensor (a split's pieces:
-        torch_mesh.partition's reduce_scatterv), else from one flat tensor they are copied into."""
-        calls = []
-        for o, parts in zip(outputs, inputs):
-            sizes, whole = [x.numel() for x in parts], span(parts)
-            if whole is None:
-                whole = torch.cat([x.detach().reshape(-1) for x in parts], out=blank((sum(sizes),), parts[0].dtype, parts[0].device))
-            calls.append((REDUCE_SCATTER, [whole], [o], sizes, op(opts.reduceOp), 0))
-        return self._issue(calls, outputs, asynchronous(opts))
+        torch_mesh.partition's reduce_scatterv), else from one flat tensor they are copied into (packed)."""
+        return self._issue([(REDUCE_SCATTER, [packed(parts, True)[0]], [o], [x.numel() for x in parts], op(opts.reduceOp), 0)
+                            for o, parts in zip(outputs, inputs)], outputs, asynchronous(opts))
 
     def alltoall(self, outputs, inputs, opts=None):
-        return self._issue([(EXCHANGE, list(inputs), list(outputs), [], 0, 0)], outputs, asynchronous(opts))
+        return self._alltoall(inputs, outputs, outputs, opts)
 
     def all_to_all_single(self, output, input, output_split_sizes, input_split_sizes, opts=None):
-        def rows(t, sizes):
-            return list(sizes) or [t.shape[0] // self._size] * self._size
-        return self._issue([(EXCHANGE, list(input.split(rows(input, input_split_sizes))), list(output.split(rows(output, output_split_sizes))),
-                             [], 0, 0)], output, asynchronous(opts))
+        def pieces(t, sizes):
+            return list(t.split(list(sizes) or [t.shape[0] // self._size] * self._size))
+        return self._alltoall(pieces(input, input_split_sizes), pieces(output, output_split_sizes), output, opts)
 
     def gather(self, outputs, inputs, opts=dist.GatherOptions()):
-        """Every rank's input to the root's list of outputs, any sizes (MPI_Gatherv): the exchange."""
+        """Every rank's input to the root's list of outputs, any sizes (MPI_Gatherv): the rooted all-to-all."""
         receives = list(outputs[0]) if self._rank == opts.rootRank else [None] * self._size
-        return self._issue([(EXCHANGE, self._one(opts.rootRank, inputs[0]), receives, [], 0, 0)], outputs, asynchronous(opts))
+        return self._alltoall(self._rooted(opts.rootRank, inputs[0]), receives, outputs, opts)
 
     def scatter(self, outputs, inputs, opts=dist.ScatterOptions()):
-        """The root's list of inputs, one to each rank, any sizes (MPI_Scatterv): the exchange."""
+        """The root's list of inputs, one to each rank, any sizes (MPI_Scatterv): the rooted all-to-all."""
         sends = list(inputs[0]) if self._rank == opts.rootRank else [None] * self._size
-        return self._issue([(EXCHANGE, sends, self._one(opts.rootRank, outputs[0]), [], 0, 0)], outputs, asynchronous(opts))
+        return self._alltoall(sends, self._rooted(opts.rootRank, outputs[0]), outputs, opts)
 
     def send(self, tensors, dst, tag):
-        return self._issue([(EXCHANGE, self._one(dst, t), [None] * self._size, [], 0, 0) for t in tensors], tensors, True)
+        return self._issue([(SEND, [t], [], [], 0, dst) for t in tensors], tensors, True)
 
     def recv(self, tensors, src, tag):
-        return self._issue([(EXCHANGE, [None] * self._size, self._one(src, t), [], 0, 0) for t in tensors], tensors, True)
+        return self._issue([(RECV, [], [t], [], 0, src) for t in tensors], tensors, True)
 
     def all_to_all_counted(self, out, input, counts, sends, receives, host, landed):
         """MPI_Alltoallv whose counts the GPU wrote (nccl.h ncclMeshAlltoAllCounted; torch_mesh.all_to_all_counted):

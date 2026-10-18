@@ -7,11 +7,11 @@ run on the host path.
 Every collective takes one path: a group of calls issued by `_stream.mm`'s `issue` (the backend's methods, torch's
 functional collectives and the library's own calls alike), each call one kind of the library's set. An all-gather and a
 reduce-scatter are always the V calls (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`; the library takes equal
-segments as its equal program). `all_to_all`, `all_to_all_single`, `gather`, `scatter`, `send` and `recv` are one
-exchange, each peer's tensor sent and received in one group and nothing to or from a peer that has none (NCCL's own
-lowering of its all-to-all, gather and scatter; a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
-`Scatterv`). The counted all-to-all is the library's call of its own; the partials merge is a reduction by the library's
-partials operator.
+segments as its equal program). `all_to_all`, `all_to_all_single`, `gather` and `scatter` are `ncclMeshAlltoAllV`,
+MPI_Alltoallv with its counts on the host (a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
+`Scatterv`: every count 0 but toward or from the root, as NCCL's gather and scatter are its forms); a list that is not
+the pieces of one tensor goes through one flat tensor. `send` and `recv` are the library's point to point. The counted
+all-to-all is the library's call of its own; the partials merge is a reduction by the library's partials operator.
 
 ## Install
 
@@ -69,8 +69,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | broadcast, reduce | |
 | all_gather (list and into a tensor) | a list of unequal sizes: one MPI_Allgatherv (Uneven nodes) |
 | reduce_scatter (list and tensor) | a list of unequal sizes: one MPI_Reduce_scatter (Uneven nodes) |
-| gather, scatter | any per-rank sizes: the rooted V (the exchange) |
-| all_to_all, all_to_all_single | uneven splits, empty inputs (the exchange) |
+| gather, scatter | any per-rank sizes: the rooted V (`ncclMeshAlltoAllV`) |
+| all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
 | functional collectives under torch.compile | one graph; `backend="mesh"` batches its collectives (Performance) |

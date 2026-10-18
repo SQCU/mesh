@@ -48,9 +48,10 @@ all-gathers the blocks and packs the valid elements into the logical tensor (tor
 the parts); Replicate to Shard takes this rank's valid elements into its block (torch_mesh::unpack, then its static
 block); Partial to Shard unpacks with the identity and reduce-scatters the blocks; Shard to Partial places this rank's
 valid elements among zeros; Shard(d) to Shard(d') goes through Replicate; Shard's scatter from a source rank is the
-rooted V (the backend's exchange, MPI_Scatterv).  Context parallelism's head-tail split keeps each half at its capacity:
-rank r's block is its head's valid positions, padding, its tail's, padding (context_parallel_buffers,
-context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its ring, called in their place).
+rooted V (the backend's scatter, MPI_Scatterv through ncclMeshAlltoAllV).  Context parallelism's head-tail split keeps
+each half at its capacity: rank r's block is its head's valid positions, padding, its tail's, padding
+(context_parallel_buffers, context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its
+ring, called in their place).
 The ring is split-KV attention [Dao et al. 2023, Flash-Decoding]: every rank's query block gathered (one Allgatherv),
 each block's attention over this rank's own keys and values its partials (the row's logsumexp and output), and the
 partials reduce-scattered by the library's partials operator (ncclMeshRedOpCreatePartials in ncclMeshReduceScatterV),
