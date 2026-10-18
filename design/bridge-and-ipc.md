@@ -6,241 +6,132 @@ Each node runs one bridge, `rdma/mesh-flow`, as the admin user's launchd agent `
 signals it. Its one operand is its configuration (etc/bridge/README.md), and it reads no environment: what it serves is
 found on the node, and what a program needs of it is asked for by the program.
 
-The bridge holds its node's RDMA for the node's clients. Its work, and nothing else:
+The bridge's work, and nothing else:
 
-- it registers its window, its configuration's share of the node's memory, whole on every RDMA device as the device
-  comes up (`#region`);
-- it finds its ports and the node each one reaches, keeps each link paired, and floods the mesh's map over the links
-  (`#ports`, `#records`);
-- on each link it makes the link's queue pairs once, as the link pairs, and leases them to programs, one program a
-  lease (`#links`, `#leases`);
-- it serves every client of its node at once, each a slot with its leases of the window and its program (`#clients`);
-- it compiles each started program's transfers into chains of work requests on the queue pairs the program leased, and
-  runs them on two threads a port that spin on the link's completion queues (`#programs`, `#loops`);
-- it hosts the meeting at which a program's members agree on their leases, and forwards the member pairs whose routes
-  cross its node (`#meet`, `#relays`);
+- it finds its ports and the node each one reaches, and keeps each link paired (`#ports`);
+- it keeps the mesh's map, its own record and every other bridge's, flooded over the links (`#ports`, `#region`);
+- it serves every client at once, its node's processes and its neighbours, each with its own lease and programs
+  (`#clients`);
+- it pairs each program toward every node it binds, over a link or along the map's route, runs its transfers and ends
+  them, and forwards the programs whose routes pass through its node (`#protocol`, `#flows`, `#routes`), over queue
+  pairs and threads it holds a link and a port, not a program and a hop (`#lanes`, `#progress`, `#cables`);
 - it carries requests, its clients' to the services of any node and its neighbours' to its own node's, admitting each
-  against its node's memory, and serves node-info and, where configured, commands (`#requests`);
-- it fails a program that loses a link, a peer or its client as a value naming the node, at the program and at its
-  peers (`#programs`, design/recovery.md);
-- where its configuration keeps them, it stamps each program path's crossings for its clients' ledger cuts (`#ledger`);
-- a signal, or a change of its binary, stops it from any state with every resource released (`#stop`).
-
-Its event loop waits on one kqueue with no timeout, every turn of it an event's: its sockets (the request listener,
-the HELLO socket, the kernel's network events, each link's control socket, each request's), its clients' processes'
-exits (EVFILT_PROC), its signals (EVFILT_SIGNAL), its own binary (EVFILT_VNODE), the power sources' and thermal
-pressure's notify(3) descriptors, its configuration's paced emissions (EVFILT_TIMER: the `hello` and `health`
-intervals, etc/bridge/README.md), and a user event its own threads and queues trigger (`wake`): a job's end on a port's
-queue, a progress thread's word (`#loops`), the clients' control word (`control_watch`, an address wait on it), a
-memory-pressure change (a dispatch source), a host name configd changed (an SCDynamicStore notification). Nothing on
-the event loop reads a clock to decide; the send thread reads one for the keepalive's interval alone (`#keepalive`).
+  against its node's memory, and serves holds, its node's node-info and, where configured, commands (`#requests`);
+- it tells a program's failure, naming the node, to the program and the peer (design/recovery.md);
+- where its configuration keeps them, it writes each flow's ledger, its crossings timed, at the flow's end (`#ledger`).
 
 Operator, 2026-10-14 (D10): "clients are clients, bridge services are bridge services. clients shouldn't know anything
 about other clients on the same mesh. ... clients *ask*, bridges *do*". And (D3), on whether the bridge keeps links
 paired with no client attached: "this emerges from other requirements. required."
 
 The bridge is updated by the mesh's own convergence (README.md Convergence; bin/mesh-converge.sh): the admin user's
-agent `io.mesh.converge` builds the upstream revision in a stage, installs its images, and runs bin/mesh-user.sh on
-them; a bridge whose binary changed stops at once, as a signal stops it (`#stop`), its programs and its peers' failing
-as values, and launchd starts the new binary (KeepAlive). install.sh, the root layer, installs only `bin/mesh-stat`,
-the reader node-info runs, built beside the admin user's running bridge.
+agent `io.mesh.converge` builds the upstream revision in a stage, installs its images between calls once the node is
+quiet, and runs bin/mesh-user.sh on them; a bridge whose binary changed stops on its own between calls, at the first liveness turn (3 s)
+at which it holds no flow and no awaiting program (the region's `busy` word 0; it serves on until then, the binary it
+started from mapped), and launchd starts the new one. install.sh, the root layer, installs only `bin/mesh-stat`, the
+reader node-info runs, built beside the admin user's running bridge. SIGTERM (launchd's stop) ends the bridge, its programs
+failing as values and each flow released as at its end. A bridge never receives SIGKILL from the mesh (RDMA-RULES.md);
+its lanes', stripes', stream's and devices' verbs objects are released by the kernel at its exit, never by a call
+(design/RDMA-KERNEL-RECOVERY.md "October 18").
 
 ## region
 
 The node's one region is the shared memory object `/mesh0` (mesh.h `MESH_NAME`), made by the bridge at its start and
-laid out by `mesh_layout`: an arena, the window, of the size its configuration states (the bridge's one operand, a
-document its consumer writes in JSON, TOML or YAML, etc/bridge/README.md; no default; design/prepared-machine.md#M09,
-with the operator's words: the window is the bridge's, its sizing for an execution the client's); a page-table row a
-block (its page entry, the mapping and address of the block a lease bound to it; its buffer, the owner and the lease's
-extent; its delivery, the address and per-invocation stride of the completion word a landing on it stores: 64 bytes,
-and a bit in each of the row planes); the node's ports (`MESH_PORTS`, 8), with each port's lease words (`lease_off`,
-`MESH_LEASES` a port, `#leases`); and the client slots (`MESH_CLIENTS`, 64). The region's tables are 64.5 bytes a
-window page and 0.5 MiB besides (65 MiB beside a 16 GiB window, 57 MiB beside 14 GiB; design/prepared-machine.md#M09).
+laid out (`mesh_layout`): an arena, the window, of the size its configuration states (the bridge's one operand, a
+document its consumer writes in JSON, TOML or YAML, etc/bridge/README.md; no default, and a port whose device cannot
+register it refused, logged and turned again later, design/recovery.md#registration; design/prepared-machine.md#M09, with the operator's words: the window is the bridge's, its sizing for
+an execution the client's), a page-table row a block (its page entry, the mapping and address of the block a lease
+bound to it; its buffer, the owner and the lease's extent; its delivery, the address and per-invocation stride of the
+completion word a landing on it stores: 64 bytes, and a bit in each of the row planes), the node's ports (`MESH_PORTS`) and the client slots (`MESH_CLIENTS`).
+The arena is the registered window: every port's device registers it whole when the device comes up,
+before any queue pair exists (`device_up`), and never deregisters it (the kernel does at the bridge's exit), so no
+program's start or run changes a device's mappings while DMA may be live (the operator's rule, quoted at M09). Nothing
+in the region is sized by a call: arena pages, page-table rows, transfer lists and publication targets are a lease,
+taken as a program asks for them and refused as a value naming the execution where the window cannot give them, never
+by growing the window. A destination's transfer lists are leased at its first transfer with room for the entries one
+block holds (42 a list at 16 KiB), and leased again twice as large, the entries copied and the old lease returned,
+when a list fills (`mesh_lists_grow`, at most `MESH_ORDERS` a list): through MESH_VERSION 113 every
+destination of every program, a relay's two of every relayed direction among them, leased room for 4,096 entries a
+list, 1.5 MiB, for the two to four transfers a session or a relay binds.
 
-The arena is the registered window. Every port's device registers it whole when the device comes up, before any queue
-pair exists (mesh-verbs.h `device_up`), in extents of 1 GiB (`MESH_REGION`, each inside one 4 GiB bank of the window's
-bank-aligned base), and never deregisters it: the kernel reclaims the registrations at the bridge's exit (`#stop`), so
-no program's start or run and no link's loss changes a device's mappings while DMA may be live (the operator's rule,
-quoted at M09). A device checks the window against its own `max_mr` first; a window of more extents, or an extent the
-device refuses, is logged with the extent, the errno and the extents held, and the port turns again at its next
-memory-pressure change or link event, keeping the extents it took (design/recovery.md#registration). The registration
-reads the stop flag between extents (`#stop`). The window is never clamped and never grows.
+A program's publications are its own: `mesh_transfers_prepare` derives them from its SEND lists, one target a slot of
+each SEND transfer (the row it sends and its column of SEND cells), and lays them after its SEND cells in their one
+lease, a section of the program's slot, sorted by row, which the slot names (`targets`, `target_count`); a producer's records (`mesh_publication_prepare`,
+design/prepared-machine.md#M10) and the bridge's relay hand-off (#flows) find a row's run by bisection
+(`mesh_row_targets`), and the slot's retirement reclaims them with its other leases. Until MESH_VERSION 111 every row
+carried room for a publication toward each of `MESH_DESTINATIONS` destinations (1,088 of its 1,136 bytes), written as
+a client bound the row: 1.11 GiB beside a 16 GiB window, resident as rows were leased, for the few rows a program
+publishes; the region's tables are now 64.5 bytes a window page and 0.5 MiB besides (65 MiB at 16 GiB, 57 MiB at 14
+GiB; design/prepared-machine.md#M09).
 
-Nothing in the region is sized by a call: arena pages, page-table rows, transfer lists and publication targets are a
-lease, taken as a program asks for them and refused as a value naming the execution where the window cannot give them.
-A destination's transfer lists are leased at its first transfer with room for the entries one block holds (42 a list
-at 16 KiB), and leased again twice as large, the entries copied and the old lease returned, when a list fills
-(mesh-call.c `mesh_lists_grow`, at most `MESH_ORDERS` a list). A program's publications are its own:
-`mesh_transfers_prepare` derives them from its SEND lists, one target a slot of each SEND transfer (the row it sends
-and its column of SEND cells), and lays them after its SEND cells in their one lease, sorted by row, which the slot
-names (`targets`, `target_count`); a producer's records (`mesh_publication_prepare`, design/prepared-machine.md#M10)
-and a relay's landings (`#relays`) find a row's run by bisection (`mesh_row_targets`), and the slot's retirement
-reclaims them with its other leases. The bridge leases from the window for itself as a client does: a page a port for
-its keepalive frames, taken as the port is found (`#keepalive`), and the map's pages (below).
+The map is the bridge's table of records, one a node (`struct mesh_record`): its node number, name and boot, the
+record's sequence in that boot, its bridge's window in bytes, the node's memory in bytes and hardware model
+(`hw.memsize`, `hw.model`), its ports by index, each port's peer, phase, code, bandwidth and pairings and the queue pairs
+its device holds against those it can use (`pairs`, `max_pairs`: its max_qp less one), and its health (mesh-plan.h `struct mesh_health`,
+design/recovery.md#diagnosis): every node's window and model are in every bridge's map, read where the records are
+(`#records`). Its
+`map_nodes` records lie at `map_off` in arena pages the bridge leases for itself and leases again larger as the mesh
+grows (`mesh_records`), so no node count caps it. The map serial (`map`) is the bridge's to bump (`mesh_notify`)
+before and after each change, odd while it writes; its own record is in before the region opens. A reader copies the
+records and keeps its copy where the serial it read before was even and is unchanged after (`mesh_map_whole`), the
+seqlock's reader (Boehm, MSPC 2012): mesh-plan.h `mesh_map`, with `mesh_map_wait` for the next map. A record whose
+links (each port's peer, phase and bandwidth), name, boot and facts are unchanged changes only its health, its
+sequence and its ports' counts (codes, pairings, queue pairs), under the health serial (`health`), so the map serial
+moves only when the mesh does; `mesh_nodes_health` reads the records under both. A change the map does not take (a
+record that changes nothing it holds, or one the prune drops at once) moves neither serial.
 
-The map is the bridge's table of records, one a node (`struct mesh_record`): its node number and name, the record's
-sequence (which orders a node's records, `#records`), its bridge's window in bytes, the node's memory in bytes and
-hardware model (`hw.memsize`, `hw.model`), its ports by index, each port's peer, phase, code, bandwidth, pairings, the
-queue pairs its device can use (`max_pairs`: its max_qp less one), and its link's queue pairs and leases (`pairs`,
-`leases`, set at the link's pairing, which floods a new record, and 0 at its loss), and its health (mesh-plan.h `struct
-mesh_health`, design/recovery.md#diagnosis): every node's window and model are in every bridge's map, read where the
-records are (`#records`). Its `map_nodes` records lie at `map_off` in arena pages the bridge leases for itself and
-leases again larger as the mesh grows (`mesh_records`), so no node count caps it. The map serial (`map`) is the
-bridge's to bump (`mesh_notify`) before and after each change, odd while it writes; its own record is in before the
-region opens. A reader copies the records and keeps its copy where the serial it read before was even and is unchanged
-after (`mesh_map_whole`), the seqlock's reader (Boehm, MSPC 2012): mesh-plan.h `mesh_map`, with `mesh_map_serial` (the
-serial now) and `mesh_map_wait` (the next whole map: an address wait on the serial, with no bound, until it differs). A
-reader that meets the serial odd waits on it alike, its bridge's notification after the write or its exit ending the
-wait. A record whose links (each port's peer, phase and bandwidth), name and facts are unchanged changes only its
-health, its sequence and its ports' counts, under the health serial (`health`), so the map serial moves only when the
-mesh does; `mesh_nodes_health` reads the records under both. A change the map does not take (a record that changes
-nothing it holds, or one the prune drops at once) moves neither serial.
+The region holds a `bell` a port, the word that port's progress threads park on (`#progress`): a client rings the
+bells of the ports its program's flows ride (`mesh_transfers_wake`, a `mesh_notify` each; the slot's `ports`, a bit a
+port, which the bridge sets as it takes the program's flows) as a group of its program starts, so a thread that parked
+while nothing moved serves that group's first publication and landing at once, and no other port's threads wake. The
+region's `busy` word is the count of flows and awaiting programs the bridge holds, relayed ones among them, 0 between
+calls, and `idle_since` the wall clock (ns) at which it last came to 0 (0 while it is not): a node's idle test (the
+convergence's, bin/mesh-converge.sh, through mesh-stat's `idle` and `idle_since`, which the library's reader
+mesh-plan.h `mesh_busy` reads), so a node that only relays another node's call is busy, and the bridge's own before
+it stops for a rebuilt binary. Its `stopping` word turns nonzero once the bridge waits to stop for a rebuilt binary:
+a client that holds flows past their execution (a session kept for the next execution, metal-microbench
+docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) reads it (nccl.h `ncclMeshBridgeStopping`),
+releases what it holds between executions and holds nothing after, so a held flow never keeps a bridge from its
+upgrade.
 
-A bridge posts the notify(3) name `MESH_STARTED` (mesh-plan.h; a loop bridge's followed by its region's name) once its
-sockets listen and its region is open, so a client that waits for its node's bridge blocks on that event
-(`mesh_bridge_wait`) rather than trying again. The region's `bridge_pid` is the running bridge's process, 0 once it has
-stopped (`#stop`).
-
-A client slot (`struct mesh_client`) holds one client: its owner word (its generation, slot and process: generation <<
-38 | slot << 32 | pid), its program once started (`configured`, the owner), its execution's key, its ring depth and
-whether it is cyclic, its publication targets once prepared, and its program by destination node, `MESH_DESTINATIONS`
-(64) of them (`mesh_destination`). Each is the destination's node, its `struct mesh_tx` (SEND cells, cancellation
-words, transfer lists of `MESH_QUEUES` (4) queues each way, and the link it rides with each queue's lease on it, `port`
-and `lease`, `#leases`) and its status (`struct mesh_port_info`: phase, code, domain, `failed` the node where it
-failed, and `prepared`). A client writes its own slot's other words and its own rows, and claims and frees lease words
-for its own slot alone (`#meet`); the bridge writes the statuses, the ports, the lease words otherwise, and the map. No
-client reads, waits for or names another client's.
+A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
+execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, its publication
+targets once prepared (`targets`, above), the digest of what its program is made from (`digest`, 0 for none:
+mesh-call.h `mesh_transfers_digest`, `#protocol`), and its programs by destination node, `MESH_DESTINATIONS` of them
+(`mesh_destination`). Each is the destination's node, its `struct
+mesh_tx` (SEND cells, cancellation words, transfer lists of `MESH_QUEUES` queues each way, trace) and its status
+(`struct mesh_port_info`: phase, code, domain, `failed` the node where it failed, the destination or a relay on its
+route, and `prepared`). A client writes its own slot's other words and its own rows; the bridge writes the statuses,
+the ports and the map. No client reads, waits for or names another client's.
 
 ## ports
 
-A port is an RDMA device of the node (`rdma_enN`, its interface `enN`), given an index in the order the bridge finds it:
-at its start, and again when an interface attaches or its link comes on that no port has (`ports_found`); a device the
-window cannot give a page for its keepalive frames is found again at the next such event. A port turns when an event
-asks it (`wanted`): its finding, its link coming on or its interface attaching, a paired link of it lost (it says HELLO
-again at once), the configuration's HELLO interval for a port with no peer (`hello`, a paced emission: a HELLO lost on
-its link has no other event, and a port that never paired otherwise waits for its next event), or a memory-pressure
-change after its window's registration was refused. On its turn, on its own dispatch queue, a port without a link reads
-its device's port, opening the device first where it is not open (a context, a protection domain and, once its port is
-active, the whole window registered, `#region`, all three once for the process's life; a device the list does not give,
-or whose port is not active, waits for its next event, and a verbs call the open device refuses, a registration aside,
-stops the bridge, `#stop`, which launchd starts again on a fresh device context), and while its port is active it sends
-a hello (its node) to every node on its link (the link-local all-nodes group, UDP `MESH_PORT`). Of two nodes that hear
-each other, the lower node dials the higher's listener on the address it heard (the higher answers each hello it hears,
-so the lower hears it at once), and the two exchange their link hellos (node, the port's LID and GID, the block size; a
-peer of another block size is refused, EPROTO) over that connection, its control socket. At the peer's hello the port's
-table in the region names the peer node, the phase `MESH_PAIRED`, the port's bandwidth, the index the peer gave the
-cable and its pairings, and the bridge makes the link's queue pairs (`#links`). The table holds no device name or
-address: those stay in the bridge, and a reader names a port by its index (`mesh_observe`).
+A port is an RDMA device of the node (`rdma_enN`, its interface `enN`), given an index in the order the bridge finds
+it: at its start, and again when an interface attaches or its link comes on that no port has (`ports_found`). On its
+turn (every 3 s, design/recovery.md#pause), a port without a link opens its device (a context, a protection domain
+and, once its port is active, the whole window registered: design/prepared-machine.md#M09; checked against that
+device's own max_mr on the port's own queue, a refusal logged with the extent, the errno and the extents held, and the
+port turning again 60 s later, doubling to 30 min, the extents it took kept: design/recovery.md#registration), and
+while its port is active it sends a hello (its node and boot) to every node on its link (the link-local all-nodes group, UDP
+`MESH_PORT`). Of two nodes that hear each other, the lower node dials the higher's listener on the address
+it heard, and the two exchange their link hellos (node, boot, the port's LID and GID, the block size) over that
+connection, its control socket, which the bridge keeps with a keepalive. A port whose device failed with its link active takes no
+hello and no connection until its turn has forgotten the device (no verbs call) and opened it again. The link is then paired: the
+region's port table names the peer node, the phase `MESH_PAIRED`, the port's bandwidth and its pairings. The table
+holds no device name or address: those stay in the bridge, and a reader names a port by its index (`mesh_observe`).
 
 Each change to its port table is a new record of the bridge's node, its sequence one more, which the bridge sends as
-RECORD over every paired port, as it does at an urgent change of its health and at the configuration's `health`
-interval (a paced emission; none where it states none; design/recovery.md#diagnosis). A bridge that hears a record newer
-than the newest it has heard of that node (`#records`) puts it in its map and sends it on over its other paired ports,
-and a port newly paired is sent every record the map holds: OSPF's flooding of link-state records (RFC 2328 §13). Every
-bridge's map so holds every node's newest record, with no registry and nothing written by hand. A reader takes the map
+RECORD over every paired port. A bridge that hears a record newer than the newest it has heard of that node (`#records`)
+puts it in its map and sends it on over its other paired ports, and a port newly paired is sent every record the map
+holds: OSPF's flooding of link-state records (RFC 2328 §13). Every bridge's map so holds every node's newest record,
+with no registry and nothing written by hand. A reader takes the map
 from mesh-plan.h (`mesh_map`): two nodes are linked where each one's record holds a port paired with the other, and
 members the links leave apart are joined along the map's route through other nodes. No reader joins records itself.
 
 A node is its bridge's node number, a 31-bit fold of the host's UUID (`gethostuuid`), and its name the host's. A cable
 moved to another port, a cable added, a peer that restarted: each is a port that finds its peer again, with no
 configuration (there is none) and no restart, and its next record carries the change to every map. Several cables
-between one pair of nodes are several ports, told apart by the port index, each paired with its own queue pairs and
-leases. The map joins the two nodes by one link at the bandwidth of the slowest of their paired ports (mesh-plan.h
-`mesh_map`), and the bridges carry the pair's programs and channels over one cable, the one both ends take alike: the
-lowest index the pair's lower node gave one of its cables to the other (mesh-flow.c `cable_to`, mesh-call.c
-`agree_port_to`). Its other cables stay paired and carry records, and a program agreed after the first cable's loss
-takes the next.
-
-## links
-
-A link is a port paired with its peer. At the peer's hello the bridge makes the link's queue pairs (`link_make`; at a
-pairing after the device context's first, the same queue pairs made again in place, below): n of them, the fewer of its
-device's usable queue pairs (`max_pairs`, its max_qp less one: RDMA-FIRST.md's "max_qp: 11 (10 usable)") and
-`LINK_PAIRS` (1 + `MESH_LEASES`, 17), each unreliable connected (UC, mesh-verbs.h `pair_make`) on the link's two
-completion queues, its SENDs' and its receives', which every pair of the link shares (entries: n times the device's
-frames a queue pair, at most its max_cqe; each pair's `share` of them its SEND gate and its receive ring's capacity,
-`#loops`). Pair 0 is the keepalive's (`#keepalive`); lease l is pair l + 1 (`#leases`). It tells the peer every pair in
-one PAIRS message (`pairs_tell`): each pair's index, number, first sequence number and round (the pair's making), with
-the code and the SENDs completed that a lease's release carries (`#leases`). At the peer's first PAIRS the link's count
-is the fewer of the two ends' makings, and the bridge connects each pair to the peer's of its index (INIT, RTR, RTS:
-TN3205's one out-of-band step is the exchange of these numbers), posts the keepalive pair's receives, sets every lease
-word below the count free (0) and the others `MESH_LEASE_DOWN`, tells the region the link's leases (the count less one),
-starts the port's two threads once (`#loops`) and marks the link up, logging `link i (enN): node p paired: n queue
-pairs, n-1 leases, f frames a pair`. A count under two loses the link (ENOSPC). A Thunderbolt 5 device gives 10: 9
-leases a link, and the loopback fabric's devices as many.
-
-No queue pair or completion queue of a link is ever destroyed (RDMA-KERNEL-RECOVERY.md "October 16 and 17", "October
-18"). At the link's loss its pairs are let go of with no verbs call (`link_quiet`), each pair's queue pair, round and
-capacities kept and its completion queues kept; at its next pairing `link_make` makes each pair again in place
-(`pair_new`, below) and takes and drops what its completion queues hold from the pairing before, and at that pairing's
-first PAIRS each pair takes the higher of the two ends' rounds, so an end whose pairs were kept and an end whose bridge
-started again meet at one round, and a completion of a round before stays skipped. As a lease's holder lets go of it
-(`#leases`) its pair is made again in place (`pair_new`, mesh-verbs.h `pair_reset`): moved to the error state (its
-posted receives and SENDs end, and nothing waits on what the move flushes), to the reset state and to INIT, its number
-kept and its round one more, and the peer told its new first sequence number and round (a PAIRS of that one pair); each
-end connects its pair to the peer's once the peer's told round is its own (`pair_join`), so two ends that made one pair
-again in either order meet at the same round, and a pair waits in INIT, taking nothing, until they do. A completion's
-work request id names its pair's index, the low 16 bits of its round and its record or gate position (`wr_id`: round <<
-48 | index << 40 | 40 bits), so a progress thread skips a completion of a pair made again since, the flushed ones among
-them (`#loops`). Every making, resetting and connecting, and the letting go at a loss, is under the port's guard
-(`#loops`).
-
-A link is lost (`port_lost`, design/recovery.md#detection) by events alone: its link off or its interface detached
-(KEV_DL_LINK_OFF, KEV_DL_IF_DETACHED), its control socket's end or reset or a send the socket refused, the peer's
-FAREWELL (`#stop`), a message of another magic or kind or a malformed PAIRS (EPROTO), an error completion on the
-keepalive pair or a completion queue's poll that fails. A verbs call of a pair's making, resetting or connecting that
-fails stops the bridge instead (`#stop`, `MESH_STOP_DEVICE`), and launchd starts it again on a fresh device context: a
-device that refused every connect after the Mini's October 17 panic connected once a new process opened it
-(RDMA-KERNEL-RECOVERY.md). The loss: the link down (`up` 0, its threads parked), every lease word `MESH_LEASE_DOWN` and
-the region's leases 0, every program holding a lease of it failed as a value naming the peer (ECONNRESET where the peer
-said FAREWELL, else the loss's code; `#programs`), the link's pairs let go of under the guard with no verbs call
-(`link_quiet`), every request channel crossing it failed (`#requests`), and the port's phase `MESH_PAIRING`, so it turns
-again at once and says HELLO once its port is active. Nothing declares a loss by silence: a peer whose program never
-runs its side, or whose host stops with its link up, is waited for until one of these events, or its client's cancel or
-revoke.
-
-## leases
-
-A lease is one queue pair of a link, held by one program at a time. The region holds a word for each (`mesh_leases`,
-`MESH_LEASES` a port): 0 free, a client slot's owner word while that slot claims or holds it, `MESH_LEASE_DOWN` while
-the link is down or past its count. A program's slot names, for each destination, the port it rides (mesh_tx `port`,
-the port index plus one) and each queue's lease on it (`lease`, the lease index plus one); its members choose them
-together before its start (`#meet`), and the bridge checks them at the start (`#programs`). A queue of a program is a
-lease: its SENDs and the receives its peer posts for them run in order on that one queue pair, and no other program's
-work is on it.
-
-The operator, 2026-10-16: "nobody gave permission for anything but a pre-posted exclusive flow". And 2026-10-18:
-"it's called rdma. you have direct memory access ... why is there something you're calling a 'flow' on top of that
-other than as suggestive metadata?" A lease is that exclusive, pre-posted crossing with nothing on top of it: its word
-is its one state in the region, its pair's round its one state on the link.
-
-A lease is let go when its holder's path ends (`path_release`), under the port's guard: the ring's words past its
-landed count cancelled where the program failed (`#programs`), the pair made again in place (`#links`) and joined
-where the peer's newer making was told, the peer told the new number with a code, and the word free. The code is what the peer's holder
-does:
-
-- **0**: the holder ended in order, or held nothing. The PAIRS carries `sent`, the SENDs the holder completed on the
-  pair's last making. A program here holding the lease takes every landing of them first: once its ring's landed count
-  reaches `sent` (its receive thread wakes the event loop at that count), its status toward that destination is
-  stopped (`MESH_STOPPED`, ECONNRESET, naming the far node: its program there ended), its words kept, and it lets go of
-  the lease in its turn with code 0 (`peer_released`); a relay's other side closes then (`#relays`). Where no program
-  here holds the lease, the pair is made again and joined at once.
-- **not 0**: the holder's program failed with that code (a lost link or peer, an abort, an error completion). A
-  program here holding the lease fails as a value with that code, naming the node across the link (`#programs`), and
-  lets go of its every lease with it, so a failure crosses a route lease by lease.
-
-A lease claimed by a slot whose client is gone and held by no program is free again at the bridge's next turn
-(`clients_turn`).
-
-**Limits.** A Thunderbolt 5 link has 9 leases. A member pair takes one lease a queue it uses on every hop of its route
-(`#meet`). libnccl-mesh's session binds every other member, two queues a member pair (rdma/NCCL.md), so on a line of
-four members the middle link carries four member pairs, 8 of its 9 leases, and two such sessions hold it in turn, not
-at once. Each member claims every lease free as it reports (`#meet`), so two sessions opening at one time on one cable
-split its leases between their claims, and the later may find a hop with none (EBUSY). On the loopback fabric
-(mesh-loop `share`, two communicators on one line, 32 calls each, three runs) sessions opened in turn shared the links
-in every run; two opened at one time left the later communicator's first group EBUSY and its next group opened
-(metal-microbench output_data/dead-history-20261017/scratch-rewrite/all.txt). A refusal is a value; nothing waits for
-a lease.
+between one pair of nodes are several ports, told apart by the port index.
 
 ## clients
 
@@ -249,9 +140,9 @@ compare-exchange, never retires another's and never waits for any other client; 
 bridge's to retire, on its turn. Its rows and arena pages are claimed with a compare-exchange on each bitmap word that
 expects them clear (`mesh_scan`), so two clients preparing at once never hold the same rows or pages. A slot is one
 execution's program: `name` is its execution's, every member of one execution names it alike (an NCCL communicator's
-unique id, a call's name), and its key is the members' meeting's (`#meet`). A client that runs several programs takes a
-slot for each on its one attach (`mesh_program_attach(program, client, name)`, sharing the client's mapping). An attach
-is refused (EBUSY) when every slot is held, and ESRCH when the node's bridge is gone.
+unique id, a call's name), and the bridges pair a program with the members' programs of the same name. A client that
+runs several programs takes a slot for each on its one attach (`mesh_program_attach(program, client, name)`, sharing
+the client's mapping). An attach is refused (EBUSY) when every slot is held, and ESRCH when the node's bridge is gone.
 
 A client's memory is its leases, the system call the bridge is to its clients. The operator, 2026-10-15: "the bridge's
 job is to allocate essentially all of the memory on the entire device so that there are large already 'pinned'
@@ -274,273 +165,152 @@ lease, communicator, session and `ncclCommRegister` fail (`ncclRemoteError`), as
 freed them all; it then attaches to the next bridge's region, never holding leases of two (rdma/NCCL.md "Memory").
 
 A program is bound (`mesh_transfer_bind`: a transfer names its member node and queue, never a port; the destination's
-lists are leased at its first transfer), prepared (`mesh_transfers_prepare`, `mesh_host_inputs` or the Metal
-transport, then `mesh_transfers_cyclic` where it runs without end), agreed (`mesh_transfers_agree`: its members'
-leases and relays, `#meet`) and started (`mesh_transfers_start`, `#programs`). Its slot ends one of two ways:
+lists are leased at its first transfer), prepared (`mesh_transfers_prepare`, `mesh_host_inputs` or the Metal transport)
+and started (`mesh_transfers_start`). The start takes the bridge's map as it stands: the bridge pairs the program toward
+each node it binds, over a port paired with that node or along the map's route through other nodes' bridges, and the
+start returns once every destination is paired, or with the failure that destination's status names with its node
+(EHOSTUNREACH where the map has no route to the node; ETIMEDOUT past the bridge's own windows, design/recovery.md#first;
+the others mesh-call.h lists). A later loss fails the program alike, and the next start reads the map again.
+`mesh_detach`, or the client's process exiting, retires the slot (vacant at once, `mesh_retire`) and ends its program:
+its rows (a program's, or the leases of a lease-owning slot) are closed; once no port holds a flow of the client the
+bridge releases them and returns their pages to the window in the same turn (`mesh_retired_release`, then
+`mesh_reclaim`'s `mesh_buffer_reclaim`), so the window's unleased bytes (`mesh_window`, node-info) count them free as
+soon as the client is gone; a lease that finds no room reclaims again before it fails, as a backstop. The bridge watches each slot's process from the turn it first sees the slot (a kqueue
+`NOTE_EXIT` on its pid, registered again for each new slot of the process, since the kernel keeps one watch per pid;
+a pid already gone at that turn is retired then), and a process's exit retires every slot it holds, its lease slot
+and its programs' slots alike; the liveness turn (every 3 s) retires any slot whose process is gone that the watch
+missed.
 
-- **In order** (`mesh_detach`): the owner word is left `MESH_ORDERLY` for the bridge, which closes each path of the
-  program: every cell the program released is posted and its SEND completed, then each lease is let go with code 0 and
-  the SENDs it completed (`#leases`); once none is held the bridge logs `program <key> (slot s) ended in order` and
-  vacates the slot. `mesh_detach` writes one byte on each relay channel the agreement opened, which tells the relay
-  that the route ends in order, and closes them (`#relays`).
-- **An abort** (`mesh_retire`: a revoke, nccl.h `ncclMeshCommCancel`, or the client's process exiting) vacates the
-  slot at once; the bridge fails the program at its next turn (ECANCELED), cancels its words (a revoking process's
-  waits on them end there, a GPU walk's among them) and lets go of its every lease with that code, so its peers'
-  programs fail too (`#leases`).
+## records
 
-Either way its rows (a program's, or the leases of a lease-owning slot) are closed; once no program the bridge holds
-belongs to a retired slot, the bridge releases them and returns their pages to the window in the same turn
-(`mesh_retired_release`, then `mesh_reclaim`'s `mesh_buffer_reclaim`), so the window's unleased bytes (`mesh_window`,
-node-info) count them free as soon as the client is gone; a lease that finds no room reclaims again before it fails,
-as a backstop. The bridge watches each slot's process from the turn it first sees the slot (a kqueue `NOTE_EXIT` on its
-pid, registered again for each new slot of the process, since the kernel keeps one watch per pid; a pid already gone
-at that turn is retired then), and a process's exit retires every slot it holds, its lease slot and its programs'
-slots alike.
+A record is newer than another of its node where its boot is later, or its boot the same and its sequence later. Each
+bridge keeps, apart from the map, the newest record it ever heard of each node (its boot and sequence: RFC 2328 §13's
+database, mesh-flow.c `struct known`), and takes and sends on a record only where it is newer than that, the map holding
+the node or not. The map's prune (a node no paired path reaches leaves it, §14) drops a node's record but not its entry,
+so a copy of a record the map dropped, still in flight on a cycle of survivors after its node stopped, is no longer
+taken as fresh and sent on again: it ends at the first bridge that has heard it. A record no newer than the newest heard,
+of a node the map no longer holds, is put again only where a paired path now reaches its node (the paths came back
+before its node's next record), and sent on only then. An entry unheard for six health periods (60 s) whose node the
+map no longer holds compares with nothing (§14's MaxAge), so a node whose clock went back is heard again; a full table
+of 256 entries gives the longest unheard of the nodes the map does not hold its place.
 
-A client watches its bridge alike (mesh-dataflow.c `mesh_watch`: a kqueue `NOTE_EXIT` on the bridge's pid, one thread
-a process, over a mapping of the region it keeps, registered as the process first opens the region): at the bridge's
-exit it marks the region's bridge gone (`bridge_pid` 0), cancels each of its own slots' programs' words (`UINT64_MAX`
-where none landed, every one of a cyclic program's), fails each of their destinations' statuses (ESRCH) with its start
-woken, moves the map's and the health's serials by 2 (their parity kept: a reader that found the bridge alive and had
-not yet slept finds its word changed), and wakes the waiters on the map, health and control words, so no wait of the
-process, a GPU program's on its landing words among them, outlives its bridge.
+At MESH_VERSION 112 the dedupe read the map alone: once the prune dropped a node, any copy of its last record was fresh,
+put, dropped and sent on, so a node of two or more cables that stopped in a mesh whose survivors held a cycle (a ring,
+a Studio K4, two cables between one pair) left its last record circulating for good, each pass moving every survivor's
+map serial twice and so reopening every communicator's session at its next group (output_data/sixnode-20261015
+substrate/flood_storm.py; at 113, metal-microbench output_data/bridge-20261015/flood_db.py).
 
-## programs
+A record carries its node's facts with its links: its bridge's window (the bytes its configuration registers), its
+memory and its hardware model. They are the driver's to read from its own bridge's map, every node's at once,
+rather than each node's node-info over ssh: the library's reader copies them (mesh-plan.h `struct mesh_node_health`,
+`mesh_nodes_health`) and mesh-stat prints them in each of its `nodes` (`window`, `memory`, `model`).
 
-A program starts when its client sets its slot's `configured` (`mesh_transfers_start`) and the bridge's next turn takes
-it (`program_take`). Its start is local: the bridge compiles it on this node from the program's lists and the leases
-its slot names, and waits on no peer. For each destination with transfers it makes a path on the port the slot names
-(`struct path`), and for each of the path's rings (queue k's slot s is ring k x slots + s, at most `MESH_QUEUES`; the
-agreement allows one slot a queue):
+## protocol
 
-- a SEND stream (`sends_configure`): every cell of the destination's SEND transfers, in invocation order and in their
-  lists' order within one, each cell the chain of its chunks' work requests over its invocation's ring slot; a cyclic
-  program's last cell followed by its first, a one-pass program's by its column's terminal cell, which no producer
-  releases;
-- a receive ring (`receives_configure`): the records of every RECEIVE transfer, invocation by invocation, in their
-  lists' order within one, a record a chunk, each storing on its landing its slot's completion word (the row's
-  delivery, among the program's cancellation words), or, on a row the program also sends on, that slot's SEND cell (a
-  relay's, `#relays`), else a sink of its own; a record is posted once the record of its transfer a ring's span of
-  invocations before it has landed (a slot short of the transfer's depth), within the ring's capacity.
+Over a link's control socket the two bridges speak in fixed messages (`struct message`), each keyed by an execution's
+key:
 
-Both ends derive the same order from the same lists (the members' programs of one execution bind each other's
-transfers alike), so the hardware pairs each SEND with the receive posted for it: a SEND waits in the hardware for its
-receive (TN3205's credit), and nothing else orders them. The operator, 2026-10-18: "you *do* know where the buffer is,
-because the receive work request chose an address, and *you* wrote the code for the rdma users on both mesh clients."
-A landing's word is the record's: the bridge stores the record's argument plus its cycle there
-(design/prepared-machine.md#M30), and a reader waits on that word alone.
+| message | sent when | the receiver |
+|---|---|---|
+| READY (queues and slots, the route, the stripe of the program's stripes, whether the sender's end takes queue pairs of its own, the digest of what the sender's program is made from) | a program starts toward a node (a routed pair's lower end; its higher end once the lower's READY reached it); the route is the nodes from the receiver to it | where the route ends at the receiver, pairs with its client's program of the key toward the sender (one awaiting it is given it at once), else holds the flow (`#flows`), or, where that program names another digest, fails both (ESTALE, below); where the route goes on, makes a relay's two flows and sends READY on with the rest of the route; on a relay's existing flow (the far end's READY coming back), mirrors that direction and sends the READY on toward the route's start (`#routes`) |
+| PAIRS (an exclusive flow's queue pair numbers and sequence numbers; a lane rider's index and generation in its port's table) | the flow paired: an exclusive flow's queue pairs made (INIT) | its queue pairs ready to receive (RTR) and its receives posted; or its records taking its lanes' headers (`#lanes`) |
+| POSTED | its receives posted; a relay's once its partner heard the next hop's POSTED | its queue pairs ready to send (RTS), served by its port's progress threads: the flow runs |
+| END | the program ended on this side | its flow fails (ECONNRESET, domain 4); a relay's goes on |
+| FAIL (code, node) | a flow failed, at the node named | its flow fails (ECANCELED, domain 4) naming that node; a relay's goes on, its code kept; one of ESTALE fails the receiver's whole program alike (below) |
+| RECORD (a node's record) | the sender's port table changed, a newer record reached it, or the port paired | takes it where it is newer than the newest heard of its node, and sends it on (`#records`) |
+| LANES (the port's lanes' queue pairs and the frames a header may name; none and a code where they failed) | the port's lanes made, once the link paired | its lanes ready to receive and send, each listening for its first header: the lanes are up (`#lanes`) |
+| FAREWELL | the bridge stops | the link's end is orderly |
 
-The start is refused as a value, each destination's status naming this node and the code, where a destination's port
-is not paired (ENETDOWN), a list or lease is one the bridge cannot carry (EINVAL: a transfer of more slots than the
-program's, a ring past `MESH_QUEUES`, a word outside the window, a queue with no lease or one past the link's count), or
-a lease word is not the program's (ENETRESET: the link paired again since the agreement). Otherwise each path's rings
-are attached to their leases under the port's guard (each record's work request id its pair's round and index,
-`#links`), their first receives posted, and each destination's status `MESH_PAIRED` with `prepared` the owner, its
-start woken. `mesh_transfers_start` returns 0, or the first refused destination's code; ESRCH where the bridge is
-gone, ECANCELED where the program's own slot retired while it waited. From then the program runs on its ports' threads
-alone (`#loops`): its producers release cells (mesh.h `struct mesh_send` `ready`, the cycle), the send thread posts
-each released cell's chain on its lease as the lease's gate allows, and the receive thread stores each landing's word
-and posts the ring's next records.
+Every message of a flow names its stripe beside its key and ends (`struct message` `stripe`), since several stripes of
+one routed program may share a port (`#cables`). No SEND of a program is posted before the peer's receives are (credit flow control holds a SEND until its receive is
+posted, TN3205; POSTED orders the two). POSTED is end to end: a relay tells it toward a route's end only once its
+partner heard it from the next hop, so a routed program's start returns once the far member's program has started and
+every relay between has posted, as a direct program's does (MESH_VERSION 112's relay posted at once, so a routed
+start returned before the far member had started and its first group failed at the library's silent bound). A relay
+flow tries to tell it at the end of each of its own jobs and as its partner hears the next hop's POSTED, whichever
+comes last (`flow_tell`). Through MESH_VERSION 114 it tried at its own jobs' ends alone, so a relay whose jobs had all
+ended before the next hop's POSTED came never told it, and both ends' starts waited out their 630 s windows: no
+routed start had run on hardware, and a transcription of the code's control flow over chains, rings, stars and
+partial graphs of 3 to 6 nodes left 1,987 of 5,920 routed starts (74 routed pairs, 40 orders of their starts each)
+waiting so, none since, each returning within 63 ms of its own start (metal-microbench
+output_data/bridge-20261015/round3 relay_posted.py). A
+program waits for its peer's READY at most the peer window (600 s) and for its queue pairs to pair at most the pairing
+window (30 s), design/recovery.md#first; past either it fails (ETIMEDOUT).
 
-**Its end in order** (`MESH_ORDERLY`, `#clients`). The bridge marks each of its paths closing. The send thread marks a
-closing path's ring drained once its stream is idle (its next cell not released) and every SEND posted on the lease
-has completed, or the peer let go of it; the event loop then lets go of the path's leases with code 0 and the SENDs
-completed (`#leases`), and once no path holds one the program has ended and its slot is vacant. Each peer's program
-takes every landing of those SENDs, then stops its status toward this node (ECONNRESET naming it), its words kept:
-libnccl-mesh reads that status when no position of its session is outstanding and opens the session again at its next
-group (nccl-mesh.c `session_watch`). Nothing orders the two ends' releases, and nothing needs to: a client detaches
-only once every landing its program waited on has come, and a SEND's completion is the hardware's report that its data
-left.
-
-**Its failure** (`program_fail`, design/algorithm-sources.md#meshresult). A program fails as a value naming a node: at
-an abort of its slot (ECANCELED, this node), at an error completion or a refused post on one of its leases (that code,
-this node), at a lease its peer let go of with a code (that code, the node across the link), at the loss of a link it
-holds a lease of (ECONNRESET where the peer said FAREWELL, else the loss's code; the peer), and at the stop (ESHUTDOWN).
-Each path's leases are let go with the code (`#leases`), so its peers fail alike. Its words past each ring's landed
-count are cancelled, whether or not its client still holds its slot (an abort gives the slot up first, and the
-program's rows stay its own until it is freed) (`ring_cancel`: `UINT64_MAX` from the first record not landed,
-through the program's invocations less the ring's depth in a cyclic program, whose readers keep within the depth of
-the landings, and every record not landed in a one-pass program; a landed word stays, so a call whose positions all
-landed completes), the words of a destination never attached are cancelled whole (by the cancellation table its slot
-named when the program was taken), and, where its slot is still its client's, each destination's status is
-`MESH_STOPPED` with the code, the domain and the node. A GPU walk whose wait reads its word cancelled halts its later
-waits (nccl-mesh-metal.m `mesh_step_check`), so a halted walk's later cells, computed without the lost peer's, are
-never released. A failed program is freed once its slot retires. Where the bridge itself stops, its clients cancel
-their own words (`#clients`, `mesh_watch`). Each failure is logged: `program <key> (slot s) failed at node n: <error>
-(domain d)`.
-
-On the loopback fabric (mesh-loop, a line of four and a torus of six bridges, metal-microbench
-output_data/dead-history-20261017/scratch-rewrite/all.txt): libnccl-mesh's calls on the host path and the GPU walk ran
-48 of 48 and 96 of 96; a communicator destroyed after its last group, 20 times on each path, ended every program and
-relay in order (80 and 120 of each), none failed and no word cancelled; a member's client killed in a call, its
-bridge stopped, and its bridge's binary replaced each failed every member's call as a value, the library's next calls
-ran, and the replaced bridge came back.
-
-## loops
-
-The operator, 2026-10-18: "queues are an implementation detail of how the rdma driver works. the bridge does not
-expose them. the queue is a data structure which should be spinqueried as FAST AS HARDWARE THREADS ALLOW on both sides
-of each bridge, both to accept remote attempts to send, and to submit buffers which apis on the same side are trying
-to send."
-
-Each port has two progress threads (`port_progress`, QOS_CLASS_USER_INTERACTIVE), started once at its link's first
-pairing and joined only at the stop: its receive thread (`mesh.rdma.receive`) and its send thread (`mesh.rdma.send`).
-While the link is up and no guard stands, each passes without pause, reading the stop flag every pass:
-
-- a receive pass (`receive_pass`) polls the link's receive completion queue: a keepalive frame's slot is posted again;
-  a lease's landing stores its record's word (its argument plus the cycle, a release store), counts the ring's landed
-  records, posts the ring's next records, and stamps the ledger where one is kept;
-- a send pass (`send_pass`) polls the SEND completion queue, each completion retiring its pair's frames to its
-  position; posts a keepalive frame where one is due (`#keepalive`); posts each held lease's released cells, request by
-  request, while the lease's gate holds their frames (the frames posted and not retired, plus the next request's, at
-  most the gate, the lease's share of the link's completion queues: `ibv_post_send` accepts past a queue's frames and
-  corrupts later, so the gate is the bridge's); and marks a closing path's ring drained (`#programs`).
-
-A completion of a pair made again since its post is skipped (`#links`). A thread's error (an error completion, a
-refused post, a poll that fails) is a word on its pair (`failed`) and the event loop's wake; the event loop takes it at
-its next turn (`pairs_turn`): a lease's is its holder's failure, the keepalive pair's or a completion queue's the link's
-loss. The receive thread wakes the event loop too when a ring's landed count reaches the SENDs its peer said it
-completed (`#leases`), and the send thread when a ring drains. The threads take no lock and allocate nothing.
-
-While the link is down or a guard stands, a thread tells the guard value it holds at (`quiet`) and waits on the port's
-`bell` (an address wait), which every change of either rings; at the stop it tells it holds no more (`UINT64_MAX`) and
-returns. The guard (`guard_raise`, `guard_lower`) is the event loop's, raised around every change of the link's verbs
-objects (a queue pair made, reset or connected, what the completion queues hold from the pairing before dropped; none is
-destroyed) and of what holds its pairs (a path attached or let go, the link's pairs let go of at its loss): it makes the
-guard odd, rings the bell, and returns once each thread holds at that value, so no queue pair of the device is posted on
-or polled while another changes. Posting on one queue pair of a device while another of the same device was destroyed
-crashed a bridge in the provider's `tbt_post_recv` (a store to an unmapped page at a mapping's offset 8:
-design/RDMA-KERNEL-RECOVERY.md's September signature of the provider's shared doorbell mapping, and its "The stripe
-writes of October 1") and failed the next queue pair's first SENDs with IBV_WC_LOC_PROT_ERR.
-
-**Cost.** Two threads spin for every paired port, whether or not a program holds a lease on it: two cores a link. On
-the loopback fabric every bridge of the mesh shares one host, so a line of four bridges spins twelve threads on an
-18-core host; there a crossing's one-way hop read 26.0-26.3 us median (p10 14.3-14.6, p90 44.7-45.0) on a line of four
-against 12.7-15.3 us (p10 5.5-7.0) on a line of two (mesh-loop `hop`, 3,000 rounds, two runs each,
-metal-microbench output_data/dead-history-20261017/scratch-rewrite/hop.txt).
-
-## meet
-
-A program's members choose its leases together before its start, at one meeting (mesh-call.h
-`mesh_transfers_agree(context, nodes, n, rank)`, after `mesh_transfers_prepare` and before `mesh_transfers_start`;
-libnccl-mesh's session calls it as it opens). The meeting is the `meet` service of the first member's bridge
-(nodes[0]), a request channel (`#requests`) like any other: each of a key's n members sends a `struct mesh_meet` (key,
-n, its rank, its report's bytes) and its report and half closes; the bridge holds each until every rank of the key has
-sent one, then answers each with them all (a uint32 n, n uint32 byte counts, the reports in rank order). A second
-report of one key and rank ends the first's channel (ECONNRESET). n is at most `MESH_MEET_RANKS` (256) and a report at
-most `MESH_MEET_BYTES` (1 MiB), else EPROTO. The bridge keeps nothing of a meeting once it has answered, and a channel
-that ends (its member's interrupt or exit, a link of its route lost) leaves it.
-
-The agreement (mesh-call.c):
-
-1. Each member claims every free lease of each of its paired ports for its slot (a compare-exchange of each word from
-   0 to its owner word) and reports its node, those ports (each its index, its peer, the index the peer gave the
-   cable, its leases and the mask it claimed) and every destination its program binds (node, slots, invocations,
-   depth, whether cyclic, and its transfers each way, queue by queue).
-2. The first member plans on its own map (`agree_plan`): each pair of members that binds either way is routed
-   (`mesh_route`, the routing table every bridge and member makes of the same records; EHOSTUNREACH where none), and on
-   each hop of the route each queue the pair uses takes the lowest lease that both of the hop's member ends claimed,
-   below the fewer of their counts, and that no other pair of the plan takes on that link (EBUSY where none; a hop
-   between two relays is narrowed by no claim, and its relays' own claims decide, `#relays`). A pair with more than one
-   slot a queue is refused (EINVAL). Each interior node of a route is given the pair's two directions to forward, the
-   far ends' transfers and the leases on its two hops (`struct mesh_relay_entry`), all of one node's in one request to
-   its `relay` service, whose answers the plan awaits; a relay's refusal is the plan's.
-3. The members meet again (the key xor 0x6d656574206c6561), the first member's report the plan: its code and, for each
-   member and destination, the port toward the route's first hop and each queue's lease. Each member writes its own
-   into its slot (mesh_tx `port`, `lease`) and frees every claim the plan did not give it, all of them where the plan
-   refused.
-
-The agreement returns 0, or on every member alike the plan's refusal: EINVAL, EHOSTUNREACH, EBUSY or a relay's code;
-ECONNRESET where a member's meeting was cut short, ECANCELED where the member's own slot retired. It waits on its
-sockets alone, with no bound; `mesh_transfers_interrupt` from another thread ends the wait (libnccl-mesh's revoke
-retires the session's slot, then interrupts it). The relay channels it opened are kept in the program's context until
-`mesh_detach` (`#relays`). Every member of several meets, whether or not its program binds a destination; a lone
-member (`n` 1) that binds none returns 0 at once.
-
-## relays
-
-A relay forwards a member pair whose route crosses its node, with no client of its own there: the agreement's first
-member asks it (the bridge's `relay` service, mesh-plan.h `struct mesh_relay_request`: the key, the count of entries,
-at most 64, and their bytes; each entry a `struct mesh_relay_entry` and its transfers, the far end's SENDs through
-neighbour `a` toward `b` queue by queue, then the other way's). For each entry the bridge takes a client slot of its own
-under the program's key (`mesh_slot_take`, among the node's `MESH_CLIENTS`) and mirrors the pair into it (`mirror`):
-each transfer from `a` received into a section of its own (`mesh_relay_slot` bytes a slot, rounded up to the window's
-block: its ring's slots but the last of its invocation pages, and the last its bytes or its pages, the more) and sent
-from the same section toward `b` on the same queue and binding, and each transfer the other way likewise; the program
-prepared as its ends' are, cyclic where they are; its port toward each neighbour the cable both ends take (`#ports`;
-EHOSTUNREACH where none is paired); and each queue's lease toward each neighbour claimed, free or claimed by a live
-slot of the same key not yet started (a member on this node that is also a relay of another pair: the leases it
-reported free were planned for both), else EBUSY. It then starts as a member's program does (`#programs`), logs `relay
-of <key> between nodes a and b (slot s)`, and answers 0 once every entry runs, its channel held open; else it answers
-the refusal, every slot of the request retired and its claims freed.
-
-A record landing on a relay's row stores into that slot's SEND cell toward the next hop (`receive_input`): the landing
-releases the cell, and the send thread posts it on the next hop's lease, so a relayed row is sent on as it lands, with
-no client and no copy. A relay's leases of the window are its route's to count (nccl.h `ncclMeshRelayBytes` states
-them for libnccl-mesh's wire, which a planner reads: metal-microbench tools/mesh/programs.py `sessions`); a lease the
-window cannot give refuses the request as a value.
-
-A relay ends with its route. A neighbour that lets go of its lease in order (`#leases`) closes the relay's other side:
-what landed from the first is sent on, the other side's leases are let go in order in their turn, and once neither
-holds one the relay has ended in order (`program <key> (slot s, a relay) ended in order`) and its slot is retired. The
-requester's byte past its request (written by `mesh_detach` where the program ended in order) says the route ends in
-order; a relay channel that closes without it (the requester's abort or exit, a link of the channel's route lost)
-fails the relay's programs (ECONNRESET), their leases let go with the code. A failure at either end crosses the relay
-as a lease's code does (`#leases`). On the loopback fabric relayed calls ran 12 of 12 on a line of four and 30 of 30
-on a torus of six, and every relay ended in order at each of the destroys above (`#programs`).
+A program may name the digest of what it is made from (mesh-call.h `mesh_transfers_digest`, after it is prepared and
+before it starts; a session of libnccl-mesh's, its communicator's, the digest of its members, map and routes that its
+agreement compares, nccl-mesh.c `map_digest`), and each READY carries it (a relay's READY onward its lease's, which `mirror` names from the READY it
+mirrors). A READY whose end's program of its execution names another digest is refused, and both programs fail at once
+toward every destination they bind (ESTALE, naming the node whose program differs, in each destination's status:
+`program_stale`), whether the end's program has taken the READY's flow, awaits it, or starts later with the READY held
+for it (its acceptance compares every READY held for its execution first); each of their flows tells its peer FAIL with
+ESTALE naming that node (the refusing node, toward the node it names), which fails that peer's program alike and is
+never told back to its sender, so every member of an execution whose programs differ fails at start as a value rather
+than one waiting out the peer window for a READY no program of the other's takes. A program is compared only while it
+runs (started, and not yet failed toward every destination it binds: `program_runs`); a READY that meets one that
+ended or failed is held for the execution's next program, as one that meets none. A program that names none (0) is
+compared with nothing. A message names a flow by its execution, its two ends and its stripe, not by its program's
+generation, so a FAIL in flight from a program that failed can still fail its successor of the same execution where
+that successor starts first; it fails as a value and runs again on the map as it is then. Through MESH_VERSION 114 nothing was compared at the start: the library's agreement
+(its session's position 0) found differing digests only once a start returned, and a member whose program bound a
+member whose program did not bind it back waited 630 s, so the library bound a channel to every member; with one
+member's map a link short, over chains, rings, stars, complete and partial maps of 3 to 6 members with programs
+bound to the members they move with only, a member's start waited so in 808 of 1,868 cases (1,244 of 9,876 members),
+none since: each start returns, failed or paired, within 0.1 s of its own (the members start within 0.1 s), or is held
+by a peer whose program failed first until that peer's library opens its next session (output_data/bridge-20261015/
+round3 stale_digest.py).
 
 ## requests
 
 A node asks its own bridge, never a shell on another node (the operator, 2026-10-16: "why should a node do programming
 by sshing into a terminal mode on a mesh peer instead of querying their own mesh bridge to ask 'hey what neighbors do i
 have'?"). The bridge is the node's one daemon, as PRRTE's prted, Ray's raylet and the kubelet are each their node's.
-Clients ask it about the mesh: `mesh_nodes_health` (`#records`) for every node's record, memory and health. They send
+Clients ask it about the mesh: `mesh_nodes_health` (#records) for every node's record, memory and health. They send
 requests through it to the services of any node: `mesh_request`. ssh remains for administering the substrate alone
 (installing or upgrading a bridge), as PRRTE uses it only to start its daemons.
 
 A request is a channel (RFC 4254 section 5, the SSH connection protocol's channels; its `direct-streamlocal` channel
 to a Unix socket on the far host is what `ssh node nc -U path` used). A client connects to its own bridge at
-[::1]:MESH_PORT and sends a `struct mesh_request` (MESH_REQUEST_OPEN) naming the node, by its bridge number (its own
-too), the service, and the bytes the request will take outside the window there (`#admission`). It reads the bridge's
-int32 answer: 0 once the far end is open, else an errno.
+[::1]:MESH_PORT and sends a `struct mesh_request` naming the node, by its bridge number (its own too), and the service.
+It reads the bridge's int32 answer: 0 once the far end is open, else an errno.
 
 - EHOSTUNREACH: the map holds no path to the node.
 - ENOENT: the node serves no such service.
 - ECONNREFUSED: the service's socket refused.
-- ENOMEM: the node's available memory is short of the request's bytes (`#admission`).
-- ENOSPC: the bridge holds `MESH_CHANNELS` (256) channels already.
-- the code of a link of its route lost before the far end answered (ENETRESET where it names none).
+- ETIMEDOUT: no answer within the pairing window, 30 s.
 
-A channel unanswered waits for its answer, its route's loss or its client's end, with no bound. The connection then
-carries the client's bytes to the service and the service's back. Each direction ends with its writer's half close
-(shutdown SHUT_WR), and a channel that fails anywhere resets the connection.
+The connection then carries the client's bytes to the service and the service's back. Each direction ends with its
+writer's half close (shutdown SHUT_WR), and a channel that fails anywhere resets the connection.
 
-A channel's messages ride the links' control sockets beside the bridges' own (`#wire`):
+A channel's messages ride the links' control sockets beside the bridges' own (#protocol):
 
 | message | the receiver |
 |---|---|
-| CHANNEL_OPEN (its key, origin and destination; the service; the sender's window; the bytes) | at the destination, admits it and connects the service's socket (or opens its own service) and answers CONFIRM, or REFUSE with why; elsewhere, opens the next hop along its own map's route and answers once that hop does |
+| CHANNEL_OPEN (its key, origin and destination; the service; the sender's window) | at the destination, connects the service's socket and answers CONFIRM, or REFUSE with why; elsewhere, opens the next hop along its own map's route and answers once that hop does |
 | CHANNEL_CONFIRM, CHANNEL_REFUSE | answers the hop the OPEN came from, and at the origin the client |
 | CHANNEL_DATA | gives the bytes to the channel's other end |
 | CHANNEL_WINDOW (bytes) | may send that many more bytes toward the sender |
 | CHANNEL_SHUT | that direction ended: the other end is told once its queue is given |
 | CHANNEL_CLOSE (code) | the channel failed: every other end is told (a socket reset, the next hop CLOSE) |
 
-- **Keys.** A channel's key is its origin's bridge number and sequence, the same on every hop. A bridge between holds
-  the channel as two ends, each a port, and needs no route of its own beyond the next hop.
-- **Windows.** Each hop grants its sender a window (128 KiB), and grants bytes back only as they leave toward the other
-  end (RFC 4254 section 5.2), so a hop holds at most a window each way. A socket end is read only while the other end
-  takes at once what is read.
+- **Keys.** A channel's key is its origin's bridge number and sequence, the same on every hop. A relay holds the
+  channel as two ends, each a port, and needs no route of its own beyond the next hop.
+- **Windows.** Each hop grants its sender a window (128 KiB), and grants bytes back only as they leave toward the
+  other end (RFC 4254 section 5.2), so a hop holds at most a window each way. A socket end is read only while the
+  other end takes at once what is read. 256 channels a node at 128 KiB each stay under a port's MESH_UNSENT (64 MiB),
+  so no client can make the bridge drop a link.
 - **Losses.** A link lost fails every channel crossing it, and each channel's other ends are told.
-- **Registration.** A service registers its listening Unix socket (MESH_REQUEST_SERVE: its name and its socket's path)
-  on a connection it holds open, at most `MESH_SERVICES` (32) at once. The registration lasts while that connection
-  does, and a newer one of the same name replaces it. The resident rank registers `rank` (metal-microbench rank.swift),
-  and registers again at its bridge's start (`mesh_bridge_wait`).
-- **The bridge's own services.** `meet` (`#meet`), `relay` (`#relays`), `exec` (`#exec`) and `nodeinfo`: a channel
-  to `nodeinfo` is a connection to the node's own node-info (io.mesh.nodeinfo, [::1]:8100, else 8099), so a driver
-  reads every node's node-info by its bridge number. It needs no address and checks no identity.
-- **Ledger cuts.** A request of kind MESH_REQUEST_LEDGER names a program's key and a file, and is answered at once
-  (`#ledger`).
+- **Registration.** A service registers its listening Unix socket (MESH_REQUEST_SERVE: its name and its socket's
+  path) on a connection it holds open. The registration lasts while that connection does, and a newer one of the
+  same name replaces it. The resident rank registers `rank` (metal-microbench rank.swift) and registers again
+  whenever its bridge restarts.
+- **Compatibility.** The kinds came at MESH_VERSION 115, unchanged then: an older bridge dropped them (an OPEN toward
+  it timed out), and the region was untouched. MESH_VERSION 116 adds the health record's `available` and a request's
+  `bytes` (#admission).
+- **Streams.** A request of kind MESH_REQUEST_STREAM (MESH_VERSION 118; mesh-dataflow.h `mesh_stream`) asks the
+  bridge for a raw one-way stream of so many bytes to a neighbour's bridge over a queue pair each end makes for it,
+  every word checked there, its answer the two ends' numbers (design/bridge-dataflow.md#streams): the link's raw
+  rate, read by the one process that opens verbs.
 
 Exercised on one node (metal-microbench output_data/bridge-20261016): a 3 MiB echo through a registered service in
 38.6 ms; 40 concurrent channels of 1 B to 5 MiB, all correct, in 0.44 s; a reader slower than its writer held to the
@@ -555,15 +325,15 @@ ENOMEM) where the reading is short of the bytes. Available memory is what the ke
 measure jetsam keeps: kern.memorystatus_level percent of hw.memsize. Each refusal is logged with the bytes asked, the
 memory available and the pressure. This is the kubelet's admission (a pod is not admitted on a node under memory
 pressure), with the client stating the bytes: the operator's 2026-10-15 rule that a client knows how much it allocates
-(`#clients`). A request that names none, a cancel's or a meeting's, is admitted at any pressure. The health record
-carries `available` beside `free` (the kernel's free pages, which leave out the cache it reclaims): on the Mini with
-its rank resident, 0.27 GiB free against 5.3 GiB available (2026-10-16).
+(#clients). A request that names none, a cancel's, is admitted at any pressure. The health record carries `available`
+beside `free` (the kernel's free pages, which leave out the cache it reclaims): on the Mini with its rank resident,
+0.27 GiB free against 5.3 GiB available (2026-10-16).
 
 The bridge also watches its node. While the kernel's memory pressure is at warning or worse, or the available memory
 is under a sixteenth of the node's (1.5 GiB on the Mini, 8 GiB on the M5), it logs the largest processes its user
 runs, by physical footprint (`memory low: ...; largest: <name> (<pid>) <GiB>, ...`). It logs this as the condition
-begins and again as the kernel's pressure changes while it lasts. That names what holds memory outside the window,
-whether the holder is a bridge client or not; the bridge never ends a process for it.
+begins and every minute while it lasts. That names what holds memory outside the window, whether the holder is a
+bridge client or not (the 2026-10-16 builders were not); the bridge never ends a process for it.
 
 ### exec
 
@@ -577,99 +347,186 @@ as PRRTE's daemons launch a job's processes and forward their output once ssh ha
 - **Isolation.** Its process group is its own. It holds no descriptor but its standard three
   (POSIX_SPAWN_CLOEXEC_DEFAULT: none of the bridge's devices or sockets). Its environment is HOME, USER, LOGNAME,
   SHELL, TMPDIR, LANG and PATH=/usr/bin:/bin:/usr/sbin:/sbin; the shell's own startup file (zsh's .zshenv) adds to it.
-- **Aborts.** A channel that fails while the command runs sends its process group SIGTERM, and the bridge reaps it at
-  its exit (EVFILT_PROC). A client aborts by resetting its connection (closing it with SO_LINGER 0); its bridge takes
-  the reset as that end's error at its next read or write of it.
+- **Aborts.** A channel that fails while the command runs sends its process group SIGTERM, and the bridge reaps it. A
+  client aborts by resetting its connection (closing it with SO_LINGER 0); its bridge notices a reset even after the
+  client has ended its input.
 - **Trust.** Any node on a cable to this one may run commands here once `exec` is served, as it may already write
   into the window.
 
-A configuration that does not state `exec` true refuses the service (EACCES).
+The bridge also serves `nodeinfo`: a channel to it is a connection to the node's own node-info (io.mesh.nodeinfo,
+[::1]:8100, else 8099), so a driver reads every node's node-info by its bridge number. It needs no address and checks
+no identity.
 
-## records
+### holds
 
-A node's records are ordered by their sequence, and of two of one sequence the one of greater bytes is the newer (RFC
-2328 §13.1's checksum, `record_newer`). Each bridge keeps, apart from the map, the newest record it ever heard of each
-node (RFC 2328 §13's database, mesh-flow.c `struct known`), and takes and sends on a record only where it is newer than
-that, the map holding the node or not. The map's prune (a node no paired path reaches leaves it, §14) drops a node's
-record but not its entry, so a copy of a record the map dropped, still in flight on a cycle of survivors after its node
-stopped, is not taken as fresh and sent on again: it ends at the first bridge that has heard it. A record older than
-the newest heard is answered by that newest, sent back on the port it came from (§13 step 8); one equal to it, of a
-node the map does not hold, is put again only where a paired path now reaches its node (the paths came back before
-its node's next record), and sent on only then. A bridge's own sequence starts at 1 each time it starts; a record of
-its own node newer than the one it holds (an earlier start's, flooded back to it as a link pairs, or answered by step
-8) moves its sequence past it and floods its record again (§13.4), so a node whose bridge started again is heard again
-by sequence alone. A full table of 256 entries gives its place to the first entry whose node the map does not hold.
+The bridge serves `hold` itself: a request of one line, `<name> <the unix second it ends> <why>`, writes
+~/.cache/mesh/hold/<name>, which the node's convergence reads (README.md Convergence). A line of `<name>` alone removes
+that file. The answer is a line, `held <name>` or `released <name>`, else why not. A driver holds every node its calls
+cross this way: a relay, a node with no checkout, and a node whose node-info it has not read are all reached alike.
 
-A record carries its node's facts with its links: its bridge's window (the bytes its configuration registers), its
-memory and its hardware model. They are the driver's to read from its own bridge's map, every node's at once, rather
-than each node's node-info over ssh: the library's reader copies them (mesh-plan.h `struct mesh_node_health`,
-`mesh_nodes_health`) and mesh-stat prints them in each of its `nodes` (`window`, `memory`, `model`).
+## flows
 
-## ledger
+A program toward one node is a flow on each port its route crosses: its receive rings and SEND streams
+(design/prepared-machine.md M04-M30), a ring and a stream a queue of its toward the node and a slot of the queue. A
+direct program's flows take queue pairs of their own where both ends' devices have room for them (`exclusive`, a queue
+pair a ring, with its own two completion queues, its receives posted ahead as today), and ride their ports' lanes
+otherwise; a routed program's flows, and every relay's, ride the lanes of the ports they cross (`#lanes`). A client's
+flow runs over the client's own rows. On a node the route passes through, the program is a relay's two flows, toward
+the route's previous node and its next, over rows the bridge leases itself, the one's receive rows the other's SEND
+rows: a record landed from the previous node releases the SEND cell that carries it on (design/prepared-machine.md
+M08), so a relay copies nothing and no process of its node takes part. On the route's last node, while no client's
+program of the key has started there, the bridge holds the flow: it pairs it (its queue pairs made where it takes its
+own) and answers PAIRS at once, posts its receives (then POSTED) once that program starts and binds its rows, and fails
+it toward the sender (ETIMEDOUT) where none starts within the peer window.
 
-Where its configuration states `ledger = true` (etc/bridge/README.md), the bridge keeps a ledger of each path of each
-program (its side toward one destination): Q5P's bridge trace (M27, the per-call bridge's MESH_LEDGER, mesh git
-5702ea5), which located a crossing's stages on the pair, kept on the resident bridge, so that a crossing's hop can be
-set against Q5P's ~6 us bridge to bridge stage by stage (metal-microbench docs/measurement.md 2026-10-15 and
-2026-10-16; Q5P is metal-microbench 533958a, mesh 5702ea5). The configuration is its one switch; the bridge's start
-line says "ledgers kept".
+Each port's verbs work (opening, querying and retiring its device, making and destroying queue pairs and lanes,
+registering memory) runs on that port's own thread, so a call blocked in the driver blocks that port alone, and the
+bridge's event loop, its other ports and its clients' starts go on (design/recovery.md Q14).
 
-- **What it holds.** For each SEND cell of the path, as its send thread posts it (`stream_post`): the cell, its
-  stream's cycle, when the thread first saw it released, when it posted its first SEND (after the lease's gate) and
-  when its last. For each record that landed (`receive_pass`): the record, its cycle, and when its word was stored.
-  Every time is the bridge's CLOCK_UPTIME_RAW in ns (CLOCK_MONOTONIC reads whole microseconds on macOS), each node its
-  own. No completion is stamped.
-- **Its bound.** 65,536 events of each kind a path (`MESH_LEDGER_EVENTS`), each a ring the newest overwrite: 40 bytes
-  a SEND event and 24 a landing, 4 MiB a path outside the window, allocated as the program is taken, with the names of
-  the path's cells (40 bytes a cell).
-- **Its cost.** Off: a branch on the path's ledger pointer where a cell is seen and posted and at a landing. On: a
-  clock read and a store into the ledger's own buffers; nothing allocated, written or locked on a progress thread.
-- **How it is read.** A client cuts it (MESH_REQUEST_LEDGER: mesh-plan.h `mesh_ledger(name, path)`, nccl.h
-  `ncclMeshLedger(comm, path)`): the bridge appends to the file `path` (absolute, under 104 bytes), on its event loop,
-  for each path of each running program of the key that keeps a ledger, one header line and then the path's events
-  since the previous cut (the newest 65,536 where more came). It answers 0, ENOENT where no running program of the key
-  keeps one, ENOTSUP where the configuration keeps none, EINVAL for a path not absolute. The bridge's log holds no
-  ledger, and the bridge writes no ledger file but at a cut.
+A flow fails alone: its client's pending words toward the node cancelled (M12), its status `MESH_STOPPED` with the
+failure's code and domain and the node where it failed, its queue pairs destroyed (a lane rider's records posted on its
+lanes landed first, or the lanes gone), its peer told (FAIL), and on a relay the route's other flow failed with it. A
+failed flow is never resumed; the next program is a new flow, on the map as it is then.
 
-The lines, each a JSON object:
+## lanes
 
-- the header, `{"ledger":id,"key":"<execution, hex>","node":n,"peer":p,"port":i,"near":a,"far":b,"invocations":T,
-  "cyclic":0|1,"started":ns,"sends":S,"landings":L,"cut":[s,l]}`: `node` this bridge's, `peer` the node across the
-  link, `port` its index, `near` this node and `far` the path's destination (a member's far member, a relay's
-  neighbour), `started` when the program was taken, `sends` and `landings` the path's events so far, `cut` the counts
-  at the previous cut, and `id` the bridge's number of the ledger, which its event lines carry;
-- a SEND cell, `{"s":[id,ring,invocation,position,binding,cycle,chunks,seen,first,posted,0,bytes]}` (`posted` its last
-  SEND's; `bytes` the transfer's, -1 where the cell was not named);
-- a landing, `{"r":[id,ring,invocation,position,binding,chunk,chunks,cycle,landed]}`.
+A device holds 11 queue pairs (max_qp), 10 of them usable (RDMA-FIRST.md: the bridge counts max_qp less one,
+`device_up`), and at MESH_VERSION 112 every flow took its own: two a
+destination a communicator's session (its classes' queues, nccl-mesh.c `session_open`), on every hop of a route, both
+ends of every relay. One six-member communicator then asked 18 of a middle Studio of a chain, 12 of a ring's busiest
+port, 10 of every port of a star's hub (a second communicator, 14), and the call failed (ENOSPC) on any of them
+(output_data/sixnode-20261015 substrate/qp_demand.py). A port's queue pairs are now its link's: `MESH_LANES` (2) lanes,
+UC queue pairs made when the link pairs and told the peer (LANES), which every flow on the link that takes no queue
+pairs of its own shares, both ways, a flow's queue k riding lane k mod 2 (the library's large and small classes apart).
+A direct program's flow takes queue pairs of its own only where they fit a PAIRS message (`MESH_PAIRS`, 16) and both
+ends' devices have room for them beside the lanes and every other flow's (`flow_make`: the device's usable queue pairs
+less what its flows and lanes hold or will, the lanes' two counted before they are made, so no flow's queue pairs
+leave the lanes without room; each end's READY or PAIRS tells its word, ANDed into the other's until the flow pairs,
+so both pair alike), and rides the lanes where either has none: nothing is refused for a map's size, a node's
+communicators or a program's queues and slots (a lane rider holds no queue pair a ring), and the pair's direct program
+keeps its queue pairs. A program's operands ride exclusive flows alone, their rings posted ahead (the operator,
+2026-10-16: "nobody gave permission for anything but a pre-posted exclusive flow"; metal-microbench docs/principles.md
+section 4): a lane's receiver posts a crossing's records only on its header's landing, a wire round trip on every
+crossing, so the lanes are no path for a program's data (e500528c put the pair's direct program on them, 20.2 us a
+crossing; 921312ce took it off). The making of a flow, the lanes' reason, is paid before the execution that uses it,
+on a posterior over what that execution will be (metal-microbench docs/placement.md#retention-and-protention-the-next-execution-planned-ahead);
+until that estimator places the device's queue pairs, a routed program and one whose queue pairs do not fit still
+ride the lanes, which is a defect to remove, not a form. The lanes' pages (their headers and discard blocks, 7 pages at 16 KiB) are leased for every
+port the region has at the bridge's start, beside the map's (`lanes_reserve`), so a port found later, once clients
+hold the window, has them; a port the window could not give them takes them as its lanes are made, and waits (logged
+once) where the window has none, as lanes wait for a device's room.
 
-A cell and its records share a name across the link: ring (the peer's ring of the same index), the program's
-invocation, the position among that invocation's transfers of the ring (in their lists' order, which both ends' streams
-and rings take, so the hardware pairs them), and the cycle; `binding` is the transfer's binding as its list names it.
+TB5 has SEND and RECEIVE alone (no RDMA WRITE, no SEND with immediate: TN3205), and a queue pair's receives are taken
+in the order posted, so rings that advance apart cannot share one by posting ahead. A lane's sender therefore heads
+what it sends: each header (one 4 KiB frame) names, entry by entry, the records the SENDs after it fill (the receiving
+flow by its index and generation in its port's table, its ring, the chunks and their bytes), and the receiver, on the
+header's landing, posts those records of those rings in that order, then listens for the next header. Credit flow
+control holds each SEND until its receive is posted (TN3205), so no SEND lands before its record and no record is
+posted for a SEND that does not come; the data lands in the program's own rows, never copied. A header's entries are
+the streams of the lane's flows whose cells their producers released, in turn, as many chunks as the lane's frames
+take beside those in flight and the peer's receive room (its queue pair's and its share of the receive completion
+queue, less the header's frame), a cell's chunks spanning headers where they must. An entry naming a flow that is no
+longer the one its index names, or no longer takes records (it stopped: its rows are no longer its own), is posted as
+discards of the same frames, so the lane stays in step; an entry whose frames are not its ring's records' fails that
+flow, a header out of sequence or past the room the lane told fails the lanes. Lanes that failed, or could not be made
+or connected, are reset, never the link (`lanes_reset`, design/recovery.md#loss): the flows that posted on them fail,
+the peer is told (a LANES of none and why) and resets its own where they were joined to these, and both make new lanes
+a pause later, the link paired and its exclusive flows running throughout; a flow still pairing waits for them within
+its pairing window. A peer's LANES that names new queue pairs while this end's lanes are joined to its old ones resets
+them alike (the TCP stream orders a peer's LANES of none before its new ones). Lanes are up (their `up` word, which the
+progress threads read) once the event loop takes their connect's end, never in the connect itself, so lanes reset while
+they connected stay down (through MESH_VERSION 114 the connect's job wrote `up` as it ended, after a reset the event
+loop had made meanwhile, and the progress threads served lanes joined to queue pairs the peer had destroyed until
+their teardown). A flow on the lanes is released once its records posted on them have landed, or the lanes' queue
+pairs that held them are destroyed (their generation moved): through MESH_VERSION 114 also once the lanes were merely
+down, so a relay's lease could be returned to the window, and leased by another client, while its records were still
+posted on lanes not yet torn down and a peer's SEND in flight could land in it.
 
-`rdma/ledger.py PATH...` reads two nodes' cuts of an execution, pairs each path with its peer's across the link (the
-same key, the two nodes each the other's, and the one's `far` the other's `near`: a member's path toward a member
-across the link, or toward a relay and the relay's toward it; of several, the one sharing the most cell names) and a
-cell sent with its last chunk landed, and gives each
-direction's seen to first post (the send thread's pass and gate), first to last post, and the one-way bridge-to-bridge
-hop with the clocks' offset cancelled: each crossing paired with one the other way, of the same name where the program
-crosses back there, else the nearest in time, hop = ((landed_B - seen_A) + (landed_A - seen_B)) / 2, as Q5P's analysis
-took it (an offset so taken holds the two directions' hops alike). On a line of three with ledgers kept (mesh-loop's
-`nccl`, the walk, every rank's cut) every path paired: an end member's hop toward the middle node 20 crossings over
-its two paths, 17 paired by name and 3 by time, and the middle node's toward it 17, all by name; the relay's 3
-forwarded cells carry its own program's names and pair with no landing by name. Not kept: Q5P's third time of a landing (after its ring's next records were posted) and its layout lines
-(`trace_layout`, `trace_binding`), whose work the names do.
+A lane costs its receiver a reaction a header that a ring posted ahead does not: the header's frame (4 KiB, 0.46 us
+at the link's 8.9 GB/s, RDMA-FIRST.md), the receive thread's turn and the records' posts, with the header's SENDs held
+by credit flow control until then (the resumption of a held SEND is unmeasured). An estimate of at least 1.5 us a
+crossing: on the pair's coded ledger call (71 crossings a step at 17.26 ms, metal-microbench docs/measurement.md
+2026-10-15) 0.11 ms a step, 0.6 %; at the form the engine is building, Q5P's (141 crossings a step at 3.96 ms, each
+landing 5 to 18 us after its publication) 0.21 ms, 5.3 % of the step and up to a third of a crossing. That is why a
+direct program kept queue pairs of its own where its devices had room, a second transport beside the lanes for the
+latency-bound path alone, until a crossing's landing was measured on each on the pair. Measured 2026-10-16 (mesh
+f4ba8792; metal-microbench docs/measurement.md 2026-10-16, coded17-21 against lanes1-3, the pair's one-row split, 71
+crossings a step): on the lanes the M5's FFN sum waits 14.4-16.8 us against 12.0-12.3 on its own queue pairs, the
+Mini's stream lands about 3.5 us later (45.4-46.4 against 42.2-42.9 us), a step 5.28-5.34 ms against 5.10-5.21 (2-3 %);
+a session's own start (nccl.h ncclMeshSessionWaits on the member that arrived last) 3.7-10.2 ms against 327-990 ms,
+the exclusive queue pairs' making and pairing each session. At a session a call (A28), the start outweighs the steps'
+cost below some 2,500 to 8,000 steps a call, so a direct program's flows ride the lanes; the exclusive form stays in
+the code for a flow a READY asks it of, and goes with the next change that touches it.
+
+A position is a whole slot on the wire (512 KiB of the library's large class; of its small one the communicator's
+`small`, one block where none is given, the pair's decode 3,072 bytes, one frame), a filler
+as much as a piece: TN3205 pairs a SEND with a receive of the same 4 KiB frames, and an exclusive ring posts its
+receives ahead of what lands, so a position shorter than its slot would leave its receives' frames unmatched and every
+later SEND of the ring a record off. A lane's header names the chunks and bytes of what follows it before its receives
+are posted, so a lane can carry a position's own bytes (the producer naming them with its release, the receiver
+posting that many frames and storing the words of the slot's records it skips at the last one's landing, a relay
+carrying them on with its hand-off), and the library could then price a position at its bytes where its programs move
+fillers or pieces short of a slot (at 16 MiB on six-node maps, up to twice a program's bytes). It is not built: the
+exclusive form, the latency path every direct program of the pair takes, cannot carry it, so a price at a position's
+bytes would be wrong on every exclusive flow, and the lanes' own path has not yet carried a crossing on hardware.
+Once a crossing's landing is measured on each and the exclusive form is deleted, the lanes carry every position at
+its own bytes and the library prices it so, one transport and one price (the library's request of 2026-10-15).
+
+A port's lanes hold two queue pairs whatever its programs, routes and communicators. Over the review's seven
+six-node cablings and 240 numberings each, one six-member communicator holds 4 queue pairs on the busiest device (its
+lanes and its direct neighbour's exclusive flow; 6 to 18 at 112, refused on three cablings), and with four splits
+beside it 8 (12 to 36 at 112, refused on all seven); no direct flow had to ride the lanes, and a fifth communicator
+toward one neighbour would; the pair holds 4 where it held 2 (metal-microbench output_data/bridge-20261015
+qp_lanes.py, qp_lanes.json; at the budget of 10 alike, qp_lanes2.py). The lanes' protocol, modelled with relays, stopped programs and reused table indices on
+chains, rings, stars and a Studio K4, delivers every chunk to its record and completes every program that was not
+stopped, 480 of 480 runs; posting the next header's receive before a header's records, posting no discards, or
+reading no generation each misdeliver or desynchronise a lane in most runs (lanes_model.py, lanes_model.json).
+
+## progress
+
+A port's flows and lanes are served by the port's two progress threads, its receives' and its SENDs', started at its
+first flow or its lanes and kept for the bridge's life: one pass serves every exclusive flow in the port's table (its
+completion queues, its streams) and the port's lanes (their headers, their landings, their SENDs and completions) while
+a flow in the table rides them or their SENDs or records are in flight, so a port of exclusive flows alone polls its
+flows' queues and no other, as Q5P's threads did (mesh git 5702ea5, a thread a link and direction).
+A flow enters the table when it is to be served and leaves it once neither thread reads it (an epoch each thread tells
+at the end of the first pass that read it: the two threads read `high` and `epoch` on one line at every pass, and a
+store of each pass's epoch by both bounced that line between their cores at the pass rate, a coherence miss in every
+pass of the latency path; mesh git 765a8590^ told it every pass). MESH_VERSION 112 started two threads a flow, spinning while the flow lived, so a session kept 2(N-1)
+spinning, and four a relayed pair: 10 to 34 on a member of a six-node mesh and 50 to 70 on a relay hub, above the
+rank's encoding threads (QOS_CLASS_USER_INTERACTIVE). A node now runs two a paired port (at most two a cable,
+independent of members, communicators and routes), and they spin only while something moves: after MESH_IDLE_NS
+(100 ms) of nothing a thread parks on its port's `bell`, looking again every MESH_IDLE_POLL_NS (1 ms) while something
+is its to look for (`port_pass`: a flow whose SENDs it serves, an exclusive flow's receives or a lane rider's headers,
+a lane's records posted and not landed, a lane's SENDs in flight), else every MESH_PAUSE_NS (3 s), and at once when
+the bell rings: a client's group of a program on the port starting (mesh-call.h `mesh_transfers_wake`), a landing that
+released one of the port's SEND cells while its send thread was parked (`send_wake`: a relay's index hand-off, the
+cell's `port` naming whose thread posts it), the bridge listing or unlisting a flow, its lanes changing or it
+stopping. A thread woken by its bell with nothing to look for parks again at once. Nothing lands on a lane for a flow
+this end has not listed (the peer sends only after this end's POSTED, which follows the listing), so a node whose links
+are paired and which runs no program sleeps: two looks a thread every 3 s, where the round's first pass looked every
+1 ms for as long as its lanes were up (2,000 wakes a second on the pair, 10,000 on a Studio of five cables). The ready
+words a producer releases have no descriptor to wait on (RDMA-FIRST.md "Sleeps"), so a group's own ring is what ends
+the park without a poll's delay; within a group, and for 100 ms after, the threads spin as before. A peer's landing on
+a parked receive thread waits for its next look, at most 1 ms: the receive side's one event source is its completion
+queues, which a completion channel (`ibv_req_notify_cq`) would wake at once, but that path has never run on this
+provider and a destruction of a queue whose events are not acknowledged blocks (`ibv_destroy_cq`), so it waits for a
+measurement. A send thread tells it is parked, then looks once more before it waits, and `send_wake` orders its
+release before it reads that word, so one of the two sees the other.
 
 ## keepalive
 
-A configuration's `keepalive_us` (etc/bridge/README.md; the bridge reads `keepalive`, nanoseconds) is the most a link
-lets pass between frames on its keepalive queue pair (pair 0, `#links`) while a program holds one of its leases: the
-send thread posts a 64-byte KEEPALIVE frame (a `struct message`, from the port's page of the window) once the interval
-has passed since its last, while fewer than 16 are in flight; the peer's receive thread posts each of its 16 receive
-slots again as a frame lands (`receive_pass`), and nothing else reads them. A link no program holds a lease on carries
-none, and a configuration that states none sends none. The frames ride a queue pair no program holds, made (or made
-again in place) at the link's pairing alone, so no lease's release touches it. Its siblings are the configuration's
-`hello` (a port with no peer says HELLO again at that interval, `#ports`) and `health` (the node's record flooded again
-at that interval, `#records`), each none where the configuration states none.
+A configuration's `keepalive_us` (etc/bridge/README.md; the bridge reads `keepalive`, nanoseconds) gives each exclusive
+flow a queue pair of its own past its data's, made, connected and destroyed with them, and bounds how long the flow's
+send side lets pass between frames on it while the flow progresses. The pair's number travels last in the flow's
+PAIRS, its count one past the data's (`flow_make` counts it against the device; a count of the data's alone, an end
+whose configuration states none, leaves the pair unconnected and unused at both ends). The receive side posts 256
+receives of one frame into the port's discard block on it once it is ready to receive (`flow_alive_listen`), and its
+receive thread posts each again as it lands (`flow_receive`, wr_id `FLOW_ALIVE_HEARD`); the send thread posts a
+16-byte SEND of the discard block on it once the interval passed since its last, one at a time (`flow_alive`, wr_id
+`FLOW_ALIVE_SENT`, taken by `send_retire`). Each flow's census at its release is followed by its keepalives posted and
+heard. The frames ride the flow's own queue pairs, whose posts the flow's quiescing stops before any of them is
+destroyed, as its data's.
 
 Why: on the pair (metal-microbench output_data/split-20261017, 2026-10-17) the Mac mini's Thunderbolt RDMA path, quiet
 for the 40-50 us of a layer's window, completed its next SEND 6.2 us after its post where the M5's took 2.5, and
@@ -679,175 +536,159 @@ published). The provider's completions are a ring the controller writes and the 
 (`tbt_poll_qp_send`, `tbt_poll_qp_recv`: a descriptor's bit 0x15), so the time is the controller's, not a parked
 thread's: the send thread saw each released cell within 0.04 us. A host-path exchange of 3,072 bytes read 12.8-13.8 us
 a round after gaps of 0-10 us, 15.1-15.6 after 20 and 16.5-18.8 after 40-160 (gapprobe2); UDP on the same cable did
-not keep it awake (gapprobe3). With frames every 5 us on the link, through the one call in which they flowed, the
+not keep it awake (gapprobe3). With frames every 5 us on the lanes, through the one call in which they flowed, the
 Mini's SEND completion read 1.8-1.9 us and the bridge-to-bridge hop 2.98 us median, 2.60 p10, 4.21 p90 against 6.50,
-5.08 and 8.88 (ka3 against tc62), the step's median 3,904 us, p10 3,673, mean of the last 120 4,029 (mesh 12f484f8).
+5.08 and 8.88 (ka3 against tc62), the step's median 3,904 us, p10 3,673, mean of the last 120 4,029.
 
-## stop
+The lanes carried them first (mesh b21ced65, 9e0b3a4a) and must not: posting on the lanes' long-lived queue pairs while
+a flow's were destroyed on the same device crashed the M5's bridge in `tbt_post_recv` (a store to an unmapped page at
+a mapping's offset 8: design/RDMA-KERNEL-RECOVERY.md's September signature of the provider's shared doorbell mapping),
+failed the next flow's first SENDs with IBV_WC_LOC_PROT_ERR, and left the lanes' frames unheard from the second call
+on. Nothing posts on a queue pair that outlives a teardown of another.
 
-The operator, 2026-10-18: "imagine a number for every single state the bridge can be in. for all numbers there must be
-a signal which can be sent to the bridge which causes the bridge to shut down as an application and release all
-resources."
+## stripes
 
-The bridge has one stop flag (`stop`, mesh-verbs.h), set by a signal's handler (SIGTERM, SIGINT and SIGHUP: `stopped`,
-which keeps the signal as the reason), by the event loop at its binary's change (EVFILT_VNODE: the file it started from
-deleted, written, extended, renamed or revoked; the reason `MESH_STOP_BINARY`) and by a verbs call a port's device
-refused (`device_lost`: a pair's making, making again or connection, a lease's remaking, the open device's port read,
-query or protection domain; the reason `MESH_STOP_DEVICE`, its FAREWELL "a verbs call of its device was refused"), after
-which launchd starts the bridge again on a fresh device context; the kqueue's EVFILT_SIGNAL wakes the event loop. Every
-loop reads it every pass: the event loop's turn, each progress thread's pass (a parked one is woken by its bell), the
-clients' control watcher, and a device's registration between extents (ECANCELED). No thread of the bridge waits on a
-peer, a client or a drain: a progress thread waits on its bell alone, the guard on the progress threads alone, which
-hold at their next pass or have returned, and the event loop on its kqueue alone.
+A client writes into a neighbour's window with no program at the neighbour: a stripe (the operator, 2026-10-01:
+"MAKING K-MANY COMPUTERS INTO A SHARED ADDRESS SPACE WHERE EXTREMELY HIGH NUMBERS OF CPU CORES CAN ASYNCHRONOUSLY START
+WRITING TO STRIPES OF THE REALLY BIG SHARED ADDRESS SPACE"; metal-microbench docs/acceptance-20261014.md A51: "The
+bridge serves a neighbour's request over a link whether or not a local client has configured a matching program").
+Any thread of any client, or a GPU, puts a request (the bytes at an offset of its node's window, the neighbour, a word
+and a value) into a ring of its own that it registered with its bridge (mesh-call.h `mesh_requests_create`,
+`mesh_write`); the bridge sends a descriptor and then the bytes, the neighbour's bridge posts its receives at the
+same offset as the descriptor lands, and each bridge stores the value into its word as its side completes. A port's
+stripes ride a flow of its own, two queue pairs made on demand and told the peer as the lanes are (STRIPES), served by
+the port's progress threads (design/bridge-dataflow.md#stripes, which also holds the deviations from mesh 8fc27cbe,
+where they were first built and from which they are restored, and the integration check). The descriptor's receive
+posting is a header's, the one the bridge keeps for anything but the lanes' control: stripes are a client's writes
+into memory, never a program's operands, which ride pre-posted exclusive flows alone (#lanes).
 
-The stop, in order: `bridge node n: stopping (<reason>)`; each port's bell rung and its two threads joined; every
-request channel ended (ESHUTDOWN) and every request socket closed; each port told FAREWELL with the reason, as far as
-its socket takes it at once, and lost (ESHUTDOWN): every program holding a lease of it failed as a value, its pairs let
-go of with no verbs call (`#links`); every program freed; the region's `bridge_pid` 0 and the clients' control word
-notified, so every client's watch and wait ends (`#clients`); the control watcher joined; `bridge node n: stopped: q
-queue pairs on p ports left to the kernel's reclaim at its exit`; exit 0, the region unlinked at the exit. The stop
-makes no verbs call and waits on no port's queue (a registration under way reads the flag between extents): every verbs
-object the bridge made, its queue pairs, completion queues, registrations, protection domains and contexts, is the
-kernel's to reclaim at the process's exit (design/RDMA-KERNEL-RECOVERY.md "October 18", where whether that reclaim
-avoids the driver's termination deadlock on TB5 is an open reading). A peer that hears the FAREWELL loses the link at
-once (ECONNRESET, its programs failing as values naming this node), and logs the reason (design/recovery.md#diagnosis).
+The flow's queue pairs live while the link is paired, so their posts would cross every other queue pair's teardown
+on the device (#keepalive's hazard). While a port's device holds them, every change of the device's verbs objects
+runs with the port's guard raised, the progress threads making no pass until it returns, and the stripe flow's own
+teardown moves its queue pairs to the error state and drains them before destroying them: the answer to the double
+deregistration and the panics that ended 8fc27cbe (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1").
+With no stripe flow on a port, its verbs work runs unguarded, as before.
 
-On the loopback fabric (mesh-loop `sigterm`), SIGTERM to every bridge of a line of four and of a torus of six, once
-each, in each state the loop makes (idle, pairing, a host-path call, a GPU-walk call, a relayed call, after a link loss,
-with a client killed, with a peer's bridge stopped), at mesh a68717f9: every bridge exited 0 with its stopped line and
-no region left, in 1.1-7.7 ms, and the fabric's queue pairs held by a live process read 0 in every state (the line's
-pairing read 40 until the reading reaped the bridges it starts itself, unreaped children answering `kill(pid, 0)`; 0 in
-3 of 3 after; metal-microbench output_data/mesh-noteardown-20261018, line4.txt, line4-pairing-after-reap.txt and
-torus6.txt; loopverbs holds a queue pair's ring by its process and frees it at that process's exit, as the kernel
-reclaims, design/bridge-dataflow.md#the-loopback-fabric). SIGTERM is launchd's stop; a bridge never receives SIGKILL
-from the mesh (RDMA-RULES.md).
+## ledger
 
-## wire
+Where its configuration states `ledger = true` (etc/bridge/README.md), the bridge keeps a ledger of each flow: Q5P's
+bridge trace (M27, the per-call bridge's MESH_LEDGER, mesh git 5702ea5, deleted with that bridge in 800fe6bc), which
+located a crossing's stages on the pair, restored on the resident bridge, so that a crossing's ~20 us a hop today
+can be set against Q5P's ~6 us bridge to bridge stage by stage (metal-microbench docs/measurement.md 2026-10-15 and
+2026-10-16; Q5P is metal-microbench 533958a, mesh 5702ea5). The configuration is its one switch; the bridge's start
+line says "ledgers kept".
 
-The bridge's whole wire vocabulary is one enum (mesh-flow.c `enum wire`):
+- **What it holds.** A flow's ledger is made on its port's queue before either side is prepared or the flow listed
+  (`ledger_open`). For each SEND cell its send thread first saw released (`flow_send` for an exclusive flow,
+  `lane_send` for a lane rider): the cell, its stream's cycle, and when it was seen, when its first SEND was posted,
+  when its last was, and when that SEND's completion was taken. A queue pair's completions come in the order posted,
+  so the completion whose gate count reaches the cell's last SEND's is the cell's (an exclusive flow's; a lane's
+  completions retire frames its flows share and are not attributed). For each receive record that landed
+  (`flow_receive`, `lane_receive`): its index, its cycle, and when its word was stored. Every time is the bridge's
+  `ledger_ns` (CLOCK_UPTIME_RAW, ns: CLOCK_MONOTONIC reads whole microseconds on macOS), each node its own.
+- **Its bound.** A side's events are one pass of the flow's cells or records, and every pass of a cyclic program's,
+  up to MESH_LEDGER_EVENTS (65,536) each; past it the flow runs on and the ledger keeps the first. They are allocated
+  as the side is prepared, 56 bytes an event sent and 16 a landing (4.5 MiB a flow at the bound), with the cells' and
+  records' names (32 and 16 bytes each).
+- **Its cost.** Off: a branch on the flow's ledger pointer where a cell is seen, where its SENDs are posted, at a SEND
+  completion and at a landing. On: a clock read and a store into the ledger's own buffers; nothing allocated, logged
+  or locked on a progress thread.
+- **How it is written.** At the flow's release (`flow_release`, once neither progress thread reads the flow and a lane
+  rider's records have landed), on its port's queue: its header into the bridge's log, then a line an event, into the
+  log where there are MESH_LEDGER_LINES (2,048) or fewer, else into a file beside the log,
+  `ledger-<key>-<node>-<peer>-<stripe>-<ledger>-<UTC time>.jsonl`, which the header names (the file's first line is
+  the header again). A flow held across executions (a program planned ahead, metal-microbench
+  docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) is written when it ends.
 
-    enum wire { HELLO=1, PAIRS, FAREWELL, RECORD, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_REFUSE, CHANNEL_DATA, CHANNEL_WINDOW,
-                CHANNEL_SHUT, CHANNEL_CLOSE, KEEPALIVE };
+The lines, each a JSON object (in the log after its line stamp):
 
-| member | carried on | sent | its receiver |
-|---|---|---|---|
-| HELLO | UDP to the link-local all-nodes group, then the control socket | by a port whose device is open: its node, LID, GID, block size | the lower node dials the higher; on the socket, the link's greeting (`#ports`) |
-| PAIRS | the control socket | at a link's making, and at each lease's making again, with its holder's code and SENDs completed | pairs joined; a lease's holder fails, or takes its last landings and lets go (`#links`, `#leases`) |
-| FAREWELL | the control socket | by a stopping bridge, with its reason | the link lost at once (`#stop`) |
-| RECORD | the control socket | a node's record, flooded | the map (`#records`) |
-| CHANNEL_* | the control socket | a request's channel, hop by hop | `#requests` |
-| KEEPALIVE | the keepalive queue pair | by the send thread at the configured interval while a program holds a lease of the link | nothing but its receive posted again (`#keepalive`) |
+- the header, `{"ledger":id,"key":"<execution, hex>","node":n,"peer":p,"port":i,"near":a,"far":b,"stripe":s,
+  "stripes":S,"exclusive":0|1,"queues":Q,"qps":R,"invocations":T,"cyclic":0|1,"started":ns,"sends":n,"send_room":N,
+  "landings":m,"landing_room":M,"file":"<name>"|null}`: `node` this bridge's, `peer` the link's other node, `near`
+  and `far` the program's two end nodes as this end names them (the flow at the link's other end names them the other
+  way round), `id` the bridge's number of the ledger, which its event lines carry;
+- a SEND cell, `{"s":[id,queue,invocation,position,binding,cycle,chunks,seen,first,posted,completed,bytes]}` (`bytes`
+  the transfer's, -1 where the cell was not named; design/bridge-dataflow.md section 6);
+- a landing, `{"r":[id,ring,invocation,position,binding,chunk,chunks,cycle,landed]}`.
 
-Each is a `struct message`: its magic (0x4d595048 plus `MESH_VERSION`), its kind, the sender's node, block size and
-port, its LID and GID, a code, a key, a count and its payload's bytes (at most 64 MiB). A message of another magic or
-of a kind outside the vocabulary loses the link (EPROTO). Every program datum crosses as SENDs on its leases. No
-message describes data to a reader, and none orders, gates, acknowledges or schedules a crossing: a landing's word is
-the only signal a reader acts on. A PAIRS's `sent` tells the peer's bridge alone how many landings of a lease to take
-before it lets go of the lease (`#leases`).
+A cell and its records share a name across the link: queue (the peer's ring of the same index, queue k's slot j), the
+program's invocation, the position among that invocation's transfers of the queue (in their lists' order, which both
+ends' streams and rings take, so the hardware pairs them), and the cycle; `binding` is the transfer's binding as its
+list names it. A time not reached is 0: a lane rider's completion, a cell seen and not yet posted at the flow's end.
 
-Adding a member to this enum, or a state to the bridge (a lease word's value, a program's state, a link's phase, a
-message a loop waits for), is a design change. It needs an operator's quote, verbatim and dated, in this section before
-it is written. What a reviewer holds it to is the record and the rule of 2026-09-08 and 09-09, restored here verbatim.
+`rdma/ledger.py PATH...` reads two nodes' logs or ledger files of an execution, pairs each flow with its peer's
+across the link (the same key and stripe, the nodes and the ends each the other's) and a cell sent with its last
+chunk landed, and gives each direction's seen to first post (the send thread's pass and gate), first to last post,
+last post to completion (the RC round trip), and the one-way bridge-to-bridge hop with the clocks' offset cancelled:
+each crossing paired with one the other way, of the same name where the program crosses back there, else the nearest
+in time, hop = ((landed_B - seen_A) + (landed_A - seen_B)) / 2, as Q5P's analysis took it (an offset so taken holds
+the two directions' hops alike). Not restored: Q5P's third time of a landing (after its ring's next records were
+posted) and its layout lines (`trace_layout`, `trace_binding`), whose work the names now do.
 
-From d8d69cca:design/distributed-reduce.md:203-242 (2026-09-09):
+## cables
 
-### What was done instead, and why it is forbidden
+Several cables between two nodes are several ports, each with its own lanes. A program between two nodes is striped
+over its route's cables: its invocations t with t mod s = j are its stripe j of s (`stripe`, `stripes`), a flow on
+each hop. A direct program's s is the pair's cables, flow j on cable j in the cable order both ends read alike
+(`cable_rank`: the index the lower node gave each), so a bulk class's positions run over every cable at once
+(MESH_VERSION 112 put a program's queue q on cable q mod n, so the large class rode one cable and a third carried
+nothing). A routed program's s is the least common multiple of its hops' cables (`route_stripes`: a hop's the fewer of
+its two ends' records', the first hop's this node's own), and stripe j rides cable (h + j) mod c of a hop of c cables
+(`stripe_cable`, h the execution and the two ends mixed, alike at every bridge), so each cable of every hop carries s/c
+of the program's invocations and a pair's routed programs spread over a hop's cables; past `MESH_STRIPES` (8) s is
+the fewest cables of a hop, each stripe then a cable of its own on every hop, so the route still carries its slowest
+hop's cables; on a relay a direction's stripes share one lease, each stripe's flows preparing its own
+invocations of the lease's rows. At the round's first pass a routed or relayed program rode one cable a hop, priced
+as all of them: over doubled Studio rings, chains and stars 4 of 18 to 20 of 20 routed pairs were priced at twice
+what they could carry (metal-microbench output_data/bridgereview-20261015 routed_cables.py), and 12 of 20 on chains of
+mixed counts (2, 3, 2, 3, 1 cables; 3, 4, 5, 2, 1), and over 2,000 random connected six-node cablings of 1 to 3
+cables an edge 10,013 of 32,850 routed pairs, none now (routed_stripes_random.py); k routed programs over one doubled hop put 1.5, 2.25,
+2.75 and 3.95 on its busiest cable for k of 2, 3, 4 and 6, now k/2, as priced (output_data/bridge-20261015
+routed_stripes.py). A flow's receive ring posts its own invocations ahead by its share of
+the program's span, so a stripe count that does not divide a cyclic program's invocations stripes it unevenly rather
+than refusing it. Every READY carries its stripe, and a flow whose ends disagree (one end sees a cable the other does
+not yet) fails as a value (EPROTO). The map prices a pair of several paired cables at their bandwidth together, and a
+route at its slowest hop's (mesh-dataflow.c `mesh_paired`, `mesh_hop_cost`), which the stripes deliver where the
+least common multiple is kept.
 
-Every divergence from this document that reached the repository was a
-control-flow object standing in for something the page table already held,
-written by an agent that had not read the prior art and did not want to. The
-record is kept here so that the next such object is recognized on sight.
+## routes
 
-- A `K_DIGEST` control frame carrying the sent hash, a mismatch poisoning the
-  whole program through the status word, and a paragraph added to this
-  specification to bless it (2026-09-08, `f47fc4e`, `2188f44`), after the
-  operator had said that acknowledgements are a private feature of the
-  transport and not the algorithm. The digest is a page.
-- A `K_OPEN`/`K_READY` rendezvous with exponential backoff that held every
-  page until a "ready" message arrived, and `K_ABORT`/`K_ABORTED` propagation
-  between peers: a hand-rolled connection protocol on a link that already
-  has flow control. Its one real function — not sending to a peer whose client
-  had not attached — was the receiving bridge dropping frames addressed to it;
-  the bridge now holds them.
-- A runtime reduce node that counted generations by one where a row family
-  advances by the number in flight, so families past the first never reduced;
-  it was committed as measured without a run that could have shown it.
-- Hidden-state rows read as a contiguous matrix across two pages, crossing the
-  page headers; the paged path was committed with a relative error copied from
-  the CPU path it replaced.
-- The digest page used as the gate on the next stage's issue — the numerical
-  check made a dependency of the numerical program, which this document
-  forbids in two places.
-- A driver with phases, per-job state, per-call tasks awaiting predictions,
-  completion words, and fixed 128-row groups: a scheduler. It issued about two
-  thousand GPU command buffers per evaluation and made the pass three times
-  slower than the barrier it was meant to remove. The readiness it tracked was
-  already in the stamps.
+A routed pair's route is its lower node's: the lower end's program takes the route of its own map (mesh-dataflow.c
+`mesh_route`, the library's routing table, mesh-plan.h `mesh_routes`, the same table every bridge and member makes of
+the same records) and sends a READY a stripe along it; the higher end's program awaits those READYs whatever its own
+map holds (`program_await`: no route of its own is read to pair, so a higher end that sees none, its peer's one cable
+pairing again in its view, still pairs on the lower's; at the round's first pass it was refused EHOSTUNREACH at once
+and the lower's start waited out its 630 s windows, metal-microbench output_data/bridgereview-20261015
+higher_route.py), taking at once the stripes the lower's READYs left held and the rest as they come, each take told
+the await before its READY goes out, its status paired once every stripe runs; bounded by the peer window where its
+map routes to the lower, by the pairing window from when the lower was last reachable where it does not (the peer
+window once a route appears), refused at once (EHOSTUNREACH) where the lower has been unreachable longer or was never
+heard of, and ended sooner by the lower's own failure as a value or its program's revoke (the slot retired); each READY
+of its goes back along the relays the lower's made, each mirroring the direction it carries and sending it on, so
+every relay of the route carries both directions on one route (MESH_VERSION 112 routed each end on its own map: two
+maps a link flap apart left both programs held on different relays, and a route of two or more relays carried the far
+end's direction to its first relay alone). A READY that ends on a port where this node's program of its key toward the
+sender runs flows elsewhere (one end saw a cable the other did not) is refused and the program failed at once, both as
+values (EPROTO), rather than left to the peer window.
 
-None of these was hard to avoid. The token store, the in-data flag, the
-region runtime, the timestamped epoch and the row-streamed reduce-scatter are
-each thirty to fifty years old, documented, and measured; reinventing a piece
-of one from a message-passing reflex is not engineering caution, it is not
-having done the reading. A change to this repository that adds a frame kind,
-a handshake, a retry, a phase, a token, a gate, or a scheduler is wrong before
-it is measured, and measurement has so far agreed every time.
-
-From 1347b7aa:design/pages-and-functions.md:156-212 (2026-09-08):
-
-### Addendum: waiting for messages about data, on infinitely many Minis
-
-Suppose a Mini does not wait on its input rows. Suppose it waits for a
-message that says the data is coming, or is done, or may be used: a token, a
-gate value, a "ready" flag, a scheduler's decision, a completion callback that
-stands in for the pages. Then it acts on the message. This is what goes wrong.
-
-1. **The message is a second thing on the same link.** The pages take one
-   hop. The message about them takes a hop too. Every dependency on the chain
-   now costs a hop for the pages and a hop for the message. On a chain of
-   depth D the NFE waits for D messages it did not need. On an infinite mesh
-   D is not bounded, so the extra wait is not bounded either. Waiting on the
-   rows costs nothing extra: the row is stamped when the page lands.
-2. **The message can be true and the data still absent.** A message says
-   something about the sender's state. The pages may still be in flight, or
-   lost, or land out of order, or be corrupt. Acting on the message is acting
-   on a claim. To make the claim safe, the sender and receiver need
-   acknowledgements, retries, and ordering. That is a protocol on top of page
-   delivery. The digest, computed after the pages were used, already finds a
-   wrong page without any of it.
-3. **The message can be false and the data present.** The pages landed and
-   the rows are stamped, but the message is late, or the sender concluded
-   early, or the link that carried the message broke while the link that
-   carried the pages did not. The Mini sits with everything it needs and does
-   nothing. Waiting on the rows would have run the function at once.
-4. **The wait binds this Mini to another Mini's control flow.** A message
-   comes from a sender's scheduler, not from data. If that scheduler is slow,
-   this Mini is slow, and every Mini downstream is slow, even though their
-   pages have all arrived. On an infinite mesh there is always a slowest
-   scheduler somewhere, and the chain of "waiting for whose message" has no
-   end. Waiting on rows binds a Mini only to the pages in front of it.
-5. **Work handed to the GPU while it waits for a message is killed or idles.**
-   We measured this: a command buffer that waits on a signal for seconds is
-   ended by the watchdog, and every buffer behind it dies with it. A GPU given
-   only functions whose rows are stamped runs at its roofline fraction. Its
-   utilization then does not depend on the mesh at all.
-6. **Messages need their own storage and their own freeing.** Every message in
-   flight is state: a queue entry, a counter, an event value, a callback. On an
-   infinite mesh the number of messages in flight is not bounded, so this
-   state is not bounded, and it is freed by other messages. Pages are freed by
-   release when the dependent's rows are stamped. That state is bounded by the
-   pages, and the pages were needed anyway.
-7. **A speculative message lets a function run before its data.** "The pages
-   will arrive" is not "the pages have arrived". A function that runs on the
-   promise reads stale pages and writes a wrong output with a good stamp. The
-   digest will disagree later, and the NFE will be repeated, but the work was
-   wasted and the wrong output already travelled a hop.
-8. **Fan-in multiplies all of the above.** A function whose inputs come from
-   many Minis would need a message from each, each a hop, each a race with its
-   pages. The rows give one check for all of them: are they all stamped k.
-
-The rule that follows is the one already in the spec. A Mini acts on data,
-and only on data, and acts the moment the data is present. The row's stamp is
-the only signal. The GPU is handed only functions whose rows are stamped. The
-NFE concludes on a status word, never on a message inside the data. With that
-rule a Mini's latency and utilization are the same whether it has one
-neighbour or an infinite mesh behind it. Without it they are not.
+A relay's flows ride its ports' lanes, so a route costs the relays it crosses no queue pairs. Each relayed direction
+(an execution's key, its sending end and its receiving end: a pair of an execution's members whose route crosses the
+node is two, one each way, and a pair of another execution, a split or shrink communicator of the same members, two
+more; never one a node pair across executions) leases its rows and a client slot of the relay (`mirror`; one lease and
+one slot whatever its stripes), its slots among the node's `MESH_CLIENTS` (64) with every slot its own processes hold
+(libnccl-mesh's attach one a process and one a session), from the
+window as a client's leases are (no reserve: the window is the clients' and the bridge's alike, and the planner counts
+a relay's leases on every node a member route crosses, members or not, metal-microbench programs.py `sessions`; a
+lease the window cannot give fails the relayed program as a value naming the relay): for each transfer the sender
+sends, its slots of `mesh_relay_slot` bytes (its ring's depth less one slots of its invocation pages, and a last of
+its bytes or its pages, the more), each rounded up to the window's block; the program's SEND cells and targets in one
+lease (256 bytes a cell, a cell an invocation of each slot of each transfer and a terminal one, 16 bytes a target,
+rounded up to the block); and the lists of its two destinations, a block each. At the library's session (two
+classes, slots of 512 KiB and 16 KiB, ring depth 16, a cycle of 32 positions: nccl-mesh.c, `POSITIONS` 2 x `DEPTH`)
+a relayed direction is 8,716,288 bytes (8.3 MiB), where it was 16,007,168 with the cycle of 8,192 positions and lists
+of 4,096 entries (12,894,208 at that cycle with lists sized by use; output_data/bridge-20261015 footprint2.py); the
+library states the same count for its own wire (nccl-mesh.c `relay_bytes`, ncclMeshRelayBytes), which a planner reads
+in place of a figure of its own (11,813,376, the planner's of 2026-10-15, is the first pass's count at the cycle of 32
+with lists of 4,096 entries). Beside the relays' leases a node's bridge holds its lanes' pages, 7 pages of 16 KiB a
+port the region has (`lanes_reserve`: `MESH_PORTS` 8 of them, 917,504 bytes a node at its start, whatever its cables;
+a port the window could not give them at the start takes them as its lanes are made), and its map's records.

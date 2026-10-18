@@ -15,7 +15,7 @@
 #include <time.h>
 
 #define QD 4095
-/* design/RDMA-KERNEL-RECOVERY.md#september-5-authorized-recovery-and-receive-address-repair */
+/* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
    virtual-address boundary.  The window is mapped at a bank-aligned base and registered in extents of
    MESH_REGION bytes, which divides the bank: every extent lies inside one bank, however many banks the
@@ -25,12 +25,11 @@
 struct wire_mapping { char *data; size_t length; };
 /* design/bridge-and-ipc.md#ports: a port's device: its context, protection domain and the whole window's `extents`
    registered on it (design/prepared-machine.md#M09), the queue pairs it holds against those it can use (`max_pairs`:
-   its max_qp less one, RDMA-FIRST.md's "max_qp: 11 (10 usable)"), a queue pair's frames and a completion queue's
-   entries at most */
+   its max_qp less one, RDMA-FIRST.md's "max_qp: 11 (10 usable)") */
 struct mesh_device {
   char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
-  uint32_t extents,frame_capacity,pairs,max_pairs,max_cqe;
+  uint32_t extents,frame_capacity,pairs,max_pairs;
   char *wire;
   struct ibv_port_attr port;
   union ibv_gid gid;
@@ -58,10 +57,25 @@ static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t
     .length=(uint32_t)(remaining<capacity?remaining:capacity),
     .lkey=device->regions[offset/MESH_REGION]->lkey};
 }
+/* design/algorithm-sources.md#programcopy */
+/* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
+   every SEND, IBV_SEND_SIGNALED or not (the bridge's census: send completions equal requests), so a
+   SEND's completion is its queue's retirement and lands where the send thread polls it. */
+struct mesh_queue {
+  _Alignas(64) struct ibv_qp *pair;
+  struct ibv_cq *completion,*sent;
+  int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
+  int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
+  int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
+  uint32_t receive_capacity,send_capacity;
+};
+_Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
+/* a program's queue pairs on one port and their two completion queues */
+struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn; };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
-/* design/RDMA-KERNEL-RECOVERY.md#september-5-authorized-recovery-and-receive-address-repair */
+/* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 static int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   wire->length=(size_t)mesh_arena_pages(m)*m->pgsz;
   wire->data=NULL;
@@ -76,6 +90,52 @@ static int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   return 0;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
+/* design/prepared-machine.md#M11 */
+/* design/RDMA-KERNEL-RECOVERY.md: queue pairs, then completion queues; a failed destruction keeps its handle for the
+   next retirement turn.  1 once nothing is held. */
+static int down_pair(struct mesh_verbs *provider){
+  while(provider->qp_count){
+    struct ibv_qp *q=provider->queues[provider->qp_count-1].pair;
+    if(q && ibv_destroy_qp(q))return 0;
+    provider->queues[--provider->qp_count].pair=NULL;
+    if(q)provider->device->pairs--;
+  }
+  if(provider->completion){if(ibv_destroy_cq(provider->completion))return 0;provider->completion=NULL;}
+  if(provider->sent){if(ibv_destroy_cq(provider->sent))return 0;provider->sent=NULL;}
+  free(provider->queues);provider->queues=NULL;provider->count=0;
+  return 1;
+}
+/* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": each queue pair moved to the error state, so the
+   device ends its posted receives and SENDs (flushed, IBV_WC_WR_FLUSH_ERR) before it is destroyed, and its completion
+   queues drained of what that returns until `polls` polls in a row take none; the completions drained.  A queue pair
+   whose move is refused is destroyed as down_pair destroys it.  The stripe flow's teardown takes it (mesh-flow.c
+   stripes_job); every other teardown destroys its queue pairs as they stand. */
+static uint32_t pair_flush(struct mesh_verbs *provider,uint32_t polls){
+  for(int q=0;q<provider->qp_count;q++)if(provider->queues[q].pair){
+    struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
+    ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE);
+  }
+  uint32_t drained=0,empty=0;
+  struct ibv_wc done[16];
+  while(empty<polls){
+    int taken=0;
+    struct ibv_cq *queues[2]={provider->completion,provider->sent};
+    for(int c=0;c<2;c++)if(queues[c]){const int n=ibv_poll_cq(queues[c],16,done);if(n>0)taken+=n;}
+    if(taken){drained+=(uint32_t)taken;empty=0;}
+    else empty++;
+  }
+  return drained;
+}
+/* design/RDMA-KERNEL-RECOVERY.md "October 18": a retired device's registrations, protection domain and context
+   forgotten with no verbs call (ibv_dealloc_pd during the device's termination deadlocks Apple's driver, 09-05 and
+   10-18); the kernel releases them at the process's exit */
+static int down_device(struct mesh_device *device){
+  free(device->regions);device->regions=NULL;device->extents=0;
+  device->domain=NULL;
+  device->context=NULL;
+  device->frame_capacity=0;
+  return 1;
+}
 static void down(void){ if(shm)shm_unlink(shm); }
 /* design/recovery.md#diagnosis: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
@@ -122,7 +182,7 @@ static int device_up(struct mesh_device *device,struct wire_mapping *wire,int *r
   if(!device->regions && !(device->regions=calloc(extents,sizeof *device->regions)))return ENOMEM;
   device->extents=extents;
   const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-  for(size_t e=0,first=0;e<extents && !stop;e++,first+=MESH_REGION){
+  for(size_t e=0,first=0;e<extents;e++,first+=MESH_REGION){
     const size_t bytes=wire->length-first<MESH_REGION?wire->length-first:MESH_REGION;
     if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
       const int error=errno?errno:EIO;
@@ -133,61 +193,60 @@ static int device_up(struct mesh_device *device,struct wire_mapping *wire,int *r
       *refused=error;return error;
     }
   }
-  if(stop)return ECANCELED;
   say("%s: window of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
     (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
   device->wire=wire->data;device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
-  device->max_cqe=(uint32_t)capabilities.max_cqe;
   return 0;
 }
-/* design/bridge-and-ipc.md#links: a link's two completion queues, its SENDs' and its receives', which every queue pair
-   of the link shares, each made where it is not yet (made once a device context, never destroyed: the kernel reclaims
-   them at the bridge's exit, design/RDMA-KERNEL-RECOVERY.md); 0, or the errno */
-static int link_cqs(struct mesh_device *device,uint32_t entries,struct ibv_cq **sent,struct ibv_cq **received){
-  if(!*sent && !(*sent=ibv_create_cq(device->context,(int)entries,NULL,NULL,0)))return errno?errno:EIO;
-  if(!*received && !(*received=ibv_create_cq(device->context,(int)entries,NULL,NULL,0)))return errno?errno:EIO;
-  return 0;
-}
-/* design/bridge-and-ipc.md#links: a UC queue pair on the link's completion queues, in INIT, its capacities read; 0, or
-   the errno (ENOSPC: the device holds no more; a pair made and then refused INIT is kept in *made, never destroyed) */
-static int pair_make(struct mesh_device *device,struct ibv_cq *sent,struct ibv_cq *received,struct ibv_qp **made,uint32_t *sends,uint32_t *receives){
-  if(device->pairs>=device->max_pairs)return ENOSPC;
-  struct ibv_qp_init_attr qi={.send_cq=sent,.recv_cq=received,.qp_type=IBV_QPT_UC,
-    .cap={.max_send_wr=device->frame_capacity,.max_recv_wr=device->frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-  struct ibv_qp *qp=ibv_create_qp(device->domain,&qi);
-  if(!qp)return errno?errno:EIO;
-  device->pairs++;
-  struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  if(ibv_query_qp(qp,&queried,IBV_QP_CAP,&actual) || ibv_modify_qp(qp,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){
-    *made=qp;
-    return errno?errno:EIO;
+/* design/prepared-machine.md#M11 */
+/* `count` UC queue pairs and their two completion queues, in INIT, against the device's usable queue pairs.  0, or the
+   error (ENOSPC: the device holds no more queue pairs). */
+static int pair_up(struct mesh_verbs *provider,int count){
+  struct mesh_device *device=provider->device;
+  if(device->pairs+(uint32_t)count>device->max_pairs)return ENOSPC;
+  uint32_t frames=device->frame_capacity;
+  provider->queues=calloc((size_t)count,sizeof *provider->queues);
+  if(!provider->queues)return ENOMEM;
+  provider->count=count;provider->psn=arc4random()&0xffffff;
+  if(!(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  if(!(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  for(int q=0;q<count;q++){
+    struct mesh_queue *queue=&provider->queues[q];
+    queue->completion=provider->completion;queue->sent=provider->sent;
+    queue->poll=provider->completion->context->ops.poll_cq;
+    struct ibv_qp_init_attr qi={.send_cq=queue->sent,.recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
+      .cap={.max_send_wr=frames,.max_recv_wr=frames,.max_send_sge=1,.max_recv_sge=1}};
+    if(!(queue->pair=ibv_create_qp(device->domain,&qi)))return errno?errno:EIO;
+    device->pairs++;provider->qp_count=q+1;
+    queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
+    struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
+    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual))return errno?errno:EIO;
+    queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
+    struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+    if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   }
-  *sends=actual.cap.max_send_wr;*receives=actual.cap.max_recv_wr;*made=qp;
   return 0;
 }
-/* design/bridge-and-ipc.md#links: a queue pair ready to receive from the peer's (`remote` its number, `remote_psn` its
-   first sequence number), at `lid` and `gid`, and ready to send from `psn`; 0, or the errno */
-static int pair_connect(struct mesh_device *device,struct ibv_qp *qp,uint32_t remote,uint32_t remote_psn,uint32_t psn,uint16_t lid,const uint8_t *gid){
-  struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote_psn,.dest_qp_num=remote,
-    .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=device->gid_index}}};
-  memcpy(&r.ah_attr.grh.dgid,gid,16);
-  if(ibv_modify_qp(qp,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
-  struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=psn};
-  if(ibv_modify_qp(qp,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
+/* design/algorithm-sources.md#programcopy */
+/* each queue pair ready to receive from the peer's (`remote`: its queue pair numbers and first sequence numbers), the
+   peer's port at `lid` and `gid` */
+static int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],uint16_t lid,const uint8_t *gid){
+  for(int q=0;q<provider->count;q++){
+    struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[q][1],.dest_qp_num=remote[q][0],
+      .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=provider->device->gid_index}}};
+    memcpy(&r.ah_attr.grh.dgid,gid,16);
+    if(ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
+  }
   return 0;
 }
-/* design/bridge-and-ipc.md#links: a queue pair made again in place, its number kept, at a lease's release and at the
-   link's pairing again (the bridge destroys no verbs object: design/RDMA-KERNEL-RECOVERY.md): the error state (its
-   posted receives and SENDs end, flushed), the reset state, then INIT as pair_make leaves one, for pair_connect; 0, or
-   the errno */
-static int pair_reset(struct ibv_qp *qp){
-  struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR},reset={.qp_state=IBV_QPS_RESET},init={.qp_state=IBV_QPS_INIT,.port_num=1};
-  if(ibv_modify_qp(qp,&error,IBV_QP_STATE) || ibv_modify_qp(qp,&reset,IBV_QP_STATE) ||
-     ibv_modify_qp(qp,&init,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
+static int pair_send(struct mesh_verbs *provider){
+  for(int q=0;q<provider->count;q++){
+    struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
+    if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
+  }
   return 0;
 }
 /* design/algorithm-sources.md#link */

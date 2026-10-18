@@ -6,6 +6,25 @@
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe): a lease of one slot of `bytes` at exactly arena page `page` (a
+   multiple of the block), so the two ends of a stripe place what they exchange at the same window offsets; ENOMEM where
+   a page of it is held, EINVAL where `page` is not a block's first */
+int mesh_section_at(struct mesh_ctx *,uint32_t page,size_t bytes,struct mesh_section *);
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe, on the resident bridge): a ring of `entries` (a power of two, 4 at
+   least) stripe requests (mesh.h struct mesh_requests), a lease of the client's slot registered with its node's bridge
+   (MESH_RINGS of every client's at once), whose requests the bridge takes while the slot is the client's (its
+   retirement deregisters the ring); a GPU writes requests into a ring of its own by the protocol mesh.h states.  0,
+   EINVAL, EBUSY where MESH_RINGS rings are registered, or the refused lease */
+int mesh_requests_create(struct mesh_ctx *,uint32_t entries,struct mesh_requests **);
+/* a host thread's request into a ring (any number of threads at once; mesh.h struct mesh_stripe's operands, `offset` a
+   byte offset of the window, `word` a region offset), then mesh_requests_wake: 0, EAGAIN where the ring holds `entries`
+   requests the bridge has not taken (not yet: write it again), EINVAL where it is not one the window holds */
+int mesh_write(struct mesh_requests *,uint32_t node,uint64_t offset,uint64_t bytes,uint64_t word,uint64_t value);
+/* the bridge told a ring's requests toward `node` are written: the bells of the ports paired with `node` rung (each
+   port's send thread takes them; one parked looks again within 1 ms anyway while a stripe flow is up on it) and the
+   control word (the bridge makes the ports' stripe flows where none is up); a GPU writer's host calls it once its
+   kernel wrote its requests */
+void mesh_requests_wake(struct mesh_requests *,uint32_t node);
 /* design/algorithm-sources.md#programcopy: `section` sent to or received from (`direction`) the member `node`, never a
    port, on its `queue` (< MESH_QUEUES), for the invocations [begin, end) alone, invocation t at ring slot (t - begin)
    mod `depth` (0: the program's), its cells, words and slots indexed from `begin`; 0, EINVAL or a refused lease */
@@ -16,28 +35,22 @@ int mesh_transfer_bind(struct mesh_ctx *,uint32_t node,uint32_t queue,int direct
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
 /* design/prepared-machine.md#M30 */
 int mesh_transfers_cyclic(struct mesh_ctx *);
-/* design/bridge-and-ipc.md#leases, #meet, #relays: the members' agreement on the program's leases, after
-   mesh_transfers_prepare and before mesh_transfers_start: rank `rank` of the `n` members `nodes` (the same list on every
-   member, this node's at `rank`) meets the others at the bridge of nodes[0] (its `meet` service), each reporting the
-   leases it claimed of its paired links and the destinations its program binds; nodes[0]'s member routes every pair on
-   its map, takes for each hop a lease of each queue the pair uses that both of the hop's ends hold free, asks each relay
-   on a route to forward the pair (its `relay` service: the channel kept in the context, closed by mesh_detach), and
-   tells every member the leases it takes, which its slot then names (mesh.h mesh_tx `port` and `lease`); a member's
-   other claims are freed.  0, or the refusal as a value: EINVAL (a list of more than one slot a queue, this node not
-   nodes[rank]), EHOSTUNREACH (no route), EBUSY (no lease free on a hop, or a relay's taken), ECONNRESET (a member's
-   meeting cut short), a relay's refusal; every member returns the same where the root's plan refused.  Every member of
-   several meets, whether or not its program binds a destination (a lone member binding none returns 0 at once).  It
-   waits on its sockets alone: mesh_transfers_interrupt from another thread ends the wait */
-int mesh_transfers_agree(struct mesh_ctx *,const uint32_t *nodes,uint32_t n,uint32_t rank);
-void mesh_transfers_interrupt(struct mesh_ctx *);
-/* design/bridge-and-ipc.md#programs, design/recovery.md#first: 0 once the node's bridge has compiled the program's chains
-   toward every node it binds on the leases its slot names and posted their first receives; else the failure, and that
-   node's status in the client's slot names the node and the code: ESRCH the bridge gone, EINVAL a list or lease it
-   cannot carry, ENETDOWN the lease's port not paired, ENETRESET a lease no longer the program's (its link paired again
-   since the agreement), ECANCELED this program's own slot retired while it waits (a revoke), ENOMEM.  It waits on the
-   bridge alone, never on a peer: a peer's SENDs wait for this end's receives in the hardware (TN3205's credit).  A later
-   loss fails the program as a value: its words past their landed counts read ~0 and its status the code */
+/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from (0: none), named after
+   mesh_transfers_prepare and before mesh_transfers_start; a peer's program of the same execution that names another
+   fails both as values (ESTALE); EBUSY once started */
+int mesh_transfers_digest(struct mesh_ctx *,uint64_t digest);
+/* design/bridge-and-ipc.md#clients, design/recovery.md#first: 0 once the node's bridge has paired the program toward
+   every node it binds, on its current map, directly or along its route through other nodes' bridges; else the failure,
+   and that node's status in the client's slot names the node and the code: ESRCH the bridge gone, ETIMEDOUT past
+   MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS, EHOSTUNREACH no cable or route reaches it, ENETDOWN, ECONNRESET,
+   ECANCELED a link or the peer's program lost, or this program's own slot retired while it waits (a revoke), ESTALE a
+   member's program of the execution made from another digest (mesh_transfers_digest; every destination fails, naming
+   that member), ENOSPC, ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
 int mesh_transfers_start(struct mesh_ctx *);
+/* design/bridge-and-ipc.md#progress: the progress threads of the ports a started program's flows ride woken (each port's
+   bell), a group of it about to publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks
+   again within 1 ms anyway while a flow is its port's) */
+void mesh_transfers_wake(struct mesh_ctx *);
 
 /* ---- The numerical executor (mesh 2b49f3c6^, restored on the resident bridge's substrate) -----------------------
    Worker threads fire a function when its inputs' arrivals reach its pending count, then publish its outputs by

@@ -5,8 +5,7 @@
 #include <errno.h>
 #include <signal.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes,inputs_off,inputs_bytes; uint32_t row_cursor,arena_cursor; int fd;
-  int agreeing,*relays; uint32_t relay_count; };
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes,inputs_off,inputs_bytes; uint32_t row_cursor,arena_cursor; int fd; };
 /* design/bridge-and-ipc.md#clients: a client slot of this node's one region, its execution `name` (the same on every
    member: its programs' queue pairs pair with the members' of the same name), taken vacant by one compare-exchange
    (mesh_slot_take, which the bridge's own leases take too).  A client takes a vacant slot only: it never retires, waits
@@ -18,11 +17,8 @@ int mesh_slot_take(struct mesh_ctx *,struct hdr *,uint64_t key);
    mesh_attach's), sharing its mapping: a slot is one execution's program, so a client running several takes one each
    on its one attach.  0, EBUSY where none is vacant, ESRCH where the client's bridge is gone */
 int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,const char *name);
-/* the slot retired in order (design/bridge-and-ipc.md#programs: its bridge posts every cell its program released, takes
-   those SENDs' completions and then lets go of its leases, holding its rows until then; the caller waits on none of it),
-   the relay channels its agreement holds closed (told it ended in order where it did), and the region unmapped where
-   the context mapped it (mesh_attach's; a program's slot leaves its client's mapping alone); an abort calls mesh_retire
-   first */
+/* the slot retired (mesh_retire), and the region unmapped where the context mapped it (mesh_attach's; a program's slot
+   leaves its client's mapping alone) */
 int mesh_detach(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#region: a process gone (its slot's or the bridge's pid; 0: none) */
 static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
@@ -35,8 +31,7 @@ static inline uint64_t mesh_transfer_frames(struct hdr *m,const struct mesh_tran
 static inline uint64_t mesh_transfer_cells(const struct mesh_transfer *out,uint32_t invocations){
   return (uint64_t)out->count*(mesh_transfer_active(out,invocations)+1);
 }
-/* design/algorithm-sources.md#programtensor: a slot retired as an abort (its bridge fails its program, its leases made
-   again and its peers told; a revoke, or the bridge where its process is gone): vacant at once */
+/* design/algorithm-sources.md#programtensor */
 void mesh_retire(struct hdr *,uint64_t client);
 /* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records, the count of cables between them (0:
    none; the ports each one's record holds paired with the other, the fewer of the two ends' counts), *beta 8e9 over
@@ -50,6 +45,10 @@ uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path);
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 /* design/prepared-machine.md#M09 */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
+/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe): exactly arena pages [first, first + pages), claimed by
+   compare-exchange as mesh_arena_alloc's are; MESH_ABSENT (errno ENOMEM) where a page of them is held, EINVAL past the
+   arena */
+uint32_t mesh_arena_claim(struct mesh_ctx *,uint32_t first,uint32_t pages);
 /* design/prepared-machine.md#M09: the window's arena pages no lease holds */
 uint32_t mesh_arena_free(struct hdr *);
 /* design/prepared-machine.md#M09: a lease its client returns while it holds it (mesh-call.h mesh_section_create's
@@ -62,6 +61,13 @@ void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
    program releases when `row` is published, one a target (mesh_row_targets) where `records` is given; their count */
 uint32_t mesh_publication_prepare(struct mesh_ctx *,uint32_t row,struct prepared_publication *);
 void mesh_retired_release(struct hdr *);
+/* design/bridge-dataflow.md#streams (mesh 554a3793^ mesh-verbs-stream.c, inside the bridge): mesh-plan.h's
+   MESH_REQUEST_STREAM, its `node` the receiver (a neighbour) and `bytes` the stream's, in whole blocks; a raw one-way stream of `bytes` from this node's bridge to node `node`'s, every word checked there: the bridges' JSON
+   line of the sender's and the receiver's numbers (rate between 10 and 90 percent of the pages landed, mismatched words,
+   misordered completions) into `result` (`room` bytes); 0, or the -errno the bridge answered (EHOSTUNREACH no cable,
+   EBUSY a stream on the port, ENOMEM no window for it at either end, ETIMEDOUT past the pairing window, a verbs or
+   completion error) */
+int mesh_stream(uint32_t node,uint64_t bytes,char *result,size_t room);
 #ifdef MESH_LOOP_FABRIC
 /* design/bridge-dataflow.md#the-loopback-fabric: the loop bridge this process is a client of, before its first attach or
    request (the host build of libmesh alone, make host): its region (a loop bridge's configuration's `region`) and its

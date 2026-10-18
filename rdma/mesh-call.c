@@ -1,6 +1,4 @@
 #include "mesh-call.h"
-#include <sys/socket.h>
-#include <unistd.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -108,6 +106,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   struct mesh_client *client=mesh_client_at(m,context->client);
   atomic_store_explicit(&client->depth,depth,memory_order_relaxed);
   atomic_store_explicit(&client->cyclic,0,memory_order_relaxed);
+  atomic_store_explicit(&client->digest,0,memory_order_relaxed);
   uint64_t cells=0,targets=0;
   const uint32_t destinations=mesh_destination(client,0);
   for(uint32_t q=0;q<destinations*MESH_QUEUES;q++){
@@ -190,18 +189,22 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   return 0;
 }
 
-/* design/prepared-machine.md#M06; design/bridge-and-ipc.md#programs: the program handed to the node's bridge, which
-   compiles its chains toward each destination on the leases its slot names and posts its first receives, or fails it
-   (that destination's status names the code and the node): 0 once every destination started, else the first failed
-   destination's code; ESRCH where the bridge is gone (its exit wakes it: mesh-dataflow.c mesh_watch), and ECANCELED once
-   the program's own slot is retired while it waits (mesh_retire wakes it: a revoke); it waits on nothing else, and on
-   no peer */
+/* design/prepared-machine.md#M06 */
+/* design/algorithm-sources.md#programcopy */
+/* design/bridge-and-ipc.md#clients: the program handed to the node's bridge, which pairs it toward each destination
+   node, over a port paired with it or along the map's route, or fails it (that destination's status names the code and
+   the node where it failed): 0 once every destination is paired, else the first failed destination's code; ESRCH where
+   the bridge is gone, ECANCELED once the program's own slot is retired while it waits (mesh_retire wakes it: a revoke,
+   nccl-mesh.c session_retire), and ETIMEDOUT where it answers within none of its own windows (design/recovery.md#first) */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
+  /* design/prepared-machine.md#M12 */
   uint64_t idle=0;
   if(!atomic_compare_exchange_strong_explicit(&client->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
+  /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
+  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS;
   const uint32_t destinations=mesh_destination(client,0);
   int failed=0;
   for(uint32_t d=0;d<destinations;d++){
@@ -209,13 +212,23 @@ int mesh_transfers_start(struct mesh_ctx *context){
     struct mesh_port_info *status=&client->status[d];
     for(uint64_t seen;(seen=atomic_load_explicit(&status->prepared,memory_order_acquire))!=context->client;){
       if(atomic_load_explicit(&client->owner,memory_order_acquire)!=context->client)return ECANCELED;
-      if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire)))return ESRCH;
-      os_sync_wait_on_address(&status->prepared,seen,sizeof seen,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+      if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed)))return ESRCH;
+      uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      if(at>deadline)return ETIMEDOUT;
+      os_sync_wait_on_address_with_timeout(&status->prepared,seen,sizeof seen,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+        OS_CLOCK_MACH_ABSOLUTE_TIME,deadline-at<MESH_PAUSE_NS?deadline-at:MESH_PAUSE_NS);
     }
     if(!failed && atomic_load_explicit(&status->phase,memory_order_relaxed)==MESH_STOPPED)
       failed=(int)atomic_load_explicit(&status->code,memory_order_relaxed);
   }
   return failed;
+}
+
+/* design/bridge-and-ipc.md#progress: the bell of each port the program's flows ride */
+void mesh_transfers_wake(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  const uint32_t ports=atomic_load_explicit(&mesh_client_at(m,context->client)->ports,memory_order_acquire);
+  for(uint32_t p=0;p<MESH_PORTS;p++)if(ports>>p&1)mesh_notify(&m->bell[p]);
 }
 
 /* design/prepared-machine.md#M30 */
@@ -242,10 +255,21 @@ int mesh_transfers_cyclic(struct mesh_ctx *context){
   return 0;
 }
 
-/* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the window has them */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
+/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from, which every READY of it carries and
+   every peer's program of its execution must name alike (0: none, compared with nothing; mesh_transfers_prepare sets
+   0).  Called after mesh_transfers_prepare, before mesh_transfers_start. */
+int mesh_transfers_digest(struct mesh_ctx *context,uint64_t digest){
+  struct mesh_client *client=mesh_client_at(context->M,context->client);
+  if(atomic_load_explicit(&client->configured,memory_order_acquire))return EBUSY;
+  atomic_store_explicit(&client->digest,digest,memory_order_relaxed);
+  return 0;
+}
+
+/* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the window has them
+   (`exactly` MESH_ABSENT) or exactly from arena page `exactly` (mesh_section_at, design/bridge-dataflow.md#stripes) */
+static int mesh_section_place(struct mesh_ctx *context,size_t bytes,uint32_t count,uint32_t exactly,struct mesh_section *section){
   struct hdr *m=context->M;
-  if(!bytes || !count)return EINVAL;
+  if(!bytes || !count || (exactly!=MESH_ABSENT && (count!=1 || exactly%m->block)))return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz,capacity=mesh_arena_pages(m);
   if(bytes>capacity*(size_t)m->pgsz)return ENOMEM;
   size_t span=(bytes+quantum-1)/quantum*m->block;
@@ -259,7 +283,8 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
   }
   mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
   /* design/prepared-machine.md#M01 */
-  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
+  /* design/prepared-machine.md#M03 */
+  uint32_t page=exactly==MESH_ABSENT?mesh_arena_alloc(context,(uint32_t)span*count,m->block):mesh_arena_claim(context,exactly,(uint32_t)span);
   if(page==MESH_ABSENT){
     int error=errno;
     mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);
@@ -271,313 +296,57 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
   *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride};
   return 0;
 }
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
+  return mesh_section_place(context,bytes,count,MESH_ABSENT,section);
+}
+int mesh_section_at(struct mesh_ctx *context,uint32_t page,size_t bytes,struct mesh_section *section){
+  return mesh_section_place(context,bytes,1,page,section);
+}
 
 /* design/algorithm-sources.md#programtensor */
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return (char *)context->M+atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,index)].address,memory_order_relaxed);}
 
-/* ---- The members' agreement on leases and relays (design/bridge-and-ipc.md#leases, #meet, #relays) --------------- */
-
-/* a member's report at the meeting: this node, its paired ports (each its index, its peer, the index the peer gave the
-   cable, its link's leases and the mask of them this program claimed), and each destination the program binds (its
-   node, its slots, invocations, depth and cycle, and its transfers each way queue by queue, which a relay mirrors);
-   the root's second report the assignment (a code and, for each rank's destination, the port it takes and each queue's
-   lease) */
-struct agree_port { uint32_t index,peer,peer_port,leases,mask; };
-struct agree_destination { uint32_t node,slots,invocations,depth,cyclic,sends[MESH_QUEUES],receives[MESH_QUEUES]; };
-struct agree_head { uint32_t node,ports,destinations,reserved; };
-struct agree_lease { uint32_t rank,node,port; uint8_t lease[MESH_QUEUES]; };
-struct agree_assignment { int32_t code; uint32_t count; };
-#define AGREE_SECOND UINT64_C(0x6d656574206c6561)
-
-static int agree_cancelled(struct mesh_ctx *c){ return atomic_load(&mesh_client_at(c->M,c->client)->owner)!=c->client; }
-static int whole_io(struct mesh_ctx *c,int fd,void *bytes,size_t size,int sending){
-  __atomic_store_n(&c->agreeing,fd,__ATOMIC_RELEASE);
-  if(agree_cancelled(c)){__atomic_store_n(&c->agreeing,-1,__ATOMIC_RELEASE);return ECANCELED;}
-  for(size_t done=0;done<size;){
-    const ssize_t moved=sending?send(fd,(char *)bytes+done,size-done,0):recv(fd,(char *)bytes+done,size-done,0);
-    if(moved<0 && errno==EINTR)continue;
-    if(moved<=0){__atomic_store_n(&c->agreeing,-1,__ATOMIC_RELEASE);return moved?errno:ECONNRESET;}
-    done+=(size_t)moved;
-  }
-  __atomic_store_n(&c->agreeing,-1,__ATOMIC_RELEASE);
-  return 0;
-}
-/* the meeting of `key` at node `root`: this member's report sent, and every member's read back (*table, the caller's
-   to free: a uint32 n, n uint32 byte counts, the reports); 0, or the errno */
-static int agree_meet(struct mesh_ctx *c,uint32_t root,uint64_t key,uint32_t n,uint32_t rank,const void *report,uint32_t bytes,unsigned char **table,size_t *length){
-  const int fd=mesh_request(root,"meet",0);
-  if(fd<0)return -fd;
-  const struct mesh_meet head={key,n,rank,bytes,0};
-  int error=whole_io(c,fd,(void *)&head,sizeof head,1);
-  if(!error && bytes)error=whole_io(c,fd,(void *)report,bytes,1);
-  if(!error && shutdown(fd,SHUT_WR))error=errno;
-  size_t room=4096,got=0;
-  unsigned char *made=error?NULL:malloc(room);
-  if(!error && !made)error=ENOMEM;
-  while(!error){
-    if(got==room){unsigned char *grown=realloc(made,room*2);if(!grown){error=ENOMEM;break;}made=grown;room*=2;}
-    __atomic_store_n(&c->agreeing,fd,__ATOMIC_RELEASE);
-    if(agree_cancelled(c)){__atomic_store_n(&c->agreeing,-1,__ATOMIC_RELEASE);error=ECANCELED;break;}
-    const ssize_t moved=recv(fd,made+got,room-got,0);
-    __atomic_store_n(&c->agreeing,-1,__ATOMIC_RELEASE);
-    if(moved<0 && errno==EINTR)continue;
-    if(moved<0)error=errno;
-    else if(!moved)break;
-    else got+=(size_t)moved;
-  }
-  close(fd);
-  uint32_t count=0;
-  if(!error && got>=sizeof count)memcpy(&count,made,sizeof count);
-  if(!error && (count!=n || got<sizeof(uint32_t)*(1+(size_t)n)))error=ECONNRESET;
-  if(error){free(made);return error;}
-  *table=made;*length=got;
-  return 0;
-}
-/* rank r's report in a meeting's table (its bytes in *bytes), NULL past it */
-static const unsigned char *agree_report(const unsigned char *table,size_t length,uint32_t r,uint32_t *bytes){
-  uint32_t n,at=0;
-  memcpy(&n,table,sizeof n);
-  if(r>=n)return NULL;
-  size_t offset=sizeof(uint32_t)*(1+(size_t)n);
-  for(uint32_t i=0;i<=r;i++){memcpy(&at,table+sizeof(uint32_t)*(1+i),sizeof at);if(i<r)offset+=at;}
-  if(offset+at>length)return NULL;
-  *bytes=at;
-  return table+offset;
-}
-/* a report's port toward neighbour `node` over the cable both ends take (the lowest index the pair's lower node gave
-   one of its cables to the other): its entry, NULL where none */
-static const struct agree_port *agree_port_to(const unsigned char *report,uint32_t own,uint32_t node){
-  struct agree_head head;memcpy(&head,report,sizeof head);
-  const struct agree_port *best=NULL;
-  uint32_t rank=UINT32_MAX;
-  for(uint32_t p=0;p<head.ports;p++){
-    const struct agree_port *at=(const struct agree_port *)(report+sizeof head)+p;
-    if(at->peer!=node)continue;
-    const uint32_t r=own<node?at->index:at->peer_port;
-    if(r<rank){rank=r;best=at;}
-  }
-  return best;
-}
-/* a report's destination record for `node` and its transfers, NULL where it binds none */
-static const struct agree_destination *agree_destination(const unsigned char *report,uint32_t bytes,uint32_t node,const struct mesh_transfer **list){
-  struct agree_head head;memcpy(&head,report,sizeof head);
-  size_t at=sizeof head+head.ports*sizeof(struct agree_port);
-  for(uint32_t d=0;d<head.destinations && at+sizeof(struct agree_destination)<=bytes;d++){
-    const struct agree_destination *x=(const void *)(report+at);
-    uint64_t transfers=0;
-    for(uint32_t k=0;k<MESH_QUEUES;k++)transfers+=(uint64_t)x->sends[k]+x->receives[k];
-    at+=sizeof *x;
-    if(x->node==node){*list=(const void *)(report+at);return at+transfers*sizeof(struct mesh_transfer)<=bytes?x:NULL;}
-    at+=transfers*sizeof(struct mesh_transfer);
-  }
-  return NULL;
-}
-/* the root's assignment: every member pair either binds, routed on this node's map (mesh_route), each hop a lease of
-   each queue the pair uses, the lowest that the hop's member ends claimed and no other pair of this assignment holds on
-   that link; each relay of a route asked to forward the pair's two directions (its channel kept in the program's
-   context); *out the assignment, its code 0 or the refusal (EHOSTUNREACH no route, EBUSY no lease free, a relay's) */
-struct agree_used { uint32_t a,b,mask; };
-static int agree_plan(struct mesh_ctx *c,const uint32_t *nodes,uint32_t n,const unsigned char *table,size_t length,unsigned char **out,uint32_t *bytes){
-  struct hdr *m=c->M;
-  const size_t room=(size_t)n*n+1;
-  struct agree_lease *lease=calloc(room,sizeof *lease);
-  struct agree_used *used=calloc(room*MESH_MEET_RANKS+1,sizeof *used);
-  unsigned char **request=calloc(MESH_MEET_RANKS,sizeof *request);
-  size_t *request_bytes=calloc(MESH_MEET_RANKS,sizeof *request_bytes);
-  uint32_t *relay_node=calloc(MESH_MEET_RANKS,sizeof *relay_node),relays=0,leases=0,links=0;
-  int error=lease && used && request && request_bytes && relay_node?0:ENOMEM;
-  for(uint32_t i=0;i<n && !error;i++){
-    uint32_t bytes_i=0;
-    const unsigned char *report=agree_report(table,length,i,&bytes_i);
-    if(!report || bytes_i<sizeof(struct agree_head)){error=EPROTO;break;}
-    for(uint32_t j=i+1;j<n && !error;j++){
-      uint32_t bytes_j=0;
-      const unsigned char *other=agree_report(table,length,j,&bytes_j);
-      const struct mesh_transfer *list_i=NULL,*list_j=NULL;
-      if(!other || bytes_j<sizeof(struct agree_head)){error=EPROTO;break;}
-      const struct agree_destination *to_j=agree_destination(report,bytes_i,nodes[j],&list_i),*to_i=agree_destination(other,bytes_j,nodes[i],&list_j);
-      if(!to_j && !to_i)continue;
-      uint32_t rings=0;
-      for(uint32_t k=0;k<MESH_QUEUES;k++)
-        rings|=(uint32_t)((to_j && (to_j->sends[k] || to_j->receives[k])) || (to_i && (to_i->sends[k] || to_i->receives[k])))<<k;
-      if((to_j && to_j->slots>1) || (to_i && to_i->slots>1)){error=EINVAL;break;}
-      uint32_t *path=NULL;
-      const uint32_t hops=mesh_route(m,nodes[i],nodes[j],&path);
-      if(hops<2 || hops>MESH_MEET_RANKS){free(path);error=EHOSTUNREACH;break;}
-      uint8_t (*chosen)[MESH_QUEUES]=calloc(hops,sizeof *chosen);
-      if(!chosen){free(path);error=ENOMEM;break;}
-      for(uint32_t h=0;h+1<hops && !error;h++){
-        const uint32_t x=path[h],y=path[h+1],lo=x<y?x:y,hi=x<y?y:x;
-        uint32_t mask=(UINT32_C(1)<<MESH_LEASES)-1,most=MESH_LEASES;
-        for(uint32_t r=0;r<n && !error;r++)if(nodes[r]==x || nodes[r]==y){
-          uint32_t b=0;
-          const unsigned char *at=agree_report(table,length,r,&b);
-          const struct agree_port *port=at?agree_port_to(at,nodes[r],nodes[r]==x?y:x):NULL;
-          if(!port){error=EHOSTUNREACH;break;}
-          mask&=port->mask;
-          if(port->leases<most)most=port->leases;
-        }
-        uint32_t u=0;
-        while(u<links && !(used[u].a==lo && used[u].b==hi))u++;
-        if(u==links)used[links++]=(struct agree_used){lo,hi,0};
-        for(uint32_t k=0;k<MESH_QUEUES && !error;k++){
-          if(!(rings>>k&1))continue;
-          uint32_t l=0;
-          while(l<most && (!(mask>>l&1) || (used[u].mask>>l&1)))l++;
-          if(l==most){error=EBUSY;break;}
-          used[u].mask|=UINT32_C(1)<<l;chosen[h][k]=(uint8_t)(l+1);
-        }
-      }
-      for(uint32_t end=0;end<2 && !error;end++){
-        const uint32_t r=end?j:i,far=end?nodes[i]:nodes[j],next=end?path[hops-2]:path[1],h=end?hops-2:0;
-        uint32_t b=0;
-        const unsigned char *at=agree_report(table,length,r,&b);
-        const struct agree_port *port=agree_port_to(at,nodes[r],next);
-        lease[leases]=(struct agree_lease){r,far,port->index,{0}};
-        memcpy(lease[leases++].lease,chosen[h],MESH_QUEUES);
-      }
-      for(uint32_t h=1;h+1<hops && !error;h++){
-        const struct agree_destination *shape=to_j?to_j:to_i;
-        const struct mesh_transfer *list=to_j?list_i:list_j;
-        const int flipped=!to_j;
-        struct mesh_relay_entry entry={.a=flipped?path[h+1]:path[h-1],.b=flipped?path[h-1]:path[h+1],.slots=shape->slots?shape->slots:1,
-          .invocations=shape->invocations,.depth=shape->depth,.cyclic=shape->cyclic};
-        memcpy(flipped?entry.lease_b:entry.lease_a,chosen[h-1],MESH_QUEUES);
-        memcpy(flipped?entry.lease_a:entry.lease_b,chosen[h],MESH_QUEUES);
-        uint64_t transfers=0;
-        for(uint32_t k=0;k<MESH_QUEUES;k++){entry.sends[k]=shape->sends[k];entry.receives[k]=shape->receives[k];transfers+=(uint64_t)shape->sends[k]+shape->receives[k];}
-        uint32_t v=0;
-        while(v<relays && relay_node[v]!=path[h])v++;
-        if(v==MESH_MEET_RANKS){error=E2BIG;break;}
-        if(v==relays){relay_node[relays++]=path[h];request_bytes[v]=sizeof(struct mesh_relay_request);}
-        const size_t add=sizeof entry+transfers*sizeof(struct mesh_transfer);
-        unsigned char *grown=realloc(request[v],request_bytes[v]+add);
-        if(!grown){error=ENOMEM;break;}
-        request[v]=grown;
-        memcpy(grown+request_bytes[v],&entry,sizeof entry);
-        memcpy(grown+request_bytes[v]+sizeof entry,list,transfers*sizeof(struct mesh_transfer));
-        request_bytes[v]+=add;
-      }
-      free(chosen);free(path);
-    }
-  }
-  if(!error && relays && !(c->relays=calloc(relays,sizeof *c->relays)))error=ENOMEM;
-  for(uint32_t v=0;v<relays && !error;v++){
-    struct mesh_relay_request head={mesh_client_at(m,c->client)->key,0,(uint32_t)(request_bytes[v]-sizeof head)};
-    for(size_t at=sizeof head;at<request_bytes[v];){
-      struct mesh_relay_entry e;memcpy(&e,request[v]+at,sizeof e);
-      uint64_t transfers=0;
-      for(uint32_t k=0;k<MESH_QUEUES;k++)transfers+=(uint64_t)e.sends[k]+e.receives[k];
-      at+=sizeof e+transfers*sizeof(struct mesh_transfer);head.count++;
-    }
-    memcpy(request[v],&head,sizeof head);
-    const int fd=mesh_request(relay_node[v],"relay",0);
-    if(fd<0){error=-fd;break;}
-    c->relays[c->relay_count++]=fd;
-    error=whole_io(c,fd,request[v],request_bytes[v],1);
-  }
-  for(uint32_t v=0;v<c->relay_count && !error;v++){
-    int32_t answer=0;
-    error=whole_io(c,c->relays[v],&answer,sizeof answer,0);
-    if(!error)error=answer;
-  }
-  for(uint32_t v=0;v<MESH_MEET_RANKS && request;v++)free(request[v]);
-  free(request);free(request_bytes);free(relay_node);free(used);
-  const size_t made=sizeof(struct agree_assignment)+(error?0:leases)*sizeof *lease;
-  unsigned char *assignment=malloc(made);
-  if(!assignment){free(lease);return ENOMEM;}
-  const struct agree_assignment head={error,error?0:leases};
-  memcpy(assignment,&head,sizeof head);
-  if(!error)memcpy(assignment+sizeof head,lease,leases*sizeof *lease);
-  free(lease);
-  *out=assignment;*bytes=(uint32_t)made;
-  return error;
-}
-void mesh_transfers_interrupt(struct mesh_ctx *context){
-  const int fd=__atomic_load_n(&context->agreeing,__ATOMIC_ACQUIRE);
-  if(fd>=0)shutdown(fd,SHUT_RDWR);
-}
-int mesh_transfers_agree(struct mesh_ctx *context,const uint32_t *nodes,uint32_t n,uint32_t rank){
+/* ---- Stripe requests (mesh 8fc27cbe; mesh.h struct mesh_requests, design/bridge-dataflow.md#stripes) ---------- */
+int mesh_requests_create(struct mesh_ctx *context,uint32_t entries,struct mesh_requests **requests){
   struct hdr *m=context->M;
-  struct mesh_client *client=mesh_client_at(m,context->client);
-  if(!n || rank>=n || n>MESH_MEET_RANKS || nodes[rank]!=m->node)return EINVAL;
-  const uint32_t destinations=mesh_destination(client,0);
-  int bound=0;
-  for(uint32_t d=0;d<destinations;d++)bound|=mesh_destination_transfers(m,context->client,d)!=0;
-  if(n==1 && !bound)return 0;
-  size_t bytes=sizeof(struct agree_head)+MESH_PORTS*sizeof(struct agree_port);
-  for(uint32_t d=0;d<destinations;d++){
-    bytes+=sizeof(struct agree_destination);
-    for(uint32_t q=0;q<MESH_QUEUES*2;q++)bytes+=atomic_load(client->tx[d].length+q)*sizeof(struct mesh_transfer);
+  if(entries<4 || (entries&(entries-1)) || !requests)return EINVAL;
+  struct mesh_section section;
+  const size_t bytes=sizeof(struct mesh_requests)+(size_t)entries*sizeof(struct mesh_stripe);
+  int status=mesh_section_create(context,bytes,1,&section);
+  if(status)return status;
+  struct mesh_requests *ring=mesh_section_address(context,section,0);
+  memset(ring,0,bytes);
+  const uint64_t at=(uint64_t)((char *)ring-(char *)m);
+  ring->entries=entries;ring->owner=context->client;ring->at=at;
+  _Atomic uint64_t *rings=mesh_rings(m);
+  for(uint32_t r=0;r<MESH_RINGS;r++){
+    uint64_t vacant=0;
+    if(!atomic_compare_exchange_strong_explicit(rings+r,&vacant,at,memory_order_acq_rel,memory_order_relaxed))continue;
+    *requests=ring;
+    return 0;
   }
-  unsigned char *report=calloc(1,bytes);
-  if(!report)return ENOMEM;
-  struct agree_head head={m->node,0,0,0};
-  struct agree_port port[MESH_PORTS];
-  for(uint32_t p=0;p<m->links && p<MESH_PORTS;p++){
-    const struct mesh_link_info *link=&mesh_links(m)[p];
-    const uint32_t leases=atomic_load(&link->leases);
-    if(atomic_load(&link->phase)!=MESH_PAIRED || !leases)continue;
-    uint32_t mask=0;
-    for(uint32_t l=0;l<leases && l<MESH_LEASES;l++){
-      uint64_t vacant=0;
-      if(atomic_compare_exchange_strong(mesh_leases(m,p)+l,&vacant,context->client))mask|=UINT32_C(1)<<l;
-    }
-    port[head.ports++]=(struct agree_port){p,atomic_load(&link->peer),atomic_load(&link->peer_port),leases,mask};
-  }
-  memcpy(report+sizeof head,port,head.ports*sizeof *port);
-  size_t at=sizeof head+head.ports*sizeof(struct agree_port);
-  for(uint32_t d=0;d<destinations;d++){
-    if(!mesh_destination_transfers(m,context->client,d))continue;
-    const struct mesh_tx *tx=&client->tx[d];
-    struct agree_destination x={tx->node,tx->slots,tx->invocations,atomic_load(&client->depth),atomic_load(&client->cyclic),{0},{0}};
-    unsigned char *list=report+at+sizeof x;
-    for(int way=0;way<2;way++)for(uint32_t k=0;k<MESH_QUEUES;k++){
-      const uint32_t count=atomic_load(mesh_order_length(m,context->client,d*MESH_QUEUES+k,way?MESH_RECEIVE:MESH_SEND));
-      if(way)x.receives[k]=count;else x.sends[k]=count;
-      memcpy(list,mesh_transfers(m,context->client,d*MESH_QUEUES+k,way?MESH_RECEIVE:MESH_SEND),count*sizeof(struct mesh_transfer));
-      list+=count*sizeof(struct mesh_transfer);
-    }
-    memcpy(report+at,&x,sizeof x);
-    at=(size_t)(list-report);head.destinations++;
-  }
-  memcpy(report,&head,sizeof head);
-  const uint64_t key=client->key;
-  unsigned char *table=NULL,*second=NULL,*plan=NULL;
-  size_t length=0,second_length=0;
-  uint32_t plan_bytes=0;
-  int error=agree_meet(context,nodes[0],key,n,rank,report,(uint32_t)at,&table,&length);
-  if(!error && !rank){
-    const int planned=agree_plan(context,nodes,n,table,length,&plan,&plan_bytes);
-    if(planned && !plan)error=planned;
-  }
-  if(!error)error=agree_meet(context,nodes[0],key^AGREE_SECOND,n,rank,plan,rank?0:plan_bytes,&second,&second_length);
-  uint32_t got=0;
-  const unsigned char *assigned=error?NULL:agree_report(second,second_length,0,&got);
-  struct agree_assignment result={EPROTO,0};
-  if(assigned && got>=sizeof result)memcpy(&result,assigned,sizeof result);
-  if(!error && (result.code || got<sizeof result+(size_t)result.count*sizeof(struct agree_lease)))error=result.code?result.code:EPROTO;
-  uint32_t kept[MESH_PORTS]={0};
-  for(uint32_t e=0;!error && e<result.count;e++){
-    struct agree_lease x;memcpy(&x,assigned+sizeof result+e*sizeof x,sizeof x);
-    if(x.rank!=rank)continue;
-    const uint32_t d=mesh_destination(client,x.node);
-    if(d==MESH_DESTINATIONS || client->tx[d].node!=x.node || x.port>=MESH_PORTS){error=EPROTO;break;}
-    client->tx[d].port=(uint8_t)(x.port+1);
-    memcpy(client->tx[d].lease,x.lease,MESH_QUEUES);
-    for(uint32_t k=0;k<MESH_QUEUES;k++)if(x.lease[k])kept[x.port]|=UINT32_C(1)<<(x.lease[k]-1);
-  }
-  for(uint32_t p=0;p<head.ports;p++)for(uint32_t l=0;l<MESH_LEASES;l++){
-    if(!(port[p].mask>>l&1) || (!error && (kept[port[p].index]>>l&1)))continue;
-    uint64_t held=context->client;
-    atomic_compare_exchange_strong(mesh_leases(m,port[p].index)+l,&held,0);
-  }
-  if(error && context->relays){
-    for(uint32_t v=0;v<context->relay_count;v++)close(context->relays[v]);
-    free(context->relays);context->relays=NULL;context->relay_count=0;
-  }
-  free(report);free(table);free(second);free(plan);
-  return error;
+  mesh_lease_return(context,section.first);
+  return EBUSY;
+}
+void mesh_requests_wake(struct mesh_requests *ring,uint32_t node){
+  struct hdr *m=(struct hdr *)((char *)ring-ring->at);
+  for(uint32_t p=0;p<m->links && p<MESH_PORTS;p++)
+    if(atomic_load_explicit(&mesh_links(m)[p].phase,memory_order_acquire)==MESH_PAIRED &&
+       atomic_load_explicit(&mesh_links(m)[p].peer,memory_order_relaxed)==node)mesh_notify(&m->bell[p]);
+  mesh_notify(&m->control);
+}
+int mesh_write(struct mesh_requests *ring,uint32_t node,uint64_t offset,uint64_t bytes,uint64_t word,uint64_t value){
+  const struct hdr *m=(const struct hdr *)((const char *)ring-ring->at);
+  const uint64_t window=(uint64_t)mesh_arena_pages(m)*m->pgsz;
+  if(offset>window || bytes>window-offset || (word && ((word&7) || word<m->data_off || word>m->length-sizeof(uint64_t))))return EINVAL;
+  uint64_t k=atomic_load_explicit(&ring->head,memory_order_relaxed);
+  do if(k-atomic_load_explicit(&ring->taken,memory_order_acquire)>=ring->entries)return EAGAIN;
+  while(!atomic_compare_exchange_weak_explicit(&ring->head,&k,k+1,memory_order_acq_rel,memory_order_relaxed));
+  struct mesh_stripe *entry=&ring->request[k&(ring->entries-1)];
+  entry->offset=offset;entry->bytes=bytes;entry->word=word;entry->value=value;entry->node=node;
+  atomic_store_explicit(&entry->ready,k+1,memory_order_release);
+  mesh_requests_wake(ring,node);
+  return 0;
 }
 
 /* ---- The numerical executor (mesh 2b49f3c6^; mesh-call.h) ------------------------------------------------------ */
@@ -599,7 +368,7 @@ _Static_assert(sizeof(struct mesh_function)==104,"M23");
 /* hot-path-loads M18 on prepared-machine.md M07: a received row's landing of one invocation slot, which a worker polls
    (`word`, 1 plus the cycle once landed, UINT64_MAX once its destination was cancelled; `expected` the word of its next
    cycle): its uses (call records uses[first, first + count)) each take one arrival; the slot's one counting landing
-   also releases a forwarded row's SEND cells (`publications`: the row sent on from where it landed) and completes
+   also releases a relayed row's SEND cells (`publications`, the old bridge's publication of a landed row) and completes
    one event of `instances` instances from `slot` (1, or a constant's every slot); `identity` its destination (+
    MESH_DESTINATIONS in the constants program) */
 struct mesh_call_landing {
@@ -682,9 +451,6 @@ struct mesh_calls {
   struct mesh_active *actives;
   struct mesh_route_event *route_events;
   uint32_t route_base,route_event_count;
-  /* design/bridge-and-ipc.md#programs: the destinations a landing found cancelled (a bit an identity), whose every other
-     landing is lost with it: its bridge cancels the positions past a channel's landed count alone */
-  _Atomic uint64_t lost[2*MESH_DESTINATIONS/64];
 };
 
 /* design/algorithm-sources.md#programtensor: the arrival cells, completion records and input words are leases of the
@@ -896,10 +662,8 @@ uint32_t mesh_function_publications(struct mesh_function *function,struct mesh_s
 static void mesh_call_cleanup(struct mesh_call *,int);
 
 /* design/algorithm-sources.md#meshresult: a landing read UINT64_MAX, its destination cancelled (prepared-machine.md
-   M12), or another landing of its destination did: its instances concluded with the link's failure, the destination's
-   code where the bridge gave one, and the destination marked lost (`lost`) */
+   M12): its instances concluded with the link's failure, the destination's code where the bridge gave one */
 static void mesh_landing_lost(struct mesh_calls *calls,const struct mesh_call_landing *landing){
-  atomic_fetch_or_explicit(calls->lost+landing->identity/64,UINT64_C(1)<<(landing->identity%64),memory_order_release);
   struct mesh_ctx *program=landing->identity<MESH_DESTINATIONS?calls->context:calls->constants;
   const int64_t code=atomic_load_explicit(&mesh_client_at(program->M,program->client)->status[landing->identity%MESH_DESTINATIONS].code,memory_order_relaxed);
   for(uint32_t i=0;i<landing->instances;i++)
@@ -1036,19 +800,12 @@ static void *mesh_call_progress(void *argument){
       if(--call->pending)continue;
       mesh_call_fire(call,value-1,extent,&submitted);
     }
-    /* prepared-machine.md M07, M30: PUBLISH(row) of a landed row, its use range walked; a pending one of a destination
-       found lost, lost (mesh_landing_lost) */
-    const uint64_t lost=atomic_load_explicit(calls->lost,memory_order_acquire)|atomic_load_explicit(calls->lost+1,memory_order_acquire);
+    /* prepared-machine.md M07, M30: PUBLISH(row) of a landed row, its use range walked */
     for(uint32_t i=0;i<landing_count;i++){
       struct mesh_call_landing *landing=landings+i;
       if(!landing->word)continue;
       const uint64_t value=atomic_load_explicit(landing->word,memory_order_acquire);
-      if(value<landing->expected){
-        if(lost && atomic_load_explicit(calls->lost+landing->identity/64,memory_order_relaxed)>>(landing->identity%64)&1){
-          mesh_landing_lost(calls,landing);landing->word=NULL;
-        }
-        continue;
-      }
+      if(value<landing->expected)continue;
       if(value==UINT64_MAX){mesh_landing_lost(calls,landing);landing->word=NULL;continue;}
       const uint64_t cycle=landing->expected++-1;
       /* prepared-machine.md M04, M30 */

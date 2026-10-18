@@ -6,9 +6,8 @@ loader (`rdma/bridge_configuration.py`), writes its canonical form (a property l
 in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's agent
 definition, so the keeper's load at boot keeps it, and records the document's path beside it, so the node's
 convergence (`bin/mesh-converge.sh`, etc/converge/README.md) installs each upstream revision with the node's own. A
-changed configuration is renamed into place and takes effect at once: `mesh-user.sh` renames the bridge's binary anew
-with it, which stops the bridge as a signal does (its running calls fail as values; design/bridge-and-ipc.md#stop), and
-launchd starts it again on the new configuration. There
+changed configuration is renamed into place and takes effect when the bridge stops itself, between calls (README.md,
+Convergence): its running calls are never ended for it. There
 is no default anywhere in the code: without a configuration the bridge and `mesh-user.sh` refuse to start, naming what
 they need.
 
@@ -19,41 +18,28 @@ A document has these keys:
 - `exec` (optional): true where the bridge runs its peers' commands as its user, its own service `exec`
   (design/bridge-and-ipc.md#exec). Any node on a cable to this one may then run commands here, as it may already write
   into the window. A document that does not state it true serves none.
-- `ledger` (optional): true where the bridge keeps each program path's stamps (design/bridge-and-ipc.md#ledger):
-  every SEND cell its send thread posted (when it saw the cell released, its first SEND and its last) and every record
-  that landed, each with the time, for its clients' cuts: a cut (MESH_REQUEST_LEDGER; mesh-plan.h `mesh_ledger`,
-  nccl.h `ncclMeshLedger`) appends a running program's events since the previous cut to a file the client names. The
-  bridge writes no ledger to its log and no ledger file but at a cut. `rdma/ledger.py` reads two nodes' cuts of an
-  execution and gives each direction's send thread delay and one-way bridge-to-bridge hop. It is for measuring: a path
-  keeps up to 4 MiB more of the node's memory (outside the window) and its progress threads read the clock at each
-  event. A document that does not state it true keeps none, and its canonical form names no `ledger` (so
-  `ledger = false` changes nothing a node runs); the pair's documents state it true and the Studios' false.
-The bridge's paced emissions, each optional and each none where a document does not state it
-(design/bridge-and-ipc.md#keepalive):
-
-- `keepalive_us`: the most microseconds a link goes without a frame on its keepalive queue pair while a program holds a
-  lease on it: the port's send thread posts a 64-byte KEEPALIVE frame that often, so a link's controller that slows
-  after a quiet stretch (the Mac mini's, 6-10 us after 40 us of nothing) stays ready. A link no program holds a lease
-  on carries none.
-- `hello_us`: how often a port with no peer says HELLO again. A port's pairing is driven by events (its device opening,
-  its link coming on, a link lost, the peer's HELLO); a HELLO lost on its link has none, so a node whose document states
-  no interval pairs that port only at its next such event.
-- `health_us`: how often the node's record, with its health, is flooded again (design/recovery.md#diagnosis); its
-  urgent changes (power, memory or thermal pressure) are flooded as they happen either way.
-
-The pair's documents state `keepalive_us` 5; the pair's and the Studios' state `hello_us` 1,000,000 and `health_us`
-10,000,000; the examples state `hello_us` alone.
+- `ledger` (optional): true where the bridge keeps each flow's ledger (design/bridge-and-ipc.md#ledger): every SEND
+  cell its send thread saw released and every record that landed, each with the time, written at the flow's end into
+  the bridge's log, or past 2,048 events into a file beside the log that the log names. `rdma/ledger.py` reads two
+  nodes' ledgers of an execution and gives each direction's send thread delay, RC round trip and one-way
+  bridge-to-bridge hop. It is for measuring: a flow keeps up to 4.5 MiB more of the node's memory (outside the window)
+  and its progress threads read the clock at each event. A document that does not state it true keeps none, and its
+  canonical form names no `ledger` (so `ledger = false` changes nothing a node runs); the shipped documents state it
+  false.
+- `keepalive_us` (optional): the most microseconds an exclusive flow goes without a frame while it runs
+  (design/bridge-and-ipc.md#keepalive): each such flow takes one queue pair more, and its send side posts a one-frame
+  SEND on it that often, so a link's controller that slows after a quiet stretch (the Mac mini's, 6-10 us after 40 us of
+  nothing) stays ready. Both ends of a flow state it for its frames to flow; a document that states none makes no such
+  queue pair.
 
 The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
-when the device comes up, before any queue pair exists, and never deregisters it: the kernel reclaims it at the bridge's
-exit (design/RDMA-KERNEL-RECOVERY.md). Each device
+when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
 checks the window against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a window of more
 extents than that device registers is refused for that port, logged with the extent, its bytes, the errno and the
-extents the device holds, and the port turns again at its next memory-pressure change or link event, keeping its extents
+extents the device holds, and the port turns again 60 s later, doubling to 30 min, keeping its extents
 (design/recovery.md#registration). The bridge starts and serves the node either way; the window is never clamped. Clients lease
 from it; a lease that does not fit fails at its start with an error naming the execution, and the window never grows.
-How much an execution needs, on its own node, on the nodes it peers with and on the nodes that relay its routes, is
-the client's to know.
+How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
 
 ## The loopback fabric's configurations
 

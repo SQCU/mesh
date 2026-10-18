@@ -17,7 +17,8 @@ library's own call; the partials merge (merge_partials) is an all-reduce, reduce
 partials operator.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
-store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; it takes no pg_options."""
+store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; it takes no pg_options.
+The silent-link bound is the library's (nccl.h)."""
 import math
 import os
 
@@ -372,7 +373,7 @@ def _(partials, root, group_name):
 def counted(host, group):
     """A counted all-to-all's received counts once they have landed (host[0] set), read on the host with no wait on
     the GPU: the wait ends at their arrival or at the call's failure (host[0] 2, or the communicator's asynchronous
-    error: a lost or revoked link's cancellation, nccl.h), never at a time."""
+    error: a lost, silent or revoked link's cancellation, nccl.h), never at a time."""
     word, error = ffi.cast('uint64_t *', host.data_ptr()), ffi.new('ncclResult_t *')
     while not word[0]:
         check(LIB.ncclCommGetAsyncError(group.comm, error))

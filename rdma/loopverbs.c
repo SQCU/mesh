@@ -4,23 +4,19 @@
    place of -lrdma; the deployed bridge is built from the same source without either).  Every queue pair has, in a
    shared fabric segment (its name the bridge's configuration's, loop_fabric), a byte ring of the SENDs addressed to it,
    one producer (its peer's process) and one consumer (its owner).  A SEND is copied into its destination's ring and
-   completes on the sender as it is delivered there (a SEND to a queue pair gone, made again or reset since its peer
-   connected is dropped and completes, as UC drops it; a SEND delivered before such a reset is dropped at the drain, its
-   record naming the ring's generation it was sent to); the owner drains its ring into its receives in the order posted,
-   a SEND waiting for its receive as TB5's credit flow control holds it (TN3205), and completes each receive with its
-   byte count, or IBV_WC_LOC_LEN_ERR where the SEND is longer than the receive.  A queue pair moved to the error state
-   flushes its posted receives and pending SENDs (IBV_WC_WR_FLUSH_ERR), as the move to the error state before every
-   reset (mesh-verbs.h pair_reset) has them flushed; one moved to the reset state moves its ring's generation.  A ring
-   is held by the process whose queue pair holds it (`used` its pid) and is free again once that process has exited, as
-   the kernel reclaims a process's verbs objects at its exit (the bridge destroys none).  A device holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: RDMA-FIRST.md), a
-   SEND at most half a ring (the port's max_msg_sz).  Pairing is the bridges' own (their control sockets on the loopback
-   interface).  Only the bridge's verbs are provided: one scatter-gather entry a request, SEND and RECV on
-   unreliable-connected queue pairs, one port. */
+   completes on the sender as it is delivered there (a SEND to a queue pair gone or made again since its peer connected
+   is dropped and completes, as UC drops it); the owner drains its ring into its receives in the order posted, a SEND
+   waiting for its receive as TB5's credit flow control holds it (TN3205), and completes each receive with its byte
+   count, or IBV_WC_LOC_LEN_ERR where the SEND is longer than the receive.  A queue pair moved to the error state
+   flushes its posted receives and pending SENDs (IBV_WC_WR_FLUSH_ERR), as mesh-verbs.h pair_flush expects.  A device
+   holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: RDMA-FIRST.md), a SEND at most half a ring
+   (the port's max_msg_sz).  Pairing is the bridges' own (their control sockets on the loopback interface).  Only the
+   bridge's verbs are provided: one scatter-gather entry a request, SEND and RECV on unreliable-connected queue pairs,
+   one port. */
 #include <infiniband/verbs.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <signal.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -34,7 +30,7 @@ enum { LOOP_QPS = 1024, LOOP_DEVICES = 64, LOOP_DEVICE_QPS = 10 };
 #define LOOP_RING ((uint64_t)8 << 20)
 
 /* a queue pair's incoming SENDs: `head` the bytes written, `tail` the bytes consumed, each record an 8-byte length then
-   the payload rounded up to 8 bytes; `used` the pid of the process whose queue pair holds the ring, `generation` moved at each
+   the payload rounded up to 8 bytes; `used` nonzero while a queue pair holds the ring, `generation` moved at each
    making */
 struct loop_ring {
   _Alignas(128) _Atomic uint64_t head;
@@ -77,8 +73,8 @@ static uint32_t keys_ = 1;
    any device is opened */
 void loop_fabric(const char *name) { snprintf(fabric_name_, sizeof fabric_name_, "%s", name ? name : ""); }
 
-/* the fabric segment, made and sized by the first process to need it (a shared memory object is sized once), the
-   others looking at its size until the maker's ftruncate, which follows its shm_open */
+/* the fabric segment, made and sized by the first process to need it (a shared memory object is sized once), which the
+   others wait for */
 static struct loop_fabric *fabric(void) {
   if (fabric_) return fabric_;
   if (!fabric_name_[0]) { errno = ENOENT; return NULL; }
@@ -87,7 +83,9 @@ static struct loop_fabric *fabric(void) {
   if (file < 0) {
     if (errno != EEXIST || (file = shm_open(fabric_name_, O_RDWR, 0600)) < 0) return NULL;
     struct stat info;
-    while (!fstat(file, &info) && info.st_size < (off_t)sizeof(struct loop_fabric)) sched_yield();
+    for (int polls = 0; !fstat(file, &info) && info.st_size < (off_t)sizeof(struct loop_fabric); polls++)
+      if (polls == 100000) { close(file); errno = ETIMEDOUT; return NULL; }
+      else usleep(100);
   }
   void *mapped = mmap(NULL, sizeof(struct loop_fabric), PROT_READ | PROT_WRITE, MAP_SHARED, file, 0);
   close(file);
@@ -126,7 +124,7 @@ static int deliver(struct loop_qp *q) {
       const uint64_t record = 8 + ((send->length + 7) & ~(uint64_t)7);
       const uint64_t head = atomic_load_explicit(&ring->head, memory_order_relaxed), tail = atomic_load_explicit(&ring->tail, memory_order_acquire);
       if (record > LOOP_RING - (head - tail)) break;
-      const uint64_t length = send->length | (uint64_t)q->generation << 32;
+      const uint64_t length = send->length;
       ring_copy(ring, head, &length, 8);
       ring_copy(ring, head + 8, (const void *)(uintptr_t)send->address, send->length);
       atomic_store_explicit(&ring->head, head + record, memory_order_release);
@@ -148,12 +146,6 @@ static int drain(struct loop_qp *q) {
     if (tail == head) break;
     uint64_t length;
     ring_read(ring, tail, &length, 8);
-    const uint32_t generation = (uint32_t)(length >> 32);
-    length &= UINT32_MAX;
-    if (generation != atomic_load_explicit(&ring->generation, memory_order_acquire)) {
-      atomic_store_explicit(&ring->tail, tail + 8 + ((length + 7) & ~(uint64_t)7), memory_order_release);
-      continue;
-    }
     struct loop_receive *receive = q->posted + q->posted_head;
     struct ibv_wc entry = {.wr_id = receive->wr_id, .opcode = IBV_WC_RECV, .byte_len = (uint32_t)length, .qp_num = q->qp.qp_num};
     if (length > receive->length) entry.status = IBV_WC_LOC_LEN_ERR;
@@ -184,7 +176,8 @@ static int poll_cq(struct ibv_cq *cq, int entries, struct ibv_wc *wc) {
   pthread_mutex_unlock(&lock_);
   /* a bridge's progress threads poll without pause while anything moves, as a device's completion queue lets them; N
      bridges' on one host's cores yield once a queue has stayed empty, so the processes with work run */
-  if (idle > 8) sched_yield();
+  if (idle > 64) usleep(20);
+  else if (idle > 8) sched_yield();
   return error ? -1 : taken;
 }
 
@@ -383,9 +376,8 @@ struct ibv_qp *ibv_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *init) {
   uint32_t number = LOOP_QPS;
   for (uint32_t k = 0; held && *held < LOOP_DEVICE_QPS && k < LOOP_QPS && number == LOOP_QPS; k++) {
     const uint32_t at = (atomic_fetch_add(&fabric_->next, 1)) % LOOP_QPS;
-    uint32_t holder = atomic_load(&fabric_->rings[at].used);
-    if (holder && (kill((pid_t)holder, 0) == 0 || errno != ESRCH)) continue;
-    if (atomic_compare_exchange_strong(&fabric_->rings[at].used, &holder, (uint32_t)getpid())) number = at;
+    uint32_t vacant = 0;
+    if (atomic_compare_exchange_strong(&fabric_->rings[at].used, &vacant, 1)) number = at;
   }
   if (number == LOOP_QPS) {
     pthread_mutex_unlock(&lock_);
@@ -427,11 +419,6 @@ int ibv_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attributes, int mask) {
   if (mask & IBV_QP_STATE) {
     qp->state = attributes->qp_state;
     if (attributes->qp_state == IBV_QPS_ERR) flush(q);
-    if (attributes->qp_state == IBV_QPS_RESET) {
-      q->posted_count = q->pending_count = 0;
-      q->connected = 0;
-      atomic_fetch_add(&fabric_->rings[qp->qp_num].generation, 1);
-    }
   }
   pthread_mutex_unlock(&lock_);
   return 0;

@@ -3,9 +3,8 @@
 Read `THREAT-MODEL.md` first. This file is the operational rule that follows from it.
 
 **Recovery is critical priority.** An execution that loses a link or an operand fails, returning an error, and is
-never resumed: the node's resident bridge (`rdma/mesh-flow.c`, design/bridge-and-ipc.md) fails each program holding a
-lease of a lost link as a value naming the node, its peers' programs with it, and pairs its links again with or without
-a client. Read `design/recovery.md` (its mandates, requirements and risks) before changing any of it.
+never resumed; the node's resident bridge (`rdma/mesh-flow.c`, design/bridge-and-ipc.md) pairs its links again with or
+without a client. Read `design/recovery.md` (its mandates, requirements and risks) before changing any of it.
 
 ## The contract
 
@@ -154,7 +153,7 @@ Operator instruction, 2026-09-05:
 Verify actual user sessions and workloads, then perform the ordinary restart
 without another approval request when the node is idle.
 This authorization applies to every mesh machine. It does not authorize
-uncatchable signals to verbs owners; retain the SIGTERM stop below.
+uncatchable signals to verbs owners; retain the teardown procedure below.
 
 ## The kill guard
 
@@ -204,13 +203,9 @@ hook and the zsh line check.
 
 ### Signals are distinguished, not blocked uniformly
 
-`SIGTERM` to the bridge is correct: its handler sets the stop, the bridge tells its
-peers FAREWELL and fails its programs as values, and it exits with no verbs call, its
-queue pairs, registrations, protection domain and context left to the kernel's
-reclaim at the exit (design/bridge-and-ipc.md#stop; `ibv_dealloc_pd` deadlocks the
-driver while the device terminates, and whether the exit-time reclaim avoids that on
-TB5 is unread: design/RDMA-KERNEL-RECOVERY.md, October 18); the driver that started
-a bridge stops it that way. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
+`SIGTERM` to the bridge is correct and safe: the teardown handler runs
+`ibv_destroy_qp` / `ibv_dereg_mr` / `ibv_dealloc_pd` / `ibv_close_device` and the
+device is released; the driver that started a bridge stops it that way. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
 allowed. What is blocked is anything uncatchable or unhandled: `-9`, `-KILL`,
 `-STOP`, `-17`, `launchctl kill KILL`, and — because a `pgrep -f mesh-flow` or a
 `launchctl print` makes a PID feel like a safe target — *any* non-TERM signal
@@ -262,17 +257,35 @@ previous file is saved at `~/.zshrc.bak-meshguard`.
 the hook travels with the repo instead of living on one machine. The hook script
 lives in `bin/` for the same reason.
 
-## The bridge's wire is closed
+## Collectives and tensor parallelism
 
-The bridge's whole wire vocabulary is one enum, design/bridge-and-ipc.md#wire:
+Read `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
+`~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. A collective is a compiled program
+made ahead of time along trees of an explicit link map (`rdma/mesh-plan.h`, `rdma/mesh-collective.c`). Using
+the library: `rdma/NCCL.md`; PyTorch programs: `rdma/torch-mesh/README.md`; NumPy: `rdma/mesh_mpi.py`; where
+nodes or links differ: `design/heterogeneity.md`; adding a node: metal-microbench `docs/nodes.md`.
 
-    enum wire { HELLO=1, PAIRS, FAREWELL, RECORD, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_REFUSE, CHANNEL_DATA, CHANNEL_WINDOW,
-                CHANNEL_SHUT, CHANNEL_CLOSE, KEEPALIVE };
+## Tests and specification
 
-Adding a member to it, or a state to the bridge (a lease word's value, a program's state, a link's phase, a message a
-loop waits for), is a design change: it needs an operator's quote, verbatim and dated, in design/bridge-and-ipc.md#wire
-before it is written. A program's data crosses as SENDs on its leases, and a landing's word is the only signal a reader
-acts on. The record and the rule a change is held to, restored verbatim:
+The operator instructed on September 6, 2026: "delete all tests. tests aren't
+specification". The complete instruction is preserved in
+[design/SPECIFICATION.md §24](design/SPECIFICATION.md#24-whole-program-review-and-deletion-of-tests-september-6-2026).
+Repository-owned tests and verification harnesses have been removed. Review the complete data and execution flow
+against the user instructions and explicit algebra.
+
+Runtime testing of any code is prohibited until every item of metal-microbench `docs/acceptance-20261014.md` is attained in source; its `docs/principles.md` section 5 quotes the operator's prohibition (T9).
+
+## Source workflow
+
+Operator instruction, September 9, 2026: use commits and checkouts, and use
+`main` when it suffices. Preserve overwritten source only in commit history;
+no resets, cleans, stashes, backup copies, or uncommitted source transfers.
+This governs development synchronization; the bootstrap continues to follow the latest named
+branch.
+
+## The record a transport change is held to
+
+A change that adds a frame kind, a handshake, a retry, a phase, a token, a gate, a scheduler or a state to the bridge is held to this record before it is written. Restored verbatim:
 
 From d8d69cca:design/distributed-reduce.md:203-242 (2026-09-09):
 
@@ -377,28 +390,3 @@ NFE concludes on a status word, never on a message inside the data. With that
 rule a Mini's latency and utilization are the same whether it has one
 neighbour or an infinite mesh behind it. Without it they are not.
 
-## Collectives and tensor parallelism
-
-Read `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
-`~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. A collective is a compiled program
-made ahead of time along trees of an explicit link map (`rdma/mesh-plan.h`, `rdma/mesh-collective.c`). Using
-the library: `rdma/NCCL.md`; PyTorch programs: `rdma/torch-mesh/README.md`; NumPy: `rdma/mesh_mpi.py`; where
-nodes or links differ: `design/heterogeneity.md`; adding a node: metal-microbench `docs/nodes.md`.
-
-## Tests and specification
-
-The operator instructed on September 6, 2026: "delete all tests. tests aren't
-specification". The complete instruction is preserved in
-[design/SPECIFICATION.md §24](design/SPECIFICATION.md#24-whole-program-review-and-deletion-of-tests-september-6-2026).
-Repository-owned tests and verification harnesses have been removed. Review the complete data and execution flow
-against the user instructions and explicit algebra.
-
-Runtime testing of any code is prohibited until every item of metal-microbench `docs/acceptance-20261014.md` is attained in source; its `docs/principles.md` section 5 quotes the operator's prohibition (T9).
-
-## Source workflow
-
-Operator instruction, September 9, 2026: use commits and checkouts, and use
-`main` when it suffices. Preserve overwritten source only in commit history;
-no resets, cleans, stashes, backup copies, or uncommitted source transfers.
-This governs development synchronization; the bootstrap continues to follow the latest named
-branch.

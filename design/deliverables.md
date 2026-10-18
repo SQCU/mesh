@@ -269,7 +269,7 @@ Mesh.syncOnRemoteFill(parts, index:)                      // explicit, diegetic,
 Mesh.observe() -> Topology                                // the bridges' map
 bounds(program, placement, topology, capability) -> Bounds // pure lower bounds; never picks a placement
 
-mesh.Program(backend, *, functions, group, trace)            // SPMD; realize() == start()
+mesh.Program(backend, *, functions, group, timeout, trace)   // SPMD; realize() == start()
 Program.tensor(shape, block_shape, dtype, transferable, *, contiguous) -> Tensor  // blocks of Refs (views of backings)
 Program.kernel_call(kernel, *, out_shape, grid, in_specs, out_specs, peer)(*operands)  // kernel(program, inputs, outputs, coordinate)
 BlockSpec(block_shape, index_map, region_map) / ShapeDtypeStruct(shape, dtype) / Partial(required, terms)
@@ -316,11 +316,11 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **S1. The bridge finds its ports and serves them all.** Nothing is configured: the bridge gives each RDMA device it finds an index, and its hellos find the node each one reaches ([bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)). Ref: JACCL hostfile (the full-mesh case of what the map holds). Check: a node with three cabled ports pairs three links (the port table shows each one's phase); the same program runs at world size 2 and 3 with nothing changed. Not it: a hostfile, or a configured peer list.
 
-**S2. TX/RX per link on dedicated threads; drain and refill immediately.** `rdma/mesh-flow.c` `port_progress`: a link's send thread and receive thread, spinning while the link is up; a landing posts its ring's next records as it stores its word (`ring_advance`). Ref: NCCL proxy; JACCL per-wire polling. Check: I6. Not it: a progress loop that also runs numerical callbacks.
+**S2. TX/RX per link on dedicated threads; drain and refill immediately.** `rdma/mesh-flow.c` `tx_thread(link)`, `rx_thread(link)`; RX reposts before delivering. Ref: NCCL proxy; JACCL per-wire polling. Check: I6. Not it: a progress loop that also runs numerical callbacks.
 
 **S3. Chunked transport, invisible.** `mesh_section_create(ctx, bytes, count, receive, &section)`; internal `C`, `K = ceil(N/C)`. Ref: TN3205 frame matching; llama.cpp PR #26421 (128 KiB stride cost). Check: I10.
 
-**S4. Out-of-band pairing on the control socket; every syscall bounded.** The link hello (node, the index it gave the cable, LID, GID, block size), then the link's queue pairs' numbers (PAIRS: once at its pairing, and a lease's new round and first sequence number each time its pair is made again in place) ([bridge-and-ipc.md#links](bridge-and-ipc.md#links)); a session's members agree their leases and relays once, at one member's bridge ([bridge-and-ipc.md#meet](bridge-and-ipc.md#meet)); the control socket is dialed and accepted nonblocking, each read and write on the event loop ([recovery.md](recovery.md) Q14). Ref: TN3205; `RDMA-RULES.md`. Check: no call on a link's control socket in `rdma/mesh-flow.c` blocks.
+**S4. Out-of-band pairing on the control socket; every syscall bounded.** The link hello (node, boot, LID, GID, block size), then each program's READY, PAIRS and POSTED ([bridge-and-ipc.md#protocol](bridge-and-ipc.md#protocol)); `accept/connect/read` each with a deadline ([recovery.md](recovery.md) Q14). Ref: TN3205; `RDMA-RULES.md`. Check: each of those calls in `rdma/mesh-flow.c` has a deadline.
 
 ### L — library core
 
@@ -341,7 +341,7 @@ record's, its last sentence the restored surfaces' names.
 
 **L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5. Restored surfaces: Swift's sections and leases; Python storage freed with its last view (a window lease returned with it, `mesh.lease`).
 
-**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Swift `Mesh.syncOnRemoteFill`, `examples/sync-on-remote-fill.swift`; Python `collective.sync_on_remote_fill` (no bound: a result never filled waits forever), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
+**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Swift `Mesh.syncOnRemoteFill`, `examples/sync-on-remote-fill.swift`; Python `collective.sync_on_remote_fill` (bounded by the program's timeout), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
 
 ### G — genericity
 
@@ -361,9 +361,9 @@ record's, its last sentence the restored surfaces' names.
 
 **T1. The map is a graph value, observed.** `mesh-plan.h` `struct mesh_link_map` from `mesh_map`: the bridges' records of every node's ports, flooded to every bridge, two nodes linked where each holds a port paired with the other ([bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)). Ref: JACCL hostfile as the full-mesh case; OSPF flooding (RFC 2328 §13). Check: a tree, a ring with spurs and a full mesh run the same program with nothing configured; no code path assumes a link exists.
 
-**T2. Routes are the map's; the bridges forward.** `mesh_map` joins members the links leave apart along the whole mesh's path on fewest links; on each node of the route a relay program the members' agreement started carries both directions, its receive rows its SEND rows, a landed record releasing the next hop's SEND cell ([bridge-and-ipc.md#relays](bridge-and-ipc.md#relays)). Ref: Patarasuk–Yuan (spanning tree suffices); Monsoon. Check: leaf→leaf on a star is two SENDs with no process of the hub taking part; per-cut bytes equal declared traffic.
+**T2. Routes are the map's; the bridges forward.** `mesh_map` joins members the links leave apart along the whole mesh's path on fewest links; on each node of the route the program is a relay's two flows, a landed record releasing the next hop's SEND cell ([bridge-and-ipc.md#flows](bridge-and-ipc.md#flows)). Ref: Patarasuk–Yuan (spanning tree suffices); Monsoon. Check: leaf→leaf on a star is two SENDs with no process of the hub taking part; per-cut bytes equal declared traffic.
 
-**T3. Multi-link striping per pair.** `send(part, to:, queue:)` where `queue` selects among a pair's links; chunks round-robin when `queue == .all`. Ref: JACCL `ring_impl` wires; TN3205 10 QPs/device. Check: equal bytes per link of a pair in `report`. Restored surfaces: Swift `send(part, to:, queue:)` (a queue of the program, each on a lease of the pair's link; the bridges carry a pair's programs over one cable, [bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)); Python `queue=` (a libnccl-mesh communicator of its own, its crossings progressing apart from other queues').
+**T3. Multi-link striping per pair.** `send(part, to:, queue:)` where `queue` selects among a pair's links; chunks round-robin when `queue == .all`. Ref: JACCL `ring_impl` wires; TN3205 10 QPs/device. Check: equal bytes per link of a pair in `report`. Restored surfaces: Swift `send(part, to:, queue:)` (a queue of the bridge's flows); Python `queue=` (a libnccl-mesh communicator of its own, its crossings progressing apart from other queues').
 
 **T4. Bounds before runs.** `bounds(program, placement, topology, capability) -> {compute, memory, cut: {cut: s}, path: s, max}`, pure; `topology` is the T1 value (links, observed), `capability: [node: Capability(rate, bandwidth)]` the caller's sustained rates. Ref: `docs/amdahl_superiority.md` four lower bounds; Hockney; LogGP; COSMA. Check: reproduces the ten-minute table (1+3, 2+17, 1+1). Restored surfaces: `swift/Bounds.swift` `bounds(_:_:_:_:)`, `examples/bounds-table.swift`.
 

@@ -21,12 +21,10 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 /* The node's bridge's window as its region holds it: its bytes (the arena its configuration registered at device up) and
    the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
 int mesh_window(uint64_t *bytes,uint64_t *unleased);
-/* The node's bridge's start, the event a client blocks on with no bound: mesh_bridge_wait returns 0 once a bridge of this
-   version holds the region, at once where one does, else at the notify(3) name a bridge posts once its sockets listen and
-   its region is open (MESH_STARTED, a loop bridge's followed by its region's name), or an errno where the name cannot
-   be watched. */
-#define MESH_STARTED "io.mesh.bridge.started"
-int mesh_bridge_wait(void);
+/* The flows and awaiting programs the node's bridge holds (0 between calls) and the wall clock in ns at which it last
+   came to hold none (0 while it holds any; mesh.h struct hdr `busy`, `idle_since`, design/bridge-and-ipc.md#region; a
+   read that meets the bridge as it becomes busy is told busy, 1); 0, or -errno where the bridge is unreachable. */
+int mesh_busy(uint64_t *busy,uint64_t *idle_since);
 
 /* A link map, an operand: `nodes` nodes and `links` links of a kind.
      MESH_LINKS_MESH   every pair is linked (`link` lists only the pairs given bandwidths, if any)
@@ -48,8 +46,9 @@ int mesh_bridge_wait(void);
    a table, two of the map's nodes are linked where the route between them crosses no other of them (relays alone),
    and that hop's bytes cross every link of it (a relay forwards each slot as it lands, mesh-flow.c receive_input;
    mesh_trees_pack).  Without one, two nodes are linked where a link joins them.  Several links between one pair are
-   its cables; the bridges carry a pair's programs over one of them (design/bridge-and-ipc.md#ports), so a route prices
-   the pair's hop at its slowest cable's bandwidth.  `link`, `bandwidth`, `next` and `mark` are the caller's storage. */
+   its cables, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is striped over
+   them, position t on cable t mod n, so the pair carries n times its slowest cable's bandwidth.  `link`, `bandwidth`,
+   `next` and `mark` are the caller's storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark; };
 /* 0 where a map is one, else EINVAL: every link's nodes among its nodes and relays; a ring one cycle through every node
@@ -66,7 +65,7 @@ int mesh_link_map_check(const struct mesh_link_map *);
 int mesh_link_map_joined(const struct mesh_link_map *,uint32_t *apart);
 /* The routing table of a map's links (into next, N x N as struct mesh_link_map's; map->next is not read): each node
    b's in-tree of shortest routes toward it, by fewest links, then the least sum of their hops' inverse bandwidths
-   (8e15 over its slowest cable's bits a second, in whole fs a byte; a hop with no
+   (a pair's cables striped: 8e15 over n times its slowest cable's bits a second, in whole fs a byte; a hop with no
    bandwidth counts none), each node's parent among its equals the one of the least hash of its mark, the parent's
    and the root's (equal-cost multipath by a hash, as ECMP spreads flows [RFC 2992]): routes of equal length spread
    over the links rather than piling onto the lowest-numbered node, every bridge and member that holds the same
@@ -95,10 +94,10 @@ uint32_t mesh_route_path(const struct mesh_link_map *,uint32_t a,uint32_t b,uint
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map);
 /* The map of the node's bridge (design/bridge-and-ipc.md#ports) as of one map serial, from its records of every
    node's ports (mesh_observe's views), so the same records give every member the same map: the whole map, its nodes
-   the records' ascending by bridge, two joined by one link where each one's bridge holds ports paired with the other,
-   at the bandwidth of the slowest of those ports at either end (the least any of them reports; 0 where none reports
-   one; the bridges carry the two's programs over one cable, design/bridge-and-ipc.md#ports), each node marked by its
-   bridge's number, its
+   the records' ascending by bridge, two joined by a link a cable where each one's bridge holds ports paired with the
+   other (the fewer of the two ends' counts), each at the bandwidth of the slowest of those ports at either end (the
+   least any of them reports; 0 where none reports one; the bridge stripes a program between the two over every
+   cable, a routed one end to end, design/bridge-and-ipc.md#cables), each node marked by its bridge's number, its
    table mesh_routes' (the routes the bridges forward along, mesh-dataflow.c mesh_route);
    then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
    i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its
@@ -106,12 +105,10 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
    to 63 bytes and its NUL, the record's name field (mesh.h struct mesh_record). */
 #define MESH_NAME_BYTES 64
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map);
-/* The bridge's map serial (never 0; it changes with the records, odd while the bridge writes them): mesh_map_serial reads
-   it now (0 where the bridge is unreachable); mesh_map_wait waits on it, with no bound, until it is whole (even) and
-   differs from *serial, and writes it there: 0, or the unreachable bridge's errno (ESRCH once the bridge is gone).  Read
-   before mesh_map, it makes a later change end the next wait at once. */
-uint64_t mesh_map_serial(void);
-int mesh_map_wait(uint64_t *serial);
+/* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
+   passes and writes it there; 0 where it differs, ETIMEDOUT where the bound passed, else an unreachable bridge's errno.
+   Read (*serial 0) before mesh_map, it makes a later change end the next wait at once. */
+int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
 /* Whether the map links its nodes a and b, either way (a mesh every pair; with a table, their route crossing relays
    alone). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
@@ -136,12 +133,12 @@ uint32_t mesh_trees_path(const struct mesh_trees *,uint32_t from,uint32_t to,uin
    along minimum-length arborescences [Chu & Liu 1965; Edmonds 1967] of the map's hops, a hop's length the sum of its
    ports' lengths.  A port is a link one way: with a table every link a hop's route crosses, so the hops of a tree that
    cross one link charge it each (relayed hops share the links they cross); its length grows by (1 + eps x flow/capacity)
-   and its capacity is its hop's one link's bandwidth, the slowest the map gives the pair (the bridges carry a node pair
-   over one link; where the map gives some hop no bandwidth, every hop alike).  A root's equal trees merged, its `most`
-   heaviest kept and their flows' shares their log weights (the packing's description: libnccl-mesh cuts a configured
-   form's segments among them by the form's shares, nccl.h ncclMeshForm, never by these).  Writes root, parent (nodes a
-   tree) and log_weight for at most nodes x most trees, each root's heaviest first; returns the count, 0 where the map
-   does not join its nodes (mesh_link_map_joined).  At two nodes, each node's one tree. */
+   and its capacity is its hop's cables' count times the slowest one's bandwidth (where the map gives some hop no
+   bandwidth, its cables' count: every cable alike).  A root's equal trees merged, its `most` heaviest kept and their
+   flows' shares their log weights (the packing's description: libnccl-mesh cuts a configured form's segments among
+   them by the form's shares, nccl.h ncclMeshForm, never by these).  Writes root, parent (nodes a tree) and log_weight
+   for at most nodes x most trees, each root's heaviest first; returns the count, 0 where the map does not join its
+   nodes (mesh_link_map_joined).  At two nodes, each node's one tree. */
 uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
@@ -299,33 +296,22 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
    the request will take there, 0 for none) and reads the bridge's int32 answer: 0 once the service's end is open, else
    an errno (EHOSTUNREACH: the map holds no path to the node; ENOENT: the node serves no such service; ECONNREFUSED: the
    service's socket refused; ENOMEM: the node's available memory, read at the request, is short of its `bytes`;
-   ENETRESET: a link of its route lost). The connection then carries the client's
+   ETIMEDOUT). The connection then carries the client's
    bytes to the service and the service's back, each direction ended by its writer's half close (shutdown SHUT_WR);
    a channel that fails anywhere resets the connection. A service registers its listening Unix socket
    (MESH_REQUEST_SERVE, its name and its socket's path) on a connection it holds open: the registration lasts while
-   that connection does, and a newer one of the same name replaces it.
+   that connection does, and a newer one of the same name replaces it. The bridge serves `hold` itself (#holds).
    MESH_REQUEST_LEDGER (#ledger, where the bridge's configuration keeps ledgers): `bytes` a program's key, `path` a file
-   the bridge appends each running program of that key's events to, those since the latest such request, each path's
-   after its header line; the answer 0, ENOENT where no running program of the key keeps a ledger, ENOTSUP where the
-   configuration keeps none, EINVAL for a path not absolute; the connection then closed.
-   Two services are the bridge's own (design/bridge-and-ipc.md#meet, #relays): `meet`, where a key's `n` members each
-   send a struct mesh_meet and its report and half close, held until every rank of the key has sent one, each then
-   answered with them all: a uint32 n, n uint32 byte counts, the reports in rank order; and `relay`, where a requester
-   sends a struct mesh_relay_request and its entries, each a struct mesh_relay_entry and its transfers (the far end's
-   SENDs through neighbour `a` toward `b` queue by queue, then the other way's), and reads an int32 answer: 0 once the
-   bridge forwards each pair of directions over the leases named, its rows received into from one neighbour and sent
-   from to the other, while the channel stays open; a byte past the request says the requester ends in order, and the
-   channel's close ends them. */
+   the bridge appends each running flow of that program's events to, those since the latest such request, each flow's
+   after its header line; the answer 0, ENOENT where no running flow of the key keeps a ledger, ENOTSUP where the
+   configuration keeps none, EINVAL for a path not absolute; the connection then closed. */
 #define MESH_SERVICE_BYTES 48
 #define MESH_SERVICE_PATH 104
-enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3 };
+/* MESH_REQUEST_STREAM: a raw one-way stream to a neighbour inside the bridge (design/bridge-dataflow.md#streams;
+   mesh-dataflow.h mesh_stream) */
+enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3, MESH_REQUEST_STREAM=4 };
 struct mesh_request { uint32_t magic,kind,node,reserved; uint64_t bytes; char service[MESH_SERVICE_BYTES]; char path[MESH_SERVICE_PATH]; };
 #define MESH_REQUEST_MAGIC 0x4d524551u
-#define MESH_MEET_RANKS 256
-#define MESH_MEET_BYTES 1048576
-struct mesh_meet { uint64_t key; uint32_t n,rank,bytes,reserved; };
-struct mesh_relay_request { uint64_t key; uint32_t count,bytes; };
-struct mesh_relay_entry { uint32_t a,b; uint8_t lease_a[4],lease_b[4]; uint32_t slots,invocations,depth,cyclic,sends[4],receives[4]; };
 /* a channel to `service` at `node`, admitted for `bytes` there, open: its connection's descriptor, or -errno */
 int mesh_request(uint32_t node,const char *service,uint64_t bytes);
 /* `service` registered as the Unix socket at `path`: the descriptor of the connection whose life the registration
