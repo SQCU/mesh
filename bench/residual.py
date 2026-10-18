@@ -7,7 +7,6 @@ def step():
     G = G + mx.eye(R)*1e-3
     L = mx.linalg.cholesky(G, stream=mx.cpu)
     return L
-mx.eval(step())
 it=5; t=time.perf_counter()
 for _ in range(it): mx.eval(step())
 e=(time.perf_counter()-t)/it

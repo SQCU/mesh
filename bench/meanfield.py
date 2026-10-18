@@ -24,7 +24,6 @@ def solve(A,R,V,rho, exchange=None):
     mx.eval(V)
     return V, exchanged
 
-V2,ex = solve(A,R,V,rho); mx.eval(V2)
 t0=time.perf_counter(); V2,ex = solve(A,R,V,rho); e=time.perf_counter()-t0
 flop = M*K*(2*N*N + 8*N)
 print(f"  solve: {e*1e3:.1f} ms   {flop/1e12:.3f} TFLOP   {flop/e/1e12:.2f} TFLOP/s")

@@ -53,7 +53,6 @@ def bound_balanced_bmm(X, idx=None):
     return (mx.maximum(xb @ W1, 0.0) @ W2).reshape(-1, D)
 
 def bench(f, idx):
-    mx.eval(f(X, idx)); mx.eval(f(X, idx))
     reps = []
     for _ in range(REPS):
         t0 = time.perf_counter()

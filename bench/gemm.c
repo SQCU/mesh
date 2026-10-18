@@ -15,7 +15,6 @@ int main(int argc,char**argv){
     float *X=malloc((size_t)N*K*4), *Y=malloc((size_t)N*K*4);
     for(size_t i=0;i<(size_t)N*K;i++){X[i]=0.5f;Y[i]=0.f;}
     int iters = K<=8?200: K<=64?60: K<=256?24: 12;
-    cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,N,K,N,1.f,A,N,X,K,0.f,Y,K);
     double t=now();
     for(int i=0;i<iters;i++)
       cblas_sgemm(CblasRowMajor,CblasNoTrans,CblasNoTrans,N,K,N,1.f,A,N,X,K,0.f,Y,K);

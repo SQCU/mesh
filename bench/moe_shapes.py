@@ -8,7 +8,6 @@ mx.eval(X)
 print(f"{socket.gethostname()} T={T} D={D} FF={FF}")
 
 def bench(f, X, FL, it):
-    r = f(X); mx.eval(r)
     reps = []
     for _ in range(3):
         t0 = time.perf_counter()

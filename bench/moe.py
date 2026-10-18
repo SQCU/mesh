@@ -36,7 +36,6 @@ def moe(X):
         outs.append(o)
     return outs[0] + outs[1] if TOPK==2 else outs[0]
 
-mx.eval(moe(X))
 it=3; t=time.perf_counter()
 for _ in range(it): mx.eval(moe(X))
 e=(time.perf_counter()-t)/it

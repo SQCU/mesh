@@ -54,7 +54,6 @@ def bound_balanced_bmm(X):
 
 print(f"{socket.gethostname()} T={T} N={T*TOPK} rows/expert~{T*TOPK//E} useful={FL/1e9:.0f} GFLOP")
 for f in [baseline_py_bounds, sort_take_gather_mm, bound_balanced_bmm, route_and_permute_only]:
-    mx.eval(f(X))
     it = 10
     reps = []
     for _ in range(5):

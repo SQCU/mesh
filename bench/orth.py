@@ -1,4 +1,4 @@
-import mlx.core as mx, time, sys, json, platform, os
+import mlx.core as mx, time, sys, json, platform
 
 def ridge_adjusted_normal_matrix(X, ridge):
     G = X.T @ X
@@ -120,7 +120,6 @@ def run(n, R, names, reps, ridge_rel, kw):
         errs[nm] = orth_err(Q) if nm != "normal_matrix_only" else float("nan")
         del Q
     best = {nm: float("inf") for nm, _ in calls}
-    duty = float(os.environ.get("ORTH_DUTY", "0.0"))
     for _ in range(reps):
         for nm, c in calls:
             t = time.perf_counter()
@@ -128,7 +127,6 @@ def run(n, R, names, reps, ridge_rel, kw):
             e = time.perf_counter() - t
             if e < best[nm]:
                 best[nm] = e
-            time.sleep(min(20.0, e * duty))
     return best["normal_matrix_only"], [(nm, best[nm], errs[nm]) for nm, _ in calls]
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ def pairwise_distance():
     inner_products = X @ X.T
     n = mx.sum(X*X, axis=1)
     return n[:,None] + n[None,:] - 2*inner_products
-mx.eval(pairwise_distance())
 it=10; t=time.perf_counter()
 for _ in range(it): mx.eval(pairwise_distance())
 e=(time.perf_counter()-t)/it
