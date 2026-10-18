@@ -125,7 +125,7 @@ def all_reduce(tensor, op, group):
 
 # design/algorithm-sources.md#collectivereduce_scatter
 def partials(tensor, root, group):
-    """nccl.h's log-sum-exp merge of a (rows, 2 + dim) float32 operand laid out [m: rows][l: rows][O: rows x dim], in
-    place, toward every member (root None) or `root` (the backend's ProcessGroupMesh.merge_partials, both paths)."""
-    return group._get_backend(tensor.device).merge_partials(tensor, tensor, tensor.shape[1] - 2, -1 if root is None else root,
+    """nccl.h's log-sum-exp merge (ncclMeshRedOpCreatePartials) of a (rows, 2 + dim) float32 operand, each row [m, l, O],
+    in place, toward every member (root None) or `root` (the backend's ProcessGroupMesh.merge_partials, both paths)."""
+    return group._get_backend(tensor.device).merge_partials(tensor, tensor, root=-1 if root is None else root,
                                                              async_op=True)

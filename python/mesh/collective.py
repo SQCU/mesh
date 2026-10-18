@@ -4,7 +4,7 @@ a row crosses once its own blocks are ready (a program runs in row order).  A cr
 consumer reads the blocks: read whole is MPI_Allgatherv (all_gather, broadcast: ncclMeshAllGatherV); moved to an owner
 is MPI_Alltoallv (all_to_all, scatter, gather); contracted is MPI_Reduce_scatter (reduce_scatter, reduce:
 ncclMeshReduceScatterV) or the all-reduce, by SUM, MAX or MIN; a softmax over a split is the log-sum-exp merge of its
-partials, PARTIALS (ncclMeshAllReducePartials, ncclMeshReducePartials).  Any other associative combine is a supplied
+partials, PARTIALS (the reduction operator ncclMeshRedOpCreatePartials over rows of [m, l, O]).  Any other associative combine is a supplied
 kernel declaring `combine` (Swift's `using combine:`): the terms moved to their owner by one all-to-all and combined
 there by a tree of its calls.  Every member records every verb (the program is SPMD); `peers` and `owners` are ranks
 of the program, `owners` each block's index to its owner."""
