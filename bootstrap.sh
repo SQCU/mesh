@@ -8,7 +8,7 @@ DEST="${MESH_DEST:-/usr/local/src/mesh}"
 echo "==> 1/3  opening the lifeline"
 launchctl enable system/com.openssh.sshd 2>/dev/null
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
-nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1 \
+nc -z 127.0.0.1 22 >/dev/null 2>&1 \
   && echo "    sshd listening on :22" \
   || echo "    WARNING sshd did not come up, do not walk away yet"
 

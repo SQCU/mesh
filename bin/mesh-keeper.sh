@@ -20,12 +20,12 @@ done < <(grep -v '^firewall' "$POLICY")
 fw_want=$(awk '$1=="firewall"{print $2;exit}' "$POLICY")
 fw_have=$("$FW" --getglobalstate 2>/dev/null | grep -q 'State = 1' && echo on || echo off)
 [ "$fw_have" = "$fw_want" ] || { echo "[$(ts)] DRIFT firewall=$fw_have -> $fw_want"; "$FW" --setglobalstate "$fw_want" >/dev/null 2>&1; drift=1; }
-nc -z -G 2 127.0.0.1 22 >/dev/null 2>&1 || {
+nc -z 127.0.0.1 22 >/dev/null 2>&1 || {
   echo "[$(ts)] DRIFT sshd down"
   launchctl enable system/com.openssh.sshd >/dev/null 2>&1
   launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1
   drift=1; }
-nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1 || {
+nc -z 127.0.0.1 5900 >/dev/null 2>&1 || {
   echo "[$(ts)] DRIFT screensharing down"
   launchctl enable system/com.apple.screensharing >/dev/null 2>&1
   launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1
@@ -61,13 +61,20 @@ if [ -n "$_uid" ]; then
     launchctl bootstrap "user/$_uid" "$_p" 2>/dev/null && { echo "[$(ts)] DRIFT $_user's agent $_l loaded in its user domain"; drift=1; }
   done
 fi
-_new=/usr/local/mesh/jobs/io.mesh.update.plist.new
-if [ -f "$_new" ] && ! launchctl print system/io.mesh.update 2>/dev/null | grep -q '^[[:space:]]*pid = ' && ! pgrep -qf '/install\.sh'; then
-  _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_new" system /Library/LaunchDaemons/io.mesh.update.plist) || _out="FAIL $_out"
-  [ -z "$_out" ] || { echo "[$(ts)] DRIFT io.mesh.update: $_out"; drift=1; }
+if ! pgrep -qf '/install\.sh'; then
+  for _n in /usr/local/mesh/jobs/*.plist.new; do
+    [ -f "$_n" ] || continue; _l=$(basename "$_n" .plist.new)
+    launchctl print "system/$_l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
+    _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_n" system "/Library/LaunchDaemons/$_l.plist") || _out="FAIL $_out"
+    [ -z "$_out" ] || { echo "[$(ts)] DRIFT $_l: $_out"; drift=1; }
+  done
+  for _p in /Library/LaunchDaemons/io.mesh.*.plist; do
+    [ -f "$_p" ] || continue; _l=$(basename "$_p" .plist)
+    launchctl print "system/$_l" >/dev/null 2>&1 && continue
+    [ -n "$_uid" ] && launchctl print "gui/$_uid/$_l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
+    echo "[$(ts)] DRIFT $_l not loaded"; launchctl bootstrap system "$_p" >/dev/null 2>&1; drift=1
+  done
 fi
-launchctl print system/io.mesh.update >/dev/null 2>&1 || {
-  echo "[$(ts)] DRIFT io.mesh.update not loaded"; launchctl bootstrap system /Library/LaunchDaemons/io.mesh.update.plist >/dev/null 2>&1; drift=1; }
 pgrep -qf /usr/local/mesh/bin/babeld || {
   echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {
@@ -78,7 +85,7 @@ if [ -n "$_uid" ]; then
     for _c in "gui/$_uid" "user/$_uid"; do launchctl print "$_c/$_l" >/dev/null 2>&1 && { _d=$_c; break; }; done
     if [ -z "$_d" ]; then [ "$(plutil -extract LimitLoadToSessionType raw "$_n" 2>/dev/null)" = Background ] || continue; _d=user/$_uid; fi
     launchctl print "$_d/$_l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
-    _out=$(MESH_AGENT_NOWAIT=1 /usr/local/mesh/bin/mesh-agent.sh "$_n" "$_d") || _out="FAIL $_out"
+    _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_n" "$_d") || _out="FAIL $_out"
     [ -z "$_out" ] || { echo "[$(ts)] DRIFT $_user's agent $_l: $_out"; drift=1; }
   done
 fi

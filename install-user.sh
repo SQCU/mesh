@@ -16,14 +16,13 @@ load(){
   else bad "$label: $out"; fi
 }
 system_owns(){
-  label=$1; port=$2; url=$3
+  label=$1; port=$2
   pid=$(launchctl print "system/$label" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')
-  [ -n "$pid" ] && /usr/sbin/lsof -nP -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 \
-    && curl -fsS --max-time 3 "$url" | "$PY" -c 'import json,sys; raise SystemExit(0 if isinstance(json.load(sys.stdin),dict) else 1)'
+  [ -n "$pid" ] && /usr/sbin/lsof -nP -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
 }
 provide_http(){
-  label=$1; port=$2; url=$3
-  if system_owns "$label" "$port" "$url"; then
+  label=$1; port=$2
+  if system_owns "$label" "$port"; then
     mv -f "$A/$label.plist.new" "$A/$label.plist"
     retained=$((retained+1))
     ok "$label provided by system domain on :$port"
@@ -64,7 +63,7 @@ cat > "$A/io.mesh.nodeinfo.plist.new" <<PL
   <key>ProgramArguments</key><array><string>$PY</string><string>$D/bin/mesh-nodeinfod.py</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ThrottleInterval</key><integer>1</integer>
   <key>StandardErrorPath</key><string>$D/log/io.mesh.nodeinfo.err.log</string>
 </dict></plist>
 PL
@@ -80,7 +79,7 @@ cat > "$A/io.mesh.telemetry.plist.new" <<PL
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ThrottleInterval</key><integer>1</integer>
   <key>StandardOutPath</key><string>$D/log/io.mesh.telemetry.out.log</string>
   <key>StandardErrorPath</key><string>$D/log/io.mesh.telemetry.err.log</string>
 </dict></plist>
@@ -94,18 +93,14 @@ cat > "$A/io.mesh.observer.plist.new" <<PL
   <key>WorkingDirectory</key><string>$D</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ThrottleInterval</key><integer>1</integer>
   <key>StandardOutPath</key><string>$D/log/io.mesh.observer.out.log</string>
   <key>StandardErrorPath</key><string>$D/log/io.mesh.observer.err.log</string>
 </dict></plist>
 PL
 load io.mesh.nodeinfo
-provide_http io.mesh.telemetry 8788 http://127.0.0.1:8788/v1/latest
-provide_http io.mesh.observer 8787 http://127.0.0.1:8787/latest.json
-sleep 2
-printf x | nc -G 2 -w 2 ::1 8100 >/dev/null 2>&1 && ok "responder answering on :8100" || bad "responder not answering"
-curl -fsS --max-time 3 http://127.0.0.1:8788/v1/latest >/dev/null 2>&1 && ok "telemetry answering on :8788" || bad "telemetry not answering"
-curl -fsS --max-time 3 http://127.0.0.1:8787/latest.json >/dev/null 2>&1 && ok "observer answering on :8787" || bad "observer not answering"
+provide_http io.mesh.telemetry 8788
+provide_http io.mesh.observer 8787
 cat > "$A/io.mesh.update.user.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

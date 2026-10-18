@@ -78,7 +78,7 @@ cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
 <key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>ExitTimeOut</key><integer>60</integer>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>1</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
 PL
 loaded=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$loaded"; exit 1; }
