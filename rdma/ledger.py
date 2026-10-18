@@ -28,13 +28,12 @@ For each direction between two nodes it reports, in microseconds (median, p10, p
   post (the wire and the receiver's poll alone).  An offset so taken holds the two directions' hops alike: nothing on
   the pair tells them apart.
 
-    python ledger.py PATH [PATH ...] [--key KEY] [--skip N] [--bindings] [--json]
+    python ledger.py PATH [PATH ...] [--key KEY] [--bindings] [--json]
 
 PATH: a bridge's log (~/Library/Logs/io.mesh.bridge.log), a ledger file (ledger-*.jsonl) or a directory of them, of
 the two nodes, however fetched; a file a header names is read from beside the log that names it or from any directory
-given.  --key: the execution (hex) to report, else every one with a flow paired across a link.  --skip: invocations
-below N left out (Q5P's analysis left out 3).  --bindings: the hop and the send thread's delay by binding as well.
---json: one JSON document in place of the text."""
+given.  --key: the execution (hex) to report, else every one with a flow paired across a link.  --bindings: the hop
+and the send thread's delay by binding as well.  --json: one JSON document in place of the text."""
 import argparse
 import bisect
 import collections
@@ -111,20 +110,19 @@ def name(event):
     return event.get('queue', event.get('ring')), event['invocation'], event['position'], event['cycle']
 
 
-def crossings(sender, receiver, skip):
+def crossings(sender, receiver):
     """The cells `sender` sent that `receiver` landed whole: {(program, stripe, name): crossing}, the program its two end
     nodes (either way), a crossing its SEND's times on the sender's clock and its last chunk's landing on the
     receiver's."""
     landed = collections.defaultdict(dict)
     for r in receiver['landings']:
-        if r['invocation'] >= skip:
-            landed[name(r)][r['chunk']] = r
+        landed[name(r)][r['chunk']] = r
     out = {}
     h = sender['header']
     program = (min(h['near'], h['far']), max(h['near'], h['far']))
     for s in sender['sends']:
         chunks = landed.get(name(s))
-        if s['invocation'] < skip or not chunks or len(chunks) != s['chunks']:
+        if not chunks or len(chunks) != s['chunks']:
             continue
         out[program, h['stripe'], name(s)] = dict(s, landed=max(r['landed'] for r in chunks.values()))
     return out
@@ -193,7 +191,7 @@ def direction(forward, backward, bindings):
     return report
 
 
-def analyse(flows, key, skip, bindings):
+def analyse(flows, key, bindings):
     """{execution: {'A -> B': direction}} of every execution with a flow paired across a link."""
     links = collections.defaultdict(lambda: collections.defaultdict(dict))
     flowcount = collections.Counter()
@@ -205,7 +203,7 @@ def analyse(flows, key, skip, bindings):
         if other is None:
             continue
         flowcount[h['key'], h['node'], h['peer']] += 1
-        links[h['key']][h['node'], h['peer']].update(crossings(flow, other, skip))
+        links[h['key']][h['node'], h['peer']].update(crossings(flow, other))
     out = {}
     for execution, by in links.items():
         report = {}
@@ -226,12 +224,11 @@ def main():
     arguments = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     arguments.add_argument('paths', nargs='+')
     arguments.add_argument('--key')
-    arguments.add_argument('--skip', type=int, default=0)
     arguments.add_argument('--bindings', action='store_true')
     arguments.add_argument('--json', action='store_true')
     options = arguments.parse_args()
     flows = read(options.paths)
-    report = analyse(flows, options.key, options.skip, options.bindings)
+    report = analyse(flows, options.key, options.bindings)
     if options.json:
         json.dump(report, sys.stdout, indent=1)
         print()
