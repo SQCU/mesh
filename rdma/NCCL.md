@@ -186,12 +186,12 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     a group completes in its encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
   - A wait is a kernel polling its position's completion word, a word of the session's that ends only at its landing
-    or its cancel: its bridge's (a lost link or peer, a revoke: design/bridge-and-ipc.md#control, design/recovery.md
-    Q16), or the process's own where its bridge exits (libmesh's watch of its bridge, `mesh-dataflow.c` `mesh_watch`).
+    or its cancel: its bridge's (a lost link or peer, a cancel or a revoke, its own stop: design/bridge-and-ipc.md#control,
+    design/recovery.md Q16), or the process's own where its bridge exits (libmesh's watch of its bridge, `mesh-dataflow.c` `mesh_watch`).
     A wait that reads a cancel records its position and channel in the session's violation words and halts the
     program's later waits, and the group fails as a value after its command buffer (`ncclCommGetAsyncError`, or the
     communicator's next group). A peer that is alive and slow is waited for; one whose program never runs its side is
-    ended by the caller's `ncclCommRevoke`.
+    ended by the caller's `ncclMeshCommCancel` or `ncclCommRevoke`.
 
 Types: the Metal path moves the integer types, float16, float32, bfloat16 and fp8 (e4m3fn, e5m2: decoded, combined in
 float32 and encoded to nearest even as the host does, overflow to NaN or infinity; metal-microbench docs/kernels.md
@@ -292,7 +292,9 @@ programs'.
 ## Failures
 
 A loss is an event its bridge sees (design/bridge-and-ipc.md#control, design/recovery.md#detection): a link off, the
-control socket's end, a peer's FAREWELL or FAIL, an error completion, a client's exit, a revoke. The bridge then mutes
+control socket's end, a peer's FAREWELL or FAIL, an error completion, a client's exit, a cancel or a revoke, the
+bridge's own stop (a signal, or a change of its binary or configuration: it stops at once, ending every call it carries
+as a value; launchd starts it again). The bridge then mutes
 the program's flows and cancels its words past their landed counts: every wait on them ends, a word that landed stays
 (a group whose positions all landed completes). Where the bridge itself exits, the process cancels its own words
 (`mesh-dataflow.c` `mesh_watch`), so no wait outlives it. No clock decides anything. The failure is returned:
@@ -314,9 +316,16 @@ session's waits end and its groups in flight fail, a session opening ends (a mem
 a peer that never comes, a member that failed to load, is ended at once) and none opens after it, and every later
 group on it fails at once (`ncclRemoteError`, "revoked") until `ncclCommDestroy` closes its session.
 
+`ncclMeshCommCancel(comm)` (nccl.h) ends the communicator's call in flight as the revoke ends it, from any thread and
+under the communicator's own lock alone (its session's program retired as an abort: FAIL to each peer, its words past
+their landed counts cancelled, so every GPU and host wait of it ends and the call fails as a value, `ncclRemoteError`
+"was cancelled"; a session opening ends at once), and keeps the communicator: its next group closes the cancelled
+session and opens a new one. It is for a caller whose requester went away (its request's channel closed) and that
+holds the communicator for the next request; the peers' calls fail at the FAIL and their next groups open again.
+
 ### Finalize, Destroy, Abort
 
-Only Abort and Revoke discard work, and nothing of the close goes on the wire. `ncclCommFinalize` finishes the
+Only Abort, Revoke and a cancel discard work, and nothing of the close goes on the wire. `ncclCommFinalize` finishes the
 communicator's own GPU work (every program it encoded) and returns the failure its session holds, if any; no group runs
 on the communicator after it. `ncclCommDestroy` (after Finalize's work, where it was not called) hands the session to
 its bridge in order and returns, waiting on no peer: the bridge posts every cell the session released, takes those

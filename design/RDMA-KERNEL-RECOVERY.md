@@ -304,8 +304,8 @@ own bridge stopped for its changed binary, "closed toward node ...: this bridge 
 lanes up, with nothing logged after. Of the Mini's 27 stops for a changed binary from 2026-10-16 02:56Z to 2026-10-17
 13:52Z, 25 with its lanes up and 2 with them failing, the two panics were both of the first kind; no stop with its lanes
 failing panicked. The bridge then destroyed its queue pairs with receives posted and without first moving them to the
-error state (mesh-verbs.h `down_pair`); every flow's, the stripe flow's and a stream's teardown flushes them first now
-(below), the lanes' does not. The trigger is not established.
+error state; every teardown, the lanes' among them, now moves them there first and then destroys them (mesh-verbs.h
+`down_pair`, below). The trigger is not established.
 
 After the 10-17 panic the Mini's bridge, started 11 s after boot, failed every queue pair's INIT to RTR ("Failed
 INIT→RTR kernel transition" in the provider's log; its lanes every 3 s, every program `code 5 domain 1`) for five
@@ -399,43 +399,36 @@ three can happen:
   (any flow's, the lanes', the stripe flow's) runs with the port's guard raised: both progress threads stop passing,
   so no queue pair of the device is posted on, and they go on once the change returns (`port_guard`). No stripe post
   crosses another queue pair's teardown, and no post of another flow crosses the stripe flow's.
-- **Receives flushed before destruction.** Its teardown moves both queue pairs to the error state and drains the
-  flushed completions (`pair_flush`) before `down_pair`, so the device holds no posted receive of it when it is
-  destroyed, at a stripe flow's reset and at the bridge's stop alike.
+- **The error state before destruction.** Its teardown moves both queue pairs to the error state and then destroys
+  them (`port_down`, mesh-verbs.h `down_pair`), at a stripe flow's reset and at the bridge's stop alike; nothing waits
+  on what the move flushes.
 
-What integration testing reads first (design/bridge-dataflow.md#stripes): "stripes closed (N completions flushed)" with
-N > 0 where receives were posted (the provider's flush works); a session's teardown on a port with stripes up crashing
+What integration testing reads first (design/bridge-dataflow.md#stripes): "stripes closed" after a stripe flow's reset
+with receives posted; a session's teardown on a port with stripes up crashing
 nothing; the Mini's bridge stopped with a stripe flow up, then the M5's, apart, with each extent deregistered once in
 the kernel log and no panic.
 
-**Every teardown's flush, MESH_VERSION 120.** An exclusive flow, the stripe flow and a raw stream are each released
-only by the event that ends them (a program's detach once every cell it released was posted and completed, a relay's
-two ends' RELEASED, a failure, the link's loss, the bridge's stop), out of its port's table, and then their queue pairs
-(an exclusive flow's data and control pairs) are moved to the error state and drained before `down_pair`, the port's
-guard raised around both whatever the device holds (`flow_release`: `guard_raise(port, 1)`; the stripe flow's and a
-stream's jobs always raise it): no queue pair of the device, the lanes' included, is posted on while a flow's are
-flushed and destroyed, the hazard of October 16 and 17 and of the lanes' keepalive (bridge-and-ipc.md#keepalive). The
-drain is Linux's (ib_drain_qp: ib_drain_rq, ib_drain_sq), with no clock: what the move to the error state returned is
-taken, counting every work request posted on the provider and not yet taken from its completion queues (mesh-verbs.h
-`pair_flush`, `pair_outstanding`: each post and each completion taken counts, an error's too); then, on each way
-whose count is not met, a marker receive and a marker SEND are posted on each queue pair, which the error state
-completes behind every work request posted before them (a queue's completions come in the order posted), and the drain
-ends on each completion queue once every marker of its way came or its count is met. A provider that flushes fewer
-completions than it held (on the pair, the bounded flush of mesh 2e02569a drained 687 of 688 on the M5, 687 of 687 on
-the Mini, in 343 and 455 ms) is ended by its markers; a way whose marker the provider refuses (its post's error, logged)
-waits on its count alone; a queue pair whose move to the error state is refused drains nothing and is destroyed as
-`down_pair` destroys it, and a poll the device fails ends the drain. Each teardown logs "<what> flushed N of M work
-requests, markers S of K seen, R refused, in T us". The lanes' own teardown is unchanged: destroyed without a flush.
+**Every teardown, MESH_VERSION 122.** An exclusive flow, the stripe flow and a raw stream are each released only by
+the event that ends them (a program's detach once every cell it released was posted and completed, a relay's two ends'
+RELEASED, a failure, the link's loss, the bridge's stop), and the lanes at their failure, the link's loss or the stop;
+each is first out of its port's table (no progress thread reads it), then torn down on the port's queue by
+mesh-verbs.h `down_pair`: every queue pair moved to the error state, then the queue pairs and completion queues
+destroyed. A flow's runs with the port's guard raised whatever the device holds (`flow_release`: `guard_raise(port,
+1)`), the stripe flow's and a stream's always, the lanes' where the device holds a stripe flow or a stream, and the
+bridge's stop after `port_still` (no progress thread runs): no queue pair of the device is posted on while another's
+are moved and destroyed, the hazard of October 16 and 17 and of the lanes' keepalive (bridge-and-ipc.md#keepalive).
+Nothing waits on what the move flushes, so a provider that flushes fewer completions than a pair held (on the pair,
+the bounded flush of mesh 2e02569a took 687 of 688 on the M5, 687 of 687 on the Mini) holds no teardown. A destruction
+the driver refuses is kept in the port's `remains` (`port_down`, up to MESH_REMAINS, past which its handles are let
+go), tried again at each of the port's later teardowns and before its device retires, and logged "a destruction
+refused"; its owner goes on as released, its queue pairs in the error state, so nothing lands in its rows.
 
 On the loopback fabric (loopverbs flushes at the move, as the Apple provider is expected to; metal-microbench
-output_data/dead-history-20261017/scratch-delete/w1/run2, a line of 4 at mesh f6432540): 180 runs of the `destroy`
-reading, 30 each on the host path and the walk at 4,096, 65,536 and 1,048,576 elements, every rank's ncclCommDestroy
-right after its last group: 0 landings cancelled, 360 flows ended in order and 120 relays released each 30 runs, no
-flow failed, every flush exact (N = M); `kill` (a client killed mid-call), 18 of 18 survivor calls failed as values;
-`kill ... bridge` (a bridge stopped under ranks waiting in a walk), 4 of 4. On hardware it is unread: the pair's first
-held communicator's close (its "ended in order", "flushed N of N" and census lines, and nothing in the kernel log) is
-the reading. With loopverbs modelling a provider that drops one flushed completion at each move to the error state
-(mesh-loop up ... short; output_data/dead-history-20261017/scratch-delete/w1/run10, mesh 0fcfb3ef): every one of the
-destroy reading's 240 flushes and each stripe flow's at the stop drained one short and was ended by its markers (for
-example "flushed 684 of 687 work requests, markers 3 of 3 seen"), and every other reading as above; with the exact
-provider (run11) no marker is posted, every count met at the move.
+output_data/dead-history-20261017/scratch-delete/w1/run13 and run14, a line of 4 at mesh 0fb8eb54): 40 runs of the
+`destroy` reading, every rank's ncclCommDestroy right after its last group: 0 landings cancelled, 480 flows ended in
+order and 160 relays released; `kill` (a client killed mid-call) 3 of 3 survivor calls failed as values on the host
+path and the walk; `kill ... bridge` (a bridge stopped under ranks waiting) 4 of 4; `kill ... binary` (a node's
+binary replaced by rename under a call) 4 of 4 on the host path and the walk six times, the bridge started again and
+the map converged each time, and the NCCL matrix 48 of 48 after such a restart. On hardware it is unread: the pair's
+first held communicator's close (its "ended in order" and census lines, and nothing in the kernel log) is the
+reading.

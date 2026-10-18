@@ -35,8 +35,9 @@ paired with no client attached: "this emerges from other requirements. required.
 The bridge is updated by the mesh's own convergence (README.md Convergence; bin/mesh-converge.sh): the admin user's
 agent `io.mesh.converge` builds the upstream revision in a stage, installs its images, and runs bin/mesh-user.sh on
 them; a bridge whose binary changed (the file it started from written, replaced, renamed or removed: its kqueue's
-EVFILT_VNODE on it) stops on its own between calls, once it carries no flow and no awaiting program (the region's
-`busy` word 0; it serves on until then, the binary it started from mapped), and launchd starts the new one.
+EVFILT_VNODE on it) stops at once, as a signal stops it: each awaiting program fails as a value (ESHUTDOWN), each port
+tells its peer FAREWELL and is lost, so every program on it fails as a value here and at its peers, and launchd starts
+the new binary (KeepAlive).
 install.sh, the root layer, installs only `bin/mesh-stat`, the reader node-info runs, built beside the admin user's
 running bridge. SIGTERM (launchd's stop) ends the bridge by the
 same teardown, its programs failing as values. A bridge never receives SIGKILL from the mesh (RDMA-RULES.md); its
@@ -96,16 +97,12 @@ bells of the ports its program's flows ride (`mesh_transfers_wake`, a `mesh_noti
 port, which the bridge sets as it takes the program's flows) as a group of its program starts, so a thread that parked
 while nothing moved serves that group's first publication and landing at once, and no other port's threads wake. The
 region's `busy` word is the count of the flows that carry a program (each not yet failed or released) and the
-awaiting programs the bridge holds, relayed ones among them, 0 between calls: a node's idle test (mesh-stat's `idle`,
-which the library's reader mesh-plan.h `mesh_busy` reads), so a node that only relays another node's call is busy, and
-the bridge's own before it stops for a rebuilt binary. Its `stopping` word turns nonzero, its waiters woken, once the
-bridge waits to stop for a rebuilt binary: a client that holds flows past their execution (a session kept for the next
-execution, metal-microbench docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) waits on it
-(mesh-plan.h `mesh_stopping_wait`, an address wait with no bound that also returns at the bridge's exit; nccl.h
-`ncclMeshBridgeStopping` reads it), releases what it holds between executions and holds nothing after, so a held flow
-never keeps a bridge from its upgrade. A bridge posts the notify(3) name `MESH_STARTED` (mesh-plan.h; a loop bridge's
-followed by its region's name) once its sockets listen and its region is open, so a client that waits for its node's
-bridge blocks on that event (`mesh_bridge_wait`) rather than trying again.
+awaiting programs the bridge holds, relayed ones among them, 0 between calls: an observation (mesh-stat's `idle`, which
+the library's reader mesh-plan.h `mesh_busy` reads, and mesh-loop's), which nothing waits on. A bridge posts the
+notify(3) name `MESH_STARTED` (mesh-plan.h; a loop bridge's followed by its region's name) once its sockets listen and
+its region is open, so a client that waits for its node's bridge blocks on that event (`mesh_bridge_wait`) rather than
+trying again; a client that waits for the bridge to go (a client that holds sessions past their execution and serves
+on across bridges) blocks on its process's exit (`mesh_exit_wait`, EVFILT_PROC), then on the next one's start.
 
 A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
 execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, its publication
@@ -190,11 +187,11 @@ each node it binds, over a port paired with that node or along the map's route t
 start returns once every destination is paired, or with the failure that destination's status names with its node
 (EHOSTUNREACH where the map has no route to the node; ESRCH where its bridge exits; the others mesh-call.h lists). It
 waits on those events alone, an address wait on each destination's status with no bound: a peer whose program never
-starts is waited for until the client's revoke (design/recovery.md#first). A later loss fails the program alike, and
+starts is waited for until the client's cancel or revoke (design/recovery.md#first). A later loss fails the program alike, and
 the next start reads the map again. `mesh_detach` retires the slot in order: its owner word is left `MESH_ORDERLY`
 until the bridge has read it (the turn after, when it vacates the slot), and each running flow of its program ends in
 order (`#control`: every cell it released posted, those SENDs' completions taken, then released, its peer told
-nothing). An abort (`mesh_retire`: a revoke, or the client's process exiting) vacates the slot at once and fails each
+nothing). An abort (`mesh_retire`: a revoke, a cancel of the call in flight, nccl.h `ncclMeshCommCancel`, or the client's process exiting) vacates the slot at once and fails each
 flow (FAIL). Either ends its program:
 its rows (a program's, or the leases of a lease-owning slot) are closed; once no port holds a flow of the client the
 bridge releases them and returns their pages to the window in the same turn (`mesh_retired_release`, then
@@ -208,8 +205,8 @@ A client watches its bridge alike (mesh-dataflow.c `mesh_watch`: a kqueue `NOTE_
 a process, over a mapping of the region it keeps, registered as the process first opens the region): at the bridge's
 exit it marks the region's bridge gone (`bridge_pid` 0), cancels each of its own slots' programs' words (`UINT64_MAX`
 where none landed, every one of a cyclic program's, as the bridge cancels a flow that never landed), fails each of
-their destinations' statuses (ESRCH) with its start woken, and wakes the waiters on the map, health, control and
-stopping words, so no wait of the process, a GPU program's on its landing words among them, outlives its bridge.
+their destinations' statuses (ESRCH) with its start woken, and wakes the waiters on the map, health and control words,
+so no wait of the process, a GPU program's on its landing words among them, outlives its bridge.
 
 ## records
 
@@ -260,7 +257,7 @@ partner heard it from the next hop, so a routed program's start returns once the
 every relay between has posted, as a direct program's does. A relay flow tries to tell it at the end of each of its own
 jobs and as its partner hears the next hop's POSTED, whichever comes last (`flow_tell`). A program waits for its peer's
 READY and for its queue pairs to pair with no bound: until they come, or a failure as a value (its peer's FAIL, a link
-lost, the map's prune of a routed peer), or its client's revoke (design/recovery.md#first).
+lost, the map's prune of a routed peer), or its client's cancel or revoke (design/recovery.md#first).
 
 A program may name the digest of what it is made from (mesh-call.h `mesh_transfers_digest`, after it is prepared and
 before it starts; a session of libnccl-mesh's, its communicator's, the digest of its members, map and routes that its
@@ -401,7 +398,7 @@ A flow that fails fails its client program's every flow, toward every node: each
 its client's words toward its node cancelled past the landed count (M12, `#control`), its status `MESH_STOPPED` with
 the failure's code and domain and the node where it failed, its peer told (FAIL: an exclusive flow's on its control
 queue pair by its send thread, a lane rider's on its lanes, one not yet running on the control socket), and its queue
-pairs moved to the error state, drained and destroyed under the port's guard (a lane rider's records posted on its
+pairs moved to the error state and destroyed under the port's guard (a lane rider's records posted on its
 lanes landed first, or the lanes gone); on a relay the route's other flow fails with it. A failed flow is never
 resumed; the next program is a new flow, on the map as it is then. A flow whose program ended in order is released
 (`#control`) and is not a failure.
@@ -585,18 +582,14 @@ lease and client slot then return): by then each end's program had every cell it
 relay, and had sent every cell it released. A relay of an end that fails fails with it (FAIL), or with a link's loss.
 
 **The release** (R6). A flow is released by the event that ends it, its program's in-order end drained or a failure:
-out of its port's table, its queue pairs moved to the error state and drained as Linux's ib_drain_qp drains one
-(mesh-verbs.h `pair_flush`: the work requests posted and not yet taken from its completion queues, every post and
-every poll of the provider counted, an error completion's too: `struct mesh_verbs` `sent_posted`, `sent_polled`,
-`received_posted`, `received_polled`; where a way's count is not met, a marker receive and SEND on each queue pair,
-whose flushed completions, behind every earlier one, end the drain; a way whose marker the provider refused waits on
-its count alone), then destroyed, all under the port's
-guard (`port_guard`, mesh 542d0bc7: no queue pair of the device is posted on meanwhile,
-design/RDMA-KERNEL-RECOVERY.md). A queue pair whose move to the error state is refused is destroyed undrained. A lane
-rider is released once its records posted on the lanes have landed (the last landing wakes the event loop,
-FLOW_RELEASING) or the lanes that held them are gone. A destruction the driver refuses keeps its handles and is tried
-again once another flow of the port is freed or its link is lost. Each release logs its census and "link P (name):
-program K toward node F flushed N of M work requests, markers S of K seen, R refused, in T us".
+out of its port's table, then its queue pairs moved to the error state and destroyed (mesh-verbs.h `down_pair`: the
+move ends the device's posted receives and SENDs, so no queue pair is destroyed ready to send with receives posted;
+the move returns, and nothing waits on what it flushes), all under the port's guard (`port_guard`, mesh 542d0bc7: no
+queue pair of the device is posted on meanwhile, design/RDMA-KERNEL-RECOVERY.md). A lane rider is released once its
+records posted on the lanes have landed (the last landing wakes the event loop, FLOW_RELEASING: the peer sent each
+header's data behind it, on the same lane) or the lanes that held them are gone. A destruction the driver refuses is
+kept in the port's `remains` (`port_down`), tried again at each of the port's later teardowns and before its device
+retires, and its flow is freed. Each release logs its census.
 
 **FAIL.** A running exclusive flow's FAIL is told by its send thread (FLOW_TELLING, its program muted, FLOW_MUTED),
 which posts it on the control queue pair and says so once its completion is taken (`said`); the event loop then stops
@@ -614,12 +607,15 @@ positions all landed completes. A GPU walk whose wait reads its word cancelled h
 on its FAIL. Where the bridge itself exits, its clients cancel their own words (`#clients`, `mesh_watch`).
 
 **Loss** (R7). By events alone: a link off (KEV_DL_LINK_OFF, KEV_DL_IF_DETACHED), the control socket's end or reset, a
-peer's FAREWELL (its flows lost at once), a FAIL, an error completion, a client process's exit (EVFILT_PROC), a revoke
-(`mesh_retire`), and the map's prune (a program awaiting a node no paired path reaches fails, `#routes`). Nothing
+peer's FAREWELL (its flows lost at once), a FAIL, an error completion, a client process's exit (EVFILT_PROC), a cancel or a
+revoke (`mesh_retire`), and the map's prune (a program awaiting a node no paired path reaches fails, `#routes`). Nothing
 declares a loss by silence: a peer whose program never runs its side, or whose host stops with its link up, is waited
-for until one of these events, its client's revoke among them. On the loopback fabric's line of 4 (mesh-loop `kill`)
+for until one of these events, its client's cancel or revoke among them. On the loopback fabric's line of 4 (mesh-loop `kill`)
 a client killed in a call fails each other member's call as a value within 1.1-2.5 ms, and a member whose own bridge
-stops fails its call by its watch of the bridge (0.9 ms), its peers by the FAREWELL.
+stops fails its call by its watch of the bridge (0.9 ms), its peers by the FAREWELL; a node's bridge whose binary is
+replaced by rename under a call (mesh-loop `kill ... binary`, mesh 0fb8eb54) fails every member's call as a value, its
+own member's in 2.6-3.0 ms and the others' in 1.0-2.3 ms, and starts again, the map converging, six times of six on
+the host path and the walk (metal-microbench output_data/dead-history-20261017/scratch-delete/w1/run14).
 
 **What still rides the control socket**, and whether the lanes could carry it: HELLO (a link's bootstrap: before any
 queue pair, it cannot); READY with its program and route, PAIRS and POSTED (the pairing: an exclusive flow's queue
@@ -628,7 +624,7 @@ lane rider's PAIRS and POSTED and an exclusive flow's READY, once the lanes are 
 READY); LANES and STRIPES (their own queue pairs' numbers: bootstrap); RECORD (the map, every node's record flooded: the
 lanes could carry it, a header entry naming no flow, once up); FAREWELL (the lanes could, ahead of the socket's end; a
 stopping bridge queues it on each socket and sends what the socket takes at once, never waiting on a peer that does not
-read); the requests' CHANNEL_* (services' byte streams, flow-controlled windows: the lanes could, as stripes do for
+read, and the socket's close follows); the requests' CHANNEL_* (services' byte streams, flow-controlled windows: the lanes could, as stripes do for
 bytes); STREAM (its own queue pair's bootstrap).
 
 ## keepalive
@@ -684,7 +680,7 @@ after makes it again, so every attempt is a request's.
 The flow's queue pairs live while the link is paired, so their posts would cross every other queue pair's teardown
 on the device (#keepalive's hazard). While a port's device holds them, every change of the device's verbs objects
 runs with the port's guard raised, the progress threads making no pass until it returns, and the stripe flow's own
-teardown moves its queue pairs to the error state and drains them before destroying them: the answer to the double
+teardown moves its queue pairs to the error state and then destroys them: the answer to the double
 deregistration and the panics that ended 8fc27cbe (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1").
 With no stripe flow on a port, its verbs work runs unguarded, as before.
 
@@ -778,7 +774,7 @@ the same records) and sends a READY a stripe along it; the higher end's program 
 stripes the lower's READYs left held, whatever its own map holds, and awaits the rest as they come, each take told the
 await before its READY goes out, its status paired once every stripe runs. Where none is held yet and its own map holds
 no route to the lower it is refused at once (EHOSTUNREACH naming the lower), as the lower is where its map holds none
-to the higher; otherwise it awaits with no bound, ended by the lower's own failure as a value, its program's revoke (the
+to the higher; otherwise it awaits with no bound, ended by the lower's own failure as a value, its program's cancel or revoke (the
 slot retired), or the map's prune of the lower (EHOSTUNREACH, `awaits_lost`). Each READY of its goes back along the
 relays the lower's made, each mirroring the direction it carries and sending it on, so
 every relay of the route carries both directions on one route (MESH_VERSION 112 routed each end on its own map: two
