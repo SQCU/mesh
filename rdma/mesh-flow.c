@@ -366,7 +366,7 @@ static void wake(void){
    stamped where the data path passes them; a request names a program's key and a file its paths' events since the
    latest such request are appended to, each path's after its header */
 #define MESH_LEDGER_EVENTS (UINT32_C(1)<<16)
-struct ledger_send { uint64_t cell,seen,posted; uint32_t cycle,pad; };
+struct ledger_send { uint64_t cell,seen,first,posted; uint32_t cycle,pad; };
 struct ledger_landing { uint64_t record,landed; uint32_t cycle,pad; };
 struct ledger_cell { uint64_t cell,bytes; uint32_t ring,invocation,position,binding,chunks,pad; };
 struct ledger {
@@ -384,6 +384,7 @@ static void ledger_seen(struct ledger *l,uint32_t ring,const struct mesh_send *c
   l->current[ring]=e;
   atomic_store_explicit(&l->sends,e+1,memory_order_release);
 }
+static void ledger_first(struct ledger *l,uint32_t ring){ l->send[l->current[ring]%MESH_LEDGER_EVENTS].first=now_ns(); }
 static void ledger_posted(struct ledger *l,uint32_t ring){ l->send[l->current[ring]%MESH_LEDGER_EVENTS].posted=now_ns(); }
 static void ledger_landed(struct ledger *l,const struct prepared_receive *record){
   const uint32_t e=atomic_load_explicit(&l->landings,memory_order_relaxed);
@@ -694,6 +695,7 @@ static int stream_post(struct pair *pair,uint32_t k,struct stream *stream,struct
       posting.next=NULL;posting.send_flags=IBV_SEND_SIGNALED;posting.wr_id=wr_id(pair->round,k,pair->posted);
       const int error=post(pair->qp,&posting,&bad);
       if(error){pair->posted-=frames;return error<0?-error:error;}
+      if(ledger && stream->remaining==stream->cell->chunks)ledger_first(ledger,ring);
       stream->next=request->next;stream->remaining--;pair->requests++;
     }
     if(ledger)ledger_posted(ledger,ring);
@@ -1752,7 +1754,7 @@ static int ledger_cut(uint64_t key,const char *path){
         const struct ledger_cell want={.cell=s->cell},*c=l->cell?bsearch(&want,l->cell,l->cells,sizeof *l->cell,ledger_cell_order):NULL;
         fprintf(out,"{\"s\":[%u,%lld,%lld,%lld,%lld,%u,%lld,%llu,%llu,%llu,0,%lld]}\n",l->id,c?(long long)c->ring:-1ll,c?(long long)c->invocation:-1ll,
                 c?(long long)c->position:-1ll,c?(long long)c->binding:-1ll,s->cycle,c?(long long)c->chunks:-1ll,(unsigned long long)s->seen,
-                (unsigned long long)s->seen,(unsigned long long)s->posted,c?(long long)c->bytes:-1ll);
+                (unsigned long long)s->first,(unsigned long long)s->posted,c?(long long)c->bytes:-1ll);
       }
       for(uint32_t e=landings-l->cut_landings>MESH_LEDGER_EVENTS?landings-MESH_LEDGER_EVENTS:l->cut_landings;e!=landings;e++){
         const struct ledger_landing *r=l->landing+e%MESH_LEDGER_EVENTS;

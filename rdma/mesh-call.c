@@ -599,7 +599,7 @@ _Static_assert(sizeof(struct mesh_function)==104,"M23");
 /* hot-path-loads M18 on prepared-machine.md M07: a received row's landing of one invocation slot, which a worker polls
    (`word`, 1 plus the cycle once landed, UINT64_MAX once its destination was cancelled; `expected` the word of its next
    cycle): its uses (call records uses[first, first + count)) each take one arrival; the slot's one counting landing
-   also releases a relayed row's SEND cells (`publications`, the old bridge's publication of a landed row) and completes
+   also releases a forwarded row's SEND cells (`publications`: the row sent on from where it landed) and completes
    one event of `instances` instances from `slot` (1, or a constant's every slot); `identity` its destination (+
    MESH_DESTINATIONS in the constants program) */
 struct mesh_call_landing {
