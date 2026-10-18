@@ -3,9 +3,9 @@
 balances on).
 
 While a group is watched (`watch`), every collective it runs is marked as it is issued and once it has completed, by
-`mark` alone: the backend's group (ProcessGroupMesh._group, every coalesced group among them) takes it around its call,
-and the C++ path (torch_mesh/_stream.mm: DTensor's functional collectives and the group's direct calls) takes the same
-mark on the same stream.  On MPS tensors a mark is a timing event of torch's pool recorded on its stream, so the mark
+`mark` alone: every collective takes the one path (ProcessGroupMesh._issue into torch_mesh/_stream.mm issue, torch's
+functional collectives and the library's own calls alike), which marks a host-path group around its call and a Metal-path
+group on torch's stream.  On MPS tensors a mark is a timing event of torch's pool recorded on its stream, so the mark
 at issue is where the GPU finished the work before the collective and the mark at completion where the GPU has passed
 its wait; on host tensors the monotonic clock (a host collective completes in the call).  A step's work on the rank is
 the sum, over its collectives, of the time from the mark after the previous collective (the previous step's last, or

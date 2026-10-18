@@ -404,7 +404,7 @@ the node's uplink.
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-flow.c`, `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh-metal.m`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
-| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions and their one silent bound, `mesh.h` `MESH_SILENT_NS`), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py`, `_mps.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
+| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions and their one silent bound, `mesh.h` `MESH_SILENT_NS`), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
 | `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_observe`, `mesh_map`, `mesh_map_wait`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
