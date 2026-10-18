@@ -24,7 +24,7 @@ probe(){ t=$(mktemp "$T/.probe.XXXXXX")
   rm -f "$t" "$t.a" "$t.b"; printf '%s' "$i"; }
 f(){ printf '%s' "$2" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1; }
 self=$(ifconfig 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{split($2,a,"%"); print a[1];exit}')
-ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
+ports=$(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print substr($2,6)}')
 mine=$(ifconfig 2>/dev/null | awk '$1=="inet6"{split($2,x,"%"); print x[1]}')
 cand=$(netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" {split($1,x,"%"); print x[1]}')
 for p in $ports; do

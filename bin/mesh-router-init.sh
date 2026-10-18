@@ -5,7 +5,7 @@ PREFIX=fd6d:6573:68
 LOG=$MESH_ROOT/log/router.log
 [ -d "$MESH_ROOT/log" ] && exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
-ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
+ports=$(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print substr($2,6)}')
 uuid=$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/{print $4}')
 h=$(printf '%s' "$uuid" | shasum -a 256 | cut -c1-20)
 g(){ printf '%x' $(( 0x${1} | 0x1000 )); }

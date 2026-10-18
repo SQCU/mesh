@@ -3,7 +3,7 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 s=$0; [ -L "$s" ] && s=$(readlink "$s"); here=${s%/*}
 norm(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/%<0>$//' \
         | awk -F: 'NF>2{o="";for(i=1;i<=NF;i++){g=$i;sub(/^0+/,"",g);if(g=="")g="0";o=o (i>1?":":"") g}print o;next}{print}'; }
-ports=$(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{sub(/^rdma_/,"",$1);print $1}')
+ports=$(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print substr($2,6)}')
 me=$(scutil --get LocalHostName 2>/dev/null)
 T=$(mktemp -d); : > "$T/named" "$T/pids"
 trap 'kill $(cat "$T/pids") 2>/dev/null; rm -rf "$T"' EXIT; trap 'exit 1' INT TERM
