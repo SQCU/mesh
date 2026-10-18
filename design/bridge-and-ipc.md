@@ -96,10 +96,9 @@ bells of the ports its program's flows ride (`mesh_transfers_wake`, a `mesh_noti
 port, which the bridge sets as it takes the program's flows) as a group of its program starts, so a thread that parked
 while nothing moved serves that group's first publication and landing at once, and no other port's threads wake. The
 region's `busy` word is the count of the flows that carry a program (each not yet failed or released) and the
-awaiting programs the bridge holds, relayed ones among them, 0 between calls, and `idle_since` the wall clock (ns) at
-which it last came to 0 (0 while it is not): a node's idle test (mesh-stat's `idle` and `idle_since`, which the
-library's reader mesh-plan.h `mesh_busy` reads), so a node that only relays another node's call is busy, and the
-bridge's own before it stops for a rebuilt binary. Its `stopping` word turns nonzero, its waiters woken, once the
+awaiting programs the bridge holds, relayed ones among them, 0 between calls: a node's idle test (mesh-stat's `idle`,
+which the library's reader mesh-plan.h `mesh_busy` reads), so a node that only relays another node's call is busy, and
+the bridge's own before it stops for a rebuilt binary. Its `stopping` word turns nonzero, its waiters woken, once the
 bridge waits to stop for a rebuilt binary: a client that holds flows past their execution (a session kept for the next
 execution, metal-microbench docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) waits on it
 (mesh-plan.h `mesh_stopping_wait`, an address wait with no bound that also returns at the bridge's exit; nccl.h
@@ -377,13 +376,6 @@ as PRRTE's daemons launch a job's processes and forward their output once ssh ha
 The bridge also serves `nodeinfo`: a channel to it is a connection to the node's own node-info (io.mesh.nodeinfo,
 [::1]:8100, else 8099), so a driver reads every node's node-info by its bridge number. It needs no address and checks
 no identity.
-
-### holds
-
-The bridge serves `hold` itself: a request of one line, `<name> <the unix second it ends> <why>`, writes
-~/.cache/mesh/hold/<name>, which the node's convergence reads (README.md Convergence). A line of `<name>` alone removes
-that file. The answer is a line, `held <name>` or `released <name>`, else why not. A driver holds every node its calls
-cross this way: a relay, a node with no checkout, and a node whose node-info it has not read are all reached alike.
 
 ## flows
 

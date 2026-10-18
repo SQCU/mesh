@@ -61,7 +61,7 @@ name).
 | `control` | clients (`mesh-call.c mesh_transfers_start`, `mesh-dataflow.c mesh_retire`); bridge (on a rebuilt binary, at stop) | the bridge's `control_watch` | "look at the client slots now" |
 | `map`, `map_off`, `map_nodes` | bridge (`map_put`, `map_grow`) | `mesh-dataflow.c mesh_records_read` (seqlock, an odd value waited on untimed), `mesh_map_serial`, `mesh_map_wait` (untimed) | the map: an odd `map` value means a write is in progress |
 | `health` | bridge (`health_put`) | `mesh_nodes_health` (a write overlapping a read: read again, an odd value waited on untimed) | a second seqlock for health-only record changes |
-| `busy`, `idle_since` | bridge (`busy_tell`) | `mesh_busy`, `mesh-stat` | flows not failed or released plus awaiting programs; wall-clock ns at which the count last reached 0 |
+| `busy` | bridge (`busy_tell`) | `mesh_busy`, `mesh-stat` | flows not failed or released plus awaiting programs |
 | `stopping` | bridge (`main`, once its binary changed; it wakes the word's waiters) | clients (`mesh_stopping_wait`, an address wait; `nccl-mesh.c ncclMeshBridgeStopping`; metal-microbench `mesh_rank.m`) | "release held flows between executions" (§5) |
 | `bell[8]` | clients (`mesh_transfers_wake`, `mesh_requests_wake`); bridge (`port_bell`, `send_wake`) | port p's progress threads, when parked | a futex-like word; this is not a hardware doorbell |
 | `rings_off` table | clients (`mesh_requests_create`, `mesh_retire`); bridge (`stripes_requests_turn`, a gone owner's ring) | the bridge's event loop and send threads | the registered stripe request rings (#stripes) |
@@ -273,8 +273,8 @@ answers with an int32: 0 once the channel is open, otherwise an errno (`asked`).
 control sockets hop by hop:
 
 - **Opening**: `CHANNEL_OPEN` goes to the first cable of the route's next hop (`channel_hop`). At the destination,
-  `service_open` admits the request against `available_now()` (`admitted`, `ENOMEM`) and opens `hold`, `exec`,
-  `nodeinfo` or a registered Unix socket.
+  `service_open` admits the request against `available_now()` (`admitted`, `ENOMEM`) and opens `exec`, `nodeinfo`
+  or a registered Unix socket.
 - **Flow control**: each hop grants a 128 KiB window (`MESH_WINDOW`) and returns credit only as bytes leave
   (`end_drain`). `CHANNEL_DATA` carries at most 32 KiB.
 - **Failure**: a lost port ends its channels (`requests_lost`), and `CHANNEL_CLOSE` reaches the other ends. Channels
@@ -873,7 +873,7 @@ nothing at the peer checks who wrote what (any node on a cable may already write
 7. A ring is a lease of a client slot, deregistered at its retirement and reclaimed with its rows; 8fc27cbe's
    outlived a process that died without `mesh_detach`.
 
-**Integration check** (the main session, both bridges at MESH_VERSION 120; never measured on the pair, at 8fc27cbe or
+**Integration check** (the main session, both bridges at MESH_VERSION 121; never measured on the pair, at 8fc27cbe or
 since):
 - On each node a client leases the same exact pages (`mesh_section_at`) and a word; the M5's client fills its range
   with a pattern (page index and word index, as `rdma/mesh-stream.c` writes), writes 1 GiB as 256 stripes of 4 MiB
