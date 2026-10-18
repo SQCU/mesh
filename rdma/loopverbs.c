@@ -8,10 +8,8 @@
    is dropped and completes, as UC drops it); the owner drains its ring into its receives in the order posted, a SEND
    waiting for its receive as TB5's credit flow control holds it (TN3205), and completes each receive with its byte
    count, or IBV_WC_LOC_LEN_ERR where the SEND is longer than the receive.  A queue pair moved to the error state
-   flushes its posted receives and pending SENDs (IBV_WC_WR_FLUSH_ERR), and a work request posted on it in that state
-   (mesh-verbs.h pair_flush's markers) completes so at once, behind them; the fabric's `flush` mode `short` (its loop
-   bridge's configuration, loop_flush) models a provider whose move to the error state drops one of the flushed
-   completions, so the marker ends the drain.  A device
+   flushes its posted receives and pending SENDs (IBV_WC_WR_FLUSH_ERR), as the move to the error state before every
+   teardown (mesh-verbs.h down_pair) has them flushed.  A device
    holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: RDMA-FIRST.md), a SEND at most half a ring
    (the port's max_msg_sz).  Pairing is the bridges' own (their control sockets on the loopback interface).  Only the
    bridge's verbs are provided: one scatter-gather entry a request, SEND and RECV on unreliable-connected queue pairs,
@@ -71,13 +69,10 @@ static char fabric_name_[64];
 static struct loop_qp *qps_;
 static struct ibv_device devices_[LOOP_DEVICES], *list_[LOOP_DEVICES + 1];
 static uint32_t keys_ = 1;
-static int flush_short_;
 
 /* the fabric segment's name, the bridge's configuration's (mesh-flow.c configuration_read, its `loop` `fabric`), before
    any device is opened */
 void loop_fabric(const char *name) { snprintf(fabric_name_, sizeof fabric_name_, "%s", name ? name : ""); }
-/* the provider the fabric models at the move to the error state: `short` (above), else the exact flush */
-void loop_flush(const char *mode) { flush_short_ = mode && !strcmp(mode, "short"); }
 
 /* the fabric segment, made and sized by the first process to need it (a shared memory object is sized once), the
    others looking at its size until the maker's ftruncate, which follows its shm_open */
@@ -188,8 +183,6 @@ static int post_send(struct ibv_qp *qp, struct ibv_send_wr *wr, struct ibv_send_
   struct loop_qp *q = (struct loop_qp *)qp;
   int error = 0;
   pthread_mutex_lock(&lock_);
-  for (; wr && !error && qp->state == IBV_QPS_ERR; wr = wr->next)
-    error = complete(q->send_cq, (struct ibv_wc){.wr_id = wr->wr_id, .status = IBV_WC_WR_FLUSH_ERR, .opcode = IBV_WC_SEND, .qp_num = q->qp.qp_num});
   for (; wr && !error; wr = wr->next) {
     if (wr->opcode != IBV_WR_SEND || wr->num_sge != 1 || q->pending_count == q->send_capacity || wr->sg_list[0].length > LOOP_RING / 2) {
       error = q->pending_count == q->send_capacity ? ENOMEM : EINVAL;
@@ -208,8 +201,6 @@ static int post_recv(struct ibv_qp *qp, struct ibv_recv_wr *wr, struct ibv_recv_
   struct loop_qp *q = (struct loop_qp *)qp;
   int error = 0;
   pthread_mutex_lock(&lock_);
-  for (; wr && !error && qp->state == IBV_QPS_ERR; wr = wr->next)
-    error = complete(q->recv_cq, (struct ibv_wc){.wr_id = wr->wr_id, .status = IBV_WC_WR_FLUSH_ERR, .opcode = IBV_WC_RECV, .qp_num = q->qp.qp_num});
   for (; wr && !error; wr = wr->next) {
     if (wr->num_sge != 1 || q->posted_count == q->receive_capacity) { error = ENOMEM; break; }
     q->posted[(q->posted_head + q->posted_count++) % q->receive_capacity] =
@@ -404,18 +395,14 @@ struct ibv_qp *ibv_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *init) {
   return &q->qp;
 }
 
-/* a queue pair's flush, moved to the error state: its posted receives and pending SENDs completed IBV_WC_WR_FLUSH_ERR
-   (the `short` provider's drops its first posted receive's, or where none is posted its first SEND's) */
+/* a queue pair's flush, moved to the error state: its posted receives and pending SENDs completed IBV_WC_WR_FLUSH_ERR */
 static void flush(struct loop_qp *q) {
-  int drop = flush_short_;
   for (; q->posted_count; q->posted_count--, q->posted_head = (q->posted_head + 1) % q->receive_capacity)
-    if (drop) drop = 0;
-    else complete(q->recv_cq, (struct ibv_wc){.wr_id = q->posted[q->posted_head].wr_id, .status = IBV_WC_WR_FLUSH_ERR, .opcode = IBV_WC_RECV,
-                                             .qp_num = q->qp.qp_num});
+    complete(q->recv_cq, (struct ibv_wc){.wr_id = q->posted[q->posted_head].wr_id, .status = IBV_WC_WR_FLUSH_ERR, .opcode = IBV_WC_RECV,
+                                        .qp_num = q->qp.qp_num});
   for (; q->pending_count; q->pending_count--, q->pending_head = (q->pending_head + 1) % q->send_capacity)
-    if (drop) drop = 0;
-    else complete(q->send_cq, (struct ibv_wc){.wr_id = q->pending[q->pending_head].wr_id, .status = IBV_WC_WR_FLUSH_ERR, .opcode = IBV_WC_SEND,
-                                             .qp_num = q->qp.qp_num});
+    complete(q->send_cq, (struct ibv_wc){.wr_id = q->pending[q->pending_head].wr_id, .status = IBV_WC_WR_FLUSH_ERR, .opcode = IBV_WC_SEND,
+                                        .qp_num = q->qp.qp_num});
   q->connected = 0;
 }
 

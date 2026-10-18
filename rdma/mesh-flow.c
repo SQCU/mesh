@@ -209,7 +209,7 @@ _Static_assert(sizeof(struct control_frame)==16,"a control frame");
    queue pair (`alive`, the last of its pairs, and the peer's, `peer_alive`), its page (`control_page`), its frames
    posted and retired and heard, the keepalive's last posting (`alive_at`, #keepalive); a lane rider's gate positions
    past its last SENDs on each lane (`lane_mark`), which its drain waits on; the stop it takes once its FAIL is said
-   (`stop_code`, `stop_domain`, `stop_where`), and the port's flows freed when its release was refused (`frees`) */
+   (`stop_code`, `stop_domain`, `stop_where`) */
 enum { READIED, PAIRING, POSTING, RUNNING, FAILED };
 enum { HEARD_READY=1, HEARD_PAIRS=2, HEARD_POSTED=4 };
 enum { JOB_PAIR=1, JOB_RECEIVE, JOB_RUN, JOB_CHANGE };
@@ -225,7 +225,7 @@ struct flow {
   _Atomic uint32_t domain;
   _Atomic uint64_t lane_frames;
   int state,job,result,stopping,hold,qps,cyclic,told,listed,exclusive,decided;
-  int alive,peer_alive,connected,flushed,passed;
+  int alive,peer_alive,connected,passed;
   uint64_t key,owner,digest,alive_at,alive_posted,alive_heard;
   _Atomic int ending,drained,said,released;
   _Atomic int64_t heard_fail;
@@ -234,7 +234,6 @@ struct flow {
   uint64_t control_posted,control_retired,fail_posted,lane_mark[MESH_LANES];
   int64_t fail_code,stop_code;
   uint32_t fail_origin,stop_domain,stop_where;
-  uint64_t frees;
   struct side side[2],pending[2];
   uint32_t pairs[MESH_PAIRS][2];
   struct hdr *M; struct port *port; struct mesh_verbs provider;
@@ -308,7 +307,7 @@ struct stripes {
   int state,job,result,heard,committed,wanted;
   _Atomic int up,done;
   _Atomic int64_t failed;
-  uint32_t peer[2][2],peer_piece,piece,page,pages,flushed;
+  uint32_t peer[2][2],peer_piece,piece,page,pages;
   int64_t code;
   _Atomic uint64_t window,flight,written,landed;
   _Alignas(128) struct stripe_piece sent[MESH_STRIPE_CHUNKS];
@@ -342,7 +341,7 @@ struct stream {
   _Atomic int up,done,finished;
   _Atomic int64_t failed;
   uint32_t peer[1][2],page,pages,count,page_bytes,window;
-  uint64_t key,bytes,flushed;
+  uint64_t key,bytes;
   struct ibv_sge *spans;
   struct ibv_send_wr *sends;
   struct ibv_recv_wr *receives;
@@ -359,9 +358,10 @@ struct stream {
    the port's bell); its stripe flow (design/bridge-dataflow.md#stripes) and the guard of its device's verbs objects
    (`guard`, odd while raised, and the value each progress thread last held at: port_guard); #control: the FAILs and
    RELEASEDs of its lane riders, as entries its lanes' send thread takes into lane 0's next header (`tells`, the event
-   loop's from `tell_head`, the send thread's to `tell_tail`), and how many of its flows were freed (`frees`: a flow whose
-   queue pairs' destruction was refused tries again at the next) */
+   loop's from `tell_head`, the send thread's to `tell_tail`), and the queue pairs whose destruction the driver refused
+   (`remains`, tried again at each of the port's teardowns and before its device retires, their owners freed) */
 #define MESH_TELLS 256u
+#define MESH_REMAINS 64u
 struct port {
   struct mesh_device device;
   uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,retiring,open,flows,committed,wanted;
@@ -369,7 +369,7 @@ struct port {
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
   _Atomic int done,closing;
-  uint64_t bandwidth,frees;
+  uint64_t bandwidth;
   struct message heard;
   uint16_t lid;
   uint8_t gid[16];
@@ -389,6 +389,8 @@ struct port {
   _Atomic uint64_t guard,guarded[2];
   struct lane_entry tells[MESH_TELLS];
   _Atomic uint64_t tell_head,tell_tail;
+  struct mesh_verbs remains[MESH_REMAINS];
+  uint32_t remain_count;
 };
 static struct hdr *M;
 static struct wire_mapping wire;
@@ -660,7 +662,6 @@ static int ring_advance(struct flow *link,struct receive_ring *ring){
     struct ibv_recv_wr *bad;
     int error=post(record->pair,&record->request,&bad);
     if(error)return error<0?-error:error;
-    link->provider.received_posted++;
     ring->outstanding+=record->frames;ring->posted++;
   }
   return 0;
@@ -695,9 +696,8 @@ static uint64_t keepalive_ns,hello_ns,health_ns;
    its ports, each a loopverbs device and a cable: the loopback port this end listens on for it and the peer end's, the
    lower of the two dialing the higher (in place of a link's hello) */
 void loop_fabric(const char *name);
-void loop_flush(const char *mode);
 struct loop_port { char device[32]; uint16_t listen,peer; int fd; };
-static struct { char region[32],fabric[64],flush[16]; uint32_t node,ports; uint16_t service; struct loop_port port[MESH_PORTS]; } loop_config;
+static struct { char region[32],fabric[64]; uint32_t node,ports; uint16_t service; struct loop_port port[MESH_PORTS]; } loop_config;
 #endif
 /* a flow's ledger, made on its port's queue before either side is prepared or the flow listed, where the configuration
    keeps them; a flow whose ledger cannot be allocated runs without one, logged */
@@ -1120,7 +1120,7 @@ static void send_wake(_Atomic uint64_t *ready){
 /* design/algorithm-sources.md#independent-native-queues */
 /* The flow's SEND completions: each retires its queue's frames through its request (the device completes every SEND,
    signaled or not), a control frame's its control frames (#control), an error completion's as well; *taken their
-   count, every one counted taken (mesh-verbs.h pair_flush).  0, or the first error completion's status. */
+   count.  0, or the first error completion's status. */
 static uint64_t lane_discard(const struct port *port,uint32_t lane);
 static struct ibv_sge lane_span(const struct port *port,uint64_t offset,uint64_t length);
 static __attribute__((always_inline)) inline int send_retire(struct flow *link,int *taken){
@@ -1128,7 +1128,6 @@ static __attribute__((always_inline)) inline int send_retire(struct flow *link,i
   int count=link->provider.queues[0].poll(link->provider.sent,16,done);
   *taken=count>0?count:0;
   if(count<0)return EIO;
-  link->provider.sent_polled+=(uint64_t)count;
   int error=0;
   for(int i=0;i<count;i++){
     if(done[i].status && !error)error=(int)done[i].status;
@@ -1163,7 +1162,7 @@ static int control_post(struct flow *link,uint32_t kind,uint32_t channel,uint64_
     .send_flags=IBV_SEND_SIGNALED},*bad;
   const int error=link->provider.queues[link->qps].send(link->provider.queues[link->qps].pair,&posting,&bad);
   if(error)return error<0?-error:error;
-  link->control_posted++;link->provider.sent_posted++;
+  link->control_posted++;
   return 0;
 }
 /* receive slot k of the flow's control queue pair posted; 0, or the error */
@@ -1171,7 +1170,6 @@ static int control_listen(struct flow *link,uint32_t k){
   struct ibv_sge span=lane_span(link->port,control_offset(link,1,k),CONTROL_SLOT);
   struct ibv_recv_wr request={.wr_id=CONTROL_HEARD_TAG|k,.sg_list=&span,.num_sge=1},*bad;
   const int error=link->provider.queues[link->qps].receive(link->provider.queues[link->qps].pair,&request,&bad);
-  if(!error)link->provider.received_posted++;
   return error<0?-error:error;
 }
 /* a frame the peer sent, on the receive thread: a FAIL the flow's failure (its threads stop serving it, the event loop
@@ -1278,7 +1276,6 @@ static int flow_send(struct flow *link){
         posting.wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
         int error=post(link->provider.queues[cell->queue].pair,&posting,&bad);
         if(error){gate->posted-=frames;flow_lost(link,error<0?-error:error,1);return 1;}
-        link->provider.sent_posted++;
         stream->next=request->next;stream->remaining--;gate->requests++;moved=1;
       }
       /* #ledger */
@@ -1319,15 +1316,14 @@ static __attribute__((always_inline)) inline void record_landed(struct flow *lin
   ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
 }
 /* A running flow's receive completions, one pass of its port's receive thread: each record's landing (record_landed)
-   posting its ring's next records, each control frame heard (frame_heard), every completion counted taken (an error's
-   too: mesh-verbs.h pair_flush).  Whether anything was taken; a failure is the flow's (flow_lost). */
+   posting its ring's next records, each control frame heard (frame_heard).  Whether anything was taken; a failure is
+   the flow's (flow_lost). */
 static int flow_receive(struct flow *link){
   if(!link->rings && !link->peer_alive)return 0;
   struct ibv_wc done[16];
   const struct mesh_queue *queue=link->provider.queues;
   int count=queue->poll(queue->completion,16,done);
   if(count<0){flow_lost(link,EIO,3);return 1;}
-  link->provider.received_polled+=(uint64_t)count;
   int lost=0;
   for(int i=0;i<count && !lost;i++){
     uint64_t status_opcode;
@@ -1382,7 +1378,6 @@ static int lane_listen(struct port *port,uint32_t lane){
   struct ibv_sge span=lane_span(port,lane_offset(port,lane,MESH_HEADERS+(uint32_t)(l->received[lane]&1)),LANE_FRAME);
   struct ibv_recv_wr request={.wr_id=LANE_HEARD+lane,.sg_list=&span,.num_sge=1},*bad;
   const int error=l->provider.queues[lane].receive(l->provider.queues[lane].pair,&request,&bad);
-  if(!error)l->provider.received_posted++;
   return error<0?-error:error;
 }
 
@@ -1459,7 +1454,6 @@ static int lane_send(struct port *port,uint32_t lane){
   gate->posted+=1;gate->requests++;
   posting.wr_id=LANE_SENT|((uint64_t)lane<<48)|(gate->posted&MESH_GATE_MASK);
   int error=post(pair,&posting,&bad);
-  if(!error)l->provider.sent_posted++;
   l->mark[lane][h]=gate->posted;l->sent[lane]++;
   for(uint32_t e=0;e<entries && !error;e++){
     struct ibv_send_wr *request=first[e];
@@ -1469,7 +1463,6 @@ static int lane_send(struct port *port,uint32_t lane){
       gate->posted+=(request->sg_list->length+4095)/4096;gate->requests++;
       posting.wr_id=LANE_SENT|((uint64_t)lane<<48)|(gate->posted&MESH_GATE_MASK);
       error=post(pair,&posting,&bad);
-      if(!error)l->provider.sent_posted++;
     }
   }
   for(uint32_t e=0;e<entries;e++)if(giver[e])giver[e]->lane_mark[lane]=gate->posted;
@@ -1480,14 +1473,12 @@ static int lane_send(struct port *port,uint32_t lane){
   }
   return 1;
 }
-/* the lanes' SEND completions, each retiring its lane's frames (an error's too, every one counted taken: mesh-verbs.h
-   pair_flush); whether any was taken */
+/* the lanes' SEND completions, each retiring its lane's frames (an error's too); whether any was taken */
 static int lane_retire(struct port *port){
   struct lanes *l=&port->lanes;
   struct ibv_wc done[16];
   const int count=l->provider.queues[0].poll(l->provider.sent,16,done);
   if(count<0){lanes_lost(port,EIO);return 1;}
-  l->provider.sent_polled+=(uint64_t)count;
   for(int i=0;i<count;i++){
     if(done[i].status)lanes_lost(port,(int64_t)done[i].status);
     struct send_gate *gate=l->gate+((done[i].wr_id>>48)&(MESH_LANES-1));
@@ -1561,7 +1552,7 @@ static int lane_heard(struct port *port,uint32_t lane){
         struct ibv_recv_wr request={.wr_id=LANE_DISCARD,.sg_list=&span,.num_sge=1};
         error=post(pair,&request,&bad);
       }
-      if(!error){l->records++;l->provider.received_posted++;}
+      if(!error)l->records++;
     }
   }
   if(!error){l->received[lane]++;error=lane_listen(port,lane);}
@@ -1576,7 +1567,6 @@ static int lane_receive(struct port *port){
   struct ibv_wc done[16];
   const int count=l->provider.queues[0].poll(l->provider.completion,16,done);
   if(count<0){lanes_lost(port,EIO);return 1;}
-  l->provider.received_polled+=(uint64_t)count;
   for(int i=0;i<count;i++){
     if(done[i].status){lanes_lost(port,(int64_t)done[i].status);return 1;}
     const uint64_t id=done[i].wr_id;
@@ -1643,7 +1633,6 @@ static int stripes_send(struct port *port){
   struct ibv_wc done[16];
   const int count=control->poll(s->provider.sent,16,done);
   if(count<0){stripes_lost(port,EIO);return 1;}
-  s->provider.sent_polled+=(uint64_t)count;
   for(int i=0;i<count;i++){
     if(done[i].status){stripes_lost(port,(int64_t)done[i].status);return 1;}
     if((done[i].wr_id&~STRIPE_SLOT)==STRIPE_DESCRIPTOR){s->descriptors_done++;continue;}
@@ -1685,7 +1674,6 @@ static int stripes_send(struct port *port){
       struct ibv_sge span=stripe_span(port,offset,sizeof d);
       struct ibv_send_wr posting={.wr_id=STRIPE_DESCRIPTOR|slot,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
       const int error=control->send(control->pair,&posting,&bad);
-      if(!error)s->provider.sent_posted++;
       if(error){
         stripe_failed(at,owner,d.word,error<0?-error:error);
         atomic_fetch_sub_explicit(&s->flight,1,memory_order_release);
@@ -1707,7 +1695,6 @@ static int stripes_send(struct port *port){
       struct ibv_send_wr posting={.wr_id=STRIPE_DATA|slot,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
       const int error=data->send(data->pair,&posting,&bad);
       if(error){stripes_lost(port,error<0?-error:error);return 1;}
-      s->provider.sent_posted++;
       s->send_frames+=frames;s->send_head++;s->out.done+=length;moved=1;
       if(last)s->out.active=0;
     }
@@ -1721,7 +1708,6 @@ static int stripe_listen(struct port *port,uint32_t slot){
   struct ibv_sge span=stripe_span(port,stripe_descriptor(port,slot),sizeof(struct mesh_descriptor));
   struct ibv_recv_wr request={.wr_id=STRIPE_DESCRIPTOR|slot,.sg_list=&span,.num_sge=1},*bad;
   const int error=s->provider.queues[0].receive(s->provider.queues[0].pair,&request,&bad);
-  if(!error)s->provider.received_posted++;
   return error<0?-error:error;
 }
 /* design/bridge-dataflow.md#stripes: one pass of the port's receive thread over its stripe flow (peer_serve's receive
@@ -1737,7 +1723,6 @@ static int stripes_receive(struct port *port){
   struct ibv_wc done[16];
   const int count=s->provider.queues[0].poll(s->provider.completion,16,done);
   if(count<0){stripes_lost(port,EIO);return 1;}
-  s->provider.received_polled+=(uint64_t)count;
   if(count)atomic_thread_fence(memory_order_acquire);
   for(int i=0;i<count;i++){
     if(done[i].status){stripes_lost(port,(int64_t)done[i].status);return 1;}
@@ -1769,7 +1754,6 @@ static int stripes_receive(struct port *port){
     struct ibv_recv_wr request={.wr_id=STRIPE_DATA|slot,.sg_list=&span,.num_sge=1},*bad;
     int error=data->receive(data->pair,&request,&bad);
     if(error){stripes_lost(port,error<0?-error:error);return 1;}
-    s->provider.received_posted++;
     s->receive_frames+=frames;s->receive_head++;s->in.done+=length;moved=1;
     if(!last)continue;
     s->in.active=0;s->arrived_tail++;
@@ -1801,10 +1785,7 @@ static int stream_post(struct port *port,uint32_t n){
   }
   const struct mesh_queue *queue=s->provider.queues;
   struct ibv_send_wr *bad_send;struct ibv_recv_wr *bad_receive;
-  bad_send=NULL;bad_receive=NULL;
   const int error=s->sending?queue->send(queue->pair,s->sends,&bad_send):queue->receive(queue->pair,s->receives,&bad_receive);
-  const uint64_t taken=!error?n:s->sending?(bad_send?(uint64_t)(bad_send-s->sends):0):(bad_receive?(uint64_t)(bad_receive-s->receives):0);
-  if(s->sending)s->provider.sent_posted+=taken;else s->provider.received_posted+=taken;
   if(error)return error<0?-error:error;
   if(!s->posted)s->own.begin_ns=ledger_ns();
   s->posted+=n;s->own.posts++;
@@ -1820,7 +1801,6 @@ static int stream_pass(struct port *port){
   const int count=queue->poll(s->sending?s->provider.sent:s->provider.completion,(int)s->window,s->completions);
   s->own.polls++;
   if(count<0){stream_lost(port,EIO);return 1;}
-  if(s->sending)s->provider.sent_polled+=(uint64_t)count;else s->provider.received_polled+=(uint64_t)count;
   if(!count)s->own.empty_polls++;
   for(int i=0;i<count;i++){
     const struct ibv_wc *done=s->completions+i;
@@ -2092,42 +2072,36 @@ static void flow_job(struct flow *f,int job){
   });
 }
 
-/* design/RDMA-KERNEL-RECOVERY.md "Every teardown's flush": a provider's drain logged (mesh-verbs.h pair_flush): the
-   work requests it drained of those it held, the markers posted and seen, any the provider refused, and how long */
-static void flush_say(const struct port *port,const char *what,const struct mesh_flush *flush,uint64_t began){
-  if(!flush->moved){say("link %u (%s): %s: its move to the error state refused, nothing drained\n",port->index,port->name,what);return;}
-  say("link %u (%s): %s flushed %llu of %llu work requests, markers %u of %u seen, %u refused, in %.1f us\n",port->index,port->name,what,
-      (unsigned long long)flush->drained,(unsigned long long)flush->outstanding,flush->seen,flush->markers,flush->refused,
-      (double)(ledger_ns()-began)/1e3);
+/* design/RDMA-KERNEL-RECOVERY.md: a provider's teardown on its port's queue (mesh-verbs.h down_pair: its queue pairs to
+   the error state, then destroyed), after the port's earlier refused ones are tried again; one the driver refuses is
+   kept in the port's `remains` (where MESH_REMAINS are kept, its handles are let go) and its owner goes on as released
+   (its queue pairs are in the error state: nothing lands in its rows), logged */
+static void port_down(struct port *port,struct mesh_verbs *provider){
+  for(uint32_t i=0;i<port->remain_count;)if(down_pair(port->remains+i))port->remains[i]=port->remains[--port->remain_count];else i++;
+  if(down_pair(provider))return;
+  say("link %u (%s): a destruction refused: %s; its queue pairs %s\n",port->index,port->name,strerror(errno),
+      port->remain_count<MESH_REMAINS?"kept for the port's next teardown":"let go");
+  if(port->remain_count<MESH_REMAINS)port->remains[port->remain_count++]=*provider;
+  *provider=(struct mesh_verbs){.device=provider->device};
 }
 /* design/algorithm-sources.md#meshresult: a flow out of its port's table and its queue pairs destroyed, on its port's
    queue.  A flow on its port's lanes is released once its records posted on the lanes have landed (the last landing
-   wakes the event loop, FLOW_RELEASING), or the lanes' queue pairs that held them are destroyed (their generation
-   moved: lanes that failed and are not yet closed may still land a SEND in its rows, which a relay's lease returns to
-   the window as it is freed).  An exclusive flow's queue pairs are moved to the error state and their flushed
-   completions drained before they are destroyed (mesh-verbs.h pair_flush: every work request posted and not yet
-   taken, each the error state flushes to one completion; the count drained, and how long, logged), all under the
-   port's guard (port_guard: no queue pair of the device is posted on meanwhile, design/RDMA-KERNEL-RECOVERY.md).  Then
-   the link's census (each ring's SEND requests and frames posted and retired by the send completions its queue pair
-   took, an exclusive flow's; its records posted, landed and their bytes; its cells sent; its control frames) and its
-   ledger (#ledger) are written.  1 once nothing is held, 0 while records are still posted on its lanes, -1 where a
-   destruction was refused (its handles kept for a later release) */
+   wakes the event loop, FLOW_RELEASING: the peer sent each header's data behind it, on the same lane), or the lanes'
+   queue pairs that held them are destroyed (their generation moved: lanes that failed and are not yet closed may still
+   land a SEND in its rows, which a relay's lease returns to the window as it is freed).  An exclusive flow's queue pairs
+   are moved to the error state and destroyed (mesh-verbs.h down_pair), under the port's guard (port_guard: no queue
+   pair of the device is posted on meanwhile, design/RDMA-KERNEL-RECOVERY.md).  Then the link's census (each ring's SEND
+   requests and frames posted and retired by the send completions its queue pair took, an exclusive flow's; its records
+   posted, landed and their bytes; its cells sent; its control frames) and its ledger (#ledger) are written.  1 once
+   nothing is held (a destruction the driver refused is the port's to try again: port_down), 0 while records are still
+   posted on its lanes */
 static int flow_release(struct flow *flow){
   port_unlist(flow);
   if(!flow->exclusive && atomic_load_explicit(&flow->lane_frames,memory_order_acquire) &&
      flow->port->lanes.generation==flow->lane_epoch)return 0;
   const int raised=flow->provider.queues?guard_raise(flow->port,1):0;
-  if(flow->provider.queues && !flow->flushed){
-    char what[96];
-    snprintf(what,sizeof what,"program %016llx toward node %u",(unsigned long long)flow->key,flow->far);
-    const uint64_t began=ledger_ns();
-    const struct mesh_flush flush=pair_flush(&flow->provider);
-    flush_say(flow->port,what,&flush,began);
-    flow->flushed=1;
-  }
-  const int down=down_pair(&flow->provider);
+  port_down(flow->port,&flow->provider);
   guard_lower(flow->port,raised);
-  if(!down)return -1;
   if(!flow->rings && !flow->streams)return 1;
   for(int q=0;flow->rings && q<flow->qps;q++){
     uint64_t sent=0;
@@ -2182,7 +2156,7 @@ static void flow_cancel(struct flow *f){
    rider's records still posted) by their last landing */
 static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;
-  f->stopping=1;f->frees=f->port->frees;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);
+  f->stopping=1;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);
   atomic_fetch_or_explicit(&f->ending,FLOW_RELEASING,memory_order_release);
   dispatch_async(f->port->work,^{
     port_unlist(f);
@@ -2191,9 +2165,9 @@ static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where
       status_failed(&mesh_client_at(M,owner)->status[destination],owner,code,domain,where);
     }
     const int released=flow_release(f);
-    atomic_store_explicit(&f->stopped,released>0?1:released?3:2,memory_order_release);
+    atomic_store_explicit(&f->stopped,released?1:2,memory_order_release);
     port_pairs(f->port);
-    if(released>0 || (!released && !atomic_load_explicit(&f->lane_frames,memory_order_acquire)))wake();
+    if(released || !atomic_load_explicit(&f->lane_frames,memory_order_acquire))wake();
   });
 }
 
@@ -2430,7 +2404,6 @@ static void flow_free(struct flow *f){
   if(f->exclusive)f->port->committed-=(uint32_t)(f->qps+f->alive);
   for(int d=0;d<2;d++){lease_drop(f->side[d].lease);lease_drop(f->pending[d].lease);}
   if(f->control_page!=MESH_ABSENT)mesh_bits_clear(mesh_arena_bits(M),f->control_page,control_pages());
-  f->port->frees++;
   free(f);
   busy_tell();
 }
@@ -2999,7 +2972,7 @@ static void lanes_job(struct port *port,int job){
     }else{
       atomic_store_explicit(&l->up,0,memory_order_release);
       port_settle(port);
-      result=down_pair(&l->provider)?0:EBUSY;
+      port_down(port,&l->provider);
       if(!result)l->generation++;
     }
     guard_lower(port,raised);
@@ -3150,8 +3123,8 @@ static void stripes_abandon(struct port *port){
 /* design/bridge-dataflow.md#stripes: a stripe flow's job on its port's queue, always guarded (port_guard): its two
    queue pairs and completion queues made (STRIPES_MAKING); connected to the peer's, ready (stripes_ready) and the port's
    progress threads started (STRIPES_CONNECTING: the event loop alone makes it up as it takes the job); or, once neither
-   progress thread reads it, the requests it held failed, its queue pairs moved to the error state and their flushed
-   completions drained (pair_flush), then destroyed (STRIPES_CLOSING): the one owner of its teardown, and the device's
+   progress thread reads it, the requests it held failed, its queue pairs moved to the error state and destroyed
+   (mesh-verbs.h down_pair, STRIPES_CLOSING): the one owner of its teardown, and the device's
    registrations stay until the device retires (down_device, port_turn) */
 static void stripes_job(struct port *port,int job){
   struct stripes *s=&port->stripes;
@@ -3171,14 +3144,7 @@ static void stripes_job(struct port *port,int job){
       if(!result)result=stripes_ready(port);
       if(!result)result=port_threads(port);
     }else{
-      s->flushed=0;
-      if(s->provider.queues){
-        const uint64_t began=ledger_ns();
-        const struct mesh_flush flush=pair_flush(&s->provider);
-        flush_say(port,"stripes",&flush,began);
-        s->flushed=(uint32_t)flush.drained;
-      }
-      result=down_pair(&s->provider)?0:EBUSY;
+      port_down(port,&s->provider);
     }
     port_guard(port,0);
     s->result=result;
@@ -3220,7 +3186,7 @@ static void stripes_turn(struct port *port){
     if(job==STRIPES_CLOSING){
       if(result)say("link %u (%s): stripes teardown: %s\n",port->index,port->name,strerror(result));
       else{
-        say("link %u (%s): stripes closed (%u completions flushed)\n",port->index,port->name,s->flushed);
+        say("link %u (%s): stripes closed\n",port->index,port->name);
         s->state=STRIPES_DOWN;if(s->committed)port->committed-=2;s->committed=0;
       }
     }else if(s->state==STRIPES_CLOSING){}
@@ -3745,7 +3711,7 @@ static void requests_stop(void){
    pair made (STREAMS_MAKING); connected to the peer's and ready (STREAMS_CONNECTING: its chains' storage, and at the
    receiver its first `window` receives posted before it tells POSTED, so no SEND of the sender's comes before its
    receive: the 2026-09-10 benchmark's first defect, design/transport-one-gib-2026-09-10.md); or, once neither
-   progress thread reads it, flushed and destroyed (STREAMS_CLOSING) */
+   progress thread reads it, moved to the error state and destroyed (STREAMS_CLOSING) */
 static void streams_job(struct port *port,int job){
   struct stream *s=&port->stream;
   s->job=job;atomic_store_explicit(&s->done,0,memory_order_relaxed);
@@ -3768,14 +3734,7 @@ static void streams_job(struct port *port,int job){
       if(!result && !s->sending)result=stream_post(port,MIN(s->window,s->count));
       if(!result)result=port_threads(port);
     }else{
-      s->flushed=0;
-      if(s->provider.queues){
-        const uint64_t began=ledger_ns();
-        const struct mesh_flush flush=pair_flush(&s->provider);
-        flush_say(port,"stream",&flush,began);
-        s->flushed=flush.drained;
-      }
-      result=down_pair(&s->provider)?0:EBUSY;
+      port_down(port,&s->provider);
       free(s->spans);free(s->sends);free(s->receives);free(s->completions);
       s->spans=NULL;s->sends=NULL;s->receives=NULL;s->completions=NULL;
     }
@@ -3819,7 +3778,7 @@ static void streams_clear(struct port *port,int64_t code){
 }
 /* design/recovery.md#loss: a stream that failed (a verbs call's error, a completion's, the peer's FAIL, the link lost):
    the peer told where the failure is this end's, the requester answered with the code, its queue
-   pair closed (flushed) where it has one */
+   pair closed where it has one */
 static void streams_fail(struct port *port,int64_t code,int tell){
   struct stream *s=&port->stream;
   say("link %u (%s): stream %016llx toward node %u: %s\n",port->index,port->name,(unsigned long long)s->key,port->peer,strerror((int)code));
@@ -3919,8 +3878,7 @@ static void streams_turn(struct port *port){
     s->job=0;
     if(job==STREAMS_CLOSING){
       if(result){say("link %u (%s): stream teardown: %s\n",port->index,port->name,strerror(result));return;}
-      say("link %u (%s): stream %016llx closed (%llu completions flushed)\n",port->index,port->name,(unsigned long long)s->key,
-          (unsigned long long)s->flushed);
+      say("link %u (%s): stream %016llx closed\n",port->index,port->name,(unsigned long long)s->key);
       streams_clear(port,ECANCELED);
       return;
     }
@@ -4037,7 +3995,7 @@ static void port_lost(struct port *port,int64_t code,int retire){
   port->stripes.heard=0;port->stripes.wanted=0;
   /* design/bridge-dataflow.md#streams: a stream on the port fails, its requester answered */
   if(port->stream.state!=STREAMS_DOWN && port->stream.state!=STREAMS_CLOSING)streams_fail(port,port->parted?ECONNRESET:code,0);
-  port->wanted|=port->greeted || retire;port->frees++;
+  port->wanted|=port->greeted || retire;
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
   port->retiring|=retire;port->open&=!retire;
   link_set(port,0,retire?MESH_STOPPED:MESH_PAIRING,code);
@@ -4073,6 +4031,7 @@ static void port_turn(struct port *port){
   port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
     int result=0,refused=0;
+    for(uint32_t i=0;retire && i<port->remain_count;)if(down_pair(port->remains+i))port->remains[i]=port->remains[--port->remain_count];else i++;
     if(retire && !down_device(&port->device))result=-(errno?errno:EBUSY);
     else if(!(result=device_up(&port->device,&wire,&refused)))result=device_gid(&port->device);
     port->result=result;port->refused=refused;
@@ -4443,11 +4402,10 @@ static void relay_released(struct flow *f){
     if(g && g->state!=FAILED){g->state=FAILED;flow_stop(g,0,0,0);}
   }
 }
-/* design/bridge-and-ipc.md#flows: every flow's turn: its job's end taken, a stopped flow freed (its release refused, it
-   tries again once another flow of its port is freed or its link is lost; its records still posted, at their last
-   landing), a failed one telling FAIL stopped once that is sent or its peer's own came, a data thread's failure, the
-   peer's FAIL heard (#control: its failure, not told back), a program ended in order released once it drained, a
-   relay's end's RELEASED heard taken */
+/* design/bridge-and-ipc.md#flows: every flow's turn: its job's end taken, a stopped flow freed (a rider's whose records
+   were still posted, again at their last landing), a failed one telling FAIL stopped once that is sent or the peer's
+   own FAIL came, a data thread's failure, the peer's FAIL heard (#control: its failure, not told back), a program ended
+   in order released once it drained, a relay's end's RELEASED heard taken */
 static void flows_turn(void){
   for(struct flow *f=flows,*next;f;f=next){
     next=f->next;
@@ -4455,7 +4413,7 @@ static void flows_turn(void){
     if(f->stopping){
       const int stopped=atomic_load_explicit(&f->stopped,memory_order_acquire);
       if(stopped==1 && !f->job)flow_free(f);
-      else if(stopped==2 || (stopped==3 && f->frees!=f->port->frees))flow_stop(f,0,0,0);
+      else if(stopped==2)flow_stop(f,0,0,0);
       continue;
     }
     if(f->state==FAILED){
@@ -4500,9 +4458,7 @@ static void *control_watch(void *unused){
    (#keepalive); NULL, or why it is refused */
 #ifdef MESH_LOOP_FABRIC
 /* design/bridge-dataflow.md#the-loopback-fabric: a loop bridge's `loop` (a dictionary: `region`, `fabric`, `node`,
-   `service` and `ports`, each port a dictionary of `device`, `listen` and `peer`, and where it states one the provider
-   loopverbs models at a queue pair's move to the error state, `flush`: "short", loopverbs.c loop_flush);
-   NULL, or why it is refused */
+   `service` and `ports`, each port a dictionary of `device`, `listen` and `peer`); NULL, or why it is refused */
 static int loop_number(CFDictionaryRef d,CFStringRef key,int64_t most,int64_t *value){
   CFTypeRef v=CFDictionaryGetValue(d,key);
   return v && CFGetTypeID(v)==CFNumberGetTypeID() && CFNumberGetValue(v,kCFNumberSInt64Type,value) && *value>0 && *value<=most;
@@ -4520,8 +4476,6 @@ static const char *loop_read(CFPropertyListRef list){
   if(!loop_number(l,CFSTR("node"),0x7fffffff,&node))return "its loop's node, a positive 31-bit number";
   if(!loop_number(l,CFSTR("service"),65535,&service))return "its loop's service, a port";
   loop_config.node=(uint32_t)node;loop_config.service=(uint16_t)service;
-  if(CFDictionaryGetValue(l,CFSTR("flush")) && !loop_text(l,CFSTR("flush"),loop_config.flush,sizeof loop_config.flush))
-    return "its loop's flush, where stated, a provider's name (short)";
   CFTypeRef ports=CFDictionaryGetValue(l,CFSTR("ports"));
   if(!ports || CFGetTypeID(ports)!=CFArrayGetTypeID() || CFArrayGetCount(ports)>MESH_PORTS)return "its loop's ports, at most MESH_PORTS";
   loop_config.ports=(uint32_t)CFArrayGetCount(ports);
@@ -4638,7 +4592,6 @@ int main(int argc,char **argv){
   const char *region=loop_config.region;
   const uint16_t service=loop_config.service;
   loop_fabric(loop_config.fabric);
-  loop_flush(loop_config.flush);
 #else
   const char *region=MESH_NAME;
   const uint16_t service=(uint16_t)atoi(MESH_PORT);
@@ -4748,7 +4701,7 @@ int main(int argc,char **argv){
   say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u%s%s\n",node,host,name,
     (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows,ledger_kept?", ledgers kept (design/bridge-and-ipc.md#ledger)":"",
     alive);
-  int rebuilt=0,flood=0;
+  int flood=0;
   while(!stop){
     if(atomic_load_explicit(&found,memory_order_acquire))ports_found();
     const int moved=atomic_exchange_explicit(&pressured,0,memory_order_acquire);
@@ -4768,23 +4721,12 @@ int main(int argc,char **argv){
     host_taken();
     clients_turn();
     busy_tell();
-    /* design/bridge-and-ipc.md: a bridge whose binary changed stops between calls, once it carries no flow and no
-       awaiting program (`busy` 0) */
-    if(rebuilt && !atomic_load_explicit(&M->busy,memory_order_acquire)){stop=1;stop_reason=MESH_STOP_BINARY;break;}
     struct kevent64_s ready[16];
     int count=kevent64(events,NULL,0,ready,16,0,NULL);
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
       if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
-      else if(e->filter==EVFILT_VNODE){
-        if(!rebuilt){
-          rebuilt=1;
-          atomic_store_explicit(&M->stopping,1,memory_order_release);
-          os_sync_wake_by_address_all(&M->stopping,sizeof M->stopping,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-          mesh_notify(&M->control);
-          say("bridge node %u: its binary changed; it stops once no program runs through it\n",node);
-        }
-      }
+      else if(e->filter==EVFILT_VNODE){stop=1;stop_reason=MESH_STOP_BINARY;}
       else if(e->filter==EVFILT_TIMER && e->ident==HELLO_TIMER){
         for(uint32_t p=0;p<port_count;p++)if(!ports[p].greeted && ports[p].control<0 && !ports[p].refused)ports[p].wanted=1;
       }
@@ -4846,9 +4788,14 @@ int main(int argc,char **argv){
   char why[96];farewell_text(stop_reason,why,sizeof why);
   say("bridge node %u: stopping (%s)\n",node,why);
   requests_stop();
+  /* design/bridge-and-ipc.md: a stop (a signal, or the binary changed) ends what the bridge carries at once: each
+     awaiting program fails as a value (ESHUTDOWN), each port tells its peer FAREWELL and is lost, so every program on it
+     fails (its words past their landed counts cancelled, its status ESHUTDOWN) and the peers' fail at the FAREWELL or
+     the socket's end; then every flow, the stripe flow, a stream and the lanes are torn down (mesh-verbs.h down_pair) and
+     the devices retired */
+  for(struct await *a=awaits,*next;a;a=next){next=a->next;program_fail(a->owner,a->destination,ESHUTDOWN,M->node);}
   for(uint32_t p=0;p<port_count;p++){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
-    ports[p].parted=1;
     port_lost(ports+p,ESHUTDOWN,1);
   }
   for(uint32_t p=0;p<port_count;p++){
@@ -4860,21 +4807,16 @@ int main(int argc,char **argv){
     });
     port_still(port);
     dispatch_sync(port->work,^{
-      /* design/bridge-dataflow.md#stripes: no progress thread runs: the stripe flow's queue pairs flushed and destroyed */
+      /* design/bridge-dataflow.md#stripes: no progress thread runs: the stripe flow's and the stream's queue pairs moved to
+         the error state and destroyed, then the lanes', then the device */
       if(port->stripes.provider.queues){
-        const uint64_t began=ledger_ns();
-        const struct mesh_flush flush=pair_flush(&port->stripes.provider);
-        flush_say(port,"stripes",&flush,began);
-        if(!down_pair(&port->stripes.provider))say("link %u (%s): stripes teardown: %s\n",port->index,port->name,strerror(errno));
+        port_down(port,&port->stripes.provider);
       }
       if(port->stream.provider.queues){
-        const uint64_t began=ledger_ns();
-        const struct mesh_flush flush=pair_flush(&port->stream.provider);
-        flush_say(port,"stream",&flush,began);
-        if(!down_pair(&port->stream.provider))say("link %u (%s): stream teardown: %s\n",port->index,port->name,strerror(errno));
+        port_down(port,&port->stream.provider);
       }
       if(port->stream.fd>=0){fd_answer(port->stream.fd,ESHUTDOWN);close(port->stream.fd);port->stream.fd=-1;}
-      if(!down_pair(&port->lanes.provider))say("link %u (%s): lanes teardown: %s\n",port->index,port->name,strerror(errno));
+      port_down(port,&port->lanes.provider);
       if(!down_device(&port->device))say("link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno));
     });
   }

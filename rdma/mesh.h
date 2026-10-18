@@ -13,10 +13,10 @@
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* 121: a flow's control frames the keepalive and FAIL alone, a lane rider's RELEASED (design/bridge-and-ipc.md#control),
-   no delivered or finalize words in a client's slot, records ordered by their sequence alone (no boot), and the
-   region's `busy` alone (no wall clock beside it) */
-#define MESH_VERSION 121u
+/* 122: a flow's control frames the keepalive, FAIL and RELEASED (design/bridge-and-ipc.md#control), no delivered or
+   finalize words in a client's slot, records ordered by their sequence alone (no boot), and no `stopping` word (a
+   bridge whose binary changed exits at once) */
+#define MESH_VERSION 122u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -126,15 +126,13 @@ struct mesh_client {
   struct mesh_port_info status[MESH_DESTINATIONS];
 };
 /* design/prepared-machine.md#M01, #M09; `busy`, design/bridge-and-ipc.md#region: the flows that carry a program and
-   the awaiting programs the bridge holds (0 between calls); `stopping`, design/bridge-and-ipc.md#region: nonzero once the bridge waits to stop (its binary changed) for the
-   flows it holds to end, so a client holding flows past their execution (metal-microbench
-   docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) releases them between executions and holds
-   none after; `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a
+   the awaiting programs the bridge holds (0 between calls), which nothing waits on; `bell`,
+   design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a
    client rings (mesh_notify) as a group of a program riding that port starts */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,stopping;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy;
   _Atomic uint64_t bell[MESH_PORTS];
   uint64_t rings_off;
 };

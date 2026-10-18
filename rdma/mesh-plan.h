@@ -27,12 +27,13 @@ int mesh_busy(uint64_t *busy);
 /* The node's bridge's two lifecycle events a client blocks on, each with no bound: mesh_bridge_wait returns 0 once a
    bridge of this version holds the region, at once where one does, else at the notify(3) name a bridge posts once its
    sockets listen and its region is open (MESH_STARTED, a loop bridge's followed by its region's name), or an errno where
-   the name cannot be watched; mesh_stopping_wait returns 0 once the bridge waits to stop (mesh.h struct hdr `stopping`:
-   its binary changed; a client holding flows past their execution releases them), ESRCH once it is gone, or the
-   unreachable bridge's errno. */
+   the name cannot be watched; mesh_exit_wait returns 0 once the bridge that holds the region now has exited (its
+   process's exit, EVFILT_PROC: a signal, or its binary changed, which ends it at once), at once where none runs, or the
+   errno where its region is of another version or its exit cannot be watched.  A client that keeps serving across
+   bridges waits on the one, then the other. */
 #define MESH_STARTED "io.mesh.bridge.started"
 int mesh_bridge_wait(void);
-int mesh_stopping_wait(void);
+int mesh_exit_wait(void);
 
 /* A link map, an operand: `nodes` nodes and `links` links of a kind.
      MESH_LINKS_MESH   every pair is linked (`link` lists only the pairs given bandwidths, if any)

@@ -483,6 +483,11 @@ ncclResult_t pncclCommShrink(ncclComm_t comm, int* excludeRanksList, int exclude
 /* Revoke: comm's operations in flight end with an error and none is issued after it (NCCL 2.29). */
 ncclResult_t  ncclCommRevoke(ncclComm_t comm, int revokeFlags);
 ncclResult_t pncclCommRevoke(ncclComm_t comm, int revokeFlags);
+/* Cancel: comm's operations in flight end with an error, as Revoke ends them (its session's program retired as an abort:
+   FAIL to each peer, its words past their landed counts cancelled, so every GPU and host wait of it ends), and comm
+   stays usable: its next group opens a new session.  From any thread, as Revoke; for a caller whose requester went away
+   (its request's channel closed) and that holds comm for the next request. */
+ncclResult_t ncclMeshCommCancel(ncclComm_t comm);
 
 /* Grow: the unique id comm's root gives the ranks joining (ncclCommGetUniqueId), and the communicator of comm's ranks
    and nRanks - comm's count more, made at that id's bootstrap (NCCL 2.29). */
@@ -985,11 +990,6 @@ void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
    their programs.  A caller that times its work across a session's opening takes this out of it: what a peer's late
    start or a flow's pairing held it, not its own work (metal-microbench tools/mesh/rates.py measured). */
 void ncclMeshSessionWaits(uint64_t* ns);
-/* Whether this process's node's bridge waits to stop (its binary changed: the region's `stopping`), so a caller that
-   holds communicators past their execution (metal-microbench docs/placement.md#retention-and-protention-the-next-
-   execution-planned-ahead) destroys them between executions and holds none after: 1, else 0 (no attach, or a bridge
-   that runs on). */
-int ncclMeshBridgeStopping(void);
 /* A held communicator taken up by a new execution (metal-microbench docs/placement.md#retention-and-protention-the-next-
    execution-planned-ahead): every member that takes it up agrees on `ticket`, the execution's identity (the same on every
    member), at its session's next position, so the members run one execution on one session or none.  ncclSuccess where

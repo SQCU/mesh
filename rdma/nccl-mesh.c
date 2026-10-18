@@ -268,7 +268,7 @@ struct ncclComm {
   ncclResult_t async;
   struct session *session, *opening;
   pthread_mutex_t guard;
-  int revoked, finalized;
+  int revoked, finalized, cancelled;
   void **scratch, **spent;
   size_t *scratch_bytes;
   uint32_t scratches, scratch_used, spents;
@@ -919,6 +919,22 @@ ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
   if (comm->opening) session_retire(comm->opening);
   if (comm->session) {
     release_all(comm->session, ncclRemoteError, "its communicator %s was revoked (ncclCommRevoke)", comm->name);
+    session_retire(comm->session);
+  }
+  pthread_mutex_unlock(&comm->guard);
+  return ncclSuccess;
+}
+
+/* ncclMeshCommCancel: comm's session (or the one opening) retired as an abort and its groups in flight failed, as
+   ncclCommRevoke does, under the communicator's own lock alone; comm is not revoked, and its next group closes the
+   cancelled session and opens a new one (session_ensure, `cancelled`) */
+ncclResult_t ncclMeshCommCancel(ncclComm_t comm) {
+  if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
+  pthread_mutex_lock(&comm->guard);
+  if (comm->opening) session_retire(comm->opening);
+  if (comm->session) {
+    __atomic_store_n(&comm->cancelled, 1, __ATOMIC_SEQ_CST);
+    release_all(comm->session, ncclRemoteError, "its call on communicator %s was cancelled (ncclMeshCommCancel)", comm->name);
     session_retire(comm->session);
   }
   pthread_mutex_unlock(&comm->guard);
@@ -2124,14 +2140,17 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
   struct session *s = comm->session;
   if (s) session_watch(s);
   if (s && atomic_load(&s->failed)) {
-    const ncclResult_t result = fail((ncclResult_t)atomic_load(&s->failed), "%s", s->failure);
+    const int cancelled = __atomic_exchange_n(&comm->cancelled, 0, __ATOMIC_SEQ_CST);
+    const ncclResult_t result = cancelled ? ncclSuccess : fail((ncclResult_t)atomic_load(&s->failed), "%s", s->failure);
     session_close(s, 0);
-    return result;
+    if (!cancelled) return result;
+    s = NULL;
   }
   if (s && !session_issued(s) && !attach_live(s->attach)) {
     session_close(s, 0);
     s = NULL;
   }
+  if (!s) __atomic_store_n(&comm->cancelled, 0, __ATOMIC_SEQ_CST);
   return s ? ncclSuccess : session_open(comm);
 }
 
@@ -3278,13 +3297,6 @@ uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 void ncclMeshMetal4Records(uint64_t *issued, uint64_t *capacity) { metal_records(issued, capacity); }
 
 void ncclMeshSessionWaits(uint64_t *ns) { *ns = atomic_load(&session_waits); }
-
-int ncclMeshBridgeStopping(void) {
-  pthread_mutex_lock(&attach_lock);
-  const int stopping = attaches && attach_live(attaches) && atomic_load_explicit(&attaches->context.M->stopping, memory_order_acquire) != 0;
-  pthread_mutex_unlock(&attach_lock);
-  return stopping;
-}
 
 /* whether a rank's moves of a program are at most one SEND and one receive, each of every part: the whole operand in one
    piece each way */

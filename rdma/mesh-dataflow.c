@@ -80,7 +80,7 @@ static void mesh_watch_exit(const struct mesh_watched *w){
     }
   }
   atomic_thread_fence(memory_order_seq_cst);
-  mesh_wake(&m->map);mesh_wake(&m->health);mesh_wake(&m->control);mesh_wake(&m->stopping);
+  mesh_wake(&m->map);mesh_wake(&m->health);mesh_wake(&m->control);
 }
 static void *mesh_watch_run(void *argument){
   const int queue=(int)(intptr_t)argument;
@@ -199,7 +199,7 @@ int mesh_busy(uint64_t *busy){
 }
 
 /* design/bridge-and-ipc.md#region: the bridge's start (its notify name watched before the region is read, so a start
-   between the two is not missed) and its stop between calls */
+   between the two is not missed) and its exit */
 int mesh_bridge_wait(void){
   char name[96];
 #ifdef MESH_LOOP_FABRIC
@@ -219,16 +219,20 @@ int mesh_bridge_wait(void){
   notify_cancel(token);
   return error;
 }
-int mesh_stopping_wait(void){
+int mesh_exit_wait(void){
   struct hdr *m;size_t length;
-  int error=mesh_open(0,&m,&length,NULL);
-  if(error)return error;
-  while(!atomic_load_explicit(&m->stopping,memory_order_acquire)){
-    if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire))){error=ESRCH;break;}
-    os_sync_wait_on_address(&m->stopping,0,sizeof m->stopping,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
-  }
+  const int error=mesh_open(0,&m,&length,NULL);
+  if(error)return error==ESRCH || error==ENOENT?0:error;
+  const pid_t pid=(pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_acquire);
   munmap(m,length);
-  return error;
+  const int queue=kqueue();
+  if(queue<0)return errno;
+  struct kevent64_s watch;EV_SET64(&watch,(uint64_t)pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
+  int result=0;
+  if(kevent64(queue,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))result=errno==ESRCH?0:errno;
+  else for(struct kevent64_s exited;kevent64(queue,NULL,0,&exited,1,0,NULL)<1 && errno==EINTR;){}
+  close(queue);
+  return result;
 }
 
 /* design/bridge-and-ipc.md#region */
