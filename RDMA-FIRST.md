@@ -15,7 +15,7 @@ not taken from a datasheet.
 | memory bandwidth | 238 GB/s mini · 362 GB/s MacBook | shared with the workload; a copy costs 2N of it |
 | scatter-gather | `max_sge: 1` | a record cannot be split across SGEs |
 | queue pairs | `max_qp: 11` (10 usable), `max_srq: 0` | no shared receive queue |
-| hardware threads | 12 mini (8P+4E) · 18 MacBook (6P+12E) | no SMT; a paired port's progress holds two, parked when idle |
+| hardware threads | 12 mini (8P+4E) · 18 MacBook (6P+12E) | no SMT; a paired port's progress spins two |
 
 ## Expensive
 
@@ -56,9 +56,11 @@ of cleverness: nobody writing for a microcontroller ever had this ratio availabl
 
 **Sparse in-channel agreement.** Control can time-share the copper. The cost is a ratio, not a
 principle: agreement amortized per *program* is invisible (10–20 µs against a 112 ms gigabyte),
-agreement per *page* is over 200% overhead. So a port's two bridges agree once per program over
-the port's one TCP control stream (`rdma/mesh-flow.c`, design/bridge-and-ipc.md#protocol), READY,
-PAIRS and POSTED as it starts and END or FAIL as it ends, and the data path never inspects bytes.
+agreement per *page* is over 200% overhead. So a program's members agree once, as their session
+opens, on the leases and relays it rides (a meeting at one member's bridge over the bridges'
+request channels, design/bridge-and-ipc.md#meet); a link's two bridges exchange its queue pairs'
+numbers once as it pairs and once more for each lease made again (PAIRS on the link's TCP control
+stream, `rdma/mesh-flow.c`, design/bridge-and-ipc.md#links); and the data path never inspects bytes.
 
 ## The queue does not enforce its own depth
 
@@ -119,8 +121,8 @@ The bridge does not follow this table. A record is one block of the node's page 
 1023 four-frame records at 4095. That figure is calculated (design/actual-frame-capacity-2026-09-13.md),
 never measured, and the 64 KB rows above stalled at depth 8 with 128 frames posted, well inside
 the budget; until a run at 16 KiB and depth settles it, the measurement and the bridge's rule
-disagree. A link's throughput is a program's queue pairs (its highest queue toward the node times
-its slots, within `max_qp`; design/bridge-and-ipc.md#flows) over the one arena window (below).
+disagree. A program's throughput toward a node is its leases of the link (one a queue it uses; at most
+9 leases a link, within `max_qp`; design/bridge-and-ipc.md#leases) over the one arena window (below).
 
 ## What follows
 
@@ -162,27 +164,26 @@ aware of another, that attach to its shared region, lease pages in it, and ask t
 carry them to member nodes (`rdma/mesh-call.h`). Nothing about a workload can reach the data
 plane except the bytes it puts in its pages and the node it names.
 
-A port's data path is its two progress threads (design/bridge-and-ipc.md#progress), serving every
-program on the port: one posts each send its producer released while its queue pair (or its lane)
-holds the frames, the other drains receive completions, publishes each landed record and posts the
-ring's next receives (or a lane header's records). Neither waits on anything but a word or a
-completion queue it polls while anything moves, and after 100 ms of nothing each parks on its
-port's bell, which a program's group rings for the ports it rides as it starts.
+A port's data path is its two progress threads (design/bridge-and-ipc.md#loops), serving every
+lease of its link: one posts each send its producer released while its lease's queue pair holds
+the frames, the other drains receive completions, publishes each landed record and posts the
+ring's next receives. Neither waits on anything but a word or a completion queue it polls, without
+pause while the link is up.
 
 ## Routing is a compiled path, not a table
 
 RDMA never routes: a queue pair joins two ports over one cable. A program names only its member
-node (`rdma/mesh-call.h` `mesh_transfer_bind`). Where the two are not linked, the node's bridge
-computes the route once, as the program starts, from its own map (`rdma/mesh-plan.h`
-`mesh_trees_path` in the destination's heaviest tree, `mesh_trees_shortest` where none are packed;
-EHOSTUNREACH where there is no path), and sends READY with it over the first link; each bridge on
-the path relays the program and sends READY on with the rest of the route to the next node it
-names, a member of the execution or not (design/bridge-and-ipc.md#protocol, #flows).
+node (`rdma/mesh-call.h` `mesh_transfer_bind`). Where the two are not linked, the members'
+agreement computes the route once, as their session opens, on the map of the bridge they meet at
+(`rdma/mesh-call.h` `mesh_transfers_agree`, the bridges' routing table's path, `mesh_route`;
+EHOSTUNREACH where there is no path), and asks each bridge on the path, a member of the execution
+or not, to relay the pair's two directions on leases of its two links (design/bridge-and-ipc.md#relays).
 
 A next-hop table would be O(N) memory per node *and* a fleet-wide agreement problem: 2048
 entries per node at 2048 nodes, a million entries and distributed consensus at a million. The
-path is computed once per program, by the bridge that starts it, and after that every hop reads
-the next name. The mesh can be arbitrarily large and the data plane never learns how large.
+path is computed once per session, as it opens, and after that each relay forwards what lands to
+the one neighbour its program names. The mesh can be arbitrarily large and the data plane never
+learns how large.
 
 ## What the transport is not
 
@@ -225,7 +226,7 @@ the program with an error naming the node, which its caller may retry at once
 ## Registration is arithmetic, not a lookup
 
 The arena is one contiguous window registered in equal 1 GiB extents, one memory region per
-extent, each registered on a port's device the first time a program names a page of it. Because
+extent, each registered on every port's device as the device comes up. Because
 the extents are equal, an address maps to its region by division: `(addr - base) / extent`.
 There is no table to search, no address that can miss, and no lookup that can fail, so no
 call site needs a branch for the case where it does.
@@ -254,12 +255,7 @@ correct resolution for a kernel-bypass data plane is to spin, which is what such
 by design and why they are given a core. Sleeping pretends the choice does not have to be made,
 and buys a latency floor in exchange. A wait on a shared word has one form, its address wait
 (`rdma/mesh.h` `mesh_notify`; the bridge's `os_sync_wait_on_address` on `control`). The bridge
-spins two threads a port while anything moves, never a program's own (at six nodes a relay hub
-held 50 to 70 spinning a session's life at MESH_VERSION 112), and parks them on their port's
-`bell` after 100 ms of nothing: the group that releases the next ready word rings the bells of
-the ports its program rides as it starts (mesh-call.h `mesh_transfers_wake`), and a relay's
-landing that releases the next hop's cell rings that port's when its send thread is parked, so
-the descriptor the ready words lack is the group's start or the landing, and a program that does
-not ring is served within the park's 1 ms look. A port with nothing of its own to look for (no
-flow listed, no lane work in flight) looks every 3 s, so a node of paired links running no
-program sleeps.
+spins two threads a port without pause while its link is up, never a program's own (at six nodes a
+relay hub held 50 to 70 spinning a session's life at MESH_VERSION 112); they wait on a word of the
+bridge's own only while the link is down or the port's guard stands (design/bridge-and-ipc.md#loops),
+so a ready word needs no descriptor: the send thread's next pass finds it.
