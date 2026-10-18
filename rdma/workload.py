@@ -38,38 +38,31 @@ class WorkloadMeter:
             self.measure_condition.notify()
 
     def measure_loop(self):
-        payload = None
+        undelivered = None
         while True:
             with self.measure_condition:
-                while self.pending_measures is None and payload is None:
-                    if self.measure_stopping:
-                        return
+                while self.pending_measures is None and not self.measure_stopping:
                     self.measure_condition.wait()
-                if self.pending_measures is not None:
-                    payload = self.pending_measures
-                    self.pending_measures = None
+                payload, self.pending_measures = self.pending_measures, None
+            if payload is None:
+                return
+            if undelivered is not None:
+                payload["measures"] = {**undelivered["measures"], **payload["measures"]}
+                payload["delivery_error"] = undelivered["delivery_error"]
+                payload["delivery_attempts"] = undelivered["delivery_attempts"]
             body = json.dumps(payload, separators=(",", ":")).encode()
             try:
-                connection = http.client.HTTPConnection(self.address[0], self.address[1], timeout=30)
+                connection = http.client.HTTPConnection(self.address[0], self.address[1])
                 connection.request("POST", "/v1/workload-measures", body, {"Content-Type": "application/json"})
                 response = connection.getresponse()
                 response.read()
                 connection.close()
-                if response.status < 300:
-                    payload = None
+                if response.status >= 300:
+                    raise OSError(f"HTTP {response.status}")
+                undelivered = None
             except Exception as error:
-                payload["delivery_error"] = f"{type(error).__name__}: {error}"
-                payload["delivery_attempts"] = int(payload.get("delivery_attempts", 0)) + 1
-            with self.measure_condition:
-                if self.measure_stopping:
-                    if self.pending_measures is None:
-                        return
-                    payload = self.pending_measures
-                    self.pending_measures = None
-                    continue
-            if payload is not None:
-                with self.measure_condition:
-                    self.measure_condition.wait(1.0)
+                undelivered = dict(payload, delivery_error=f"{type(error).__name__}: {error}",
+                                   delivery_attempts=int(payload.get("delivery_attempts", 0)) + 1)
 
     def close(self, measures=None):
         if measures is not None:
@@ -78,7 +71,7 @@ class WorkloadMeter:
             self.measure_stopping = True
             self.measure_condition.notify_all()
         if self.measure_thread is not None:
-            self.measure_thread.join(timeout=1.5)
+            self.measure_thread.join()
         self.socket.close()
 
     def record(self, elapsed_s, flops_lower, flops_upper, bytes_lower, bytes_upper,
@@ -121,17 +114,11 @@ class WorkloadMeter:
             self.socket.sendto(body, self.address)
             return True
         except OSError:
-            try:
-                connection = http.client.HTTPConnection(self.address[0], self.address[1], timeout=0.2)
-                connection.request("POST", "/v1/workload", body, {"Content-Type": "application/json"})
-                response = connection.getresponse()
-                response.read()
-                connection.close()
-                return response.status < 300
-            except Exception:
-                return False
+            return False
 
-    def span(self, stage, rows=None, operations=None, interval=2.0):
+    def span(self, stage, rows=None, operations=None, interval=None):
+        """A stage's records: one at its start, one at its finish, and one every `interval` seconds between where the
+        consumer's configuration gives an interval."""
         return WorkloadSpan(self, stage, rows, operations, interval)
 
 class WorkloadSpan:
@@ -140,7 +127,7 @@ class WorkloadSpan:
         self.stage = str(stage)
         self.rows = rows
         self.operations = {} if operations is None else dict(operations)
-        self.interval = max(0.25, float(interval))
+        self.interval = None if interval is None else float(interval)
         self.started = None
         self.stop = threading.Event()
         self.thread = None
@@ -161,8 +148,9 @@ class WorkloadSpan:
     def start(self):
         self.started = time.monotonic()
         self.publish()
-        self.thread = threading.Thread(target=self.run, name='mesh-workload-meter', daemon=True)
-        self.thread.start()
+        if self.interval is not None:
+            self.thread = threading.Thread(target=self.run, name='mesh-workload-meter', daemon=True)
+            self.thread.start()
         return self
 
     def __exit__(self, exc_type, exc, trace):
@@ -170,7 +158,8 @@ class WorkloadSpan:
 
     def finish(self):
         self.stop.set()
-        self.thread.join(timeout=self.interval)
+        if self.thread is not None:
+            self.thread.join()
         self.publish(True)
 
 __all__ = ["WorkloadMeter", "WorkloadSpan"]
