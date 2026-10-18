@@ -41,7 +41,8 @@ the new binary (KeepAlive).
 install.sh, the root layer, installs only `bin/mesh-stat`, the reader node-info runs, built beside the admin user's
 running bridge. SIGTERM (launchd's stop) ends the bridge by the
 same teardown, its programs failing as values. A bridge never receives SIGKILL from the mesh (RDMA-RULES.md); its
-teardown retires every verbs object in the order design/RDMA-KERNEL-RECOVERY.md gives.
+teardown, once its programs have failed and its region tells it gone, retires every verbs object in the order
+design/RDMA-KERNEL-RECOVERY.md gives, each port on its own queue, the ports side by side.
 
 ## region
 
@@ -205,8 +206,10 @@ A client watches its bridge alike (mesh-dataflow.c `mesh_watch`: a kqueue `NOTE_
 a process, over a mapping of the region it keeps, registered as the process first opens the region): at the bridge's
 exit it marks the region's bridge gone (`bridge_pid` 0), cancels each of its own slots' programs' words (`UINT64_MAX`
 where none landed, every one of a cyclic program's, as the bridge cancels a flow that never landed), fails each of
-their destinations' statuses (ESRCH) with its start woken, and wakes the waiters on the map, health and control words,
-so no wait of the process, a GPU program's on its landing words among them, outlives its bridge.
+their destinations' statuses (ESRCH) with its start woken, moves the map's and the health's serials by 2 (their parity
+kept: a reader that found the bridge alive and had not yet slept finds its word changed), and wakes the waiters on the
+map, health and control words, so no wait of the process, a GPU program's on its landing words among them, outlives its
+bridge.
 
 ## records
 
