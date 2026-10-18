@@ -393,7 +393,7 @@ the node's uplink.
 | `viz/` | the whole-fabric observer (`io.mesh.observer`, :8787) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-flow.c`, `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh-metal.m`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
-| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions and their one silent bound, `mesh.h` `MESH_SILENT_NS`), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
+| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
 | `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_observe`, `mesh_map`, `mesh_map_wait`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
@@ -554,9 +554,9 @@ same for its layer with that script's subcommands. A layer changes only to image
 Nothing stops a bridge but the bridge. Its agent's definition names its program and its configuration's path alone, so
 it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the
 installation above, or `make` by hand, which relinks the binary whenever libmesh changes) or a new configuration
-(`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge restarts itself on a new
-binary between calls, never ending a call it carries, a relayed one among them (design/bridge-and-ipc.md); a process
-already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
+(`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge stops at once on a new
+binary, ending every call it carries, a relayed one among them, as a value its caller may retry, and launchd starts
+the new one (design/bridge-and-ipc.md#stop); a process already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
 
 Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what
 each layer installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two
@@ -597,8 +597,8 @@ different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) 
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes
 (`bin/mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]`; etc/bridge/README.md, with the two didactic examples; no default; design/bridge-and-ipc.md; Convergence above). It finds its ports and peers and keeps its links paired; it serves
 every client at once, the node's processes and its neighbours; it keeps the mesh's map, each bridge's record of its
-ports flooded to every bridge (`mesh-plan.h` `mesh_map`, `mesh-stat`); and it forwards programs along their routes for
-members the cables do not join.
+ports flooded to every bridge (`mesh-plan.h` `mesh_map`, `mesh-stat`); and it runs relay programs on the routes of
+members the cables do not join, which those members' agreement asks of it.
 
 The data flow of each, every word and buffer with its writer, its waiter and its failure path, cited to file and
 function: [design/bridge-dataflow.md](design/bridge-dataflow.md) (the bridge) and
