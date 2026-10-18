@@ -585,16 +585,18 @@ lease and client slot then return): by then each end's program had every cell it
 relay, and had sent every cell it released. A relay of an end that fails fails with it (FAIL), or with a link's loss.
 
 **The release** (R6). A flow is released by the event that ends it, its program's in-order end drained or a failure:
-out of its port's table, its queue pairs moved to the error state and drained of exactly what they held (mesh-verbs.h
-`pair_flush`: the work requests posted and not yet taken from its completion queues, every post and every poll of the
-provider counted, an error completion's too: `struct mesh_verbs` `sent_posted`, `sent_polled`, `received_posted`,
-`received_polled`, each of which the error state flushes to one completion), then destroyed, all under the port's
+out of its port's table, its queue pairs moved to the error state and drained as Linux's ib_drain_qp drains one
+(mesh-verbs.h `pair_flush`: the work requests posted and not yet taken from its completion queues, every post and
+every poll of the provider counted, an error completion's too: `struct mesh_verbs` `sent_posted`, `sent_polled`,
+`received_posted`, `received_polled`; where a way's count is not met, a marker receive and SEND on each queue pair,
+whose flushed completions, behind every earlier one, end the drain; a way whose marker the provider refused waits on
+its count alone), then destroyed, all under the port's
 guard (`port_guard`, mesh 542d0bc7: no queue pair of the device is posted on meanwhile,
 design/RDMA-KERNEL-RECOVERY.md). A queue pair whose move to the error state is refused is destroyed undrained. A lane
 rider is released once its records posted on the lanes have landed (the last landing wakes the event loop,
 FLOW_RELEASING) or the lanes that held them are gone. A destruction the driver refuses keeps its handles and is tried
-again once another flow of the port is freed or its link is lost. Each release logs its census and "link P flushed N
-of M work requests in T us".
+again once another flow of the port is freed or its link is lost. Each release logs its census and "link P (name):
+program K toward node F flushed N of M work requests, markers S of K seen, R refused, in T us".
 
 **FAIL.** A running exclusive flow's FAIL is told by its send thread (FLOW_TELLING, its program muted, FLOW_MUTED),
 which posts it on the control queue pair and says so once its completion is taken (`said`); the event loop then stops

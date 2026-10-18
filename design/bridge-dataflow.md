@@ -581,7 +581,8 @@ and stops the threads' serving; `flows_turn` fails the flow, telling nothing bac
    `code`, `domain`, `failed = where`, `prepared` woken).
 3. `flow_release`: wait for the lane frames (0 returned while a rider's records are posted on lanes not yet torn
    down), then under the port's guard `pair_flush` (each queue pair to the error state, both completion queues drained
-   of every work request posted and not yet taken: "flushed N of M work requests in T us") and `down_pair` (-1 where
+   of every work request posted and not yet taken, a marker receive and SEND on each queue pair ending a way whose count
+   falls short: "flushed N of M work requests, markers S of K seen, R refused, in T us") and `down_pair` (-1 where
    a destruction is refused, its handles kept), then the census (each ring's requests, frames, completions, records
    posted and landed, cells sent; the control frames and keepalives) and `ledger_write`, and the rings and streams
    freed.
@@ -803,7 +804,7 @@ and kept while the link is paired:
 | `STRIPES_MADE` | | — | the peer's STRIPES heard → CONNECTING |
 | `STRIPES_CONNECTING` | | `pair_receive`, `pair_send`, `stripes_ready` (piece = the lesser of the two ends', the data pair's frames less the descriptors their completion queues hold, every count 0, the 256 descriptor slots' receives posted on pair 0), `port_threads` | done → UP (`up = 1`, the bell rung) |
 | `STRIPES_UP` | | the progress threads serve it at every pass (`port_pass`) | a failure (`stripes_lost` → `stripes_reset`, STRIPES of 0 to the peer; a make or connect that failed leaves its `code` standing), the peer's STRIPES of 0 or of new QPs, the link lost → CLOSING |
-| `STRIPES_CLOSING` | | `up = 0`, `port_settle` (neither thread reads it), `stripes_abandon` (each request taken and not completed fails: `ECONNRESET`), `pair_flush` (each QP to `IBV_QPS_ERR`, both completion queues drained of every work request posted and not taken), `down_pair` | done → DOWN, `committed -= 2`, "stripes closed (N completions flushed)" logged |
+| `STRIPES_CLOSING` | | `up = 0`, `port_settle` (neither thread reads it), `stripes_abandon` (each request taken and not completed fails: `ECONNRESET`), `pair_flush` (each QP to `IBV_QPS_ERR`, both completion queues drained of every work request posted and not taken, markers ending a short way; "stripes flushed N of M ..." logged), `down_pair` | done → DOWN, `committed -= 2`, "stripes closed (N completions flushed)" logged |
 
 A piece is at most `MESH_STRIPE_PIECE` (4 MiB, 8fc27cbe's `MESH_STRIPE_CHUNK`) and the device's `max_msg_sz` in whole
 frames, the lesser of the two ends' (STRIPES' `code`), and never crosses a 1 GiB registration (`stripe_length`), so both
@@ -956,7 +957,9 @@ moves the ring's generation). A SEND is copied into its destination's ring and c
 queue pair gone or made again is dropped and completes, as UC drops it); the owner's polls drain its ring into its
 receives in the order posted, a SEND waiting for its receive as TB5's credit flow control holds it, `IBV_WC_LOC_LEN_ERR`
 for a SEND longer than its receive; a move to `IBV_QPS_ERR` flushes the posted receives and SENDs
-(`IBV_WC_WR_FLUSH_ERR`), as `pair_flush` expects; 10 queue pairs a device (TB5's); a SEND at most half a ring, 4 MiB,
+(`IBV_WC_WR_FLUSH_ERR`), and a post in that state (`pair_flush`'s markers) completes so at once, behind them; with its
+configuration's `flush` "short" (mesh-loop up ... short) the move drops one of the flushed completions, so the
+markers end the drain; 10 queue pairs a device (TB5's); a SEND at most half a ring, 4 MiB,
 the port's `max_msg_sz`; one link-local GID a port. Its polls never sleep: a completion queue that stayed empty more
 than 8 polls yields the core (`sched_yield`), so N bridges' threads on one host's cores let the processes with work
 run. The first process to need the fabric makes and sizes the segment; another that opens it first looks at its size,
@@ -992,7 +995,7 @@ counted all-to-all, split-KV partials, retain and contents) transcribed; the ari
 part that needs no Python):
 Every wait of the driver is on an event (a map's serial, a bridge's start, a process's exit, a landing word, a pipe),
 none bounded by a clock:
-- `mesh-loop up FAMILY N WINDOW_MIB DIRECTORY`: a line, ring, star, complete map or a torus of two rows, of N (2 to 8)
+- `mesh-loop up FAMILY N WINDOW_MIB DIRECTORY [short]`: a line, ring, star, complete map or a torus of two rows, of N (2 to 8)
   nodes, every cable two loopverbs devices and two free loopback ports; each node's configuration written, its bridge
   started (posix_spawn, its log in DIRECTORY), and the call returns once every bridge's map holds N nodes and its own
   cables are paired (`mesh_nodes_health`, `mesh_observe`), each bridge awaited on its map's serial (`mesh_map_serial`,
@@ -1008,7 +1011,8 @@ none bounded by a clock:
 - `mesh-loop destroy DIRECTORY COUNT RUNS host|walk`: RUNS times, N ranks, an all-reduce then a last group (a send and
   receive around the ring) of COUNT float32 each, every value exact, every rank's `ncclCommDestroy` right after its last
   group; then every bridge holding no flow (`mesh_busy`), and the bridges' logs read: flows ended in order, relays
-  released by both their ends, flows failed, and each exclusive flow's flush ("flushed N of M": N equal to M).
+  released by both their ends, flows failed, and each exclusive flow's flush ("flushed N of M": those short, and those
+  their markers ended).
 - `mesh-loop kill DIRECTORY COUNT host|walk [bridge]`: N ranks, an all-reduce, then the last rank waits while the
   others begin a second and is killed (SIGKILL): each other rank's call fails as a value, the time from the kill to its
   return read; with `bridge`, every rank begins the second and the last rank's node's bridge is stopped (SIGTERM, as

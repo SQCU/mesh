@@ -415,11 +415,17 @@ two ends' RELEASED, a failure, the link's loss, the bridge's stop), out of its p
 guard raised around both whatever the device holds (`flow_release`: `guard_raise(port, 1)`; the stripe flow's and a
 stream's jobs always raise it): no queue pair of the device, the lanes' included, is posted on while a flow's are
 flushed and destroyed, the hazard of October 16 and 17 and of the lanes' keepalive (bridge-and-ipc.md#keepalive). The
-drain takes exactly what the error state flushes: every work request posted on the provider and not yet taken from its
-completion queues (mesh-verbs.h `pair_flush`, `pair_outstanding`: each post and each completion taken counts, an
-error's too), each flushed to one completion, with no poll bound; a queue pair whose move to the error state is
-refused drains nothing and is destroyed as `down_pair` destroys it, and a poll the device fails ends the drain. Each
-release logs "flushed N of M work requests in T us". The lanes' own teardown is unchanged: destroyed without a flush.
+drain is Linux's (ib_drain_qp: ib_drain_rq, ib_drain_sq), with no clock: what the move to the error state returned is
+taken, counting every work request posted on the provider and not yet taken from its completion queues (mesh-verbs.h
+`pair_flush`, `pair_outstanding`: each post and each completion taken counts, an error's too); then, on each way
+whose count is not met, a marker receive and a marker SEND are posted on each queue pair, which the error state
+completes behind every work request posted before them (a queue's completions come in the order posted), and the drain
+ends on each completion queue once every marker of its way came or its count is met. A provider that flushes fewer
+completions than it held (on the pair, the bounded flush of mesh 2e02569a drained 687 of 688 on the M5, 687 of 687 on
+the Mini, in 343 and 455 ms) is ended by its markers; a way whose marker the provider refuses (its post's error, logged)
+waits on its count alone; a queue pair whose move to the error state is refused drains nothing and is destroyed as
+`down_pair` destroys it, and a poll the device fails ends the drain. Each teardown logs "<what> flushed N of M work
+requests, markers S of K seen, R refused, in T us". The lanes' own teardown is unchanged: destroyed without a flush.
 
 On the loopback fabric (loopverbs flushes at the move, as the Apple provider is expected to; metal-microbench
 output_data/dead-history-20261017/scratch-delete/w1/run2, a line of 4 at mesh f6432540): 180 runs of the `destroy`
@@ -428,4 +434,8 @@ right after its last group: 0 landings cancelled, 360 flows ended in order and 1
 flow failed, every flush exact (N = M); `kill` (a client killed mid-call), 18 of 18 survivor calls failed as values;
 `kill ... bridge` (a bridge stopped under ranks waiting in a walk), 4 of 4. On hardware it is unread: the pair's first
 held communicator's close (its "ended in order", "flushed N of N" and census lines, and nothing in the kernel log) is
-the reading.
+the reading. With loopverbs modelling a provider that drops one flushed completion at each move to the error state
+(mesh-loop up ... short; output_data/dead-history-20261017/scratch-delete/w1/run10, mesh 0fcfb3ef): every one of the
+destroy reading's 240 flushes and each stripe flow's at the stop drained one short and was ended by its markers (for
+example "flushed 684 of 687 work requests, markers 3 of 3 seen"), and every other reading as above; with the exact
+provider (run11) no marker is posted, every count met at the move.

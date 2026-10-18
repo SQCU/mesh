@@ -311,8 +311,10 @@ with its duration and count, goes to `fabric.log` and the unified log, and `mesh
    failing. No path here runs a program again after a cut: a failed execution's process prepares its programs again,
    their counts starting at zero.
 4. **The flush on Apple's provider is unread.** A move to the error state and its flushed completions have never run on
-   hardware; every teardown drains exactly the work requests it held (mesh-verbs.h `pair_flush`), so a provider that
-   flushes fewer holds that port's queue at the teardown; the guard's pause of a port's progress threads during another
+   hardware; every teardown drains as Linux's ib_drain_qp does (mesh-verbs.h `pair_flush`: the work requests it held,
+   then a marker receive and SEND on each queue pair, whose flushed completions end the drain where the count falls
+   short: the pair's bounded flush of 2e02569a read 687 of 688 on the M5), so only a provider that both flushes fewer
+   and refuses a post in the error state would hold that port's queue at the teardown; the guard's pause of a port's progress threads during another
    flow's verbs work is unmeasured. Integration reads both first (design/bridge-dataflow.md#stripes,
    RDMA-KERNEL-RECOVERY.md).
 5. **A peer silent with its link up.** A peer whose client never runs its side, or whose bridge is stopped by a signal
