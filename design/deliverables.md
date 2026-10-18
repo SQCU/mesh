@@ -320,7 +320,7 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **S3. Chunked transport, invisible.** `mesh_section_create(ctx, bytes, count, receive, &section)`; internal `C`, `K = ceil(N/C)`. Ref: TN3205 frame matching; llama.cpp PR #26421 (128 KiB stride cost). Check: I10.
 
-**S4. Out-of-band pairing on the control socket; every syscall bounded.** The link hello (node, the index it gave the cable, LID, GID, block size), then the link's queue pairs' numbers (PAIRS: once at its pairing, and for each lease made again) ([bridge-and-ipc.md#links](bridge-and-ipc.md#links)); a session's members agree their leases and relays once, at one member's bridge ([bridge-and-ipc.md#meet](bridge-and-ipc.md#meet)); the control socket is dialed and accepted nonblocking, each read and write on the event loop ([recovery.md](recovery.md) Q14). Ref: TN3205; `RDMA-RULES.md`. Check: no call on a link's control socket in `rdma/mesh-flow.c` blocks.
+**S4. Out-of-band pairing on the control socket; every syscall bounded.** The link hello (node, the index it gave the cable, LID, GID, block size), then the link's queue pairs' numbers (PAIRS: once at its pairing, and a lease's new round and first sequence number each time its pair is made again in place) ([bridge-and-ipc.md#links](bridge-and-ipc.md#links)); a session's members agree their leases and relays once, at one member's bridge ([bridge-and-ipc.md#meet](bridge-and-ipc.md#meet)); the control socket is dialed and accepted nonblocking, each read and write on the event loop ([recovery.md](recovery.md) Q14). Ref: TN3205; `RDMA-RULES.md`. Check: no call on a link's control socket in `rdma/mesh-flow.c` blocks.
 
 ### L — library core
 

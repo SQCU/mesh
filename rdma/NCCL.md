@@ -328,8 +328,9 @@ for a peer that never comes, a member that failed to load, is ended at once) and
 group on it fails at once (`ncclRemoteError`, "revoked") until `ncclCommDestroy` closes its session.
 
 `ncclMeshCommCancel(comm)` (nccl.h) ends the communicator's call in flight as the revoke ends it, from any thread and
-under the communicator's own lock alone (its session's program retired as an abort: its leases made again with the
-code each peer's program fails by, its words past their landed counts cancelled, so every GPU and host wait of it ends and the call fails as a value, `ncclRemoteError`
+under the communicator's own lock alone (its session's program retired as an abort: its leases made again in place
+with the code each peer's program fails by, its words past their landed counts cancelled by its bridge though the
+abort gave up its slot first, so every GPU and host wait of it ends and the call fails as a value, `ncclRemoteError`
 "was cancelled"; a session opening ends at once), and keeps the communicator: its next group closes the cancelled
 session and opens a new one. It is for a caller whose requester went away (its request's channel closed) and that
 holds the communicator for the next request; the peers' calls fail at that code and their next groups open again.

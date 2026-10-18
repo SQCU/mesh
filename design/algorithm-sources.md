@@ -328,15 +328,14 @@ writers get independent streams; a writer increments its own position and
 release-stores its prepared event. The consumer clears slots after acquiring their values.
 Declared lifetimes provide the reuse order; the producer does not read fullness.
 
-ABI 73 puts each stream's cursor, mask and slots in one aligned extent, applying
-the same preallocated circular-storage mechanism without a separate slot-address
-field. `mesh_stream_bytes` supplies the setup layout rule; reader initialization
-walks those extents once and records their terminal slot pointers. Shared
-producer streams, private reader arrays and numerical-worker mutable state are
-separated at 128-byte boundaries. The [allocation analysis](pages-and-functions.md#costs-and-remaining-work)
-records the substantial reservation increase, actual layout formulas and the
-unchanged O(P) probe count. This is a layout specialization, not a new queue
-algorithm or a claim that padding alone solves handoff latency.
+A lease's SEND stream (mesh-flow.c `struct stream`, prepared-machine.md M04) is
+that preallocated circular storage: its cells are laid out at preparation and
+linked in publication order (`successor`, a cyclic program's last cell to its
+first), each cell's `ready` word written by its producer alone and read by the
+port's send thread alone, whose cursor (the current cell and its cycle) is its
+own, and the producer reads no fullness. Producer cells and the bridge's private stream state
+are separated at 128-byte boundaries. This is a layout specialization, not a new
+queue algorithm or a claim that padding alone solves handoff latency.
 
 ABI 70 carries the publication's invocation value alongside its final record
 index in the same lock-free eight-byte slot. TX copies that value into the
@@ -975,7 +974,7 @@ lies between polling and posting.
 A program's rows outlive its native requests. A program that ends in order has every
 released cell posted and completed before its bridge lets go of its leases
 (design/bridge-and-ipc.md#programs); a failed one's rings are detached from their
-leases under the port's guard before each lease is made again; and its slot's rows
+leases under the port's guard before each lease's pair is made again in place; and its slot's rows
 are released only once no program holds a lease over them (`mesh_retired_release`,
 then `mesh_reclaim`), so no queue pair still bound to a row writes it after its
 pages return to the window. The
@@ -1018,7 +1017,8 @@ paired with the other reports (mesh-dataflow.c mesh_join), and the bridges carry
 the lowest index the pair's lower node gave one of its cables to the other (mesh-flow.c cable_to;
 design/bridge-and-ipc.md#ports), so a hop is priced at its slowest cable's bandwidth (mesh-collective.c
 mesh_hop_inverse). A map a caller makes may list several links of one pair: a hop over them is priced alike, and the
-tree packing counts them in a port's capacity (`mesh_trees_pack`).
+tree packing charges a port one link's bandwidth, the slowest the map gives the pair (`mesh_trees_pack`), since the
+bridges carry the pair over one link whatever cables join the two.
 
 The table (`mesh_routes`): Dijkstra [1959] toward each node in its dense form, every length an exact integer (a
 hop's inverse bandwidth in whole fs a byte) so every bridge and member that holds the same records makes

@@ -730,7 +730,7 @@ stamps) is the same in both forms, so two members may encode the same crossing d
 | Encode failure mid-walk (e.g. `EOVERFLOW` argument ring) | `launch_metal` / `ncclMeshComplete` | `walk_failed`: `release_all` and `inflight_lose` on each session through the ticket | the group's result; the later completion's loss |
 
 **The bridge's stop.** The library reads no stop word. A bridge stops at once at a signal or a change of its binary
-(design/bridge-dataflow.md#5-failure-cancellation-and-release), and every session on it fails as a value: the peers'
+(design/bridge-dataflow.md#4-failure-cancellation-and-release), and every session on it fails as a value: the peers'
 at its FAREWELL, this process's as its own teardown cancels the words past their landed counts and, at its exit, as
 libmesh's watch cancels the rest (statuses `ESRCH`). The next group's `session_ensure` closes the session and opens
 one on the bridge started again (`attach_live`, `attach_current`); libmesh's `mesh_bridge_wait` tells a caller the new
@@ -797,7 +797,7 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
 | Revoke, cancel, finalize, destroy, abort, exit? | `ncclCommRevoke`, `ncclMeshCommCancel`, `session_retire`, `ncclCommFinalize`, `session_kept`, `ncclCommDestroy`, `ncclCommAbort`, `session_close`, `drain`, `session_exit` |
 | Issue / complete / tickets? | `launch_metal` (`issue`), `ncclMeshComplete`, `retire`, `losses_through`, `ncclMeshRetired` |
 | Held communicators across calls? | mb `mesh_rank.m`: `MeshRankFlows`, `adopted`, `healthy`, `MeshRankGroup`, `agreed`, `MeshRankDetach`; `tools/mesh/flows.py:plan`, `observed` |
-| Bridge upgrade? | its stop (design/bridge-dataflow.md#5-failure-cancellation-and-release); `session_ensure`, `attach_live`; `mesh-dataflow.c mesh_bridge_wait` |
+| Bridge upgrade? | its stop (design/bridge-dataflow.md#4-failure-cancellation-and-release); `session_ensure`, `attach_live`; `mesh-dataflow.c mesh_bridge_wait` |
 | torch's use? | `torch_mesh/backend.py:ProcessGroupMesh`, `_stream.mm:on_stream`, `complete`, `MeshWork`, `functional` |
 
 ## Ambiguities and hazards in the code at this HEAD
@@ -816,10 +816,14 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
    - `tools/mesh/flows.py:plan` keeps a name across committed calls without consulting each member's reported
      `held` (131-138, 145-155).
    - So one member can adopt a session at position N while its peer makes a new communicator of the same name (same
-     slot key) and opens a session: the adopter's `ncclMeshCommAgree` (mb `agreed`) waits for the maker's position on
-     the held session, and the maker's agreement waits at `members[0]`'s bridge for a report the adopter never sends
-     (`mesh_transfers_agree`); both until a cancel or a revoke (`agreed` registers the communicator in the call's
-     groups, so the call's cancellation revokes it).
+     slot key) and opens a session. The maker's held communicator has ended first (mb `adopted` destroys one it does
+     not take up, an end in order; a process that no longer holds it has exited, an abort), so the adopter's
+     `ncclMeshCommAgree` (mb `agreed`) does not wait for a position that will not come: it fails with `ncclRemoteError`
+     at the peer's destination status stopped with its position not landed (the in-order end, nccl-mesh.c
+     `peer_stopped`) or at its cancelled words (the abort's code). The adopter then destroys the communicator and makes
+     one, and both members' agreements meet at `members[0]`'s bridge (`mesh_transfers_agree`). A maker whose held
+     program is still running when the adopter agrees is waited for until it ends, or until a cancel or a revoke
+     (`agreed` registers the communicator in the call's groups, so the call's cancellation revokes it).
 5. **A peer's skew is no failure.** A slow peer is waited for; a dead one is found by events
    (design/bridge-and-ipc.md#leases, #links). A caller that encodes and never commits holds `drain` (ncclCommDestroy,
    ncclCommFinalize, a host-path group) until it commits: its own program's fault, no transport event.

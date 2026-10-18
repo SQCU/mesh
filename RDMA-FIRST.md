@@ -59,7 +59,7 @@ principle: agreement amortized per *program* is invisible (10–20 µs against a
 agreement per *page* is over 200% overhead. So a program's members agree once, as their session
 opens, on the leases and relays it rides (a meeting at one member's bridge over the bridges'
 request channels, design/bridge-and-ipc.md#meet); a link's two bridges exchange its queue pairs'
-numbers once as it pairs and once more for each lease made again (PAIRS on the link's TCP control
+numbers once as it pairs, and a lease's new round each time its pair is made again in place (PAIRS on the link's TCP control
 stream, `rdma/mesh-flow.c`, design/bridge-and-ipc.md#links); and the data path never inspects bytes.
 
 ## The queue does not enforce its own depth
