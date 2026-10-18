@@ -19,7 +19,7 @@
    or, where the dispatch has violation words (p.halts), violation word [2] set, read once in 64 looks while it spins
    (no look of it where the word has landed); mesh_step_check: a word cancelled (or a wait the halt ended short of its
    target) is recorded in violation words [2] and [3] where the dispatch has them, so every later wait of the program
-   ends (design/bridge-and-ipc.md#control: the bridge cancels the positions past a channel's landed count alone, and a
+   ends (design/bridge-and-ipc.md#programs: the bridge cancels the positions past a channel's landed count alone, and a
    later position's word may still hold a landing), else the positions the record's check names have their slots
    checked against the filler protocol (the stamp; violation words [0] and [1]).
    mesh_step_await: a landing awaited by thread 0 and checked, then the threadgroup past a device barrier and a

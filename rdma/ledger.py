@@ -3,24 +3,23 @@ bridge trace (M27, MESH_LEDGER, mesh git 5702ea5) and its reader (metal-microben
 output_data/regression-20261015/q5p/ledger.py, with the hop of its scratchpad analysis q5hop/hop.py) restored on the
 resident bridge.
 
-A bridge whose configuration states `ledger = true` keeps, for each flow, every SEND cell its send thread first saw
-released and every receive record that landed, and writes them at the flow's release: a header line naming the flow
-(its execution key, this node, its peer across the link, the program's two end nodes, its stripe) and a line for each
-event, in the bridge's log or, past MESH_LEDGER_LINES, in a file beside the log that the header names.  An event names
-its cell or record by queue (the peer's ring of the same index), program invocation, position among that invocation's
-transfers of the queue, binding and cycle, so one node's SEND of a cell and its peer's landing of the cell's records
-pair across the two nodes, whose clocks (each bridge's ledger_ns, CLOCK_UPTIME_RAW) differ by an unknown offset.  A
-SEND's line ends with the cell's bytes (its transfer's: -1 where the cell was not named), so a reader takes the wire's
-time out of a crossing's (metal-microbench tools/torch_parallel/timeline.py); a ledger written before the bytes were
-recorded has none, and its events carry no 'bytes'.
+A bridge whose configuration states `ledger = true` keeps, for each path of each program (its side toward one
+destination), every SEND cell its send thread posted (when it first posted it, and its last request) and every receive
+record that landed, and appends them to a file a client names (MESH_REQUEST_LEDGER, nccl.h ncclMeshLedger): a header
+line naming the path (its execution key, this node, its neighbour across the link, the path's two end nodes) and a line
+for each event since the latest such request.  An event names its cell or record by queue (the peer's ring of the same
+index), program invocation, position among that invocation's transfers of the queue, binding and cycle, so one node's
+SEND of a cell and its peer's landing of the cell's records pair across the two nodes, whose clocks (each bridge's
+CLOCK_UPTIME_RAW) differ by an unknown offset.  A SEND's line ends with the cell's bytes (its transfer's: -1 where the
+cell was not named), so a reader takes the wire's time out of a crossing's (metal-microbench
+tools/torch_parallel/timeline.py).
 
 For each direction between two nodes it reports, in microseconds (median, p10, p90):
 
 - seen -> first post: from the send thread's first look at the released cell to its first SEND posted (its pass and its
   gate);
 - first -> last post: a cell of several chunks;
-- last post -> completion: from the cell's last SEND posted to its completion taken, the RC round trip (an exclusive
-  flow's; a lane rider's completions are not attributed);
+- last post -> completion: from the cell's last SEND posted to its completion taken (none stamped: 0);
 - the one-way bridge-to-bridge hop with the clock offset cancelled: each crossing paired with one the other way, the
   same cell name each way where the program crosses both ways there, else the reverse crossing nearest in time, as
   Q5P's analysis paired a point's two publications: hop = ((landed_B - seen_A) + (landed_A - seen_B)) / 2, the offset
@@ -30,9 +29,8 @@ For each direction between two nodes it reports, in microseconds (median, p10, p
 
     python ledger.py PATH [PATH ...] [--key KEY] [--bindings] [--json]
 
-PATH: a bridge's log (~/Library/Logs/io.mesh.bridge.log), a ledger file (ledger-*.jsonl) or a directory of them, of
-the two nodes, however fetched; a file a header names is read from beside the log that names it or from any directory
-given.  --key: the execution (hex) to report, else every one with a flow paired across a link.  --bindings: the hop
+PATH: a ledger file a client's cut appended to (ledger-*.jsonl, *.log) or a directory of them, of the two nodes, however
+fetched.  --key: the execution (hex) to report, else every one with a path paired across a link.  --bindings: the hop
 and the send thread's delay by binding as well.  --json: one JSON document in place of the text."""
 import argparse
 import bisect
@@ -59,33 +57,18 @@ def lines(path):
 
 
 def read(paths):
-    """Every flow the paths hold, {(node, started, ledger): {'header', 'sends', 'landings'}}; an event belongs to the
+    """Every path the files hold, {(node, started, ledger): {'header', 'sends', 'landings'}}; an event belongs to the
     latest header of its ledger number before it in its file."""
-    files, places = [], []
+    files = []
     for path in map(Path, paths):
-        if path.is_dir():
-            places.append(path)
-            files += sorted(path.glob('*.log')) + sorted(path.glob('ledger-*.jsonl'))
-        else:
-            places.append(path.parent)
-            files.append(path)
-    flows, done = {}, set()
-    while files:
-        path = files.pop(0).resolve()
-        if path in done or not path.exists():
-            continue
-        done.add(path)
+        files += sorted(path.glob('*.log')) + sorted(path.glob('ledger-*.jsonl')) if path.is_dir() else [path]
+    flows = {}
+    for path in dict.fromkeys(p.resolve() for p in files):
         latest = {}
         for r in lines(path):
             if 'ledger' in r and 'node' in r:
                 flow = flows.setdefault((r['node'], r['started'], r['ledger']), {'header': r, 'sends': [], 'landings': []})
                 latest[r['ledger']] = flow
-                if r.get('file'):
-                    found = next((d / r['file'] for d in [path.parent, *places] if (d / r['file']).exists()), None)
-                    if found is None:
-                        print(f'ledger {r["ledger"]} of node {r["node"]}: {r["file"]} not found beside {path}', file=sys.stderr)
-                    else:
-                        files.append(found)
             elif 's' in r and r['s'][0] in latest:
                 latest[r['s'][0]]['sends'].append(dict(zip(SEND, r['s'][1:])))
             elif 'r' in r and r['r'][0] in latest:
@@ -94,12 +77,11 @@ def read(paths):
 
 
 def peer_of(flow, flows):
-    """The flow at the other end of `flow`'s link: the same execution and stripe, the two nodes and the program's two
-    ends each the other's; of several (an execution's key run again), the one sharing the most cell names."""
+    """The path at the other end of `flow`'s link: the same execution, the two nodes and the path's two ends each the
+    other's; of several (an execution's key run again), the one sharing the most cell names."""
     h = flow['header']
     candidates = [g for g in flows.values() if g['header']['key'] == h['key'] and g['header']['node'] == h['peer'] and
-                  g['header']['peer'] == h['node'] and g['header']['near'] == h['far'] and g['header']['far'] == h['near']
-                  and g['header']['stripe'] == h['stripe']]
+                  g['header']['peer'] == h['node'] and g['header']['near'] == h['far'] and g['header']['far'] == h['near']]
     names = {name(s) for s in flow['sends']} | {name(r) for r in flow['landings']}
     return max(candidates, key=lambda g: len(names & ({name(s) for s in g['sends']} | {name(r) for r in g['landings']})),
                default=None)
@@ -111,7 +93,7 @@ def name(event):
 
 
 def crossings(sender, receiver):
-    """The cells `sender` sent that `receiver` landed whole: {(program, stripe, name): crossing}, the program its two end
+    """The cells `sender` sent that `receiver` landed whole: {(program, name): crossing}, the program its two end
     nodes (either way), a crossing its SEND's times on the sender's clock and its last chunk's landing on the
     receiver's."""
     landed = collections.defaultdict(dict)
@@ -124,7 +106,7 @@ def crossings(sender, receiver):
         chunks = landed.get(name(s))
         if not chunks or len(chunks) != s['chunks']:
             continue
-        out[program, h['stripe'], name(s)] = dict(s, landed=max(r['landed'] for r in chunks.values()))
+        out[program, name(s)] = dict(s, landed=max(r['landed'] for r in chunks.values()))
     return out
 
 
@@ -192,7 +174,7 @@ def direction(forward, backward, bindings):
 
 
 def analyse(flows, key, bindings):
-    """{execution: {'A -> B': direction}} of every execution with a flow paired across a link."""
+    """{execution: {'A -> B': direction}} of every execution with a path paired across a link."""
     links = collections.defaultdict(lambda: collections.defaultdict(dict))
     flowcount = collections.Counter()
     for flow in flows.values():
@@ -209,7 +191,7 @@ def analyse(flows, key, bindings):
         report = {}
         for (a, b), forward in sorted(by.items()):
             report[f'node {a} -> node {b}'] = dict(direction(forward, by.get((b, a), {}), bindings),
-                                                   flows=flowcount[execution, a, b])
+                                                   paths=flowcount[execution, a, b])
         out[execution] = report
     return out
 
@@ -234,12 +216,12 @@ def main():
         print()
         return
     if not report:
-        sys.exit(f'{len(flows)} flows read, none paired with its peer\'s across a link'
+        sys.exit(f'{len(flows)} paths read, none paired with its peer\'s across a link'
                  + (f' for execution {options.key}' if options.key else ''))
     for execution, directions in report.items():
         print(f'execution {execution}')
         for label, d in directions.items():
-            print(f"  {label}: {d['crossings']} crossings over {d['flows']} flows; paired {d['paired by name']} by name, "
+            print(f"  {label}: {d['crossings']} crossings over {d['paths']} paths; paired {d['paired by name']} by name, "
                   f"{d['paired by time']} by time")
             for stage in ('seen -> first post', 'first -> last post', 'last post -> completion', 'hop from seen',
                           'hop from last post', 'receiver - sender clock'):

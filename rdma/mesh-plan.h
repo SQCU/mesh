@@ -48,9 +48,8 @@ int mesh_bridge_wait(void);
    a table, two of the map's nodes are linked where the route between them crosses no other of them (relays alone),
    and that hop's bytes cross every link of it (a relay forwards each slot as it lands, mesh-flow.c receive_input;
    mesh_trees_pack).  Without one, two nodes are linked where a link joins them.  Several links between one pair are
-   its cables, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is striped over
-   them, position t on cable t mod n, so the pair carries n times its slowest cable's bandwidth.  `link`, `bandwidth`,
-   `next` and `mark` are the caller's storage. */
+   its cables; the bridges carry a pair's programs over one of them (design/bridge-and-ipc.md#ports), so a route prices
+   the pair's hop at its slowest cable's bandwidth.  `link`, `bandwidth`, `next` and `mark` are the caller's storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark; };
 /* 0 where a map is one, else EINVAL: every link's nodes among its nodes and relays; a ring one cycle through every node
@@ -67,7 +66,7 @@ int mesh_link_map_check(const struct mesh_link_map *);
 int mesh_link_map_joined(const struct mesh_link_map *,uint32_t *apart);
 /* The routing table of a map's links (into next, N x N as struct mesh_link_map's; map->next is not read): each node
    b's in-tree of shortest routes toward it, by fewest links, then the least sum of their hops' inverse bandwidths
-   (a pair's cables striped: 8e15 over n times its slowest cable's bits a second, in whole fs a byte; a hop with no
+   (8e15 over its slowest cable's bits a second, in whole fs a byte; a hop with no
    bandwidth counts none), each node's parent among its equals the one of the least hash of its mark, the parent's
    and the root's (equal-cost multipath by a hash, as ECMP spreads flows [RFC 2992]): routes of equal length spread
    over the links rather than piling onto the lowest-numbered node, every bridge and member that holds the same
@@ -96,10 +95,10 @@ uint32_t mesh_route_path(const struct mesh_link_map *,uint32_t a,uint32_t b,uint
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map);
 /* The map of the node's bridge (design/bridge-and-ipc.md#ports) as of one map serial, from its records of every
    node's ports (mesh_observe's views), so the same records give every member the same map: the whole map, its nodes
-   the records' ascending by bridge, two joined by a link a cable where each one's bridge holds ports paired with the
-   other (the fewer of the two ends' counts), each at the bandwidth of the slowest of those ports at either end (the
-   least any of them reports; 0 where none reports one; the bridge stripes a program between the two over every
-   cable, a routed one end to end, design/bridge-and-ipc.md#cables), each node marked by its bridge's number, its
+   the records' ascending by bridge, two joined by one link where each one's bridge holds ports paired with the other,
+   at the bandwidth of the slowest of those ports at either end (the least any of them reports; 0 where none reports
+   one; the bridges carry the two's programs over one cable, design/bridge-and-ipc.md#ports), each node marked by its
+   bridge's number, its
    table mesh_routes' (the routes the bridges forward along, mesh-dataflow.c mesh_route);
    then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
    i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its

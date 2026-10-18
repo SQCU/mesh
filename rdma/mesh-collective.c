@@ -21,7 +21,7 @@ static int mesh_joins(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   return 0;
 }
 
-/* The links joining u and x (either way), a pair's cables (design/bridge-and-ipc.md#cables): their count, and *slowest
+/* The links joining u and x (either way), a pair's cables (design/bridge-and-ipc.md#ports): their count, and *slowest
    the least bandwidth the map gives any of them (0: none given) */
 static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t x,uint64_t *slowest){
   uint32_t count=0;
@@ -34,16 +34,14 @@ static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t 
     }
   return count;
 }
-/* A pair's hop striped over its n cables (design/bridge-and-ipc.md#cables: a direct program's position t on cable t mod
-   n), its inverse bandwidth in whole fs a byte: 8e15 over n times its slowest cable's bits a second; 0 where the map
-   gives none of them a bandwidth */
+/* A pair's hop, carried over one of its cables (design/bridge-and-ipc.md#ports: the bridges take one cable a pair), its
+   inverse bandwidth in whole fs a byte: 8e15 over its slowest cable's bits a second; 0 where the map gives none of them
+   a bandwidth */
 static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   uint64_t slowest;
-  const uint32_t n=mesh_cables(map,u,x,&slowest);
+  mesh_cables(map,u,x,&slowest);
   if(!slowest)return 0;
-  double inverse=8e9/(double)slowest;
-  if(n>1)inverse/=n;
-  return (uint64_t)llround(inverse*1e6);
+  return (uint64_t)llround(8e9/(double)slowest*1e6);
 }
 
 /* A node's mark (the map's, else its number) */
@@ -196,8 +194,7 @@ static void mesh_distances(uint32_t N,const unsigned char *joined,const uint64_t
     }
   }
 }
-/* Each root's in-tree of shortest routes (fewest links, then the least inverse bandwidths, a pair's cables striped,
-   mesh_hop_inverse): each node's parent among those one equal step nearer the root, the least hash of its mark, the
+/* Each root's in-tree of shortest routes (fewest links, then the least inverse bandwidths, mesh_hop_inverse): each node's parent among those one equal step nearer the root, the least hash of its mark, the
    parent's and the root's.  A node's parent reads its own candidates alone, so a route is a function of
    the shortest routes between its ends.  Integers throughout. */
 int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
@@ -209,8 +206,8 @@ int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
   unsigned char *joined=calloc(pairs,1),*done=malloc(N);
   struct mesh_length *length=malloc(N*sizeof *length);
   const int status=inverse && joined && done && length?0:ENOMEM;
-  /* a pair's hop: joined where a link joins it (a mesh's every pair), at its cables' inverse bandwidth striped (none
-     given counts none) */
+  /* a pair's hop: joined where a link joins it (a mesh's every pair), at its inverse bandwidth (none given counts
+     none) */
   for(uint32_t u=0;!status && map->kind==MESH_LINKS_MESH && u<N;u++)for(uint32_t x=0;x<N;x++)joined[(size_t)u*N+x]=u!=x;
   for(uint32_t l=0;!status && l<map->links;l++){
     const uint32_t u=map->link[l][0],x=map->link[l][1];
@@ -363,8 +360,8 @@ uint32_t mesh_trees_path(const struct mesh_trees *trees,uint32_t from,uint32_t t
 }
 
 /* The tree set's members' hops: each linked pair's route on the map's table, its physical links (u N + x, the sender's
-   way) at hop[(a n + b) N ..] (count[a n + b]), and its length (its links, then its pairs' striped inverse
-   bandwidths, as mesh_routes measures) */
+   way) at hop[(a n + b) N ..] (count[a n + b]), and its length (its links, then its pairs' inverse bandwidths, as
+   mesh_routes measures) */
 struct mesh_hops { uint32_t n,N,*count,*hop; struct mesh_length *length; };
 /* a tree edge, member v's hop to its parent u, put on (sign 1) or taken off (-1) every physical link it crosses the way
    from v to u: a reduction's part goes up each edge once and a broadcast's comes down it, so the loads down mirror the

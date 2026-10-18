@@ -296,9 +296,9 @@ def session_bytes(peers, wire_=None):
 
 def relay_bytes(wire_=None):
     """ncclMeshRelayBytes: the bytes of its node's window a relay's bridge leases for one direction of a session on
-    `wire_` (wire(): None, this process's) that its route crosses (mesh-flow.c mirror): one such lease, and one client
-    slot of its bridge (mesh.h MESH_CLIENTS), a direction of two members of a session whose route crosses the node,
-    whatever its stripes; session_bytes (above) is what each member's own bridge leases."""
+    `wire_` (wire(): None, this process's) that its route crosses (mesh-flow.c mirror): the two directions of two
+    members of a session whose route crosses the node are one relay program, one client slot of its bridge (mesh.h
+    MESH_CLIENTS) and twice this; session_bytes (above) is what each member's own bridge leases."""
     made = ffi.new('uint64_t *')
     if lib.ncclMeshRelayBytes(wire_ if wire_ is not None else wire(), made):
         raise ValueError('ncclMeshRelayBytes')

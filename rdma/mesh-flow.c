@@ -371,6 +371,7 @@ struct ledger_landing { uint64_t record,landed; uint32_t cycle,pad; };
 struct ledger_cell { uint64_t cell,bytes; uint32_t ring,invocation,position,binding,chunks,pad; };
 struct ledger {
   uint32_t id,cells,cut_sends,cut_landings,current[MESH_QUEUES];
+  uint64_t started;
   struct ledger_cell *cell;
   struct ledger_send *send;
   struct ledger_landing *landing;
@@ -1007,7 +1008,7 @@ static struct program *program_take(uint64_t owner,int relay){
     struct path *path=paths+prog->path_count++;
     *path=(struct path){.program=prog,.destination=d,.node=tx->node,.port=tx->port?tx->port-1u:MESH_PORTS};
     if(ledger_kept && (path->ledger=calloc(1,sizeof *path->ledger))){
-      path->ledger->id=atomic_fetch_add(&ledger_ids,1)+1;
+      path->ledger->id=atomic_fetch_add(&ledger_ids,1)+1;path->ledger->started=now_ns();
       path->ledger->send=calloc(MESH_LEDGER_EVENTS,sizeof *path->ledger->send);
       path->ledger->landing=calloc(MESH_LEDGER_EVENTS,sizeof *path->ledger->landing);
       if(!path->ledger->send || !path->ledger->landing){ledger_free(path->ledger);path->ledger=NULL;}
@@ -1742,8 +1743,9 @@ static int ledger_cut(uint64_t key,const char *path){
       if(!l)continue;
       if(!out && !(out=fopen(path,"a")))return errno;
       const uint32_t sends=atomic_load_explicit(&l->sends,memory_order_acquire),landings=atomic_load_explicit(&l->landings,memory_order_acquire);
-      fprintf(out,"{\"ledger\":%u,\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"invocations\":%u,\"cyclic\":%u,\"sends\":%u,"
-              "\"landings\":%u,\"cut\":[%u,%u]}\n",l->id,(unsigned long long)key,M->node,at->node,at->port,prog->invocations,prog->cyclic,sends,
+      fprintf(out,"{\"ledger\":%u,\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"near\":%u,\"far\":%u,"
+              "\"invocations\":%u,\"cyclic\":%u,\"started\":%llu,\"sends\":%u,\"landings\":%u,\"cut\":[%u,%u]}\n",l->id,(unsigned long long)key,M->node,
+              at->port<port_count?ports[at->port].peer:0,at->port,M->node,at->node,prog->invocations,prog->cyclic,(unsigned long long)l->started,sends,
               landings,l->cut_sends,l->cut_landings);
       for(uint32_t e=sends-l->cut_sends>MESH_LEDGER_EVENTS?sends-MESH_LEDGER_EVENTS:l->cut_sends;e!=sends;e++){
         const struct ledger_send *s=l->send+e%MESH_LEDGER_EVENTS;

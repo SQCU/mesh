@@ -7,7 +7,7 @@
    nccl-mesh.c exports hidden to this file where MESH_HOST_EXECUTOR is defined), publications release-stored, a wait for
    a landing a poll of its word (nccl-mesh-metal.m mesh_step_wait: until it reaches 1 + the cycle or its bridge's
    cancel stores ~0, or, where its dispatch has violation words, word [2] set), a cancelled wait recorded in violation
-   words [2] and [3], so every later wait ends (design/bridge-and-ipc.md#control), a landed wait's positions checked
+   words [2] and [3], so every later wait ends (design/bridge-and-ipc.md#programs), a landed wait's positions checked
    against the filler protocol (violation words [0] and [1]).  A buffer is a host
    address (metal_wrap returns its address; metal_contents it); what metal_scratch and metal_event made is counted and
    freed with its last release.  The Metal 4 form's own steps (a caller's kernel running a step: metal_send_deferred,

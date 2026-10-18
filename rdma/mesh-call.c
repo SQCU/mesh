@@ -682,7 +682,7 @@ struct mesh_calls {
   struct mesh_active *actives;
   struct mesh_route_event *route_events;
   uint32_t route_base,route_event_count;
-  /* design/bridge-and-ipc.md#control: the destinations a landing found cancelled (a bit an identity), whose every other
+  /* design/bridge-and-ipc.md#programs: the destinations a landing found cancelled (a bit an identity), whose every other
      landing is lost with it: its bridge cancels the positions past a channel's landed count alone */
   _Atomic uint64_t lost[2*MESH_DESTINATIONS/64];
 };

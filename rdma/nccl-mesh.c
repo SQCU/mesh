@@ -482,7 +482,7 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
   return NULL;
 }
 
-/* the digest of what a communicator's programs and its session's flows are made from (FNV-1a over 64-bit words): the
+/* the digest of what a communicator's programs and its session's channels are made from (FNV-1a over 64-bit words): the
    planner's rules (MESH_PLAN_VERSION), its members, the route between each two of them on `map` (mesh_route_path: its
    nodes' marks, the bridges' node numbers) and the bandwidth of each link it crosses (the cables between one pair),
    the session's wire, the caller's paths and the trees (each tree's root, parents and weight's bits: two builds of
@@ -884,7 +884,7 @@ static void session_retire(struct session *s);
 static ncclResult_t drain(void);
 static ncclResult_t session_kept(struct session *s);
 /* ncclCommFinalize (NCCL: "completing all operations in the background ... flushed"; MPI_Finalize): comm's issued work
-   completed, events alone (design/bridge-and-ipc.md#control): every GPU program finished (drain), nothing on the wire;
+   completed, events alone (design/bridge-and-ipc.md#programs): every GPU program finished (drain), nothing on the wire;
    a session that failed returns its failure.  comm's session is closed by ncclCommDestroy, whose bridge then posts what
    it released; no group runs on comm after it */
 ncclResult_t ncclCommFinalize(ncclComm_t comm) {
@@ -902,11 +902,12 @@ ncclResult_t ncclCommFinalize(ncclComm_t comm) {
 }
 
 /* ncclCommRevoke: comm revoked for good (`revoked`, until ncclCommDestroy): its session's program retired as an abort
-   (mesh-dataflow.c mesh_retire: its bridge fails its flows and tells their peers FAIL, and cancels its words past
-   their landed counts, after its last landing, so a GPU wait on them ends and its program halts: nccl-mesh-metal.m
-   mesh_step_check), its groups in flight failed (a host-path group returns the revoke, a completion through one returns
-   the loss), a session opening (its start waiting for its peers' programs, its agreement for their digests) ended at
-   once (the same retire ends the start's wait; its agreement reads the revoke), a session not yet opening never opened
+   (mesh-dataflow.c mesh_retire: its bridge fails its program, makes its leases again with the code each peer's
+   program fails by, and cancels its words past their landed counts, so a GPU wait on them ends and its program halts:
+   nccl-mesh-metal.m mesh_step_check), its groups in flight failed (a host-path group returns the revoke, a completion
+   through one returns the loss), a session opening (its agreement's meeting, its start, its digests' meeting) ended at
+   once (mesh_transfers_interrupt ends the meeting's socket wait and the retire the start's; the digests' wait reads the
+   revoke), a session not yet opening never opened
    (session_open reads the revoke where it begins and where it would wait), and every later group on comm failed at
    once.  All under the communicator's own lock alone, never the sessions' lock, which a group of any communicator holds
    while it waits on its peers: a revoke from another thread reaches a member waiting for an absent peer, or behind
@@ -947,11 +948,11 @@ static ncclResult_t revoked_fail(ncclComm_t comm) {
   return fail(ncclRemoteError, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
 }
 
-/* ncclCommDestroy (design/bridge-and-ipc.md#control: the client never waits on the close; its bridge does): comm's
+/* ncclCommDestroy (design/bridge-and-ipc.md#programs: the client never waits on the close; its bridge does): comm's
    session closed in order once no session of it is opening and its own GPU programs have finished (session_close: its
    slot retired in order, mesh_detach, so its bridge posts every cell the session released, takes those SENDs'
-   completions and then releases its flows and rows, telling no peer), and comm freed; it returns without waiting on any
-   peer.  A session that failed, or a revoked comm's, closes as an abort */
+   completions and then lets go of its leases and rows, each peer told the SENDs completed on its lease), and comm
+   freed; it returns without waiting on any peer.  A session that failed, or a revoked comm's, closes as an abort */
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
   pthread_mutex_lock(&session_lock);
@@ -962,7 +963,8 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   return ncclSuccess;
 }
 
-/* ncclCommAbort: comm revoked (its session's flows failed, FAIL), then destroyed: nothing issued is completed */
+/* ncclCommAbort: comm revoked (its session's program failed, its peers' with it), then destroyed: nothing issued is
+   completed */
 ncclResult_t ncclCommAbort(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
   ncclCommRevoke(comm, NCCL_REVOKE_DEFAULT);
@@ -1223,7 +1225,7 @@ static int landed(uint64_t word, uint64_t at) { return word != UINT64_MAX && wor
 static _Atomic uint64_t session_waits;
 
 /* the session's failure kept for its next group, its positions counted as seen; its words are its bridge's to cancel
-   (design/bridge-and-ipc.md#control: past their landed counts, after its last landing), which a revoke or a failed
+   (design/bridge-and-ipc.md#programs: past their landed counts, after its last landing), which a revoke or a failed
    session's close asks of it by retiring the session's program as an abort (session_retire) */
 static void release_all(struct session *s, int result, const char *format, ...) {
   int none = ncclSuccess;
@@ -1349,10 +1351,11 @@ static ncclResult_t drain(void) {
 
 static void inflight_lose(struct session *s);
 /* the session ended: its groups in flight lost, every GPU program finished (drain), its program's slot retired with
-   its sections (its rings and violation words: the bridge holds them until it has released its flows) in order
+   its sections (its rings and violation words: the bridge holds them until it has let go of its leases) in order
    (`orderly`: mesh_detach, its bridge posting every cell the session released, taking those SENDs' completions and
-   then releasing its flows, nothing told any peer, design/bridge-and-ipc.md#control), else as an abort (mesh_retire
-   first: its bridge fails its flows, FAIL to each peer, and cancels its words past their landed counts), the process's
+   then letting go of its leases, design/bridge-and-ipc.md#programs; the relay channels its agreement holds closed with
+   the word that it ended in order), else as an abort (mesh_retire first: its bridge fails its program, its leases made
+   again with the code each peer's program fails by, its words past their landed counts cancelled), the process's
    attach left it (detached where its bridge is gone and nothing else holds it) */
 static void session_close(struct session *s, int orderly) {
   if (!s) return;
@@ -1377,8 +1380,9 @@ static void session_close(struct session *s, int orderly) {
 }
 
 /* the session's program's slot retired as an abort (mesh-dataflow.c mesh_retire, once whoever calls it): its start's
-   wait ends (mesh-call.c mesh_transfers_start: ECANCELED), and its bridge fails its flows (FAIL to its peers) and
-   cancels its words past their landed counts */
+   wait ends (mesh-call.c mesh_transfers_start: ECANCELED), its agreement's wait too (mesh_transfers_interrupt), and its
+   bridge fails its program (its leases made again with the code its peers' programs fail by) and cancels its words
+   past their landed counts */
 static void session_retire(struct session *s) { mesh_retire(s->header, s->context.client); mesh_transfers_interrupt(&s->context); }
 
 /* the process's exit: every session closed in order (its GPU work finished, then its bridge posts what it released) */
@@ -1603,11 +1607,11 @@ static uint64_t session_bytes(uint64_t peers, const struct mesh_wire *wire) {
          WHOLE(sizeof(struct mesh_cancellation) + (peers ? peers : 1) * sizeof(struct mesh_cancel_range), block) + WHOLE(page, block);
 }
 
-/* one direction of a session a relay's bridge forwards (ncclMeshRelayBytes; mesh-flow.c mirror): the direction's
-   transfers, a ring of each class, mirrored; the lists of its two destinations, the sender and the receiver; and the
-   SEND cells and targets of its two transfers */
+/* one direction of a session a relay's bridge forwards (ncclMeshRelayBytes; mesh-flow.c mirror, whose one program a
+   relayed pair carries both directions): the direction's transfers, a ring of each class, mirrored; one of the
+   program's two destinations' lists; and the SEND cells and targets of its two transfers */
 static uint64_t relay_bytes(const struct mesh_wire *wire) {
-  return ring_bytes(wire->slot, wire) + ring_bytes(wire->small, wire) + 2 * lists_bytes(wire) + cells_bytes(2, wire);
+  return ring_bytes(wire->slot, wire) + ring_bytes(wire->small, wire) + lists_bytes(wire) + cells_bytes(2, wire);
 }
 #undef WHOLE
 
@@ -2139,7 +2143,8 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
    walk recorded) fails this group and closes the session, and the caller's next group opens another (no group is tried again here).  A session runs on the map its
    members agreed on until it fails: a change of the map never closes it, so no member reopens at a group of its own
    and fails the group a peer had in flight on the old one.  A link or node its routes cross lost fails it on every
-   member (the bridges cancel its flows, a member gone retires its program and its peers' flows toward it end), each
+   member (the bridges cancel its words, a member gone retires its program and its peers' programs fail by the code its
+   leases carry), each
    member reopening at its next group on the map then, which the agreement (session_agree) checks; a change that leaves
    its routes working (a link elsewhere, a node joining, a better route appearing) reaches the communicator's next
    session, and every call of metal-microbench makes its communicators at its first crossing (A28: the route resolved
@@ -2384,9 +2389,7 @@ static struct metal_check check_of(struct session *s, struct channel *ch, uint64
 }
 
 /* the GPU waits until `count` of the channel's positions have landed: a spin on each one's completion word not yet
-   awaited, in order, each position checked against its role as its wait covers it (a program over several cables
-   lands its positions out of order, position t on cable t mod n: design/bridge-and-ipc.md#cables, so a later
-   position's landing says nothing of an earlier one's) */
+   awaited, in order, each position checked against its role as its wait covers it */
 static ncclResult_t arrive(struct metal_program *program, struct session *s, struct channel *ch, uint64_t count) {
   ncclResult_t result = ncclSuccess;
   for (uint64_t at = ch->waited; at < count && !result; at++) {

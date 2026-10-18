@@ -4,10 +4,11 @@ list of its name (the document's stem), its purpose, its window in bytes, whethe
 them, `ledger`.  A document states its `purpose` and its window, either `window_gib` (GiB) or `window_percent` (of the
 node's physical memory, read where this runs: the node's own bin/mesh-user.sh), and may state `exec`, true where the
 bridge runs its peers' commands as its user (design/bridge-and-ipc.md#exec; a document that does not state it true
-serves none), and `ledger`, true where the bridge keeps each flow's ledger and writes it at the flow's end
+serves none), and `ledger`, true where the bridge keeps each program path's stamps for its clients' ledger cuts
 (design/bridge-and-ipc.md#ledger; a document that does not state it true keeps none, and its canonical form names no
 `ledger`), and its paced emissions (design/bridge-and-ipc.md#keepalive), each in microseconds and each none where it is
-not stated: `keepalive_us`, the most an exclusive flow goes without a frame on its control queue pair while it runs;
+not stated: `keepalive_us`, the most a link goes without a frame on its keepalive queue pair while a program holds one
+of its leases;
 `hello_us`, the interval at which a port with no peer says HELLO again (a HELLO lost on its link has no other event);
 and `health_us`, the interval at which the node's record is flooded again (design/recovery.md#diagnosis) (canonical
 `keepalive`, `hello` and `health`, nanoseconds), and nothing else; the window is at most the node's memory.  There is no
