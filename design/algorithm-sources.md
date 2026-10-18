@@ -1237,6 +1237,19 @@ kernel declaring `combine` (Swift's `using combine:`): each peer's term moved to
 and combined there by a tree of the combine's kernel (`kernel_call(op, peer=owner)`), into fresh blocks; `all_reduce`
 of such a combine is that `reduce_scatter`, then `all_gather`.
 
+Swift's `reduce(_:to:using:worker:)`, `reduceScatter` and `allReduce` (swift/Mesh.swift) are mesh-collective.c's
+compiled programs, as the verbs' movement is: the members' trees (`mesh_trees_shortest` over the bridges' map of them,
+`mesh_map`, libnccl-mesh's rule for a communicator given no paths), `mesh_compile` of `MESH_REDUCE`,
+`MESH_REDUCE_SCATTER` or `MESH_ALLREDUCE` (each tree's part whole), and every member's steps
+(`mesh_program_steps_cut`) over an operand whose element is a part, index i in owners[i]'s segment: in round order a
+COPY step a `send` of the peer's part, a REDUCE step the same and the supplied combine's `call` into the member's (a
+member holding none takes it as it comes, the compile's COPY of a first child; a peer holding none sends none). A rank's
+own terms are combined first. Every rank records the same steps, so the transfers' identities pair; the trees of every
+member set are folded into the digest `start()` names (`mesh_transfers_digest`), so members that read other maps fail
+as values (ESTALE). The walk was checked offline against the compiled programs (every kind, on full-mesh, ring, line
+and star maps of 2 to 7 members, random contributors and segments: each member holds what the verb defines, each term
+once).
+
 ## Collective movement
 
 The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm)
@@ -1250,6 +1263,11 @@ every block) and `broadcast(..., root, peers)` the same with every block `root`'
 destinations)` is MPI_Alltoallv (`torch.distributed.all_to_all_single` on the "mesh" backend), and `scatter` and
 `gather` the same with every block's sender or receiver `root`. Each defines the block on its receivers in place, its
 blocks packed into one window tensor and back.
+
+Swift's `broadcast` and `allGather` are mesh-collective.c's `MESH_ALLGATHER` among the parts' ranks and the
+destinations (a part an element, a contributor's segment its parts; the walk at
+[collective.reduce_scatter](#collectivereduce_scatter)), in place of a send of every part to every destination and
+of `size` gathers; `gather`, `scatter`, `allScatter` and `allToAll` stay sends, point to point as NCCL's are.
 
 ## Vocabulary projection
 

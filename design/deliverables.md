@@ -243,9 +243,9 @@ recovery, [recovery.md](recovery.md); the collectives' API, [rdma/NCCL.md](../rd
 Restored 2026-10-17 against the restored interfaces (mesh 604f210e deleted it with the Swift module's record; the
 module came back in 71bced9e, the Python surface in python/mesh). The importable library is the Swift module `Mesh`
 (`swift/Mesh.swift`, `Bounds.swift`, `Topology.swift`) over the C runtime (`rdma/mesh-call.c`, `mesh-dataflow.c`,
-`mesh.h`, the node's resident bridge `mesh-flow.c`), and its Python surface `mesh` (`python/mesh`) over libnccl-mesh
-(`torch.distributed`'s "mesh" backend, rdma/torch-mesh) with torch operands; the kernels and layers its examples
-compose (`examples/kernels.py`, `examples/nn.py`) are program type C, not the library (section 5):
+`mesh-collective.c`, `mesh.h`, the node's resident bridge `mesh-flow.c`), and its Python surface `mesh` (`python/mesh`)
+over libnccl-mesh (`torch.distributed`'s "mesh" backend, rdma/torch-mesh) with torch operands; the kernels and layers
+its examples compose (`examples/kernels.py`, `examples/nn.py`) are program type C, not the library (section 5):
 
 ```
 Mesh(region:, rank:, size:, workers:, inFlight:, placement:, nodes:) // the execution's name; rank r's bridge node
@@ -258,8 +258,9 @@ mesh_call_operand.load(at:as:)                           // logical element inde
 Mesh.call(function, inputs:, outputs:, on:, worker:)
 Mesh.map(function, inputs: [[TensorPart]], outputs:, workers:)
 Mesh.send(part, to:, queue:) -> TensorPart
-Mesh.broadcast / scatter / allScatter / gather / allGather / allToAll
+Mesh.broadcast / scatter / allScatter / gather / allGather / allToAll // broadcast, allGather: mesh-collective.c's all-gather
 Mesh.reduce(parts, to:, using:, worker:) / reduceScatter(contributions, to:, using:, workers:) / allReduce(…)
+                                                          // mesh_compile's reduce, reduce-scatter, all-reduce: each step a send, a REDUCE the combine's call
 Mesh.start()                                              // realize storage, bindings, receives, links
 Mesh.invocation(slot).submit() -> generation              // admission of one instance
 MeshInvocation.result(generation) -> Result<Void, MeshError> // N2: one status load; busy until conclusion
@@ -332,11 +333,11 @@ record's, its last sentence the restored surfaces' names.
 
 **L3. Publish on visibility, fire on presence.** completion → `mesh_publish(row)` → for each consumer in the row's contiguous use range: decrement its pending count; zero enqueues it on its worker. No consumer evaluates "are my inputs present". Ref: Monsoon; Realm; TensorFlow Send/Recv; Naiad occurrence counts. Check: I2, I3, I17; `mesh_publish` walks one contiguous range and performs one decrement per use. Restored surfaces: Swift `rdma/mesh-call.c` (a call's pending count); Python `Program` (a token per (writer, reader) edge, a call firing at its last token, design/algorithm-sources.md#program).
 
-**L4. Ten collective verbs as movement + supplied combine.** §2 list; `reduce*` take `using: TensorFunction`. Ref: MPI-4.1 ch. 5; Rabenseifner/Patarasuk–Yuan; Gloo. Check: every verb is `send` + `call(combine)`; movement does no arithmetic; explicit destinations at every world size. Not it: gather-everything-then-sum; any verb inferred from `size`. Restored surfaces: Swift's verbs; Python `mesh.collective` (a block row one libnccl-mesh call: movement `ncclMeshAllGatherV` or the all-to-all; a reduction by `SUM`, `MAX` or `MIN` `ncclMeshReduceScatterV` or the all-reduce, by `PARTIALS` the log-sum-exp merge; any other combine movement plus the supplied combine's kernel).
+**L4. Ten collective verbs as movement + supplied combine.** §2 list; `reduce*` take `using: TensorFunction`. Ref: MPI-4.1 ch. 5; Rabenseifner/Patarasuk–Yuan; Gloo. Check: every verb is `send` + `call(combine)`; movement does no arithmetic; explicit destinations at every world size. Not it: gather-everything-then-sum; any verb inferred from `size`. Restored surfaces: Swift's verbs, bound to mesh-collective.c's compiled programs (`mesh_compile` along the members' trees, `mesh_program_steps_cut`): each step a `send`, a REDUCE step the supplied combine's `call`; gather, scatter and the all-to-all point to point; Python `mesh.collective` (a block row one libnccl-mesh call: movement `ncclMeshAllGatherV` or the all-to-all; a reduction by `SUM`, `MAX` or `MIN` `ncclMeshReduceScatterV` or the all-reduce, by `PARTIALS` the log-sum-exp merge; any other combine movement plus the supplied combine's kernel).
 
 **L5. Partial is a type.** A `P`-layout term of the Definition (full support, pending `+`) is typed: `TensorPart.partial: Bool` set on `reduceScatter/reduce` contributions; `Mesh.call` throws `MeshError.partialOperand(part)` at setup when a non-combine function binds a partial. Ref: DTensor `Partial`; Legion `reduce`; Korthikanti 2022. Check: one `throw` in `call`; no runtime state. Restored surfaces: Python `Partial` (`kernel_call` refuses a partial operand of any kernel that does not declare `combine`, TypeError at recording; `Partial.merge` refuses a contribution counted twice); Swift has no partial type yet.
 
-**L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. A *partial tensor* (Definition) has combine `+` and the exactness of I23; another associative combine is movement plus a supplied function and carries no claim beyond associativity. Ref: `MPI_Op`; Blelloch. Check: no special case for `+` in the movement. Restored surfaces: Swift `reduce(using:)`; Python `op=` (`SUM`, `MAX`, `MIN` and `PARTIALS` go to libnccl-mesh; any supplied kernel declaring `combine` otherwise).
+**L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. A *partial tensor* (Definition) has combine `+` and the exactness of I23; another associative combine is movement plus a supplied function and carries no claim beyond associativity. Ref: `MPI_Op`; Blelloch. Check: no special case for `+` in the movement. Restored surfaces: Swift `reduce(using:)` (the combine's calls placed by the compiled reduce's REDUCE steps); Python `op=` (`SUM`, `MAX`, `MIN` and `PARTIALS` go to libnccl-mesh; any supplied kernel declaring `combine` otherwise).
 
 **L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5. Restored surfaces: Swift's sections and leases; Python storage freed with its last view (a window lease returned with it, `mesh.lease`).
 

@@ -252,6 +252,27 @@ private final class MeshMemory {
     }
 }
 
+// the C planner's arrays (mesh-plan.h), held while its structs point into them: a forest's trees (struct mesh_trees),
+// a compile's program (struct mesh_program)
+private class MeshArrays {
+    private var held: [UnsafeMutableRawPointer] = []
+
+    // design/algorithm-sources.md#collective-movement
+    func make<Value>(_ count: Int, _ value: Value) -> UnsafeMutablePointer<Value> {
+        let made = UnsafeMutablePointer<Value>.allocate(capacity: max(1, count))
+        made.initialize(repeating: value, count: max(1, count))
+        held.append(UnsafeMutableRawPointer(made))
+        return made
+    }
+
+    // design/algorithm-sources.md#collective-movement
+    deinit { held.forEach { $0.deallocate() } }
+}
+
+private final class MeshForest: MeshArrays {
+    var trees = mesh_trees()
+}
+
 private typealias MeshBody = (OpaquePointer) -> Void
 private struct MeshLaunch {
     let function: MeshBody?
@@ -365,6 +386,8 @@ public final class Mesh {
     private var preparations: [() throws -> Void] = []
     private var finalizations: [() throws -> Void] = []
     private var routes: [Placement.Edge: [Int]]
+    private var forests: [[Int]: MeshForest] = [:]
+    private var digest: UInt64 = 0xcbf29ce484222325
 
     // design/algorithm-sources.md#program
     // `region`: the execution's name, the same on every member (its programs pair with theirs on the node's bridge);
@@ -542,9 +565,10 @@ public final class Mesh {
                                   identity, ring, ring.pages, 0, UInt32.max, part.shared ? 1 : UInt32(inFlight))
     }
 
-    // design/algorithm-sources.md#collective-movement
+    // design/algorithm-sources.md#collective-movement: each part to every destination, one compiled MESH_ALLGATHER
     public func broadcast(_ parts: [TensorPart], to destinations: [Int], queue: Int = 0) throws -> [[TensorPart]] {
-        try destinations.map { destination in try parts.map { try send($0, to: destination, queue: queue) } }
+        let held = try collective(Int(MESH_ALLGATHER), [parts], owners: parts.map(\.rank), over: Set(destinations), queue: queue)
+        return destinations.map { d in parts.indices.map { held(d, $0) } }
     }
 
     // design/algorithm-sources.md#collective-movement
@@ -564,9 +588,10 @@ public final class Mesh {
         try parts.map { try send($0, to: destination, queue: queue) }
     }
 
-    // design/algorithm-sources.md#collective-movement
+    // design/algorithm-sources.md#collective-movement: every part on every rank, one compiled MESH_ALLGATHER
     public func allGather(_ parts: [TensorPart], queue: Int = 0) throws -> [[TensorPart]] {
-        try (0..<size).map { try gather(parts, to: $0, queue: queue) }
+        let held = try collective(Int(MESH_ALLGATHER), [parts], owners: parts.map(\.rank), over: Set(0..<size), queue: queue)
+        return (0..<size).map { r in parts.indices.map { held(r, $0) } }
     }
 
     // design/algorithm-sources.md#collective-movement
@@ -574,39 +599,107 @@ public final class Mesh {
         try allScatter(parts, to: Array(0..<size), queue: queue)
     }
 
-    // design/algorithm-sources.md#collectivereduce_scatter
+    // design/algorithm-sources.md#collectivereduce_scatter: the parts combined at `destination`, one compiled MESH_REDUCE
     public func reduce(_ parts: [TensorPart], to destination: Int, using combine: TensorFunction,
                        worker: Int, queue: Int = 0) throws -> TensorPart {
         precondition(!parts.isEmpty && parts.allSatisfy { $0.bytes == parts[0].bytes })
-        var level = parts
-        while level.count > 1 {
-            var next: [TensorPart] = []
-            for i in stride(from: 0, to: level.count, by: 2) {
-                if i + 1 == level.count { next.append(level[i]); continue }
-                let owner = level.count == 2 ? destination : level[i].rank
-                let pair = try gather([level[i], level[i + 1]], to: owner, queue: queue)
-                let output = [try part(on: owner, bytes: pair[0].bytes)]
-                try call(combine, inputs: pair, outputs: output, on: owner, worker: worker)
-                next.append(output[0])
-            }
-            level = next
-        }
-        return try send(level[0], to: destination, queue: queue)
+        return try collective(Int(MESH_REDUCE), parts.map { [$0] }, owners: [destination], over: [destination], using: combine,
+                              workers: [worker], queue: queue)(destination, 0)
     }
 
-    // design/algorithm-sources.md#collectivereduce_scatter
+    // design/algorithm-sources.md#collectivereduce_scatter: index i's contributions combined at owners[i], one compiled
+    // MESH_REDUCE_SCATTER
     public func reduceScatter(_ contributions: [[TensorPart]], to owners: [Int], using combine: TensorFunction,
                               workers: [Int], queue: Int = 0) throws -> [TensorPart] {
         precondition(contributions.allSatisfy { $0.count == owners.count } && workers.count == owners.count)
-        return try owners.indices.map { i in
-            try reduce(contributions.map { $0[i] }, to: owners[i], using: combine, worker: workers[i], queue: queue)
-        }
+        let held = try collective(Int(MESH_REDUCE_SCATTER), contributions, owners: owners, over: Set(owners), using: combine,
+                                  workers: workers, queue: queue)
+        return owners.indices.map { held(owners[$0], $0) }
+    }
+
+    // design/algorithm-sources.md#collectivereduce_scatter: index i's contributions combined on every rank, one compiled
+    // MESH_ALLREDUCE (index i in owners[i]'s segment: reduced up its trees, then down them to every rank)
+    public func allReduce(_ contributions: [[TensorPart]], owners: [Int], using combine: TensorFunction,
+                          workers: [Int], queue: Int = 0) throws -> [[TensorPart]] {
+        precondition(contributions.allSatisfy { $0.count == owners.count } && workers.count == owners.count)
+        let held = try collective(Int(MESH_ALLREDUCE), contributions, owners: owners, over: Set(0..<size), using: combine,
+                                  workers: workers, queue: queue)
+        return (0..<size).map { r in owners.indices.map { held(r, $0) } }
     }
 
     // design/algorithm-sources.md#collectivereduce_scatter
-    public func allReduce(_ contributions: [[TensorPart]], owners: [Int], using combine: TensorFunction,
-                          workers: [Int], queue: Int = 0) throws -> [[TensorPart]] {
-        try allGather(reduceScatter(contributions, to: owners, using: combine, workers: workers, queue: queue), queue: queue)
+    private func combined(_ a: TensorPart, _ b: TensorPart, using combine: TensorFunction, worker: Int) throws -> TensorPart {
+        let output = try part(on: a.rank, bytes: a.bytes)
+        try call(combine, inputs: [a, b], outputs: [output], on: a.rank, worker: worker)
+        return output
+    }
+
+    // design/algorithm-sources.md#collective-movement: a collective as mesh-collective.c compiles it (mesh_compile of
+    // `what` along the members' trees, each tree's part whole) among `ranks`, the owners and the contributors, over an
+    // operand whose element is a part, index i in owners[i]'s segment (a rank's own terms of an index combined first),
+    // every member's steps (mesh_program_steps_cut) recorded in round order: a COPY the peer's part sent to the member, a
+    // REDUCE the same combined into the member's (a member holding none takes it as it comes, the compile's COPY of a
+    // first child; a peer holding none sends none); rank r's part of index i
+    private func collective(_ what: Int, _ contributions: [[TensorPart]], owners: [Int], over ranks: Set<Int>,
+                            using combine: TensorFunction? = nil, workers: [Int] = [], queue: Int) throws -> (Int, Int) -> TensorPart {
+        let members = ranks.union(owners).union(contributions.flatMap { $0.map(\.rank) }).sorted(), n = members.count
+        let order = owners.indices.sorted { (owners[$0], $0) < (owners[$1], $1) }
+        var held = [[TensorPart?]](repeating: Array(repeating: nil, count: order.count), count: n), position = order
+        for (e, i) in order.enumerated() {
+            position[i] = e
+            for terms in contributions {
+                let m = members.firstIndex(of: terms[i].rank)!
+                held[m][e] = try held[m][e].map { try combined($0, terms[i], using: combine!, worker: workers[i]) } ?? terms[i]
+            }
+        }
+        if n > 1, let root = owners.first.flatMap(members.firstIndex) {
+            let forest = try forest(of: members), scratch = MeshArrays(), bits = scratch.make((n + 63) / 64, UInt64(0))
+            let contributors = (0..<n).filter { m in held[m].contains { $0 != nil } }, counts = members.map { r in owners.filter { $0 == r }.count }
+            for m in contributors { bits[m / 64] |= 1 << UInt64(m % 64) }
+            var trees = forest.trees, parts: UInt32 = 0, moves: UInt32 = 0, program = mesh_program()
+            mesh_compile_room(&trees, 1, &parts, &moves)
+            let error = mesh_compile(&trees, UInt32(what), UInt32(root), 0, 1, bits, &program,
+                                     scratch.make(Int(parts), UInt32(0)), scratch.make(Int(parts), 0.0), scratch.make(n + 1, UInt32(0)),
+                                     scratch.make(Int(moves), mesh_move()))
+            if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EINVAL) }
+            let segments = what == Int(MESH_REDUCE) ? [UInt64(order.count)]
+                : (what == Int(MESH_ALLGATHER) ? contributors.map { counts[$0] } : counts).map(UInt64.init)
+            var steps: [(round: UInt32, member: Int, index: Int, step: mesh_step)] = []
+            for m in 0..<n {
+                var made = [mesh_step](repeating: mesh_step(), count: Int(max(1, program.first[m + 1] - program.first[m])))
+                let count = Int(mesh_program_steps_cut(&program, UInt32(m), mesh_operand(type: 0, element_bytes: 1,
+                                                       elements: UInt64(order.count)), segments, &made))
+                steps += made.prefix(count).enumerated().filter { $0.element.op != UInt32(MESH_STEP_SEND) }
+                    .map { (round: $0.element.round, member: m, index: $0.offset, step: $0.element) }
+            }
+            for (_, m, _, step) in steps.sorted(by: { ($0.round, $0.member, $0.index) < ($1.round, $1.member, $1.index) }) {
+                for e in Int(step.first)..<Int(step.first + step.piece.elements) {
+                    guard let value = held[Int(step.peer)][e] else { continue }
+                    let arrived = try send(value, to: members[m], queue: queue)
+                    held[m][e] = try step.op == UInt32(MESH_STEP_COPY) || held[m][e] == nil ? arrived
+                        : combined(held[m][e]!, arrived, using: combine!, worker: workers[order[e]])
+                }
+            }
+        }
+        return { rank, i in held[members.firstIndex(of: rank)!][position[i]]! }
+    }
+
+    // design/algorithm-sources.md#collective-movement: the members' trees, mesh_trees_shortest over the bridges' map of
+    // them (mesh_map: two members linked where their route crosses no other member), libnccl-mesh's own rule for a
+    // communicator given no paths (nccl.h ncclMeshCommInitRank); read once a member set and folded into the digest
+    // start() names, so members that read other maps fail as values (ESTALE) rather than pair other transfers
+    private func forest(of members: [Int]) throws -> MeshForest {
+        if let made = forests[members] { return made }
+        let n = members.count, forest = MeshForest(), bridges = members.map { UInt32(nodes[$0]) }
+        let root = forest.make(n, UInt32(0)), parent = forest.make(n * n, UInt32(0)), weight = forest.make(n, 0.0)
+        let count = try Mesh.withMap(bridges) { map, _, _ in mesh_trees_shortest(map, root, parent, weight) }
+        if count == 0 { throw POSIXError(.EHOSTUNREACH) }
+        forest.trees = mesh_trees(nodes: UInt32(n), count: count, root: root, parent: parent, log_weight: weight)
+        for word in bridges.map(UInt64.init) + (0..<n).map({ UInt64(root[$0]) }) + (0..<n * n).map({ UInt64(parent[$0]) }) {
+            digest = (digest ^ word) &* 0x100000001b3
+        }
+        forests[members] = forest
+        return forest
     }
 
     // design/algorithm-sources.md#programkernel_call
@@ -626,10 +719,15 @@ public final class Mesh {
             try check(mesh_transfers_prepare(memory.constants, 1, 1, 1))
             try check(mesh_host_inputs(memory.constants))
         }
+        if !forests.isEmpty {
+            if bound.program { try check(mesh_transfers_digest(memory.context, digest)) }
+            if bound.constants { try check(mesh_transfers_digest(memory.constants, digest)) }
+        }
         for prepare in preparations { try prepare() }
         preparations.removeAll()
         deliveries.removeAll()
         routes.removeAll()
+        forests.removeAll()
         // design/prepared-machine.md#M18
         try check(mesh_calls_prepare(calls))
         for finalize in finalizations { try finalize() }
