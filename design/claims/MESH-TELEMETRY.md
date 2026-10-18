@@ -6,13 +6,12 @@ Controlling specifications: [`../mesh-coprocessor-demo.md`](../mesh-coprocessor-
 
 Implementation surfaces:
 
-- `user/mesh-telemetry.py` owns each node's in-memory leased telemetry stream.
+- `user/mesh-telemetry.py` owns each node's in-memory telemetry stream, a workload producer's rows kept until its
+  process exits.
 - `viz/serve.py` owns discovery, membership, live whole-fabric aggregation, and the
   page-table visualization feed.
 - `rdma/workload.py` owns workload-independent operation envelopes and measures.
-- `xonotic/solver/strat/roofline.py` owns measured operating-point search.
-- `xonotic/solver/strat/matrix_worker.py` and `strat_responder.py` own distributed Gram
-  placement and counterfactual measures.
+- `xonotic/solver/strat/strat_responder.py` owns distributed Gram placement and counterfactual measures.
 
 The claims are substantiated only when active aggregates have the same support as the
 reachable lease, stale capacity is reported only as inventory, missing objective
@@ -52,16 +51,10 @@ size.
 
 Ports 8788 and 8787 should each have one answering provider. Installation retains a
 loaded system job or an answering userspace provider rather than forcing an ownership
-transfer. User installation measures the system job's socket ownership and response
-before relying on it. It can bootstrap the same userspace interface when the system
+transfer. User installation measures the system job's socket ownership before relying on it. It can bootstrap the same userspace interface when the system
 provider is absent. Definition refresh and any pre-existing supervisor overlap require
 a continuity-preserving handoff; routine installation no longer resolves them by stopping
 the working provider. Retained jobs are not reported as newly deployed generations.
-
-The Xonotic operating profile is indexed by the literal player, team, and cart counts
-reported by the workload. Runtime bot changes trace a player-count slice at fixed team
-and cart coordinates. Match realization moves between those slices. Aggregation never
-merges observations whose three coordinates differ.
 
 Interactive observer polling requests the node's labelled scalar/array-length measure
 projection; the complete latest node record remains available without that query.

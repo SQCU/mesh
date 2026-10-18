@@ -31,7 +31,6 @@ xonotic/render-build/
 xonotic/darkplaces-work/libjpeg*.dylib
 xonotic/darkplaces-work/libpng*.dylib
 xonotic/darkplaces-work/libfreetype*.dylib
-xonotic/qcbench/id1/
 xonotic/.tmp/
 xonotic/solver/strat/runs/
 build/

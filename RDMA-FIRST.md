@@ -263,16 +263,3 @@ the descriptor the ready words lack is the group's start or the landing, and a p
 not ring is served within the park's 1 ms look. A port with nothing of its own to look for (no
 flow listed, no lane work in flight) looks every 3 s, so a node of paired links running no
 program sleeps.
-
-**Still present.**
-
-| where | state |
-|---|---|
-| `rdma/mesh-call.c` `mesh_transfers_start` | Sleeps 1 ms a turn until the bridge stores the program's `prepared` word, probing the bridge with `kill(pid, 0)` each turn. The bridge stores the word without waking it, so the client cannot wait on it; were it woken, the start would wait on the word to its deadline. |
-| `rdma/nccl-mesh.c` progress thread | `usleep(20)` on each pass of a routing session that moved nothing: twice the link's round trip. |
-| `rdma/nccl-mesh.c` `drain` | `usleep(50)` on each pass while the session's GPU programs finish. |
-| `rdma/nccl-mesh.c` bootstrap connect | `usleep(100000)` between attempts to reach the root, to its deadline. |
-| `rdma/nccl-mesh.c` `session_close` | Sleeps `LINGER_S` (1 s) before releasing the rings, on exit and before a session for other peers opens. |
-| `bin/mesh-peers.sh` | Partly fixed. The browse now ends when the reply stream goes quiet instead of after a fixed three seconds, using a 50 ms poll period. The per-node `dns-sd -t` resolve and the `nc -G` info probe still run to a deadline and dominate the wall time, so the script returns no faster than before. Saying it is fixed would be false. |
-| `bin/mesh-rdma-init.sh`, `install.sh` (two), `install-user.sh` (two) | Waiting on launchd to settle. Each should poll the condition it actually wants. |
-| `xonotic/ipcbench/bench.c` | Same habit, game-side, inherited from the build workflow and not yet cleaned. |
