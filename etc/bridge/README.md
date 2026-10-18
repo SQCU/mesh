@@ -26,17 +26,26 @@ A document has these keys:
   and its progress threads read the clock at each event. A document that does not state it true keeps none, and its
   canonical form names no `ledger` (so `ledger = false` changes nothing a node runs); the shipped documents state it
   false.
-- `keepalive_us` (optional): the most microseconds an exclusive flow goes without a frame while it runs
-  (design/bridge-and-ipc.md#keepalive): each such flow takes one queue pair more, and its send side posts a one-frame
-  SEND on it that often, so a link's controller that slows after a quiet stretch (the Mac mini's, 6-10 us after 40 us of
-  nothing) stays ready. Both ends of a flow state it for its frames to flow; a document that states none makes no such
-  queue pair.
+The bridge's paced emissions, each optional and each none where a document does not state it
+(design/bridge-and-ipc.md#keepalive):
+
+- `keepalive_us`: the most microseconds an exclusive flow goes without a frame on its control queue pair while it runs:
+  its send side posts a one-frame SEND that often, so a link's controller that slows after a quiet stretch (the Mac
+  mini's, 6-10 us after 40 us of nothing) stays ready.
+- `hello_us`: how often a port with no peer says HELLO again. A port's pairing is driven by events (its device opening,
+  its link coming on, a link lost, the peer's HELLO); a HELLO lost on its link has none, so a node whose document states
+  no interval pairs that port only at its next such event.
+- `health_us`: how often the node's record, with its health, is flooded again (design/recovery.md#diagnosis); its
+  urgent changes (power, memory or thermal pressure) are flooded as they happen either way.
+
+The shipped documents of the pair and the Studios state `keepalive_us` 5 (the pair's), `hello_us` 1,000,000 and
+`health_us` 10,000,000; the examples state `hello_us` alone.
 
 The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
 when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
 checks the window against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a window of more
 extents than that device registers is refused for that port, logged with the extent, its bytes, the errno and the
-extents the device holds, and the port turns again 60 s later, doubling to 30 min, keeping its extents
+extents the device holds, and the port turns again at its next memory-pressure change or link event, keeping its extents
 (design/recovery.md#registration). The bridge starts and serves the node either way; the window is never clamped. Clients lease
 from it; a lease that does not fit fails at its start with an error naming the execution, and the window never grows.
 How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
