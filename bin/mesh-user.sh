@@ -5,12 +5,12 @@
 # TOML or YAML document, etc/bridge/README.md): rdma/bridge_configuration.py writes its canonical form, which the agent's
 # definition names, so the keeper's load at boot keeps it.  There is no default configuration.  With CONVERGENCE, the
 # node's convergence document (etc/converge/README.md), the checkout follows its upstream by itself: the user's agent
-# io.mesh.converge runs bin/mesh-converge.sh, which builds each upstream revision in a stage and runs this script again on
-# the staged images (MESH_USER_BUILT) in a turn between calls (README.md, Convergence).  Each document's path is recorded
+# io.mesh.converge runs bin/mesh-converge.sh, which builds each upstream revision in a stage, installs its images by
+# rename and runs this script again on them (MESH_USER_BUILT) (README.md, Convergence).  Each document's path is recorded
 # beside its canonical form, so the convergence and the keeper keep the node's own.  The bridge's definition names its
 # program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename and the
-# bridge stops itself at its first liveness turn that carries no call (README.md, Convergence).  The install records
-# what it installed (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes) and the inputs it converged to.
+# bridge restarts itself on it between calls (README.md, Convergence).  The install records what it installed
+# (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes) and the inputs it converged to.
 # Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]  (~/mesh)
 set -u
 if [ $# -lt 1 ] || [ ! -f "$1" ] || { [ $# -ge 3 ] && [ ! -f "$3" ]; }; then
@@ -54,17 +54,13 @@ reader = READERS.get(path.suffix.lower())
 if reader is None:
     sys.exit(f'{path}: a convergence document is a .json, .toml or .yaml document')
 document = reader(path.read_bytes())
-keys = {'period_s', 'quiet_s', 'notice_s', 'wait_s', 'gpu_percent'}
-if not isinstance(document, dict) or set(document) != keys | {'purpose'}:
-    sys.exit(f'{path}: a convergence document states its purpose and {", ".join(sorted(keys))}, and nothing else')
+if not isinstance(document, dict) or set(document) != {'purpose', 'period_s'}:
+    sys.exit(f'{path}: a convergence document states its purpose and period_s, and nothing else')
 if not isinstance(document['purpose'], str) or not document['purpose'].strip():
     sys.exit(f'{path}: purpose, a statement of what the convergence is for, is required')
-for key in keys:
-    if isinstance(document[key], bool) or not isinstance(document[key], int) or document[key] < 0:
-        sys.exit(f'{path}: {key} is a whole number, at least 0')
-if document['period_s'] < 1 or document['wait_s'] < document['quiet_s']:
-    sys.exit(f'{path}: period_s is at least 1 and wait_s at least quiet_s')
-Path(sys.argv[3]).write_bytes(plistlib.dumps({'name': path.stem, **{k: document[k] for k in sorted(keys)}, 'purpose': ' '.join(document['purpose'].split())}))
+if isinstance(document['period_s'], bool) or not isinstance(document['period_s'], int) or document['period_s'] < 1:
+    sys.exit(f'{path}: period_s is a whole number of seconds, at least 1')
+Path(sys.argv[3]).write_bytes(plistlib.dumps({'name': path.stem, 'period_s': document['period_s'], 'purpose': ' '.join(document['purpose'].split())}))
 PY
   printf '%s\n' "$convergence" > "$support/io.mesh.converge/document"
 fi
@@ -74,7 +70,7 @@ before=$(sed -n 's/^images=//p' "$state/facts/io.mesh.bridge" 2>/dev/null)
 [ -z "$renew" ] || { cp "$source/rdma/mesh-flow" "$source/rdma/mesh-flow.renew" && mv -f "$source/rdma/mesh-flow.renew" "$source/rdma/mesh-flow"; } || exit 1
 cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- the node's bridge (bin/mesh-user.sh): a new binary or configuration is installed by rename, and the bridge stops itself at its first liveness turn that carries no call (README.md, Convergence) -->
+<!-- the node's bridge (bin/mesh-user.sh): a new binary or configuration is installed by rename, and the bridge restarts itself on it between calls (README.md, Convergence) -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
 <key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string>
@@ -84,7 +80,7 @@ PL
 loaded=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$loaded"; exit 1; }
 [ -z "$loaded" ] || printf '%s\n' "$loaded"
 [ -n "$loaded" ] || { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
-  || echo "io.mesh.bridge: its new binary or configuration is installed; the bridge stops itself at its first liveness turn that carries no call and launchd starts it on them (node-info converging names it until then)"
+  || echo "io.mesh.bridge: its new binary or configuration is installed; the bridge restarts itself on them between calls"
 printf 'revision=%s\nimages=%s\n' "$(git -C "$source" rev-parse HEAD 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
 period=$(plutil -extract period_s raw -o - "$support/io.mesh.converge/configuration.plist" 2>/dev/null)
 if [ -n "$period" ]; then

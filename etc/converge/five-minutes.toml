@@ -1,6 +1,2 @@
-purpose = "A headless node of the mesh (the Mac mini, the Mac Studios) that follows its checkouts' upstreams without hands: a pass every 5 minutes, so a push reaches the node within one pass and its build; a turn only after a minute in which the node carried no call, held none and ran its GPU at most 5 % (a driver's stream leaves seconds between its calls, a minute is past its end, and a driver or a measurement that pauses longer holds the node), announced for 10 s first (two of node-info's 5 s samples, which a driver reads before it places a call); a pass that finds no such minute within 3 minutes leaves the turn to the next."
+purpose = "A headless node of the mesh (the Mac mini, the Mac Studios) that follows its checkouts' upstreams without hands: a pass every 5 minutes, so a push reaches the node within one pass and its build; each layer's images are installed by rename, and the bridge restarts itself on them between calls."
 period_s = 300
-quiet_s = 60
-notice_s = 10
-wait_s = 180
-gpu_percent = 5

@@ -395,7 +395,7 @@ the node's uplink.
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, sampled by `io.mesh.nodeinfo` (`user/mesh-nodeinfod.py`) and served on 8099. |
 | `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` makes a launchd job's staged definition NEW the loaded one in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) under PLIST (default NEW without `.new`). A definition that names no digest of its own (an XML comment) is stamped with the digest of the files its program arguments name. It is kept, with no restart, where it equals PLIST and the loaded job runs its program arguments; a definition that does not parse is refused and the loaded one kept; otherwise it replaces the loaded job (`bootout`, then `bootstrap`; a failed load is reported, its definition in place, and the keeper loads an unloaded system daemon or background agent at its next pass). A running job that is not KeepAlive, or one that runs this install (an ancestor of the caller), has its new definition staged, which the keeper loads between its runs. A running job whose process holds an RDMA device (the IORegistry's user client) is never stopped by launchd, which follows its SIGTERM with SIGKILL: its new definition is put in place for its next load. Every resident job is KeepAlive with `ThrottleInterval` 1, so launchd starts it again at once after an exit, at most once a second (its default is 10); the bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. |
-| `bin/mesh-converge.sh` | the node's convergence (Convergence, below): with no argument the mesh checkout's pass (`io.mesh.converge`); `held`, `idle`, `quiet`, `begin`/`end` and `stamp` are the node's convergence for any consumer's layer. |
+| `bin/mesh-converge.sh` | the node's convergence (Convergence, below): with no argument the mesh checkout's pass (`io.mesh.converge`); `held` and `stamp` are the node's convergence for any consumer's layer, `off` takes the node out. |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION. It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
 | `bin/mesh-run.sh` | run a command on one node, `all`, or `others`. Installed as `mesh-run`. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer, at each run, unless its link is the node's only one (design/recovery.md, port). Idempotent; run at boot and every keeper pass. |
@@ -491,10 +491,7 @@ lacks its fit (coefficients and bandwidth), its served and attention readings (a
 attention line of either plan: torch-mesh refuses the first two and cannot price a layer's plan without the third), what each of its
 layers installed as that layer's install last recorded it (`revisions` and `images`, `<label>:<revision>` and
 `<label>:<digest>`, from `~/.cache/mesh/facts/<label>`, whose other lines it publishes as they are), each layer's last
-convergence outcome (`converge`, `<label>:held|busy|staging|failed|converging|converged|off`) and the layers changing
-now (`converging`: a turn under way, or `io.mesh.bridge` while the running bridge's binary is another file than its
-definition's, by inode (`lsof`), so it has yet to stop itself and start on what was installed; a driver leaves them
-out), the model files it holds
+convergence outcome (`converge`, `<label>:held|staging|failed|converging|converged|off`), the model files it holds
 (`models`, `<dir>/<file>:<bytes>` under `~/models`, links followed), its health report's numbers, each fabric
 port's line as the fabric init last wrote it (`port=<port> link=<status> rdma_peer=present|absent`), and its routes.
 `rdma_peer` is whether the IORegistry holds an `AppleThunderboltRDMAPeerInterface` for the port's RDMA interface (its
@@ -549,54 +546,41 @@ The root layer above is `io.mesh.update`'s. The user layer (the admin user's mes
 library, and any consumer's layer on top, such as metal-microbench's resident rank) follows its upstreams by itself on
 a node given a convergence document (`bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE`, etc/converge/README.md):
 the user's agent `io.mesh.converge` runs `bin/mesh-converge.sh` every `period_s`, and a consumer's own agent does the
-same for its layer with that script's subcommands. A layer changes only between calls, only to images built and
-checked beforehand, and one layer at a time:
+same for its layer with that script's subcommands. A layer changes only to images built and checked beforehand:
 
 1. **Held.** A checkout with local work (changes to tracked files, commits its upstream lacks, no upstream) is left as
    it is, nothing fetched.
 2. **Fetched**, and the upstream's own copy of the script run, so a broken script is mended by the next push. A layer
-   whose upstream and documents are what its install last recorded (`~/.cache/mesh/converge/<label>`) is done; one
-   whose staged build failed at these inputs waits for them to move.
-3. **Quiet.** The node idle `quiet_s` on end within `wait_s`: no live hold (`~/.cache/mesh/hold/<name>`: its first word
-   the unix second it ends, the rest why; a driver writes one on each node its calls cross, a measurement on its node),
-   no other layer's turn, the bridge carrying no call (`mesh-stat` `"idle"` and `"idle_since"`, where the bridge
-   publishes them), each consumer's probe idle (`~/.cache/mesh/idle.d/<label>`: succeeds printing the pids of its
-   resident processes that serve no call), no other process mapping libmesh, and the GPU at most `gpu_percent` busy.
-   Else the pass ends (`busy`).
-4. **Staged.** The upstream revision is built in a worktree of its own (`~/.cache/mesh/stage/<repository>`) at
+   whose upstream and documents are what its install last recorded (`~/.cache/mesh/converge/<label>`) is done.
+3. **Staged.** The upstream revision is built in a worktree of its own (`~/.cache/mesh/stage/<repository>`) at
    background priority: for the mesh, `make -C rdma all`, the bindings and torch-mesh's extension. A failed build
-   changes nothing on the node (`failed`, with its log beside the state). A staged bridge signed ad hoc where the
-   running one carries the signing identity is refused, since the Local Network grant keyed on that identity would not
-   carry over to it.
-5. **The turn.** The node announces it (node-info `converging`) for `notice_s`, is checked idle again, fast-forwards
-   the checkout, installs each staged image whose bytes differ by rename (the libraries first, the bridge's own binary
-   last, and the binary anew wherever libmesh changed, since the bridge watches its binary alone), runs
-   `bin/mesh-user.sh` on them (`MESH_USER_BUILT`: the bindings, torch-mesh, the configuration and the bridge's agent),
-   records what it installed, and lasts until the bridge has stopped itself and started on them, within `wait_s` (a
-   bridge still carrying a relayed call then restarts once that call ends, and the outcome says so).
+   changes nothing on the node (`failed`, with its log beside the state), and the next pass builds again. A staged
+   bridge signed ad hoc where the running one carries the signing identity is not installed, since the Local Network
+   grant keyed on that identity would not carry over to it.
+4. **Installed.** The checkout is fast-forwarded, each staged image whose bytes differ is installed by rename (the
+   libraries first, the bridge's own binary last, and the binary anew wherever libmesh changed, since the bridge
+   watches its binary alone), `bin/mesh-user.sh` runs on them (`MESH_USER_BUILT`: the bindings, torch-mesh, the
+   configuration and the bridge's agent), and what it installed is recorded.
 
 Nothing stops a bridge but the bridge. Its agent's definition names its program and its configuration's path alone, so
-it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the turn
-above, or `make` by hand, which relinks the binary whenever libmesh changes) or a new configuration (`mesh-user.sh`
-renames it into place and then gives the binary a new file). The bridge notices its binary's new file at its next
-liveness turn (3 s), stops itself at the first such turn at which it carries no call (no flow and no awaiting program,
-relayed ones included: design/bridge-and-ipc.md), and launchd starts it on what was installed; node-info lists it in
-`converging` until then. An update never ends a call the bridge carries, a relayed one among them, whatever the node's
-idle test saw (it sees a relayed call only through mesh-stat's `idle` and `idle_since`). Only a changed definition
-replaces the loaded agent (a SIGTERM, which ends the bridge's calls as values): its checkout moved, or the definition's
-text itself changed (once, at the first install of this form, 2026-10-16).
+it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the
+installation above, or `make` by hand, which relinks the binary whenever libmesh changes) or a new configuration
+(`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge restarts itself on a new
+binary between calls, never ending a call it carries, a relayed one among them (design/bridge-and-ipc.md); a process
+already running keeps the files it mapped. The bridge's loaded definition is replaced only while it holds no RDMA
+device (`bin/mesh-agent.sh`); a new one is otherwise in place for its next load.
 
 Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what
 each layer installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two
 versions until every node has converged, and a consumer's process holding the older library fails its calls as values
 until its own layer converges, a pass later. A change of an agent's own definition while it runs is staged
-(`<label>.plist.new`) and loaded by the keeper between its runs. To hold a node through a measurement, write a hold.
-Whether a node converges is the operator's choice, one command each way: `bin/mesh-user.sh CONFIGURATION CHECKOUT
-CONVERGENCE` (then each consumer's own setup, which writes its agent where the document is recorded) puts it in;
-`bin/mesh-converge.sh off` takes it out, removing the recorded document and every layer's agent (`<label>.converge`)
-once no pass runs and marking each layer's outcome `off`, so neither a later `mesh-user.sh` without CONVERGENCE nor a
-consumer's setup writes them again. A `launchctl disable` alone is undone by the next `mesh-user.sh` or setup, whose
-agent install enables the label.
+(`<label>.plist.new`) and loaded by the keeper between its runs. Whether a node converges is the operator's choice, one
+command each way: `bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE` (then each consumer's own setup, which writes
+its agent where the document is recorded) puts it in; `bin/mesh-converge.sh off` takes it out, removing the recorded
+document and every layer's agent (`<label>.converge`; an agent whose pass runs removes itself as that pass ends) and
+marking each layer's outcome `off`, so neither a later `mesh-user.sh` without CONVERGENCE nor a consumer's setup writes
+them again. A `launchctl disable` alone is undone by the next `mesh-user.sh` or setup, whose agent install enables the
+label.
 
 ## Reading the docs
 
