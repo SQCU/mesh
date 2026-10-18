@@ -269,7 +269,7 @@ Mesh.syncOnRemoteFill(parts, index:)                      // explicit, diegetic,
 Mesh.observe() -> Topology                                // the bridges' map
 bounds(program, placement, topology, capability) -> Bounds // pure lower bounds; never picks a placement
 
-mesh.Program(backend, *, functions, group, timeout, trace)   // SPMD; realize() == start()
+mesh.Program(backend, *, functions, group, trace)            // SPMD; realize() == start()
 Program.tensor(shape, block_shape, dtype, transferable, *, contiguous) -> Tensor  // blocks of Refs (views of backings)
 Program.kernel_call(kernel, *, out_shape, grid, in_specs, out_specs, peer)(*operands)  // kernel(program, inputs, outputs, coordinate)
 BlockSpec(block_shape, index_map, region_map) / ShapeDtypeStruct(shape, dtype) / Partial(required, terms)
@@ -341,7 +341,7 @@ record's, its last sentence the restored surfaces' names.
 
 **L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5. Restored surfaces: Swift's sections and leases; Python storage freed with its last view (a window lease returned with it, `mesh.lease`).
 
-**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Swift `Mesh.syncOnRemoteFill`, `examples/sync-on-remote-fill.swift`; Python `collective.sync_on_remote_fill` (bounded by the program's timeout), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
+**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Swift `Mesh.syncOnRemoteFill`, `examples/sync-on-remote-fill.swift`; Python `collective.sync_on_remote_fill` (no bound: a result never filled waits forever), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
 
 ### G — genericity
 

@@ -20,7 +20,7 @@ separates shared function metadata from each value's operands and uses.
 **The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
 type B, the library, its kernels and layers `examples/kernels.py` and `examples/nn.py` type C, design/deliverables.md
 section 5): the same contract as `swift/Mesh.swift`, spelled as Pallas spells it. A `Program(backend, *, functions,
-group, timeout, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
+group, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
 collective's members place the work. Recording builds the graph; `realize()` (`start()`, Swift's name) prepares it;
 the host then writes its inputs (`write`) and reads its results (`export`, `Result.ready`, `consume`). The firing
 rule is the old executor's (design/deliverables.md L3): an edge per (writer, reader) pair of overlapping regions on a
@@ -30,8 +30,8 @@ bounded channels), a host write a token on the edges of the block it fills, a ca
 firing once. Kernels run on one compute thread, the ready call earliest by row, then record. Operands are torch
 tensors (`Ref.tensor`; `Ref.array` and `write` give NumPy views of CPU ones), each backing allocated where a member's
 call touches it, in the node's bridge's window where a crossing of that member reads or writes it
-(`torch_mesh.backend.blank`, over `mesh.lease`). Every wait is bounded by the program's `timeout` (default 10 s, mesh.h `MESH_SILENT_NS`'s bound);
-a failure is a value (`Program.report`, `MeshError`) and the caller makes the program again. The package's import
+(`torch_mesh.backend.blank`, over `mesh.lease`). A wait ends at its event: the landing it waits on, or its program's
+failure; a failure is a value (`Program.report`, `MeshError`) and the caller makes the program again. The package's import
 name is `mesh`, the name `rdma/mesh.py` also takes: importing it loads that module from the same checkout and carries
 its names (`ffi`, `lib`, `lease`, `current`, ...), so `torch_mesh` and `mesh_mpi` find what they import; a program
 puts the checkout's `python/` ahead of `rdma/` on its path before it imports torch (the examples do).
@@ -279,7 +279,7 @@ invocation are preserved. The listener closes the moment it accepts, so a peer
 dialing for its next realization is refused, and dials again, until this node's next
 realization listens; nothing lands in a backlog that no pairing accepts. A connection
 reset before the peers' first exchange is an abandoned attempt, and the pairing
-connects again within its deadline.
+connects again.
 This implements event observation in source, not complete R2 cancellation or
 R3–R7 recovery. An unreported silent partition is not detected by inventing a timer.
 No caller-death or cable-loss run accompanies this change.
@@ -894,17 +894,17 @@ row index to those flows' queues through a precomputed membership bitset, indepe
 of collective verb and peer count. Several ports register the same canonical
 payload backing through their own devices; they do not create operand copies.
 
-A program's pairing on a port has one monotonic deadline, the pairing window
-(mesh.h `MESH_PAIR_NS`, 30 s from both programs' start), and its wait for its
-peer's start the peer window (`MESH_PEER_NS`). A port's control connection is dialed
-nonblocking to the link-local address its peer's hello came from, so pairing performs
-no host or service lookup. Apple's BSD [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
+A program's pairing on a port waits on events alone: its peer's READY, PAIRS and
+POSTED, a FAIL, the link's loss, its own program's revoke (design/recovery.md#first).
+A port's control connection is dialed nonblocking to the link-local address its peer's
+hello came from, so pairing performs no host or service lookup. Apple's BSD
+[connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
 and [accept](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html)
-contracts supply the nonblocking socket mechanism. Expiry fails the flow with
-`ETIMEDOUT`; it does not end the bridge.
-The deadline is setup state only: TX, RX, numerical publication and consumer
-completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
-userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
+contracts supply the nonblocking socket mechanism; a connection that fails is the
+link's loss, which fails the flows on it and does not end the bridge. TX, RX, numerical
+publication and consumer completion contain no clock check. As
+[RDMA-RULES.md](../RDMA-RULES.md) explains, a driver call blocked in kernel sleep
+cannot be unwound from user space: it blocks only its port's queue.
 
 In the Python surface `Program.copy(source.on(sender), destination.on(receiver), *, queue=0)` (also `send`, `recv`)
 cuts tensors at both block grids into regions; a region whose two ends are one member is a local copy call, else a
@@ -1137,7 +1137,7 @@ cost is `mesh_map`'s from it (mesh-plan.h `MESH_ALPHA_US`, `MESH_BETA_NS`).
 
 ### Mesh.observe
 
-`mesh_observe`, `mesh_map` and `mesh_map_wait`, the bridge's map reader (mesh-plan.h, mesh-dataflow.c): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
+`mesh_observe`, `mesh_map`, `mesh_map_serial` and `mesh_map_wait`, the bridge's map reader (mesh-plan.h, mesh-dataflow.c): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
 `mesh_observe` copies the node's port table into plain `mesh_link_view` records, a
 port by its index, and returns the port count or negative errno. `mesh_map` copies
 the bridge's map (design/bridge-and-ipc.md#region), every node's newest record, as
@@ -1146,8 +1146,8 @@ copied, the copy kept where the serial was even and is unchanged (`mesh_map_whol
 else copied again. From that copy it makes the whole map, two nodes linked where each
 one's record holds ports paired with the other, its table the routes the bridges
 forward along, and over the members the members' map of it (#topology).
-`mesh_map_wait` waits on the serial, within its bound, so a loop of executions
-takes the next map. The bridges keep their links paired with or without a client, so
+`mesh_map_serial` reads the serial, and `mesh_map_wait` waits on it with no bound until it
+changes (ESRCH where the bridge exits), so a loop of executions takes the next map. The bridges keep their links paired with or without a client, so
 the map is current whether or not anything runs (design/recovery.md, mandate 14).
 
 ## Program.write
@@ -1399,8 +1399,9 @@ The MPI Forum's [communication completion](https://www.mpi-forum.org/docs/mpi-4.
 explicit completion operations. The user requested an explicit counterexample;
 no default collective may invoke it.
 
-In the Python surface `collective.sync_on_remote_fill(*results, timeout=None)` waits until every result is filled,
-within its program's `timeout` (TimeoutError past it; MeshError where the program failed). No verb calls it.
+In the Python surface `collective.sync_on_remote_fill(*results)` waits until every result is filled, or its program
+failed (MeshError), with no bound: a result never filled waits forever (design/collective-goals-2026-09-14.md: slower,
+and it can deadlock forever). No verb calls it.
 
 ## bounds
 
@@ -1446,7 +1447,7 @@ comparison it reproduces; the frontier records stay where they are.
   mesh fb7828b: `--rows 4096 --depth 2`, 10 warm then 3,000 measured): **1,429.2** results/s streamed against
   **962.9** whole (+48.6% paired), 1.326 ms against 2.007 ms a result.
 - `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`: the explicit wait and its counterexample
-  (`deadlock` ends in the program's bound, TimeoutError, rather than waiting forever); section 0 rides queues of its
+  (`deadlock` waits forever, as design/collective-goals-2026-09-14.md asks it to show); section 0 rides queues of its
   own, so `independent` (section 0 never written) completes every other.
 
 `--trace FILE` keeps each call's (kind, record, row, begin and end ns, thread); the literature summary counts the
