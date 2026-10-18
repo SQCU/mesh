@@ -15,11 +15,11 @@ large OCR run use the same telemetry interface. Workload producers name dimensio
 operation envelopes; the mesh reporter stores no game rule, document type, policy arm,
 or task-specific limit.
 
-Every reachable leased node contributes its own sample to the whole-fabric view.
-Inventory capacity remains visible separately from the live aggregate. A LAN, direct
-fabric, or routed path may disappear and later return without changing node identity.
-The observer reconnects to the node's in-memory sequenced ring and renews membership
-from the new sample.
+Every node its bridge holds a record of contributes its own sample to the whole-fabric
+view, read through that bridge. Inventory capacity remains visible separately from the
+live aggregate. A LAN, direct fabric, or routed path may disappear and later return
+without changing node identity: membership is the bridge's records, and the observer
+resumes the node's in-memory sequenced ring from the last sequence it read.
 
 The page-table phase space is the exact allocation simplex:
 
@@ -55,8 +55,9 @@ in-memory stream; it does not own a second cache or service.
 
 The canonical services are one telemetry provider on port 8788 per node and one
 whole-fabric observer on port 8787. System and user launch domains realize the same
-interfaces. Handoff measures the listening socket and response before the prior
-provider exits, and restores the reachable provider when handoff does not complete.
+interfaces. Installation chooses the provider by launchd's state and the listening
+socket: a running userspace provider listening on the port is retained, else the system
+job is loaded, and the userspace one wherever no provider is loaded.
 
 ## Policy compute placed on the fabric
 
