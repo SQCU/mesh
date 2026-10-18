@@ -9,7 +9,6 @@ static void busy_tell(void){
 static uint32_t map_page,map_pages,map_room;
 /* design/bridge-and-ipc.md#ledger: the ledger's clock, nanoseconds (CLOCK_MONOTONIC's are whole microseconds here), as
    Q5P's trace kept (mesh git 5702ea5, M27) */
-uint64_t ledger_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 /* design/bridge-and-ipc.md#records: the bytes the kernel can give without pressure (kern.memorystatus_level percent of
    the node's memory), read now */
 static uint64_t available_now(void){
@@ -122,7 +121,6 @@ static void health_text(const struct mesh_health *h,char *out,size_t room){
            h->reset<5?resets[h->reset]:"unknown",h->shutdown);
 }
 static uint32_t known_count;
-static struct mesh_record *record_held(uint32_t node);
 static struct known *known_at(uint32_t node){
   for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
   struct known *at=NULL;
@@ -131,14 +129,6 @@ static struct known *known_at(uint32_t node){
   if(at)*at=(struct known){.node=node};
   return at;
 }
-/* design/algorithm-sources.md#meshresult: a data thread's failure, taken by the event loop (flow_fail) */
-void flow_lost(struct flow *flow,int64_t code,uint32_t domain){
-  int64_t none=0;
-  if(atomic_compare_exchange_strong(&flow->failed,&none,code?code:EIO))atomic_store(&flow->domain,domain);
-  atomic_store_explicit(&flow->progressing,0,memory_order_release);
-  wake();
-}
-static int owned(uint64_t owner){ return owner && atomic_load(&mesh_client_at(M,owner)->owner)==owner; }
 static struct mesh_tx *side_tx(struct flow *f,int d){ return &mesh_client_at(M,f->side[d].owner)->tx[f->side[d].destination]; }
 static uint32_t side_channel(struct flow *f,int d,uint32_t k){ return f->side[d].destination*MESH_QUEUES+k; }
 static uint32_t side_length(struct flow *f,int d,uint32_t k){ return f->side[d].owner?atomic_load(mesh_order_length(M,f->side[d].owner,side_channel(f,d,k),d)):0; }
@@ -200,31 +190,6 @@ static _Atomic uint64_t *receive_input(struct hdr *m,uint64_t owner,const struct
   return at>=m->data_off && at<=m->length-sizeof(uint64_t)?(void *)((char *)m+at):NULL;
 }
 
-/* design/prepared-machine.md#M08 */
-/* Posts the ring's next records while its queue has room and the record behind each has landed (its
-   transfer's `span` invocations before: the ring's records land in the order posted, so `landed` counts
-   them).  Called once at configuration and at each receive completion: the refill is fired by the event. */
-/* design/prepared-machine.md#M30 */
-/* A cyclic program's ring wraps: its posted count runs on, record posted % count in cycle posted / count,
-   at running invocation invocation + cycle * N; the span is held under N and a record with no record of
-   its transfer behind it waits on its own previous posting, so a record is posted again only after its
-   last posting completed (completions arrive in order). */
-static int ring_advance(struct flow *link,struct receive_ring *ring){
-  int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=link->provider.queues[0].receive;
-  while(ring->count && (link->cyclic || ring->posted<ring->count)){
-    struct prepared_receive *record=ring->first+ring->posted%ring->count;
-    uint64_t cycle=ring->posted/ring->count;
-    if((record->behind && ring->posted>=record->behind && ring->landed<=ring->posted-record->behind) ||
-       ring->outstanding+record->frames>ring->capacity)break;
-    record->cycle=(uint32_t)cycle;
-    struct ibv_recv_wr *bad;
-    int error=post(record->pair,&record->request,&bad);
-    if(error)return error<0?-error:error;
-    ring->outstanding+=record->frames;ring->posted++;
-  }
-  return 0;
-}
-
 /* design/bridge-and-ipc.md#cables: whether the flow carries the program's invocation t, and how many of a transfer's
    active invocations [begin, begin + active) it carries */
 static int stripe_of(const struct flow *link,uint32_t t){ return t%link->stripes==link->stripe; }
@@ -233,8 +198,6 @@ static uint32_t stripe_count(const struct flow *link,uint32_t begin,uint32_t act
   return first<active?(active-first+link->stripes-1)/link->stripes:0;
 }
 
-/* design/bridge-and-ipc.md#lanes: the lane a flow's ring q (queue q / slots) rides, and that lane's queue pair */
-uint32_t ring_lane(uint32_t q,uint32_t slots){ return (q/(slots?slots:1))%MESH_LANES; }
 static _Atomic uint32_t ledger_ids;
 /* a flow's ledger, made on its port's queue before either side is prepared or the flow listed, where the configuration
    keeps them; a flow whose ledger cannot be allocated runs without one, logged */
@@ -259,43 +222,6 @@ static void ledger_open(struct flow *f){
 static uint32_t ledger_room(uint64_t once,int cyclic){ return cyclic || once>MESH_LEDGER_EVENTS?MESH_LEDGER_EVENTS:(uint32_t)once; }
 /* design/bridge-and-ipc.md#ledger: taken by a cut and by a ledger's release, so a cut never reads a ledger freed */
 static pthread_mutex_t ledger_lock=PTHREAD_MUTEX_INITIALIZER;
-/* the send thread's stores: a cell first seen released, its queue's event from then on */
-void ledger_seen(struct ledger *l,const struct mesh_send *cell,uint64_t cycle){
-  const uint32_t q=cell->queue;
-  if(!l->send_room){l->current[q]=LEDGER_NONE;return;}
-  const uint32_t e=l->sends;
-  l->send[e%l->send_room]=(struct ledger_send){.cell=(uintptr_t)cell,.seen=ledger_ns(),.cycle=(uint32_t)cycle,.next=LEDGER_NONE};
-  if(l->last[q]!=LEDGER_NONE)l->send[l->last[q]%l->send_room].next=e;
-  if(l->pending[q]==LEDGER_NONE)l->pending[q]=e;
-  l->last[q]=e;l->current[q]=e;
-  __atomic_store_n(&l->sends,e+1,__ATOMIC_RELEASE);
-}
-/* SENDs of event e posted at `at`: its first, and where `done` its last, after which its gate held `mark` frames */
-void ledger_stamp(struct ledger *l,uint32_t e,int done,uint64_t mark,uint64_t at){
-  if(e==LEDGER_NONE)return;
-  struct ledger_send *s=l->send+e%l->send_room;
-  if(!s->first)s->first=at;
-  if(done){s->posted=at;s->mark=mark&MESH_GATE_MASK;}
-}
-/* an exclusive flow's SEND completion on queue q, its gate's frames retired through it: every event of the queue whose
-   last SEND it retires (a queue pair's completions come in the order posted) completed now */
-static void ledger_retired(struct ledger *l,uint32_t q,uint64_t retired){
-  uint64_t at=0;
-  for(uint32_t e;q<l->queues && (e=l->pending[q])!=LEDGER_NONE;){
-    struct ledger_send *s=l->send+e%l->send_room;
-    if(!s->posted || ((retired-s->mark)&MESH_GATE_MASK)>=(UINT64_C(1)<<47))break;
-    if(!at)at=ledger_ns();
-    s->completed=at;l->pending[q]=s->next;
-  }
-}
-/* the receive thread's store: a record of the flow landed, its word stored */
-void ledger_landed(struct flow *link,const struct prepared_receive *record){
-  struct ledger *l=link->ledger;
-  if(!l->landing_room)return;
-  const uint32_t e=l->landings;
-  l->landing[e%l->landing_room]=(struct ledger_landing){(uint32_t)(record-link->receive),record->cycle,ledger_ns()};
-  __atomic_store_n(&l->landings,e+1,__ATOMIC_RELEASE);
-}
 /* design/bridge-and-ipc.md#ledger: a flow's ledger written at its release, on its port's queue once neither progress
    thread reads the flow: its header into the bridge's log, then a line for each cell seen and each record landed, which
    name the cell or record by queue, invocation, position, binding and cycle, as the peer's ledger of the same flow
@@ -309,9 +235,9 @@ static int ledger_cell_order(const void *a,const void *b){
 /* the ledger's header line, `cut` the events past the latest cut */
 static void ledger_header(const struct flow *f,const struct ledger *l,uint32_t sends,uint32_t landings,const char *file,char *line,size_t room){
   snprintf(line,room,"{\"ledger\":%u,\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"near\":%u,\"far\":%u,\"stripe\":%u,"
-           "\"stripes\":%u,\"exclusive\":%d,\"queues\":%u,\"qps\":%d,\"invocations\":%u,\"cyclic\":%u,\"started\":%llu,\"sends\":%u,\"send_room\":%u,"
+           "\"stripes\":%u,\"exclusive\":1,\"queues\":%u,\"qps\":%d,\"invocations\":%u,\"cyclic\":%u,\"started\":%llu,\"sends\":%u,\"send_room\":%u,"
            "\"landings\":%u,\"landing_room\":%u,\"cut\":[%u,%u],\"file\":%s%s%s}\n",l->id,(unsigned long long)f->key,M->node,f->port->peer,
-           f->port->index,f->near,f->far,f->stripe,f->stripes,f->exclusive,f->queues,f->qps,l->invocations,l->cyclic,(unsigned long long)l->started,
+           f->port->index,f->near,f->far,f->stripe,f->stripes,f->queues,f->qps,l->invocations,l->cyclic,(unsigned long long)l->started,
            sends,l->send_room,landings,l->landing_room,l->cut_sends,l->cut_landings,file?"\"":"",file?file:"null",file?"\"":"");
 }
 /* the event lines of the ledger's cells seen and records landed from the latest cut through `sends` and `landings` (the
@@ -398,8 +324,8 @@ static int ledger_cut(uint64_t key,const char *path){
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M04, #M06, #M29 */
 /* The SEND side: every SEND cell of the flow's invocations (#cables), its chain of chunk requests over its invocation's
-   ring slot and its stream successor, a stream a ring (the cells' layout is mesh_transfers_prepare's), and an exclusive
-   flow's gate a queue pair (a flow on its port's lanes posts through the lanes' gates, #lanes).  A stream's cells run
+   ring slot and its stream successor, a stream a ring (the cells' layout is mesh_transfers_prepare's), and its gate a
+   queue pair.  A stream's cells run
    invocation by invocation, the publications of each in binding order, as the peer's ring posts its receives: TN3205's
    credit flow control holds a SEND until its matching receive is posted (metal-microbench docs/kernels.md Transport
    (git 7300d1e^)).  0, or the error (EINVAL: a transfer of more slots than the program's). */
@@ -422,9 +348,9 @@ static int sends_configure(struct flow *link){
   /* design/prepared-machine.md#M29 */
   link->requests=aligned_alloc(128,(requests+1)*sizeof *link->requests);
   link->streams=calloc((size_t)qps,sizeof *link->streams);
-  link->gates=link->exclusive?aligned_alloc(64,(size_t)qps*sizeof *link->gates):NULL;
+  link->gates=aligned_alloc(64,(size_t)qps*sizeof *link->gates);
   struct mesh_send **last=calloc((size_t)qps,sizeof *last),**terminal=calloc((size_t)qps,sizeof *terminal);
-  if(!link->requests||!link->streams||(link->exclusive && !link->gates)||!last||!terminal){free(last);free(terminal);return ENOMEM;}
+  if(!link->requests||!link->streams||!link->gates||!last||!terminal){free(last);free(terminal);return ENOMEM;}
   link->request_count=requests;
   /* #ledger: the cells' names, each stream's position at its latest invocation (`positions`, a slot's pair), and room for
      the events of one pass, a cyclic program's of every pass up to the bound */
@@ -443,10 +369,8 @@ static int sends_configure(struct flow *link){
   }
   /* a request is one frame at least, so a queue pair's frames also bound the completions it can have pending in the
      SEND completion queue its pairs share */
-  if(link->exclusive){
-    uint32_t sends=(uint32_t)link->provider.sent->cqe/(uint32_t)qps;
-    for(int q=0;q<qps;q++)link->gates[q]=(struct send_gate){.capacity=MIN(link->provider.queues[q].send_capacity,sends)};
-  }
+  const uint32_t sends=(uint32_t)link->provider.sent->cqe/(uint32_t)qps;
+  for(int q=0;q<qps;q++)link->gates[q]=(struct send_gate){.capacity=MIN(link->provider.queues[q].send_capacity,sends)};
   size_t next=0;int error=0;
   for(uint32_t k=0;k<link->queues && !error;k++){
     uint32_t count=side_length(link,MESH_SEND,k);
@@ -456,7 +380,7 @@ static int sends_configure(struct flow *link){
       uint32_t active=mesh_transfer_active(out+i,invocations),column=active+1;
       for(uint32_t slot=0;slot<out[i].count && !error;slot++){
         uint32_t row=out[i].local_row+slot*out[i].stride,chunks=mesh_row_chunks(m,row,out[i].bytes),stream=k*tx->slots+slot;
-        struct ibv_qp *pair=link->exclusive?link->provider.queues[stream].pair:lane_pair(link,ring_lane(stream,tx->slots));
+        struct ibv_qp *pair=link->provider.queues[stream].pair;
         struct mesh_send *cells=link->publications+out[i].first+(size_t)slot*column;
         for(uint32_t u=0;u<active && !error;u++){
           if(!stripe_of(link,out[i].begin+u))continue;
@@ -503,10 +427,7 @@ static int sends_configure(struct flow *link){
   }
   /* design/prepared-machine.md#M30: a cyclic program's last cell is followed by its first */
   for(int q=0;q<qps && !error;q++)if(last[q])last[q]->successor=cyclic?(uintptr_t)link->streams[q].cell:(uintptr_t)terminal[q];
-  for(int q=0;q<qps;q++){
-    link->streams[q].first=link->streams[q].cell;link->streams[q].cycle=0;
-    link->streams[q].lane=ring_lane((uint32_t)q,tx->slots);
-  }
+  for(int q=0;q<qps;q++){link->streams[q].first=link->streams[q].cell;link->streams[q].cycle=0;}
   link->stream_count=0;
   for(int q=0;q<qps;q++)if(link->streams[q].cell)link->streams[link->stream_count++]=link->streams[q];
   free(last);free(terminal);free(positions);
@@ -515,13 +436,11 @@ static int sends_configure(struct flow *link){
 
 /* design/prepared-machine.md#M08 */
 /* The receive side: each ring's records invocation by invocation (the flow's invocations, #cables), the transfers of
-   each in binding order, a transfer's chunks in order, each storing its word (receive_input).  An exclusive flow's
-   ring is its queue pair's, its first records posted at once and each record posted once the record of its transfer
-   `span` of the flow's own invocations before has landed (the ring's span over the program's invocations, divided
-   among the stripes; a cyclic ring's first records wait on its last of the cycle before), so a ring's posted frames
-   stay within its queue pair's.  A flow on its port's lanes posts nothing here: a lane's header posts its records as
-   the peer sends them (#lanes).  0, or the error (EINVAL: a transfer of more slots than the program's, a word outside
-   the window). */
+   each in binding order, a transfer's chunks in order, each storing its word (receive_input).  A ring is its queue
+   pair's, its first records posted at once and each record posted once the record of its transfer `span` of the flow's
+   own invocations before has landed (the ring's span over the program's invocations, divided among the stripes; a
+   cyclic ring's first records wait on its last of the cycle before), so a ring's posted frames stay within its queue
+   pair's.  0, or the error (EINVAL: a transfer of more slots than the program's, a word outside the window). */
 static int receives_configure(struct flow *link){
   struct hdr *m=link->M;struct mesh_client *client=mesh_client_at(m,link->side[MESH_RECEIVE].owner);
   /* design/prepared-machine.md#M09, #M10: the program's targets lie in the window, as each word it stores does */
@@ -563,14 +482,14 @@ static int receives_configure(struct flow *link){
   }
   /* a record is one frame at least, so a queue pair's frames also bound the completions it can have pending in the
      receive completion queue its pairs share */
-  const uint32_t receives=link->exclusive?(uint32_t)link->provider.completion->cqe/(uint32_t)qps:UINT32_MAX;
+  const uint32_t receives=(uint32_t)link->provider.completion->cqe/(uint32_t)qps;
   for(int q=0;q<qps;q++)link->rings[q]=(struct receive_ring){.completed=-1,.span=UINT32_MAX,
-    .capacity=link->exclusive?MIN(link->provider.queues[q].receive_capacity,receives):UINT32_MAX};
+    .capacity=MIN(link->provider.queues[q].receive_capacity,receives)};
   size_t at=0;int error=0;
   for(int ring=0;ring<qps && !error;ring++){
     uint32_t k=(uint32_t)ring/tx->slots,slot=(uint32_t)ring%tx->slots,count=k<link->queues?side_length(link,MESH_RECEIVE,k):0;
     struct mesh_transfer *in=count?side_transfers(link,MESH_RECEIVE,k):NULL;
-    struct ibv_qp *pair=link->exclusive?link->provider.queues[ring].pair:lane_pair(link,ring_lane((uint32_t)ring,tx->slots));
+    struct ibv_qp *pair=link->provider.queues[ring].pair;
     struct receive_ring *r=link->rings+ring;
     r->first=link->receive+at;
     /* firsts: the ring index of each transfer's own records, own invocation by own invocation (base[i] the first's) */
@@ -631,435 +550,36 @@ static int receives_configure(struct flow *link){
     }
     r->span=span;
     free(base);free(firsts);
-    if(!error && link->exclusive)error=ring_advance(link,r);
+    if(!error)error=ring_advance(link,r);
   }
   if(at)link->receive[at]=link->receive[at-1];
   return error;
 }
 
-/* design/bridge-and-ipc.md#progress: a landing that released a SEND cell (the index hand-off of a relay, or of a member
-   that sends on what it receives) wakes the send thread that posts the cell, where that thread is parked: the fence
-   orders the release before the read of its parked word, as the thread orders its parked word before its last look
-   (port_progress), so one of the two sees the other */
-void send_wake(_Atomic uint64_t *ready){
-  const uint32_t p=atomic_load_explicit(&((struct mesh_send *)(void *)ready)->port,memory_order_acquire);
-  atomic_thread_fence(memory_order_seq_cst);
-  if(p && p<=MESH_PORTS && atomic_load_explicit(&ports[p-1].parked[1],memory_order_relaxed))mesh_notify(&M->bell[p-1]);
-}
-
-/* design/prepared-machine.md#M04 */
-/* design/prepared-machine.md#M06 */
-/* design/prepared-machine.md#M15 */
-/* design/algorithm-sources.md#independent-native-queues */
-/* The flow's SEND completions: each retires its queue's frames through its request (the device completes every SEND,
-   signaled or not); *taken their count.  0, or an error completion's status. */
-static __attribute__((always_inline)) inline int send_retire(struct flow *link,int *taken){
-  struct ibv_wc done[16];
-  int count=link->provider.queues[0].poll(link->provider.sent,16,done);
-  *taken=count>0?count:0;
-  if(count<0)return EIO;
-  for(int i=0;i<count;i++){
-    if(done[i].status)return (int)done[i].status;
-    /* #keepalive */
-    if(done[i].wr_id==FLOW_ALIVE_SENT){link->alive_flight=0;continue;}
-    struct send_gate *gate=link->gates+(done[i].wr_id>>48);
-    gate->retired=done[i].wr_id&MESH_GATE_MASK;gate->completions++;
-    /* #ledger */
-    if(link->ledger)ledger_retired(link->ledger,(uint32_t)(done[i].wr_id>>48),gate->retired);
-  }
-  return 0;
-}
-/* design/bridge-and-ipc.md#keepalive: the flow's keepalive frame, one frame of the port's discard block on its last
-   queue pair, where both ends made that pair, none is in flight and the configuration's `keepalive` passed since the
-   last; 1 where one was posted, -1 where the flow was lost */
-static int flow_alive(struct flow *link){
-  if(!link->alive || !link->peer_alive || link->alive_flight)return 0;
-  const uint64_t at=ledger_ns();
-  if(at-link->alive_at<keepalive_ns)return 0;
-  struct ibv_sge span=lane_span(link->port,lane_discard(link->port,0),FLOW_ALIVE_BYTES);
-  struct ibv_send_wr posting={.wr_id=FLOW_ALIVE_SENT,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-  const int error=link->provider.queues[link->qps].send(link->provider.queues[link->qps].pair,&posting,&bad);
-  if(error){flow_lost(link,error<0?-error:error,1);return -1;}
-  link->alive_flight=1;link->alive_at=at;link->alive_posted++;
-  return 1;
-}
-/* design/bridge-and-ipc.md#keepalive: `count` receives of one frame into the port's discard block posted on the flow's
-   last queue pair; 0, or the error */
-static int flow_alive_listen(struct flow *link,uint32_t count){
-  struct ibv_sge span=lane_span(link->port,lane_discard(link->port,0),4096);
-  struct ibv_recv_wr request={.wr_id=FLOW_ALIVE_HEARD,.sg_list=&span,.num_sge=1},*bad;
-  int error=0;
-  for(uint32_t k=0;k<count && !error;k++)error=link->provider.queues[link->qps].receive(link->provider.queues[link->qps].pair,&request,&bad);
-  return error<0?-error:error;
-}
-
-/* design/prepared-machine.md#M08 */
-/* design/algorithm-sources.md#independent-native-queues */
-/* A running flow's SENDs, one pass of its port's send thread (design/bridge-and-ipc.md#progress): each stream's cells
-   in order, a cell released by its producer posting its chain's requests while its queue pair holds their frames (the
-   gate: frames posted less those its SEND completions retired; ibv_post_send accepts past the queue's frames and
-   corrupts later, so the gate is the caller's), then its SEND completions taken.  Whether anything moved; a failure is
-   the flow's (flow_lost). */
-int flow_send(struct flow *link){
-  int moved=0,taken=0;
-  struct ibv_send_wr *bad;
-  struct ledger *ledger=link->ledger;
-  int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
-  for(uint32_t s=0;s<link->stream_count;s++){
-    struct send_stream *stream=link->streams+s;
-    for(;;){
-      if(!stream->remaining){
-        struct mesh_send *cell=stream->cell;
-        if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle)break;
-        stream->next=&cell->request;stream->remaining=cell->chunks;
-        /* #ledger */
-        if(ledger)ledger_seen(ledger,cell,stream->cycle);
-      }
-      struct mesh_send *cell=stream->cell;
-      struct send_gate *gate=link->gates+cell->queue;
-      const uint32_t unposted=stream->remaining;
-      while(stream->remaining){
-        struct ibv_send_wr *request=stream->next;
-        uint32_t frames=(request->sg_list->length+4095)/4096;
-        if(((gate->posted-gate->retired)&MESH_GATE_MASK)+frames>gate->capacity)break;
-        gate->posted+=frames;
-        /* posted as a copy: the cell's first request keeps the producer's argument in its wr_id (mesh_transfers_prepare),
-           which a host producer reads at every publication (mesh_host_publish), and the copy's names the gate */
-        struct ibv_send_wr posting=*request;
-        posting.next=NULL;posting.send_flags=IBV_SEND_SIGNALED;
-        posting.wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
-        int error=post(link->provider.queues[cell->queue].pair,&posting,&bad);
-        if(error){flow_lost(link,error<0?-error:error,1);return 1;}
-        stream->next=request->next;stream->remaining--;gate->requests++;moved=1;
-      }
-      /* #ledger */
-      if(ledger && stream->remaining!=unposted)ledger_stamp(ledger,ledger->current[cell->queue],!stream->remaining,gate->posted,ledger_ns());
-      if(stream->remaining)break;
-      stream->cell=(struct mesh_send *)cell->successor;
-      if(stream->cell==stream->first)stream->cycle++;
-    }
-  }
-  /* #keepalive */
-  const int alive=keepalive_ns?flow_alive(link):0;
-  if(alive<0)return 1;
-  if(link->stream_count || link->alive_flight){
-    int error=send_retire(link,&taken);
-    if(error){flow_lost(link,error,2);return 1;}
-  }
-  return moved || alive || taken;
-}
-
-/* design/prepared-machine.md#M08 */
-/* design/prepared-machine.md#M11 */
-/* design/algorithm-sources.md#programcopy */
-/* A running flow's receive completions, one pass of its port's receive thread: each stores its completion word and
-   posts the ring's next records.  Whether anything landed; a failure is the flow's (flow_lost). */
-int flow_receive(struct flow *link){
-  if(!link->rings)return 0;
-  struct ibv_wc done[16];
-  const struct mesh_queue *queue=link->provider.queues;
-  int count=queue->poll(queue->completion,16,done);
-  if(count<0){flow_lost(link,EIO,3);return 1;}
-  for(int i=0;i<count;i++){
-    uint64_t status_opcode;
-    memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
-    if((uint32_t)status_opcode){flow_lost(link,(uint32_t)status_opcode,2);return 1;}
-    if(!((status_opcode>>32)&IBV_WC_RECV))continue;
-    /* #keepalive: the peer's frame heard, its receive posted again */
-    if(done[i].wr_id==FLOW_ALIVE_HEARD){
-      link->alive_heard++;
-      const int error=flow_alive_listen(link,1);
-      if(error){flow_lost(link,error,1);return 1;}
-      continue;
-    }
-    struct prepared_receive *record=(void *)(uintptr_t)done[i].wr_id;
-    struct receive_ring *ring=link->rings+record->queue;
-    ring->landed++;ring->bytes+=done[i].byte_len;
-    atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
-    if(record->release)send_wake(record->input);
-    /* #ledger */
-    if(link->ledger)ledger_landed(link,record);
-    ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
-    int error=ring_advance(link,ring);
-    if(error){flow_lost(link,error,1);return 1;}
-  }
-  return count>0;
-}
-
-/* design/bridge-dataflow.md#stripes: a stripe flow's failure, the event loop's to reset (stripes_turn) */
-static void stripes_lost(struct port *port,int64_t code){
-  int64_t none=0;
-  atomic_compare_exchange_strong(&port->stripes.failed,&none,code?code:EIO);
-  atomic_store_explicit(&port->stripes.up,0,memory_order_release);
-  wake();
-}
-/* a stripe's next piece from window offset `offset`, `remaining` bytes left: at most the flow's piece and never past a
-   registered extent (MESH_REGION), so both ends cut a stripe alike and each piece is one SGE of one registration */
-static uint32_t stripe_length(uint64_t offset,uint64_t remaining,uint32_t piece){
-  const uint64_t room=MESH_REGION-offset%MESH_REGION,most=remaining<piece?remaining:piece;
-  return (uint32_t)(most<room?most:room);
-}
-static struct ibv_sge stripe_span(const struct port *port,uint64_t offset,uint32_t length){
-  const uint64_t at=offset<wire.length?offset:0;
-  return (struct ibv_sge){.addr=(uintptr_t)port->device.wire+offset,.length=length,.lkey=port->device.regions[at/MESH_REGION]->lkey};
-}
-/* the window offset of descriptor slot `slot` of the port's stripe flow (received 0 to MESH_DESCRIPTORS - 1, sent the
-   next MESH_DESCRIPTORS) */
-static uint64_t stripe_descriptor(const struct port *port,uint32_t slot){
-  return (uint64_t)port->stripes.page*M->pgsz+(uint64_t)slot*sizeof(struct mesh_descriptor);
-}
-/* a word of this node's region a stripe stores (`word` a region offset in the window, 8-byte aligned; 0 none) */
-static int stripe_word_valid(uint64_t word){ return !word || (!(word&7) && word>=M->data_off && word<=M->length-sizeof(uint64_t)); }
-static void stripe_word(uint64_t word,uint64_t value){
-  if(word && stripe_word_valid(word))atomic_store_explicit((_Atomic uint64_t *)((char *)M+word),value,memory_order_release);
-}
-/* a request failed as a value: its writer's word UINT64_MAX, its ring's failures counted and the code kept (a ring whose
-   client retired meanwhile is left alone: its rows stay held while the request is in flight, clients_turn) */
-static void stripe_failed(uint64_t ring,uint64_t owner,uint64_t word,int64_t code){
-  if(!owned(owner))return;
-  stripe_word(word,UINT64_MAX);
-  if(ring<M->data_off || ring>M->length-sizeof(struct mesh_requests))return;
-  struct mesh_requests *q=(void *)((char *)M+ring);
-  atomic_fetch_add_explicit(&q->failed,1,memory_order_relaxed);
-  atomic_store_explicit(&q->code,code,memory_order_release);
-}
-/* design/bridge-dataflow.md#stripes: one pass of the port's send thread over its stripe flow (mesh 8fc27cbe peer_serve's
-   SEND half): its SEND completions taken (a stripe's last piece completing stores its writer's word), then the next
-   request of each registered ring naming the port's peer taken (compare-exchange of the ring's `taken`, so the threads
-   of every port toward that node take each request once), its descriptor posted on the control pair, then its pieces
-   on the data pair while the pair's frames and the piece ring hold them; a request of a range the windows do not hold
-   or a word that is no word fails as a value (EINVAL).  Whether anything moved; a failure is the flow's (stripes_lost) */
-int stripes_send(struct port *port){
-  struct stripes *s=&port->stripes;
-  const struct mesh_queue *control=s->provider.queues,*data=s->provider.queues+1;
-  struct ibv_wc done[16];
-  const int count=control->poll(s->provider.sent,16,done);
-  if(count<0){stripes_lost(port,EIO);return 1;}
-  for(int i=0;i<count;i++){
-    if(done[i].status){stripes_lost(port,(int64_t)done[i].status);return 1;}
-    if((done[i].wr_id&~STRIPE_SLOT)==STRIPE_DESCRIPTOR){s->descriptors_done++;continue;}
-    const struct stripe_piece *p=s->sent+(done[i].wr_id&STRIPE_SLOT)%MESH_STRIPE_CHUNKS;
-    s->send_frames-=p->frames;s->send_tail++;
-    if(!p->last)continue;
-    if(owned(p->owner))stripe_word(p->word,p->value);
-    atomic_fetch_add_explicit(&s->written,1,memory_order_relaxed);
-    atomic_fetch_sub_explicit(&s->flight,1,memory_order_release);
-  }
-  int moved=count>0;
-  _Atomic uint64_t *rings=mesh_rings(M);
-  const uint64_t window=atomic_load_explicit(&s->window,memory_order_relaxed);
-  for(uint32_t scanned=0;scanned<MESH_RINGS;scanned++){
-    if(!s->out.active){
-      if(s->descriptors_sent-s->descriptors_done>=MESH_DESCRIPTORS)break;
-      const uint32_t r=(s->cursor+scanned)%MESH_RINGS;
-      const uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
-      if(!at || at<M->data_off || at>M->length-sizeof(struct mesh_requests))continue;
-      struct mesh_requests *q=(void *)((char *)M+at);
-      const uint64_t entries=q->entries;
-      if(!entries || (entries&(entries-1)) || entries>(M->length-at-sizeof *q)/sizeof(struct mesh_stripe))continue;
-      uint64_t k=atomic_load_explicit(&q->taken,memory_order_acquire);
-      const struct mesh_stripe *e=q->request+(k&(entries-1));
-      if(atomic_load_explicit(&e->ready,memory_order_acquire)!=k+1 || e->node!=port->peer)continue;
-      const struct mesh_descriptor d={.offset=e->offset,.bytes=e->bytes,.word=e->word,.value=e->value};
-      const uint64_t owner=q->owner;
-      if(!atomic_compare_exchange_strong_explicit(&q->taken,&k,k+1,memory_order_acq_rel,memory_order_relaxed))continue;
-      s->cursor=(r+1)%MESH_RINGS;moved=1;
-      atomic_fetch_add_explicit(&s->flight,1,memory_order_acq_rel);
-      if(d.offset>wire.length || d.bytes>wire.length-d.offset || d.offset>window || d.bytes>window-d.offset || !stripe_word_valid(d.word)){
-        stripe_failed(at,owner,d.word,EINVAL);
-        atomic_fetch_sub_explicit(&s->flight,1,memory_order_release);
-        continue;
-      }
-      const uint32_t slot=(uint32_t)(s->descriptors_sent%MESH_DESCRIPTORS);
-      const uint64_t offset=stripe_descriptor(port,MESH_DESCRIPTORS+slot);
-      memcpy(wire.data+offset,&d,sizeof d);
-      struct ibv_sge span=stripe_span(port,offset,sizeof d);
-      struct ibv_send_wr posting={.wr_id=STRIPE_DESCRIPTOR|slot,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-      const int error=control->send(control->pair,&posting,&bad);
-      if(error){
-        stripe_failed(at,owner,d.word,error<0?-error:error);
-        atomic_fetch_sub_explicit(&s->flight,1,memory_order_release);
-        stripes_lost(port,error<0?-error:error);
-        return 1;
-      }
-      s->descriptors_sent++;
-      s->out=(struct stripe_cut){.d=d,.owner=owner,.ring=at,.active=1};
-    }
-    while(s->out.active){
-      const uint64_t offset=s->out.d.offset+s->out.done;
-      const uint32_t length=stripe_length(offset,s->out.d.bytes-s->out.done,s->piece),frames=length?(length+4095)/4096:1;
-      if(s->send_frames+frames>s->send_capacity || s->send_head-s->send_tail>=MESH_STRIPE_CHUNKS)break;
-      const int last=s->out.done+length>=s->out.d.bytes;
-      const uint32_t slot=(uint32_t)(s->send_head%MESH_STRIPE_CHUNKS);
-      s->sent[slot]=(struct stripe_piece){.word=last?s->out.d.word:0,.value=s->out.d.value,.owner=s->out.owner,.ring=s->out.ring,
-        .frames=frames,.last=(uint32_t)last};
-      struct ibv_sge span=stripe_span(port,offset,length);
-      struct ibv_send_wr posting={.wr_id=STRIPE_DATA|slot,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-      const int error=data->send(data->pair,&posting,&bad);
-      if(error){stripes_lost(port,error<0?-error:error);return 1;}
-      s->send_frames+=frames;s->send_head++;s->out.done+=length;moved=1;
-      if(last)s->out.active=0;
-    }
-    if(s->out.active)break;
-  }
-  return moved;
-}
-/* a descriptor slot's receive posted again, once the stripe it named has every piece's receive posted */
-static int stripe_listen(struct port *port,uint32_t slot){
-  struct stripes *s=&port->stripes;
-  struct ibv_sge span=stripe_span(port,stripe_descriptor(port,slot),sizeof(struct mesh_descriptor));
-  struct ibv_recv_wr request={.wr_id=STRIPE_DESCRIPTOR|slot,.sg_list=&span,.num_sge=1},*bad;
-  const int error=s->provider.queues[0].receive(s->provider.queues[0].pair,&request,&bad);
-  return error<0?-error:error;
-}
-/* design/bridge-dataflow.md#stripes: one pass of the port's receive thread over its stripe flow (peer_serve's receive
-   half): its receive completions taken (a descriptor landed queued by its slot; a stripe's last piece landing stores
-   its word here), then each landed descriptor's pieces' receives posted at its offset, in the order the descriptors
-   landed, while the data pair's frames and the piece ring hold them, and its slot's receive posted again once they all
-   are (so no more descriptors are in flight than slots: credit flow control holds the peer's next one until then,
-   TN3205).  A descriptor naming bytes past this node's window or a word that is no word is the peer's protocol error
-   (EPROTO).  Whether anything moved; a failure is the flow's (stripes_lost) */
-int stripes_receive(struct port *port){
-  struct stripes *s=&port->stripes;
-  const struct mesh_queue *data=s->provider.queues+1;
-  struct ibv_wc done[16];
-  const int count=s->provider.queues[0].poll(s->provider.completion,16,done);
-  if(count<0){stripes_lost(port,EIO);return 1;}
-  if(count)atomic_thread_fence(memory_order_acquire);
-  for(int i=0;i<count;i++){
-    if(done[i].status){stripes_lost(port,(int64_t)done[i].status);return 1;}
-    const uint64_t slot=done[i].wr_id&STRIPE_SLOT;
-    if((done[i].wr_id&~STRIPE_SLOT)==STRIPE_DESCRIPTOR){s->arrived[s->arrived_head++%MESH_DESCRIPTORS]=(uint32_t)slot;continue;}
-    const struct stripe_piece *p=s->posted+slot%MESH_STRIPE_CHUNKS;
-    s->receive_frames-=p->frames;s->receive_tail++;
-    if(!p->last)continue;
-    stripe_word(p->word,p->value);
-    atomic_fetch_add_explicit(&s->landed,1,memory_order_relaxed);
-  }
-  int moved=count>0;
-  for(;;){
-    if(!s->in.active){
-      if(s->arrived_tail==s->arrived_head)break;
-      const uint32_t slot=s->arrived[s->arrived_tail%MESH_DESCRIPTORS];
-      memcpy(&s->in.d,wire.data+stripe_descriptor(port,slot),sizeof s->in.d);
-      const struct mesh_descriptor *d=&s->in.d;
-      if(d->offset>wire.length || d->bytes>wire.length-d->offset || !stripe_word_valid(d->word)){stripes_lost(port,EPROTO);return 1;}
-      s->in.done=0;s->in.slot=slot;s->in.active=1;
-    }
-    const uint64_t offset=s->in.d.offset+s->in.done;
-    const uint32_t length=stripe_length(offset,s->in.d.bytes-s->in.done,s->piece),frames=length?(length+4095)/4096:1;
-    if(s->receive_frames+frames>s->receive_capacity || s->receive_head-s->receive_tail>=MESH_STRIPE_CHUNKS)break;
-    const int last=s->in.done+length>=s->in.d.bytes;
-    const uint32_t slot=(uint32_t)(s->receive_head%MESH_STRIPE_CHUNKS);
-    s->posted[slot]=(struct stripe_piece){.word=last?s->in.d.word:0,.value=s->in.d.value,.frames=frames,.last=(uint32_t)last};
-    struct ibv_sge span=stripe_span(port,offset,length);
-    struct ibv_recv_wr request={.wr_id=STRIPE_DATA|slot,.sg_list=&span,.num_sge=1},*bad;
-    int error=data->receive(data->pair,&request,&bad);
-    if(error){stripes_lost(port,error<0?-error:error);return 1;}
-    s->receive_frames+=frames;s->receive_head++;s->in.done+=length;moved=1;
-    if(!last)continue;
-    s->in.active=0;s->arrived_tail++;
-    if((error=stripe_listen(port,s->in.slot))){stripes_lost(port,error);return 1;}
-  }
-  return moved;
-}
-
-/* design/bridge-dataflow.md#streams: a stream's failure, the event loop's to end (streams_turn) */
-static void stream_lost(struct port *port,int64_t code){
-  int64_t none=0;
-  atomic_compare_exchange_strong(&port->stream.failed,&none,code?code:EIO);
-  atomic_store_explicit(&port->stream.up,0,memory_order_release);
-  wake();
-}
-/* the window offset of a stream's page */
-static uint64_t stream_offset(const struct port *port,uint64_t page){
-  return (uint64_t)port->stream.page*M->pgsz+page*port->stream.page_bytes;
-}
-/* the stream's next `n` pages from `posted`, chained as mesh-verbs-stream.c chained them: SENDs, or receives */
-static int stream_post(struct port *port,uint32_t n){
-  struct stream *s=&port->stream;
-  for(uint32_t i=0;i<n;i++){
-    const uint64_t page=s->posted+i;
-    s->spans[i]=stripe_span(port,stream_offset(port,page),s->page_bytes);
-    if(s->sending)s->sends[i]=(struct ibv_send_wr){.wr_id=page,.next=i+1<n?s->sends+i+1:NULL,.sg_list=s->spans+i,.num_sge=1,
-      .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
-    else s->receives[i]=(struct ibv_recv_wr){.wr_id=page,.next=i+1<n?s->receives+i+1:NULL,.sg_list=s->spans+i,.num_sge=1};
-  }
-  const struct mesh_queue *queue=s->provider.queues;
-  struct ibv_send_wr *bad_send;struct ibv_recv_wr *bad_receive;
-  const int error=s->sending?queue->send(queue->pair,s->sends,&bad_send):queue->receive(queue->pair,s->receives,&bad_receive);
-  if(error)return error<0?-error:error;
-  if(!s->posted)s->own.begin_ns=ledger_ns();
-  s->posted+=n;s->own.posts++;
-  return 0;
-}
-/* design/bridge-dataflow.md#streams: one pass of the stream at its end's progress thread (the send thread where it
-   sends, the receive thread where it receives): its completions taken (a SEND's retiring its page; a receive's landing
-   its page, in posting order and of a whole page, its count's first, tenth, ninetieth percent and last landing timed),
-   then its next pages posted while fewer than `window` are in flight; the last completion finishing it */
-int stream_pass(struct port *port){
-  struct stream *s=&port->stream;
-  const struct mesh_queue *queue=s->provider.queues;
-  const int count=queue->poll(s->sending?s->provider.sent:s->provider.completion,(int)s->window,s->completions);
-  s->own.polls++;
-  if(count<0){stream_lost(port,EIO);return 1;}
-  if(!count)s->own.empty_polls++;
-  for(int i=0;i<count;i++){
-    const struct ibv_wc *done=s->completions+i;
-    if(done->status){stream_lost(port,(int64_t)done->status);return 1;}
-    if(!s->sending && done->byte_len!=s->page_bytes){stream_lost(port,EPROTO);return 1;}
-    s->own.misordered+=done->wr_id!=s->completed+(uint64_t)i;
-  }
-  if(count){
-    const uint64_t at=ledger_ns();
-    s->completed+=(uint64_t)count;
-    if(!s->own.first_ns){s->own.first_ns=at;s->own.first_count=s->completed;}
-    if(!s->own.low_count && s->completed>=s->count/10){s->own.low_ns=at;s->own.low_count=s->completed;}
-    if(!s->own.high_count && s->completed>=9*(uint64_t)s->count/10){s->own.high_ns=at;s->own.high_count=s->completed;}
-    s->own.last_ns=at;s->own.completed=s->completed;
-  }
-  const uint64_t room=s->window-(s->posted-s->completed),left=s->count-s->posted,n=room<left?room:left;
-  if(n){
-    const int error=stream_post(port,(uint32_t)n);
-    if(error){stream_lost(port,error);return 1;}
-  }
-  if(s->completed==s->count){atomic_store_explicit(&s->up,0,memory_order_release);atomic_store_explicit(&s->finished,1,memory_order_release);wake();}
-  return count || n;
-}
-
-/* design/bridge-and-ipc.md#flows: a flow's verbs work, on its port's queue: an exclusive flow's queue pairs made; ready
-   to receive, its receives prepared (an exclusive flow's posted, a lane rider's taking its headers' records); its
-   SENDs prepared, an exclusive flow's queue pairs ready to send, and served by its port's progress threads; or a side
-   whose lists arrived, the flow's SENDs unserved while it is prepared and served again where they were.  0, or the
-   error */
+/* design/bridge-and-ipc.md#flows: a flow's verbs work, on its port's queue: its queue pairs made; ready to receive, its
+   receives prepared and posted; its SENDs prepared, its queue pairs ready to send, and served by its port's progress
+   threads; or a side whose lists arrived, the flow's SENDs unserved while it is prepared and served again where they
+   were.  0, or the error */
 static int flow_work(struct flow *f,int job){
   int error=0;
-  if(job==JOB_PAIR)return f->exclusive?pair_up(&f->provider,f->qps+f->alive):0;
+  if(job==JOB_PAIR)return pair_up(&f->provider,f->qps);
   ledger_open(f);
   const int ran=atomic_load_explicit(&f->progressing,memory_order_acquire);
   if(job==JOB_CHANGE)port_quiet(f);
-  if(job==JOB_RECEIVE && f->exclusive){
-    /* #keepalive: its queue pair connected and its receives posted where both ends made one, else left unconnected */
-    f->provider.count=f->qps+(f->alive && f->peer_alive);
-    error=pair_receive(&f->provider,(const uint32_t (*)[2])f->pairs,f->port->heard.lid,f->port->heard.gid);
-    if(!error && f->alive && f->peer_alive)error=flow_alive_listen(f,FLOW_ALIVE_RECEIVES);
-  }
-  if(!error && job!=JOB_RUN && f->side[MESH_RECEIVE].owner && !(f->configured&1u<<MESH_RECEIVE) && !(error=receives_configure(f))){
+  if(job==JOB_RECEIVE)error=pair_receive(&f->provider,(const uint32_t (*)[2])f->pairs,f->port->heard.lid,f->port->heard.gid);
+  if(!error && job!=JOB_RUN && f->side[MESH_RECEIVE].owner && !(f->configured&1u<<MESH_RECEIVE) && !(error=receives_configure(f)))
     f->configured|=1u<<MESH_RECEIVE;
-    f->lane_epoch=f->port->lanes.generation;
-    if(!f->exclusive)error=port_list(f,0,1);
-  }
   if(!error && job!=JOB_RECEIVE && f->side[MESH_SEND].owner && !(f->configured&1u<<MESH_SEND) && !(error=sends_configure(f)))
     f->configured|=1u<<MESH_SEND;
-  if(!error && job==JOB_RUN && f->exclusive)error=pair_send(&f->provider);
-  if(!error && (job==JOB_RUN || (job==JOB_CHANGE && ran)))error=port_list(f,1,0);
+  if(!error && job==JOB_RUN)error=pair_send(&f->provider);
+  if(!error && (job==JOB_RUN || (job==JOB_CHANGE && ran)))error=port_list(f);
   return error;
 }
 static void flow_job(struct flow *f,int job){
   f->job=job;atomic_store_explicit(&f->done,0,memory_order_relaxed);
   dispatch_async(f->port->work,^{
-    /* design/bridge-dataflow.md#stripes: guarded where the device holds a stripe flow (port_guard) */
-    const int raised=guard_raise(f->port,0);
+    /* design/bridge-and-ipc.md#lanes: guarded (port_guard) */
+    const int raised=guard_raise(f->port);
     f->result=flow_work(f,job);
     guard_lower(f->port,raised);
     port_pairs(f->port);
@@ -1070,26 +590,17 @@ static void flow_job(struct flow *f,int job){
 
 /* design/algorithm-sources.md#meshresult: a flow out of its port's table and its queue pairs destroyed, on its port's
    queue, the link's census printed: each ring's SEND requests and frames posted and retired by the send completions
-   its queue pair took (an exclusive flow's), and its records landed and their bytes.  A flow on its port's lanes is
-   released once its records posted on the lanes have landed, or the lanes' queue pairs that held them are destroyed
-   (their generation moved: lanes that failed and are not yet closed may still land a SEND in its rows, which a relay's
-   lease returns to the window as it is freed), its ledger then written (#ledger).  1 once nothing is held (a failed
-   destruction, or records still posted, keep it for the next turn) */
+   its queue pair took, and its records landed and their bytes, its ledger then written (#ledger).  1 once nothing is
+   held (a failed destruction keeps it for the next turn) */
 static int flow_release(struct flow *flow){
   port_unlist(flow);
   for(int q=0;flow->rings && q<flow->qps;q++)
-    say("link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu%s\n",
+    say("link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu\n",
       flow->port->index,q,flow->gates?(unsigned long long)flow->gates[q].requests:0ull,flow->gates?(unsigned long long)flow->gates[q].posted:0ull,
       flow->gates?(unsigned long long)flow->gates[q].retired:0ull,flow->gates?(unsigned long long)flow->gates[q].completions:0ull,
-      flow->rings[q].count,flow->rings[q].posted,(unsigned long long)flow->rings[q].landed,(unsigned long long)flow->rings[q].bytes,
-      flow->exclusive?"":" (lanes)");
-  if(flow->alive)say("link %u keepalives posted=%llu heard=%llu%s (design/bridge-and-ipc.md#keepalive)\n",flow->port->index,
-                     (unsigned long long)flow->alive_posted,(unsigned long long)flow->alive_heard,
-                     flow->peer_alive?"":", the peer made no keepalive queue pair");
-  if(!flow->exclusive && atomic_load_explicit(&flow->lane_frames,memory_order_acquire) &&
-     flow->port->lanes.generation==flow->lane_epoch)return 0;
-  /* design/bridge-dataflow.md#stripes: guarded where the device holds a stripe flow (port_guard) */
-  const int raised=guard_raise(flow->port,0),down=down_pair(&flow->provider);
+      flow->rings[q].count,flow->rings[q].posted,(unsigned long long)flow->rings[q].landed,(unsigned long long)flow->rings[q].bytes);
+  /* design/bridge-and-ipc.md#lanes: guarded (port_guard) */
+  const int raised=guard_raise(flow->port),down=down_pair(&flow->provider);
   guard_lower(flow->port,raised);
   if(!down)return 0;
   ledger_write(flow);
@@ -1126,13 +637,13 @@ static void ready_say(struct flow *f,const uint32_t *route,uint32_t hops){
   struct mesh_client *client=mesh_client_at(M,f->side[d].owner);
   struct mesh_tx *tx=side_tx(f,d);
   struct ready ready={.hops=hops,.slots=tx->slots,.invocations=tx->invocations,.depth=atomic_load(&client->depth),
-    .cyclic=atomic_load(&client->cyclic),.stripe=f->stripe,.stripes=f->stripes,.exclusive=(uint32_t)f->exclusive,
+    .cyclic=atomic_load(&client->cyclic),.stripe=f->stripe,.stripes=f->stripes,.exclusive=1,
     .digest=atomic_load_explicit(&client->digest,memory_order_relaxed)};
   size_t transfers=0;
   for(uint32_t k=0;k<f->queues;k++)transfers+=ready.lengths[k]=side_length(f,MESH_SEND,k);
   size_t bytes=sizeof ready+(size_t)hops*sizeof *route+transfers*sizeof(struct mesh_transfer);
   unsigned char *payload=malloc(bytes),*at=payload;
-  if(!payload){port_lost(f->port,ENOMEM,0);return;}
+  if(!payload){port_lost(f->port,ENOMEM);return;}
   memcpy(at,&ready,sizeof ready);at+=sizeof ready;
   memcpy(at,route,(size_t)hops*sizeof *route);at+=(size_t)hops*sizeof *route;
   for(uint32_t k=0;k<f->queues;k++){memcpy(at,side_transfers(f,MESH_SEND,k),ready.lengths[k]*sizeof(struct mesh_transfer));at+=ready.lengths[k]*sizeof(struct mesh_transfer);}
@@ -1237,7 +748,6 @@ static void flow_free(struct flow *f){
   if(f->partner)f->partner->partner=NULL;
   f->port->flows--;
   f->port->reserved[f->slot/64]&=~(UINT64_C(1)<<(f->slot%64));
-  if(f->exclusive)f->port->committed-=(uint32_t)(f->qps+f->alive);
   for(int d=0;d<2;d++){lease_drop(f->side[d].lease);lease_drop(f->pending[d].lease);}
   free(f);
   flow_count--;busy_tell();
@@ -1264,28 +774,17 @@ void flow_tell(struct flow *f){
   f->told=1;
   flow_say(f,POSTED,0,0,NULL,M->node);
 }
-/* design/bridge-and-ipc.md#lanes: the peer's word on whether the flow takes queue pairs of its own (its READY's
-   `exclusive`, its PAIRS' count), ANDed into the flow's until the flow pairs, so both ends pair alike; 0, or EPROTO
-   where a flow that paired hears otherwise */
-int flow_mode(struct flow *f,int exclusive){
-  if(f->decided)return f->exclusive==!!exclusive?0:EPROTO;
-  if(f->exclusive && !exclusive){f->exclusive=0;f->port->committed-=(uint32_t)(f->qps+f->alive);f->alive=0;}
-  return 0;
-}
 /* design/bridge-and-ipc.md#protocol: a flow's next step, its job's end or a message heard: paired once the peer's READY
-   or PAIRS is heard (an exclusive flow's queue pairs made; PAIRS sent), ready to receive once its PAIRS are and, held,
+   or PAIRS is heard (its queue pairs made; PAIRS sent), ready to receive once its PAIRS are and, held,
    once its client's program took it (POSTED told, flow_tell), running once its POSTED is; a relay whose side's lists
-   arrived after its receives were posted changes.  A flow on its port's lanes receives, runs and changes once the lanes
-   are up (lanes that fail to be made or connected are the link's loss, which fails it: #lanes) */
+   arrived after its receives were posted changes */
 void flow_step(struct flow *f){
   if(f->state==FAILED || f->job || f->stopping)return;
   for(int d=0;d<2;d++)if(f->pending[d].owner && !f->side[d].owner){f->side[d]=f->pending[d];f->pending[d]=(struct side){0};}
-  const struct lanes *l=&f->port->lanes;
-  const int up=f->exclusive || l->state==LANES_UP;
-  if(f->state==READIED && (f->heard&(HEARD_READY|HEARD_PAIRS))){f->decided=1;flow_job(f,JOB_PAIR);}
-  else if(f->state==PAIRING && (f->heard&HEARD_PAIRS) && !f->hold && up)flow_job(f,JOB_RECEIVE);
-  else if(f->state==POSTING && (f->heard&HEARD_POSTED) && up)flow_job(f,JOB_RUN);
-  else if(up && (f->state==POSTING || f->state==RUNNING) && ((f->side[MESH_SEND].owner && !(f->configured&1u<<MESH_SEND) && f->state==RUNNING) ||
+  if(f->state==READIED && (f->heard&(HEARD_READY|HEARD_PAIRS)))flow_job(f,JOB_PAIR);
+  else if(f->state==PAIRING && (f->heard&HEARD_PAIRS) && !f->hold)flow_job(f,JOB_RECEIVE);
+  else if(f->state==POSTING && (f->heard&HEARD_POSTED))flow_job(f,JOB_RUN);
+  else if((f->state==POSTING || f->state==RUNNING) && ((f->side[MESH_SEND].owner && !(f->configured&1u<<MESH_SEND) && f->state==RUNNING) ||
                                 (f->side[MESH_RECEIVE].owner && !(f->configured&1u<<MESH_RECEIVE))))flow_job(f,JOB_CHANGE);
 }
 static void flow_done(struct flow *f){
@@ -1300,11 +799,9 @@ static void flow_done(struct flow *f){
     return;
   }
   if(job==JOB_PAIR){
-    /* #lanes: an exclusive flow's PAIRS its queue pairs, a lane rider's none, its index and generation in its code */
     uint32_t pairs[MESH_PAIRS][2];
-    for(int q=0;f->exclusive && q<f->qps+f->alive;q++){pairs[q][0]=f->provider.queues[q].pair->qp_num;pairs[q][1]=(f->provider.psn+(uint32_t)q)&0xffffff;}
-    flow_say(f,PAIRS,f->exclusive?(uint32_t)(f->qps+f->alive):0,f->exclusive?0:(int64_t)((uint64_t)f->generation<<32|f->slot),
-             (const uint32_t (*)[2])pairs,M->node);
+    for(int q=0;q<f->qps;q++){pairs[q][0]=f->provider.queues[q].pair->qp_num;pairs[q][1]=(f->provider.psn+(uint32_t)q)&0xffffff;}
+    flow_say(f,PAIRS,(uint32_t)f->qps,0,(const uint32_t (*)[2])pairs,M->node);
     f->state=PAIRING;
     if(!f->hold)f->deadline=now+MESH_PAIR_NS;
   }else if(job==JOB_RECEIVE){
@@ -1321,31 +818,22 @@ static void flow_done(struct flow *f){
 }
 
 /* design/bridge-and-ipc.md#flows: a flow made on a port toward `far` for the execution `key`, the program's invocations
-   t with t mod stripes = stripe (#cables), an index of the port's table its own (MESH_FLOWS a port), exclusive where
-   `exclusive` asks it, its queue pairs fit a PAIRS message, and the port's device has room for them beside those its
-   flows and lanes hold or will, the lanes' own counted before they are made (#lanes: else it rides the lanes); NULL
-   where it is not one or the table is full */
-static struct flow *flow_make(struct port *port,uint64_t key,uint32_t near,uint32_t far,uint32_t queues,uint32_t slots,uint32_t stripe,uint32_t stripes,
-                              int exclusive){
-  if(!queues || !slots || queues>MESH_QUEUES || (uint64_t)queues*slots>INT32_MAX || !stripes || stripes>MESH_STRIPES || stripe>=stripes)return NULL;
+   t with t mod stripes = stripe (#cables), an index of the port's table its own (MESH_FLOWS a port), its queue pairs
+   fitting a PAIRS message (the device refuses those past its usable ones as its job makes them, ENOSPC as a value);
+   NULL where it is not one or the table is full */
+static struct flow *flow_make(struct port *port,uint64_t key,uint32_t near,uint32_t far,uint32_t queues,uint32_t slots,uint32_t stripe,uint32_t stripes){
+  if(!queues || !slots || queues>MESH_QUEUES || (uint64_t)queues*slots>MESH_PAIRS || !stripes || stripes>MESH_STRIPES || stripe>=stripes)return NULL;
   uint32_t slot=0;
   while(slot<MESH_FLOWS && port->reserved[slot/64]>>(slot%64)&1)slot++;
   if(slot==MESH_FLOWS)return NULL;
   struct flow *f=calloc(1,sizeof *f);
   if(!f)return NULL;
   const uint32_t qps=queues*slots;
-  exclusive=exclusive && qps<=MESH_PAIRS && port->device.max_pairs &&
-    port->committed+qps+(port->lanes.committed?0:MESH_LANES)<=port->device.max_pairs;
-  /* #keepalive: a queue pair of its own past the data's, where the configuration states a keepalive, a PAIRS message
-     holds it and the device has room */
-  const int alive=exclusive && keepalive_ns && qps<MESH_PAIRS && port->lanes.page!=MESH_ABSENT &&
-    port->committed+qps+1+(port->lanes.committed?0:MESH_LANES)<=port->device.max_pairs;
-  *f=(struct flow){.next=flows,.near=near,.far=far,.queues=queues,.stripe=stripe,.stripes=stripes,.qps=(int)qps,.exclusive=exclusive,.alive=alive,
+  *f=(struct flow){.next=flows,.near=near,.far=far,.queues=queues,.stripe=stripe,.stripes=stripes,.qps=(int)qps,
     .slot=slot,.generation=++port->generation[slot],.key=key,.created=now,.deadline=now+MESH_PEER_NS,.M=M,.port=port,
     .provider={.device=&port->device}};
   port->reserved[slot/64]|=UINT64_C(1)<<(slot%64);
   if(slot>=atomic_load(&port->high))atomic_store(&port->high,slot+1);
-  if(exclusive)port->committed+=qps+(uint32_t)alive;
   flows=f;port->flows++;flow_count++;busy_tell();
   return f;
 }
@@ -1462,7 +950,7 @@ static uint64_t program_keyed(uint64_t key){
 static uint32_t cable_rank(const struct port *port){ return M->node<port->peer?port->index:port->peer_port; }
 static uint32_t cables(uint32_t node,struct port **out){
   uint32_t n=0;
-  for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted && ports[p].peer==node && !ports[p].retiring)out[n++]=ports+p;
+  for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted && ports[p].peer==node)out[n++]=ports+p;
   for(uint32_t i=1;i<n;i++)for(uint32_t j=i;j>0 && cable_rank(out[j])<cable_rank(out[j-1]);j--){struct port *t=out[j];out[j]=out[j-1];out[j-1]=t;}
   return n;
 }
@@ -1480,27 +968,26 @@ static struct port *stripe_cable(struct port **next,uint32_t n,uint64_t key,uint
   return next[(pair_hash(key,a,b)+stripe)%n];
 }
 
-/* design/bridge-and-ipc.md#protocol, #routes: a READY.  Its flow here pairs (its `exclusive` ANDed into the flow's,
-   #lanes); one heard by a relay's flow (the far end's program telling its direction) is mirrored and sent on by the
+/* design/bridge-and-ipc.md#protocol, #routes: a READY.  Its flow here pairs; one heard by a relay's flow (the far end's program telling its direction) is mirrored and sent on by the
    relay's other flow toward the route's start, so every relay of the route carries both directions; a program whose
    route goes on past this node is relayed toward the route's next node, over rows the bridge leases (no client of this
-   node takes part, its stripes sharing them), each stripe on the lanes of the cable of the next hop it rides
-   (stripe_cable); one that ends here is taken by a program awaiting it, else held, its queue pairs made where it takes
-   its own and no rows, for the client whose program takes it (#flows).  One that ends here naming another digest than
+   node takes part, its stripes sharing them), each stripe on the cable of the next hop it rides (stripe_cable); one
+   that ends here is taken by a program awaiting it, else held, its queue pairs made and no rows, for the client whose
+   program takes it (#flows).  One that ends here naming another digest than
    this node's program of its key (#protocol) is refused, and that program failed toward every destination, both as
    values (ESTALE: program_stale).  One that ends on a port where this node's program of its key toward its sender has
    no flow, while that program runs on others, finds the two ends' maps apart: refused, and the program failed, both as
    values (EPROTO) */
 void ready_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   struct ready ready;
-  if(heard->bytes<sizeof ready){port_lost(port,EPROTO,0);return;}
+  if(heard->bytes<sizeof ready){port_lost(port,EPROTO);return;}
   memcpy(&ready,payload,sizeof ready);
   uint64_t transfers=0;
   for(uint32_t k=0;k<MESH_QUEUES;k++)transfers+=ready.lengths[k];
   const uint32_t queues=ready.slots?heard->count/ready.slots:0;
   if(!ready.hops || !queues || queues>MESH_QUEUES || heard->count%ready.slots || !ready.stripes || ready.stripes>MESH_STRIPES ||
      ready.stripe>=ready.stripes || ready.stripe!=heard->stripe ||
-     heard->bytes!=sizeof ready+(uint64_t)ready.hops*sizeof(uint32_t)+transfers*sizeof(struct mesh_transfer)){port_lost(port,EPROTO,0);return;}
+     heard->bytes!=sizeof ready+(uint64_t)ready.hops*sizeof(uint32_t)+transfers*sizeof(struct mesh_transfer)){port_lost(port,EPROTO);return;}
   uint32_t *route=malloc((size_t)ready.hops*sizeof *route);
   struct mesh_transfer *list=malloc((transfers?transfers:1)*sizeof *list);
   if(!route || !list){free(route);free(list);ready_refuse(port,heard,ENOMEM);return;}
@@ -1517,8 +1004,7 @@ void ready_heard(struct port *port,const struct message *heard,const unsigned ch
   else if(f && !f->partner && (f->stripes!=ready.stripes || f->queues!=queues || (uint32_t)f->qps!=heard->count))
     flow_fail(f,EPROTO,4,FAIL,M->node,M->node);
   else if(f){
-    int error=f->partner?(!f->side[MESH_RECEIVE].owner && !f->pending[MESH_RECEIVE].owner?relay_direction(f,&ready,list,shape):0):
-      flow_mode(f,(int)ready.exclusive);
+    int error=f->partner && !f->side[MESH_RECEIVE].owner && !f->pending[MESH_RECEIVE].owner?relay_direction(f,&ready,list,shape):0;
     if(error)flow_fail(f,error,1,FAIL,M->node,M->node);
     else{
       if(f->partner)port_say(f->partner->port,(struct message){.kind=READY,.count=heard->count,.key=heard->key,.from=heard->from,
@@ -1543,7 +1029,7 @@ void ready_heard(struct port *port,const struct message *heard,const unsigned ch
           "differ): refused\n",port->index,port->name,(unsigned long long)heard->key,heard->from);
       ready_refuse(port,heard,EPROTO);
       program_fail(owner,d,EPROTO,M->node);
-    }else if(!(f=flow_make(port,heard->key,M->node,heard->from,queues,ready.slots,ready.stripe,ready.stripes,(int)ready.exclusive)))
+    }else if(!(f=flow_make(port,heard->key,M->node,heard->from,queues,ready.slots,ready.stripe,ready.stripes)))
       ready_refuse(port,heard,E2BIG);
     else{
       f->hold=1;f->heard=HEARD_READY;f->digest=ready.digest;
@@ -1554,9 +1040,9 @@ void ready_heard(struct port *port,const struct message *heard,const unsigned ch
     struct port *next[MESH_PORTS];
     struct flow *g=NULL;
     const uint32_t n=cables(route[1],next);
-    f=n?flow_make(port,heard->key,heard->to,heard->from,queues,ready.slots,ready.stripe,ready.stripes,0):NULL;
+    f=n?flow_make(port,heard->key,heard->to,heard->from,queues,ready.slots,ready.stripe,ready.stripes):NULL;
     if(f)g=flow_make(stripe_cable(next,n,heard->key,heard->from,heard->to,ready.stripe),heard->key,heard->from,heard->to,queues,
-                     ready.slots,ready.stripe,ready.stripes,0);
+                     ready.slots,ready.stripe,ready.stripes);
     if(!g){
       if(f){f->state=FAILED;flow_free(f);}
       ready_refuse(port,heard,n?E2BIG:EHOSTUNREACH);
@@ -1647,7 +1133,7 @@ static void health_put(struct mesh_record *held,const struct mesh_record *record
   memcpy(held->port,record->port,sizeof held->port);
   mesh_notify(&M->health);
 }
-static struct mesh_record *record_held(uint32_t node){
+struct mesh_record *record_held(uint32_t node){
   for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
   return NULL;
 }
@@ -1712,10 +1198,9 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   struct mesh_record *held=record_held(heard.node);
   struct known *k=known_at(heard.node);
   /* design/bridge-and-ipc.md#records, RFC 2328 s13: a record no newer than the newest heard of its node, the map holding
-     it or not, is dropped and not sent on, so a record the map pruned never circulates; an entry unheard for
-     MESH_RECORD_AGE_NS whose node the map no longer holds compares with nothing (s14's MaxAge) */
-  const int aged=k && !held && k->heard && now-k->heard>MESH_RECORD_AGE_NS;
-  if(k && k->boot && !aged && (heard.boot<k->boot || (heard.boot==k->boot && heard.sequence<=k->sequence))){
+     it or not, is dropped and not sent on, so a record the map pruned never circulates (a node's later boot is always
+     newer) */
+  if(k && k->boot && (heard.boot<k->boot || (heard.boot==k->boot && heard.sequence<=k->sequence))){
     /* the newest known of a node the map dropped while no paired path reached it: put again where a path now does,
        and sent on only then (a pruned record that no path reaches stops here) */
     if(!held && heard.boot==k->boot && heard.sequence==k->sequence){
@@ -1746,165 +1231,11 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
 }
 
-/* design/bridge-dataflow.md#stripes: the largest piece this end's device takes in one SEND (its port's max_msg_sz, in
-   whole frames, at most MESH_STRIPE_PIECE: mesh 8fc27cbe's 4 MiB, MESH_STRIPE_CHUNK) */
-static uint32_t stripes_piece(const struct port *port){
-  const uint32_t most=port->device.port.max_msg_sz/4096*4096;
-  return most && most<MESH_STRIPE_PIECE?most:MESH_STRIPE_PIECE;
-}
-/* the stripe flow ready to run, on the port's queue once its queue pairs are connected: the piece both ends cut by, its
-   queue pairs' frames less the descriptors their completion queues hold beside them, every count from zero and every
-   descriptor slot's receive posted; 0, or the post's error */
-static int stripes_ready(struct port *port){
-  struct stripes *s=&port->stripes;
-  const uint32_t own=stripes_piece(port);
-  s->piece=s->peer_piece && s->peer_piece/4096*4096<own?s->peer_piece/4096*4096:own;
-  if(!s->piece)s->piece=4096;
-  const uint32_t sends=(uint32_t)s->provider.sent->cqe,receives=(uint32_t)s->provider.completion->cqe;
-  s->send_capacity=MIN(s->provider.queues[1].send_capacity,sends>MESH_DESCRIPTORS+1?sends-MESH_DESCRIPTORS-1:1);
-  s->receive_capacity=MIN(s->provider.queues[1].receive_capacity,receives>MESH_DESCRIPTORS+1?receives-MESH_DESCRIPTORS-1:1);
-  s->send_head=s->send_tail=s->descriptors_sent=s->descriptors_done=s->receive_head=s->receive_tail=s->arrived_head=s->arrived_tail=0;
-  s->send_frames=s->receive_frames=s->cursor=0;
-  s->out=s->in=(struct stripe_cut){0};
-  int error=s->provider.queues[0].receive_capacity<MESH_DESCRIPTORS || s->provider.queues[0].send_capacity<MESH_DESCRIPTORS?ENOSPC:0;
-  for(uint32_t slot=0;slot<MESH_DESCRIPTORS && !error;slot++)error=stripe_listen(port,slot);
-  return error;
-}
-/* the requests a stripe flow took and had not completed when it stopped (the threads read it no more): each failed as
-   a value (its writer's word UINT64_MAX, ECONNRESET) */
-static void stripes_abandon(struct port *port){
-  struct stripes *s=&port->stripes;
-  uint64_t abandoned=0;
-  if(s->out.active){stripe_failed(s->out.ring,s->out.owner,s->out.d.word,ECONNRESET);s->out.active=0;abandoned++;}
-  for(;s->send_tail!=s->send_head;s->send_tail++){
-    const struct stripe_piece *p=s->sent+s->send_tail%MESH_STRIPE_CHUNKS;
-    if(p->last){stripe_failed(p->ring,p->owner,p->word,ECONNRESET);abandoned++;}
-  }
-  atomic_fetch_sub_explicit(&s->flight,abandoned,memory_order_release);
-}
-/* design/bridge-dataflow.md#stripes: a stripe flow's job on its port's queue, always guarded (port_guard): its two
-   queue pairs and completion queues made (STRIPES_MAKING); connected to the peer's, ready (stripes_ready) and the port's
-   progress threads started (STRIPES_CONNECTING: the event loop alone makes it up as it takes the job); or, once neither
-   progress thread reads it, the requests it held failed, its queue pairs moved to the error state and their flushed
-   completions drained (pair_flush), then destroyed (STRIPES_CLOSING): the one owner of its teardown, and the device's
-   registrations stay until the device retires (down_device, port_turn) */
-static void stripes_job(struct port *port,int job){
-  struct stripes *s=&port->stripes;
-  s->job=job;atomic_store_explicit(&s->done,0,memory_order_relaxed);
-  dispatch_async(port->work,^{
-    int result=0;
-    if(job==STRIPES_CLOSING){
-      atomic_store_explicit(&s->up,0,memory_order_release);
-      port_settle(port);
-      stripes_abandon(port);
-    }
-    port_guard(port,1);
-    if(job==STRIPES_MAKING)result=pair_up(&s->provider,2);
-    else if(job==STRIPES_CONNECTING){
-      result=pair_receive(&s->provider,(const uint32_t (*)[2])s->peer,port->heard.lid,port->heard.gid);
-      if(!result)result=pair_send(&s->provider);
-      if(!result)result=stripes_ready(port);
-      if(!result)result=port_threads(port);
-    }else{
-      s->flushed=s->provider.queues?pair_flush(&s->provider,MESH_FLUSH_POLLS):0;
-      result=down_pair(&s->provider)?0:EBUSY;
-    }
-    port_guard(port,0);
-    s->result=result;
-    port_pairs(port);
-    atomic_store_explicit(&s->done,1,memory_order_release);
-    wake();
-  });
-}
-/* design/recovery.md#loss: a stripe flow that failed (made, connected or run) or whose peer's did: the requests it held
-   fail as values, it is closed and made again a pause later where a request still needs it, and the peer is told (a
-   STRIPES of none and why) where the failure is this end's; the link, its lanes and its flows run on */
-static void stripes_reset(struct port *port,int64_t code,const char *what,int tell){
-  struct stripes *s=&port->stripes;
-  say("link %u (%s): stripes toward node %u %s: %s (%llu written, %llu landed)\n",port->index,port->name,port->peer,what,
-      strerror((int)code),(unsigned long long)atomic_load(&s->written),(unsigned long long)atomic_load(&s->landed));
-  if(tell)port_say(port,(struct message){.kind=STRIPES,.count=0,.code=code},NULL,0);
-  atomic_store_explicit(&s->up,0,memory_order_release);
-  if(s->state!=STRIPES_DOWN)s->state=STRIPES_CLOSING;
-  s->heard=0;s->wanted=0;s->code=code;
-}
-/* design/bridge-dataflow.md#stripes: the port's stripe flow's turn, on the event loop, as lanes_turn's: a job's end
-   taken (made: STRIPES told the peer, its queue pairs and its piece; connected: up; closed: down, the device's queue
-   pairs given back; a make or connect that failed: stripes_reset); its failure reset; made where it is wanted and the
-   link paired, a pause after it last closed, where the window gives its pages and the device has room for its two
-   queue pairs (else `code` says why, and the requests naming the peer fail as values: stripes_requests_turn), connected
-   once both ends made theirs, closed once it failed or the link went */
-void stripes_turn(struct port *port){
-  struct stripes *s=&port->stripes;
-  if(port->greeted){
-    const struct mesh_record *r=record_held(port->peer);
-    atomic_store_explicit(&s->window,r?r->window:0,memory_order_relaxed);
-  }
-  if(s->job){
-    if(!atomic_load_explicit(&s->done,memory_order_acquire))return;
-    const int job=s->job,result=s->result;
-    s->job=0;
-    if(job==STRIPES_CLOSING){
-      if(result)say("link %u (%s): stripes teardown: %s\n",port->index,port->name,strerror(result));
-      else{
-        say("link %u (%s): stripes closed (%u completions flushed)\n",port->index,port->name,s->flushed);
-        s->state=STRIPES_DOWN;if(s->committed)port->committed-=2;s->committed=0;
-      }
-    }else if(s->state==STRIPES_CLOSING){}
-    else if(result)stripes_reset(port,result,job==STRIPES_MAKING?"not made":"not connected",1);
-    else if(job==STRIPES_MAKING){
-      s->state=STRIPES_MADE;
-      struct message said={.kind=STRIPES,.count=2,.code=stripes_piece(port)};
-      for(uint32_t q=0;q<2;q++){said.pair[q][0]=s->provider.queues[q].pair->qp_num;said.pair[q][1]=(s->provider.psn+q)&0xffffff;}
-      port_say(port,said,NULL,0);
-    }else{
-      s->state=STRIPES_UP;s->code=0;
-      atomic_store_explicit(&s->up,1,memory_order_release);port_bell(port);
-      say("link %u (%s): stripes up toward node %u: pieces of %u bytes\n",port->index,port->name,port->peer,s->piece);
-    }
-  }
-  const int64_t failed=atomic_exchange(&s->failed,0);
-  if(failed && port->greeted && (s->state==STRIPES_UP || s->state==STRIPES_CONNECTING))stripes_reset(port,failed,"failed",1);
-  if(s->job)return;
-  if(s->state==STRIPES_CLOSING && now>=s->retry){s->retry=now+MESH_PAUSE_NS;stripes_job(port,STRIPES_CLOSING);}
-  else if(port->greeted && s->state==STRIPES_DOWN && s->wanted && now>=s->retry){
-    if(!s->pages){
-      const uint32_t pages=(uint32_t)((2*MESH_DESCRIPTORS*sizeof(struct mesh_descriptor)+M->pgsz-1)/M->pgsz);
-      const uint32_t page=mesh_arena_alloc(&bridge,pages,pages);
-      if(page!=MESH_ABSENT){s->page=page;s->pages=pages;}
-    }
-    if(!s->pages){
-      if(s->code!=ENOMEM)say("link %u (%s): stripes not made: the window holds no pages for their descriptors\n",port->index,port->name);
-      s->code=ENOMEM;s->retry=now+MESH_PAUSE_NS;
-    }else if(port->committed+2>port->device.max_pairs){
-      if(s->code!=ENOSPC)say("link %u (%s): stripes not made: the device holds %u of its %u usable queue pairs\n",port->index,port->name,
-                             port->committed,port->device.max_pairs);
-      s->code=ENOSPC;s->retry=now+MESH_PAUSE_NS;
-    }else{port->committed+=2;s->committed=1;s->state=STRIPES_MAKING;stripes_job(port,STRIPES_MAKING);}
-  }
-  else if(port->greeted && s->state==STRIPES_MADE && s->heard){s->state=STRIPES_CONNECTING;stripes_job(port,STRIPES_CONNECTING);}
-}
-/* a peer's STRIPES: its stripe flow's queue pairs and its largest piece (this end makes its own where it has none), or
-   (count 0) its stripe flow failed, with why: this end's, where joined to it, reset untold */
-void stripes_heard(struct port *port,const struct message *heard){
-  struct stripes *s=&port->stripes;
-  const int joined=s->state==STRIPES_UP || s->state==STRIPES_CONNECTING;
-  if(heard->count!=2){
-    if(joined)stripes_reset(port,heard->code?heard->code:EPROTO,"failed at its peer",0);
-    else s->heard=0;
-    return;
-  }
-  if(joined)stripes_reset(port,EPROTO,"made again by its peer",0);
-  memcpy(s->peer,heard->pair,sizeof s->peer);
-  s->peer_piece=(uint32_t)heard->code;s->heard=1;s->wanted=1;
-  stripes_turn(port);
-}
 /* design/bridge-dataflow.md#stripes: every registered ring's next request read on the event loop: a ring whose client
-   is gone deregistered; a request naming a node that a stripe flow of this node's carries toward is left to the send
-   threads of the ports up toward it, which take it; else the ports paired with its node want their stripe flows made
-   (stripes_turn), and it waits while one is being made; and it fails as a value (its writer's word UINT64_MAX, its
-   ring's code) where its node is this node (EINVAL) or no cable's (EHOSTUNREACH: a stripe goes over one link, its
-   node a neighbour), or where every cable's stripe flow could not be made (its code: ENOSPC, ENOMEM) */
+   is gone deregistered; a request naming a node a cable of this node's is paired with is left to the send threads of
+   the ports toward it, which take it once their links' stripe lanes are served (made with the link, and made again
+   with it); and it fails as a value (its writer's word UINT64_MAX, its ring's code) where its node is this node
+   (EINVAL) or no cable's (EHOSTUNREACH: a stripe goes over one link, its node a neighbour) */
 void stripes_requests_turn(void){
   _Atomic uint64_t *rings=mesh_rings(M);
   for(uint32_t r=0;r<MESH_RINGS;r++){
@@ -1921,16 +1252,8 @@ void stripes_requests_turn(void){
     const uint32_t node=e->node;
     struct port *cable[MESH_PORTS];
     const uint32_t n=node==M->node?0:cables(node,cable);
-    int64_t code=node==M->node?EINVAL:n?0:EHOSTUNREACH;
-    int up=0,failing=n>0;
-    for(uint32_t j=0;j<n;j++){
-      struct stripes *s=&cable[j]->stripes;
-      up|=s->state==STRIPES_UP;
-      if(s->state==STRIPES_DOWN && s->code && now<s->retry){if(!code)code=s->code;}
-      else failing=0;
-      if(s->state!=STRIPES_UP)s->wanted=1;
-    }
-    if(up || (n && !failing))continue;
+    const int64_t code=node==M->node?EINVAL:EHOSTUNREACH;
+    if(n)continue;
     const uint64_t word=e->word,owner=q->owner;
     if(!atomic_compare_exchange_strong_explicit(&q->taken,&k,k+1,memory_order_acq_rel,memory_order_relaxed))continue;
     if(atomic_load_explicit(&q->code,memory_order_relaxed)!=code)
@@ -2737,7 +2060,7 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
     struct flow *f=flow_on(cable[j],client->key,M->node,node,j);
     if(f && !f->hold){program_fail(owner,d,EBUSY,M->node);return;}
     if(f && (f->stripes!=n || f->queues!=queues || (uint32_t)f->qps!=queues*slots)){flow_fail(f,EPROTO,4,FAIL,M->node,M->node);f=NULL;}
-    if(!f && !(f=flow_make(cable[j],client->key,M->node,node,queues,slots,j,n,1))){program_fail(owner,d,E2BIG,M->node);return;}
+    if(!f && !(f=flow_make(cable[j],client->key,M->node,node,queues,slots,j,n))){program_fail(owner,d,E2BIG,M->node);return;}
     flow_take(f,owner,d);
     ready_say(f,&node,1);
     flow_step(f);
@@ -2752,7 +2075,7 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
   if(!m){free(route);status_failed(&client->status[d],owner,EHOSTUNREACH,4,node);return;}
   const uint32_t stripes=route_stripes(route,hops,m);
   for(uint32_t j=0;j<stripes;j++){
-    struct flow *f=flow_make(stripe_cable(next,m,client->key,M->node,node,j),client->key,M->node,node,queues,slots,j,stripes,0);
+    struct flow *f=flow_make(stripe_cable(next,m,client->key,M->node,node,j),client->key,M->node,node,queues,slots,j,stripes);
     if(!f){free(route);program_fail(owner,d,E2BIG,M->node);return;}
     flow_take(f,owner,d);
     ready_say(f,route+1,hops-1);
@@ -2760,6 +2083,18 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
     if(f->state==FAILED)break;
   }
   free(route);
+}
+/* design/bridge-and-ipc.md#stop: the bridge stopping: every program's words toward its destinations cancelled (~0) and
+   its status the stop's code, stored from the event loop's thread as plain memory stores, no queue, thread or verbs
+   call waited on; a program awaiting its routed peer's READYs told alike */
+void programs_stop(int64_t code){
+  for(struct flow *f=flows;f;f=f->next){
+    if(!owned(f->owner))continue;
+    if(f->cancel)mesh_cancel(M,f->cancel,f->destination);
+    status_failed(&mesh_client_at(M,f->owner)->status[f->destination],f->owner,code,4,M->node);
+  }
+  for(struct await *a=awaits;a;a=a->next)
+    if(owned(a->owner))status_failed(&mesh_client_at(M,a->owner)->status[a->destination],a->owner,code,4,M->node);
 }
 /* design/bridge-and-ipc.md#clients: every client slot read: a slot's process watched from the turn its slot is first
    seen (its exit retires every slot it holds, the event loop's EVFILT_PROC), one already gone retired at once, and on a

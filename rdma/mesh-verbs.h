@@ -134,7 +134,7 @@ static __attribute__((unused)) int down_device(struct mesh_device *device){
   free(device->regions);device->regions=NULL;device->extents=0;
   device->domain=NULL;
   device->context=NULL;
-  device->frame_capacity=0;
+  device->frame_capacity=0;device->pairs=0;
   return 1;
 }
 static __attribute__((unused)) void down(void){ if(shm)shm_unlink(shm); }
@@ -203,8 +203,29 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
   return 0;
 }
 /* design/prepared-machine.md#M11 */
-/* `count` UC queue pairs and their two completion queues, in INIT, against the device's usable queue pairs.  0, or the
-   error (ENOSPC: the device holds no more queue pairs). */
+/* queue pair q made on the provider's completion queues, UC, its capacities read, and moved to INIT (d6dceac verbs_up's
+   attributes and mask, as every pairing since); the device's count of its queue pairs one more.  0, or the error */
+static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
+  struct mesh_device *device=provider->device;
+  const uint32_t frames=device->frame_capacity;
+  struct mesh_queue *queue=&provider->queues[q];
+  queue->completion=provider->completion;queue->sent=provider->sent;
+  queue->poll=provider->completion->context->ops.poll_cq;
+  struct ibv_qp_init_attr qi={.send_cq=queue->sent,.recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
+    .cap={.max_send_wr=frames,.max_recv_wr=frames,.max_send_sge=1,.max_recv_sge=1}};
+  if(!(queue->pair=ibv_create_qp(device->domain,&qi)))return errno?errno:EIO;
+  device->pairs++;
+  queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
+  struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
+  if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual))return errno?errno:EIO;
+  queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
+  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+  if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
+  return 0;
+}
+/* `count` UC queue pairs in INIT, against the device's usable queue pairs, on the provider's two completion queues, made
+   where it has none (a link's are made once a context and kept across its pairings: design/bridge-and-ipc.md#lanes).
+   0, or the error (ENOSPC: the device holds no more queue pairs). */
 static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,int count){
   struct mesh_device *device=provider->device;
   if(device->pairs+(uint32_t)count>device->max_pairs)return ENOSPC;
@@ -212,43 +233,61 @@ static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,int count
   provider->queues=calloc((size_t)count,sizeof *provider->queues);
   if(!provider->queues)return ENOMEM;
   provider->count=count;provider->psn=arc4random()&0xffffff;
-  if(!(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
-  if(!(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  if(!provider->completion && !(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  if(!provider->sent && !(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   for(int q=0;q<count;q++){
-    struct mesh_queue *queue=&provider->queues[q];
-    queue->completion=provider->completion;queue->sent=provider->sent;
-    queue->poll=provider->completion->context->ops.poll_cq;
-    struct ibv_qp_init_attr qi={.send_cq=queue->sent,.recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
-      .cap={.max_send_wr=frames,.max_recv_wr=frames,.max_send_sge=1,.max_recv_sge=1}};
-    if(!(queue->pair=ibv_create_qp(device->domain,&qi)))return errno?errno:EIO;
-    device->pairs++;provider->qp_count=q+1;
-    queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
-    struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
-    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual))return errno?errno:EIO;
-    queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
-    struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-    if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
+    const int error=pair_make(provider,q);
+    if(provider->queues[q].pair)provider->qp_count=q+1;
+    if(error)return error;
   }
   return 0;
 }
 /* design/algorithm-sources.md#programcopy */
-/* each queue pair ready to receive from the peer's (`remote`: its queue pair numbers and first sequence numbers), the
-   peer's port at `lid` and `gid` */
+/* queue pair q ready to receive from the peer's (`remote`: its queue pair number and first sequence number), the peer's
+   port at `lid` and `gid`; ready to send */
+static __attribute__((unused)) int queue_receive(struct mesh_verbs *provider,int q,const uint32_t *remote,uint16_t lid,const uint8_t *gid){
+  struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],.dest_qp_num=remote[0],
+    .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=provider->device->gid_index}}};
+  memcpy(&r.ah_attr.grh.dgid,gid,16);
+  if(ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
+  return 0;
+}
+static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q){
+  struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
+  if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
+  return 0;
+}
+/* each queue pair ready to receive from the peer's, then each ready to send */
 static __attribute__((unused)) int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],uint16_t lid,const uint8_t *gid){
-  for(int q=0;q<provider->count;q++){
-    struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[q][1],.dest_qp_num=remote[q][0],
-      .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=provider->device->gid_index}}};
-    memcpy(&r.ah_attr.grh.dgid,gid,16);
-    if(ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
-  }
+  for(int q=0;q<provider->count;q++){const int error=queue_receive(provider,q,remote[q],lid,gid);if(error)return error;}
   return 0;
 }
 static __attribute__((unused)) int pair_send(struct mesh_verbs *provider){
-  for(int q=0;q<provider->count;q++){
-    struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
-    if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
-  }
+  for(int q=0;q<provider->count;q++){const int error=queue_send(provider,q);if(error)return error;}
   return 0;
+}
+/* design/bridge-and-ipc.md#lanes: a link's queue pairs destroyed at its next pairing (d6dceac's down_pair, its completion
+   queues kept, the context's own), then what those queues hold of them taken and dropped: a poll returns what is there
+   and 0 once none is (no queue pair is left to add any).  0, or the destruction's error (the context gone: forgotten
+   instead, pair_forget) */
+static __attribute__((unused)) int pairs_down(struct mesh_verbs *provider){
+  while(provider->qp_count){
+    struct ibv_qp *q=provider->queues[provider->qp_count-1].pair;
+    if(q && ibv_destroy_qp(q))return errno?errno:EIO;
+    provider->queues[--provider->qp_count].pair=NULL;
+    if(q)provider->device->pairs--;
+  }
+  free(provider->queues);provider->queues=NULL;provider->count=0;
+  struct ibv_wc stale[32];
+  struct ibv_cq *queues[2]={provider->completion,provider->sent};
+  for(int c=0;c<2;c++)while(queues[c] && ibv_poll_cq(queues[c],32,stale)>0){}
+  return 0;
+}
+/* a provider whose context is gone forgotten with no verbs call: its queue pairs and completion queues are the kernel's
+   to release at the process's exit (design/RDMA-KERNEL-RECOVERY.md "October 18") */
+static __attribute__((unused)) void pair_forget(struct mesh_verbs *provider){
+  free(provider->queues);provider->queues=NULL;provider->count=provider->qp_count=0;
+  provider->completion=provider->sent=NULL;
 }
 /* design/algorithm-sources.md#link */
 static __attribute__((unused)) uint64_t port_bandwidth(const struct ibv_port_attr *port){
