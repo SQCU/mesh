@@ -92,17 +92,10 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def artifact(path, cache=None):
+def artifact(path):
     if not os.path.exists(path):
         return {"path": path, "exists": False}
-    stat = os.stat(path)
-    key = (os.path.realpath(path), stat.st_size, stat.st_mtime_ns)
-    if cache is not None and key in cache:
-        return dict(cache[key])
-    row = {"path": path, "exists": True, "bytes": stat.st_size, "sha256": sha256(path)}
-    if cache is not None:
-        cache[key] = dict(row)
-    return row
+    return {"path": path, "exists": True, "bytes": os.path.getsize(path), "sha256": sha256(path)}
 
 
 def entity_class_measure(path):
@@ -120,15 +113,14 @@ def entity_class_measure(path):
 
 
 class MapAssets:
-    def __init__(self, basedir, entity_tool, python, progs, csprogs, checkpoints_per_lane, dry_run, artifact_cache):
+    def __init__(self, basedir, entity_tool, python, progs, csprogs, checkpoints_per_lane, dry_run):
         self.basedir, self.entity_tool, self.python = basedir, entity_tool, python
         self.progs, self.csprogs = progs, csprogs
         self.checkpoints_per_lane, self.dry_run = checkpoints_per_lane, dry_run
-        self.artifact_cache = artifact_cache
         program_files = sorted(glob.glob(os.path.join(os.path.dirname(self.entity_tool), "*.py")))
         program_files.append(os.path.join(ROOT, "payload", "cfg", "gamemodes-payload.cfg"))
         self.entity_program_id = hashlib.sha256(json.dumps({
-            os.path.relpath(path, ROOT): artifact(path, self.artifact_cache)
+            os.path.relpath(path, ROOT): artifact(path)
             for path in program_files
         }, sort_keys=True).encode()).hexdigest()
         self.entity_realizations = {}
@@ -138,10 +130,8 @@ class MapAssets:
 
     def asset_identity(self, found):
         if found[0] == "file":
-            return {"kind": "file", "source": artifact(found[1], self.artifact_cache)}
-        stat = os.stat(found[1])
-        source = {"path": os.path.realpath(found[1]), "bytes": stat.st_size,
-                  "mtime_ns": stat.st_mtime_ns}
+            return {"kind": "file", "source": artifact(found[1])}
+        source = {"path": os.path.realpath(found[1]), "bytes": os.path.getsize(found[1])}
         with zipfile.ZipFile(found[1]) as bundle:
             member = bundle.getinfo(found[2])
         return {"kind": "zip", "source": source, "member": found[2],
@@ -194,7 +184,7 @@ class MapAssets:
             destination = os.path.join(data_dir, filename)
             try:
                 shutil.copyfile(source, destination)
-                record["gamecode"][name] = artifact(destination, self.artifact_cache)
+                record["gamecode"][name] = artifact(destination)
             except OSError as exc:
                 record["gamecode"][name] = {"path": destination, "source": source, "error": f"{type(exc).__name__}: {exc}"}
         try:
@@ -202,7 +192,7 @@ class MapAssets:
             if not found:
                 raise FileNotFoundError(f'map BSP was not found: {cfg["map"]}')
             self.extract_asset(found, bsp)
-            record["bsp"] = artifact(bsp, self.artifact_cache)
+            record["bsp"] = artifact(bsp)
             source_ent = cfg.get("entity_file")
             if source_ent:
                 source_ent = os.path.abspath(os.path.expanduser(source_ent))

@@ -17,7 +17,6 @@ cvar_t csqc_usedemoprogs = {0, "csqc_usedemoprogs","1","use csprogs stored in de
 cvar_t cl_shownet = {0, "cl_shownet","0","1 = print packet size, 2 = print packet message list"};
 cvar_t cl_autoreconnect = {CVAR_SAVE, "cl_autoreconnect", "1", "retry the requested server after connection loss; disconnect cancels the request"};
 static char cl_connect_host[MAX_INPUTLINE];
-static double cl_connect_retry_at;
 cvar_t cl_nolerp = {0, "cl_nolerp", "0","network update smoothing"};
 cvar_t cl_lerpexcess = {0, "cl_lerpexcess", "0","maximum allowed lerp excess (hides, not fixes, some packet loss)"};
 cvar_t cl_lerpanim_maxdelta_server = {0, "cl_lerpanim_maxdelta_server", "0.1","maximum frame delta for smoothing between server-controlled animation frames (when 0, one network frame)"};
@@ -373,7 +372,6 @@ void CL_EstablishConnection(const char *host, int firstarg)
 		return;
 	if (host != cl_connect_host)
 		strlcpy(cl_connect_host, host, sizeof(cl_connect_host));
-	cl_connect_retry_at = realtime + 3;
 
 #ifdef CONFIG_MENU
 	M_Update_Return_Reason("");
@@ -426,7 +424,7 @@ void CL_ReconnectFrame(void)
 {
 	if (cl_autoreconnect.integer && cl_connect_host[0] &&
 		!cls.netcon && !cls.connect_trying && !cls.demoplayback &&
-		!sv.active && realtime >= cl_connect_retry_at)
+		!sv.active)
 	{
 		Con_Printf("Retrying connection to %s\n", cl_connect_host);
 		CL_EstablishConnection(cl_connect_host, -1);
