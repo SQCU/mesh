@@ -1,4 +1,7 @@
 import socket, subprocess, sys, os, threading, time
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path[:0] = [HERE, os.path.join(os.path.dirname(HERE), "bin")]
+import mesh_restart
 SCRIPT = os.environ.get("MESH_NODEINFO", os.path.expanduser("~/.local/mesh/bin/mesh-nodeinfo.sh"))
 PORT = int(os.environ.get("MESH_NODEINFO_PORT", "8100"))
 LATEST = (b"", "starting", 0.0)
@@ -43,6 +46,7 @@ try: s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
 except Exception as error: print(f"nodeinfo dual-stack: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
 s.bind(("::", PORT)); s.listen(64)
 threading.Thread(target=sample, daemon=True).start()
+mesh_restart.on_change(__file__)
 while True:
     try: c, _ = s.accept()
     except Exception as error:

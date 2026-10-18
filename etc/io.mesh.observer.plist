@@ -8,6 +8,7 @@
   <array>
     <string>/usr/local/mesh/bin/mesh-python</string>
     <string>/usr/local/mesh/viz/serve.py</string>
+    <string>/usr/local/mesh/etc/observer.json</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/usr/local/mesh</string>

@@ -3,8 +3,15 @@ import concurrent.futures, http.server, json, math, os, socketserver, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path[:0] = [os.path.join(ROOT, "bin")]
+import mesh_restart
 STAT = os.path.join(ROOT, "bin", "mesh-stat")
-PERIOD = float(os.environ.get("MESH_POLL", "2"))
+CONFIGURATION = sys.argv[1] if len(sys.argv) > 1 else None
+try:
+    with open(CONFIGURATION) as f: PERIOD = float(json.load(f)["period_s"])
+    CONFIGURED = None
+except (TypeError, OSError, ValueError, KeyError) as error:
+    PERIOD, CONFIGURED = None, f"no cadence: the observer's configuration document (serve.py DOCUMENT, etc/observer.json) gives no period_s ({type(error).__name__}: {error})"
 NODE_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 KEEP = int(os.environ.get("MESH_KEEP", "600"))
 ESTIMATE = int(os.environ.get("MESH_ESTIMATE_WINDOW", "60"))
@@ -312,7 +319,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/data.json") or self.path.startswith("/latest.json") or self.path.startswith("/v1/visualization"):
             with lock:
-                payload = {"period":PERIOD,"inventory":nodes,"fabric":fabric_snapshot(),"service":{"http_events":list(http_events)}}
+                payload = {"period":PERIOD,"configuration":CONFIGURATION,"error":CONFIGURED,"inventory":nodes,"fabric":fabric_snapshot(),"service":{"http_events":list(http_events)}}
                 if self.path.startswith("/latest.json"):
                     payload["latest"] = {name: rows[-1] for name, rows in hist.items() if rows}
                 elif self.path.startswith("/v1/visualization"):
@@ -333,9 +340,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             del http_events[:-16]
 
 if __name__ == "__main__":
-    threading.Thread(target=poll, daemon=True).start()
+    mesh_restart.on_change(__file__, CONFIGURATION, os.path.join(ROOT, "etc", "mesh-capacity.json"), os.environ.get("MESH_NODES", os.path.join(ROOT, "etc", "mesh-nodes.json")))
+    if PERIOD is not None: threading.Thread(target=poll, daemon=True).start()
+    else: print(CONFIGURED, file=sys.stderr, flush=True)
     port = int(os.environ.get("MESH_PORT", "8787"))
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler) as server:
-        print(f"mesh observer http://localhost:{port} every {PERIOD:g}s")
+        print(f"mesh observer http://localhost:{port}, a sample every {PERIOD} s ({CONFIGURATION})", flush=True)
         server.serve_forever()

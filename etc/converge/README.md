@@ -7,13 +7,13 @@ READERS: JSON, TOML or YAML), writes its canonical form (`~/Library/Application 
 records its path beside it and writes the admin user's agent `io.mesh.converge` (README.md, Convergence). Without
 one, nothing moves the checkout but the next run of `mesh-user.sh`. There is no default. Whether a node converges is
 the operator's choice: `bin/mesh-converge.sh off` takes a node out again, removing the recorded document and every
-layer's agent.
+layer's agent definition; each layer's loop ends at its next pass.
 
 A document has two keys, each required:
 
 - `purpose`: one line stating what the configuration is for.
-- `period_s`: seconds between passes (the agent's StartInterval). A push has no event on the node, so a pass asks the
-  upstream every period.
+- `period_s`: seconds between passes (`mesh-converge.sh follow` reads it before each). A push has no event on the
+  node, so a pass asks the upstream every period.
 
 `five-minutes.toml` is written for the headless nodes of the E2B pair and the Studios; its `purpose` states the
 reasoning. A development machine whose checkouts carry work in progress needs none: its checkouts are held anyway

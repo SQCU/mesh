@@ -4,6 +4,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+sys.path[:0] = [HERE, os.path.join(ROOT, "bin")]
+import mesh_restart
 RATE = int(os.environ.get("MESH_TELEMETRY_RATE", "1000"))
 BANDWIDTH_RATE = int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE)))
 PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
@@ -706,6 +708,7 @@ def stop(*_):
 
 def serve():
     store = TelemetryRing()
+    mesh_restart.on_change(__file__, os.environ.get("MESH_CAPACITY"), os.path.join(ROOT, "etc", "mesh-capacity.json"), "/usr/local/mesh/etc/mesh-capacity.json")
     threading.Thread(target=store.exited, daemon=True).start()
     for target in (power_loop, bandwidth_loop, sample_loop, ingest_loop): threading.Thread(target=target, args=(store,), daemon=True).start()
     host = os.environ.get("MESH_TELEMETRY_HOST", "::")

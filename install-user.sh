@@ -31,24 +31,25 @@ provide_http(){
   fi
 }
 mkdir -p "$D/bin" "$D/etc" "$D/log" "$D/viz" "$A" "$HOME/.local/bin"
-install -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
-install -m 755 "$R/user/mesh-nodeinfod.py" "$D/bin/mesh-nodeinfod.py"
-install -m 755 "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py"
-install -m 755 "$R/user/mesh-update-user.sh" "$D/bin/mesh-update-user.sh"
-install -m 755 "$R/bin/mesh-peers.sh" "$D/bin/mesh-peers.sh"
-install -m 755 "$R/bin/mesh-run.sh" "$D/bin/mesh-run.sh"
-install -m 755 "$R/bin/mesh-observe.py" "$D/bin/mesh-observe.py"
-install -m 755 "$R/bin/mesh-top.py" "$D/bin/mesh-top.py"
-install -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$D/bin/"
-install -m 644 "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json"
-install -m 644 "$R/etc/mesh-nodes.json" "$D/etc/mesh-nodes.json"
-install -m 644 "$R/keys/authorized_keys" "$D/etc/authorized_keys"
-install -m 755 "$R/viz/serve.py" "$D/viz/serve.py"
-install -m 644 "$R/viz/index.html" "$D/viz/index.html"
-install -m 755 "$R/bin/mesh-stat" "$D/bin/mesh-stat" && rm -f "$D/bin/libmesh.dylib" || bad "mesh-stat installed"
+install -C -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
+install -C -m 755 "$R/user/mesh-nodeinfod.py" "$D/bin/mesh-nodeinfod.py"
+install -C -m 755 "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py"
+install -C -m 755 "$R/user/mesh-update-user.sh" "$D/bin/mesh-update-user.sh"
+install -C -m 755 "$R/bin/mesh-peers.sh" "$D/bin/mesh-peers.sh"
+install -C -m 755 "$R/bin/mesh-run.sh" "$D/bin/mesh-run.sh"
+install -C -m 755 "$R/bin/mesh-observe.py" "$D/bin/mesh-observe.py"
+install -C -m 755 "$R/bin/mesh-top.py" "$D/bin/mesh-top.py"
+install -C -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$R/bin/mesh_restart.py" "$D/bin/"
+install -C -m 644 "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json"
+install -C -m 644 "$R/etc/mesh-nodes.json" "$D/etc/mesh-nodes.json"
+install -C -m 644 "$R/keys/authorized_keys" "$D/etc/authorized_keys"
+[ -f "$D/etc/observer.json" ] || install -m 644 "$R/etc/observer.json" "$D/etc/observer.json"
+install -C -m 755 "$R/viz/serve.py" "$D/viz/serve.py"
+install -C -m 644 "$R/viz/index.html" "$D/viz/index.html"
+install -C -m 755 "$R/bin/mesh-stat" "$D/bin/mesh-stat" && rm -f "$D/bin/libmesh.dylib" || bad "mesh-stat installed"
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$R/user/mesh-bandwidth.m" -o "$R/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 "$R/user/mesh-bandwidth" "$D/bin/mesh-bandwidth"
-install -m 755 "$R/bin/mesh-runtime-install.sh" "$D/bin/mesh-runtime-install.sh"
+install -C -m 755 "$R/bin/mesh-runtime-install.sh" "$D/bin/mesh-runtime-install.sh"
 try "UV runtime realized" "$D/bin/mesh-runtime-install.sh" "$D" "$R"
 ln -sf "$D/bin/mesh-python" "$HOME/.local/bin/mesh-python"
 ln -sf "$D/bin/mesh-observe.py" "$HOME/.local/bin/mesh-observe"
@@ -89,7 +90,7 @@ cat > "$A/io.mesh.observer.plist.new" <<PL
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>io.mesh.observer</string>
-  <key>ProgramArguments</key><array><string>$PY</string><string>$D/viz/serve.py</string></array>
+  <key>ProgramArguments</key><array><string>$PY</string><string>$D/viz/serve.py</string><string>$D/etc/observer.json</string></array>
   <key>WorkingDirectory</key><string>$D</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -116,4 +117,4 @@ ok "mesh-peers: $D/bin/mesh-peers.sh"
 printf '%s\n' "${MESH_BRANCH:-main}" > "$D/branch"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$D/revision"
 printf 'reported_failures=%s retained_jobs=%s replaced_jobs=%s\n' "$failures" "$retained" "$replaced" > "$D/install-status"
-echo "installer completed: $failures reported failures; $retained loaded jobs current, $replaced replaced"
+echo "installer completed: $failures reported failures; $retained loaded jobs current, $replaced loaded now or with a new definition for their next load"

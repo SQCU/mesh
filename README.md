@@ -135,11 +135,8 @@ this existed, every fix required a human at a keyboard typing `sudo` on each nod
 which does not scale and is the same shape of problem as a node that cannot be
 reached. Now a push propagates to the fleet on its own. The node follows the branch
 recorded in `/usr/local/mesh/revision`, always at that branch's newest commit. Each pass
-stages every daemon's definition, which names the digest of the files its program
-arguments name, and `bin/mesh-agent.sh` replaces a loaded daemon whose definition or
-files changed, or whose loaded job runs other arguments, and leaves the rest running (the
-first pass that stamps them restarts each loaded daemon once);
-`io.mesh.update`, which runs the pass, is replaced by the keeper between its runs. The
+installs the files that changed and loads each daemon that is not loaded; a loaded daemon is left running, and picks up
+what changed by restarting itself (launchd, below). The
 admin user is the one `/usr/local/mesh/admin-user` records (`MESH_USER` changes it).
 
 ## Joining without root
@@ -379,13 +376,13 @@ the node's uplink.
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
-| `bin/mesh-keeper.sh` | a pass every 60 s (drift has no event to wait on): re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, runs the fabric init (port recovery), writes health warnings when they change, loads each staged or unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted); loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
+| `bin/mesh-keeper.sh` | a pass every 60 s (drift has no event to wait on): re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, runs the fabric init (port recovery), writes health warnings when they change, loads each unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and background agent; loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, sampled by `io.mesh.nodeinfo` (`user/mesh-nodeinfod.py`) and served on 8099. |
-| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` makes a launchd job's staged definition NEW the loaded one in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) under PLIST (default NEW without `.new`). A definition that names no digest of its own (an XML comment) is stamped with the digest of the files its program arguments name. It is kept, with no restart, where it equals PLIST and the loaded job runs its program arguments; a definition that does not parse is refused and the loaded one kept; otherwise it replaces the loaded job (`bootout`, which returns before the old instance is gone, then `bootstrap` once that instance's process has exited, an exit waited for as a kqueue event on its pid through `mesh-python`; the job is read by `launchctl print`, else `launchctl list` where print refuses a user domain; a failed load is reported, its definition in place, and the keeper loads an unloaded system daemon or background agent at its next pass). A running job that is not KeepAlive, or one that runs this install (an ancestor of the caller), has its new definition staged, which the keeper loads between its runs. A running job whose process holds an RDMA device (the IORegistry's user client) is never stopped by launchd, which follows its SIGTERM with SIGKILL: its new definition is put in place for its next load. Every resident job is KeepAlive with `ThrottleInterval` 1, so launchd starts it again at once after an exit, at most once a second (its default is 10); the bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. |
+| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** Every resident job is KeepAlive with `ThrottleInterval` 1 (launchd starts it again at once after an exit, at most once a second; its default is 10) and picks up a new program or configuration by exiting: the bridge on its binary (design/bridge-and-ipc.md); node-info, telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the updates) and the convergence's passes read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. Nothing boots a job out but the operator's `mesh-converge.sh off`, which removes definitions and lets each loop end. |
 | `bin/mesh-converge.sh` | the node's convergence (Convergence, below): with no argument the mesh checkout's pass (`io.mesh.converge`); `held` and `stamp` are the node's convergence for any consumer's layer, `off` takes the node out. |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION. It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
 | `bin/mesh-run.sh` | run a command on one node, `all`, or `others`. Installed as `mesh-run`. |
@@ -393,6 +390,7 @@ the node's uplink.
 | `bin/mesh-rdma-init.sh` | boot-time fabric record: RDMA enablement and each device's link, as boot found them. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
+| `viz/` | the whole-fabric observer (`io.mesh.observer`, :8787) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-flow.c`, `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh-metal.m`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
 | `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions and their one silent bound, `mesh.h` `MESH_SILENT_NS`), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
@@ -536,7 +534,7 @@ A node that has not converged since a push is the thing worth noticing, and you 
 The root layer above is `io.mesh.update`'s. The user layer (the admin user's mesh checkout, its bridge and
 library, and any consumer's layer on top, such as metal-microbench's resident rank) follows its upstreams by itself on
 a node given a convergence document (`bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE`, etc/converge/README.md):
-the user's agent `io.mesh.converge` runs `bin/mesh-converge.sh` every `period_s`, and a consumer's own agent does the
+the user's agent `io.mesh.converge` runs `bin/mesh-converge.sh follow`, a pass every `period_s`, the upstream's own copy of the script continuing the loop by `exec` wherever it differs from the running one, and a consumer's own agent does the
 same for its layer with that script's subcommands. A layer changes only to images built and checked beforehand:
 
 1. **Held.** A checkout with local work (changes to tracked files, commits its upstream lacks, no upstream) is left as
@@ -558,17 +556,15 @@ it changes only where the checkout moves; what the bridge runs changes by rename
 installation above, or `make` by hand, which relinks the binary whenever libmesh changes) or a new configuration
 (`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge restarts itself on a new
 binary between calls, never ending a call it carries, a relayed one among them (design/bridge-and-ipc.md); a process
-already running keeps the files it mapped. The bridge's loaded definition is replaced only while it holds no RDMA
-device (`bin/mesh-agent.sh`); a new one is otherwise in place for its next load.
+already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
 
 Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what
 each layer installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two
 versions until every node has converged, and a consumer's process holding the older library fails its calls as values
-until its own layer converges, a pass later. A change of an agent's own definition while it runs is staged
-(`<label>.plist.new`) and loaded by the keeper between its runs. Whether a node converges is the operator's choice, one
+until its own layer converges, a pass later. Whether a node converges is the operator's choice, one
 command each way: `bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE` (then each consumer's own setup, which writes
 its agent where the document is recorded) puts it in; `bin/mesh-converge.sh off` takes it out, removing the recorded
-document and every layer's agent (`<label>.converge`; an agent whose pass runs removes itself as that pass ends) and
+document and every layer's agent definition (`<label>.converge`; each layer's follow ends at its next pass) and
 marking each layer's outcome `off`, so neither a later `mesh-user.sh` without CONVERGENCE nor a consumer's setup writes
 them again. A `launchctl disable` alone is undone by the next `mesh-user.sh` or setup, whose agent install enables the
 label.

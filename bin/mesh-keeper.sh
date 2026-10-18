@@ -46,7 +46,7 @@ _announced=$(ps -o args= -p "$(pgrep -f 'dns-sd -R .*_meshnode\._tcp' | head -1)
 _lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
 _lanok=0; [ -n "$_lan" ] && [ -n "$(ipconfig getifaddr "$_lan" 2>/dev/null)" ] && _lanok=1
 _fab=0 _rdma=0
-for _d in $(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{print $1}'); do
+for _d in $(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print $2}'); do
   [ "$(ifconfig "${_d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" = active ] || continue
   _fab=1; grep -q "^port=${_d#rdma_} .* rdma_peer=present" /var/run/mesh-fabric 2>/dev/null && _rdma=1
 done
@@ -54,41 +54,25 @@ done
 [ -x /usr/local/mesh/bin/mesh-networks.sh ] && /usr/local/mesh/bin/mesh-networks.sh
 [ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
 _user=$(cat /usr/local/mesh/admin-user 2>/dev/null); _uid=$(id -u "$_user" 2>/dev/null)
-if [ -n "$_uid" ]; then
-  for _p in "/Users/$_user/Library/LaunchAgents/"*.plist; do
-    [ -f "$_p" ] && [ "$(plutil -extract LimitLoadToSessionType raw "$_p" 2>/dev/null)" = Background ] || continue; _l=$(basename "$_p" .plist)
-    launchctl print "user/$_uid/$_l" >/dev/null 2>&1 && continue
-    launchctl bootstrap "user/$_uid" "$_p" 2>/dev/null && { echo "[$(ts)] DRIFT $_user's agent $_l loaded in its user domain"; drift=1; }
-  done
-fi
 if ! pgrep -qf '/install\.sh'; then
-  for _n in /usr/local/mesh/jobs/*.plist.new; do
-    [ -f "$_n" ] || continue; _l=$(basename "$_n" .plist.new)
-    launchctl print "system/$_l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
-    _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_n" system "/Library/LaunchDaemons/$_l.plist") || _out="FAIL $_out"
-    [ -z "$_out" ] || { echo "[$(ts)] DRIFT $_l: $_out"; drift=1; }
-  done
+  if [ -n "$_uid" ]; then
+    for _p in "/Users/$_user/Library/LaunchAgents/"*.plist; do
+      [ -f "$_p" ] && [ "$(plutil -extract LimitLoadToSessionType raw "$_p" 2>/dev/null)" = Background ] || continue
+      _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_p" "user/$_uid") || _out="FAIL $_out"
+      [ -z "$_out" ] || { echo "[$(ts)] DRIFT $_user's agent: $_out"; drift=1; }
+    done
+  fi
   for _p in /Library/LaunchDaemons/io.mesh.*.plist; do
     [ -f "$_p" ] || continue; _l=$(basename "$_p" .plist)
-    launchctl print "system/$_l" >/dev/null 2>&1 && continue
     [ -n "$_uid" ] && launchctl print "gui/$_uid/$_l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
-    echo "[$(ts)] DRIFT $_l not loaded"; launchctl bootstrap system "$_p" >/dev/null 2>&1; drift=1
+    _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_p" system) || _out="FAIL $_out"
+    [ -z "$_out" ] || { echo "[$(ts)] DRIFT $_out"; drift=1; }
   done
 fi
 pgrep -qf /usr/local/mesh/bin/babeld || {
   echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {
   echo "[$(ts)] ALARM rdma disabled, physical Recovery OS visit required"; drift=1; }
-if [ -n "$_uid" ]; then
-  for _n in "/Users/$_user/Library/LaunchAgents/"*.plist.new; do
-    [ -f "$_n" ] && [ ! -L "$_n" ] && [ "$(stat -f %Su "$_n")" = "$_user" ] && grep -q '<!--' "$_n" || continue; _l=$(basename "$_n" .plist.new); _d=
-    for _c in "gui/$_uid" "user/$_uid"; do launchctl print "$_c/$_l" >/dev/null 2>&1 && { _d=$_c; break; }; done
-    if [ -z "$_d" ]; then [ "$(plutil -extract LimitLoadToSessionType raw "$_n" 2>/dev/null)" = Background ] || continue; _d=user/$_uid; fi
-    launchctl print "$_d/$_l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
-    _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_n" "$_d") || _out="FAIL $_out"
-    [ -z "$_out" ] || { echo "[$(ts)] DRIFT $_user's agent $_l: $_out"; drift=1; }
-  done
-fi
 /usr/local/mesh/bin/mesh-health.sh 2>/dev/null | sed -n 's/^warn=//p' > /var/run/mesh-health.warn
 if ! cmp -s /var/run/mesh-health.warn /var/run/mesh-health.warned; then
   while read -r w; do echo "[$(ts)] WARN $w"; logger -p user.warning -t io.mesh.keeper "$w"; done < /var/run/mesh-health.warn

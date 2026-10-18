@@ -1,15 +1,16 @@
 #!/bin/bash
 # A node's user layers follow their upstreams' branch heads, each built at its upstream in a stage and installed by rename
-# (README.md, Convergence; design/recovery.md).  With no argument, the mesh's own pass, which the admin user's agent
-# io.mesh.converge runs every period_s (bin/mesh-user.sh writes it): the mesh checkout this script is in, built at its
-# upstream in a stage, fast-forwarded, its images installed by rename (the libraries first, the bridge's binary last, and
-# the binary anew wherever libmesh changed) and bin/mesh-user.sh run on them; the bridge restarts itself on its new
-# binary between calls.  Its subcommands are the node's convergence for any consumer's layer (metal-microbench
-# tools/mesh/node-setup.sh converges its rank by them):
-#   held CHECKOUT    prints why and succeeds where CHECKOUT has work its upstream lacks (nothing is fetched)
+# (README.md, Convergence; design/recovery.md).  With no argument, one pass of the mesh's own layer: the mesh checkout
+# this script is in, built at its upstream in a stage, fast-forwarded, its images installed by rename (the libraries
+# first, the bridge's binary last, and the binary anew wherever libmesh changed) and bin/mesh-user.sh run on them; the
+# bridge restarts itself on its new binary between calls.  Its subcommands:
+#   follow           a pass every period_s, read again before each, for as long as the node has a convergence
+#                    configuration (the admin user's agent io.mesh.converge runs it, KeepAlive while it fails)
+#   held CHECKOUT    prints why and succeeds where CHECKOUT has work its upstream lacks (nothing is fetched); a
+#                    consumer's layer converges by it (metal-microbench tools/mesh/node-setup.sh)
 #   stamp REVISION   what the mesh's layer converges to at REVISION: the revision and its recorded documents' digests
 #   off              the node out of convergence, the operator's choice: the recorded convergence document and every
-#                    layer's agent (<label>.converge) removed, an agent whose pass runs left for that pass to remove;
+#                    layer's agent (<label>.converge) removed, and each layer's follow ending at its next pass;
 #                    mesh-user.sh's CONVERGENCE puts it back
 # The node's state is ~/.cache/mesh: converge/<label> (what LABEL's install last converged to, .state its last outcome,
 # .build.log its last staged build), facts/<label> (what the layer runs, which node-info publishes), stage/<repository>
@@ -20,9 +21,9 @@ export PATH=$PATH:/usr/local/mesh/bin:/usr/bin:/bin:/usr/sbin:/sbin
 S=$HOME/.cache/mesh; LABEL=io.mesh.bridge
 SUPPORT="$HOME/Library/Application Support"; CONF="$SUPPORT/io.mesh.converge/configuration.plist"
 M=${MESH_CHECKOUT:-$(cd "$(dirname "$0")/.." && pwd -P)}
-why=; configured=
-plutil -extract period_s raw -o - "$CONF" >/dev/null 2>&1 && configured=1
-configured() { [ -n "$configured" ] || why="no convergence configuration ($CONF: bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE)"; [ -n "$configured" ]; }
+why=; period_s=; MODE=${1:-}
+configured() { period_s=$(plutil -extract period_s raw -o - "$CONF" 2>/dev/null) && [ -n "$period_s" ] && return 0
+  why="no convergence configuration ($CONF: bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE)"; return 1; }
 short() { git -C "$M" rev-parse --short "$1" 2>/dev/null || printf '%s' "$1"; }
 
 held() {
@@ -90,35 +91,30 @@ swap() {
 }
 
 off() {
-  local p l d
+  local p l
   rm -f "$CONF" "$SUPPORT/io.mesh.converge/document"
   for p in "$HOME"/Library/LaunchAgents/*.converge.plist "$HOME"/Library/LaunchAgents/*.converge.plist.new; do
     [ -f "$p" ] || continue
     l=${p##*/}; l=${l%.new}; l=${l%.plist}
-    rm -f "$p"; printf '%s removed\n' "${p##*/}"
-    for d in "gui/$(id -u)" "user/$(id -u)"; do
-      if launchctl print "$d/$l" 2>/dev/null | grep -q '^[[:space:]]*pid = '; then printf '%s: its pass runs; it removes its agent as it ends\n' "$l"
-      else launchctl bootout "$d/$l" 2>/dev/null; fi
-    done
+    rm -f "$p"; printf '%s removed; its follow ends at its next pass\n' "${p##*/}"
   done
   for p in "$S"/converge/*.state; do [ ! -f "$p" ] || printf 'off\n' > "$p"; done
   return 0
 }
 
 pass() {
-  local target inputs d
-  if ! configured; then
-    report off "$why"
-    [ -f "$HOME/Library/LaunchAgents/io.mesh.converge.plist" ] || for d in "gui/$(id -u)" "user/$(id -u)"; do launchctl bootout "$d/io.mesh.converge" 2>/dev/null; done
-    return 0
-  fi
+  local target inputs f o
+  configured || { report off "$why"; return 1; }
   [ -f "$(cat "$SUPPORT/io.mesh.bridge/document" 2>/dev/null)" ] || { report failed "the bridge's recorded document is gone ($SUPPORT/io.mesh.bridge/document)"; return 0; }
   if held "$M"; then report held "$why"; return 0; fi
   git -C "$M" fetch -q 2>/dev/null || { report held "the fetch of $M failed"; return 0; }
   target=$(git -C "$M" rev-parse '@{u}')
-  if [ -z "${MESH_CONVERGE_UPSTREAM:-}" ] && ! git -C "$M" show "$target:bin/mesh-converge.sh" 2>/dev/null | cmp -s - "$0"; then
-    mkdir -p "$S/converge"; git -C "$M" show "$target:bin/mesh-converge.sh" > "$S/converge/mesh-converge.sh"
-    MESH_CONVERGE_UPSTREAM=$target MESH_CHECKOUT=$M exec /bin/bash "$S/converge/mesh-converge.sh"
+  if ! git -C "$M" show "$target:bin/mesh-converge.sh" 2>/dev/null | cmp -s - "$0"; then
+    f=$S/converge/mesh-converge.$(git -C "$M" rev-parse --short=12 "$target").sh; mkdir -p "$S/converge"
+    if git -C "$M" show "$target:bin/mesh-converge.sh" > "$f" 2>/dev/null && [ -s "$f" ]; then
+      for o in "$S"/converge/mesh-converge.*.sh; do [ "$o" = "$f" ] || [ "$o" -ef "$0" ] || rm -f "$o"; done
+      MESH_CHECKOUT=$M exec /bin/bash "$f" ${MODE:+"$MODE"}
+    fi
   fi
   inputs=$(stamp "$target")
   [ "$inputs" != "$(cat "$S/converge/$LABEL" 2>/dev/null)" ] || { report converged "mesh $(short "$target")"; return 0; }
@@ -129,10 +125,11 @@ pass() {
   report converged "mesh $(short "$target")"
 }
 
-case ${1:-} in
+case $MODE in
+  follow) [ $# = 1 ] || exit 64; while pass; do sleep "$period_s"; done; exit 0 ;;
   held) [ $# = 2 ] || exit 64; held "$2" && { printf '%s\n' "$why"; exit 0; }; exit 1 ;;
   stamp) [ $# = 2 ] || exit 64; stamp "$2" ;;
   off) [ $# = 1 ] || exit 64; off ;;
-  '') pass ;;
-  *) sed -n '2,13p' "$0" >&2; exit 64 ;;
+  '') pass; exit 0 ;;
+  *) sed -n '2,14p' "$0" >&2; exit 64 ;;
 esac

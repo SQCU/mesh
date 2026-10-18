@@ -269,9 +269,9 @@ let pollTimer=0,frame=0,lastRender=performance.now(),flowing=false;
 const TWEEN_RATE=7,TWEEN_EPSILON=1e-7;
 async function poll(){
   pollTimer=0;
-  try{ const r=await fetch('/v1/visualization'); if(!r.ok) throw new Error(`HTTP ${r.status}`); const j=await r.json(); S.nodes=j.nodes; S.inventory=j.inventory||{}; S.fabric=j.fabric||{}; S.period=j.period; S.connectionError=''; apply(); }
+  try{ const r=await fetch('/v1/visualization'); if(!r.ok) throw new Error(`HTTP ${r.status}`); const j=await r.json(); S.nodes=j.nodes; S.inventory=j.inventory||{}; S.fabric=j.fabric||{}; S.period=j.period; S.connectionError=j.error||''; apply(); }
   catch(e){ S.connectionError=`telemetry unavailable: ${e?.message||e}`; hud(); wakeRenderer(); }
-  if(!document.hidden) pollTimer=setTimeout(poll,Number(S.period||1)*1000);
+  if(!document.hidden&&Number(S.period)>0) pollTimer=setTimeout(poll,S.period*1000);
 }
 
 function wakeRenderer(){
