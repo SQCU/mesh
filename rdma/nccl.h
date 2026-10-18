@@ -24,10 +24,16 @@
    along) each time its session opens.  ncclMeshCommInitRank (below) is for a program that passes its own programs or
    paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take, on the bridges' map like any
    other; Shrink makes no exchange.  ncclCommGrow meets at the bootstrap of the id that ncclCommGetUniqueId gives comm's
-   root, which the root broadcasts on comm.  ncclCommRevoke revokes comm for good: its session's waits end, its groups
-   in flight fail, a session opening (its wait for its peers' programs, or for their agreement) ends and none opens
-   after it, and every later group on comm fails at once (ncclRemoteError), until ncclCommDestroy closes the session;
-   from any thread, under comm's own lock alone, never one a group of any communicator holds while it waits.  Making a
+   root, which the root broadcasts on comm.  ncclCommRevoke revokes comm for good: its session's program retired as an
+   abort (its bridge fails its flows, tells each peer FAIL and cancels its words past their landed counts, so its waits
+   end), its groups in flight fail, a session opening (its wait for its peers' programs, or for their agreement) ends
+   and none opens after it, and every later group on comm fails at once (ncclRemoteError), until ncclCommDestroy closes
+   the session; from any thread, under comm's own lock alone, never one a group of any communicator holds while it
+   waits.  The close (design/bridge-and-ipc.md#control): ncclCommDestroy hands the session's close to its bridge and
+   returns once its own GPU work has finished, without waiting on any peer (the bridge posts every cell the session
+   released, ends each flow with END carrying its count, holds the session's rows until the peer's CLOSED, then reclaims
+   them); ncclCommFinalize also waits for the delivery of what it published (each channel's delivered word, its peers'
+   reports); ncclCommAbort and ncclCommRevoke discard.  Making a
    communicator (a lone rank's too) attaches the process's client of its node's bridge where it
    has none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot
    held, no region of a bridge that runs, or a lease of a bridge that stopped still held.
@@ -73,8 +79,9 @@
    issue pointer stays valid until ncclGroupEnd returns.  ncclMeshComplete completes it, with every group issued before
    it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
    once, with every group before it; a host-path group fails while groups are issued and not complete.  A wait is a
-   kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait), a word of the session's that its
-   canceller ends (design/recovery.md Q16: a lost or silent link, a revoke).  The stream's `polls` bounds it: the most
+   kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait's spin), a word of the session's that
+   its bridge's cancel ends (design/bridge-and-ipc.md#control: a lost link or peer, a revoke; past the landed count alone,
+   and the first cancelled wait halts the program's later waits).  The stream's `polls` bounds it: the most
    loads of the word a wait makes (mesh_wait_bounded), the caller's bound for the group's crossings, which it derives
    from its plan (the lag it expects at them, over the period of one load on the node's GPU: rdma/NCCL.md "Bounded
    waits"); a wait that reaches it leaves its position, its channel and its bound in the session's violation words, every
@@ -116,8 +123,10 @@
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and the
    group after a failure is returned opens a session again, on the map current then (a revoked communicator's none).
-   The session's progress thread is the one silent-link watcher: a link with positions pending that delivers none for
-   mesh.h MESH_SILENT_NS is cancelled, ending every wait on it.  A group on a cancelled, silent or lost link fails with ncclRemoteError; a failure the Metal
+   A loss is an event the bridges see (design/bridge-and-ipc.md#control): a link off, a control socket's end, a peer's
+   FAREWELL or FAIL, or its flow's control frames missing past what their measured gaps make likely; the bridge then
+   cancels the session's words past their landed counts, ending every wait on them, and no clock of the library's
+   decides it.  A group on a cancelled or lost link fails with ncclRemoteError; a failure the Metal
    path finds after its group returned (calls that do not pair, too) is the communicator's asynchronous error
    (ncclCommGetAsyncError) and the next group's result.
 
@@ -437,20 +446,22 @@ ncclResult_t pncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId
 ncclResult_t  ncclCommInitAll(ncclComm_t* comm, int ndev, const int* devlist);
 ncclResult_t pncclCommInitAll(ncclComm_t* comm, int ndev, const int* devlist);
 
-/* Finalize a communicator. ncclCommFinalize flushes all issued communications,
- * and marks communicator state as ncclInProgress. The state will change to ncclSuccess
- * when the communicator is globally quiescent and related resources are freed; then,
- * calling ncclCommDestroy can locally free the rest of the resources (e.g. communicator
- * itself) without blocking. */
+/* Finalize a communicator (design/bridge-and-ipc.md#control): every GPU program it issued finished, its close handed to
+   its bridge (each flow posts what the session released, then END), and the delivery of every position it published
+   awaited, events alone (each channel's delivered word: its peers' LANDED and CLOSED reports); ncclSuccess once
+   delivered, else the failure that ended a channel first (its link or peer lost).  No group runs on comm after it;
+   ncclCommDestroy then frees it. */
 ncclResult_t  ncclCommFinalize(ncclComm_t comm);
 ncclResult_t pncclCommFinalize(ncclComm_t comm);
 
-/* Frees local resources associated with communicator object. */
+/* Frees comm once its own GPU work has finished, its session's close handed to its bridge in order (the bridge posts
+   every cell the session released, ends each flow with END and its count, and holds the session's rows until each
+   peer's CLOSED); it waits on no peer.  A failed or revoked session's close is an abort. */
 ncclResult_t  ncclCommDestroy(ncclComm_t comm);
 ncclResult_t pncclCommDestroy(ncclComm_t comm);
 
-/* Frees resources associated with communicator object and aborts any operations
- * that might still be running on the device. */
+/* ncclCommRevoke, then ncclCommDestroy: nothing issued is completed; the bridge fails the session's flows (FAIL to each
+   peer) and cancels its words past their landed counts. */
 ncclResult_t  ncclCommAbort(ncclComm_t comm);
 ncclResult_t pncclCommAbort(ncclComm_t comm);
 
@@ -926,8 +937,8 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
    through the caller's id<MTL4ArgumentTable> `table` (at least 6 buffer bindings; no setBytes, the arguments records
    of the library's ring), on pipelines of the caller's device (the residency set's), every buffer of the library's it
    touches added to the caller's id<MTLResidencySet> `residency` (committed where one was added).  Nothing is committed
-   or signalled: the caller commits its command buffer.  Its waits poll the words the bridge writes, which the session's
-   canceller ends (a lost or silent link, a revoke), never a spin on another queue's work, as the classic form's: `polls`
+   or signalled: the caller commits its command buffer.  Its waits poll the words the bridge writes, which the bridge's
+   cancel ends (a lost link or peer, a revoke), never a spin on another queue's work, as the classic form's: `polls`
    0, a wait ends at its landing or its cancellation, as the in-stream crossings of 2026-10-13 (metal-microbench Q5P);
    else the bound above.  A failure is a value: ncclCommGetAsyncError (or the communicator's next group) after the
    window.  The group completes in the encoder: with no workspace
@@ -986,8 +997,8 @@ int ncclMeshBridgeStopping(void);
 /* A held communicator taken up by a new execution (metal-microbench docs/placement.md#retention-and-protention-the-next-
    execution-planned-ahead): every member that takes it up agrees on `ticket`, the execution's identity (the same on every
    member), at its session's next position, so the members run one execution on one session or none.  ncclSuccess where
-   every peer agreed; ncclRemoteError where a peer's program ended (its landings cancelled: its process exited, or it
-   destroyed its communicator to make one), a peer agreed on another ticket or program, or the session has positions in
+   every peer agreed; ncclRemoteError where a peer's program ended (its words past their landed counts cancelled: its
+   process exited, or it destroyed its communicator to make one), a peer agreed on another ticket or program, or the session has positions in
    flight: the caller destroys the communicator and makes one, as its peers do.  The wait ends at a landing, a
    cancellation or a revoke (the caller's cancellation of its execution), never at a time: a peer that still prepares the
    execution is waited for (design/collectives-dataflow.md, held and adopted communicators).  A communicator with no open

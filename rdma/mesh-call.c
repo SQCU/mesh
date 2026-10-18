@@ -451,6 +451,9 @@ struct mesh_calls {
   struct mesh_active *actives;
   struct mesh_route_event *route_events;
   uint32_t route_base,route_event_count;
+  /* design/bridge-and-ipc.md#control: the destinations a landing found cancelled (a bit an identity), whose every other
+     landing is lost with it: its bridge cancels the positions past a channel's landed count alone */
+  _Atomic uint64_t lost[2*MESH_DESTINATIONS/64];
 };
 
 /* design/algorithm-sources.md#programtensor: the arrival cells, completion records and input words are leases of the
@@ -662,8 +665,10 @@ uint32_t mesh_function_publications(struct mesh_function *function,struct mesh_s
 static void mesh_call_cleanup(struct mesh_call *,int);
 
 /* design/algorithm-sources.md#meshresult: a landing read UINT64_MAX, its destination cancelled (prepared-machine.md
-   M12): its instances concluded with the link's failure, the destination's code where the bridge gave one */
+   M12), or another landing of its destination did: its instances concluded with the link's failure, the destination's
+   code where the bridge gave one, and the destination marked lost (`lost`) */
 static void mesh_landing_lost(struct mesh_calls *calls,const struct mesh_call_landing *landing){
+  atomic_fetch_or_explicit(calls->lost+landing->identity/64,UINT64_C(1)<<(landing->identity%64),memory_order_release);
   struct mesh_ctx *program=landing->identity<MESH_DESTINATIONS?calls->context:calls->constants;
   const int64_t code=atomic_load_explicit(&mesh_client_at(program->M,program->client)->status[landing->identity%MESH_DESTINATIONS].code,memory_order_relaxed);
   for(uint32_t i=0;i<landing->instances;i++)
@@ -800,12 +805,19 @@ static void *mesh_call_progress(void *argument){
       if(--call->pending)continue;
       mesh_call_fire(call,value-1,extent,&submitted);
     }
-    /* prepared-machine.md M07, M30: PUBLISH(row) of a landed row, its use range walked */
+    /* prepared-machine.md M07, M30: PUBLISH(row) of a landed row, its use range walked; a pending one of a destination
+       found lost, lost (mesh_landing_lost) */
+    const uint64_t lost=atomic_load_explicit(calls->lost,memory_order_acquire)|atomic_load_explicit(calls->lost+1,memory_order_acquire);
     for(uint32_t i=0;i<landing_count;i++){
       struct mesh_call_landing *landing=landings+i;
       if(!landing->word)continue;
       const uint64_t value=atomic_load_explicit(landing->word,memory_order_acquire);
-      if(value<landing->expected)continue;
+      if(value<landing->expected){
+        if(lost && atomic_load_explicit(calls->lost+landing->identity/64,memory_order_relaxed)>>(landing->identity%64)&1){
+          mesh_landing_lost(calls,landing);landing->word=NULL;
+        }
+        continue;
+      }
       if(value==UINT64_MAX){mesh_landing_lost(calls,landing);landing->word=NULL;continue;}
       const uint64_t cycle=landing->expected++-1;
       /* prepared-machine.md M04, M30 */

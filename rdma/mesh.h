@@ -183,20 +183,9 @@ _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07
 struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,padding[2]; };
 struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t cyclic,padding[6]; struct mesh_cancel_range ranges[]; };
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
-/* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M12 */
-/* design/prepared-machine.md#M30: a cyclic program's landed word holds 1 plus its cycle, which a reader of a later
-   cycle still waits past, so every word of the destination is cancelled (libnccl-mesh's own cancel; the bridge's
-   cancels past a channel's landed count alone: mesh-flow.c flow_cancel) */
-static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t destination){
-  _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[destination].offset);
-  for(uint64_t j=0;j<cancel->ranges[destination].count;j++){
-    const uint64_t word=atomic_load_explicit(words+j,memory_order_relaxed);
-    if(!word || (cancel->cyclic && word!=UINT64_MAX)){
-      atomic_store_explicit(&cancel->requested,1,memory_order_release);
-      atomic_store_explicit(words+j,UINT64_MAX,memory_order_release);
-    }
-  }
-}
+/* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M12: a destination's words are cancelled by the
+   bridge alone, after the last landing its flow stores, and only at positions past its landed count
+   (mesh-flow.c flow_cancel, design/bridge-and-ipc.md#control) */
 /* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M26: a shared word (`control`, `map`) bumped and
    its waiters woken, the writes after it ordered behind it */
 static inline void mesh_notify(_Atomic uint64_t *word){

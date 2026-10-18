@@ -1,9 +1,9 @@
 /* libnccl-mesh's Metal half (nccl-mesh-metal.m): a group's work on the GPU, encoded into the caller's command
-   buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A wait for a landing is rdma/mesh.metal's
-   mesh_remote_wait on its completion word at the position's cycle, ended by the landing or by the session's canceller
-   (every word a dispatch waits on is the session's, in its cancellation ranges: the progress thread cancels a link
-   that lands nothing for mesh.h MESH_SILENT_NS, a lost link's bridge and a revoke cancel theirs; the word ~0,
-   mesh_cancel), and, where its program is bounded (metal_begin's polls), by the bound. */
+   buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A wait for a landing is a spin on its completion word
+   at the position's cycle (rdma/mesh.metal mesh_remote_wait's), ended by the landing or by its bridge's cancel (the
+   word ~0: a lost link or peer, a revoke, past the channel's landed count alone, design/bridge-and-ipc.md#control),
+   which the wait records in the session's violation words so every later wait of the program ends (nccl-mesh-metal.m
+   mesh_step_check), and, where its program is bounded (metal_begin's polls), by the bound. */
 #ifndef NCCL_MESH_METAL_H
 #define NCCL_MESH_METAL_H
 #include <stddef.h>
