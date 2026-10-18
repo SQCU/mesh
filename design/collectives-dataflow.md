@@ -107,7 +107,7 @@ There are no other library threads. Client-side threads that drive the library: 
 | `digest` | FNV-1a over everything the programs are made from (`map_digest`, line 403); 0 until the first session opens | `session_open` |
 | `paths` | the caller's trees, every structural program's (`ncclMeshCommInitRank`; none: `trees`) | `ncclMeshCommInitRank` |
 | `trees` | the map's shortest-path trees (`mesh_trees_shortest`), where the caller gave no paths | `comm_routes` |
-| `forms`, `form_count` | the configured forms (`ncclMeshForm`), compiled ahead of the structural table; kept by splits and shrinks | `ncclMeshCommForms`, `comm_sub` |
+| `forms`, `form_count` | the configured forms (`ncclMeshForm`) with their shares (one allocation, `forms_copy`), compiled ahead of the structural table; kept by splits and shrinks | `ncclMeshCommForms`, `comm_sub` |
 | `entries`, `programs`, `listed` | the table of programs: the caller's (`listed`, kept for its life), else the forms' and then the structural one, compiled at each `comm_read` | `ncclMeshCommInitRank`, `comm_routes` |
 | `session`, `opening` | the open session; a session between its start and its agreement | `session_open` |
 | `revoked` | set by `ncclCommRevoke`, kept until destroy | `ncclCommRevoke` |
@@ -132,7 +132,11 @@ the map yet.
    - each configured form (`ncclMeshCommForms`), in order, is compiled first (`compile_form`): along those trees, or,
      a form naming `ncclMeshTreesPacked`, along `mesh_trees_pack(map, the form's eps, the form's most)` made for it
      (mesh cc8a6f8e^'s `sets[1]`, whose `eps 0.1, most 4` were constants of the library; now the configuration's
-     values), single-phase or two-phase, at its chunks, below its bound, a rooted form at its root or every root;
+     values), each segment cut among its root's packed trees by the form's `shares` (root r's k-th tree, the packing's
+     order, `shares[r x most + k]`), else equally: the trees' weights `mesh_compile` copies into the program's parts,
+     which `mesh_program_ranges` cuts by, are the configuration's, never the packing's flows (inferred from the map's
+     link bandwidths); single-phase or two-phase, at its chunks, below its bound, a rooted form at its root or every
+     root;
    - then the structural table: the single-phase all-reduce, the reduce-scatter, the all-gather and each root's reduce
      and broadcast, along the trees, uncut, of any size.
 
@@ -347,7 +351,8 @@ A change of the map never closes a session.
 - `mesh_program_steps(program, rank, operand)` makes a rank's steps (SEND, REDUCE, COPY; peer, round, buffer, first,
   piece).
 - `mesh_program_steps_cut(program, rank, operand, segments)` makes them over unequal segments: segment s the
-  `segments[s]` elements after those before it, each part its weight's share of its segment (mesh 430cf7b2^ `mesh_cut`).
+  `segments[s]` elements after those before it, each part its weight's share of its segment (mesh 430cf7b2^ `mesh_cut`;
+  `mesh_program_ranges`: the program's weights, the caller's trees' or a configured form's shares, else equal).
   An uneven call (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`) carries its own copy of the counts (`struct call`
   `segments`, `total` their sum; `elements` and `segment_at` read them), `plan_calls` cuts its steps by them, and
   `order_group` cuts every other rank's alike, so one program serves any division; its program's segments must be the
@@ -371,7 +376,7 @@ so members configured with different forms fail there too.
 |---|---|
 | `program_of` | the table's order: the configured forms (the caller's configuration), then the structural defaults |
 | `mesh_map` link bandwidths | the port's nominal speed, read by the routes (ties among routes of equally few links) and by `mesh_trees_pack` |
-| `compile_form` | packing `eps` and `most`, and every other form field, are the configuration's (`ncclMeshForm`) |
+| `compile_form` | packing `eps` and `most`, the trees' `shares`, and every other form field, are the configuration's (`ncclMeshForm`) |
 | wire (`mesh_wire_of`, `mesh_wire_large`) | `lag = 8`; the large/small split at `lag x block` (or an element wider than a small slot); slot = `NCCL_BUFFSIZE / 8` rounded to a block, carrying whole elements |
 | `nccl-mesh-metal.m:dispatch` | 256 threads a pointwise kernel, at most 1,024 threads in one threadgroup for a block's piece, at most 2^20 units a grid |
 | `ncclMeshFusableRooted` | fusable only at 2 ranks, one small slot, float16 sum (or a broadcast of any type), at most 1 scratch |

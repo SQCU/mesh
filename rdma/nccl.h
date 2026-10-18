@@ -870,10 +870,12 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const 
    broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
    (mesh-plan.h mesh_compile) along `trees`: ncclMeshTreesShortest the communicator's own (its paths, else the map's
    shortest-path trees), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
-   both the caller's: Blink's packing [Wang et al. 2020], every link a share); an all-reduce `whole` (1: single-phase,
-   each member's sum up its own tree; 0: the reduce-scatter and then the all-gather [Patarasuk & Yuan 2009;
-   Rabenseifner 2004]); each tree's part cut into `chunks` (1: uncut), pipelined down and up the trees [Blink; NCCL's
-   chunked trees]. */
+   both the caller's: Blink's packing [Wang et al. 2020], every link a share), a segment cut among its root's packed
+   trees by `shares` (root r's k-th tree in the packing's order, heaviest first, shares[r x most + k], each above 0, for
+   the communicator's ranks; NULL: equally), the configuration's allocation, not the flows the packing infers from the
+   map's links; an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
+   reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part cut into
+   `chunks` (1: uncut), pipelined down and up the trees [Blink; NCCL's chunked trees]. */
 typedef enum { ncclMeshTreesShortest = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
 typedef struct {
   int collective;
@@ -884,15 +886,16 @@ typedef struct {
   uint32_t chunks;
   uint32_t most;
   double eps;
+  const double* shares;
 } ncclMeshForm;
 /* A communicator's configuration operand: its forms, in order, compiled ahead of its structural table at each map read
    (Programs, above), so a call runs the first form of its collective (and root) whose bound its bytes are under, else
    the default; no entry, no form (the default for every collective and size).  Set before the communicator's first
    group that crosses a link (ncclInvalidUsage once its session is open or opening, or for a communicator over the
-   caller's programs, ncclMeshCommInitRank's, whose table they are); count 0 clears them.  Every rank passes the same
-   forms (the members' digest covers the programs they compile, so members configured apart fail the session's
-   agreement as a value); its splits and shrinks keep them (a form at a root past a split's ranks makes no entry
-   there).  The forms of mesh cc8a6f8e^'s default table (its tree sets, single-phase or two-phase, 1 to 64 chunks,
+   caller's programs, ncclMeshCommInitRank's, whose table they are), copied with their shares; count 0 clears them.
+   Every rank passes the same forms (the members' digest covers the programs they compile, so members configured apart
+   fail the session's agreement as a value); its splits and shrinks keep them (a form at a root past a split's ranks
+   makes no entry there).  The forms of mesh cc8a6f8e^'s default table (its tree sets, single-phase or two-phase, 1 to 64 chunks,
    by size class), named by the caller's configuration where a price chose them: the caller's configuration document
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);

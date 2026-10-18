@@ -138,6 +138,7 @@ structural table at each map read, so a call takes the first form that fits it a
 | field | form |
 |---|---|
 | `trees` | `ncclMeshTreesShortest` (the communicator's paths, else the shortest-path trees) or `ncclMeshTreesPacked` (`mesh_trees_pack` at the entry's `eps` and `most` trees a root: Blink's packed spanning trees, every link a share) |
+| `shares` | a packed form's cut of each segment among its root's trees (root r's k-th tree, heaviest first, `shares[r x most + k]`; NULL: equally): the configuration's allocation, never the flows the packing infers from the map's links |
 | `whole` | an all-reduce's: 1 single-phase, 0 two-phase (the reduce-scatter and then the all-gather along the same trees) |
 | `chunks` | each tree's part cut into chunks, pipelined down and up the trees (1: uncut) |
 | `below` | the bytes a call is under to take it (0: any size): the size classes |
@@ -157,7 +158,7 @@ output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 5
 `ncclMeshReduceScatterV(send, recv, counts, type, op, comm, stream)` are MPI_Allgatherv and MPI_Reduce_scatter: rank
 r's segment is `counts[r]` elements (any of them 0), packed in rank order. Each is one program, the communicator's
 all-gather or reduce-scatter, its operand cut into those segments (`mesh-plan.h` `mesh_program_steps_cut`: a part
-within segment s takes its weight's share of `counts[s]`), so a capacity-shaped division of the work (metal-microbench
+within segment s takes its tree's share of `counts[s]`: a configured form's `shares`, else equal), so a capacity-shaped division of the work (metal-microbench
 docs/placement.md) is one tree program over unequal segments rather than a rooted broadcast or reduce a rank. Every
 rank passes the same counts; equal counts are NCCL's own calls. Reproduction target (metal-microbench docs/measurement.md
 2026-09-30): tp SP=1 at capacity-shaped parts 255-256 ms a step; per call, the SP=1 all-gather 214-229 us and

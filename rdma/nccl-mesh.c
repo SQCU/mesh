@@ -353,9 +353,10 @@ static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, 
 static int has_root(int what) { return what == MESH_REDUCE || what == MESH_BROADCAST; }
 
 /* a configured form's entries (ncclMeshCommForms): its collective along the communicator's trees (`along`) or the map's
-   packed trees (mesh_trees_pack at the form's eps and most, made here: mesh cc8a6f8e^ comm_routes' sets[1]), whole or
-   two-phase, at its chunks, below its bound; a rooted one at its root, or at each root (-1), none where its root is
-   past the communicator's ranks (a split's) */
+   packed trees (mesh_trees_pack at the form's eps and most, made here: mesh cc8a6f8e^ comm_routes' sets[1]; a segment
+   cut among a root's trees by the form's shares, else equally, never by the flows the packing infers from the map's
+   links), whole or two-phase, at its chunks, below its bound; a rooted one at its root, or at each root (-1), none
+   where its root is past the communicator's ranks (a split's) */
 static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees *along, const ncclMeshForm *x) {
   const uint32_t n = (uint32_t)comm->nranks;
   struct mesh_trees packed = {n, 0, NULL, NULL, NULL};
@@ -368,6 +369,10 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
     if (!root || !parent || !weight) result = fail(ncclSystemError, "out of memory");
     else if (!(packed.count = mesh_trees_pack(&comm->map, x->eps, x->most, root, parent, weight)))
       result = fail(ncclInvalidArgument, "the map's links pack no trees (mesh_trees_pack)");
+    for (uint32_t t = 0, k = 0; t < packed.count; t++) {
+      k = t && root[t] == root[t - 1] ? k + 1 : 0;
+      weight[t] = x->shares ? log(x->shares[(size_t)root[t] * x->most + k]) : 0;
+    }
     trees = &packed;
   }
   for (uint32_t r = 0; !result && r < (has_root(x->collective) && x->root < 0 ? n : 1); r++) {
@@ -418,6 +423,22 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
   return ncclSuccess;
 }
 
+/* forms copied with their shares (each `nranks` roots' most) into one allocation of the communicator's */
+static ncclMeshForm *forms_copy(const ncclMeshForm *forms, uint32_t count, uint32_t nranks) {
+  size_t shares = 0;
+  for (uint32_t f = 0; f < count; f++) shares += forms[f].shares ? (size_t)nranks * forms[f].most : 0;
+  ncclMeshForm *made = malloc(count * sizeof *made + shares * sizeof(double) + 1);
+  double *at = made ? (double *)(made + count) : NULL;
+  for (uint32_t f = 0; made && f < count; f++) {
+    made[f] = forms[f];
+    if (!forms[f].shares) continue;
+    memcpy(at, forms[f].shares, (size_t)nranks * forms[f].most * sizeof *at);
+    made[f].shares = at;
+    at += (size_t)nranks * forms[f].most;
+  }
+  return made;
+}
+
 /* nccl.h ncclMeshCommForms: the forms checked and copied, taken at the communicator's next map read (a table read before
    any session, by ncclMeshFusableRooted, dropped: its next read compiles them); refused once its session is open or
    opening (its members agree on its table there), or where its table is the caller's programs */
@@ -425,14 +446,15 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int c
   if (!comm || count < 0 || (count && !forms)) return fail(ncclInvalidArgument, "ncclMeshCommForms's arguments");
   for (int f = 0; f < count; f++) {
     const ncclMeshForm *x = forms + f;
-    if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !x->chunks ||
+    int shared = !x->shares || x->trees == ncclMeshTreesPacked;
+    for (size_t k = 0; x->shares && shared && k < (size_t)comm->nranks * x->most; k++) shared = x->shares[k] > 0 && isfinite(x->shares[k]);
+    if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !x->chunks || !shared ||
         (x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesPacked) || (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
       return fail(ncclInvalidArgument, "form %d: a collective (mesh-plan.h MESH_*), a rooted one's root (-1 every root), its trees "
-                  "(shortest, or packed with eps > 0 and most > 0) and chunks > 0", f);
+                  "(shortest, or packed with eps > 0, most > 0 and shares above 0 or none) and chunks > 0", f);
   }
-  ncclMeshForm *made = count ? malloc((size_t)count * sizeof *made) : NULL;
+  ncclMeshForm *made = count ? forms_copy(forms, (uint32_t)count, (uint32_t)comm->nranks) : NULL;
   if (count && !made) return fail(ncclSystemError, "out of memory");
-  if (count) memcpy(made, forms, (size_t)count * sizeof *made);
   pthread_mutex_lock(&session_lock);
   pthread_mutex_lock(&comm->guard);
   const int open = comm->session || comm->opening;
@@ -3783,15 +3805,10 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
   snprintf(name, sizeof name, "%s/%u.%d", comm->name, split, color);
   ncclResult_t result = comm_make(made, count, members, rank, name);
   if (!result) (*made)->small = comm->small;
-  if (!result && comm->form_count) {
-    if (!((*made)->forms = malloc(comm->form_count * sizeof *comm->forms))) {
-      comm_free(*made); *made = NULL;
-      result = fail(ncclSystemError, "out of memory");
-    } else {
-      memcpy((*made)->forms, comm->forms, comm->form_count * sizeof *comm->forms);
-      (*made)->form_count = comm->form_count;
-    }
-  }
+  if (!result && comm->form_count && !((*made)->forms = forms_copy(comm->forms, comm->form_count, (uint32_t)comm->nranks))) {
+    comm_free(*made); *made = NULL;
+    result = fail(ncclSystemError, "out of memory");
+  } else if (!result) (*made)->form_count = comm->form_count;
   free(members);
   return result;
 }

@@ -677,7 +677,9 @@ static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,ui
   return sum==elements;
 }
 
-/* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]); 0 where the cut is none */
+/* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]), a segment's parts by the program's
+   weights (its trees': the caller's, a configured form's shares, or equal; libnccl-mesh never compiles the packing's
+   flows into them); 0 where the cut is none */
 static int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t *lo,uint64_t *count){
   const uint32_t segments=mesh_program_segments(program);
   uint64_t *bases=malloc(2*(size_t)segments*sizeof *bases);
