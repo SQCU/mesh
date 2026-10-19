@@ -483,7 +483,9 @@ static __attribute__((always_inline)) inline uint32_t link_lane(const struct lin
 }
 /* design/recovery.md#five-seconds: the link's first failed completion, on any lane, or a failed poll: no lane of the
    link served from here, so nothing is posted on it again, every lane it served dirty (the event loop takes `broken`)
-   and each one's holder failed; made again once nothing rides the link and both ends pair it afresh (link_turn).  1 */
+   and each one's holder failed; made again once nothing rides the link and both ends pair it afresh (link_turn).  A
+   lane this end moves to the error state is served no more before the move (lanes_release, LINK_JOB_MOVE), so the
+   completions the move flushes are dropped, never the link's failure.  1 */
 static int link_failed(struct port *port,int64_t code,uint32_t domain){
   struct link *l=&port->link;
   const uint32_t served=atomic_exchange_explicit(&l->served,0,memory_order_acq_rel);
@@ -807,7 +809,7 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
    posted, and the port's progress threads started); or a concluded link's lanes moved to the error state
    (LINK_JOB_FLUSH: the lanes it moved, and the lanes' generation moved where every queue pair of the link moved, B7's
    "B6's job"); or the lanes of flows' stops whose move a window put off moved to the error state at its end
-   (LINK_JOB_MOVE, B6 (a), B9: the lanes it moved, `numbers.move` those asked) */
+   (LINK_JOB_MOVE, B6 (a), B9: the lanes it moved, `numbers.move` those asked, served no more first, link_failed) */
 struct link_numbers { uint32_t peer[MESH_LINK_LANES][2],piece,pairing,move; uint16_t lid; uint8_t gid[16]; };
 static int link_lapsed(const struct link *l,const struct link_numbers *numbers){
   return atomic_load_explicit(&l->pairing,memory_order_relaxed)!=numbers->pairing?ECANCELED:0;
@@ -871,7 +873,7 @@ static void link_job(struct port *port,int job){
     if(!result)switch(job){
       case LINK_JOB_MAKE:result=link_make(port,&numbers);break;
       case LINK_JOB_CONNECT:if(!(result=link_connect(port,&numbers)))result=port_threads(port);break;
-      case LINK_JOB_MOVE:result=(int)pairs_error(&l->provider,numbers.move);break;
+      case LINK_JOB_MOVE:atomic_fetch_and(&l->served,~numbers.move);result=(int)pairs_error(&l->provider,numbers.move);break;
       default:{
         uint32_t standing=0;
         for(int q=0;q<l->provider.qp_count && q<(int)MESH_LINK_LANES;q++)if(l->provider.queues[q].pair)standing|=UINT32_C(1)<<q;
@@ -953,13 +955,14 @@ int lanes_take(const struct port *port,uint64_t owner,const uint32_t *lane,uint3
    use until its link pairs afresh (link_turn); a clean lane's DIRTY (lanes_take's) is cleared.  Where the stop is not
    its link's loss (`lost`, port_lost's: no verbs call), the link is still served (port_lost clears `served` first,
    link_lost), each dirty lane's queue pair is moved to the error state under the port's guard (B6 (a): its requests
-   flushed), the move stamped for B12 (`moving_at`, ports_stalled); while a port's job is out past MESH_PLATFORM_NS
-   (`stalled`, B12) or a peer interface's termination's window stands (`exit_at`, B9b), the move is put off to the
-   window's end, never dropped (B9: a deferral, `deferred`, link_turn's LINK_JOB_MOVE).  A dirty lane not moved may
-   still land a SEND in the flow's rows (`held`, B7: the flow kept until the lanes' `generation` moves past
-   `lane_epoch`, or until its put-off move moved them).  A settle or a guard not held within MESH_PLATFORM_NS
-   (port_wait: the port halted, served no more) makes no change: the move is not made, and a flow a thread may still
-   read (`kept`, still `listed`) has every lane of it dirty and its rows and storage held.  The lanes it left dirty */
+   flushed, the lane served no more first, link_failed), the move stamped for B12 (`moving_at`, ports_stalled); while a
+   port's job is out past MESH_PLATFORM_NS (`stalled`, B12) or a peer interface's termination's window stands
+   (`exit_at`, B9b), the move is put off to the window's end, never dropped (B9: a deferral, `deferred`, link_turn's
+   LINK_JOB_MOVE).  A dirty lane not moved may still land a SEND in the flow's rows (`held`, B7: the flow kept until the
+   lanes' `generation` moves past `lane_epoch`, or until its put-off move moved them).  A settle or a guard not held
+   within MESH_PLATFORM_NS (port_wait: the port halted, served no more) makes no change: the move is not made, and a
+   flow a thread may still read (`kept`, still `listed`) has every lane of it dirty and its rows and storage held.  The
+   lanes it left dirty */
 uint32_t lanes_release(struct flow *f,int lost){
   struct port *port=f->port;
   struct link *l=&port->link;
@@ -979,7 +982,7 @@ uint32_t lanes_release(struct flow *f,int lost){
   if(move){
     atomic_store(&port->moving_at,clock_ns());
     const int raised=guard_raise(port);
-    moved=raised<0?0:pairs_error(&l->provider,move);
+    if(raised>=0){atomic_fetch_and(&l->served,~move);moved=pairs_error(&l->provider,move);}
     guard_lower(port,raised);
     atomic_store(&port->moving_at,0);
     say("link %u (%s): lanes %#x left dirty toward node %u: %#x moved to the error state, their requests flushed\n",port->index,
