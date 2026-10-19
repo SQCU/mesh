@@ -1510,6 +1510,15 @@ static int start_refused(const struct session *s, uint32_t *node, uint32_t *wher
   return 0;
 }
 
+/* a landing that read ~0 on the channel to `node`: the failure a destination's status names where its bridge stored
+   one (start_refused: a take refused, or a flow failed, with its code), else its link lost */
+static ncclResult_t cancelled(const struct session *s, uint32_t node) {
+  uint32_t bound, where;
+  int64_t code;
+  if (start_refused(s, &bound, &where, &code)) return fail(ncclRemoteError, REFUSED, s->comm->name, bound, where, strerror((int)code));
+  return fail(ncclRemoteError, "the link to node %u was lost (its landings cancelled)", node);
+}
+
 /* the progress thread, the session's watcher: it follows each channel's landings up to its target (the positions a
    group, or an agreement, waits for), and where a landing reads ~0 (cancelled: by its bridge at a link's loss, a flow's
    failure or its stop, or by a revoke) or, with positions pending and none landing, its bridge is gone (bridge_gone)
@@ -1533,7 +1542,7 @@ static void *progress_run(void *argument) {
       uint64_t at = from;
       for (; at < target; at++) {
         const uint64_t arrived = mesh_host_arrived(&s->context, ch->in, (uint32_t)at);
-        if (arrived == UINT64_MAX) { release_all(s, ncclRemoteError, "the link to node %u was lost (its landings cancelled)", ch->node); break; }
+        if (arrived == UINT64_MAX) { release_all(s, cancelled(s, ch->node), "%s", last); break; }
         if (!landed(arrived, at)) { waiting = 1; break; }
       }
       if (at > from && !atomic_load(&s->failed)) { atomic_store(&ch->signaled, at); moved = 1; }
@@ -1674,15 +1683,15 @@ static void comm_advise(const struct ncclComm *comm) {
 }
 
 /* design/bridge-and-ipc.md#files: the lane pair the communicator's init leased toward node `node` (UINT32_MAX none: no
-   cable of this node joins it, or no bootstrap chose one), its report's first link to the node's, and how many of the
-   links it leased that pair on are among `ports` (a bit a port index) */
-static uint32_t lane_pair(const struct ncclComm *comm, uint32_t node, uint32_t ports, uint32_t *cables) {
+   cable of this node joins it, or no bootstrap chose one), its report's first link to the node's, and how many links
+   it leased that pair on (`cables`) */
+static uint32_t lane_pair(const struct ncclComm *comm, uint32_t node, uint32_t *cables) {
   uint32_t pair = UINT32_MAX, n = 0;
   for (uint32_t k = 0; k < comm->leased.count && k < MESH_PORTS; k++) {
     const struct mesh_lane_link *link = comm->leased.link + k;
     if (link->peer != node || comm->chosen[k] == UINT32_MAX || (pair != UINT32_MAX && comm->chosen[k] != pair)) continue;
     pair = comm->chosen[k];
-    n += link->port < MESH_PORTS && (ports >> link->port & 1);
+    n++;
   }
   if (cables) *cables = n;
   return pair;
@@ -1732,24 +1741,25 @@ static ncclResult_t start_failure(struct session *s, int status) {
 }
 
 /* the members' agreement, the session's position 0 on each channel: this rank's digest of its programs' making
-   (map_digest) and the cables its bridge bound its program to toward the channel's node (lane_pair over struct
-   mesh_client `ports`, program_take's `leased`, read once as its start returned), published on every channel and
-   every peer's awaited there and compared, before any group runs, so the members of a session run the programs of one
-   map or none, and the two ends of each link stripe its invocations over as many cables (4df30806 mesh-flow.c
-   program_take's `f->stripes != n`, carried as data: position 0 rides the first cable at both ends,
-   design/bridge-and-ipc.md#cables): a peer's count against this rank's.  A session the map changed under as it
-   opened, or whose ends bound different cables, fails as a value at both ends naming the disagreement.  It is awaited
-   as a landing is (design/recovery.md#five-seconds): position 0 is the progress thread's target, so the wait ends at
-   its landing, a cancellation (its link lost, its bridge gone or its destination's take refused: progress_run) or a
+   (map_digest) and how many cables its init leased its lane pair on toward the channel's node (lane_pair: counts from
+   the gathered reports and the one rule, mesh-call.h mesh_lanes_choose, which both ends hold before the session
+   opens), published on every channel and every peer's awaited there and compared, before any group runs, so the
+   members of a session run the programs of one map or none, and the two ends of each link stripe its invocations over
+   as many cables (4df30806 mesh-flow.c program_take's `f->stripes != n`, carried as data: position 0 rides the first
+   cable at both ends, design/bridge-and-ipc.md#cables), each end comparing the same two counts.  A leased cable a
+   bridge no longer pairs at the take (mesh-program.c program_take, after the start) is its link's loss, or leaves a
+   SEND held that fails its flow (design/recovery.md#five-seconds B2, B4).  A session the map changed under as it
+   opened, or whose ends leased different cables, fails as a value at both ends naming the disagreement.  It is
+   awaited as a landing is: position 0 is the progress thread's target, so the wait ends at its landing, a
+   cancellation (its link lost, its bridge gone or its destination's take refused: progress_run, cancelled) or a
    revoke; `serial`, the map serial this rank read its map at, names it */
 struct agreement { uint64_t digest, serial; uint32_t version, node, cables, padding; };
 _Static_assert(sizeof(struct agreement) <= MESH_SMALL_LEAST, "a small slot carries the agreement");
 static ncclResult_t session_agree(struct session *s, uint64_t serial) {
   struct ncclComm *comm = s->comm;
-  const uint32_t ports = atomic_load(&mesh_client_at(s->header, s->context.client)->ports);
   struct agreement mine = {comm->digest, serial, MESH_PLAN_VERSION, comm->members[comm->rank], 0, 0};
   for (uint32_t h = 0; h < s->count; h++) {
-    lane_pair(comm, s->channels[h].node, ports, &mine.cables);
+    lane_pair(comm, s->channels[h].node, &mine.cables);
     memcpy(s->channels[h].sending, &mine, sizeof mine);
     mesh_host_publish(&s->context, s->channels[h].out, 0);
   }
@@ -1760,7 +1770,7 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
     const ncclResult_t failed = (ncclResult_t)atomic_load(&s->failed);
     if (revoked(comm)) return revoked_fail(comm);
     if (failed) return fail(failed, "%s", s->failure);
-    if (arrived == UINT64_MAX) return fail(ncclRemoteError, "the link to node %u was lost as the session of %s opened", ch->node, comm->name);
+    if (arrived == UINT64_MAX) return cancelled(s, ch->node);
     if (!landed(arrived, 0)) { usleep(20); continue; }
     struct agreement theirs;
     memcpy(&theirs, ch->receiving, sizeof theirs);
@@ -1771,13 +1781,13 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
                   (unsigned)mine.node, comm->name, (unsigned long long)mine.serial, (unsigned long long)mine.digest,
                   (unsigned long long)mine.version, (unsigned)theirs.node, (unsigned long long)theirs.serial,
                   (unsigned long long)theirs.digest, (unsigned long long)theirs.version);
-    uint32_t bound = 0;
-    lane_pair(comm, ch->node, ports, &bound);
-    if (theirs.cables != bound)
-      return fail(ncclRemoteError, "node %u's bridge bound its session of %s toward this rank (node %u) to %u cables, and this rank's bridge "
-                  "bound it to %u toward that node: the two ends would stripe its invocations over different cables (one paired at one "
-                  "end only as the program was taken, or leased at one end only); the group fails, and the communicator is made again",
-                  ch->node, comm->name, (unsigned)mine.node, theirs.cables, bound);
+    uint32_t leased = 0;
+    lane_pair(comm, ch->node, &leased);
+    if (theirs.cables != leased)
+      return fail(ncclRemoteError, "node %u leased its session of %s toward this rank (node %u) on %u cables, and this rank leased it on %u "
+                  "toward that node: the two ends would stripe its invocations over different cables (a cable paired at one end only as "
+                  "the communicator was made); the group fails, and the communicator is made again",
+                  ch->node, comm->name, (unsigned)mine.node, theirs.cables, leased);
     ch->sent = ch->consumed = ch->end = ch->checked = ch->waited = 1;
     atomic_store(&ch->target, 1); atomic_store(&ch->signaled, 1);
     h++;
@@ -1988,7 +1998,7 @@ static ncclResult_t session_open(ncclComm_t comm) {
     }
   struct mesh_client *client = mesh_client_at(s->header, s->context.client);
   for (uint32_t h = 0; h < s->count && !status && !result; h++) {
-    const uint32_t pair = lane_pair(comm, s->channels[h].node, 0, NULL);
+    const uint32_t pair = lane_pair(comm, s->channels[h].node, NULL);
     struct mesh_tx *tx = &client->tx[mesh_destination(client, s->channels[h].node)];
     if (pair == UINT32_MAX)
       result = fail(ncclInvalidUsage, "communicator %s holds no lane pair toward node %u (ENOLCK): only an exchange leases them "
@@ -2404,7 +2414,7 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
       struct schedule *p = plans + h;
       while (ch->consumed < ch->end) {
         const uint64_t at = ch->consumed, arrived = mesh_host_arrived(&ses->context, ch->in, (uint32_t)at);
-        if (arrived == UINT64_MAX) return fail(ncclRemoteError, "the link to node %u was lost (its landings cancelled)", ch->node);
+        if (arrived == UINT64_MAX) return cancelled(ses, ch->node);
         if (!landed(arrived, at)) break;
         struct message *m = p->in_at < p->ins ? p->in + p->in_at : NULL;
         const int data = m && at >= m->first;
