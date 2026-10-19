@@ -43,6 +43,9 @@ _Static_assert(38+25<=63 && MESH_LANE_FIRST+2*MESH_LANE_PAIRS==MESH_LINK_LANES,"
    start, and how long the queue pairs of two started programs take to pair; a client's start waits on its bridge at
    most the three together */
 #define MESH_PAUSE_NS UINT64_C(3000000000)
+/* design/recovery.md#five-seconds, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
+   mesh is used longer than this without something happening on it or its scope concluding */
+#define MESH_PLATFORM_NS UINT64_C(5000000000)
 #define MESH_PEER_NS UINT64_C(600000000000)
 #define MESH_PAIR_NS UINT64_C(30000000000)
 /* design/recovery.md#detection: a destination with positions pending that lands none for this long is cancelled (mesh_cancel) */
