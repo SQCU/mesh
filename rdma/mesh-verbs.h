@@ -221,6 +221,22 @@ static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q)
   if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
   return 0;
 }
+/* design/bridge-and-ipc.md#lanes: the queue pairs of `lanes` (a bit a queue) moved to RESET, where a queue pair holds no
+   work request (the receives and SENDs posted on it are dropped, with no completion), then ready again toward the same
+   peer queue pairs (`remote`: each one's number and first sequence number; the peer's port at `lid` and `gid`) exactly
+   as the pairing made them: INIT, RTR, RTS, the same numbers.  The lanes ready again */
+static __attribute__((unused)) uint32_t pairs_reset(struct mesh_verbs *provider,uint32_t lanes,const uint32_t (*remote)[2],uint16_t lid,
+                                                    const uint8_t *gid){
+  uint32_t ready=0;
+  for(int q=0;q<provider->qp_count && q<32;q++)if((lanes>>q&1) && provider->queues[q].pair){
+    struct ibv_qp_attr reset={.qp_state=IBV_QPS_RESET},init={.qp_state=IBV_QPS_INIT,.port_num=1};
+    if(ibv_modify_qp(provider->queues[q].pair,&reset,IBV_QP_STATE) ||
+       ibv_modify_qp(provider->queues[q].pair,&init,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS) ||
+       queue_receive(provider,q,remote[q],lid,gid) || queue_send(provider,q))continue;
+    ready|=UINT32_C(1)<<q;
+  }
+  return ready;
+}
 /* design/recovery.md#five-seconds: the queue pairs of `lanes` (a bit a queue) moved to the error state, so the device
    ends their posted receives and SENDs (flushed: their completions name no holder, taken as any lane's failure or by a
    destruction's poll), nothing waiting on what it flushes (4df30806 pair_flush's modify loop, without its drain).  The

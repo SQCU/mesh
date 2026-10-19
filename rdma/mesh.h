@@ -33,9 +33,10 @@
    its MESH_LINK_LANES lanes: lane MESH_LANE_KEEPALIVE the keepalive's, lane 1 reserved and unused, and from
    MESH_LANE_FIRST communicators' pairs, a pair's large class's lane and its small class's.  A lane's lease word (struct
    hdr `lanes`) is 0 free, else the owner word of the communicator's session slot that holds it, claimed and released by
-   that client with a compare-exchange (wait-free), with MESH_LANE_DIRTY set by the bridge where the lane's posted
-   receives were never consumed (a loss, a revoke) and cleared once it has made the lane again; an owner word leaves bit
-   63 clear (its generation is 25 bits, mesh-dataflow.c mesh_slot_take) */
+   that client with a compare-exchange (wait-free), with MESH_LANE_DIRTY set by the bridge while a flow of it holds the
+   lane, from the flow's make until its stop has reset the lane's queue pair (or the link's next pairing has made it
+   again), so a lane whose receives a stopped program posted is never leased; an owner word leaves bit 63 clear (its
+   generation is 25 bits, mesh-dataflow.c mesh_slot_take) */
 #define MESH_LINK_LANES 10u
 #define MESH_LANE_KEEPALIVE 0u
 #define MESH_LANE_FIRST 2u

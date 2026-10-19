@@ -125,9 +125,9 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    and cells prepared, then it is listed in the port's table, where the port's two progress threads serve it while it is
    `progressing` and its lanes are served (the receive thread posts its rings' first records, `armed`).  It has ended
    (`ended`) once it failed or its program ended; its stop runs on the port's queue (`stopping`; `stopped` 1 once it
-   ran, 2 where a lane it left dirty may still land a SEND in its rows, `held`: the flow, and with it a retired client's
-   rows, kept until its link's lanes' `generation` moves past `lane_epoch`, or until the move a window put off moved
-   every lane it holds, design/recovery.md#five-seconds B7, B6 (a)), and the event loop frees it */
+   ran, 2 where its lanes could not be reset, so a receive its ring posted may still land a SEND in its rows, `held`:
+   the flow, and with it a retired client's rows, kept until its link's lanes' `generation` moves past `lane_epoch`, the
+   next pairing having destroyed those queue pairs), and the event loop frees it */
 struct port;
 struct flow {
   struct flow *next;
@@ -165,37 +165,41 @@ struct flow {
    LINK_MADE; connecting; up), its job on the port's queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled;
    LINK_JOB_FLUSH the lanes of a link concluded while connected or up moved to the error state at the end of that
    conclusion's quiet window, `flush_at`, 0 for none, and of any termination's, design/recovery.md#five-seconds B6 (b),
-   B9b; LINK_JOB_MOVE the lanes `move` of flows' stops whose move to the error state a window or a stuck call put off,
-   `deferred`, a bit a lane, the port queue's to set and the event loop's to take, cleared as the link is made, B6 (a),
-   B9) and a registration its make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss and at
+   B9b) and a registration its make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss and at
    a halt, a peer interface's termination heard or a guard not held, mesh-link.c port_halt, so a job of a pairing gone
    makes no call and is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`); the lanes
    the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to clear where
    it found its lane failed, every lane at a failed completion, mesh-link.c link_failed, and the termination's queue's,
-   B9b), the lanes a progress thread found failed (`broken`, the event loop's to take) and those found so here (`dirty`:
-   none is made again while the link is up; once no lane of the link is leased here, its control socket is closed and
-   both ends pair it afresh, every lane made again: link_turn), and the count of its lanes' destructions (`generation`,
+   B9b), the lanes a progress thread found failed or a flow's stop could not reset (`broken`: the event loop concludes
+   the link on reading it, and both ends pair it afresh), and the count of its lanes' destructions (`generation`,
    link_make's and a LINK_JOB_FLUSH's that moved every queue pair to the error state, past which no request of an
-   earlier pairing lands: a flow kept for a lane it left dirty is freed then, design/recovery.md#five-seconds B7).  Each
-   lane's SEND gate (`gate`: the frames posted and retired, the send thread's; its capacity, set as the lane connects)
-   and the flow whose program rides it (`holder`: the event loop's to set as the flow is made, the port's queue's to
-   clear as it stops; a lane's completions go to its holder, and none is read once it has none).  Lane
+   earlier pairing lands: a flow held for lanes its stop could not reset is freed then).  Each lane's reset count
+   (`reset`, the port queue's to move as a flow's stop resets the lane in place, mesh-link.c lanes_release): every
+   request posted on a program lane carries it in its wr_id's top byte, and a completion carrying another is one
+   posted before the reset, dropped.  Each lane's SEND gate (`gate`: the frames posted and retired, the send thread's;
+   its capacity, set as the lane connects) and the flow whose program rides it (`holder`: the event loop's to set as
+   the flow is made, the port's queue's to clear as it stops; a lane's completions go to its holder, and none is read
+   once it has none).  Lane
    MESH_LANE_KEEPALIVE's frames (design/bridge-and-ipc.md#keepalive, design/recovery.md#five-seconds: one whenever the
    link is up, every `keepalive_ns` while a flow of the port is listed, else every MESH_PLATFORM_NS/5; the send thread's
    frame in flight and its census `alive_posted`, the receive thread's `alive_heard`, which the event loop reads:
    mesh-link.c port_silent), and its page: the keepalive's block */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
-enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT, LINK_JOB_FLUSH, LINK_JOB_MOVE };
+enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT, LINK_JOB_FLUSH };
 #define LINK_ALIVE_SENT (UINT64_C(3)<<56)
 #define LINK_ALIVE_HEARD (UINT64_C(4)<<56)
 #define LINK_ALIVE_BYTES 16u
 #define LINK_ALIVE_RECEIVES 256u
+/* a program lane's request id: its lane's reset count in the top byte (struct link `reset`), the rest the request's own */
+#define LANE_RESET_SHIFT 56
+#define LANE_ID_MASK ((UINT64_C(1)<<LANE_RESET_SHIFT)-1)
 struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,refused;
   _Atomic int done;
-  _Atomic uint32_t served,broken,generation,pairing,deferred;
-  uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,job_pairing,dirty,move;
+  _Atomic uint32_t served,broken,generation,pairing;
+  uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,job_pairing;
+  _Atomic uint8_t reset[MESH_LINK_LANES];
   struct send_gate gate[MESH_LINK_LANES];
   struct flow *_Atomic holder[MESH_LINK_LANES];
   uint64_t alive_at,job_at,flush_at;
@@ -219,14 +223,13 @@ struct link {
    park on while it stands, design/recovery.md#five-seconds B13, and the value each progress thread last held at:
    mesh-link.c guard_raise; each epoch and guard told wakes the raiser parked on it, port_tell, port_wait), the threads
    that post on its queue pairs (`thread`: its two progress threads, each storing itself as it starts, and its link
-   job's while one runs, by which a provider's fault names its port, mesh-link.c fault_heard), whether this end closed
-   its control socket so both ends pair its link afresh (`cycling`, link_turn), and the event loop's reading of what its
+   job's while one runs, by which a provider's fault names its port, mesh-link.c fault_heard), and the event loop's reading of what its
    control socket heard (design/recovery.md#five-seconds, mesh-link.c port_silent: when it last heard anything,
    `heard_at`, the link's keepalive frames heard as last read, `frames`, and when the last was heard, `frame_at`, 0
    until this pairing's first, and its frame in flight, `flight` its census as last read and `flight_at` when) */
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,flows,committed,cycling,stuck;
+  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,flows,committed,stuck;
   int64_t farewell;
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
@@ -315,6 +318,8 @@ static inline int ring_advance(struct flow *link,struct receive_ring *ring){
     if((record->behind && ring->posted>=record->behind && ring->landed<=ring->posted-record->behind) ||
        ring->outstanding+record->frames>ring->capacity)break;
     record->cycle=(uint32_t)cycle;
+    record->request.wr_id=(uintptr_t)record|(uint64_t)atomic_load_explicit(&link->port->link.reset[link->lane[record->queue]],
+                                                                         memory_order_relaxed)<<LANE_RESET_SHIFT;
     struct ibv_recv_wr *bad;
     int error=post(record->pair,&record->request,&bad);
     if(error)return error<0?-error:error;

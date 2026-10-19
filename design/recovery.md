@@ -148,7 +148,7 @@ the labels are its mechanisms', which the code cites):
 | S3 the link's standing receives | as S2 | the keepalive's frame whenever the link is up (B1), heard, or the link concluded (B2) |
 | S4 the control socket and the link | a network channel shared with configd and the driver | something heard within the bound: a whole message, or the keepalive's frames moving, the record retold every 3 s (B3); else the link concluded (B2) |
 | S5 a GPU or host wait on a landing | the GPU's queue (a spin inside a kernel) | every GPU wait bounded by its stream's polls, at most `NCCL_MESH_POLLS` (W3a); a host wait ends at `~0`, which B2, B4 and the stop store, or at its bridge gone (W3c) |
-| S6 a dirty lane's requests, and every lane of a concluded link | as S2, into rows that may be released to other clients | no lane leased while a flow may have requests on it (B5); the lanes moved to the error state (B6); rows held while a request may land (B7); no post on a lane no longer served (B8) |
+| S6 a stopped program's posted receives, and every lane of a concluded link | as S2, into rows that may be released to other clients | no lane leased while a flow may have requests on it (B5); its lanes reset at its stop, a concluded link's moved to the error state (B6); rows held while a request may land (B7); no post on a lane no longer served (B8) |
 | S7 the stop and the exit's reclaim | IOKit's termination thread, through `deallocPD` | the stop takes every catchable fatal signal (B15) and waits on nothing; the exit is held to the quiet windows' end, at most the bound past the stop's start (B9, B9b) |
 
 Host threads waiting on a word, a futex or a socket hold no driver, controller or GPU state; they are no scope, and
@@ -162,9 +162,9 @@ each ends as a value once the scope it depends on concludes.
 | B2 | A port whose control socket heard nothing for the bound (stamped at the socket's making, at each whole message and as the keepalive's frames heard move), whose link is up and heard no keepalive frame for the bound since this pairing's first, or whose frame stayed in flight as long, is concluded: `port_lost(ETIMEDOUT)`, no verbs call, its programs' words `~0`, its socket closed so the peer reads its end. Read on the event loop alone; fbc53b37's `heard_at`, at the operator's bound | `port_silent` |
 | B3 | This node's record retold at its current sequence on every paired port each liveness turn (`MESH_PAUSE_NS`, 3 s); a receiver drops a record no newer than its newest, so the map and its serials stay. B2 needs B3: a record every 10 s against a 5 s bound loses a healthy link (link_model.out `control-oscillate`) | `record_retell` |
 | B4 | A served program lane whose gate holds frames posted and not retired, none retired for the bound, fails its holder as a value (ETIMEDOUT), never the link. A ring posts each record once the one behind it lands, so a SEND held that long is one its peer's flow does not post for; between calls a gate is empty | `gates_turn` |
-| B5 | A flow's lanes' lease words become owner\|DIRTY as the flow is made, and its stop clears DIRTY only on a lane it left clean, so no word reads free, or another program's, while a flow may have requests posted on its lane | `lanes_take`, `lanes_release` |
-| B6 | Moves to the error state, so a lane's posted requests flush (4df30806 `pair_flush`'s modify, without its drain): (a) at a flow's stop, each lane it left dirty, unless the stop is its link's loss, put off past a window or a stuck call and never dropped; (b) a concluded link's lanes, once its quiet window ends, where its interface stayed up; (c) every lane at the link's next pairing, before its destruction, so no queue pair is destroyed with receives posted | `lanes_release`, `link_job` (`LINK_JOB_MOVE`, `LINK_JOB_FLUSH`), `pairs_down`, `pairs_error` |
-| B7 | A flow that left a lane dirty and unmoved is kept with its rows (its client's, where retired) until the link's lanes' generation moves or its put-off move moved them | `flow_stop`, `flows_turn`, `clients_turn` |
+| B5 | A flow's lanes' lease words become owner\|DIRTY as the flow is made, and its stop clears DIRTY only once it has reset the lane, so no word reads free, or another program's, while a stopped program's requests are posted on its lane | `lanes_take`, `lanes_release` |
+| B6 | (a) At a flow's stop on a served link, each of its lanes reset in place (RESET drops what is posted with no completion; INIT, RTR, RTS toward the same peer queue pair), its reset count in every request's wr_id so an earlier completion is dropped; where it cannot be reset (link not served, a call stuck, a termination's window, the guard not held), the link concluded instead. (b) A concluded link's lanes moved to the error state once its quiet window ends, where its interface stayed up. (c) Every lane at the link's next pairing, before its destruction, so no queue pair is destroyed with receives posted | `lanes_release`, `pairs_reset`, `lane_stale`, `link_job` (`LINK_JOB_FLUSH`), `pairs_down`, `pairs_error` |
+| B7 | A flow whose lanes were not reset is kept with its rows (its client's, where retired) until the link's lanes' generation moves (the next pairing destroyed the queue pairs) | `flow_stop`, `flows_turn`, `clients_turn` |
 | B8 | No post on a lane the link no longer serves: a flow is served only while every lane it rides is in `served`, which a loss clears before the socket closes; a FAREWELL heard loses the link at once; the first failed completion or poll on any lane stops the whole link | `port_pass`, `link_lost`, `link_failed`, `message_heard` |
 | B9 | The quiet window: each conclusion holds its port's jobs (an open, a make, a connect, a put-off move) for the bound, and the exit until the latest window, so no driver call and no exit falls inside the termination a conclusion may follow; the devices are read again only after every window | `port_lost`, `quiet_until`, `windows_end` |
 | B9b | A Thunderbolt RDMA peer interface's termination, heard in its first phase (`kIOTerminatedNotification`; rule-zero/EXIT-RECLAIM.md P2): every port's window and the exit's held the bound from then, and the port its `RID` names halted and concluded with no flush; at the start, IOKit's registry waited quiet, at most the bound, before the devices are read (P3, as a window) | `peer_terminated`, `terminations_turn`, `main` |
@@ -232,12 +232,10 @@ moved to the error state where the link was connected and its interface stayed u
 link's next pairing, on hearing the peer, moves them to the error state, destroys them and makes them again with the
 sequence d6dceac paired by. A job of the lost pairing still on the port's queue makes no call (B10).
 
-The first failed completion or poll on any lane stops the whole link: every lane served no more and dirty, each
-one's program failed. A post refused, or a descriptor outside the window, fails its flow alone. A lane a program left
-with positions outstanding (a receive posted and not landed, a SEND posted and not completed) is dirty, its requests
-flushed at its flow's stop (B6 (a)). A dirty lane is leased
-to no new program, and once nothing rides the link here, the bridge closes its control socket so both ends pair it
-afresh, every lane made again.
+The first failed completion or poll on any lane stops the whole link: every lane served no more, each one's program
+failed, and the link concluded at once, both ends pairing it afresh. A post refused, or a descriptor outside the
+window, fails its flow alone. A program's stop resets its lanes in place (B6 (a)), so the next communicator leasing
+them posts on them at once.
 
 A link job that fails (making or connecting) concludes the link, which pairs again on hearing the peer (B16); a refused
 registration leaves the port down until its link next comes on (`#registration`). A loss of the port itself (link off,
@@ -365,7 +363,7 @@ pairs).
 | F1 | a direct link down mid-call | the executions on it fail; the link pairs again at the peer's next hello once its quiet window ends |
 | F3 | a link down when a program starts | the program fails at once (EHOSTUNREACH, or ENOLCK where no paired cable carries its lease) |
 | F6 | the peer bridge stops or crashes | its FAREWELL, else its socket's end or five seconds unheard (B2): the executions fail; the link pairs again with the new bridge |
-| F7 | the peer's program fails or ends | nothing is told: this side's SENDs toward it are held and fail their flow at five seconds (B4), its other waits end by that or its caller's revoke; a lane left with positions outstanding is dirty at each end |
+| F7 | the peer's program fails or ends | nothing is told: this side's SENDs toward it are held and fail their flow at five seconds (B4), its other waits end by that or its caller's revoke; each end's stop resets its lanes |
 | F8 | the peer node reboots or loses power | its peer interface's termination (B9b), the link-off, or five seconds unheard: the executions fail, no port job and no exit inside the termination's window, the port's device kept (opened afresh where its context died) |
 | F9 | the control plane (LAN, ssh, mDNS) lost, the cable up | the bridges' links are unaffected; the driver's reach is |
 | F10 | the data path dead, the control socket alive | no keepalive frame heard for five seconds concludes the link (B2); a SEND held five seconds fails its flow (B4) |
@@ -376,7 +374,7 @@ pairs).
 | F15 | a cable moved to another port or peer | the old port's executions fail; the new port pairs with whatever node it reaches |
 | F18 | the driver's own node fails | the stream stops (one driver) |
 | F19 | a node of several cables stops in a mesh whose survivors hold a cycle | its last record ends at the first bridge that has heard it (design/bridge-and-ipc.md#records) |
-| F20 | a lane's completion fails (an error status, a failed poll) | the whole link stops (`#loss`): every lane served no more and dirty, its programs failed; once nothing rides it both ends pair it afresh. A post refused is its flow's alone |
+| F20 | a lane's completion fails (an error status, a failed poll) | the whole link stops (`#loss`): every lane served no more, its programs failed, the link concluded at once and paired afresh. A post refused is its flow's alone |
 | F21 | a device refuses the window's registration | logged with the extent; the port is down until its link next comes on (`#registration`) |
 | F23 | members' programs of one execution made from maps a change apart | the session's first position carries the digest, which the members' agreement compares (`#first`) |
 | F26 | a verbs call stuck in the driver | its port concluded around it at five seconds and no driver call from any port meanwhile; the port opens again once the call returns (B12) |
