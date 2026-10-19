@@ -259,8 +259,55 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
    or past its first position), causality (the program's publications and consumptions under the wire's rule, without
    timing: a cycle among them is a deadlock) and hazard (a receive that may write what a SEND of the same rank still
    reads, or a SEND not ordered after a receive of what it reads).  It refuses nothing and changes nothing; the count
-   of warnings, UINT32_MAX where its room could not be had. */
+   of warnings, UINT32_MAX where its room could not be had.  It is mesh_group_advise of a group of the one call. */
 uint32_t mesh_program_advise(const struct mesh_program *,const struct mesh_wire *,struct mesh_operand,void (*warn)(void *,const char *),void *arg);
+/* design/collectives-dataflow.md#advisories, a group's calls on one session's wire, as libnccl-mesh issues them between
+   ncclGroupStart and ncclGroupEnd: call i of kind MESH_GROUP_*, its steps at rank r steps[r][0 .. count[r]) (a
+   point-to-point call's at its own rank alone, one SEND or COPY; a row of none where count[r] is 0), every rank's
+   collectives and counted all-to-alls in one call order; `polls` its GPU waits' bound (nccl.h ncclMeshStream polls, one
+   a group) and `bound` the most loads a wait may make (nccl.h NCCL_MESH_POLLS; 0: not read, a host group).
+   mesh_group_lay: the positions rank `rank`'s calls take on its channel toward `peer` of class `large` from `at`, each
+   collective's in call order (mesh_lay), then each counted all-to-all's, then its point-to-point calls, its j-th SEND to
+   the peer beside its j-th receive from it (libnccl-mesh lay); each placement its call and mesh_lay's place (a
+   point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at the rank; the
+   end. */
+enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_POINT };
+struct mesh_group_call { uint32_t kind,padding; const uint32_t *count; const struct mesh_step *const *steps; };
+struct mesh_group { uint32_t nodes,calls,polls,bound; const struct mesh_group_call *call; };
+struct mesh_group_place { uint32_t call,padding; struct mesh_place place; };
+uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,int large,const struct mesh_wire *,uint64_t at,
+                        struct mesh_place *scratch,struct mesh_group_place *made,uint32_t *placed);
+/* A counted all-to-all's steps at `rank` of `nodes`, all of round 0 (libnccl-mesh ncclMeshAlltoAllCounted and
+   ncclMeshAlltoAllV, nccl-mesh.c counted_steps): segments[q] the entries toward rank q, segments[nodes + q] those from
+   it.  `hosted` (both ends hold the counts): to each other rank q one SEND of its entries of `element` (buffer 0 at q's
+   segment) and from each one COPY (buffer 1 at q's); else (mesh 3981ca80^ run_counted's one exchange) to each q it has
+   counts for, its counts (of `counts`' type, buffer 0 at q's first entry) and, where element.elements (the rows' room
+   each pair's message carries) is not 0, those elements (buffer 1), and from each its counts (buffer 2 at q's place) and
+   then, after every counts receive, its rows (buffer 3).  Their count, at most 4 (nodes - 1). */
+uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,int hosted,struct mesh_operand element,
+                            struct mesh_operand counts,struct mesh_step *steps);
+/* A group's advisories: mesh_program_advise's checks over its calls laid together (projection of both ends' positions on
+   each channel and of each call's steps, the point-to-point calls' together; causality over every call's steps on the
+   shared positions; each call's priorities, depth and hazards), and bound (GPU waits of polls 0 or past `bound`: a wait
+   whose landing never comes holding its queue past the platform's deadline, design/recovery.md#five-seconds).  Returns
+   as mesh_program_advise. */
+uint32_t mesh_group_advise(const struct mesh_group *,const struct mesh_wire *,void (*warn)(void *,const char *),void *arg);
+/* The invocation axis of a bridge-level program (mesh.h struct mesh_transfer `begin`, `end` and `depth`; the slot's
+   invocations and `cyclic`, design/prepared-machine.md#M30): transfer k a SEND (`send`) or a receive of rank `rank`
+   toward or from `peer` on `queue`, for the invocations [begin, end) at ring slot (t - begin) mod depth (0: the
+   program's `depth`), a rank's k-th SEND to a peer on a queue that peer's k-th receive from it there; wait w: its rank's
+   event of transfer `transfer` at invocation t (a SEND's publication, a receive's consumption) after its event of
+   transfer `on` at t - distance.  Its advisories: invocation (a cyclic program's ring that does not divide its
+   invocations, a range that does not cover it), projection (a transfer with no peer, two ends' ranges apart, a wait
+   across ranks), causality (a cycle of waits within one invocation: Lustre's instantaneous cycle, a recursion unguarded
+   by Nakano's later) and depth (a producer that may run further ahead of its consumer than the receive ring holds, or
+   of its landings than its SEND ring holds: each ring's waits depend only back to t - D).  Returns as
+   mesh_program_advise. */
+struct mesh_cyclic_transfer { uint32_t rank,peer,queue,send,begin,end,depth,padding; };
+struct mesh_cyclic_wait { uint32_t transfer,on,distance,padding; };
+struct mesh_cyclic { uint32_t ranks,invocations,depth,cyclic,transfers,waits; const struct mesh_cyclic_transfer *transfer;
+                     const struct mesh_cyclic_wait *wait; };
+uint32_t mesh_cyclic_advise(const struct mesh_cyclic *,void (*warn)(void *,const char *),void *arg);
 /* The planner's rules' version: the trees, routes, compiles and wire above, and libnccl-mesh's table of programs made
    of them (nccl-mesh.c comm_routes: the caller's, or the communicator's configured forms, nccl.h ncclMeshCommForms,
    and then every collective along the caller's paths or the shortest-path trees, uncut); the library's session
