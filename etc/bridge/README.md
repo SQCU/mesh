@@ -15,17 +15,6 @@ A document has these keys:
 
 - `purpose`: one line stating what the configuration is for (required).
 - the window, exactly one of `window_gib` (GiB) or `window_percent` (of the node's physical memory).
-- `exec` (optional): true where the bridge runs its peers' commands as its user, its own service `exec`
-  (design/bridge-and-ipc.md#exec). Any node on a cable to this one may then run commands here, as it may already write
-  into the window. A document that does not state it true serves none.
-- `ledger` (optional): true where the bridge keeps each flow's ledger (design/bridge-and-ipc.md#ledger): every SEND
-  cell its send thread saw released and every record that landed, each with the time, written at the flow's end into
-  the bridge's log, or past 2,048 events into a file beside the log that the log names. `rdma/ledger.py` reads two
-  nodes' ledgers of an execution and gives each direction's send thread delay, RC round trip and one-way
-  bridge-to-bridge hop. It is for measuring: a flow keeps up to 4.5 MiB more of the node's memory (outside the window)
-  and its progress threads read the clock at each event. A document that does not state it true keeps none, and its
-  canonical form names no `ledger` (so `ledger = false` changes nothing a node runs); the shipped documents state it
-  false.
 - `keepalive_us` (optional): the most microseconds an exclusive flow goes without a frame while it runs
   (design/bridge-and-ipc.md#keepalive): each such flow takes one queue pair more, and its send side posts a one-frame
   SEND on it that often, so a link's controller that slows after a quiet stretch (the Mac mini's, 6-10 us after 40 us of
@@ -45,8 +34,8 @@ How much an execution needs, on its own node and on the nodes it peers or stream
 
 A loop bridge (`rdma/.build/loop/mesh-flow-loop`, mesh design/bridge-dataflow.md#the-loopback-fabric), one of N on one
 host for running relays, forwarding and the library on 3 to 8 nodes before the hardware has them, reads the same
-canonical form with one key more, `loop`: its region's name, its node, its clients' loopback port (`service`), the
-loopverbs fabric it shares with the host's other loop bridges, and its ports, each a loopverbs device and its cable's
+canonical form with one key more, `loop`: its region's name, its node, the loopverbs fabric it shares with the host's
+other loop bridges, and its ports, each a loopverbs device and its cable's
 two loopback ports. The loop's driver writes them (`rdma/.build/host/mesh-loop up`, one a node, from the map it is
 given), not `bridge_configuration.py`, which refuses the key; the deployed bridge reads no `loop` (it is built without
 the loop fabric) and a loop bridge refuses a configuration without one.

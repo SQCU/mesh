@@ -55,7 +55,6 @@ install -C -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/b
 install -m 644 -o root -g wheel "$REPO"/templates/* "$MESH_ROOT/templates/" 2>/dev/null
 ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
-ln -sf "$MESH_ROOT/bin/mesh-run.sh"    /usr/local/bin/mesh-run
 ln -sf "$MESH_ROOT/bin/mesh-observe.py" /usr/local/bin/mesh-observe
 ln -sf "$MESH_ROOT/bin/mesh-top.py" /usr/local/bin/mesh-top
 ln -sf "$MESH_ROOT/bin/mesh-python" /usr/local/bin/mesh-python
@@ -164,27 +163,8 @@ mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>1</integer>"
 mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
-install -C -m 755 -o root -g wheel "$REPO"/user/mesh-nodeinfod.py "$MESH_ROOT/bin/mesh-nodeinfod.py"
-MESH_PY=$MESH_ROOT/bin/mesh-python
 sed -e "s|__MESH_USER__|$ADMIN_USER|g" -e "s|__MESH_HOME__|$H|g" "$REPO/etc/io.mesh.observer.plist" > "$J/io.mesh.observer.plist.new"
 chmod 644 "$J/io.mesh.observer.plist.new"
-cat > "$J/io.mesh.nodeinfo.plist.new" <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>io.mesh.nodeinfo</string>
-  <key>ProgramArguments</key><array><string>$MESH_PY</string><string>$MESH_ROOT/bin/mesh-nodeinfod.py</string></array>
-  <key>UserName</key><string>${ADMIN_USER:-root}</string>
-  <key>EnvironmentVariables</key><dict>
-    <key>MESH_NODEINFO</key><string>$MESH_ROOT/bin/mesh-nodeinfo.sh</string>
-    <key>MESH_NODEINFO_PORT</key><string>8099</string></dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>
-  <key>StandardErrorPath</key><string>$MESH_ROOT/log/user/io.mesh.nodeinfo.err.log</string>
-</dict></plist>
-PL
-chmod 644 "$J/io.mesh.nodeinfo.plist.new"
 mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>1</integer>"
@@ -192,7 +172,7 @@ mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" " 
 mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
   launchctl enable system/$L >/dev/null 2>&1
   port=
   case "$L" in io.mesh.telemetry) port=8788 ;; io.mesh.observer) port=8787 ;; esac

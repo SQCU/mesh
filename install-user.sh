@@ -32,11 +32,9 @@ provide_http(){
 }
 mkdir -p "$D/bin" "$D/etc" "$D/log" "$D/viz" "$A" "$HOME/.local/bin"
 install -C -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
-install -C -m 755 "$R/user/mesh-nodeinfod.py" "$D/bin/mesh-nodeinfod.py"
 install -C -m 755 "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py"
 install -C -m 755 "$R/user/mesh-update-user.sh" "$D/bin/mesh-update-user.sh"
 install -C -m 755 "$R/bin/mesh-peers.sh" "$D/bin/mesh-peers.sh"
-install -C -m 755 "$R/bin/mesh-run.sh" "$D/bin/mesh-run.sh"
 install -C -m 755 "$R/bin/mesh-observe.py" "$D/bin/mesh-observe.py"
 install -C -m 755 "$R/bin/mesh-top.py" "$D/bin/mesh-top.py"
 install -C -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$R/bin/mesh_restart.py" "$D/bin/"
@@ -56,18 +54,6 @@ ln -sf "$D/bin/mesh-observe.py" "$HOME/.local/bin/mesh-observe"
 ln -sf "$D/bin/mesh-top.py" "$HOME/.local/bin/mesh-top"
 ok "$D/bin populated"
 PY=$D/bin/mesh-python
-cat > "$A/io.mesh.nodeinfo.plist.new" <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>io.mesh.nodeinfo</string>
-  <key>ProgramArguments</key><array><string>$PY</string><string>$D/bin/mesh-nodeinfod.py</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>
-  <key>StandardErrorPath</key><string>$D/log/io.mesh.nodeinfo.err.log</string>
-</dict></plist>
-PL
 cat > "$A/io.mesh.telemetry.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -99,7 +85,6 @@ cat > "$A/io.mesh.observer.plist.new" <<PL
   <key>StandardErrorPath</key><string>$D/log/io.mesh.observer.err.log</string>
 </dict></plist>
 PL
-load io.mesh.nodeinfo
 provide_http io.mesh.telemetry 8788
 provide_http io.mesh.observer 8787
 cat > "$A/io.mesh.update.user.plist.new" <<PL

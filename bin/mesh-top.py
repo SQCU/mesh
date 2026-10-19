@@ -7,7 +7,7 @@ import mesh, mesh_disk
 
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 LATEST = "/v1/latest?measures=scalars"
-RESIDENT = ("beacon", "bridge", "router", "nodeinfo", "telemetry", "observer")
+RESIDENT = ("beacon", "bridge", "router", "telemetry", "observer")
 SPARK = " ▁▂▃▄▅▆▇█"
 PHASES = {getattr(mesh.lib, "MESH_" + name): name for name in ("UNKNOWN", "PAIRING", "PAIRED", "STOPPED")}
 USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html FILE]   keys: q quit, j/k scroll"
