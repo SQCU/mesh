@@ -303,6 +303,10 @@ Porting:
   bridges' pre-posted flows, bound when the session opened); in-place, an operand's own copies go, not the ring's.
   Reproduction target (metal-microbench docs/measurement.md 2026-09-30 part A, 95967e6..42a16ed): per 16.8 MB
   all-reduce, the library's copies of the operand 16.78 MB to 0; tp 271.5-272.2 ms a step.
+- A host-path group waits for its own communicator's GPU groups alone and fails while one of them is issued and not
+  complete; while no landing of its own has come it parks (its session's watcher wakes it within a millisecond of one)
+  and holds no lock another communicator's groups take, so a rank may wait in a host-path collective (an
+  `ncclBroadcast` from a peer) for as long as the peer takes while its other communicators run (metal-microbench docs/elastic.md#call-delivery).
 - The host path copies every operand through the session's rings, a lease or not; `ncclMeshMemUse(ptr, bytes, event,
   value, write)` declares the caller's GPU work on a lease (an `MTLSharedEvent` and the value it reaches), which a
   host-path group reading or writing that lease waits for (until the GPU's work reaches the value). The window is where a program
