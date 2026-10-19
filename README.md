@@ -542,8 +542,8 @@ same for its layer with that script's subcommands. A layer changes only to image
 2. **Fetched**, and the upstream's own copy of the script run, so a broken script is mended by the next push. A layer
    whose upstream and documents are what its install last recorded (`~/.cache/mesh/converge/<label>`) is done.
 3. **Staged.** The upstream revision is built in a worktree of its own (`~/.cache/mesh/stage/<repository>`) at
-   background priority: for the mesh, `make -C rdma all`, the bindings and torch-mesh's extension. A failed build
-   changes nothing on the node (`failed`, with its log beside the state), and the next pass builds again. A staged
+   background priority: for the mesh, `make -C rdma all install`, the bindings and torch-mesh's extension. A failed
+   build changes nothing on the node (`failed`, with its log beside the state), and the next pass builds again. A staged
    bridge signed ad hoc where the running one carries the signing identity is not installed, since the Local Network
    grant keyed on that identity would not carry over to it.
 4. **Installed.** The checkout is fast-forwarded, each staged image whose bytes differ is installed by rename (the
@@ -553,10 +553,10 @@ same for its layer with that script's subcommands. A layer changes only to image
 
 Nothing stops a bridge but the bridge. Its agent's definition names its program and its configuration's path alone, so
 it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the
-installation above, or `make` by hand, which relinks the binary whenever libmesh changes) or a new configuration
-(`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge stops at once on a new binary,
-its programs failing as values, and launchd starts the new one (design/bridge-and-ipc.md#stop); a process already
-running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
+installation above, or `make all install` by hand, which installs the binary anew whenever libmesh changed) or a new
+configuration (`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge stops at once on a
+new binary, its programs failing as values, and launchd starts the new one (design/bridge-and-ipc.md#stop); a process
+already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
 
 Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what
 each layer installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two

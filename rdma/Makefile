@@ -43,7 +43,8 @@ mesh-stream: .build/mesh-stream
 # design/collectives-dataflow.md#advisories: the compiled collectives' advisories (mesh_program_advise) over the loopback
 # fabric's maps, at .build/mesh-advise with libmesh's sources compiled in (the installed libmesh.dylib untouched); not in `all`
 mesh-advise: .build/mesh-advise
-.build/mesh-advise: mesh-advise.c mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
+.build/mesh-advise: mesh-advise.c mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h \
+  nccl.h Makefile
 	mkdir -p .build
 	cc -fblocks -O2 -Wall -Wextra -Werror -o $@ mesh-advise.c mesh-dataflow.c mesh-call.c mesh-collective.c
 .PHONY: mesh-advise

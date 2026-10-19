@@ -1,7 +1,7 @@
 """torch.distributed's "mesh" backend (torch_mesh/backend.py) over ../libnccl-mesh.dylib; torch_mesh/_stream.mm
 hands libnccl-mesh's Metal path torch's MPS command buffer.
 
-  make -C .. libmesh.dylib libnccl-mesh.dylib
+  make -C .. all install
   uv pip install --python <venv>/bin/python --no-build-isolation -e .
 
 The torch.backends entry point registers the backend when torch is imported, so a script only names
