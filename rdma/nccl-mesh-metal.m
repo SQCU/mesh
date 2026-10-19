@@ -516,13 +516,18 @@ const char *metal_steps(void) { return STEPS.UTF8String; }
 void metal_keep(struct metal_program *program, void *object) { [program->kept addObject:(id)object]; }
 
 /* the program's end signals `event` to `value`; what it kept is released once the event has passed it
-   (metal_collect); a program in a borrowed encoder (event NULL) signals nothing and keeps nothing; the Metal 4 form's
-   residency set committed where the program made a buffer resident */
+   (metal_collect); one with no event (a failed group's, nccl-mesh.c program_end) signals nothing, and what its own
+   encoder's commands kept is held by its command buffer (a completion handler's capture) until that buffer completes
+   or is freed; a program in a borrowed encoder keeps nothing; the Metal 4 form's residency set committed where the
+   program made a buffer resident */
 void metal_end(struct metal_program *program, void *event, uint64_t value) {
   close_encoder(program);
   if (event) {
     [program->buffer encodeSignalEvent:(id<MTLEvent>)event value:value];
     @autoreleasepool { [retiring_ addObject:@[@(value), program->kept]]; }
+  } else if (!program->borrowed && program->buffer) {
+    NSMutableArray *kept = program->kept;
+    [program->buffer addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; (void)kept; }];
   }
   if (program->added) [program->residency commit];
   [program->kept release];
