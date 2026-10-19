@@ -606,6 +606,10 @@ static void *port_progress(void *argument){
   const int side=((struct progress *)argument)->side;
   free(argument);
   pthread_setname_np(side?"mesh.rdma.send":"mesh.rdma.receive");
+  /* fault_heard: this thread its port's, and its handler on a stack of its own */
+  stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
+  if(alternate.ss_sp)sigaltstack(&alternate,NULL);
+  atomic_store_explicit(&port->thread[side],pthread_self(),memory_order_release);
   _Atomic uint64_t *bell=&M->bell[port->index];
   uint64_t quiet=0,told=atomic_load_explicit(&port->seen[side],memory_order_relaxed);
   uint32_t empty=0;
@@ -666,7 +670,8 @@ static int port_threads(struct port *port){
     if(!progress){error=ENOMEM;break;}
     *progress=(struct progress){port,port->threads};
     atomic_store(&port->seen[port->threads],atomic_load(&port->epoch));
-    if((error=pthread_create(&port->thread[port->threads],&attributes,port_progress,progress)))free(progress);
+    pthread_t created;
+    if((error=pthread_create(&created,&attributes,port_progress,progress)))free(progress);
     else port->threads++;
   }
   pthread_attr_destroy(&attributes);
@@ -860,6 +865,7 @@ static void link_job(struct port *port,int job){
   memcpy(numbers.peer,l->peer,sizeof numbers.peer);memcpy(numbers.gid,port->heard.gid,sizeof numbers.gid);
   l->job=job;l->job_pairing=numbers.pairing;l->job_at=now;atomic_store_explicit(&l->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
+    atomic_store_explicit(&port->thread[2],pthread_self(),memory_order_release);
     const int raised=guard_raise(port);
     int result=link_lapsed(l,&numbers);
     if(!result)switch(job){
@@ -877,6 +883,7 @@ static void link_job(struct port *port,int job){
     guard_lower(port,raised);
     l->result=result;
     port_pairs(port);
+    atomic_store_explicit(&port->thread[2],NULL,memory_order_release);
     atomic_store_explicit(&l->done,1,memory_order_release);
     wake();
   });
@@ -1564,12 +1571,40 @@ static void terminations_watch(void){
   peer_terminated(NULL,iterator);
 }
 #endif
-/* the terminations taken on the event loop: each logged, and each port whose peer interface is terminating concluded
-   (port_lost, ETIMEDOUT: its socket closed, its programs' words ~0), its lanes left as they are, no flush (as at its
-   link's going off: link_model.py's port_lost with up=False) */
+/* design/recovery.md#five-seconds, rule-zero/EXIT-RECLAIM.md P4: the provider's doorbell fault absorbed.  A SIGSEGV or
+   SIGBUS whose pc lies in the provider's text (`provider`, read at the start) on a thread that posts on a port's queue
+   pairs (struct port `thread`) has one anonymous page mapped at the faulting page by hint, never MAP_FIXED, so nothing
+   mapped is replaced: where it got that page (no mapping was there: the doorbell the driver unmapped in a termination),
+   or the port's bit in `faulted` is set (its other thread got the page first; else the store faults again until the
+   event loop takes the bit), the store lands in that page, no doorbell rings, and the port is halted for the event loop
+   to lose (port_halt, terminations_turn: ENETDOWN, no verbs call).  The bridge does not exit.  Any other fault: the
+   default action restored, the store made again, the process ended.  On the thread's alternate stack where it has one
+   (port_progress); mmap, munmap and sigaction alone */
+static uintptr_t provider[2];
+static _Atomic uint32_t faulted;
+static void fault_heard(int number,siginfo_t *info,void *context){
+  const uintptr_t pc=__darwin_arm_thread_state64_get_pc(((ucontext_t *)context)->uc_mcontext->__ss);
+  const uintptr_t page=trunc_page((uintptr_t)info->si_addr);
+  const pthread_t self=pthread_self();
+  struct port *port=NULL;
+  for(uint32_t p=0,count=__atomic_load_n(&port_count,__ATOMIC_SEQ_CST);p<count;p++)
+    for(int t=0;t<3;t++)if(atomic_load_explicit(&ports[p].thread[t],memory_order_acquire)==self)port=ports+p;
+  if(port && pc>=provider[0] && pc<provider[1]){
+    void *got=mmap((void *)page,vm_page_size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
+    if(got!=MAP_FAILED && got!=(void *)page)munmap(got,vm_page_size);
+    if(got==(void *)page || atomic_load(&faulted)>>port->index&1){port_halt(port,&faulted);return;}
+  }
+  struct sigaction fallback={.sa_handler=SIG_DFL};
+  sigaction(number,&fallback,NULL);
+}
+/* the terminations and the absorbed faults taken on the event loop: each termination logged, and each port whose peer
+   interface is terminating concluded (port_lost, ETIMEDOUT: its socket closed, its programs' words ~0), its lanes left
+   as they are, no flush (as at its link's going off: link_model.py's port_lost with up=False); each port a fault was
+   absorbed on lost as at its link's going off (open 0, ENETDOWN, no flush: network_heard) */
 static uint32_t terminations_told;
 static void terminations_turn(void){
   const uint32_t heard=atomic_load(&terminations),lost=atomic_exchange(&terminated,0),fresh=heard-terminations_told;
+  const uint32_t faults=atomic_exchange(&faulted,0);
   if(fresh){
     const uint64_t until=atomic_load(&exit_at);
     say("bridge node %u: %u Thunderbolt RDMA peer interface%s terminating: no port job and no exit for %.1f s "
@@ -1580,6 +1615,11 @@ static void terminations_turn(void){
     say("link %u (%s): its peer interface terminating: its link concluded\n",ports[p].index,ports[p].name);
     port_lost(ports+p,ETIMEDOUT);
     ports[p].link.flush_at=0;
+  }
+  for(uint32_t p=0;p<port_count;p++)if(faults>>p&1){
+    say("link %u (%s): a fault of its provider's doorbell absorbed: its link lost (design/recovery.md#five-seconds)\n",
+        ports[p].index,ports[p].name);
+    ports[p].open=0;port_lost(ports+p,ENETDOWN);ports[p].link.flush_at=0;
   }
 }
 
@@ -1726,6 +1766,18 @@ int main(int argc,char **argv){
     signal(stopping[i],SIG_IGN);
   }
   signal(SIGPIPE,SIG_IGN);
+  /* design/recovery.md#five-seconds (fault_heard): the provider's text read and the faults' handler installed before
+     any device is opened */
+  for(uint32_t i=0;i<_dyld_image_count();i++){
+    const char *image=_dyld_get_image_name(i);
+    unsigned long size=0;
+    const uint8_t *text=image && strstr(image,"/libthunderboltrdma.")?
+      getsegmentdata((const void *)_dyld_get_image_header(i),"__TEXT",&size):NULL;
+    if(text){provider[0]=(uintptr_t)text;provider[1]=(uintptr_t)text+size;}
+  }
+  struct sigaction faults={.sa_sigaction=fault_heard,.sa_flags=SA_SIGINFO|SA_ONSTACK};
+  sigemptyset(&faults.sa_mask);
+  if(sigaction(SIGSEGV,&faults,NULL) || sigaction(SIGBUS,&faults,NULL))die("bridge faults");
   uuid_t uuid;struct timespec bound={5,0};
   if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
   uint32_t node=0;
