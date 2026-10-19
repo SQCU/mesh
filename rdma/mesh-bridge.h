@@ -35,6 +35,8 @@
 #include <IOKit/ps/IOPowerSources.h>
 #include <IOKit/ps/IOPSKeys.h>
 #include <poll.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
 
 _Static_assert(sizeof(pthread_t)==8,"M17");
 
@@ -304,7 +306,9 @@ struct stripes {
    each is parked on the port's bell); its stripe writes (design/bridge-dataflow.md#stripes), the guard of its
    device's verbs objects (`guard`, odd while raised, the word the progress threads park on while it stands,
    design/recovery.md#five-seconds B13, and the value each progress thread last held at: mesh-link.c guard_raise; each
-   epoch and guard told wakes the raiser parked on it, port_tell, port_wait),
+   epoch and guard told wakes the raiser parked on it, port_tell, port_wait), the threads that post on its queue pairs
+   (`thread`: its two progress threads, each storing itself as it starts, and its link job's while one runs, by which a
+   provider's fault names its port, mesh-link.c fault_heard),
    whether this end closed its control socket so both ends pair its link afresh (`cycling`, link_turn), and the event
    loop's reading of what its control socket
    heard (design/recovery.md#five-seconds, mesh-link.c port_silent: when it last heard anything, `heard_at`, the link's
@@ -332,7 +336,7 @@ struct port {
   _Atomic uint32_t high;
   _Atomic uint64_t epoch,seen[2];
   _Atomic int parked[2];
-  pthread_t thread[2];
+  _Atomic(pthread_t) thread[3];
   struct stripes stripes;
   _Atomic uint64_t guard,guarded[2];
 };
