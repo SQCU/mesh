@@ -1,4 +1,4 @@
 {
-  "purpose": "The whole-fabric observer's cadence (viz/serve.py): a sample of every node each period_s seconds, another node's through its bridge's exec (a curl of its telemetry there), so a reading is at most period_s old and the observer asks each node once a period.",
-  "period_s": 2
+ "purpose": "The observer's cadence (viz/serve.py): a sample of this node's own telemetry (127.0.0.1) each period_s seconds, the other nodes as this node's bridge's map and records name them; no node's telemetry is read across nodes.",
+ "period_s": 2
 }

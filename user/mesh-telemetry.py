@@ -711,7 +711,7 @@ def serve():
     mesh_restart.on_change(__file__, os.environ.get("MESH_CAPACITY"), os.path.join(ROOT, "etc", "mesh-capacity.json"), "/usr/local/mesh/etc/mesh-capacity.json")
     threading.Thread(target=store.exited, daemon=True).start()
     for target in (power_loop, bandwidth_loop, sample_loop, ingest_loop): threading.Thread(target=target, args=(store,), daemon=True).start()
-    host = os.environ.get("MESH_TELEMETRY_HOST", "::")
+    host = os.environ.get("MESH_TELEMETRY_HOST", "127.0.0.1")
     server_class = TelemetryHTTPServer6 if ":" in host else TelemetryHTTPServer
     server = server_class((host, PORT), TelemetryHandler, store)
     threading.Thread(target=server.serve_forever, daemon=True).start()

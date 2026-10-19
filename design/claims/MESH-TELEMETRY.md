@@ -7,10 +7,10 @@ Controlling specifications: [`../mesh-coprocessor-demo.md`](../mesh-coprocessor-
 Implementation surfaces:
 
 - `user/mesh-telemetry.py` owns each node's in-memory telemetry stream, a workload producer's rows kept until its
-  process exits.
-- `viz/serve.py` owns membership (the nodes its bridge holds a record of, the roster's others its inventory), live
-  whole-fabric aggregation, and the page-table visualization feed; another node's telemetry is read through its
-  bridge's exec.
+  process exits, served on loopback alone (`MESH_TELEMETRY_HOST`, 127.0.0.1): no node reads another's.
+- `viz/serve.py` owns membership (the nodes its bridge holds a record of, the roster's others its inventory), this
+  node's live aggregation and the page-table visualization feed; another node is what this node's bridge's map and
+  records say of it (its telemetry is not read across nodes: the bridge carries no request).
 - `rdma/workload.py` owns workload-independent operation envelopes and measures.
 - `xonotic/solver/strat/strat_responder.py` owns distributed Gram placement and counterfactual measures.
 
