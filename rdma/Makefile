@@ -99,29 +99,32 @@ NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitR
 .build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
 	mkdir -p .build
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
-# the Swift module Mesh beside its library in .build; the examples are built here, against it, and run on the installed
-# libraries (make install)
+# the Swift module Mesh beside its library in .build; the examples are built here, against it (searched before rdma/,
+# which may hold a stale one), and run on the installed libraries (make install)
 .build/libmesh_swift.dylib: $(SWIFT) .build/libmesh.dylib module.modulemap mesh.h mesh-plan.h mesh-call.h mesh-collective.h mesh-dataflow.h Makefile
 	swiftc -O -whole-module-optimization -emit-library -emit-module-path .build/Mesh.swiftmodule -module-name Mesh -I . -L .build -lmesh -Xlinker -rpath -Xlinker @loader_path -Xlinker -install_name -Xlinker @rpath/libmesh_swift.dylib $(SWIFT) -o $@
 linear-chain: ../examples/linear-chain.swift .build/libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+	swiftc -O -parse-as-library -I .build -I . -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 sync-on-remote-fill: ../examples/sync-on-remote-fill.swift .build/libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+	swiftc -O -parse-as-library -I .build -I . -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 bounds-table: ../examples/bounds-table.swift .build/libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+	swiftc -O -parse-as-library -I .build -I . -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 coreml-chain: ../examples/coreml-chain.swift .build/libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+	swiftc -O -parse-as-library -I .build -I . -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 indexed-gather: ../examples/indexed-gather.swift .build/libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+	swiftc -O -parse-as-library -I .build -I . -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 gram-chain: ../examples/gram-chain.swift .build/libmesh_swift.dylib
-	swiftc -O -parse-as-library -Xcc -DACCELERATE_NEW_LAPACK -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
-# the built images and examples; never an installed image (the launchd job's binary and the libraries clients map)
+	swiftc -O -parse-as-library -Xcc -DACCELERATE_NEW_LAPACK -I .build -I . -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+# the built images and examples, and any Swift module in rdma/ (none is built there); never an installed image (the
+# launchd job's binary and the libraries clients map)
 clean:
-	rm -rf $(IMAGES:%=.build/%) .build/Mesh.* $(EXAMPLES)
+	rm -rf $(IMAGES:%=.build/%) .build/Mesh.* $(EXAMPLES) Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
 .PHONY: all install examples clean native-audit
 
-# _mesh_c: the headers as one Python module (mesh_c_build.py), for the interpreter that imports it
+# _mesh_c: the headers as one Python module (mesh_c_build.py), for the interpreter that imports it, bound to the
+# installed libraries it loads (make install puts them in rdma/; this target installs nothing, so it never stops the
+# bridge: design/recovery.md#install)
 PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python
-mesh-c: mesh_c_build.py mesh-plan.h nccl.h libmesh.dylib libnccl-mesh.dylib
+mesh-c: mesh_c_build.py mesh-plan.h nccl.h
 	$(PYTHON) mesh_c_build.py
 .PHONY: mesh-c
