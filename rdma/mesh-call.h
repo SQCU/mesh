@@ -35,17 +35,19 @@ int mesh_transfer_bind(struct mesh_ctx *,uint32_t node,uint32_t queue,int direct
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
 /* design/prepared-machine.md#M30 */
 int mesh_transfers_cyclic(struct mesh_ctx *);
-/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from (0: none), named after
-   mesh_transfers_prepare and before mesh_transfers_start; a peer's program of the same execution that names another
-   fails both as values (ESTALE); EBUSY once started */
+/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from (0: none), named in its slot after
+   mesh_transfers_prepare and before mesh_transfers_start (no bridge compares it since READY went with the per-program
+   handshake: the members agree on theirs in their programs' own positions, nccl-mesh.c session_agree); EBUSY once
+   started */
 int mesh_transfers_digest(struct mesh_ctx *,uint64_t digest);
-/* design/bridge-and-ipc.md#clients, design/recovery.md#first: 0 once the node's bridge has paired the program toward
-   every node it binds, on its current map, directly or along its route through other nodes' bridges; else the failure,
-   and that node's status in the client's slot names the node and the code: ESRCH the bridge gone, ETIMEDOUT past
-   MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS, EHOSTUNREACH no cable or route reaches it, ENETDOWN, ECONNRESET,
-   ECANCELED a link or the peer's program lost, or this program's own slot retired while it waits (a revoke), ESTALE a
-   member's program of the execution made from another digest (mesh_transfers_digest; every destination fails, naming
-   that member), ENOSPC, ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
+/* design/bridge-and-ipc.md#clients, design/recovery.md#five-seconds (C1): the program handed to the node's bridge,
+   with no wait (its first wait is its first landing): 0, ECANCELED where its slot was started or retired already, ESRCH
+   where the bridge is gone.  The bridge takes it toward each node it binds, on a cable to that node where the slot holds
+   its lanes' lease (mesh_lanes_claim), or fails it as a value: that destination's status in the client's slot names
+   the node and the code.  A refusal at the take is the status alone (EINVAL a node or shape no lane pair carries,
+   EHOSTUNREACH no cable reaches it, ENOLCK no cable carries its lease, E2BIG a port's table full); a flow of it that
+   fails (its link lost: ECONNRESET, ENETDOWN, ENETRESET, ...) also has the destination's words cancelled (~0).  The
+   next start rereads the map */
 int mesh_transfers_start(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#progress: the progress threads of the ports a started program's flows ride woken (each port's
    bell), a group of it about to publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks
@@ -212,7 +214,9 @@ typedef void (*mesh_dispose)(void *);
 
 /* design/algorithm-sources.md#programkernel_call: `count` invocation slots of `workers` workers over the program
    `program` (cyclic, its transfers' sections rings of `count` slots) and the one-pass program `constants` (NULL: none),
-   both slots of one attach; `dispose(owner)` once the last worker has ended after mesh_calls_destroy */
+   both slots of one attach; mesh_calls_destroy ends every worker at its next pass (design/recovery.md#five-seconds C2:
+   it fires nothing more and waits for nothing), and `dispose(owner)` follows, on whichever thread lets go last, once
+   every worker has left and every call they submitted has completed */
 struct mesh_calls *mesh_calls_create(struct mesh_ctx *program,struct mesh_ctx *constants,uint32_t workers,uint32_t count,
   void *owner,mesh_dispose);
 /* a function on `worker` of its inputs (the first `dependency_count` waited on) and outputs; `submit` NULL: a resident

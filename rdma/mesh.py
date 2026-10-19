@@ -152,11 +152,13 @@ def members(whole, among, marks=None):
     return lmap
 
 
-def wait(serial=0, seconds=0.0):
-    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), else
-    `serial` when `seconds` pass first.  OSError naming the bridge where it is unreachable."""
+def wait(serial=0, seconds=None):
+    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), waited
+    for on the serial's word, which the bridge wakes as it moves the map; `seconds` None waits with no bound (8e716999's
+    form), a number bounds it, `serial` returned where it passes first.  OSError naming the bridge where it is
+    unreachable, ESRCH where it exits while waited on."""
     made = ffi.new('uint64_t *', serial)
-    status = lib.mesh_map_wait(made, int(seconds * 1e9))
+    status = lib.mesh_map_wait(made, (1 << 64) - 1 if seconds is None else max(0, min(int(seconds * 1e9), (1 << 64) - 1)))
     if status and status != errno.ETIMEDOUT:
         raise OSError(status, f"this node's bridge is unreachable: {os.strerror(status)}")
     return made[0]

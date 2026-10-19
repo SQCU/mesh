@@ -239,18 +239,24 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   return count;
 }
 
+/* design/recovery.md#five-seconds C5 (8e716999's mesh.wait(serial), on this bound): the map's serial waited on until
+   it differs from *serial, the bridge's exit (ESRCH: its pid in the region 0 or another, or its process gone, read at
+   every wake and every MESH_PAUSE_NS re-look, as mesh_records_read reads it) or bound_ns (UINT64_MAX: none) */
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return error;
-  const uint64_t until=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+bound_ns;
+  const uint64_t bridge=atomic_load_explicit(&m->bridge_pid,memory_order_acquire),now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  const uint64_t until=bound_ns>UINT64_MAX-now?UINT64_MAX:now+bound_ns;
   uint64_t seen=atomic_load_explicit(&m->map,memory_order_acquire);
-  for(uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);seen==*serial && at<until;at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)){
-    os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,until-at);
+  for(uint64_t at=now;!error && seen==*serial && at<until;at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)){
+    os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
+                                         until-at<MESH_PAUSE_NS?until-at:MESH_PAUSE_NS);
     seen=atomic_load_explicit(&m->map,memory_order_acquire);
+    if(seen==*serial && (atomic_load_explicit(&m->bridge_pid,memory_order_acquire)!=bridge || mesh_gone((pid_t)bridge)))error=ESRCH;
   }
-  error=seen!=*serial?0:ETIMEDOUT;
-  *serial=seen;
+  if(!error)error=seen!=*serial?0:ETIMEDOUT;
+  if(!error)*serial=seen;
   munmap(m,length);
   return error;
 }
@@ -297,10 +303,6 @@ void mesh_retire(struct hdr *m,uint64_t client){
       atomic_compare_exchange_strong(rings+r,&at,0);
   }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
-  /* a start waiting on its destinations' status (mesh-call.c mesh_transfers_start) reads the slot gone at once: a
-     revoke from another thread of its process retires the program it waits for (nccl-mesh.c ncclCommRevoke) */
-  for(uint32_t d=0;d<MESH_DESTINATIONS && slot->tx[d].node;d++)
-    os_sync_wake_by_address_all(&slot->status[d].prepared,sizeof slot->status[d].prepared,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
 }
@@ -568,22 +570,6 @@ int mesh_ledger(const char *name,const char *path){
   strcpy(request.service,"ledger");strcpy(request.path,path);
   const int fd=bridge_ask(&request);
   if(fd<0)return fd;
-  close(fd);
-  return 0;
-}
-int mesh_stream(uint32_t node,uint64_t bytes,char *result,size_t room){
-  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_STREAM,.node=node,.bytes=bytes};
-  if(!result || !room)return -EINVAL;
-  strcpy(request.service,"stream");
-  const int fd=bridge_ask(&request);
-  if(fd<0)return fd;
-  size_t got=0;
-  for(ssize_t n;got+1<room && (n=recv(fd,result+got,room-1-got,0))!=0;){
-    if(n<0 && errno==EINTR)continue;
-    if(n<0){const int error=errno;close(fd);return -error;}
-    got+=(size_t)n;
-  }
-  result[got]=0;
   close(fd);
   return 0;
 }
