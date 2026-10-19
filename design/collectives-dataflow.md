@@ -464,13 +464,6 @@ there the call is its collective with a row for an element:
   the GPU, a thread a row.
 - It reads no send buffer in place (`plan_direct`): the operand is staged.
 
-`ncclMeshAllReducePartials` and `ncclMeshReducePartials` (`partials`) take the engine's `[m: rows][l: rows][O: rows x
-dim]`: the piece laid as rows into a scratch (`partials_layout` on the host, `partials_rows` on the GPU, a row with no
-positions written as the merge's none), the all-reduce or reduce with the merge on it (completed in the stream: its
-stream copy has no issue), then laid back into `recv` (`partials_columns`). The layouts are the library's own programs
-on the stream (`layout_on`: `metal_begin`/`metal_begin4`, `program_end`, under `session_lock`); the scratch is the
-stream's workspace, else the communicator's `merge` (grown, the replaced one kept on `spent`).
-
 **Roots.**
 
 | Collective | Root's role |

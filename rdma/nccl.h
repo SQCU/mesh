@@ -1096,14 +1096,6 @@ ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, cons
    one group, each row merged up its tree where a sum adds an element, the wire's positions carrying whole rows
    (mesh-plan.h mesh_wire_pieces), a row at most a large slot (ncclInvalidUsage else). */
 ncclResult_t ncclMeshRedOpCreatePartials(ncclRedOp_t* op, size_t dim, ncclDataType_t datatype, ncclComm_t comm);
-/* The same merge of the engine's piece as it lays it, each member's float32 [m: rows][l: rows][O: rows x dim]
-   (metal-microbench decode_attention_partial's), until its caller lays rows: the piece laid as rows into a scratch (the
-   Metal path's the stream's workspace, else the communicator's own), merged there by an all-reduce
-   (ncclMeshAllReducePartials) or a reduce to `root` (ncclMeshReducePartials: a member off the root gets its own
-   partial back) with the partials merge, and laid back into recvbuff; the group completed in the stream (an issue's
-   ticket 0), so not inside ncclGroupStart/End (ncclInvalidUsage).  Both paths. */
-ncclResult_t ncclMeshAllReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t ncclMeshReducePartials(const void* sendbuff, void* recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream);
 
 #ifdef __cplusplus
 } // end extern "C"

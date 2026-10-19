@@ -136,11 +136,9 @@ counting for none. The result is the merged partial, its O / l the attention ove
 reducing collective takes it (`ncclAllReduce`, `ncclReduce`, `ncclReduceScatter`, `ncclMeshReduceScatterV`, counts in
 whole rows), inside a group or not: one group, the communicator's program of that collective with a row for an
 element, each row merged up its tree where a sum adds an element, the wire's positions carrying whole rows. This is the
-planner's `reduce` form for partials (metal-microbench docs/placement.md Crossings), until now only the engine's own
-kernels and torch-mesh's single-GPU merge. `ncclMeshAllReducePartials(send, recv, rows, dim, comm, stream)` and
-`ncclMeshReducePartials(send, recv, rows, dim, root, comm, stream)` take the engine's own layout,
-`[m: rows][l: rows][O: rows x dim]`: the piece laid as rows into a scratch, merged there with the operator and laid
-back, so not inside a group (until their caller lays rows; a member off a reduce's root gets its own partial back).
+planner's `partials` lowering of a split-KV attention (metal-microbench docs/placement.md Crossings): the engine
+(metal-microbench decode_attention_partial, mesh_rank.m issue) and torch-mesh (ProcessGroupMesh.merge_partials) each
+lay their partials as these rows and call `ncclAllReduce`, or `ncclReduce` to the one member reading them, with it.
 Reproduction target: never measured; the planner's pricing of the three-group form it replaces at 3, 4 and 6 members
 of a full mesh was 331, 331 and 226 us against the gather's 534 a chunk's layer (metal-microbench
 output_data/planner-20261015/pass2 engine2-after.json); on the loopback fabric (a line of 4) every rank's merge exact

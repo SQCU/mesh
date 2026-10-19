@@ -144,17 +144,6 @@ static void merge_rows(float *x, const float *y, size_t rows, size_t unit) {
   }
 }
 
-/* the engine's partial piece [m: rows][l: rows][O: rows x dim] laid as the merge's rows (to_rows; a row with l not above
-   0 the row [PARTIAL_NONE, 0, 0]), or rows laid back (nccl-mesh-metal.m partials_rows, partials_columns) */
-static void partials_layout(int to_rows, float *dst, const float *src, size_t rows, size_t dim) {
-  const size_t u = 2 + dim;
-  for (size_t k = 0; k < rows * u; k++) {
-    const size_t r = k / u, j = k % u, at = j == 0 ? r : j == 1 ? rows + r : 2 * rows + r * dim + j - 2;
-    if (to_rows) dst[k] = src[rows + r] > 0 ? src[at] : j ? 0.0f : PARTIAL_NONE;
-    else dst[at] = src[k];
-  }
-}
-
 /* dst[i] = dst[i] combine src[i]; the partials merge's n rows of `combine` floats where t is METAL_MERGE */
 static void combine_into(ncclDataType_t t, int combine, void *dst, const void *src, size_t n) {
   if ((int)t == METAL_MERGE) { merge_rows(dst, src, n, (size_t)combine); return; }
@@ -230,9 +219,6 @@ __attribute__((visibility("hidden"))) void nccl_mesh_premultiply(int t, void *ds
 __attribute__((visibility("hidden"))) void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t divisor) {
   truncdiv((ncclDataType_t)t, dst, src, n, divisor);
 }
-__attribute__((visibility("hidden"))) void nccl_mesh_partials(int rows_out, float *dst, const float *src, size_t rows, size_t dim) {
-  partials_layout(rows_out, dst, src, rows, dim);
-}
 #endif
 
 
@@ -283,8 +269,6 @@ struct ncclComm {
   void **scratch, **spent;
   size_t *scratch_bytes;
   uint32_t scratches, scratch_used, spents;
-  void *merge;
-  size_t merge_bytes;
   struct attach *attach;
   struct mesh_ctx slot;
   struct mesh_lane_report leased;
@@ -347,7 +331,6 @@ static void comm_free(struct ncclComm *comm) {
   routes_free(comm, 1);
   for (uint32_t k = 0; k < comm->scratches; k++) metal_release(comm->scratch[k]);
   for (uint32_t k = 0; k < comm->spents; k++) metal_release(comm->spent[k]);
-  if (comm->merge) metal_release(comm->merge);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent);
   pthread_mutex_destroy(&comm->guard);
   free(comm->members); free(comm->forms);
@@ -3954,70 +3937,6 @@ ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff, size_t sendrows, cons
   for (int r = 0; r < n; r++) { c.segments[r] = sendsegs[r]; c.segments[n + r] = recvsegs[r]; }
   __atomic_store_n(arrived, 0, __ATOMIC_RELEASE);
   return enqueue(c);
-}
-
-/* nccl.h ncclMeshAllReducePartials, ncclMeshReducePartials: the engine's piece laid as the merge's rows into a scratch
-   (partials_layout; the Metal path's partials_rows), merged there by the communicator's all-reduce (root -1) or reduce
-   to root with the partials merge (ncclMeshRedOpCreatePartials), then laid back into recvbuff (partials_columns), the
-   group completed in the stream between the two layouts, so not inside ncclGroupStart/End.  The Metal path's scratch is
-   the stream's workspace, else the communicator's own (`merge`, grown, the one it replaces kept until its end), each
-   layout a program of the library's on the stream under session_lock */
-static ncclResult_t layout_on(const ncclMeshStream *given, int to_rows, struct where dst, struct where src, size_t rows, size_t dim) {
-  if (!given) {
-    partials_layout(to_rows, (float *)((char *)dst.buffer + dst.offset), (const float *)((const char *)src.buffer + src.offset), rows, dim);
-    return ncclSuccess;
-  }
-  pthread_mutex_lock(&session_lock);
-  struct metal_program *program = given->argumentTable ? metal_begin4(given->commandEncoder, given->argumentTable, given->residencySet, NULL, given->polls)
-                                                       : metal_begin(given->commandBuffer, given->commandEncoder, NULL, given->polls);
-  const ncclResult_t result = !program ? fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory")
-                                       : gpu(metal_partials(program, to_rows, dst.buffer, dst.offset, src.buffer, src.offset, rows, dim), "the partials' rows");
-  if (program) program_end(program, given->commandEncoder != NULL, result);
-  pthread_mutex_unlock(&session_lock);
-  return result;
-}
-static ncclResult_t partials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream) {
-  if (!comm || !sendbuff || !recvbuff) return fail(ncclInvalidArgument, "a partials merge's comm, sendbuff or recvbuff is NULL");
-  if (root < -1 || root >= comm->nranks) return fail(ncclInvalidArgument, "root %d of %d ranks", root, comm->nranks);
-  if (depth) return fail(ncclInvalidUsage, "a partials merge of the engine's piece lays its rows back after its group: not inside a group");
-  const ncclMeshStream *given = stream;
-  if (given && given->fused) return fail(ncclInvalidUsage, "a partials merge is no fused crossing");
-  if (!rows) return ncclSuccess;
-  const size_t n = rows * (2 + dim), bytes = n * sizeof(float);
-  void *scratch = given ? NULL : malloc(bytes);
-  pthread_mutex_lock(&session_lock);
-  if (given && given->workspace) scratch = given->workspace(bytes, given->context);
-  else if (given && comm->merge_bytes < bytes) {
-    void **spent = comm->merge ? realloc(comm->spent, (comm->spents + 1) * sizeof *spent) : comm->spent;
-    void *made = (comm->merge && !spent) ? NULL : metal_scratch(bytes);
-    if (made && comm->merge) { comm->spent = spent; comm->spent[comm->spents++] = comm->merge; }
-    if (made) { comm->merge = made; comm->merge_bytes = bytes; }
-  }
-  if (given && !given->workspace && comm->merge_bytes >= bytes) scratch = comm->merge;
-  pthread_mutex_unlock(&session_lock);
-  ncclRedOp_t op;
-  ncclResult_t result = scratch ? ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm) : fail(ncclSystemError, "out of memory");
-  ncclMeshStream inner = given ? *given : (ncclMeshStream){0};
-  inner.issue = NULL;
-  ncclMeshBuffer merged = {scratch, 0};
-  void *x = given ? (void *)&merged : scratch;
-  const struct where at = {scratch, 0};
-  if (!result) {
-    result = layout_on(given, 1, at, given ? where_of(sendbuff) : (struct where){(void *)(uintptr_t)sendbuff, 0}, rows, dim);
-    if (!result) result = root < 0 ? ncclAllReduce(x, x, n, ncclFloat32, op, comm, given ? &inner : NULL)
-                                   : ncclReduce(x, x, n, ncclFloat32, op, root, comm, given ? &inner : NULL);
-    if (!result) result = layout_on(given, 0, given ? where_of(recvbuff) : (struct where){recvbuff, 0}, at, rows, dim);
-    if (!result && given && given->issue) *given->issue = (ncclMeshIssue){0, 1};
-    ncclRedOpDestroy(op, comm);
-  }
-  if (!given) free(scratch);
-  return result;
-}
-ncclResult_t ncclMeshAllReducePartials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, ncclComm_t comm, cudaStream_t stream) {
-  return partials(sendbuff, recvbuff, rows, dim, -1, comm, stream);
-}
-ncclResult_t ncclMeshReducePartials(const void *sendbuff, void *recvbuff, size_t rows, size_t dim, int root, ncclComm_t comm, cudaStream_t stream) {
-  return partials(sendbuff, recvbuff, rows, dim, root < 0 ? -2 : root, comm, stream);
 }
 
 ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {

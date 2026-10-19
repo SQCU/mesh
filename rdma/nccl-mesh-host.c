@@ -3,7 +3,7 @@
    path runs on host threads: N ranks on one host over mesh-flow-loop's bridges, with no GPU kernel anywhere (several
    ranks' spinning kernels on one GPU have no forward-progress guarantee: the no-cross-queue-spin rule).  Each kernel
    runs as the walk encodes it, in the walk's order, its body transcribed from nccl-mesh-metal.m's: copies and combines
-   in host memory (the host path's arithmetic, nccl-mesh.c combine_into, premultiply, truncdiv and partials_layout, which
+   in host memory (the host path's arithmetic, nccl-mesh.c combine_into, premultiply and truncdiv, which
    nccl-mesh.c exports hidden to this file where MESH_HOST_EXECUTOR is defined), publications release-stored, a wait for
    a landing a poll of its word (mesh.metal mesh_remote_wait_bounded: until it reaches 1 + the cycle or the session's
    canceller stores ~0, for at most the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, and
@@ -32,7 +32,6 @@
 void nccl_mesh_combine(int t, int combine, void *dst, const void *src, size_t n);
 void nccl_mesh_premultiply(int t, void *dst, const void *src, uint64_t bits, size_t n);
 void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t divisor);
-void nccl_mesh_partials(int rows_out, float *dst, const float *src, size_t rows, size_t dim);
 
 /* ncclDataType_t's order and sizes: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2; the
    walk takes every type but float64, as the kernels do, and the partials merge's rows (METAL_MERGE) */
@@ -341,15 +340,6 @@ int metal_counted(struct metal_program *program, int kind, const struct metal_co
     if (kind == METAL_COUNTED_SEND) { memmove(d + k->dst, s + k->src + place, length); atomic_thread_fence(memory_order_release); }
     else memmove(d + k->dst + place, s + k->src, length);
   }
-  return 0;
-}
-
-/* nccl-mesh-metal.m's partials_rows and partials_columns: nccl-mesh.c's partials_layout */
-int metal_partials(struct metal_program *program, int rows_out, void *dst, size_t dst_offset, void *src, size_t src_offset, uint64_t rows,
-                   uint64_t dim) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (!halted(v, polls)) nccl_mesh_partials(rows_out, (float *)at(dst, dst_offset), (const float *)at(src, src_offset), rows, dim);
   return 0;
 }
 

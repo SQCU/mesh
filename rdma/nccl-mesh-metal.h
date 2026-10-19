@@ -116,11 +116,6 @@ enum { METAL_COUNTED_START, METAL_COUNTED_CHECK, METAL_COUNTED_ARRIVED, METAL_CO
 struct metal_counted { void *d, *s, *a; size_t dst, src, aux; uint64_t bytes, scalar, first, row, limit; uint32_t entries; };
 int metal_counted(struct metal_program *, int kind, const struct metal_counted *);
 void *metal_contents(void *buffer);
-/* The engine's float32 partial piece [m: rows][l: rows][O: rows x dim] (nccl.h ncclMeshAllReducePartials) laid as the
-   merge's rows [m, l, O] (`rows_out` 1; a row with l not above 0 the row [the least float, 0, 0]), or rows laid back
-   (0), from src to dst */
-int metal_partials(struct metal_program *, int rows_out, void *dst, size_t dst_offset, void *src, size_t src_offset, uint64_t rows,
-                   uint64_t dim);
 /* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
 const char *metal_steps(void);
 void metal_keep(struct metal_program *, void *object);

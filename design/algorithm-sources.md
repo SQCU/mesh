@@ -1227,9 +1227,9 @@ owners=None)` (`all_sum`, `all_max`, `all_min`) reduce a block row in one libncc
 `op` is `SUM`, `MAX` or `MIN`: `reduce_scatter` MPI_Reduce_scatter (`ncclMeshReduceScatterV`, member m's segment the
 row's blocks m owns, every member's terms packed in member order; an owner off the peers contributes the operator's
 identity), `all_reduce` the row's all-reduce; an update of each block, its readers taking the reduced value. `PARTIALS`
-merges each block by its log-sum-exp (nccl.h `ncclMeshReducePartials` toward its owner, `ncclMeshAllReducePartials`
-toward every peer, through torch_mesh's ProcessGroupMesh.merge_partials on either path; the block read in row order as
-nccl.h's [m: rows][l: rows][O: rows x dim], a member off the peers an empty partial). Any other associative combine is a supplied
+merges each block by its log-sum-exp (nccl.h `ncclMeshRedOpCreatePartials`'s operator, a reduce toward its owner or an
+all-reduce toward every peer, through torch_mesh's ProcessGroupMesh.merge_partials on either path; the block read as
+rows of [m, l, O], a member off the peers an empty partial). Any other associative combine is a supplied
 kernel declaring `combine` (Swift's `using combine:`): each peer's term moved to the owner by one all-to-all a row
 and combined there by a tree of the combine's kernel (`kernel_call(op, peer=owner)`), into fresh blocks; `all_reduce`
 of such a combine is that `reduce_scatter`, then `all_gather`.

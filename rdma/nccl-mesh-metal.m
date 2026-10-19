@@ -56,7 +56,7 @@ static NSString *const STEPS =
 
 /* the kernels, after STEPS: each operator's arithmetic is written once (op_int, op_float, op_f8, merge_row: the partials
    merge, a thread a row), a landing being the wait and then the combine's body; it is the host's (nccl-mesh.c
-   combine_into, merge_rows, premultiply, truncdiv, partials_layout): the small floating types in float32 rounded to
+   combine_into, merge_rows, premultiply, truncdiv): the small floating types in float32 rounded to
    nearest even, float8 decoded and encoded by mesh.metal's f8_to and f8_from, integers wrapping */
 static NSString *const KERNELS =
   @"\n"
@@ -146,11 +146,7 @@ static NSString *const KERNELS =
   "for (uint j = 1; j < u; j++) x[j] = (a > 0.0f ? x[j] * a : 0.0f) + (b > 0.0f ? mesh_payload(y + j) * b : 0.0f); }\n"
   "#define MERGE device float *x = (device float *)(d + p.dst); volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
   "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
-  "HEAD(combine_merge) { ENTER(i == 0) MERGE } GROUP(land_merge) { ENTER(i == 0) AWAIT MERGE }\n"
-  "#define LAYOUT(name, TO) HEAD(name) { ENTER(i == 0) device float *x = (device float *)(d + p.dst); device const float *e = (device const float *)(s + p.src); "
-  "LOOP { const ulong u = p.slot + 2, r = k / u, j = k % u, at = j == 0 ? r : j == 1 ? p.first + r : 2 * p.first + r * p.slot + j - 2; TO } }\n"
-  "LAYOUT(partials_rows, x[k] = e[p.first + r] > 0.0f ? e[at] : j ? 0.0f : PARTIAL_NONE;)\n"
-  "LAYOUT(partials_columns, x[at] = e[k];)\n";
+  "HEAD(combine_merge) { ENTER(i == 0) MERGE } GROUP(land_merge) { ENTER(i == 0) AWAIT MERGE }\n";
 
 /* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2, then the
    partials merge's rows (METAL_MERGE) */
@@ -504,12 +500,6 @@ int metal_counted(struct metal_program *program, int kind, const struct metal_co
 }
 
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
-
-int metal_partials(struct metal_program *program, int rows_out, void *dst, size_t dst_offset, void *src, size_t src_offset, uint64_t rows,
-                   uint64_t dim) {
-  return dispatch(program, rows_out ? @"partials_rows" : @"partials_columns", dst, src, NULL, NULL,
-                  (struct args){.dst = dst_offset, .src = src_offset, .n = rows * (2 + dim), .first = rows, .slot = dim}, rows * (2 + dim));
-}
 
 const char *metal_steps(void) { return STEPS.UTF8String; }
 

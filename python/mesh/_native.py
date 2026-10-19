@@ -2,7 +2,7 @@
 tensors, the window's where they cross (torch_mesh.backend.blank over mesh.lease: rdma/NCCL.md "Memory"); every
 crossing and collective is libnccl-mesh's, through torch.distributed's "mesh" backend (rdma/torch-mesh/README.md):
 point to point, MPI_Allgatherv and MPI_Reduce_scatter (ncclMeshAllGatherV, ncclMeshReduceScatterV), the all-reduce,
-the all-to-all and the split-KV partials merge (ncclMeshAllReducePartials, ncclMeshReducePartials).  Host-path calls
+the all-to-all and the split-KV partials merge (ncclMeshRedOpCreatePartials's operator).  Host-path calls
 complete where they return, MPS ones are encoded on torch's stream and waited where their consumer runs.  It computes
 nothing: a program's numerics are its supplied kernels'."""
 import os
