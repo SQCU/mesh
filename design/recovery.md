@@ -230,7 +230,10 @@ off); a flow holds no queue pair, so none is destroyed. The link's lanes (design
 more before its socket closes and are left as they are, no verbs call made; once the port's quiet window ends they are
 moved to the error state where the link was connected and its interface stayed up (`#five-seconds` B6 (b)), and the
 link's next pairing, on hearing the peer, moves them to the error state, destroys them and makes them again with the
-sequence d6dceac paired by. A job of the lost pairing still on the port's queue makes no call (B10).
+sequence d6dceac paired by, and reads the port's own address again (its attributes and GID, which the LINK it tells
+names): a peer's restart can move the port's GID table, and the address of the port's opening failed every lane's
+connection at the peer with EIO, the link pairing again every six seconds (2026-10-19, after the Mini's power loss).
+A job of the lost pairing still on the port's queue makes no call (B10).
 
 The first failed completion or poll on any lane stops the whole link: every lane served no more, each one's program
 failed, and the link concluded at once, both ends pairing it afresh. A post refused, or a descriptor outside the

@@ -550,8 +550,10 @@ static int link_make(struct port *port,const struct link_numbers *numbers){
   struct mesh_verbs *p=&l->provider;
   int error=0;
   struct ibv_port_attr attributes;
+  int reopened=0;
   l->refused=0;
   if(p->queues && ibv_query_port(port->device.context,1,&attributes)){
+    reopened=1;
     error=errno?errno:EIO;
     if(link_lapsed(l,numbers))return ECANCELED;
     say("link %u (%s): its device's context gone (%s): forgotten and opened afresh\n",port->index,port->name,strerror(error));
@@ -563,6 +565,14 @@ static int link_make(struct port *port,const struct link_numbers *numbers){
     if(error!=ECANCELED)say("link %u (%s): the lanes of its last pairing not destroyed (%s): kept, destroyed at its next pairing\n",
                             port->index,port->name,strerror(error));
     return error;
+  }
+  /* design/recovery.md#loss: the port's own address (its attributes and GID) read again at every pairing, as its
+     first pairing read it at the port's opening: a peer's restart can move the port's GID table, and LINKs naming the
+     address of the port's opening failed every lane's connection at the peer with EIO, the link pairing again every six
+     seconds (2026-10-19, after the Mini's power loss) */
+  if(p->queues && !reopened){
+    port->device.port=attributes;
+    if((error=device_gid(&port->device)))return error;
   }
   for(uint32_t k=0;k<MESH_LINK_LANES;k++){
     atomic_fetch_and_explicit(&M->lanes[port->index][k],~MESH_LANE_DIRTY,memory_order_acq_rel);
@@ -740,6 +750,7 @@ static void link_turn(struct port *port){
     else if(job==LINK_JOB_MAKE){
       if(!l->counted){port->committed+=MESH_LINK_LANES;l->counted=1;}
       l->state=LINK_MADE;
+      port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
       link_tell(port);
     }else{
       l->state=LINK_UP;
