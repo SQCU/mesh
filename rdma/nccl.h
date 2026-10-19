@@ -19,14 +19,19 @@
 
    Communicators.  ncclCommInitRank is NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else the
    listener ncclGetUniqueId opens; the bindings take MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets
-   them), every rank's node (mesh_observe) meets there; the id is its name.  Every communicator reads its bridge's map
-   over its members (mesh-plan.h mesh_map: the other nodes its relays, with the routing table the bridges forward
-   along) each time its session opens.  ncclMeshCommInitRank (below) is for a program that passes its own programs or
-   paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take, on the bridges' map like any
-   other; Shrink makes no exchange.  ncclCommGrow meets at the bootstrap of the id that ncclCommGetUniqueId gives comm's
-   root, which the root broadcasts on comm.  ncclCommRevoke revokes comm for good: its session's waits end, its groups
-   in flight fail, a session opening (its wait for its peers' programs, or for their agreement) ends and none opens
-   after it, and every later group on comm fails at once (ncclRemoteError), until ncclCommDestroy closes the session;
+   them), every rank's node (mesh_observe) meets there; the id is its name.  Its two gathers lease the communicator's
+   lane pair toward each peer on a cable of its bridge (the first unbounded, the second, which holds the claims,
+   bounded by mesh.h MESH_PLATFORM_NS a send or receive), so an init fails as a value where a link has no pair free at
+   both ends or a peer is silent past that bound.  Every communicator reads its bridge's map over its members
+   (mesh-plan.h mesh_map: the other nodes its relays, with the routing table the bridges forward along) each time its
+   session opens.  ncclMeshCommInitRank (below) is for a program that passes its own programs or paths.  ncclCommSplit
+   and ncclCommShrink make communicators of the ranks they take, on the bridges' map like any other; Split leases its
+   children's lanes over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to two ranks or more,
+   as an ncclMeshCommInitRank of two ranks or more, leases none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow
+   meets at the bootstrap of the id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.
+   ncclCommRevoke revokes comm for good: its session's waits end, its groups in flight fail, a session opening (its
+   start, or its agreement awaiting its peers') ends and none opens after it, and every later group on comm fails at
+   once (ncclRemoteError), until ncclCommDestroy closes the session;
    from any thread, under comm's own lock alone, never one a group of any communicator holds while it waits.  Making a
    communicator (a lone rank's too) attaches the process's client of its node's bridge where it
    has none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot
@@ -114,12 +119,16 @@
    section (mesh-call.h mesh_transfer_bind) crosses without them, and ncclCommRegister refuses a buffer outside it.
    Design: design/prepared-machine.md#M09.
 
-   Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and the
-   group after a failure is returned opens a session again, on the map current then (a revoked communicator's none).
-   The session's progress thread is the one silent-link watcher: a link with positions pending that delivers none for
-   mesh.h MESH_SILENT_NS is cancelled, ending every wait on it.  A group on a cancelled, silent or lost link fails with ncclRemoteError; a failure the Metal
-   path finds after its group returned (calls that do not pair, too) is the communicator's asynchronous error
-   (ncclCommGetAsyncError) and the next group's result.
+   Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
+   communicator whose session failed fails its later groups, made again on the map current then (ncclCommDestroy, then
+   an init).  The session's progress thread is its waits' watcher: a link with positions pending that delivers none for
+   mesh.h MESH_SILENT_NS is cancelled, and so is every link of a session whose bridge stopped or ended, or refused or
+   failed its program toward a peer (that destination's status), ending every wait on it.  A group on a cancelled,
+   silent or lost link fails with ncclRemoteError; a failure the Metal path finds after its group returned (calls that
+   do not pair, too) is the communicator's asynchronous error (ncclCommGetAsyncError) and the next group's result.  A
+   Metal-path group that returns a failure signals nothing the library waits for: the commands it left in the stream's
+   command buffer are not committed after the communicator's ncclCommDestroy or ncclCommAbort, which wait for none of
+   them.
 
    Not implemented (not exported): ncclCommInitRankScalable,
    ncclCommSuspend, ncclCommResume, ncclCommMemStats, ncclCommWindowRegister, ncclCommWindowDeregister,
@@ -865,7 +874,9 @@ ncclResult_t pncclGroupEnd(void);
    lag of them takes that class, each position that many bytes on the wire, its frames the receive's; 0: the bridges'
    block), which its splits and shrinks keep; rank r of `nranks` on the bridge of node node[r]; `name` the
    communicator's (NULL: "nccl").  Like every communicator, it reads the bridges' map at each opening of its session.
-   Every rank passes the same nranks, paths, programs, small, nodes and name. */
+   Every rank passes the same nranks, paths, programs, small, nodes and name.  It makes no exchange, so it leases no
+   lane pair: of two ranks or more it is refused before its slot is taken (ncclInvalidUsage, ENOLCK; ncclCommInitRank's
+   bootstrap leases them). */
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const struct mesh_trees* paths,
                                   const ncclMeshProgram* programs, int count, uint64_t small, const int* node, const char* name);
@@ -936,7 +947,7 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
    else the bound above.  A failure is a value: ncclCommGetAsyncError (or the communicator's next group) after the
    window.  The group completes in the encoder: with no workspace
    its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm is any
-   communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program its table's (above).  The same as
+   communicator (one whose lanes an exchange leased: Communicators, above), its program its table's (above).  The same as
    ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency,
    .polls = polls}, which every other collective and group also takes. */
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,
@@ -1016,9 +1027,9 @@ ncclResult_t ncclMeshMemLive(void);
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
 /* The caller's GPU work on the lease holding `ptr` (writing it where `write`, else reading it) is done once `event` (an
    id<MTLSharedEvent>, retained until then) reaches `value` (mesh 3981ca80^'s, for leases): a host-path group that reads
-   the lease waits for its writers' points, one that writes it for every point, on the host, each at most mesh.h
-   MESH_SILENT_NS (ncclSystemError past it); a point reached is dropped, and ncclMemFree drops the rest.  `bytes` is not
-   read (a point is the whole lease's).  The Metal path orders its work by its stream and reads no point.
+   the lease waits for its writers' points, one that writes it for every point, on the host, each until the caller's
+   GPU work reaches it, before the group takes any lock; a point reached is dropped, and ncclMemFree drops the rest.
+   `bytes` is not read (a point is the whole lease's).  The Metal path orders its work by its stream and reads no point.
    ncclInvalidArgument where ptr is in no lease of this process. */
 ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t value, int write);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks entries, the same on
