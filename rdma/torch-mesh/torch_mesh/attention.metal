@@ -302,12 +302,21 @@ __attribute__((always_inline)) static inline uint2 mesh_keys(uint q, uint len, u
     return uint2(min(lower, upper), upper);
 }
 
+// A mask mod (metal-microbench docs/kernels.md#mask-mods) whose rows' [lo, hi) are exactly the keys they attend: keep() is
+// never asked (exact), so the bound alone masks.
+struct mesh_unmasked {
+    static constexpr constant bool exact = true;
+    __attribute__((always_inline)) bool keep(uint, uint, uint) const { return true; }
+};
+
 // The Tile plan's operand over a KV type KV (KV::at(p, k, v): logical page p's K and V line addresses of the task's KV head,
-// false where it holds none): 8 query rows, row r Q's row rows[r] (~0u for none) attending [lo[r], hi[r]); part j of J over
-// the pages [base, base + pages) of the rows' union, each part's (m, l, O) at Q's row times `parts` plus j, through F and F4
-// (coherent(device) pointers where the last of a row's parts to arrive merges them in the same dispatch). layout() places
-// the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places) and span() the pages and J.
-template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *>
+// false where it holds none): 8 query rows, row r Q's row rows[r] (~0u for none) attending [lo[r], hi[r]) and of those the
+// keys its mask mod M keeps (M::exact: all of them; else mod.keep(query[r].x, query[r].y, key) of its batch row and query
+// head); part j of J over the pages [base, base + pages) of the rows' union, each part's (m, l, O) at Q's row times `parts`
+// plus j, through F and F4 (coherent(device) pointers where the last of a row's parts to arrive merges them in the same
+// dispatch). layout() places the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places)
+// and span() the pages and J.
+template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *, typename M = mesh_unmasked>
 struct mesh_tile {
     enum : uint { dims = D, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
     KV kv;
@@ -324,6 +333,8 @@ struct mesh_tile {
     float scale;
     uint stride, s, lane, t, J, j, base, pages, parts;
     uint rows[8], lo[8], hi[8];
+    M mod;
+    uint2 query[8];
 
     __attribute__((always_inline)) void layout(threadgroup float *region, threadgroup float *d, threadgroup ulong *p) {
         qs = (threadgroup half *)region; ss = region + 4 * D; ps = (threadgroup half *)(region + 4 * D + 8 * 64);
@@ -357,7 +368,9 @@ struct mesh_tile {
 
     __attribute__((always_inline)) uint first(uint i, uint w) { return (base + j + J * (simdgroups * i + w)) * 16; }
 
-    __attribute__((always_inline)) bool live(uint r, uint position) { return position >= lo[r] && position < hi[r]; }
+    __attribute__((always_inline)) bool live(uint r, uint position) {
+        return position >= lo[r] && position < hi[r] && (M::exact || mod.keep(query[r].x, query[r].y, position));
+    }
 
     __attribute__((always_inline)) void finish(thread simdgroup_float8x8 *o, thread const float *m, thread const float *l) {
         constexpr uint NSG = simdgroups, OB = D / 8 / NSG, RS = 8 / NSG, D4 = D / 4;
@@ -406,19 +419,22 @@ struct mesh_shared {
 };
 
 // The shared part's task `item`: rows [8 item, 8 item + 8) of the `count` rows sharing the range, row e's Q row and keys
-// (over all its positions, mesh_keys') given by row(e) as uint3(Q row, lo, hi), each cut to the range; the pages of
+// (over all its positions, its mask mod's) given by row(e, query) as uint3(Q row, lo, hi) with its (batch row, query head)
+// in query, each cut to the range; the pages of
 // their union, every one of the range's `splits` parts (span every). The task's other members are the caller's
 // (layout, scale, stride, s, lane, t, j, parts), its KV type mapping the range's pages.
-template <uint D, typename KV, typename F, typename F4, typename Row>
-__attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_tile<D, KV, F, F4> &task, mesh_shared range, uint item, uint count,
+template <uint D, typename KV, typename F, typename F4, typename M, typename Row>
+__attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_tile<D, KV, F, F4, M> &task, mesh_shared range, uint item, uint count,
                                                                    Row row) {
     for (uint r = 0; r < 8; ++r) {
         const uint e = 8 * item + r;
-        const uint3 made = e < count ? row(e) : uint3(0xFFFFFFFFu, 0u, 0u);
+        uint2 query = uint2(0u);
+        const uint3 made = e < count ? row(e, query) : uint3(0xFFFFFFFFu, 0u, 0u);
         const uint2 keys = range.shared(made.yz);
         task.rows[r] = made.x;
         task.lo[r] = keys.x;
         task.hi[r] = keys.y;
+        task.query[r] = query;
     }
     task.span(range.splits, true);
 }
@@ -426,8 +442,8 @@ __attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_t
 // A sharing stream's tail on its task (rows and keys as the per-row path fills them): each row's keys cut to past the
 // range, its parts at slots [range.splits, range.splits + J) (the partial pointers offset), J the span's of `splits`
 // (every: span's); the row's part count range.splits + J, the merge's.
-template <uint D, typename KV, typename F, typename F4>
-__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4> &task, mesh_shared range, uint splits, bool every) {
+template <uint D, typename KV, typename F, typename F4, typename M>
+__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4, M> &task, mesh_shared range, uint splits, bool every) {
     for (uint r = 0; r < 8; ++r) {
         const uint2 keys = range.tail(uint2(task.lo[r], task.hi[r]));
         task.lo[r] = keys.x;
