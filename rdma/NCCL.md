@@ -60,18 +60,17 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
   so the node's bridge runs; it fails where `ncclMemAlloc` would.
 
 Each session takes its node's bridge's map when it opens (`mesh-plan.h` `mesh_map` over the communicator's nodes):
-every node the bridges' records hold, the members first and the others relays, every cable two bridges pair (a link
-each, at the slowest of its ports' bandwidths: the bridge stripes a program between two nodes over their cables,
-position t on cable t mod n, so the pair carries it at n times the slowest cable, and a routed program striped end to
-end, so each segment carries it over its cables too), and the
-routing table the bridges forward along (`mesh_routes`: each node's in-tree of shortest routes, by fewest links and
-then over the faster hops, a parent among equals the least hash of its mark, its parent's and the root's, so routes of
-equal length spread rather than pile onto the lowest-numbered node, and a route moves only where the shortest routes
-between its ends change, never for a link lost elsewhere or a node joining; a route between two nodes the
-higher-marked one's in-tree path, one path both ways). Two ranks are linked where their route crosses no other
-rank, and that hop's bytes cross every link of its route (a relay forwards each slot as it lands). A later session
-reads the map again, so a recabling, a link that paired again or a node gone reaches the next session with no edit
-and no restart. The members' map of a record is the same function's (`mesh_map_members`, Python `mesh.members`;
+every node the bridges' records hold, the members first and the others the map's relays, every cable two bridges pair
+(a link each, at the slowest of its ports' bandwidths: the bridge stripes a program between two nodes over the cables
+its communicator leased, position t on cable t mod n, so the pair carries it at n times the slowest cable), and the
+routing table (`mesh_routes`: each node's in-tree of shortest routes, by fewest links and then over the faster hops, a
+parent among equals the least hash of its mark, its parent's and the root's, so routes of equal length spread rather
+than pile onto the lowest-numbered node, and a route moves only where the shortest routes between its ends change,
+never for a link lost elsewhere or a node joining; a route between two nodes the higher-marked one's in-tree path, one
+path both ways). Two ranks are linked where their route crosses no other node; a session binds a channel to every other
+member, which needs a cable between the two ([Routes between unlinked ranks](#routes-between-unlinked-ranks)). A later
+communicator reads the map again, so a recabling, a link that paired again or a node gone reaches the next session
+with no edit and no restart. The members' map of a record is the same function's (`mesh_map_members`, Python `mesh.members`;
 `mesh.current().map` is the members' map itself).
 
 The bridges' records are a map whatever their cabling: while a cable is out, a node that still has a record may have
@@ -316,12 +315,13 @@ Porting:
 
 ## Routes between unlinked ranks
 
-A message between ranks the map does not link (send/recv, the all-to-alls, gather and scatter, and
-a collective's crossing between ranks the map joins by a route) is one program toward its destination node. The
-sending node's bridge carries it over the first link of the route, and each bridge on the route forwards it to the
-next node the route names, landing each record in rows it leases and sending it on from there, zero copy
-(design/bridge-and-ipc.md#flows). The session keeps no relay rings and takes no queue pairs a link beyond its own
-programs'.
+The bridges forward nothing (design/bridge-and-ipc.md#routes). A communicator's init leases its lane pair toward each
+peer only on a cable of its bridge, and its session binds a channel to every other member, so a member no cable of this
+node reaches fails the session at its first group that crosses a link (`ncclInvalidUsage`, ENOLCK), and a program toward
+it is refused by the bridge (EHOSTUNREACH). Nodes a route crosses between members a cable does not join take part as
+members of the communicator that contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`): such a member
+receives on the rows it sends, so each landing is handed to its SEND as it lands, with no copy
+(design/prepared-machine.md M08).
 
 ## Rules a program keeps
 
@@ -347,14 +347,16 @@ a host-path group's wait on it until it publishes or the caller revokes the comm
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued,
 
-and `ncclGetLastError` names the node where it failed: the destination's, or a relay's on its route. A link or a relay
-lost under a group fails the group (its program toward that node ends; nothing resumes it) on every member, and each
-member's next group opens a session again on the map as it is then (the operator, 2026-10-14: "it's okay for a function
-call ... to fail instead of returning if the link topo changed mid function execution"). A change of the map never
-closes a session: it runs on the map its members agreed on until a link or node its routes cross is lost, so no member
-reopens at a group of its own and fails a group a peer had in flight on the old session, and a change that leaves its
-routes working (a link that flaps elsewhere, a node that joins, a better route that appears) reaches the
-communicator's next session (each call of metal-microbench makes its communicators at its first crossing). A rank that
+and `ncclGetLastError` names the node where it failed: the destination's, or this node's where its own bridge refused
+the program. A link lost under a group fails the group (its program toward that node ends; nothing resumes it) on every
+member. A session that fails closes with its communicator's program slot and lanes, so the communicator's next group
+fails too: the caller makes it again (`ncclCommDestroy`, then an init), and its session opens on the map as it is then
+(the operator, 2026-10-14: "it's okay for a function call ... to fail instead of returning if the link topo changed mid
+function execution"). A change of the map never closes a session: it runs on the map its members agreed on until a
+link or node its routes cross is lost, so no member reopens at a group of its own and fails a group a peer had in
+flight on the old session, and a change that leaves its routes working (a link that flaps elsewhere, a node that joins,
+a better route that appears) reaches the next communicator (metal-microbench makes each call's communicators at the
+call's start). A rank that
 departed is left out with `ncclCommShrink`, a joining one taken in with `ncclCommGetUniqueId` and `ncclCommGrow`, and
 `ncclCommRevoke` revokes a communicator for good, from any thread and under the communicator's own lock alone: an init
 still running (a non-blocking one's) ends as a value, its session's waits end and its groups in flight fail, a session opening ends (a member waiting in its session's start for
@@ -365,11 +367,9 @@ A session's footprint in its node's window is `ncclMeshSessionBytes(peers, wire,
 `mesh.session_bytes(peers)`): toward each other member its four rings (16 slots each way of each class) and its transfer
 lists, then its SEND cells, completion words, cancellation ranges and violation page. A session binds every other
 member of its communicator (a point-to-point call may name any, and its members' agreement meets on those channels
-whatever map each read); a split or shrink is a communicator of its own, with its own session. A relay's is
-`ncclMeshRelayBytes(wire, &bytes)` (Python `mesh.relay_bytes()`): what its bridge leases for one direction of a session
-its route crosses (`mesh-flow.c` mirror: the direction's two rings, `mesh.h` `mesh_relay_slot`, the lists of its two
-destinations and its SEND cells and targets; 8,716,288 bytes on the default wire of a 16 KiB block), one lease and one
-client slot of that bridge a direction, both directions of every two members of a session whose route crosses it.
+whatever map each read); a split or shrink is a communicator of its own, with its own session. Each communicator of
+two ranks or more holds one of its bridge's client slots (`mesh.h` `MESH_CLIENTS`) and a lane pair of each link toward
+each peer (four communicators a link at once) from its init to its destruction.
 
 ## Environment
 

@@ -320,7 +320,7 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **S3. Chunked transport, invisible.** `mesh_section_create(ctx, bytes, count, receive, &section)`; internal `C`, `K = ceil(N/C)`. Ref: TN3205 frame matching; llama.cpp PR #26421 (128 KiB stride cost). Check: I10.
 
-**S4. Out-of-band pairing on the control socket; every syscall bounded.** The link hello (node, boot, LID, GID, block size), then each program's READY, PAIRS and POSTED ([bridge-and-ipc.md#protocol](bridge-and-ipc.md#protocol)); `accept/connect/read` each with a deadline ([recovery.md](recovery.md) Q14). Ref: TN3205; `RDMA-RULES.md`. Check: each of those calls in `rdma/mesh-flow.c` has a deadline.
+**S4. Out-of-band pairing on the control socket; every use of a channel concluded within five seconds.** The link hello (node, boot, LID, GID, block size), the link's LINK, RECORD and FAREWELL, and no message per program ([bridge-and-ipc.md#protocol](bridge-and-ipc.md#protocol)); a control socket that never blocks and is heard within `MESH_PLATFORM_NS` or concluded ([recovery.md#five-seconds](recovery.md#five-seconds)). Ref: TN3205; `RDMA-RULES.md`. Check: `rdma/rule-zero-lint.sh` passes, and every scope of recovery.md#five-seconds names what concludes it.
 
 ### L — library core
 

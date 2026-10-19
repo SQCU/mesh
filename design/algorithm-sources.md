@@ -20,7 +20,7 @@ separates shared function metadata from each value's operands and uses.
 **The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
 type B, the library, its kernels and layers `examples/kernels.py` and `examples/nn.py` type C, design/deliverables.md
 section 5): the same contract as `swift/Mesh.swift`, spelled as Pallas spells it. A `Program(backend, *, functions,
-group, timeout, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
+group, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
 collective's members place the work. Recording builds the graph; `realize()` (`start()`, Swift's name) prepares it;
 the host then writes its inputs (`write`) and reads its results (`export`, `Result.ready`, `consume`). The firing
 rule is the old executor's (design/deliverables.md L3): an edge per (writer, reader) pair of overlapping regions on a
@@ -30,7 +30,7 @@ bounded channels), a host write a token on the edges of the block it fills, a ca
 firing once. Kernels run on one compute thread, the ready call earliest by row, then record. Operands are torch
 tensors (`Ref.tensor`; `Ref.array` and `write` give NumPy views of CPU ones), each backing allocated where a member's
 call touches it, in the node's bridge's window where a crossing of that member reads or writes it
-(`torch_mesh.backend.blank`, over `mesh.lease`). Every wait is bounded by the program's `timeout` (default 10 s, mesh.h `MESH_SILENT_NS`'s bound);
+(`torch_mesh.backend.blank`, over `mesh.lease`). Every wait ends at an event (a call completing, a failure, `close`), never at a time;
 a failure is a value (`Program.report`, `MeshError`) and the caller makes the program again. The package's import
 name is `mesh`, the name `rdma/mesh.py` also takes: importing it loads that module from the same checkout and carries
 its names (`ffi`, `lib`, `lease`, `current`, ...), so `torch_mesh` and `mesh_mpi` find what they import; a program
@@ -1037,13 +1037,13 @@ the row-to-page lookup inside `mesh_publish` as well.
 Pitch Patarasuk and Xin Yuan,
 [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
 (2009), motivate sparse connected topologies. A route is the map's: `mesh_map` (mesh-plan.h) links members the
-links leave apart along the routing table's route between them ([Topology](#topology)), and the bridges forward a
-program along it (design/bridge-and-ipc.md#flows). No route is chosen by a caller or guessed from rank count.
+links leave apart along the routing table's route between them ([Topology](#topology)), each node between them a
+member of the communicator with no contribution: the bridges forward nothing (design/bridge-and-ipc.md#routes). No
+route is chosen by a caller or guessed from rank count.
 
-For a section s on `v0 → v1 → … → vk`, each intermediate node's bridge holds a relay's two flows, the one's receive
-rows the other's SEND rows: a record landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)`
-(prepared-machine.md M08), with no numerical function, consumer stamp or payload copy, and no process of that node
-takes part. For the distinct realized legs E and a cut C, payload traffic is
+For a section s on `v0 → v1 → … → vk`, each intermediate node's program receives on the rows it sends: a record
+landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)` (prepared-machine.md M08), with no numerical
+function, consumer stamp or payload copy. For the distinct realized legs E and a cut C, payload traffic is
 `B(C) = sum(bytes(s) * count(s) for (u,v,s) in E crossing C)`.
 
 ## Topology
@@ -1060,17 +1060,15 @@ A members' map (`mesh_map_members`, which `mesh_map` reads the bridges' records 
 members by) keeps every node of the whole map: the members first, the others relays that hold no rank, every link,
 each node's mark (its bridge's node number) and the routing table, an operand: each node's in-tree of shortest routes
 (fewest links, then the least sum of betas). Two members are linked where their route crosses relays alone, that hop
-costed as the relayed path it is: its links' α summed and the greatest β, a relay forwarding each slot as it lands
-(mesh-flow.c receive_input), not the betas summed; and its bytes charged to every link it crosses, in the tree packing
-(a port's capacity shared by the hops whose routes cross it) and in `mesh_program_time` (a position crossing each port
-of its route once that port is free), so hops that share a cable share its time. Several cables between one pair are
-links of their own, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is striped
-over them, position t on cable t mod n, so the hop runs at n times the slowest cable's bandwidth (round robin waits on
-the slowest), not at their bandwidths summed; a routed program is striped end to end (mesh-flow.c route_stripes: the
-least common multiple of its segments' cable counts, past a node's ports the fewest; stripe j on cable (h + j) mod c of
-each segment), each segment carrying it over min(stripes, c) of its cables at the pace of the slowest
-(`mesh_link_cost`, `mesh_program_time`, which puts each position on the cable the bridges would). The bridges' map
-lists a pair's cables as such, each at the slowest port's bandwidth at either end (mesh-dataflow.c mesh_joined).
+costed as the relayed path it is: its links' α summed and the greatest β, a node between handing each slot on as it
+lands (mesh-program.c receive_input, the index hand-off of a member with no contribution), not the betas summed; and
+its bytes charged to every link it crosses in the tree packing (a port's capacity shared by the hops whose routes cross
+it), so hops that share a cable share its time. The bridges forward nothing: a node between two members takes part as
+a member of their communicator with no contribution (design/bridge-and-ipc.md#routes). Several cables between one pair
+are links of their own, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is
+striped over the cables its communicator leased, position t on cable t mod n, so the hop runs at n times the slowest
+cable's bandwidth (round robin waits on the slowest), not at their bandwidths summed. The bridges' map lists a pair's
+cables as such, each at the slowest port's bandwidth at either end (mesh-dataflow.c mesh_joined).
 
 The table (`mesh_routes`): Dijkstra [1959] toward each node in its dense form, every length an exact integer (a
 pair's cables striped) so every bridge and member that holds the same records makes
@@ -1080,8 +1078,7 @@ the same table, each node's parent among its equals the least hash of its mark, 
 shortest routes between them: it moves only where those change (a link or node one of them crosses lost or its cost
 changed, a link joining or a cost falling that makes another as short), never for a link lost elsewhere or a node
 joining by its own cables. The route between two nodes is the path up the higher-marked one's in-tree, so a route and
-its reverse are one path, as the bridges need (a READY carries its route, and each relay mirrors the far end's
-direction). It replaces the lowest-numbered parent among equals, which sent the ring of six's three antipodal routes
+its reverse are one path. It replaces the lowest-numbered parent among equals, which sent the ring of six's three antipodal routes
 through nodes 0 and 1, and the round's first pass's global search on link loads, which balanced the table better (the
 ring of six's busiest link 5 routes in every numbering, 5 or 6 by the hash) but moved a membership's routes for a link
 lost elsewhere in up to 35 % of cases and for a node joining by one cable in up to 45 % (metal-microbench

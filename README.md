@@ -35,7 +35,7 @@ against what is used (the rest is space only the OS accounts for) and the larges
 time the disk enters that state. Each condition worth attention is a `warn=` line; the keeper writes the warnings
 whenever they change to `keeper.log` and to the unified log (`log show --last 1d --predicate 'process == "logger"'`,
 which is written even when the disk is under the floor and the keeper's own log is not). `mesh-status` prints the
-report, and the node-info responder carries its numbers and `health_warnings`.
+report, and node-info carries its numbers and `health_warnings`.
 
 ## The one step that cannot be automated
 
@@ -372,7 +372,7 @@ the node's uplink.
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
 | `viz/` | the whole-fabric observer (`io.mesh.observer`, :8787) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
-| `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-flow.c`, `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh-metal.m`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
+| `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-link.c`, `mesh-program.c` and `mesh-bridge.h` (the bridge), `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh-metal.m`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
 | `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
 | `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_observe`, `mesh_map`, `mesh_map_wait`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
@@ -562,10 +562,12 @@ library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-m
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
 different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's agent
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes
-(`bin/mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]`; etc/bridge/README.md, with the two didactic examples; no default; design/bridge-and-ipc.md; Convergence above). It finds its ports and peers and keeps its links paired; it serves
-every client at once, the node's processes and its neighbours; it keeps the mesh's map, each bridge's record of its
-ports flooded to every bridge (`mesh-plan.h` `mesh_map`, `mesh-stat`); and it forwards programs along their routes for
-members the cables do not join.
+(`bin/mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]`; etc/bridge/README.md, with the two didactic examples; no default; design/bridge-and-ipc.md; Convergence above). It is the one owner of
+the node's RDMA devices; it registers its window once and clients lease slices of it; it finds its links and pairs them
+again while it runs; it keeps the mesh's map, each bridge's record flooded to every bridge (`mesh-plan.h` `mesh_map`,
+`mesh-stat`); and it runs each program on the link lanes its communicator leased at NCCL's init. No DMA or network
+channel of it is used five seconds without something happening on it or its scope concluding
+(design/recovery.md#five-seconds). It forwards nothing, runs no command and carries no request.
 
 The data flow of each, every word and buffer with its writer, its waiter and its failure path, cited to file and
 function: [design/bridge-dataflow.md](design/bridge-dataflow.md) (the bridge) and

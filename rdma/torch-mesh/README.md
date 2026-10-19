@@ -38,8 +38,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group.
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing, a cancellation or a
   revoke.
-- Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
-  `gather`, `scatter`, a collective's crossings) are forwarded by the bridges on their route
+- A group's ranks run on nodes every two of which a cable joins: the bridges forward nothing, and a group with a rank
+  no cable of another's node reaches fails at its first collective that crosses a link
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
@@ -122,8 +122,8 @@ rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
 (`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
 each issued on torch's stream and batched into torch's command buffers: Performance), every rank's compilation met at
-the default group's store before any of its collectives runs (a rank compiling past the library's silent-link bound
-would otherwise cancel its peers' first crossings). Each replay is waited for; `replay` returns the last one's seconds
+the default group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise
+fail its peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). Each replay is waited for; `replay` returns the last one's seconds
 on the GPU (MPS timing events). Its caller is metal-microbench `tools/torch_parallel/tp.py` with `CAPTURE=K`: a
 training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
 traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target
@@ -137,10 +137,10 @@ replay's command buffers on the calls' landings (`MetalRecordGate`); and made ea
 ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
 (`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
 (no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
-Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (an exclusive flow's receives
-are posted ahead of the data: [design/bridge-dataflow.md](../../design/bridge-dataflow.md)), and the planning once is
-the communicator's compiled programs'. A training step's backward, run
-by autograd, is compiled but not batched.
+Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a flow's receives are posted
+ahead of the data on its communicator's leased lanes: [design/bridge-dataflow.md](../../design/bridge-dataflow.md)), and
+the planning once is the communicator's compiled programs'. A training step's backward, run by autograd, is compiled
+but not batched.
 
 ## What does not
 

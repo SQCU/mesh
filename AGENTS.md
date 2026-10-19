@@ -3,7 +3,7 @@
 Read `THREAT-MODEL.md` first. This file is the operational rule that follows from it.
 
 **Recovery is critical priority.** An execution that loses a link or an operand fails, returning an error, and is
-never resumed; the node's resident bridge (`rdma/mesh-flow.c`, design/bridge-and-ipc.md) pairs its links again with or
+never resumed; the node's resident bridge (`rdma/mesh-flow`, design/bridge-and-ipc.md) pairs its links again with or
 without a client. Read `design/recovery.md` (its mandates, requirements and risks) before changing any of it.
 
 ## The contract
@@ -203,9 +203,9 @@ hook and the zsh line check.
 
 ### Signals are distinguished, not blocked uniformly
 
-`SIGTERM` to the bridge is correct and safe: the teardown handler runs
-`ibv_destroy_qp` / `ibv_dereg_mr` / `ibv_dealloc_pd` / `ibv_close_device` and the
-device is released; the driver that started a bridge stops it that way. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
+`SIGTERM` to the bridge is correct and safe: it takes the stop (design/bridge-and-ipc.md#stop): FAREWELL on every
+link, every program's words `~0`, and the exit held until its ports' quiet windows end, at most five seconds; the
+bridge makes no verbs call, and the kernel releases its devices at the exit. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
 allowed. What is blocked is anything uncatchable or unhandled: `-9`, `-KILL`,
 `-STOP`, `-17`, `launchctl kill KILL`, and — because a `pgrep -f mesh-flow` or a
 `launchctl print` makes a PID feel like a safe target — *any* non-TERM signal
