@@ -7,144 +7,27 @@ static void busy_tell(void){
   atomic_store_explicit(&M->busy,busy,memory_order_release);
 }
 static uint32_t map_page,map_pages,map_room;
-/* design/bridge-and-ipc.md#ledger: the ledger's clock, nanoseconds (CLOCK_MONOTONIC's are whole microseconds here), as
-   Q5P's trace kept (mesh git 5702ea5, M27) */
 /* design/bridge-and-ipc.md#records: the bytes the kernel can give without pressure (kern.memorystatus_level percent of
    the node's memory), read now */
 static uint64_t available_now(void){
   int level=0;size_t size=sizeof level;
   return sysctlbyname("kern.memorystatus_level",&level,&size,NULL,0) || level<0?0:(uint64_t)level*(memory/100);
 }
-
-/* design/recovery.md#diagnosis: this node's health (mesh-plan.h struct mesh_health), sampled on the event loop from
-   cheap reads only: sysctl, the host's VM statistics and the notify states of thermal pressure and of the power
-   sources, whose description is read only when their notify state moved, and then on a queue of its own (power_ask) */
+/* design/bridge-and-ipc.md#records: what this node's record carries of its health (mesh-plan.h struct mesh_health), its
+   boot read once and its available memory at most MESH_HEALTH_NS apart (health_turn) */
 static struct mesh_health health;
-static int power_token=-1,thermal_token=-1;
 static uint64_t health_sent;
-static mach_port_t host_port;
 void sysctl_text(const char *name,char *out,size_t room){
   size_t size=room;
   if(sysctlbyname(name,out,&size,NULL,0))out[0]=0;
   out[room-1]=0;
 }
-static void power_read(struct mesh_health *h){
-  h->power=MESH_POWER_UNKNOWN;h->charge=-1;h->minutes=-1;
-  CFTypeRef info=IOPSCopyPowerSourcesInfo();
-  if(!info)return;
-  CFStringRef providing=IOPSGetProvidingPowerSourceType(info);
-  if(providing && CFEqual(providing,CFSTR(kIOPMACPowerKey)))h->power=MESH_POWER_AC;
-  else if(providing && CFEqual(providing,CFSTR(kIOPMBatteryPowerKey)))h->power=MESH_POWER_BATTERY;
-  else if(providing && CFEqual(providing,CFSTR(kIOPMUPSPowerKey)))h->power=MESH_POWER_UPS;
-  CFArrayRef list=IOPSCopyPowerSourcesList(info);
-  for(CFIndex i=0;list && i<CFArrayGetCount(list);i++){
-    CFDictionaryRef source=IOPSGetPowerSourceDescription(info,CFArrayGetValueAtIndex(list,i));
-    if(!source)continue;
-    int current=-1,most=-1,empty=-1;CFNumberRef value;
-    if((value=CFDictionaryGetValue(source,CFSTR(kIOPSCurrentCapacityKey))))CFNumberGetValue(value,kCFNumberIntType,&current);
-    if((value=CFDictionaryGetValue(source,CFSTR(kIOPSMaxCapacityKey))))CFNumberGetValue(value,kCFNumberIntType,&most);
-    if((value=CFDictionaryGetValue(source,CFSTR(kIOPSTimeToEmptyKey))))CFNumberGetValue(value,kCFNumberIntType,&empty);
-    if(current>=0 && most>0){h->charge=current*100/most;h->minutes=empty;break;}
-  }
-  if(list)CFRelease(list);
-  CFRelease(info);
-}
-/* design/recovery.md#five-seconds B14: the power sources' description (IOPSCopyPowerSourcesInfo, an answer from
-   another process) read on a queue of its own, never on the event loop, the canceller of every scope (as mesh-link.c
-   host_read asks configd): asked where their notify state moved (`wanted`) and no reading is out or untaken, taken by
-   health_sample as it ends */
-static dispatch_queue_t power_queue;
-static struct mesh_health power_heard;
-static _Atomic int power_reading,power_read_done;
-static int power_wanted;
-static void power_ask(void){
-  if(!power_wanted || atomic_load(&power_read_done) || atomic_exchange(&power_reading,1))return;
-  power_wanted=0;
-  dispatch_async(power_queue,^{
-    power_read(&power_heard);
-    atomic_store_explicit(&power_read_done,1,memory_order_release);
-    atomic_store(&power_reading,0);
-    wake();
-  });
-}
-static void health_sample(struct mesh_health *h){
-  h->sampled=clock_gettime_nsec_np(CLOCK_REALTIME);
-  vm_statistics64_data_t vm;mach_msg_type_number_t count=HOST_VM_INFO64_COUNT;
-  if(host_statistics64(host_port,HOST_VM_INFO64,(host_info64_t)&vm,&count)==KERN_SUCCESS){
-    h->free=(uint64_t)vm.free_count*vm_kernel_page_size;h->wired=(uint64_t)vm.wire_count*vm_kernel_page_size;
-  }
-  h->available=available_now();
-  int level=0;size_t size=sizeof level;
-  if(!sysctlbyname("kern.memorystatus_vm_pressure_level",&level,&size,NULL,0))h->pressure=(uint32_t)level;
-  uint64_t state=0;
-  if(thermal_token>=0 && notify_get_state(thermal_token,&state)==NOTIFY_STATUS_OK)h->thermal=(uint32_t)state;
-  int changed=0;
-  if(power_token>=0 && notify_check(power_token,&changed)==NOTIFY_STATUS_OK && changed)power_wanted=1;
-  if(atomic_load_explicit(&power_read_done,memory_order_acquire)){
-    h->power=power_heard.power;h->charge=power_heard.charge;h->minutes=power_heard.minutes;
-    atomic_store_explicit(&power_read_done,0,memory_order_release);
-  }
-  power_ask();
-}
-/* design/recovery.md#diagnosis: whether a power controller's record (`length` bytes of the ring kern.shutdownreason
-   holds) is of `class`, the text before its comma */
-static int record_is(const char *record,size_t length,const char *class){
-  const size_t n=strlen(class);
-  return length>=n && !strncmp(record,class,n) && (length==n || record[n]==',');
-}
-/* design/recovery.md#diagnosis: why the node last restarted, from the power controller's ring (newest first): the
-   reset's own records, the ring's from its newest up to the next that opens an earlier boot's (a `por,por_vddrtc` or
-   `wdog` record after the first), written whole into `out` (as many as its room holds, none cut); the watchdog where
-   the newest is `wdog`, a sag where any of the reset's own records is `uv` (the controller watched its rails fall: an
-   unplug or a supply under lockout), the supply cut where the newest is `por`, else other (none: unknown) */
-static uint32_t reset_read(const char *ring,char *out,size_t room){
-  uint32_t reset=MESH_RESET_UNKNOWN,records=0,sagged=0;
-  size_t used=0;
-  int whole=1;
-  out[0]=0;
-  for(const char *at=ring;;at+=strcspn(at," ")){
-    at+=strspn(at," ");
-    const size_t length=strcspn(at," ");
-    if(!length || (records && (record_is(at,length,"wdog") || (length>=14 && !strncmp(at,"por,por_vddrtc",14)))))break;
-    if(!records++)reset=record_is(at,length,"wdog")?MESH_RESET_WATCHDOG:record_is(at,length,"por")?MESH_RESET_SUPPLY:MESH_RESET_OTHER;
-    sagged|=record_is(at,length,"uv");
-    if(whole && used+(used?1:0)+length<room){if(used)out[used++]=' ';memcpy(out+used,at,length);used+=length;out[used]=0;}
-    else whole=0;
-  }
-  return sagged && reset!=MESH_RESET_WATCHDOG?MESH_RESET_SAG:reset;
-}
-/* the boot's facts, read once: when the node booted, its boot session, and why it last restarted (reset_read); the
-   power sources read here once, before any device is opened (as the node's name is, mesh-link.c host_name) */
 void health_init(void){
-  host_port=mach_host_self();
-  power_queue=dispatch_queue_create("mesh.power",DISPATCH_QUEUE_SERIAL);
   struct timeval booted;size_t size=sizeof booted;
   if(!sysctlbyname("kern.boottime",&booted,&size,NULL,0))health.booted=(uint64_t)booted.tv_sec*1000000000u+(uint64_t)booted.tv_usec*1000u;
-  sysctl_text("kern.bootsessionuuid",health.session,sizeof health.session);
-  char reason[512];sysctl_text("kern.shutdownreason",reason,sizeof reason);
-  health.reset=reset_read(reason,health.shutdown,sizeof health.shutdown);
-  notify_register_check(kIOPSNotifyAnyPowerSource,&power_token);
-  notify_register_check("com.apple.system.thermalpressurelevel",&thermal_token);
-  power_read(&health);
-  health_sample(&health);
+  health.available=available_now();
 }
-static void health_text(const struct mesh_health *h,char *out,size_t room){
-  static const char *resets[]={"unknown","supply cut","watchdog","other","supply sagged"};
-  static const char *thermals[]={"nominal","moderate","heavy","trapping","sleeping"};
-  char power[64],thermal[16],when[32];
-  if(h->power==MESH_POWER_AC && h->charge>=0)snprintf(power,sizeof power,"AC, battery %d%%",h->charge);
-  else if(h->power==MESH_POWER_AC)snprintf(power,sizeof power,"AC");
-  else if(h->power==MESH_POWER_BATTERY || h->power==MESH_POWER_UPS)
-    snprintf(power,sizeof power,"%s %d%%, %d min to empty",h->power==MESH_POWER_UPS?"UPS battery":"battery",h->charge,h->minutes);
-  else snprintf(power,sizeof power,"unknown");
-  if(h->thermal<5)snprintf(thermal,sizeof thermal,"%s",thermals[h->thermal]);else snprintf(thermal,sizeof thermal,"%u",h->thermal);
-  time_t booted=(time_t)(h->booted/1000000000u);struct tm utc;gmtime_r(&booted,&utc);strftime(when,sizeof when,"%Y-%m-%dT%H:%M:%SZ",&utc);
-  snprintf(out,room,"power %s; memory available %.2f GiB, free %.2f GiB, wired %.2f GiB, pressure %s; thermal %s; booted %s "
-           "(session %.36s), last restart %s (%.79s)",power,(double)h->available/1073741824.0,(double)h->free/1073741824.0,
-           (double)h->wired/1073741824.0,
-           h->pressure==4?"critical":h->pressure==2?"warning":h->pressure==1?"normal":"unread",thermal,when,h->session,
-           h->reset<5?resets[h->reset]:"unknown",h->shutdown);
-}
+
 static uint32_t known_count;
 static struct known *known_at(uint32_t node){
   for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
@@ -219,125 +102,6 @@ static uint32_t stripe_count(const struct flow *link,uint32_t begin,uint32_t act
   return first<active?(active-first+link->stripes-1)/link->stripes:0;
 }
 
-static _Atomic uint32_t ledger_ids;
-/* a flow's ledger, made on its port's queue before its rings and cells are prepared or the flow listed, where the
-   configuration keeps them, its send events kept a lane each (the lanes' gates retire them); a flow whose ledger cannot
-   be allocated runs without one, logged */
-static void ledger_open(struct flow *f){
-  if(!ledger_kept || f->ledger)return;
-  struct ledger *l=calloc(1,sizeof *l);
-  uint32_t *words=l?malloc(3*(size_t)MESH_LINK_LANES*sizeof *words):NULL;
-  if(!words){
-    free(l);
-    say("link %u: program %016llx toward node %u (stripe %u of %u): no ledger: %s\n",f->port->index,(unsigned long long)f->key,
-        f->far,f->stripe,f->stripes,strerror(ENOMEM));
-    return;
-  }
-  for(size_t i=0;i<3*(size_t)MESH_LINK_LANES;i++)words[i]=LEDGER_NONE;
-  l->id=atomic_fetch_add(&ledger_ids,1)+1;l->queues=MESH_LINK_LANES;l->started=ledger_ns();
-  l->current=words;l->pending=words+MESH_LINK_LANES;l->last=words+2*(size_t)MESH_LINK_LANES;
-  f->ledger=l;
-}
-/* the events a side's ledger holds: one pass of the flow's `once` cells or records, every pass of a cyclic program's
-   the bound's latest (a ring: event e at e % room, its count published as each is stored, so a cut (ledger_cut) reads
-   them while the flow runs) */
-static uint32_t ledger_room(uint64_t once,int cyclic){ return cyclic || once>MESH_LEDGER_EVENTS?MESH_LEDGER_EVENTS:(uint32_t)once; }
-/* design/bridge-and-ipc.md#ledger: taken by a cut and by a ledger's release, so a cut never reads a ledger freed */
-static pthread_mutex_t ledger_lock=PTHREAD_MUTEX_INITIALIZER;
-static int ledger_cell_order(const void *a,const void *b){
-  const uint64_t x=((const struct ledger_cell *)a)->cell,y=((const struct ledger_cell *)b)->cell;
-  return (x>y)-(x<y);
-}
-/* the ledger's header line, `cut` the events past the latest cut */
-static void ledger_header(const struct flow *f,const struct ledger *l,uint32_t sends,uint32_t landings,const char *file,char *line,size_t room){
-  snprintf(line,room,"{\"ledger\":%u,\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"near\":%u,\"far\":%u,\"stripe\":%u,"
-           "\"stripes\":%u,\"exclusive\":1,\"queues\":%u,\"qps\":%u,\"lanes\":[%u,%u],\"invocations\":%u,\"cyclic\":%u,\"started\":%llu,\"sends\":%u,"
-           "\"send_room\":%u,\"landings\":%u,\"landing_room\":%u,\"cut\":[%u,%u],\"file\":%s%s%s}\n",l->id,(unsigned long long)f->key,M->node,
-           f->port->peer,f->port->index,M->node,f->far,f->stripe,f->stripes,f->queues,f->queues,f->lane[0],f->lane[1],l->invocations,l->cyclic,
-           (unsigned long long)l->started,sends,l->send_room,landings,l->landing_room,l->cut_sends,l->cut_landings,file?"\"":"",file?file:"null",
-           file?"\"":"");
-}
-/* the event lines of the ledger's cells seen and records landed from the latest cut through `sends` and `landings` (the
-   ring's latest where more passed), each naming its cell or record by queue, invocation, position, binding and cycle as
-   the peer's ledger of the flow names the record or cell (rdma/ledger.py pairs them), to `out`, else the log */
-static void ledger_events(const struct flow *f,struct ledger *l,uint32_t sends,uint32_t landings,FILE *out){
-  char line[512];
-  if(l->cells && !l->sorted){qsort(l->cell,l->cells,sizeof *l->cell,ledger_cell_order);l->sorted=1;}
-  for(uint32_t e=sends-l->cut_sends>l->send_room?sends-l->send_room:l->cut_sends;e!=sends;e++){
-    const struct ledger_send *s=l->send+e%l->send_room;
-    const struct ledger_cell key={.cell=s->cell},*c=l->cells?bsearch(&key,l->cell,l->cells,sizeof *l->cell,ledger_cell_order):NULL;
-    snprintf(line,sizeof line,"{\"s\":[%u,%lld,%lld,%lld,%lld,%u,%lld,%llu,%llu,%llu,%llu,%lld]}\n",l->id,c?(long long)c->queue:-1ll,
-             c?(long long)c->invocation:-1ll,c?(long long)c->position:-1ll,c?(long long)c->binding:-1ll,s->cycle,c?(long long)c->chunks:-1ll,
-             (unsigned long long)s->seen,(unsigned long long)s->first,(unsigned long long)s->posted,(unsigned long long)s->completed,
-             c?(long long)c->bytes:-1ll);
-    if(out)fputs(line,out);else say("%s",line);
-  }
-  for(uint32_t e=landings-l->cut_landings>l->landing_room?landings-l->landing_room:l->cut_landings;e!=landings;e++){
-    const struct ledger_landing *r=l->landing+e%l->landing_room;
-    const struct prepared_receive *record=f->receive && r->record<l->records?f->receive+r->record:NULL;
-    const struct ledger_record *n=record?l->record+r->record:NULL;
-    snprintf(line,sizeof line,"{\"r\":[%u,%lld,%lld,%lld,%lld,%lld,%lld,%u,%llu]}\n",l->id,record?(long long)record->queue:-1ll,
-             record?(long long)record->invocation:-1ll,n?(long long)n->position:-1ll,n?(long long)n->binding:-1ll,n?(long long)n->chunk:-1ll,
-             n?(long long)n->chunks:-1ll,r->cycle,(unsigned long long)r->landed);
-    if(out)fputs(line,out);else say("%s",line);
-  }
-  l->cut_sends=sends;l->cut_landings=landings;
-}
-/* design/bridge-and-ipc.md#ledger: a flow's ledger written at its stop, on its port's queue once neither progress thread
-   reads the flow: its header into the bridge's log, then its events past its latest cut: into the log where there are
-   MESH_LEDGER_LINES or fewer, else into a file beside the log named by the program's key, the node, its peer, the
-   stripe, the ledger and the time, which the header names; then freed */
-static void ledger_write(struct flow *f){
-  pthread_mutex_lock(&ledger_lock);
-  struct ledger *l=f->ledger;
-  f->ledger=NULL;
-  pthread_mutex_unlock(&ledger_lock);
-  if(!l)return;
-  char path[PATH_MAX]={0},line[640];
-  const char *file=NULL;
-  FILE *out=NULL;
-  struct stat log;
-  if((uint64_t)(l->sends-l->cut_sends)+(l->landings-l->cut_landings)>MESH_LEDGER_LINES && !fstat(STDERR_FILENO,&log) && S_ISREG(log.st_mode) &&
-     fcntl(STDERR_FILENO,F_GETPATH,path)!=-1){
-    char *slash=strrchr(path,'/'),when[24];
-    const time_t wall=time(NULL);struct tm utc;
-    gmtime_r(&wall,&utc);strftime(when,sizeof when,"%Y%m%dT%H%M%SZ",&utc);
-    if(slash && (size_t)snprintf(slash+1,sizeof path-(size_t)(slash+1-path),"ledger-%016llx-%u-%u-%u-%u-%s.jsonl",
-                                 (unsigned long long)f->key,M->node,f->port->peer,f->stripe,l->id,when)<sizeof path-(size_t)(slash+1-path) &&
-       (out=fopen(path,"w")))file=slash+1;
-  }
-  ledger_header(f,l,l->sends,l->landings,file,line,sizeof line);
-  say("%s",line);
-  if(out)fputs(line,out);
-  ledger_events(f,l,l->sends,l->landings,out);
-  if(out && fclose(out))say("link %u: ledger %u: %s: %s\n",f->port->index,l->id,file,strerror(errno));
-  free(l->current);free(l->send);free(l->cell);free(l->landing);free(l->record);free(l);
-}
-/* design/bridge-and-ipc.md#ledger: a client's request for its program's ledger (MESH_REQUEST_LEDGER, the program's key):
-   each running flow of the key's events since its latest cut appended to `path`, each after its header, while the flow
-   runs (its progress threads store on; a cut reads the counts they published); ENOENT where no flow of the key keeps a
-   ledger, ENOTSUP where the configuration keeps none */
-static int ledger_cut(uint64_t key,const char *path){
-  if(!ledger_kept)return ENOTSUP;
-  FILE *out=NULL;
-  int found=0;
-  char line[640];
-  pthread_mutex_lock(&ledger_lock);
-  for(struct flow *f=flows;f;f=f->next){
-    struct ledger *l=f->ledger;
-    if(f->key!=key || !l || !f->running || f->ended)continue;
-    if(!out && !(out=fopen(path,"a"))){const int error=errno;pthread_mutex_unlock(&ledger_lock);return error;}
-    const uint32_t sends=__atomic_load_n(&l->sends,__ATOMIC_ACQUIRE),landings=__atomic_load_n(&l->landings,__ATOMIC_ACQUIRE);
-    ledger_header(f,l,sends,landings,NULL,line,sizeof line);
-    fputs(line,out);
-    ledger_events(f,l,sends,landings,out);
-    found=1;
-  }
-  pthread_mutex_unlock(&ledger_lock);
-  if(out && fclose(out))return errno;
-  return found?0:ENOENT;
-}
-
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M04, #M06, #M29 */
 /* The SEND side: every SEND cell of the flow's invocations (#cables), its chain of chunk requests over its invocation's
@@ -354,14 +118,13 @@ static int sends_configure(struct flow *link){
   uint32_t invocations=tx->invocations?tx->invocations:1,fallback=atomic_load_explicit(&client->depth,memory_order_acquire);
   const int cyclic=atomic_load_explicit(&client->cyclic,memory_order_acquire)!=0;
   const uint32_t queues=link->queues;
-  size_t requests=0,cells=0;
+  size_t requests=0;
   for(uint32_t k=0;k<queues;k++){
     struct mesh_transfer *out=flow_transfers(link,MESH_SEND,k);
     for(uint32_t i=0;i<flow_length(link,MESH_SEND,k);i++){
       if(out[i].count>1)return EINVAL;
       const size_t own=(size_t)out[i].count*stripe_count(link,out[i].begin,mesh_transfer_active(out+i,invocations));
       requests+=(size_t)(mesh_row_chunks(m,out[i].local_row,out[i].bytes)-1)*own;
-      cells+=own;
     }
   }
   link->publications=(void *)((char *)m+tx->cells);
@@ -371,20 +134,6 @@ static int sends_configure(struct flow *link){
   struct mesh_send **last=calloc(queues,sizeof *last),**terminal=calloc(queues,sizeof *terminal);
   if(!link->requests||!link->streams||!last||!terminal){free(last);free(terminal);return ENOMEM;}
   link->request_count=requests;
-  /* #ledger: the cells' names, each stream's position at its latest invocation (`positions`), and room for the events
-     of one pass, a cyclic program's of every pass up to the bound */
-  struct ledger *ledger=link->ledger;
-  uint32_t positions[2]={0,0};
-  if(ledger){
-    ledger->invocations=invocations;ledger->cyclic=(uint32_t)cyclic;
-    ledger->cell=malloc((cells+1)*sizeof *ledger->cell);
-    ledger->send=malloc(((size_t)ledger_room(cells,cyclic)+1)*sizeof *ledger->send);
-    if(!ledger->cell || !ledger->send){
-      free(ledger->cell);free(ledger->send);ledger->cell=NULL;ledger->send=NULL;ledger=NULL;
-      say("link %u: program %016llx toward node %u (stripe %u of %u): no ledger of its SENDs: %s\n",link->port->index,
-          (unsigned long long)link->key,link->far,link->stripe,link->stripes,strerror(ENOMEM));
-    }else ledger->send_room=ledger_room(cells,cyclic);
-  }
   size_t next=0;int error=0;
   for(uint32_t k=0;k<queues && !error;k++){
     const uint32_t count=flow_length(link,MESH_SEND,k),lane=link->lane[k];
@@ -418,7 +167,6 @@ static int sends_configure(struct flow *link){
       terminal[k]=cells+active;
     }
     /* the stream's cells in invocation order, its publications in binding order within one */
-    positions[0]=positions[1]=0;
     for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count && stripe_of(link,t);i++){
       const uint32_t active=mesh_transfer_active(out+i,invocations);
       if(!out[i].count || t<out[i].begin || t-out[i].begin>=active)continue;
@@ -426,12 +174,6 @@ static int sends_configure(struct flow *link){
       if(last[k])last[k]->successor=(uintptr_t)cell;
       else link->streams[k].cell=cell;
       last[k]=cell;
-      /* #ledger: the cell's name, its position among the stream's cells of invocation t */
-      if(ledger && ledger->cells<cells){
-        if(positions[0]!=t+1){positions[0]=t+1;positions[1]=0;}
-        ledger->cell[ledger->cells++]=(struct ledger_cell){(uintptr_t)cell,out[i].bytes,k,t,positions[1]++,out[i].binding,
-          mesh_row_chunks(m,out[i].local_row,out[i].bytes)};
-      }
     }
   }
   /* design/prepared-machine.md#M30: a cyclic program's last cell is followed by its first */
@@ -489,19 +231,6 @@ static int receives_configure(struct flow *link){
   link->rings=calloc(queues,sizeof *link->rings);
   if(!link->receive||!link->rings)return ENOMEM;
   link->receive_count=records;
-  /* #ledger: the records' names, and room for the landings of one pass, a cyclic program's of every pass up to the
-     bound */
-  struct ledger *ledger=link->ledger;
-  if(ledger){
-    ledger->invocations=invocations;ledger->cyclic=(uint32_t)link->cyclic;
-    ledger->record=malloc((records+1)*sizeof *ledger->record);
-    ledger->landing=malloc(((size_t)ledger_room(records,link->cyclic)+1)*sizeof *ledger->landing);
-    if(!ledger->record || !ledger->landing){
-      free(ledger->record);free(ledger->landing);ledger->record=NULL;ledger->landing=NULL;ledger=NULL;
-      say("link %u: program %016llx toward node %u (stripe %u of %u): no ledger of its landings: %s\n",link->port->index,
-          (unsigned long long)link->key,link->far,link->stripe,link->stripes,strerror(ENOMEM));
-    }else{ledger->records=(uint32_t)records;ledger->landing_room=ledger_room(records,link->cyclic);}
-  }
   /* a record is one frame at least, so a lane's share of frames also bounds the completions it can have pending in the
      receive completion queue the link's lanes share */
   for(uint32_t q=0;q<queues;q++)link->rings[q]=(struct receive_ring){.completed=-1,.span=UINT32_MAX,
@@ -527,11 +256,9 @@ static int receives_configure(struct flow *link){
          own slot bounds nothing */
       if(own<active)r->span=MIN(r->span,own>1?own-1:1);
     }
-    uint32_t position=0,latest=UINT32_MAX;
     for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count && !error && stripe_of(link,t);i++){
       uint32_t active=mesh_transfer_active(in+i,invocations);
       if(!in[i].count || t<in[i].begin || t-in[i].begin>=active)continue;
-      if(latest!=t){latest=t;position=0;}
       uint32_t u=t-in[i].begin,row=in[i].local_row,chunks=mesh_row_chunks(m,row,in[i].bytes);
       const uint32_t first=(link->stripe+link->stripes-in[i].begin%link->stripes)%link->stripes,mine=(u-first)/link->stripes;
       uint64_t remaining=in[i].bytes;
@@ -547,10 +274,7 @@ static int receives_configure(struct flow *link){
           .pair=pair,.argument=1,.frames=(span.length+4095)/4096,.invocation=t,.queue=ring,.link=link};
         record->release=release;
         if(!record->input){error=EINVAL;break;}
-        /* #ledger: the record's name, its transfer's position among the ring's transfers of invocation t */
-        if(ledger)ledger->record[record-link->receive]=(struct ledger_record){position,in[i].binding,c,chunks};
       }
-      position++;
     }
     r->count=(size_t)(link->receive+at-r->first);
     /* design/prepared-machine.md#M30 */
@@ -576,14 +300,13 @@ static int receives_configure(struct flow *link){
   return error;
 }
 
-/* design/bridge-and-ipc.md#flows: a flow's one job, on its port's queue: its ledger opened where kept, its receive
-   records and its SEND chains prepared over its lanes, then the flow listed in the port's table (its rings' first
-   records posted by the receive thread's first look at it, flow_arm).  No verbs call is made: its lanes' queue pairs
-   are the link's, made at its pairing (design/bridge-and-ipc.md#lanes) */
+/* design/bridge-and-ipc.md#flows: a flow's one job, on its port's queue: its receive records and its SEND chains
+   prepared over its lanes, then the flow listed in the port's table (its rings' first records posted by the receive
+   thread's first look at it, flow_arm).  No verbs call is made: its lanes' queue pairs are the link's, made at its
+   pairing (design/bridge-and-ipc.md#lanes) */
 static void flow_job(struct flow *f){
   f->job=1;atomic_store_explicit(&f->done,0,memory_order_relaxed);
   dispatch_async(f->port->work,^{
-    ledger_open(f);
     int error=receives_configure(f);
     if(!error)error=sends_configure(f);
     if(!error)error=port_list(f);
@@ -600,7 +323,7 @@ static void flow_job(struct flow *f){
    stays DIRTY, moved to the error state unless the stop is its link's loss, `lost`); once no progress thread reads it
    (`listed` 0: a flow a thread may still read is kept whole, mesh-link.c lanes_release), the census printed (each of
    its queues' lane: the SEND requests and frames posted and retired through its gate, and its ring's records posted and
-   landed and their bytes) and its ledger written (#ledger); `stopped` 2 where a dirty lane's requests may still land
+   landed and their bytes); `stopped` 2 where a dirty lane's requests may still land
    in its rows (design/recovery.md#five-seconds B7), else 1; its storage freed with it (flow_free) */
 static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where,int lost){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;struct mesh_cancellation *cancel=f->cancel;
@@ -619,7 +342,6 @@ static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where
           (unsigned long long)g->completions,f->rings[q].count,f->rings[q].posted,(unsigned long long)f->rings[q].landed,
           (unsigned long long)f->rings[q].bytes,f->lane[q],f->held>>f->lane[q]&1?" dirty, its rows held":dirty>>f->lane[q]&1?" dirty, flushed":"");
     }
-    if(!f->listed)ledger_write(f);
     atomic_store_explicit(&f->stopped,f->held?2:1,memory_order_release);
     wake();
   });
@@ -792,12 +514,10 @@ static void map_put(const struct mesh_record *record){
     uint32_t a=order[head++];double beta;
     for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,&beta)){reached[b]=1;order[tail++]=(uint32_t)b;}
   }
-  /* design/recovery.md#diagnosis: a node the prune drops is logged with its last health first (one put now and never
-     reached yet is not a loss) */
+  /* design/recovery.md#diagnosis: a node the prune drops is logged (one put now and never reached yet is not a loss) */
   for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
-    struct known *gone=known_at(next[k].node);char text[768];health_text(&next[k].health,text,sizeof text);
-    say("node %u (%s) unreachable; its last health, heard %.1f s before: %s\n",next[k].node,next[k].name,
-        gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0,text);
+    struct known *gone=known_at(next[k].node);
+    say("node %u (%s) unreachable, heard %.1f s before\n",next[k].node,next[k].name,gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0);
     if(gone)gone->gone=now;
   }
   uint64_t kept=0;
@@ -857,51 +577,16 @@ void record_retell(void){
   struct mesh_record own;memcpy(&own,held,sizeof own);
   for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
 }
-static uint64_t low_told;
-static void memory_watch(void){
-  if(health.pressure<2 && health.available>=memory/MESH_LOW_SHARE){low_told=0;return;}
-  if(low_told && now-low_told<MESH_LOW_NS)return;
-  low_told=now;
-  int count=proc_listallpids(NULL,0);
-  pid_t *pids=count>0?calloc((size_t)count+16,sizeof *pids):NULL;
-  struct { pid_t pid; uint64_t bytes; } top[MESH_LOW_LISTED]={{0,0}};
-  count=pids?proc_listallpids(pids,(int)(((size_t)count+16)*sizeof *pids)):0;
-  for(int i=0;i<count;i++){
-    struct rusage_info_v0 use;
-    if(proc_pid_rusage(pids[i],RUSAGE_INFO_V0,(rusage_info_t *)&use))continue;
-    for(int k=0;k<MESH_LOW_LISTED;k++)if(use.ri_phys_footprint>top[k].bytes){
-      memmove(top+k+1,top+k,(MESH_LOW_LISTED-1-(size_t)k)*sizeof *top);
-      top[k].pid=pids[i];top[k].bytes=use.ri_phys_footprint;break;
-    }
-  }
-  free(pids);
-  char listed[512]="";size_t used=0;
-  for(int k=0;k<MESH_LOW_LISTED && top[k].bytes;k++){
-    char name[64]="?";proc_name(top[k].pid,name,sizeof name);
-    used+=(size_t)snprintf(listed+used,used<sizeof listed?sizeof listed-used:0,"%s%s (%d) %.2f GiB",k?", ":"",name,top[k].pid,
-                           (double)top[k].bytes/1073741824.0);
-    if(used>=sizeof listed)break;
-  }
-  say("memory low: %.2f GiB available of %.2f GiB, pressure %s, the window %.2f GiB; largest: %s\n",
-      (double)health.available/1073741824.0,(double)memory/1073741824.0,health.pressure==4?"critical":health.pressure==2?"warning":"normal",
-      (double)((uint64_t)mesh_arena_pages(M)*M->pgsz)/1073741824.0,listed);
-}
 void health_turn(void){
-  struct mesh_health sampled=health;
-  health_sample(&sampled);
-  const int urgent=sampled.power!=health.power || (sampled.power!=MESH_POWER_AC && sampled.charge!=health.charge) ||
-    sampled.pressure!=health.pressure || sampled.thermal!=health.thermal;
-  health=sampled;
-  if(urgent){char text[768];health_text(&health,text,sizeof text);say("health: %s\n",text);}
-  if(urgent || now-health_sent>=MESH_HEALTH_NS){health_sent=now;record_changed();}
-  memory_watch();
+  if(now-health_sent<MESH_HEALTH_NS)return;
+  health_sent=now;health.available=available_now();
+  record_changed();
 }
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes){
   struct mesh_record heard;
   if(bytes!=sizeof heard)return;
   memcpy(&heard,payload,sizeof heard);
   heard.name[sizeof heard.name-1]=0;
-  heard.health.session[sizeof heard.health.session-1]=0;heard.health.shutdown[sizeof heard.health.shutdown-1]=0;
   if(!heard.node || heard.node==M->node || heard.ports>MESH_PORTS)return;
   heard.model[sizeof heard.model-1]=0;
   struct mesh_record *held=record_held(heard.node);
@@ -920,544 +605,14 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
     return;
   }
   if(held && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
-  /* design/recovery.md#diagnosis: a node that joins or comes back, and a peer's urgent change, are logged here */
-  char text[768];
-  if(!held && k && (k->gone || !k->heard)){
-    health_text(&heard.health,text,sizeof text);
-    if(k->gone)say("node %u (%s) back after %.1f s, %s: %s\n",heard.node,heard.name,(double)(now-k->gone)/1e9,
-                   strncmp(k->session,heard.health.session,sizeof k->session)?"a new boot":"the same boot",text);
-    else say("node %u (%s) joined: %s\n",heard.node,heard.name,text);
-  }
-  if(held && (held->health.power!=heard.health.power || held->health.pressure!=heard.health.pressure ||
-              held->health.thermal!=heard.health.thermal ||
-              (heard.health.power!=MESH_POWER_AC && held->health.charge!=heard.health.charge))){
-    health_text(&heard.health,text,sizeof text);
-    say("node %u (%s) health: %s\n",heard.node,heard.name,text);
-  }
-  if(k){k->heard=now;k->gone=0;k->boot=heard.boot;k->sequence=heard.sequence;memcpy(k->session,heard.health.session,sizeof k->session);}
+  /* design/recovery.md#diagnosis: a node that joins or comes back is logged here */
+  if(!held && k && k->gone)say("node %u (%s) back after %.1f s\n",heard.node,heard.name,(double)(now-k->gone)/1e9);
+  else if(!held && k && !k->heard)say("node %u (%s) joined\n",heard.node,heard.name);
+  if(k){k->heard=now;k->gone=0;k->boot=heard.boot;k->sequence=heard.sequence;}
   if(held && record_links_same(held,&heard))health_put(held,&heard);
   else map_put(&heard);
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
 }
-/* the ports paired with `node` whose links have their stripe lanes served */
-static uint32_t stripe_cables(uint32_t node){
-  uint32_t n=0;
-  for(uint32_t p=0;p<port_count;p++)
-    n+=ports[p].greeted && ports[p].peer==node && (atomic_load_explicit(&ports[p].link.served,memory_order_acquire)>>MESH_LANE_STRIPES&1);
-  return n;
-}
-/* design/bridge-dataflow.md#stripes: every registered ring's next request read on the event loop: a ring whose client
-   is gone deregistered; a request naming a node toward which a cable of this node's has its stripe lane served is left
-   to the send threads of those ports, which take it; any other fails as a value at once (its writer's word UINT64_MAX,
-   its ring's code): its node this node (EINVAL), or no cable's with its stripe lane served (EHOSTUNREACH: a stripe
-   goes over one link, its node a neighbour whose link is up).  Nothing waits for a link to pair or its stripe lane to
-   be made again (the wait had no event that ends it: output_data/structural-20261018/WAITS.md).  At the stop
-   (`stopping` its code, design/bridge-and-ipc.md#stop) every request not yet taken fails with it */
-void stripes_requests_turn(int64_t stopping){
-  _Atomic uint64_t *rings=mesh_rings(M);
-  for(uint32_t r=0;r<MESH_RINGS;r++){
-    uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
-    if(!at)continue;
-    struct mesh_requests *q=at>=M->data_off && at<=M->length-sizeof(struct mesh_requests)?(void *)((char *)M+at):NULL;
-    if(!q || !owned(q->owner) || !q->entries || (q->entries&(q->entries-1)) || q->entries>(M->length-at-sizeof *q)/sizeof(struct mesh_stripe)){
-      atomic_compare_exchange_strong(rings+r,&at,0);
-      continue;
-    }
-    for(uint64_t looked=0;looked<q->entries;looked++){
-      uint64_t k=atomic_load_explicit(&q->taken,memory_order_acquire);
-      const struct mesh_stripe *e=q->request+(k&(q->entries-1));
-      if(atomic_load_explicit(&e->ready,memory_order_acquire)!=k+1)break;
-      const uint32_t node=e->node;
-      const int64_t code=stopping?stopping:node==M->node?EINVAL:EHOSTUNREACH;
-      if(!stopping && node!=M->node && stripe_cables(node))break;
-      const uint64_t word=e->word,owner=q->owner;
-      if(!atomic_compare_exchange_strong_explicit(&q->taken,&k,k+1,memory_order_acq_rel,memory_order_relaxed))continue;
-      if(atomic_load_explicit(&q->code,memory_order_relaxed)!=code)
-        say("stripes: a request of client %llx toward node %u refused: %s\n",(unsigned long long)owner,node,strerror((int)code));
-      stripe_failed(at,owner,word,code);
-      if(!stopping)break;
-    }
-  }
-}
-static struct channel channels[MESH_CHANNELS];
-static struct asking askings[MESH_CHANNELS];
-static struct serving servings[MESH_SERVICES];
-static uint32_t channel_sequence;
-static pid_t orphans[MESH_CHANNELS];
-static void fd_watch(int fd,int filter,int on,uint64_t udata){
-  struct kevent64_s event;EV_SET64(&event,(uint64_t)fd,filter,EV_ADD|(on?EV_ENABLE:EV_DISABLE),0,0,udata,0,0);
-  kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-}
-static void fd_reset(int fd){
-  struct linger now_={1,0};
-  setsockopt(fd,SOL_SOCKET,SO_LINGER,&now_,sizeof now_);
-  close(fd);
-}
-void fd_answer(int fd,int32_t code){
-  if(send(fd,&code,sizeof code,0)!=(ssize_t)sizeof code)return;
-}
-static uint64_t channel_udata(const struct channel *c,int s){ return TAG_CHANNEL|(uint64_t)(c-channels)<<1|(uint64_t)s; }
-static void channel_say(const struct channel *c,int s,uint32_t kind,uint64_t count,int64_t code,const void *payload,uint32_t bytes){
-  if(c->end[s].kind==END_PORT)port_say(c->end[s].port,(struct message){.kind=kind,.key=c->key,.from=c->origin,.to=c->destination,
-                                        .count=(uint32_t)count,.code=code},payload,bytes);
-}
-/* a channel ended: where `code`, each of its ends but `from` told so (a port end CLOSE, a socket end reset; a client
-   still awaiting its answer answered with the code); the slot freed first, so a port lost meanwhile finds it free */
-static void channel_end(struct channel *c,int64_t code,int from){
-  struct channel was=*c;
-  memset(c,0,sizeof *c);
-  if(code)say("channel %u.%u to node %u's %s: %s\n",was.origin,(uint32_t)was.key,was.destination,was.service,strerror((int)code));
-  if(was.pid && !was.exited){
-    kill(-was.pid,SIGTERM);
-    for(uint32_t i=0;i<MESH_CHANNELS;i++)if(!orphans[i]){orphans[i]=was.pid;break;}
-  }
-  for(int s=0;s<2;s++){
-    struct end *e=was.end+s;
-    if(e->kind==END_SOCKET && e->fd>=0){
-      if(code && !was.open && s==0 && was.origin==M->node){fd_answer(e->fd,(int32_t)code);close(e->fd);}
-      else if(code)fd_reset(e->fd);
-      else close(e->fd);
-    }
-    if(e->kind==END_PORT && code && s!=from)channel_say(&was,s,CHANNEL_CLOSE,0,code,NULL,0);
-    free(e->queue);
-  }
-  free(was.held);
-}
-static struct channel *channel_new(void){
-  for(uint32_t i=0;i<MESH_CHANNELS;i++)if(!channels[i].used){
-    struct channel *c=channels+i;
-    memset(c,0,sizeof *c);c->used=1;c->end[0].fd=c->end[1].fd=-1;
-    return c;
-  }
-  return NULL;
-}
-static struct port *channel_hop(uint32_t node){
-  uint32_t *route=NULL;
-  const uint32_t hops=mesh_route(M,M->node,node,&route);
-  struct port *next[MESH_PORTS];
-  struct port *port=hops>=2 && cables(route[1],next)>0?next[0]:NULL;
-  free(route);
-  return port;
-}
-static void channel_pump(struct channel *c);
-static void hold_done(struct channel *c);
-static int64_t child_spawn(struct channel *c,int s);
-static void child_ended(struct channel *c);
-/* the bytes queued for end `t` given to it as far as it takes them, each granted back to the other end where it is a
-   port; once none is left and the other end has ended, end `t` told so (a socket's write side shut, a port CHANNEL_SHUT, the
-   bridge's own service answering) */
-static void end_drain(struct channel *c,int t){
-  struct end *e=c->end+t,*o=c->end+(1-t);
-  size_t given=0;
-  while(given<e->queued){
-    size_t n=e->queued-given;
-    if(e->kind==END_SOCKET){
-      ssize_t sent=send(e->fd,e->queue+given,n,0);
-      if(sent<0 && (errno==EAGAIN || errno==EINTR))break;
-      if(sent<=0){channel_end(c,sent?errno:EPIPE,-1);return;}
-      n=(size_t)sent;
-    }else if(e->kind==END_EXEC){
-      const unsigned char *line=memchr(e->queue+given,'\n',n);
-      if(line)n=(size_t)(line-(e->queue+given))+1;
-      if(c->held_bytes+n>MESH_HOLD_BYTES){channel_end(c,EMSGSIZE,-1);return;}
-      unsigned char *grown=realloc(c->held,c->held_bytes+n+1);
-      if(!grown){channel_end(c,ENOMEM,-1);return;}
-      c->held=grown;memcpy(c->held+c->held_bytes,e->queue+given,n);c->held_bytes+=n;
-      if(o->kind==END_PORT)channel_say(c,1-t,CHANNEL_WINDOW,n,0,NULL,0);
-      given+=n;
-      if(!line)continue;
-      memmove(e->queue,e->queue+given,e->queued-given);e->queued-=given;given=0;
-      const int64_t error=child_spawn(c,t);
-      if(error){channel_end(c,error,-1);return;}
-      continue;
-    }else if(e->kind==END_PORT){
-      n=MIN(n,MIN(e->credit,MESH_PACKET));
-      if(!n)break;
-      channel_say(c,t,CHANNEL_DATA,0,0,e->queue+given,(uint32_t)n);
-      e->credit-=n;
-      if(!c->used)return;
-    }else{
-      if(c->held_bytes+n>MESH_HOLD_BYTES){channel_end(c,EMSGSIZE,-1);return;}
-      unsigned char *grown=realloc(c->held,c->held_bytes+n);
-      if(!grown){channel_end(c,ENOMEM,-1);return;}
-      c->held=grown;memcpy(c->held+c->held_bytes,e->queue+given,n);c->held_bytes+=n;
-    }
-    given+=n;
-    if(o->kind==END_PORT)channel_say(c,1-t,CHANNEL_WINDOW,n,0,NULL,0);
-  }
-  memmove(e->queue,e->queue+given,e->queued-given);e->queued-=given;
-  if(e->kind==END_SOCKET){
-    const int want=e->queued>0;
-    if(want!=e->writing){e->writing=want;fd_watch(e->fd,EVFILT_WRITE,want,channel_udata(c,t));}
-  }
-  if(!e->queued && o->ended && !e->told && e->kind==END_EXEC){
-    const int64_t error=child_spawn(c,t);
-    if(error){channel_end(c,error,-1);return;}
-  }
-  if(!e->queued && o->ended && !e->told){
-    e->told=1;
-    if(e->kind==END_SOCKET)shutdown(e->fd,SHUT_WR);
-    else if(e->kind==END_PORT)channel_say(c,t,CHANNEL_SHUT,0,0,NULL,0);
-    else hold_done(c);
-    if(!c->used)return;
-  }
-  if(c->end[0].told && c->end[1].told){channel_end(c,0,-1);return;}
-  channel_pump(c);
-}
-static void end_put(struct channel *c,int t,const void *bytes,size_t n){
-  struct end *e=c->end+t;
-  if(e->queued+n>e->room){
-    unsigned char *grown=realloc(e->queue,e->queued+n);
-    if(!grown){channel_end(c,ENOMEM,-1);return;}
-    e->queue=grown;e->room=e->queued+n;
-  }
-  memcpy(e->queue+e->queued,bytes,n);e->queued+=n;
-  end_drain(c,t);
-}
-/* each socket end read while the channel is open, it has not ended, and the other end takes what it gives at once */
-static void channel_pump(struct channel *c){
-  for(int s=0;s<2;s++){
-    struct end *e=c->end+s,*o=c->end+(1-s);
-    if(e->kind!=END_SOCKET || e->ended || (c->pid && s==c->child && c->drained))continue;
-    const int want=c->open && !o->queued && (o->kind!=END_PORT || o->credit>0);
-    if(want!=e->reading){e->reading=want;fd_watch(e->fd,EVFILT_READ,want,channel_udata(c,s));}
-  }
-}
-static void end_read(struct channel *c,int s){
-  struct end *e=c->end+s,*o=c->end+(1-s);
-  if(e->ended)return;
-  size_t room=o->kind==END_PORT?MIN(o->credit,MESH_PACKET):MESH_PACKET;
-  if(!room || o->queued){channel_pump(c);return;}
-  unsigned char block[MESH_PACKET];
-  ssize_t got=recv(e->fd,block,room,0);
-  if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-  if(got<0){channel_end(c,errno,-1);return;}
-  if(!got){
-    e->reading=0;fd_watch(e->fd,EVFILT_READ,0,channel_udata(c,s));
-    if(c->pid && s==c->child){c->drained=1;child_ended(c);return;}
-    e->ended=1;end_drain(c,1-s);return;
-  }
-  end_put(c,1-s,block,(size_t)got);
-}
-/* #holds: the bridge's own service: one line, `<name> <the unix second it ends> <why>`, written to
-   ~/.cache/mesh/hold/<name> (which the node's convergence reads: README.md Convergence), or `<name>` alone, that file
-   removed; answered with a line saying which */
-static void hold_done(struct channel *c){
-  char line[MESH_HOLD_BYTES+1],answer[160],dir[PATH_MAX],path[PATH_MAX],staged[PATH_MAX];
-  size_t n=c->held_bytes;
-  memcpy(line,c->held,n);line[n]=0;
-  while(n && (line[n-1]=='\n' || line[n-1]=='\r'))line[--n]=0;
-  char *rest=strchr(line,' ');
-  if(rest)*rest++=0;
-  const struct passwd *user=getpwuid(getuid());
-  size_t name=strlen(line);
-  int valid=name>0 && name<=64 && user && line[0]!='.';
-  for(size_t i=0;valid && i<name;i++)valid=isalnum((unsigned char)line[i]) || line[i]=='-' || line[i]=='_' || line[i]=='.';
-  int error=0;
-  if(!valid)error=EINVAL;
-  else{
-    snprintf(dir,sizeof dir,"%s/.cache/mesh",user->pw_dir);mkdir(dir,0755);
-    snprintf(dir,sizeof dir,"%s/.cache/mesh/hold",user->pw_dir);mkdir(dir,0755);
-    snprintf(path,sizeof path,"%s/%s",dir,line);
-    if(!rest || !*rest){if(unlink(path) && errno!=ENOENT)error=errno;}
-    else{
-      snprintf(staged,sizeof staged,"%s/.%s.%u",dir,line,(unsigned)getpid());
-      FILE *f=fopen(staged,"w");
-      if(!f)error=errno;
-      else{
-        const int wrote=fprintf(f,"%s\n",rest)>=0;
-        if(fclose(f) || !wrote)error=errno?errno:EIO;
-        else if(rename(staged,path))error=errno;
-        if(error)unlink(staged);
-      }
-    }
-  }
-  if(error)snprintf(answer,sizeof answer,"hold %s: %s\n",valid?line:"(a name of 1 to 64 letters, digits, '-', '_' or '.')",strerror(error));
-  else snprintf(answer,sizeof answer,"%s %s\n",rest && *rest?"held":"released",line);
-  say("hold %s from node %u: %s",valid?line:"?",c->origin,answer);
-  struct end *own=c->end[0].kind==END_OWN?c->end:c->end+1;
-  own->ended=1;
-  const int t=own==c->end?1:0;
-  end_put(c,t,answer,strlen(answer));
-}
-/* #admission: a request for `bytes` outside the window admitted while the node's available memory, read now, holds
-   them; a refusal logged */
-static int64_t admitted(const struct channel *c,uint64_t bytes){
-  const uint64_t room=bytes?available_now():0;
-  if(!bytes || room>=bytes)return 0;
-  say("admission: node %u's request to %s for %.2f GiB refused: %.2f GiB available, pressure %u\n",c->origin,c->service,
-      (double)bytes/1073741824.0,(double)room/1073741824.0,health.pressure);
-  return ENOMEM;
-}
-/* a channel's far end opened here: the service's socket connected, or the bridge's own */
-static int64_t service_open(struct channel *c,int s,uint64_t bytes){
-  struct end *e=c->end+s;
-  const int64_t refused=admitted(c,bytes);
-  if(refused)return refused;
-  if(!strcmp(c->service,"hold")){e->kind=END_OWN;return 0;}
-  if(!strcmp(c->service,"exec")){
-    if(!exec_served)return EACCES;
-    e->kind=END_EXEC;return 0;
-  }
-  if(!strcmp(c->service,"nodeinfo")){
-    static const uint16_t served[]={8100,8099};
-    int64_t error=ECONNREFUSED;
-    for(size_t i=0;i<sizeof served/sizeof *served;i++){
-      struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(served[i]),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
-      int fd=socket(AF_INET6,SOCK_STREAM,0),on=1,bound=1;
-      if(fd<0)return errno;
-      if(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) || setsockopt(fd,IPPROTO_TCP,TCP_CONNECTIONTIMEOUT,&bound,sizeof bound) ||
-         connect(fd,(struct sockaddr *)&to,sizeof to) || fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK)){error=errno;close(fd);continue;}
-      e->kind=END_SOCKET;e->fd=fd;
-      return 0;
-    }
-    return error;
-  }
-  for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0 && !strcmp(servings[i].service,c->service)){
-    struct sockaddr_un to={.sun_family=AF_UNIX};
-    snprintf(to.sun_path,sizeof to.sun_path,"%s",servings[i].path);
-    int fd=socket(AF_UNIX,SOCK_STREAM,0),on=1;
-    if(fd<0)return errno;
-    if(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) || connect(fd,(struct sockaddr *)&to,sizeof to) ||
-       fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK)){const int error=errno;close(fd);return error;}
-    e->kind=END_SOCKET;e->fd=fd;
-    return 0;
-  }
-  return ENOENT;
-}
-/* #exec: the bridge's own service `exec`, where its configuration serves it: the request's first line a command run by
-   the user's shell (-c) in its home, its process group its own and every descriptor but its standard ones closed
-   (POSIX_SPAWN_CLOEXEC_DEFAULT: no device or socket of the bridge's), the rest of the request its standard input, and
-   the answer its standard output and error, then its wait status (int32), once both have ended; a channel that fails
-   while it runs sends its group SIGTERM */
-static int64_t child_spawn(struct channel *c,int s){
-  struct end *e=c->end+s;
-  int pair[2],on=1;
-  const struct passwd *user=getpwuid(getuid());
-  if(!user)return ENOENT;
-  if(socketpair(AF_UNIX,SOCK_STREAM,0,pair))return errno;
-  c->held=c->held?c->held:malloc(1);
-  size_t n=c->held_bytes;
-  while(n && (c->held[n-1]=='\n' || c->held[n-1]=='\r'))n--;
-  c->held[n]=0;
-  char *shell=user->pw_shell && *user->pw_shell?user->pw_shell:"/bin/zsh",temp[PATH_MAX]="/tmp";
-  confstr(_CS_DARWIN_USER_TEMP_DIR,temp,sizeof temp);
-  char home[PATH_MAX+8],name[256],login[256],shelled[PATH_MAX+8],tmpdir[PATH_MAX+8];
-  snprintf(home,sizeof home,"HOME=%s",user->pw_dir);snprintf(name,sizeof name,"USER=%s",user->pw_name);
-  snprintf(login,sizeof login,"LOGNAME=%s",user->pw_name);snprintf(shelled,sizeof shelled,"SHELL=%s",shell);
-  snprintf(tmpdir,sizeof tmpdir,"TMPDIR=%s",temp);
-  char *argv[]={shell,"-c",(char *)c->held,NULL};
-  char *envp[]={home,name,login,shelled,tmpdir,"PATH=/usr/bin:/bin:/usr/sbin:/sbin","LANG=en_US.UTF-8",NULL};
-  posix_spawn_file_actions_t actions;posix_spawnattr_t attributes;
-  sigset_t every,none;sigfillset(&every);sigemptyset(&none);
-  posix_spawn_file_actions_init(&actions);posix_spawnattr_init(&attributes);
-  for(int k=0;k<3;k++)posix_spawn_file_actions_adddup2(&actions,pair[1],k);
-  posix_spawn_file_actions_addchdir(&actions,user->pw_dir);
-  posix_spawnattr_setflags(&attributes,POSIX_SPAWN_CLOEXEC_DEFAULT|POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_SETSIGDEF|POSIX_SPAWN_SETSIGMASK);
-  posix_spawnattr_setpgroup(&attributes,0);posix_spawnattr_setsigdefault(&attributes,&every);posix_spawnattr_setsigmask(&attributes,&none);
-  pid_t pid=0;
-  const int error=posix_spawn(&pid,shell,&actions,&attributes,argv,envp);
-  posix_spawn_file_actions_destroy(&actions);posix_spawnattr_destroy(&attributes);
-  close(pair[1]);
-  if(error){close(pair[0]);return error;}
-  if(fcntl(pair[0],F_SETFL,fcntl(pair[0],F_GETFL)|O_NONBLOCK) || setsockopt(pair[0],SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on)){
-    kill(-pid,SIGTERM);close(pair[0]);c->pid=pid;return errno?errno:EIO;
-  }
-  e->kind=END_SOCKET;e->fd=pair[0];c->pid=pid;c->child=s;
-  struct kevent64_s watch;EV_SET64(&watch,(uint64_t)pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,UINT64_MAX,0,0);
-  kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-  say("exec from node %u, pid %d: %.200s\n",c->origin,pid,c->held);
-  channel_pump(c);
-  return 0;
-}
-/* a child's output ended and its process exited: its wait status sent after its output, and its end ended */
-static void child_ended(struct channel *c){
-  if(!c->exited){
-    int status=0;
-    const pid_t done=waitpid(c->pid,&status,WNOHANG);
-    if(done==c->pid){c->exited=1;c->status=status;}
-  }
-  if(!c->exited || !c->drained || c->reported)return;
-  int32_t status=(int32_t)c->status;
-  c->reported=1;c->end[c->child].ended=1;
-  end_put(c,1-c->child,&status,sizeof status);
-}
-/* a process exited: an exec's child whose channel awaits it, or one whose channel ended, reaped */
-void child_heard(pid_t pid){
-  for(uint32_t i=0;i<MESH_CHANNELS;i++){
-    if(orphans[i]==pid && waitpid(pid,NULL,WNOHANG)==pid)orphans[i]=0;
-    if(channels[i].used && channels[i].pid==pid && !channels[i].exited)child_ended(channels+i);
-  }
-}
-/* a client's request read whole: a channel opened toward its node's service (here, or its CHANNEL_OPEN sent to the next hop),
-   a service registered, or a ledger cut; any other kind refused (EPROTO) */
-static void asked(struct asking *a){
-  struct mesh_request *r=&a->request;
-  const int fd=a->fd;a->fd=-1;
-  fd_watch(fd,EVFILT_READ,0,0);
-  r->service[sizeof r->service-1]=0;r->path[sizeof r->path-1]=0;
-  if(r->magic==MESH_REQUEST_MAGIC && r->kind==MESH_REQUEST_LEDGER){
-    fd_answer(fd,r->path[0]=='/'?ledger_cut(r->bytes,r->path):EINVAL);close(fd);
-    return;
-  }
-  if(r->magic!=MESH_REQUEST_MAGIC || !r->service[0] || (r->kind!=MESH_REQUEST_OPEN && r->kind!=MESH_REQUEST_SERVE)){fd_answer(fd,EPROTO);close(fd);return;}
-  if(r->kind==MESH_REQUEST_SERVE){
-    struct serving *at=NULL;
-    for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0 && !strcmp(servings[i].service,r->service)){close(servings[i].fd);servings[i].fd=-1;}
-    for(uint32_t i=0;!at && i<MESH_SERVICES;i++)if(servings[i].fd<0)at=servings+i;
-    if(r->path[0]!='/' || !strcmp(r->service,"hold") || !at){fd_answer(fd,at?EINVAL:ENOSPC);close(fd);return;}
-    at->fd=fd;memcpy(at->service,r->service,sizeof at->service);memcpy(at->path,r->path,sizeof at->path);
-    fd_answer(fd,0);
-    fd_watch(fd,EVFILT_READ,1,TAG_SERVING|(uint64_t)(at-servings));
-    say("service %s: served at %s\n",at->service,at->path);
-    return;
-  }
-  struct channel *c=channel_new();
-  if(!c){fd_answer(fd,ENOSPC);close(fd);return;}
-  c->key=(uint64_t)M->node<<32|++channel_sequence;c->origin=M->node;c->destination=r->node;
-  memcpy(c->service,r->service,sizeof c->service);
-  c->end[0].kind=END_SOCKET;c->end[0].fd=fd;
-  if(r->node==M->node){
-    const int64_t error=service_open(c,1,r->bytes);
-    if(error){channel_end(c,error,-1);return;}
-    c->open=1;fd_answer(fd,0);channel_pump(c);
-    return;
-  }
-  struct port *hop=channel_hop(r->node);
-  if(!hop){channel_end(c,EHOSTUNREACH,-1);return;}
-  c->end[1].kind=END_PORT;c->end[1].port=hop;c->deadline=now+MESH_PAIR_NS;
-  channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,(int64_t)r->bytes,c->service,(uint32_t)sizeof c->service);
-}
-static void asking_heard(struct asking *a){
-  ssize_t got=recv(a->fd,(char *)&a->request+a->got,sizeof a->request-a->got,0);
-  if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-  if(got<=0){close(a->fd);a->fd=-1;return;}
-  a->got+=(size_t)got;
-  if(a->got==sizeof a->request)asked(a);
-}
-void asking_accepted(int fd){
-  int on=1;
-  for(uint32_t i=0;i<MESH_CHANNELS;i++)if(askings[i].fd<0){
-    if(fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK) || setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) ||
-       setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&on,sizeof on))break;
-    askings[i]=(struct asking){.fd=fd,.deadline=now+MESH_ASKING_NS};
-    fd_watch(fd,EVFILT_READ,1,TAG_ASKING|i);
-    return;
-  }
-  close(fd);
-}
-/* a channel's message from a port: an CHANNEL_OPEN toward this node's service or, through it, the next hop's; then its answer
-   (CHANNEL_CONFIRM or CHANNEL_REFUSE), its CHANNEL_DATA, the credit its peer granted (CHANNEL_WINDOW), its end (CHANNEL_SHUT) or its failure (CHANNEL_CLOSE) */
-void channel_heard(struct port *port,const struct message *heard,const unsigned char *payload){
-  if(heard->kind==CHANNEL_OPEN){
-    struct channel *c=channel_new();
-    struct message refuse={.kind=CHANNEL_REFUSE,.key=heard->key,.from=heard->from,.to=heard->to};
-    if(!c){refuse.code=ENOSPC;port_say(port,refuse,NULL,0);return;}
-    c->key=heard->key;c->origin=heard->from;c->destination=heard->to;
-    memcpy(c->service,payload,MIN(heard->bytes,sizeof c->service));c->service[sizeof c->service-1]=0;
-    c->end[0].kind=END_PORT;c->end[0].port=port;c->end[0].credit=heard->count;
-    if(heard->to==M->node){
-      const int64_t error=service_open(c,1,(uint64_t)heard->code);
-      if(error){refuse.code=error;port_say(port,refuse,NULL,0);channel_end(c,0,-1);return;}
-      c->open=1;channel_say(c,0,CHANNEL_CONFIRM,MESH_WINDOW,0,NULL,0);channel_pump(c);
-      return;
-    }
-    struct port *hop=channel_hop(heard->to);
-    if(!hop || hop==port){refuse.code=EHOSTUNREACH;port_say(port,refuse,NULL,0);channel_end(c,0,-1);return;}
-    c->end[1].kind=END_PORT;c->end[1].port=hop;c->deadline=now+MESH_PAIR_NS;
-    channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,heard->code,c->service,(uint32_t)sizeof c->service);
-    return;
-  }
-  struct channel *c=NULL;int s=0;
-  for(uint32_t i=0;!c && i<MESH_CHANNELS;i++)if(channels[i].used && channels[i].key==heard->key)
-    for(int k=0;k<2;k++)if(channels[i].end[k].kind==END_PORT && channels[i].end[k].port==port){c=channels+i;s=k;}
-  if(!c){
-    if(heard->kind!=CHANNEL_CLOSE && heard->kind!=CHANNEL_REFUSE)
-      port_say(port,(struct message){.kind=CHANNEL_CLOSE,.key=heard->key,.from=heard->from,.to=heard->to,.code=ECONNRESET},NULL,0);
-    return;
-  }
-  struct end *e=c->end+s;
-  const int t=1-s;
-  if(heard->kind==CHANNEL_CONFIRM && !c->open){
-    e->credit=heard->count;c->open=1;c->deadline=0;
-    if(c->end[t].kind==END_PORT)channel_say(c,t,CHANNEL_CONFIRM,MESH_WINDOW,0,NULL,0);
-    else fd_answer(c->end[t].fd,0);
-    channel_pump(c);
-  }
-  else if(heard->kind==CHANNEL_REFUSE && !c->open){
-    if(c->end[t].kind==END_PORT)channel_say(c,t,CHANNEL_REFUSE,0,heard->code,NULL,0);
-    c->end[t].kind==END_PORT?channel_end(c,0,-1):channel_end(c,heard->code?heard->code:ECONNREFUSED,s);
-  }
-  else if(heard->kind==CHANNEL_DATA && heard->bytes)end_put(c,t,payload,heard->bytes);
-  else if(heard->kind==CHANNEL_WINDOW){e->credit+=heard->count;end_drain(c,s);}
-  else if(heard->kind==CHANNEL_SHUT){e->ended=1;end_drain(c,t);}
-  else if(heard->kind==CHANNEL_CLOSE)channel_end(c,heard->code?heard->code:ECONNRESET,s);
-}
-/* a request socket's event: a client's request read, a channel's socket end read or written, a registration's
-   connection closed */
-void request_event(const struct kevent64_s *e){
-  if(e->udata&TAG_ASKING){
-    struct asking *a=askings+(e->udata&(MESH_CHANNELS-1));
-    if(a->fd==(int)e->ident)asking_heard(a);
-  }else if(e->udata&TAG_SERVING){
-    struct serving *v=servings+(e->udata&(MESH_SERVICES-1));
-    char drop[256];
-    if(v->fd!=(int)e->ident)return;
-    ssize_t got=recv(v->fd,drop,sizeof drop,0);
-    if(got==0 || (got<0 && errno!=EAGAIN && errno!=EINTR)){say("service %s: no longer served\n",v->service);close(v->fd);v->fd=-1;}
-  }else{
-    struct channel *c=channels+((e->udata&~TAG_CHANNEL)>>1);
-    const int s=(int)(e->udata&1);
-    if(!c->used || c->end[s].kind!=END_SOCKET || c->end[s].fd!=(int)e->ident)return;
-    if(e->filter==EVFILT_WRITE)end_drain(c,s);
-    else end_read(c,s);
-  }
-}
-/* the requests' turn: a channel unanswered past the pairing window fails (ETIMEDOUT), and a client that has not sent its
-   request within MESH_ASKING_NS is closed */
-void requests_turn(void){
-  for(uint32_t i=0;i<MESH_CHANNELS;i++){
-    struct channel *c=channels+i;
-    if(c->used && !c->open && c->deadline && now>c->deadline){
-      const int up=c->end[0].kind==END_PORT;
-      if(up)channel_say(c,0,CHANNEL_REFUSE,0,ETIMEDOUT,NULL,0);
-      channel_end(c,ETIMEDOUT,up?0:-1);
-    }
-    if(askings[i].fd>=0 && now>askings[i].deadline){close(askings[i].fd);askings[i].fd=-1;}
-    if(orphans[i] && waitpid(orphans[i],NULL,WNOHANG)==orphans[i])orphans[i]=0;
-    if(c->used && c->pid && !c->exited)child_ended(c);
-    /* a socket end that has ended its input and since been reset (a client's abort: its close with SO_LINGER 0)
-       fails its channel */
-    for(int k=0;c->used && k<2;k++)if(c->end[k].kind==END_SOCKET && c->end[k].ended && c->end[k].fd>=0){
-      int error=0;socklen_t size=sizeof error;
-      if(!getsockopt(c->end[k].fd,SOL_SOCKET,SO_ERROR,&error,&size) && error){channel_end(c,error,-1);break;}
-    }
-  }
-}
-/* a port lost: every channel with an end on it fails, each other end told (#requests) */
-void requests_lost(struct port *port,int64_t code){
-  for(uint32_t i=0;i<MESH_CHANNELS;i++)for(int s=0;s<2;s++)
-    if(channels[i].used && channels[i].end[s].kind==END_PORT && channels[i].end[s].port==port){channel_end(channels+i,code?code:ENETRESET,s);break;}
-}
-void requests_init(void){
-  for(uint32_t i=0;i<MESH_CHANNELS;i++)askings[i].fd=-1;
-  for(uint32_t i=0;i<MESH_SERVICES;i++)servings[i].fd=-1;
-}
-void requests_stop(void){
-  for(uint32_t i=0;i<MESH_CHANNELS;i++){
-    if(channels[i].used)channel_end(channels+i,ESHUTDOWN,-1);
-    if(askings[i].fd>=0){close(askings[i].fd);askings[i].fd=-1;}
-  }
-  for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0){close(servings[i].fd);servings[i].fd=-1;}
-}
-
-/* a port's link closed to be paired afresh would end every channel with an end on it: whether one has (link_idle) */
-int requests_held(const struct port *port){
-  for(uint32_t i=0;i<MESH_CHANNELS;i++)for(int s=0;s<2;s++)
-    if(channels[i].used && channels[i].end[s].kind==END_PORT && channels[i].end[s].port==port)return 1;
-  return 0;
-}
-
 /* design/bridge-and-ipc.md#stop: the bridge stopping (`port` NULL), or a port concluded around a call out past
    MESH_PLATFORM_NS (design/recovery.md#five-seconds B12: its flows whose stops have not run, those waiting behind the
    call): every such program's words toward its destinations cancelled (~0) and its status the code, stored from the
@@ -1474,8 +629,7 @@ void programs_stop(int64_t code,const struct port *port){
    liveness turn any client whose process exited retired; a program that ended (its slot given back or retired) has its
    flows stopped; a program started is taken toward each destination it binds, once no flow of the slot's earlier client
    runs or stops (one kept for a dirty lane, its stop run, touches no word of the slot).  Rows of a retired client are
-   released once no flow of one remains (one kept for a dirty lane among them: design/recovery.md#five-seconds B7) and
-   no stripe is in flight */
+   released once no flow of one remains (one kept for a dirty lane among them: design/recovery.md#five-seconds B7) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0,zombie=0;
@@ -1501,8 +655,6 @@ void clients_turn(int liveness){
     for(uint32_t d=0,n=mesh_destination(client,0);d<n;d++)if(mesh_destination_transfers(M,owner,d))program_take(client,owner,d);
   }
   for(struct flow *f=flows;f;f=f->next)zombie|=!owned(f->owner);
-  /* design/bridge-dataflow.md#stripes: a stripe in flight may name a retired client's bytes and word */
-  for(uint32_t p=0;p<port_count;p++)zombie|=atomic_load_explicit(&ports[p].stripes.flight,memory_order_acquire)!=0;
   unreleased|=changed;
   if(unreleased && !zombie){unreleased=0;mesh_retired_release(M);}
 }
