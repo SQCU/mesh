@@ -587,10 +587,11 @@ static void flow_job(struct flow *f){
    programs_stop stores them (no queue waited on: design/recovery.md#five-seconds B4's order, ~0 and the status before
    B6, never behind a call held on the port's queue); then on its port's queue, after its job, its lanes let go
    (lanes_release: no completion of them is taken as its own after it, and a lane it left with positions outstanding
-   stays DIRTY, moved to the error state unless the stop is its link's loss, `lost`); the census printed (each of its
-   queues' lane: the SEND requests and frames posted and retired through its gate, and its ring's records posted and
-   landed and their bytes), its ledger written (#ledger), and its storage freed; `stopped` 2 where a dirty lane's
-   requests may still land in its rows (design/recovery.md#five-seconds B7), else 1 */
+   stays DIRTY, moved to the error state unless the stop is its link's loss, `lost`); once no progress thread reads it
+   (`listed` 0: a flow a thread may still read is kept whole, mesh-link.c lanes_release), the census printed (each of
+   its queues' lane: the SEND requests and frames posted and retired through its gate, and its ring's records posted and
+   landed and their bytes) and its ledger written (#ledger); `stopped` 2 where a dirty lane's requests may still land
+   in its rows (design/recovery.md#five-seconds B7), else 1; its storage freed with it (flow_free) */
 static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where,int lost){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;struct mesh_cancellation *cancel=f->cancel;
   f->stopping=1;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);
@@ -601,26 +602,24 @@ static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where
   dispatch_async(f->port->work,^{
     const uint32_t dirty=lanes_release(f,lost);
     const struct link *l=&f->port->link;
-    for(uint32_t q=0;f->rings && q<f->queues;q++){
+    for(uint32_t q=0;f->rings && !f->listed && q<f->queues;q++){
       const struct send_gate *g=l->gate+f->lane[q];
       say("link %u census queue=%u requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu "
           "lane=%u%s\n",f->port->index,q,(unsigned long long)g->requests,(unsigned long long)g->posted,(unsigned long long)g->retired,
           (unsigned long long)g->completions,f->rings[q].count,f->rings[q].posted,(unsigned long long)f->rings[q].landed,
           (unsigned long long)f->rings[q].bytes,f->lane[q],f->held>>f->lane[q]&1?" dirty, its rows held":dirty>>f->lane[q]&1?" dirty, flushed":"");
     }
-    ledger_write(f);
-    free(f->receive);free(f->streams);free(f->rings);free(f->requests);
-    f->receive=NULL;f->streams=NULL;f->rings=NULL;f->requests=NULL;
+    if(!f->listed)ledger_write(f);
     atomic_store_explicit(&f->stopped,f->held?2:1,memory_order_release);
     wake();
   });
 }
-/* a flow freed, its index in its port's table given back */
+/* a flow freed with its storage, its index in its port's table given back */
 static void flow_free(struct flow *f){
   for(struct flow **at=&flows;*at;at=&(*at)->next)if(*at==f){*at=f->next;break;}
   f->port->flows--;
   f->port->reserved[f->slot/64]&=~(UINT64_C(1)<<(f->slot%64));
-  free(f);
+  free(f->receive);free(f->streams);free(f->rings);free(f->requests);free(f);
   flow_count--;busy_tell();
 }
 /* design/algorithm-sources.md#meshresult: a program on a port failed as a value, its status the failure naming the node

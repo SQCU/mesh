@@ -209,9 +209,10 @@ struct flow {
    conclusion's quiet window, `flush_at`, 0 for none, and of any termination's, design/recovery.md#five-seconds B6 (b),
    B9b; LINK_JOB_MOVE the lanes `move` of flows' stops whose move to the error state a window or a stuck call put off,
    `deferred`, a bit a lane, the port queue's to set and the event loop's to take, cleared as the link is made, B6 (a),
-   B9) and a registration its make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss and as
-   its peer interface's termination is heard, mesh-link.c peer_terminated, so a job of a pairing gone makes no call and
-   is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`), its largest stripe piece;
+   B9) and a registration its make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss and at
+   a halt, a peer interface's termination heard or a guard not held, mesh-link.c port_halt, so a job of a pairing gone
+   makes no call and is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`), its
+   largest stripe piece;
    the lanes the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to
    clear where it found its lane failed, every lane at a failed completion, mesh-link.c link_failed, and the
    termination's queue's, B9b), the lanes a progress thread found failed
@@ -289,18 +290,21 @@ struct stripes {
 };
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue (its
    open's job `job`, dispatched at `job_at`; a flow stop's move to the error state, begun at `moving_at`, 0 while none
-   is out; `stuck` once a job or move of the port outlived MESH_PLATFORM_NS and the port was concluded around it:
-   design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window (`quiet_at`,
+   is out; `stuck` once a job or move of the port outlived MESH_PLATFORM_NS and the port was concluded around it, until
+   the call returns: design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window
+   (`quiet_at`,
    MESH_PLATFORM_NS past its last conclusion or a peer interface's termination heard, B9b, moved only later and by any
    thread, before which no port job but an earlier conclusion's flush, struct link
    `flush_at`, is dispatched on it and the bridge does not exit: B9), whether its device is to be opened
-   (`opening`: at the start, at its link's coming on, and at a hello heard while it is not open, B16; never on a
-   clock), the queue pairs its link lanes hold (`committed`, of the device's usable queue pairs), its link lanes, its
+   (`opening`: at the start, at its link's coming on, at a hello heard while it is not open, B16, and as the call it was
+   concluded around returns, B12; never on a clock), the queue pairs its link lanes hold (`committed`, of the device's
+   usable queue pairs), its link lanes, its
    table of flows (`table`, the indices reserved and their generations, the highest reserved plus one), and its
    progress threads (#progress: the epochs each has seen of `epoch`, which a flow leaving the table moves, and whether
    each is parked on the port's bell); its stripe writes (design/bridge-dataflow.md#stripes), the guard of its
    device's verbs objects (`guard`, odd while raised, the word the progress threads park on while it stands,
-   design/recovery.md#five-seconds B13, and the value each progress thread last held at: port_guard),
+   design/recovery.md#five-seconds B13, and the value each progress thread last held at: mesh-link.c guard_raise; each
+   epoch and guard told wakes the raiser parked on it, port_tell, port_wait),
    whether this end closed its control socket so both ends pair its link afresh (`cycling`, link_turn), and the event
    loop's reading of what its control socket
    heard (design/recovery.md#five-seconds, mesh-link.c port_silent: when it last heard anything, `heard_at`, the link's
@@ -350,7 +354,8 @@ struct known { uint32_t node; uint64_t heard,gone,boot,sequence; char session[40
    (port_pass), else every MESH_PAUSE_NS, and at once when the bell rings: a client's group of a program on the port
    starting (mesh-call.h mesh_transfers_wake), a landing that released one of the port's SEND cells while its send thread
    was parked (send_wake), a flow listed or unlisted, the lanes' change, the bridge stopping.  A thread tells it is
-   parked, then looks once more before it waits, so a release whose send_wake read it unparked is served by that look */
+   parked, then looks once more before it waits, so a release whose send_wake read it unparked is served by that look,
+   and a guard raised meanwhile is held (its raiser rings once and parks: mesh-link.c port_wait) */
 #define MESH_IDLE_PASSES 4096u
 struct progress { struct port *port; int side; };
 /* design/recovery.md#diagnosis: this node's health sampled each turn; a change of its power source, of its charge off
@@ -447,7 +452,6 @@ void health_init(void);
 void wake(void);
 void stripe_failed(uint64_t ring,uint64_t owner,uint64_t word,int64_t code);
 int port_list(struct flow *f);
-void port_unlist(struct flow *f);
 void port_say(struct port *port,struct message said,const void *payload,uint32_t bytes);
 int lanes_leased(const struct port *port,uint64_t owner,const uint32_t *lane,uint32_t queues);
 int lanes_take(const struct port *port,uint64_t owner,const uint32_t *lane,uint32_t queues);
