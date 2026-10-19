@@ -1574,8 +1574,8 @@ static void terminations_watch(void){
   peer_terminated(NULL,iterator);
 }
 #endif
-/* design/recovery.md#five-seconds, rule-zero/EXIT-RECLAIM.md P4: the provider's doorbell fault absorbed.  A SIGSEGV or
-   SIGBUS whose pc lies in the provider's text (`provider`, read at the start) on a thread that posts on a port's queue
+/* design/recovery.md#five-seconds (EXIT-RECLAIM.md P4): the provider's doorbell fault absorbed.  A SIGSEGV or SIGBUS
+   whose pc lies in the provider's text (`provider`, read at the start) on a thread that posts on a port's queue
    pairs (struct port `thread`) has one anonymous page mapped at the faulting page by hint, never MAP_FIXED, so nothing
    mapped is replaced: where it got that page (no mapping was there: the doorbell the driver unmapped in a termination),
    or the port's bit in `faulted` is set (its other thread got the page first; else the store faults again until the
