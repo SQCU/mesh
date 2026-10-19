@@ -2943,6 +2943,7 @@ static struct message *sending(struct inflight *g, uint32_t h, uint64_t at) {
 static ncclResult_t complete_group(struct metal_program *program, struct inflight *g, int *published) {
   struct session *s = g->session;
   ncclResult_t result = ncclSuccess;
+  metal_gate(program, s->violation_buffer);
   for (; g->next < g->events && !result; g->next++) {
     const struct event v = g->order[g->next];
     const struct channel *ch = s->channels + v.h;
@@ -2966,6 +2967,7 @@ static ncclResult_t complete_group(struct metal_program *program, struct infligh
 static ncclResult_t issue_group(struct metal_program *program, struct inflight *g, int *published) {
   struct session *s = g->session;
   ncclResult_t result = ncclSuccess;
+  metal_gate(program, s->violation_buffer);
   for (size_t e = g->next; e < g->events && !result; e++) {
     const struct event v = g->order[e];
     struct channel *ch = s->channels + v.h;
@@ -2986,7 +2988,8 @@ static ncclResult_t issue_group(struct metal_program *program, struct inflight *
 
 /* the groups in flight, in the order every rank's walk keeps (order_group): completing through a group, each group up
    to it completed, then any later group's publications that need no wait; issuing a group, its publications that need
-   no wait, so a group issued encodes no wait at all */
+   no wait, so a group issued encodes no wait at all; each group's dispatches gated on its own session's violation
+   words (metal_gate) */
 static ncclResult_t walk(struct metal_program *program, struct inflight *issuing, struct inflight *through, int *published) {
   ncclResult_t result = ncclSuccess;
   struct inflight *g = issuing;
@@ -3194,6 +3197,7 @@ static ncclResult_t retire(struct metal_program *program) {
     struct inflight *g = inflight;
     for (uint32_t h = 0; h < g->session->count; h++)
       if (g->session->channels[h].consumed < g->end[h]) return ncclSuccess;
+    metal_gate(program, g->session->violation_buffer);
     result = epilogue(program, g->list, g->n);
     inflight = g->next_group;
     if (!inflight) inflight_last = NULL;
@@ -3362,6 +3366,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
           result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publication and landing of its whole operand "
                                           "(ncclMeshFusable, ncclMeshFusableRooted)");
         fusing.out = NULL; fusing.call = NULL;
+        metal_gate(program, violation);
         for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
         if (!result) result = retire(program);
       }

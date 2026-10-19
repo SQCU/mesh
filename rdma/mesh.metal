@@ -10,11 +10,10 @@
 #pragma METAL internals : enable
 #include <metal_stdlib>
 
-// The word at `word` once it holds at least `target`, with a system-scope fence before each load (without it the M4
-// did not observe the NIC's or the host's store: metal-microbench d8566be). No bound of its own: no libnccl-mesh wait
-// takes it (theirs are mesh_wait_bounded's, design/recovery.md#five-seconds); its word's owner ends it (a host watcher's
-// store). A reader orders its later loads after the observation with a system-scope fence of its own, after the barrier
-// that gives the observation to its threads.
+// The word at `word` once it holds at least `target`, with mesh_wait_bounded's fence before each load and no bound: no
+// wait takes it, and it and mesh_remote_wait are kept only for a libnccl-mesh.dylib built before 4efbec2f, whose STEPS
+// call mesh_remote_wait (metal-microbench metal_runtime.swift joins a dylib's STEPS to this file); both go once no
+// node's dylib is older (design/recovery.md#five-seconds).
 template <typename W>
 __attribute__((always_inline)) static inline W mesh_wait(volatile coherent(system) device const W *word, ulong target) {
     W seen;
@@ -25,11 +24,19 @@ __attribute__((always_inline)) static inline W mesh_wait(volatile coherent(syste
     return seen;
 }
 
-// The word at `word` once it holds at least `target`, or as it is after `polls` loads (each after mesh_wait's fence;
-// 0 or 1: one load): every libnccl-mesh wait, at most nccl.h NCCL_MESH_POLLS loads, which hold the GPU at most
-// MESH_PLATFORM_NS (design/recovery.md#five-seconds; a load's period the node GPU's, rdma/NCCL.md "Bounded waits").
-// The word is still a canceller's (design/recovery.md Q16), and the caller tells a word short of `target` (the bound
-// reached) from a landing.
+// A landing's completion word (M07) once it holds 1 plus the invocation's cycle (M30; 0 in a one-pass program), or
+// UINT64_MAX once its link was cancelled (M12); the word returned tells the two apart.
+__attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coherent(system) device const ulong *completion, ulong cycle) {
+    return mesh_wait(completion, 1 + cycle);
+}
+
+// The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load), each after a
+// system-scope fence (without it the M4 did not observe the NIC's or the host's store: metal-microbench d8566be): every
+// wait, at most nccl.h NCCL_MESH_POLLS loads, which hold the GPU at most MESH_PLATFORM_NS
+// (design/recovery.md#five-seconds; a load's period the node GPU's, rdma/NCCL.md "Bounded waits"). The word is still a
+// canceller's (design/recovery.md Q16), and the caller tells a word short of `target` (the bound reached) from a
+// landing. A reader orders its later loads after the observation with a system-scope fence of its own, after the
+// barrier that gives the observation to its threads.
 template <typename W>
 __attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
     W seen;

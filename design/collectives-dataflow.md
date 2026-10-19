@@ -541,7 +541,8 @@ The call is the same with an `ncclMeshStream` whose buffers are `ncclMeshBuffer`
    - `metal_begin4` (Metal 4, line 231): the caller's encoder, argument table and residency set, the device's argument
      ring and a leading barrier.
    - `metal_begin` (classic, line 220): the caller's command buffer; the caller's encoder (borrowed) or one made lazily.
-   - Either binds the session's `violation_buffer` and the stream's `polls`.
+   - Either binds the session's `violation_buffer` and the stream's `polls` (0, or more than `NCCL_MESH_POLLS`:
+     `NCCL_MESH_POLLS`). The walk gates each group's dispatches on its own session's words (`metal_gate`).
    - Metal 4 makes every ring, `publication` and `inputs` resident.
 3. **Staging.**
    - `own` is `recv` for in-place work (all-reduce, broadcast, all-gather, the root's reduce), else a workspace
@@ -639,15 +640,16 @@ invocation t and mark k:
 **GPU time, both ranks symmetric for the all-reduce, position p:**
 
 1. The producer kernel (`streamed_finish_publish`):
-   - `mesh_step_enter` (thread 0 stores the record's `sequence` into the argument ring's progress word; a bounded
-     program returns early if violation[2] is set);
+   - `mesh_step_enter` (thread 0 stores the record's `sequence` into the argument ring's progress word; the kernel
+     returns early if its session's violation[2] is set);
    - each element goes to the engine's output and, with `mesh_step_store`, into `ring_out + (p % 16) x small`;
    - `mesh_step_release`: device barrier, then thread 0 `mesh_publish`es SEND cell `p % 32` with `1 + p / 32`.
 2. The bridge sees the ready word and posts the slot. The peer's bridge writes the peer's completion word `p % 32` to
    `1 + p / 32` (design/bridge-dataflow.md).
 3. The landing kernel (`streamed_finish_norm_add`, flags 64), each threadgroup:
-   - `mesh_step_enter`; `mesh_step_await`: thread 0 waits with `mesh_remote_wait` (or the bounded form if `polls`),
-     then `mesh_step_check` checks the window's stamps (violation [0], [1]) or records a reached bound ([2..4]);
+   - `mesh_step_enter`; `mesh_step_await`: thread 0 waits with `mesh_remote_wait_bounded` (`mesh_step_wait`, at most
+     the program's `polls` loads), then `mesh_step_check` checks the window's stamps (violation [0], [1]) or records a
+     reached bound ([2..4]);
    - device barrier + system-scope fence;
    - adds the peer's row from `ring_in + (p % 16) x small` (`mesh_step_read`) to its own before the norm.
    - Nothing reads the operand buffer as the sum.
@@ -706,7 +708,7 @@ stamps) is the same in both forms, so two members may encode the same crossing d
 |---|---|---|
 | `NCCL_COMM_ID` (env) | `ncclGetUniqueId` | the root's `host:port`; bypasses opening a listener |
 | `NCCL_BUFFSIZE` (env, bytes; ≤ 0 or unset → `MESH_BUFFSIZE` = 4 MiB) | `setting` in `session_open` and `ncclMeshFusableRooted` | the large slot = `NCCL_BUFFSIZE / 8` rounded up to a block: ring bytes, pieces per message, and the digest (members must agree) |
-| `ncclMeshStream.polls` (per call) | `metal_begin`/`metal_begin4` → `p.polls` | bounds each GPU wait to `polls` loads (0: until it lands or is cancelled) |
+| `ncclMeshStream.polls` (per call) | `metal_begin`/`metal_begin4` → `p.polls` | bounds each GPU wait to `polls` loads (0, or more than `NCCL_MESH_POLLS`: `NCCL_MESH_POLLS`) |
 | `ncclMeshStream.workspace`, `issue`, `fused`, `argumentTable`, `residencySet`, `commandEncoder` | `enqueue`, `launch_metal` | form (classic or Metal 4), scratch source, issue/complete, deferred steps |
 | `ncclMeshCommInitRank`'s `paths`, `programs`, `small`, `node`, `name` | `comm_routes`, `program_of`, `mesh_wire_of`, `comm_make`, `mesh_key` | trees, programs and the small slot as operands; slot key = FNV-1a(name) |
 | `ncclMeshCommForms`'s forms | `comm_routes` (`compile_form`), `program_of` | the collective forms ahead of the defaults: packed trees, two-phase all-reduce, chunks, size bounds |
@@ -793,15 +795,10 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
    session (`comm_read`); the session reads them again, so a map that moved between the two can make a fused answer
    disagree with the session's program, which the issue then refuses. (The digest-0 `kept` cache of this hazard's
    first form went with cc8a6f8e.) A configured form that cuts the operand is never fusable (`whole_moves`).
-7. **One violation buffer for several sessions.** A completion or launch spanning groups of several sessions binds the
-   first group's session's violation buffer as every non-check dispatch's gate (2491-2492, 2593-2595;
-   `nccl-mesh-metal.m` 278, 319). With `polls > 0`, one session's reached bound stops another session's publications.
-8. **Host-path cycles wrap at 2^32 positions.** `mesh_host_publish` takes `(uint32_t)at` (1295, 1722;
+7. **Host-path cycles wrap at 2^32 positions.** `mesh_host_publish` takes `(uint32_t)at` (1295, 1722;
    `mesh-collective.c` 1259-1267), so its cycle wraps after 2^32 positions on one session; the GPU path and `landed`
    use 64 bits.
-9. **Stale comment.** `nccl-mesh-metal.h` 43 says "nccl-mesh.c gives it at least 1 here". `launch_metal` passes
-   `polls` unchanged (2491), and 0 is accepted (rdma/NCCL.md "Bounded waits").
-10. **torch-mesh never calls `ncclCommGetAsyncError` or `ncclCommDestroy`.** A Metal-path failure found after a group
-    returned surfaces only at that communicator's next group. Sessions live until `session_exit`.
-11. **`run()` busy-spins with `session_lock` held** (1680-1729). A slow peer costs a core and blocks every other
-    communicator's group, `ncclCommDestroy` and `ncclMeshFusableRooted` in the process, for up to 10 s.
+8. **torch-mesh never calls `ncclCommGetAsyncError` or `ncclCommDestroy`.** A Metal-path failure found after a group
+   returned surfaces only at that communicator's next group. Sessions live until `session_exit`.
+9. **`run()` busy-spins with `session_lock` held** (1680-1729). A slow peer costs a core and blocks every other
+   communicator's group, `ncclCommDestroy` and `ncclMeshFusableRooted` in the process, for up to 10 s.

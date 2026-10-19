@@ -161,8 +161,8 @@ ARGS(args, uint64_t, uint32_t);
 /* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
    keeps until the program's end; or the Metal 4 form's caller's encoder, argument table and residency set, the
    device's argument ring, and whether a buffer was made resident since the set's last commit; and either form's
-   session's violation words (none: nothing recorded or halted, and no wait, which nccl-mesh.c encodes only with a
-   check of the session's words) and its waits' bound (`polls`, never 0) */
+   violation words, those of the session whose group it encodes (metal_gate; none: nothing recorded or halted, and no
+   wait, which nccl-mesh.c encodes only with a check of the session's words), and its waits' bound (`polls`, never 0) */
 struct ring;
 struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed;
                        id<MTL4ComputeCommandEncoder> encoder4; id<MTL4ArgumentTable> table; id<MTLResidencySet> residency;
@@ -307,6 +307,14 @@ void metal_resident(struct metal_program *program, void *buffer) {
   program->added = 1;
 }
 
+void metal_gate(struct metal_program *program, void *violation) {
+  if ((id<MTLBuffer>)violation == program->violation) return;
+  [(id<MTLBuffer>)violation retain];
+  [program->violation release];
+  program->violation = (id<MTLBuffer>)violation;
+  metal_resident(program, violation);
+}
+
 static void close_encoder(struct metal_program *program) {
   if (!program->encoder) return;
   if (!program->borrowed) [program->encoder endEncoding];
@@ -317,8 +325,8 @@ static void close_encoder(struct metal_program *program) {
 /* the Metal 4 form's record of a step: its arguments the ring's next record (refused where the GPU has not begun the
    dispatch that read that record RECORDS dispatches ago: its command buffers not committed, or that far behind), its
    buffers made resident and their addresses in binding order (0 d, 1 s, 2 the record, 3 a, 4 v: the words a check
-   names, else the program's session's, the waits bounded by the program's polls and failures recorded where there are
-   such words; 5 progress) */
+   names, else the program's (metal_gate), the waits bounded by the program's polls and failures recorded where there
+   are such words; 5 progress) */
 static int record4(struct metal_program *program, id<MTLBuffer> d, id<MTLBuffer> s, id<MTLBuffer> a, id<MTLBuffer> words, struct args p,
                    uint64_t bound[6]) {
   struct ring *ring = program->ring;
@@ -358,9 +366,9 @@ static int dispatch4(struct metal_program *program, id<MTLComputePipelineState> 
 }
 
 /* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the program's
-   violation words) and the arguments p (2, its polls the program's where v is such words), the progress word
-   (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`) as one threadgroup of up to
-   1024 threads over a block's piece, any other over `units` threads */
+   violation words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the progress
+   word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`) as one threadgroup of
+   up to 1024 threads over a block's piece, any other over `units` threads */
 static int dispatch_as(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units,
                        int group);
 /* a GROUP kernel where `a` is given (the cells or the completion words) */
