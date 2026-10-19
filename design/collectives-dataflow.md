@@ -188,7 +188,8 @@ another thread's group.
 **`session_close` (line 1194)**, in order:
 
 1. Loses the groups in flight (`inflight_lose` records each as a `losses` entry for the next completion).
-2. `drain`: waits for library-made GPU programs; see section 6.
+2. Waits on `finished` for the library-signalled GPU programs that touched this session (`last`, kept by
+   `program_end`), no other session's, so a destroy under `session_lock` never waits on another communicator's work.
 3. Stops and joins the progress thread.
 4. Releases the ring and violation `MTLBuffer`s.
 5. Destroys the transport.
@@ -196,7 +197,7 @@ another thread's group.
 7. Decrements and prunes the attach.
 
 Its caller must have completed every window that waits on the session's words. The Metal 4 form signals nothing to the
-library (`program_end` with a borrowed encoder), so `drain` cannot wait for those windows. `mesh_rank.m:run_windows`
+library (`program_end` with a borrowed encoder), so `session_close` cannot wait for those windows. `mesh_rank.m:run_windows`
 waits for every submitted window before the detach.
 
 **`ncclCommGetAsyncError` (line 831)** returns `comm->async` if set. Otherwise it calls `session_async` (line 1058):
@@ -696,7 +697,7 @@ stamps) is the same in both forms, so two members may encode the same crossing d
   - `watch_held` destroys everything held within 250 ms of it being set.
 - torch-mesh never reads it.
 
-**`drain` (line 1179)** applies before a host-path group and in `session_close`.
+**`drain` (line 1179)** applies before a host-path group; `session_close` waits for its own session's programs only.
 
 - It waits on `finished` for every library-signalled GPU program: classic form, library-made encoder, process-wide.
 - `MESH_SILENT_NS` with nothing finishing and nothing landing → `release_all(ncclTimeout)`. A second such interval →

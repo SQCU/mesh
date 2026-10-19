@@ -1167,17 +1167,20 @@ static void gates_turn(struct port *port){
     flow_lost(f,ETIMEDOUT,2);
   }
 }
-/* design/recovery.md#five-seconds B12 (22891630^ mesh-flight.h's pending-operation age, per port: its dispatch's `job_at`
-   in place of flight_begin's stamp, its `done` in place of flight_end's; a flow stop's move to the error state stamped
-   at the call itself, `moving_at`, lanes_release, stops running one at a time on the port's queue): a port whose
-   open's or link's job, or a flow stop's move, is still out MESH_PLATFORM_NS after it began is concluded around it,
-   once: open 0 and port_lost (ETIMEDOUT: its socket closed, the map's phase STOPPED), no move to the error state, and
-   its programs' words ~0 from this thread (their stops wait behind the call on its queue).  The call itself cannot be
-   ended.  While any port's job is so out, no port dispatches a driver call and the devices are not read (`stalled`:
-   port_open, link_turn, lanes_release, ports_find); once the call returns the port opens again (`opening`, port_open
-   past its quiet window, B9; an open's own return is port_opened's) and so takes jobs again.  A port whose progress
-   threads did not hold for a settle or a guarded change within MESH_PLATFORM_NS (`unguarded`, port_wait: the change not
-   made) is concluded alike, once, unless already concluded around a call.  Read on the event loop's turn */
+/* design/recovery.md#five-seconds B12 (22891630^ mesh-flight.h's pending-operation age, per port: its dispatch's
+   `job_at` in place of flight_begin's stamp, its `done` in place of flight_end's; a flow stop's move to the error state
+   stamped at the call itself, `moving_at`, lanes_release, stops running one at a time on the port's queue): a port
+   whose open's or link's job, or a flow stop's move, is still out MESH_PLATFORM_NS after it began is concluded around
+   it, once: open 0 and port_lost (ETIMEDOUT: its socket closed, the map's phase STOPPED), no move to the error state,
+   and its programs' words ~0 from this thread (their stops wait behind the call on its queue).  The call itself cannot
+   be ended.  While any port's job is so out, no port dispatches a driver call and the devices are not read (`stalled`:
+   port_open, link_turn, lanes_release, ports_find).  A port whose progress threads did not hold for a settle or a
+   guarded change within MESH_PLATFORM_NS (`unguarded`, port_wait: the change not made) is concluded alike, once, unless
+   already concluded around a call.  Each conclusion moves the port's epoch and rings its bell; the port stays `stuck`
+   until the call returns and each progress thread has told the conclusion's epoch (a thread tells it on its first pass
+   after its call returns, port_pass, or at once on the bell where it is in none), then opens again (`opening`,
+   port_open past its quiet window, B9; an open's own return is port_opened's) and so takes jobs again.  Read on the
+   event loop's turn */
 static void ports_stalled(void){
   int any=0;
   const uint32_t unheld=atomic_exchange(&unguarded,0);
@@ -1187,11 +1190,17 @@ static void ports_stalled(void){
     const uint64_t at=atomic_load(&port->moving_at);
     const int opening=port->job && !atomic_load_explicit(&port->done,memory_order_acquire) && now-port->job_at>=MESH_PLATFORM_NS;
     const int linking=l->job && !atomic_load_explicit(&l->done,memory_order_acquire) && now-l->job_at>=MESH_PLATFORM_NS;
-    const int moving=at && now>at && now-at>=MESH_PLATFORM_NS,out=opening||linking||moving,held=!port->stuck && unheld>>p&1;
+    const int moving=at && now>at && now-at>=MESH_PLATFORM_NS,out=opening||linking||moving,held=unheld>>p&1;
     any|=out;
-    if(!out && port->stuck){port->stuck=0;if(!port->job)port->opening=1;}
-    if(port->stuck || (!out && !held))continue;
-    port->stuck=(uint32_t)out;
+    if(port->stuck){
+      int returned=!out;
+      for(int side=0;returned && side<port->threads;side++)
+        returned=atomic_load_explicit(port->seen+side,memory_order_acquire)>=atomic_load(&port->epoch);
+      if(returned){port->stuck=0;if(!port->job)port->opening=1;}
+      continue;
+    }
+    if(!out && !held)continue;
+    port->stuck=1;atomic_fetch_add(&port->epoch,1);port_bell(port);
     if(!out)say("link %u (%s): a progress thread did not hold within %.1f s for a settle or a verbs change, which was not "
                 "made: its port concluded around it (design/recovery.md#five-seconds)\n",port->index,port->name,
                 (double)MESH_PLATFORM_NS/1e9);
@@ -1304,7 +1313,7 @@ static struct port *port_at(uint32_t interface){
    went with it): forgotten with every object made on it, no verbs call (design/RDMA-KERNEL-RECOVERY.md "October 18"),
    and the device opened afresh */
 static void port_open(struct port *port){
-  if(port->job || !port->opening || port->control>=0 || now<port->quiet_at || atomic_load_explicit(&stalled,memory_order_relaxed))return;
+  if(port->job || port->stuck || !port->opening || port->control>=0 || now<port->quiet_at || atomic_load_explicit(&stalled,memory_order_relaxed))return;
   port->opening=0;
   port->interface=if_nametoindex(port->name);
   struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=port->interface};
@@ -1580,11 +1589,14 @@ static void terminations_watch(void){
    mapped is replaced: where it got that page (no mapping was there: the doorbell the driver unmapped in a termination),
    or the port's bit in `faulted` is set (its other thread got the page first; else the store faults again until the
    event loop takes the bit), the store lands in that page, no doorbell rings, and the port is halted for the event loop
-   to lose (port_halt, terminations_turn: ENETDOWN, no verbs call).  The bridge does not exit.  Any other fault: the
-   default action restored, the store made again, the process ended.  On the thread's alternate stack where it has one
-   (port_progress); mmap, munmap and sigaction alone */
+   to lose (port_halt, terminations_turn: ENETDOWN, no verbs call).  Where the page could not be mapped and the bit is
+   clear, the store is made once more (`retried`, the port's last such page: its other thread may have mapped it, its
+   bit not yet set or already taken by the event loop), and only a second fault at that page is any other fault.  The
+   bridge does not exit.  Any other fault: the default action restored, the store made again, the process
+   ended.  On the thread's alternate stack where it has one (port_progress); mmap, munmap and sigaction alone */
 static uintptr_t provider[2];
 static _Atomic uint32_t faulted;
+static _Atomic uintptr_t retried[MESH_PORTS];
 static void fault_heard(int number,siginfo_t *info,void *context){
   const uintptr_t pc=__darwin_arm_thread_state64_get_pc(((ucontext_t *)context)->uc_mcontext->__ss);
   const uintptr_t page=trunc_page((uintptr_t)info->si_addr);
@@ -1596,6 +1608,7 @@ static void fault_heard(int number,siginfo_t *info,void *context){
     void *got=mmap((void *)page,vm_page_size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
     if(got!=MAP_FAILED && got!=(void *)page)munmap(got,vm_page_size);
     if(got==(void *)page || atomic_load(&faulted)>>port->index&1){port_halt(port,&faulted);return;}
+    if(atomic_exchange(&retried[port->index],page)!=page)return;
   }
   struct sigaction fallback={.sa_handler=SIG_DFL};
   sigaction(number,&fallback,NULL);

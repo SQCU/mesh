@@ -443,6 +443,17 @@ static int sends_configure(struct flow *link){
   return error;
 }
 
+/* design/prepared-machine.md#M12: a client's cancellation at its offset `at` (0: none), only where its header, its
+   destination `d`'s range and that range's words all lie in the window, as each word the bridge stores does (#M09);
+   else NULL */
+static struct mesh_cancellation *cancel_at(uint64_t at,uint32_t d){
+  const uint64_t range=sizeof(struct mesh_cancellation)+sizeof(struct mesh_cancel_range)*((uint64_t)d+1);
+  if(!at || at<M->data_off || range>M->length || at>M->length-range)return NULL;
+  struct mesh_cancellation *cancel=(void *)((char *)M+at);
+  const uint64_t offset=cancel->ranges[d].offset,count=cancel->ranges[d].count;
+  return offset>=M->data_off && offset<=M->length && count<=(M->length-offset)/sizeof(uint64_t)?cancel:NULL;
+}
+
 /* design/prepared-machine.md#M08 */
 /* The receive side: a ring a queue of the program, on that queue's lane, its records invocation by invocation (the
    flow's invocations, #cables), the transfers of each in binding order, a transfer's chunks in order, each storing its
@@ -460,8 +471,7 @@ static int receives_configure(struct flow *link){
      client->target_count>(m->length-client->targets)/sizeof(struct mesh_target)))return EINVAL;
   struct mesh_tx *tx=flow_tx(link);
   /* design/prepared-machine.md#M12: the program's own words toward the flow's node, where it has any */
-  const uint64_t range=sizeof(struct mesh_cancellation)+sizeof(struct mesh_cancel_range)*((uint64_t)link->destination+1);
-  const struct mesh_cancellation *cancel=tx->cancel>=m->data_off && tx->cancel<=m->length-range?(const void *)((char *)m+tx->cancel):NULL;
+  const struct mesh_cancellation *cancel=cancel_at(tx->cancel,link->destination);
   const struct mesh_cancel_range *words=cancel?cancel->ranges+link->destination:NULL;
   uint32_t invocations=tx->invocations?tx->invocations:1,fallback=atomic_load_explicit(&client->depth,memory_order_acquire),depth=fallback;
   if(!depth||depth>invocations)depth=invocations;
@@ -636,11 +646,12 @@ void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t where,const 
   for(struct flow *g=flows;g;g=g->next)if(g->owner==f->owner && g->destination==f->destination)flow_fail(g,code,domain,where,lost);
 }
 /* design/algorithm-sources.md#meshresult: a client's program toward its destination `d` refused or failed as a value
-   naming the node `where`: its status the failure, then ~0 into its cancel words (M12), so a client reading a landing
-   of it reads the status the ~0 names */
+   naming the node `where`: its status the failure, then ~0 into its cancel words (M12, where they lie in the window:
+   cancel_at), so a client reading a landing of it reads the status the ~0 names */
 static void program_refused(struct mesh_client *client,uint64_t owner,uint32_t d,int64_t code,uint32_t where){
   status_failed(&client->status[d],owner,code,4,where);
-  if(client->tx[d].cancel)mesh_cancel(M,(void *)((char *)M+client->tx[d].cancel),d);
+  struct mesh_cancellation *cancel=cancel_at(client->tx[d].cancel,d);
+  if(cancel)mesh_cancel(M,cancel,d);
 }
 /* a client's program toward its destination `d` failed as a value naming the node `where`: its flows failed, and the
    program refused (program_refused) */
@@ -690,7 +701,7 @@ static struct flow *flow_make(struct port *port,uint64_t owner,uint32_t d,uint64
   const uint64_t cancel=mesh_client_at(M,owner)->tx[d].cancel;
   *f=(struct flow){.next=flows,.far=far,.queues=queues,.stripe=stripe,.stripes=stripes,.destination=d,.lane={lane[0],queues>1?lane[1]:0},
     .slot=slot,.generation=++port->generation[slot],.lanes=UINT32_C(1)<<lane[0]|(queues>1?UINT32_C(1)<<lane[1]:0),.key=key,.owner=owner,
-    .M=M,.port=port,.post_send=queue->send,.post_receive=queue->receive,.cancel=cancel?(void *)((char *)M+cancel):NULL};
+    .M=M,.port=port,.post_send=queue->send,.post_receive=queue->receive,.cancel=cancel_at(cancel,d)};
   port->reserved[slot/64]|=UINT64_C(1)<<(slot%64);
   if(slot>=atomic_load(&port->high))atomic_store(&port->high,slot+1);
   for(uint32_t q=0;q<queues;q++)atomic_store_explicit(&port->link.holder[lane[q]],f,memory_order_release);

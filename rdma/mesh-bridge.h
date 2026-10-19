@@ -292,8 +292,9 @@ struct stripes {
 };
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue (its
    open's job `job`, dispatched at `job_at`; a flow stop's move to the error state, begun at `moving_at`, 0 while none
-   is out; `stuck` once a job or move of the port outlived MESH_PLATFORM_NS and the port was concluded around it, until
-   the call returns: design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window
+   is out; `stuck` once a job or move of the port outlived MESH_PLATFORM_NS, or a progress thread did not hold within
+   it, and the port was concluded around it, until the call returns and each progress thread has told the conclusion's
+   epoch: design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window
    (`quiet_at`,
    MESH_PLATFORM_NS past its last conclusion or a peer interface's termination heard, B9b, moved only later and by any
    thread, before which no port job but an earlier conclusion's flush, struct link

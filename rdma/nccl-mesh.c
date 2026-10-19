@@ -256,9 +256,10 @@ struct session;
    that slot (`leased`, its bridge's report of its links, and `chosen`, the pair of each, UINT32_MAX none: mesh-call.h
    mesh_lanes_choose); its session (NULL until a group crosses a link); `opening` a session whose start and agreement
    run outside the sessions' lock, which a revoke ends; `revoked`, set by ncclCommRevoke and kept until ncclCommDestroy,
-   failing every group after it; `peers`, its bootstrap's sockets while its init runs, which a revoke shuts down; the
-   four under `guard`.  A non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy
-   joins it), `async` ncclInProgress until it ends and `why` its failure's text */
+   failing every group after it; `peers`, its bootstrap's sockets, kept for its life once its init succeeds (NCCL's
+   bootstrapState: ncclMeshBootstrapSend), which a revoke shuts down and comm_free closes; the four under `guard`.  A
+   non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy joins it), `async`
+   ncclInProgress until it ends and `why` its failure's text */
 struct attach;
 struct ncclComm {
   struct mesh_link_map map;
@@ -329,8 +330,19 @@ static void routes_free(struct ncclComm *comm, int all) {
   comm->entries = NULL; comm->programs = 0;
 }
 
+/* comm's bootstrap's sockets closed (NCCL's bootstrapClose), under its guard */
+static void bootstrap_close(struct ncclComm *comm) {
+  pthread_mutex_lock(&comm->guard);
+  for (int r = 0; comm->peers && r < comm->nranks; r++)
+    if (comm->peers[r] >= 0) close(comm->peers[r]);
+  free(comm->peers);
+  comm->peers = NULL;
+  pthread_mutex_unlock(&comm->guard);
+}
+
 static void comm_leave(struct ncclComm *comm);
 static void comm_free(struct ncclComm *comm) {
+  bootstrap_close(comm);
   comm_leave(comm);
   routes_free(comm, 1);
   for (uint32_t k = 0; k < comm->scratches; k++) metal_release(comm->scratch[k]);
@@ -778,17 +790,21 @@ const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
 /* NCCL's bootstrap (NVIDIA/nccl src/bootstrap.cc): the unique id is the root's address, host:port (NCCL_COMM_ID where
    set, else a listener this process opens), and the root listens on that host alone where it is an IPv6 address (the
    fabric's ULA; bootstrapCreateRoot listens on the id's address), else on every address; rank 0 takes every rank's
-   report there and sends each the whole table, at each gather of the init, on sockets it keeps until the init ends.
-   A non-root's connect is tried every 100 ms until the root listens, and the root looks for a ringer every 100 ms; each
-   reads a revoke of the communicator (ncclCommRevoke, ncclCommAbort, ncclCommDestroy: a non-blocking init's) at each
-   look, and the revoke shuts the init's sockets down (`peers`), so its gathers end.  The first gather has no deadline,
-   that revoke and the caller's process its cancellers (these sockets carry no DMA and enter no driver), and it holds no
-   slot of the bridge.  The second holds this rank's claims, lease words its bridge's other clients read, so each of its
-   sends and receives is bounded by mesh.h MESH_PLATFORM_NS (ETIMEDOUT: design/recovery.md#five-seconds).  A rank's
-   report is its status (0, else why it cannot go on, so every rank fails alike), and its bridge's node and the lane
-   pairs free there toward each peer node (mesh-call.h mesh_lanes_free); at the second gather its status is its slot's
-   and its claim's.  The id is also the communicator's name where its init names none, which its session's slot takes
-   on every member (mesh_program_attach). */
+   report there and sends each the whole table, at each gather of the init, on sockets the communicator keeps once its
+   init succeeds (NCCL's bootstrapState), closed where it fails.  A non-root's connect does not block: it is looked at
+   every 100 ms and tried again 100 ms after it fails, and a non-blocking init's root looks for a ringer every 100 ms (a
+   blocking root waits in its accept); each reads a revoke of the communicator (ncclCommRevoke, ncclCommAbort,
+   ncclCommDestroy: a non-blocking init's) at each look (NCCL's socketPollConnect reads abortFlag so), and the revoke
+   shuts the init's sockets down (`peers`), so its gathers end.  The connect and the accept hold nothing of the
+   bridge's: a rank attaches once its bootstrap has connected, or accepted every rank (comm_init).  The first gather has
+   no deadline, that revoke and the caller's process its cancellers (these sockets carry no DMA and enter no driver),
+   and it holds no slot of the bridge.  The second holds this rank's claims, lease words its bridge's other clients
+   read, so each of its sends and receives is bounded by mesh.h MESH_PLATFORM_NS (ETIMEDOUT:
+   design/recovery.md#five-seconds), as each later one on these sockets is (ncclMeshBootstrapSend).  A rank's report is
+   its status (0, else why it cannot go on, so every rank fails alike), and its bridge's node and the lane pairs free
+   there toward each peer node (mesh-call.h mesh_lanes_free) as its attach reads them; at the second gather its status
+   is its slot's and its claim's.  The id is also the communicator's name where its init names none, which its session's
+   slot takes on every member (mesh_program_attach). */
 struct report { int32_t rank, status; struct mesh_lane_report lanes; };
 static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
 
@@ -869,7 +885,7 @@ static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
 
 /* the bootstrap's sockets of comm's init at `id`, the root's to each rank r (peers[r], placed by the rank its first
    report names, that report kept in `reports`; a socket not yet placed waits at peers[0]) or a non-root's to the root
-   (peers[0], its first report sent), each placed before the revoke is read, so a revoke either finds it or is read: 0,
+   (peers[0], placed once connected), each placed before the revoke is read, so a revoke either finds it or is read: 0,
    ECANCELED (comm revoked), or the errno */
 static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports) {
   int *peers = comm->peers, status = 0;
@@ -882,15 +898,24 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
     struct addrinfo hint = {.ai_socktype = SOCK_STREAM}, *addresses = NULL;
     while (peers[0] < 0 && !revoked(comm)) {
       if (!getaddrinfo(host, colon + 1, &hint, &addresses)) {
-        for (struct addrinfo *a = addresses; a && peers[0] < 0; a = a->ai_next) {
-          bootstrap_put(comm, 0, socket(a->ai_family, SOCK_STREAM, 0));
-          if (peers[0] >= 0 && connect(peers[0], a->ai_addr, a->ai_addrlen)) bootstrap_put(comm, 0, -1);
+        for (struct addrinfo *a = addresses; a && peers[0] < 0 && !revoked(comm); a = a->ai_next) {
+          const int fd = socket(a->ai_family, SOCK_STREAM, 0);
+          if (fd < 0) continue;
+          int error = fcntl(fd, F_SETFL, O_NONBLOCK) || connect(fd, a->ai_addr, a->ai_addrlen) ? errno : 0;
+          struct pollfd look = {fd, POLLOUT, 0};
+          socklen_t length = sizeof error;
+          while (error == EINPROGRESS || error == EINTR)
+            if (revoked(comm)) error = ECANCELED;
+            else if (poll(&look, 1, 100) < 0) error = errno == EINTR ? EINPROGRESS : errno;
+            else if (look.revents && getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length)) error = errno;
+          if (error) close(fd);
+          else bootstrap_put(comm, 0, fd);
         }
         freeaddrinfo(addresses);
       }
       if (peers[0] < 0) usleep(100000);
     }
-    return peers[0] < 0 || revoked(comm) ? ECANCELED : whole(peers[0], reports + comm->rank, sizeof *reports, 1);
+    return peers[0] < 0 || revoked(comm) ? ECANCELED : 0;
   }
   uint16_t port = (uint16_t)atoi(colon + 1);
   int listener = !strcmp(root.id, id) ? root.fd : -1;
@@ -901,7 +926,7 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
     int fd = -1;
     while (fd < 0 && !status)
       if (revoked(comm)) status = ECANCELED;
-      else if (poll(&look, 1, 100) < 0 && errno != EINTR) status = errno;
+      else if (poll(&look, 1, __atomic_load_n(&comm->async, __ATOMIC_ACQUIRE) == ncclInProgress ? 100 : -1) < 0 && errno != EINTR) status = errno;
       else if ((fd = accept(listener, NULL, NULL)) < 0 && errno != EWOULDBLOCK && errno != ECONNABORTED && errno != EINTR) status = errno;
     if (!status) bootstrap_put(comm, 0, fd);
     if (!status && revoked(comm)) status = ECANCELED;
@@ -918,8 +943,8 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   return status;
 }
 
-/* a gather on the bootstrap's sockets: each other rank's report to the root (`sent`: there already, bootstrap_open's),
-   then the whole table to each; 0, or the errno */
+/* a gather on the bootstrap's sockets: each other rank's report to the root (`sent`: there already, as at the first
+   gather's root, whose bootstrap_open read each), then the whole table to each; 0, or the errno */
 static int gather(const int *peers, int nranks, int rank, struct report *reports, int sent) {
   const size_t table = (size_t)nranks * sizeof *reports;
   int status = 0;
@@ -980,14 +1005,15 @@ static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, con
 }
 
 /* design/bridge-and-ipc.md#files, a communicator's init on NCCL's bootstrap at its id, the one path of every init
-   (ncclMeshCommInitRank, blocking or not): made attached (comm_attach) and every rank's report gathered; every rank
-   taking its session's slot at its own bridge (comm_slot, once the gather holds its members) and leasing its row of
-   the table there (lease_claim); a second gather confirming every claim (NCCL's own init exchanges each peer's
-   connection through its bootstrap: ncclTransportP2pSetup).  A rank that cannot go on, a slot refused, a link with no
-   pair free at both ends (ENOSPC), a claim that found a word taken (EAGAIN), a peer silent past the second gather's
-   bound (ETIMEDOUT: bootstrap_bound) or a revoke fails the init as a value, every claim released and made holding
-   nothing of its bridge's (comm_leave); the next init reads the lease words as they then stand.  Then the checker's
-   thread (comm_advise) */
+   (ncclMeshCommInitRank, blocking or not): its bootstrap's sockets opened (bootstrap_open), then made attached
+   (comm_attach) and its lanes read (mesh_lanes_free), then every rank's report gathered; every rank taking its
+   session's slot at its own bridge (comm_slot, once the gather holds its members) and leasing its row of the table
+   there (lease_claim); a second gather confirming every claim (NCCL's own init exchanges each peer's connection through
+   its bootstrap: ncclTransportP2pSetup).  A rank that cannot go on, a slot refused, a link with no pair free at both
+   ends (ENOSPC), a claim that found a word taken (EAGAIN), a peer silent past the second gather's bound (ETIMEDOUT:
+   bootstrap_bound) or a revoke fails the init as a value, every claim released, made holding nothing of its bridge's
+   (comm_leave) and its sockets closed; the next init reads the lease words as they then stand.  Made, it keeps its
+   sockets (closed at comm_free); then the checker's thread (comm_advise) */
 static ncclResult_t comm_init(struct ncclComm *made) {
   const int nranks = made->nranks, rank = made->rank;
   struct report *reports = calloc((size_t)nranks, sizeof *reports);
@@ -1000,11 +1026,11 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   made->peers = peers;
   pthread_mutex_unlock(&made->guard);
   struct report *mine = reports + rank;
-  const int making = comm_attach(made, NULL);
+  int status = nranks > 1 ? bootstrap_open(made, made->id, reports) : 0;
+  const int making = status ? status : comm_attach(made, NULL);
   *mine = (struct report){rank, making, {0}};
   if (!making) mine->status = mesh_lanes_free(made->attach->context.M, &mine->lanes);
-  int status = nranks > 1 ? bootstrap_open(made, made->id, reports) : 0;
-  if (!status && nranks > 1) status = gather(peers, nranks, rank, reports, 1);
+  if (!status && nranks > 1) status = gather(peers, nranks, rank, reports, !rank);
   ncclResult_t result = status ? fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status)) : making ? comm_fail(making, made->name) : ncclSuccess;
   for (int r = 0; !result && r < nranks; r++)
     if (reports[r].status)
@@ -1022,14 +1048,9 @@ static ncclResult_t comm_init(struct ncclComm *made) {
       if (reports[r].status) result = lease_fail(made->name, r, reports[r].status);
     if (!result) lease_keep(made, lanes, chosen);
   }
-  pthread_mutex_lock(&made->guard);
-  for (int r = 0; r < nranks; r++)
-    if (peers[r] >= 0) close(peers[r]);
-  made->peers = NULL;
-  pthread_mutex_unlock(&made->guard);
-  free(reports); free(lanes); free(chosen); free(peers);
+  free(reports); free(lanes); free(chosen);
   if (revoked(made)) result = revoked_fail(made);
-  if (result) comm_leave(made);
+  if (result) { bootstrap_close(made); comm_leave(made); }
   else comm_advise(made);
   return result;
 }
@@ -1098,18 +1119,18 @@ ncclResult_t ncclCommFinalize(ncclComm_t comm) { return comm ? ncclSuccess : fai
 static void session_close(struct session *s);
 static void release_all(struct session *s, int result, const char *format, ...);
 static void session_retire(struct session *s);
-/* ncclCommRevoke: comm revoked for good (`revoked`, until ncclCommDestroy): an init still running (a non-blocking one's)
-   ended, every socket of its bootstrap shut down and its connect and accept reading the revoke at their next look
-   (bootstrap_open), so it fails as a value with its claims released; its session's waits cancelled, its groups in
-   flight failed (a host-path group returns the revoke, a GPU wait reads its word cancelled and ends, a completion
-   through one returns the loss), a session opening (its start, its agreement awaiting its peers' digests) ended at
-   once (its program's slot retired, which fails its peers' programs toward it; its agreement reads the revoke), a
-   session not yet opening never opened (session_open reads the revoke where it
-   begins and where it would wait), and every later group on comm failed at once.  All under the communicator's own
-   lock alone, never the sessions' lock, which a group of any communicator holds while it waits on its peers: a revoke
-   from another thread reaches a member waiting for an absent peer, or behind another communicator's slow group, at
-   once.  The session is closed (its flows ended, its slot's rows returned) by ncclCommDestroy, once its GPU work has
-   finished */
+/* ncclCommRevoke: comm revoked for good (`revoked`, until ncclCommDestroy): every socket of its bootstrap shut down, so
+   an init still running (a non-blocking one's), its connect and accept reading the revoke at their next look
+   (bootstrap_open), fails as a value with its claims released, and a bootstrap send or receive on a made one ends
+   (ncclMeshBootstrapSend); its session's waits cancelled, its groups in flight failed (a host-path group returns the
+   revoke, a GPU wait reads its word cancelled and ends, a completion through one returns the loss), a session opening
+   (its start, its agreement awaiting its peers' digests) ended at once (its program's slot retired, which fails its
+   peers' programs toward it; its agreement reads the revoke), a session not yet opening never opened (session_open
+   reads the revoke where it begins and where it would wait), and every later group on comm failed at once.  All under
+   the communicator's own lock alone, never the sessions' lock, which a group of any communicator holds while it waits
+   on its peers: a revoke from another thread reaches a member waiting for an absent peer, or behind another
+   communicator's slow group, at once.  The session is closed (its flows ended, its slot's rows returned) by
+   ncclCommDestroy, once its GPU work has finished */
 ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
   if (!comm || revokeFlags != NCCL_REVOKE_DEFAULT) return fail(ncclInvalidArgument, "comm is NULL or revokeFlags is %d", revokeFlags);
   pthread_mutex_lock(&comm->guard);
@@ -1138,6 +1159,26 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
 }
 
 ncclResult_t ncclCommAbort(ncclComm_t comm) { return ncclCommDestroy(comm); }
+
+/* nccl.h ncclMeshBootstrapSend, ncclMeshBootstrapRecv: NCCL's bootstrapSend and bootstrapRecv, `bytes` whole on the
+   made communicator's bootstrap socket to `peer` (the root's to each rank, a rank's to the root), outside every group
+   and the sessions' lock: no session, so no flow and no lane (its lease given back clean at ncclCommDestroy); each send
+   and receive bounded by MESH_PLATFORM_NS (bootstrap_bound), a revoke shutting the socket down */
+static ncclResult_t bootstrap_move(ncclComm_t comm, int peer, void *data, size_t bytes, int sending) {
+  const int fd = comm && __atomic_load_n(&comm->async, __ATOMIC_ACQUIRE) != ncclInProgress && comm->peers && peer >= 0 &&
+                 peer < comm->nranks && (data || !bytes) ? comm->peers[peer] : -1;
+  if (fd < 0)
+    return fail(ncclInvalidArgument, "a bootstrap %s rank %d: no socket of a made communicator there (the root's to each rank, a rank's "
+                "to the root), or data is NULL", sending ? "send to" : "receive from", peer);
+  const int status = whole(fd, data, bytes, sending);
+  return status ? fail(ncclRemoteError, "communicator %s: the bootstrap %s rank %d: %s", comm->name, sending ? "send to" : "receive from",
+                       peer, strerror(status))
+                : ncclSuccess;
+}
+ncclResult_t ncclMeshBootstrapSend(ncclComm_t comm, int peer, const void *data, size_t bytes) {
+  return bootstrap_move(comm, peer, (void *)(uintptr_t)data, bytes, 1);
+}
+ncclResult_t ncclMeshBootstrapRecv(ncclComm_t comm, int peer, void *data, size_t bytes) { return bootstrap_move(comm, peer, data, bytes, 0); }
 
 static ncclResult_t session_async(ncclComm_t comm);
 /* a non-blocking init's state (ncclInProgress until it ends, then its failure, named again here) or a launch's failure,
@@ -1433,18 +1474,19 @@ struct channel {
 
 /* a communicator's session: its program's slot on the process's client of the node's bridge (`context` on `attach`), the
    bridge it opened under (`pid` and `boot`, the region's then), its channels, its progress thread and its failure once
-   one is kept (`failed`, stored once `failure` is written, by the one release_all that `claimed` it); `next`, the
-   process's other sessions, closed at its exit */
+   one is kept (`failed`, stored once `failure` is written, by the one release_all that `claimed` it); `last`, the count
+   (`issued`) of the last program signalling `finished` that touched it (`touched` while one is encoded: program_end),
+   which its close awaits; `next`, the process's other sessions, closed at its exit */
 struct session {
   struct ncclComm *comm;
   struct mesh_ctx context;
   struct attach *attach;
   struct hdr *header;
-  uint64_t pid, boot;
+  uint64_t pid, boot, last;
   struct channel *channels;
   uint32_t count;
   size_t slot, small;
-  int running;
+  int running, touched;
   struct mesh_metal_transport transport;
   void *violation_buffer;
   _Atomic uint64_t *violation;
@@ -1657,7 +1699,7 @@ static void progress_targets(struct session *s, uint64_t ahead) {
 }
 
 /* every GPU program the caller was told to commit finished, awaited on `finished` (each such program's end signals its
-   count, `issued`: program_end): gpu_reached */
+   count, `issued`: program_end): gpu_reached, before a host-path group runs (launch) */
 static void drain(void) {
   if (!finished) return;
   gpu_reached(finished, issued);
@@ -1665,16 +1707,18 @@ static void drain(void) {
 }
 
 static void inflight_lose(struct session *s);
-/* the session ended: its groups in flight lost, every GPU program finished, its progress thread joined, its program's
-   slot retired with its sections (its rings and violation words: the bridge releases them) and its lanes' lease
-   released (slot_end); its communicator holds its attach until ncclCommDestroy */
+/* the session ended: its groups in flight lost, every GPU program that touched it finished (`last`; no other
+   session's, so a destroy under the sessions' lock never waits on another communicator's GPU work), its progress
+   thread joined, its program's slot retired with its sections (its rings and violation words: the bridge releases
+   them) and its lanes' lease released (slot_end); its communicator holds its attach until ncclCommDestroy */
 static void session_close(struct session *s) {
   if (!s) return;
   pthread_mutex_lock(&s->comm->guard);
   if (s->comm->session == s) s->comm->session = NULL;
   pthread_mutex_unlock(&s->comm->guard);
   inflight_lose(s);
-  drain();
+  if (finished && s->last) gpu_reached(finished, s->last);
+  if (finished) metal_collect(finished);
   if (s->running) {
     pthread_mutex_lock(&s->lock);
     atomic_store(&s->stop, 1);
@@ -3250,6 +3294,7 @@ static struct message *sending(struct inflight *g, uint32_t h, uint64_t at) {
 static ncclResult_t complete_group(struct metal_program *program, struct inflight *g, int *published) {
   struct session *s = g->session;
   ncclResult_t result = ncclSuccess;
+  s->touched = 1;
   metal_gate(program, s->violation_buffer);
   for (; g->next < g->events && !result; g->next++) {
     const struct event v = g->order[g->next];
@@ -3274,6 +3319,7 @@ static ncclResult_t complete_group(struct metal_program *program, struct infligh
 static ncclResult_t issue_group(struct metal_program *program, struct inflight *g, int *published) {
   struct session *s = g->session;
   ncclResult_t result = ncclSuccess;
+  s->touched = 1;
   metal_gate(program, s->violation_buffer);
   for (size_t e = g->next; e < g->events && !result; e++) {
     const struct event v = g->order[e];
@@ -3515,11 +3561,14 @@ static ncclResult_t retire(struct metal_program *program) {
 }
 
 /* a program's end: where the library made its encoder and the group succeeded, its end signals `finished` at its count
-   (`issued`, which drain awaits: a program the caller was told to commit); a borrowed encoder's, or a failed group's,
-   signals nothing, so no wait of the library's is on a command buffer the caller may never commit */
+   (`issued`, which drain awaits: a program the caller was told to commit), each session it touched keeping that count
+   as its `last` (session_close); a borrowed encoder's, or a failed group's, signals nothing, so no wait of the
+   library's is on a command buffer the caller may never commit.  Under the sessions' lock */
 static void program_end(struct metal_program *program, int borrowed, ncclResult_t result) {
-  if (borrowed || result) metal_end(program, NULL, 0);
-  else metal_end(program, finished ? finished : (finished = metal_event()), ++issued);
+  const uint64_t count = borrowed || result ? 0 : ++issued;
+  metal_end(program, count ? (finished ? finished : (finished = metal_event())) : NULL, count);
+  for (struct session *s = sessions; s; s = s->next)
+    if (s->touched) { s->touched = 0; if (count) s->last = count; }
 }
 
 /* a walk's failure: session s (the walk's own group's; NULL: none) and every session with a group in flight through
@@ -3599,6 +3648,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     return fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
   }
   comm->scratch_used = 0;
+  if (remote) s->touched = 1;
   for (uint32_t h = 0; metal4 && remote && h < s->count; h++) { metal_resident(program, s->channels[h].ring_out); metal_resident(program, s->channels[h].ring_in); }
   if (metal4 && remote) { metal_resident(program, s->transport.publication); metal_resident(program, s->transport.inputs); }
   const size_t r = (size_t)comm->rank;
