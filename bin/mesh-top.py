@@ -3,7 +3,7 @@ import argparse, collections, concurrent.futures, curses, html, json, os, subpro
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path[:0] = [HERE, os.path.join(HERE, "..", "rdma")]
-import mesh, mesh_disk, peers
+import mesh, mesh_disk
 
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 LATEST = "/v1/latest?measures=scalars"
@@ -15,25 +15,17 @@ USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html
 class Node:
     def __init__(self, name, number, me):
         self.name, self.number, self.me = name, number, me
-        self.sample, self.info, self.error, self.transport, self.rtt = None, {}, None, None, None
+        self.sample, self.record, self.error, self.rtt = None, {}, None, None
         self.sequence, self.previous, self.asked = None, None, None
 
 def fetch(node):
-    """The node's telemetry, its own over loopback and another's through its bridge's exec (curl there, at 127.0.0.1),
-    and its node-info through its bridge, read once."""
+    """This node's telemetry over loopback, read once; another node's stays on that node, the map giving its facts."""
     started = time.monotonic()
     try:
-        if node.me:
-            with urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}") as response: envelope = json.load(response)
-            node.transport = ("loopback", "127.0.0.1")
-        else:
-            code, out = mesh.run(node.number, f"curl -fsS 'http://127.0.0.1:{TELEMETRY_PORT}{LATEST}'")
-            if code: raise OSError(f"curl exited {code}: {out.decode(errors='replace').strip()[:160]}")
-            envelope = json.loads(out)
-            node.transport = ("bridge", f"node {node.number}")
+        with urllib.request.urlopen(f"http://127.0.0.1:{TELEMETRY_PORT}{LATEST}") as response: envelope = json.load(response)
         node.rtt = time.monotonic() - started
     except (OSError, ValueError) as error:
-        node.error, node.transport = f"{type(error).__name__}: {error}", None
+        node.error, node.rtt = f"{type(error).__name__}: {error}", None
         return
     record = (envelope or {}).get("record") or {}
     if not record.get("sample"):
@@ -42,12 +34,12 @@ def fetch(node):
     node.error = None
     if record.get("sequence") != node.sequence:
         node.previous, node.sample, node.sequence = node.sample, record["sample"], record.get("sequence")
-    if not node.info and node.number is not None:
-        try: node.info = peers.observation(peers.sample(mesh.ask(node.number, "nodeinfo", b""), 1 << 20))
-        except (OSError, ValueError) as error: node.info = {"error": f"{type(error).__name__}: {error}"}
 
 def fabric(node):
-    return (node.sample or {}).get("fabric") or {}
+    return ((node.sample if node else None) or {}).get("fabric") or {}
+
+def gib(size):
+    return f"{size / 2**30:.0f}G" if size else "?"
 
 def rate_text(value):
     if value is None: return "-"
@@ -85,36 +77,36 @@ class Top:
         self.names, self.paired, self.unmapped = {}, set(), None
 
     def refresh(self, wait=False):
-        """The map of this node's bridge (mesh.current: mesh_map), naming each bridge node; then every node it names, this
-        one's own among them, each one's telemetry asked for where no ask of it is under way (`wait`: until each answers)."""
-        own = None
+        """The map of this node's bridge (mesh.current: mesh_map), naming each bridge node, and its records (mesh.nodes:
+        each node's model, memory, window, boot and available memory); then this node's own telemetry asked for where no
+        ask of it is under way (`wait`: until it answers)."""
+        own, records = None, {}
         try:
             now = mesh.current()
             self.names, self.unmapped, own = dict(zip(now.nodes, now.names)), None, now.node
             self.paired = {frozenset((now.names[a], now.names[b])) for a, b in now.map.pairs}
+            records = {record["name"]: record for record in mesh.nodes()}
         except (OSError, ValueError) as error: self.paired, self.unmapped = set(), str(error)
         self.me = self.names.get(own) or self.me
         for number, name in [(own, self.me)] + list(self.names.items()):
             if name not in self.nodes and (not self.args.nodes or name in self.args.nodes or number == own):
                 self.nodes[name] = Node(name, number, number == own)
         for node in self.nodes.values():
-            if node.asked is None or node.asked.done(): node.asked = self.pool.submit(fetch, node)
-        if wait: concurrent.futures.wait([node.asked for node in self.nodes.values()])
+            node.record = records.get(node.name) or {}
+            if node.me and (node.asked is None or node.asked.done()): node.asked = self.pool.submit(fetch, node)
+        if wait: concurrent.futures.wait([node.asked for node in self.nodes.values() if node.asked])
         for node in self.nodes.values(): self.account(node)
-
-    def owner(self, address):
-        for node in self.nodes.values():
-            for port in fabric(node).get("ports") or []:
-                if port.get("address") and port["address"] == (address or "").split("%")[0]: return node.name, port["iface"]
-        return None, None
 
     def live(self, node):
         """The node's running bridge (its telemetry's), else None."""
         return next((b for b in fabric(node).get("bridges") or [] if not b.get("exited_at")), None)
 
-    def toward(self, node, peer):
-        """The ports of `node`'s running bridge (mesh-stat's peers, by port index) whose peer the map names `peer`."""
-        return [p for p in ((self.live(node) or {}).get("stat") or {}).get("peers") or [] if self.names.get(p.get("node")) == peer]
+    def toward(self, node):
+        """The ports of `node`'s running bridge (mesh-stat's peers, by port index) by the name the map gives each peer."""
+        found = collections.defaultdict(list)
+        for port in ((self.live(node) or {}).get("stat") or {}).get("peers") or []:
+            found[self.names.get(port.get("node")) or f"node {port.get('node', '?')}"].append(port)
+        return found
 
     def account(self, node):
         sample, previous = node.sample, node.previous
@@ -147,21 +139,6 @@ class Top:
         return {"now": last[2] / last[1], "now_ops": last[3] / last[1], "avg": sum(r[2] for r in recent) / span, "avg_ops": sum(r[3] for r in recent) / span,
                 "calls": sum(r[4] for r in recent), "peak": max(r[2] / r[1] for r in rows), "spark": [r[2] / r[1] for r in list(rows)[-32:]], "age": time.time() - end}
 
-    def cables(self):
-        found = {}
-        for node in self.nodes.values():
-            for port in fabric(node).get("ports") or []:
-                for neighbor in port.get("neighbors") or []:
-                    peer, peer_iface = self.owner(neighbor["address"])
-                    if peer and peer != node.name:
-                        key = frozenset(((node.name, port["iface"]), (peer, peer_iface)))
-                        found.setdefault(key, {})[node.name] = neighbor.get("state")
-        return found
-
-    def port(self, name, iface):
-        node = self.nodes.get(name)
-        return node, next((p for p in fabric(node).get("ports") or [] if p.get("iface") == iface), None) if node else None
-
     def frame(self):
         W = self.args.window
         lines, hints = [], []
@@ -170,12 +147,12 @@ class Top:
         add((f"mesh top  {time.strftime('%Y-%m-%d %H:%M:%S')}", "head"), (f"   every {self.args.interval:g}s, rates over {W:g}s", "dim"))
         add()
         add(("NODES", "head"))
-        add(("  node              chip           cores  mem    up        bridge                               telemetry", "dim"))
+        add(("  node              chip           mem    avail  up        bridge                               telemetry", "dim"))
         for node in sorted(self.nodes.values(), key=lambda n: n.name):
-            s, f, info = node.sample or {}, fabric(node), node.info
-            chip = ((s.get("capacity") or {}).get("metrics") or {}).get("chip") or (s.get("host") or {}).get("model") or "?"
-            mem = (s.get("host") or {}).get("memory_bytes")
-            up = duration(now - f["booted_at"]) if f.get("booted_at") else "?"
+            s, f, r = node.sample or {}, fabric(node), node.record
+            chip = ((s.get("capacity") or {}).get("metrics") or {}).get("chip") or (s.get("host") or {}).get("model") or r.get("model") or "?"
+            booted = f.get("booted_at") or (r.get("booted") or 0) / 1e9
+            up = duration(now - booted) if booted else "?"
             b = self.live(node)
             if b:
                 stat = b.get("stat") or {}
@@ -184,10 +161,11 @@ class Top:
             elif f.get("bridges"):
                 b = max(f["bridges"], key=lambda x: x["exited_at"])
                 bridge = (f"none (last exited {duration(now - b['exited_at'])} ago)", "bad")
+            elif not node.me and r: bridge = (f"in the map, window {gib(r.get('window'))}", "ok")
             else: bridge = ("none", "bad")
-            transport = f"{node.transport[0]} {node.transport[1]} {node.rtt * 1000:.0f}ms" if node.transport else "no telemetry" if node.error else "asking"
-            add("  ", (f"{node.name:<17} ", "bold"), f"{chip:<14} {info.get('cores', '?'):>5}  {(str(round(mem / 2**30)) + 'G') if mem else '?':<6} {up:<9} ",
-                (f"{bridge[0][:36]:<37}", bridge[1]), (transport, "dim" if node.transport else "bad"))
+            transport = (f"loopback {node.rtt * 1000:.0f}ms", "dim") if node.rtt is not None else ("no telemetry", "bad") if node.error else ("asking", "dim") if node.me else ("on its node", "dim")
+            add("  ", (f"{node.name:<17} ", "bold"), f"{chip:<14} {gib((s.get('host') or {}).get('memory_bytes') or r.get('memory')):<6} {gib(r.get('available')):<6} {up:<9} ",
+                (f"{bridge[0][:36]:<37}", bridge[1]), transport)
             services, groups = f.get("services") or {}, collections.defaultdict(list)
             for label in sorted(services):
                 rows, short = services[label], label.replace("io.mesh.", "")
@@ -215,55 +193,35 @@ class Top:
                     if str(holder.get("stat") or "").startswith("U") and holder.get("command") != "mesh-flow":
                         hints.append(("bad", f"{node.name}: {holder['command']} pid {holder['pid']} in U holds {port['device']} (leaked verbs context)"))
         add()
-        add(("LINKS", "head"), ("   a<->b by Thunderbolt IP adjacency (ndp); bytes/s are RECV bytes landed, from the bridge's census of each program", "dim"))
-        cables = self.cables()
-        if not cables: add(("  no cabled fabric neighbour seen", "warn"))
-        for key, states in sorted(cables.items(), key=lambda kv: sorted(kv[0], key=str)):
-            (a, ai), (b, bi) = sorted(key, key=str)
-            na, pa = self.port(a, ai)
-            nb, pb = self.port(b, bi)
-            def both(getter, good=None):
-                values = [getter(p) if p else "?" for p in (pa, pb)]
-                style = "ok" if good and all(v == good for v in values) else "warn" if good else ""
-                return ("/".join(str(v) for v in values), style)
-            add(("  ", ""), (f"{a}:{ai}", "bold"), " <-> ", (f"{b}:{bi}", "bold"), "   TB ", both(lambda p: p.get("tb_link"), "up"),
-                ("  link-ups " + "/".join(str((p or {}).get("link_ups", "?")) for p in (pa, pb)), "dim"),
-                "   IP ", both(lambda p: p.get("ip"), "active"), "  nbr ", both(lambda p: ",".join(n["state"] for n in p.get("neighbors") or []) or "none"),
-                "   RDMA dev ", both(lambda p: {2: "on", 0: "off"}.get(p.get("rdma_power"), p.get("rdma_power")), "on"))
-            segments = [("      RDMA port ", "dim")]
-            for node, iface, other in ((na, ai, b), (nb, bi, a)):
-                ports = self.toward(node, other)
-                if ports:
-                    phases = "/".join(PHASES.get(q.get("phase"), "?") for q in ports)
-                    segments.append((f"{node.name} toward {other}: port {'/'.join(str(q.get('port')) for q in ports)} {phases}   ", "ok" if "PAIRED" in phases else "warn"))
-                elif self.live(node): segments.append((f"{node.name}:rdma_{iface} no port of its bridge reaches {other}   ", "warn"))
-                else: segments.append((f"{node.name}:rdma_{iface} no bridge   ", "bad"))
-            add(*segments)
-            for src, dst in ((a, b), (b, a)):
-                recv, send = self.rates((src, dst, "recv"), W), self.rates((src, dst, "send"), W)
-                spark = "".join(SPARK[min(8, int(8 * v / recv["peak"]))] if recv and recv["peak"] else " " for v in (recv or {}).get("spark", []))
-                row = [("      ", ""), (f"{src[:14]}->{dst[:14]}", "accent"), "  "]
-                if recv:
-                    row += [(f"{rate_text(recv['now']):>11} last", "ok" if recv["now"] else ""), f"  {rate_text(recv['avg']):>11} {W:g}s", f"  peak {rate_text(recv['peak']):>10}  ", (f"{spark:<32}", "accent"),
-                            f"  RECV {count_text(recv['avg_ops'])}/s", f"  SEND {count_text((send or {}).get('avg_ops'))}/s", f"  calls {recv['calls']}"]
-                else: row.append(("no census yet (rates start after two samples of a node running a bridge)", "dim"))
-                add(*row)
-            reference = []
-            speed = (pa or pb or {}).get("speed")
-            if speed: reference.append(f"nominal {speed / 1e9:g} Gb/s = {rate_text(speed / 8)} (IOLinkSpeed)")
-            for node, other in ((na, b), (nb, a)):
-                bridge = self.live(node) if node else None
-                for port in self.toward(node, other):
-                    total = (bridge.get("census") or {}).get(str(port.get("port")))
-                    if total:
-                        reference.append(f"{node.name} port {port.get('port')}: {total['calls']} programs, {rate_text(total['bytes']).replace('/s', '')} landed, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
-            for text in reference: add(("      " + text, "dim"))
+        own = next((node for node in self.nodes.values() if node.me), None)
+        bridge = self.live(own)
+        add(("LINKS", "head"), ("   this node's bridge's ports, each peer as the map names it; bytes/s are RECV bytes landed here, from the bridge's census of each program", "dim"))
+        toward = self.toward(own)
+        if not toward: add(("  " + ("no port of this node's bridge" if bridge else "no bridge runs on this node"), "warn"))
+        for peer, ports in sorted(toward.items()):
+            phases = "/".join(PHASES.get(q.get("phase"), "?") for q in ports)
+            add(("  ", ""), (f"{own.name} port {'/'.join(str(q.get('port')) for q in ports)}", "bold"), " <-> ", (peer, "bold"), "   ", (phases, "ok" if "PAIRED" in phases else "warn"))
+            recv, send = self.rates((peer, own.name, "recv"), W), self.rates((own.name, peer, "send"), W)
+            if recv:
+                spark = "".join(SPARK[min(8, int(8 * v / recv["peak"]))] if recv["peak"] else " " for v in recv["spark"])
+                add(("      ", ""), (f"{peer[:14]}->{own.name[:14]}", "accent"), "  ", (f"{rate_text(recv['now']):>11} last", "ok" if recv["now"] else ""), f"  {rate_text(recv['avg']):>11} {W:g}s",
+                    f"  peak {rate_text(recv['peak']):>10}  ", (f"{spark:<32}", "accent"), f"  RECV {count_text(recv['avg_ops'])}/s", f"  calls {recv['calls']}")
+            if send: add(("      ", ""), (f"{own.name[:14]}->{peer[:14]}", "accent"), f"  SEND {count_text(send['avg_ops'])}/s  frames {count_text(send['avg'])}/s  calls {send['calls']}")
+            if not recv and not send: add(("      no census yet (rates start after two samples of this node's bridge)", "dim"))
+            for port in ports:
+                total = (bridge.get("census") or {}).get(str(port.get("port")))
+                if total: add((f"      port {port.get('port')}: {total['calls']} programs, {rate_text(total['bytes']).replace('/s', '')} landed, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}", "dim"))
+        add()
+        add(("CABLES", "head"), ("   this node's Thunderbolt IP ports (ioreg, ifconfig, ndp)", "dim"))
+        cabled = [p for p in fabric(own).get("ports") or [] if p.get("iface")]
+        if not any(p.get("neighbors") for p in cabled): add(("  no cabled fabric neighbour seen", "warn"))
+        for p in cabled:
+            power = {2: "on", 0: "off"}.get(p.get("rdma_power"), p.get("rdma_power"))
+            add(("  ", ""), (f"{own.name}:{p['iface']}", "bold"), "   TB ", (str(p.get("tb_link")), "ok" if p.get("tb_link") == "up" else "warn"), (f"  link-ups {p.get('link_ups', '?')}", "dim"),
+                "   IP ", (str(p.get("ip")), "ok" if p.get("ip") == "active" else "warn"), "  nbr ", ",".join(n["state"] for n in p.get("neighbors") or []) or "none",
+                "   RDMA dev ", (str(power), "ok" if power == "on" else "warn"), (f"   nominal {p['speed'] / 1e9:g} Gb/s (IOLinkSpeed)" if p.get("speed") else "", "dim"))
         add()
         add(("TOPOLOGY", "head"))
-        names = sorted({x for key in cables for x, _ in key})
-        edges = {frozenset(x for x, _ in key) for key in cables}
-        order = lambda edge: sorted(edge)
-        if names: add(f"  cabled    {shape(names, edges)}: " + "  ".join(" <-> ".join(order(e)) for e in edges), ("   (Thunderbolt IP adjacency, ndp)", "dim"))
         if self.paired: add(f"  paired    {shape(sorted({x for e in self.paired for x in e}), self.paired)}: " + "  ".join(" <-> ".join(sorted(e)) for e in self.paired), ("   (this node's bridge's map, mesh_map)", "dim"))
         else: add(("  paired    " + (self.unmapped or "the map links no two nodes"), "bad" if self.unmapped else "dim"))
         hints = list(dict.fromkeys(hints)) or [("ok", "none")]
@@ -313,7 +271,7 @@ def interactive(screen, top):
         if key == ord("k"): offset, due = max(0, offset - 1), 0
 
 def main():
-    parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth between mesh nodes: the nodes this node's bridge's map names, each read from its io.mesh.telemetry (:8788), another node's through its bridge's exec, and its io.mesh.nodeinfo through its bridge; sends no RDMA traffic of its own.")
+    parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth from this node: the nodes this node's bridge's map names, with the facts their records carry (model, memory, window, available memory, boot), and this node's io.mesh.telemetry (:8788): its services, its cables, its bridge's ports and the bytes landed through each; sends no RDMA traffic of its own.")
     parser.add_argument("-n", "--interval", type=float, default=1.0)
     parser.add_argument("--window", type=float, default=5.0)
     parser.add_argument("--nodes", type=lambda text: [x for x in text.split(",") if x], default=None)
