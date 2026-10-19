@@ -24,7 +24,7 @@ peer's send buffers contained valid headers. A read-only scan of shared memory f
 Sixteen protocol-sized descriptors in the captured root trace match shifted frames;
 other early trace entries include six-byte heartbeats.
 
-Disassembly of the installed M5 `/usr/lib/rdma/libthunderboltrdma.dylib` shows
+<a id="tbt_post_recv"></a>Disassembly of the installed M5 `/usr/lib/rdma/libthunderboltrdma.dylib` shows
 `tbt_post_recv` loading the low 32 SGE address bits and encoding them with the memory
 region key. The previous 1 GiB registrations began relative to an unaligned mapping,
 so a registration could cross a 4 GiB virtual-address boundary. Splitting registrations
