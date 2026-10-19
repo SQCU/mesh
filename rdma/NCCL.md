@@ -23,16 +23,28 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
 ## Communicators
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
-  (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens), where each rank's node meets the others'.
-- `ncclMeshCommInitRank(comm, nranks, rank, paths, programs, count, small, node, name)`: the collectives are operands;
-  the map is the bridges' (below).
+  (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens, on the node's fabric address where it holds one), where
+  each rank's node meets the others'. The root listens on that host alone where it is an IPv6 address.
+- `ncclMeshCommInitRank(comm, nranks, id, rank, paths, programs, count, small, name, config)`: the same init and
+  bootstrap (`id` the root's `host:port`, which the caller hands every rank; each rank's node is its bridge's), with
+  the collectives as operands; the map is the bridges' (below).
   - `paths`: the routing tables every collective of the structural table (below) is compiled along, each member's
     trees, checked against the map each session reads. NULL means the map's shortest-path trees.
   - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the structural table
     (below).
-  - `node`: each rank's bridge node.
-  - `name`: the communicator's, which its sessions pair under on every member.
-  - Every rank passes the same values.
+  - `small`: the bytes of the small class's slot (0: the bridges' block).
+  - `name`: the communicator's, which its sessions pair under on every member and its members' digest holds (NULL:
+    the id).
+  - `config`: NULL, or `blocking` not 0, is a blocking init; `blocking` 0 is NCCL's non-blocking init (below).
+  - Every rank passes the same values. `ncclCommInitRank` is this call with no paths, programs, small, name or config,
+    and `ncclCommInitRankConfig` the same with its config.
+- Both inits lease the communicator's lane pair toward each peer at the bootstrap's two gathers, the second bounded by
+  `MESH_PLATFORM_NS` a send or receive; an init fails as a value where a link has no pair free at both ends.
+- A non-blocking init sets `comm` at once, runs on a thread of its own and returns `ncclInProgress`;
+  `ncclCommGetAsyncError` gives `ncclInProgress` until it ends, then its result. `ncclCommRevoke`, `ncclCommAbort` and
+  `ncclCommDestroy` end it as a value with its claims released: the revoke shuts its bootstrap's sockets down, and its
+  connect and its root's accept read the revoke at each 100 ms look. `ncclCommAbort` or `ncclCommDestroy` then frees the
+  communicator, failed or not; no call but these four takes it before its init has ended.
 - `ncclCommSplit` takes the ranks of a color; `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those
   that departed, so a loop goes on with the ranks that remain and no new bootstrap.
 - Making a communicator, a lone rank's too, attaches the process's client of its node's bridge ([Memory](#memory)),
@@ -63,11 +75,11 @@ route").
 
 Before any group runs, the members agree: each publishes its digest of what its programs are made from (the route
 between each two members and the bandwidth of the links it crosses, the planner's version `MESH_PLAN_VERSION`, the
-session's wire, the paths and trees, the programs) on every channel, at the session's first position, and
-compares its peers'. Members that read the map on either side of a change fail the session as a value naming the
-disagreement (`ncclRemoteError`, "the members' maps differ") and open the next on the map then; no group runs on two
-maps, and two builds of the library that make other trees of one map disagree there too, not as a send/receive
-mismatch later.
+session's wire, the paths and trees, the programs) and of the communicator's name on every channel, at the session's
+first position, and compares its peers'. Members that read the map on either side of a change fail the session as a
+value naming the disagreement (`ncclRemoteError`, "the members' maps differ") and open the next on the map then; no
+group runs on two maps, and two builds of the library that make other trees of one map disagree there too, not as a
+send/receive mismatch later, as do ranks of two communicators that one bootstrap port paired.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR), the communicator's table of them. The caller passes its own table (`ncclMeshCommInitRank`'s `programs`;
@@ -335,8 +347,8 @@ reopens at a group of its own and fails a group a peer had in flight on the old 
 routes working (a link that flaps elsewhere, a node that joins, a better route that appears) reaches the
 communicator's next session (each call of metal-microbench makes its communicators at its first crossing). A rank that
 departed is left out with `ncclCommShrink`, a joining one taken in with `ncclCommGetUniqueId` and `ncclCommGrow`, and
-`ncclCommRevoke` revokes a communicator for good, from any thread and under the communicator's own lock alone: its
-session's waits end and its groups in flight fail, a session opening ends (a member waiting in its session's start for
+`ncclCommRevoke` revokes a communicator for good, from any thread and under the communicator's own lock alone: an init
+still running (a non-blocking one's) ends as a value, its session's waits end and its groups in flight fail, a session opening ends (a member waiting in its session's start for
 a peer that never comes, a member that failed to load, is ended at once) and none opens after it, and every later
 group on it fails at once (`ncclRemoteError`, "revoked") until `ncclCommDestroy` closes its session.
 

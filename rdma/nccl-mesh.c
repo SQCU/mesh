@@ -25,6 +25,8 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <fcntl.h>
 
 enum { WHAT_SEND = 16, WHAT_RECV, WHAT_COUNTED };
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
@@ -254,7 +256,9 @@ struct session;
    that slot (`leased`, its bridge's report of its links, and `chosen`, the pair of each, UINT32_MAX none: mesh-call.h
    mesh_lanes_choose); its session (NULL until a group crosses a link); `opening` a session whose start and agreement
    run outside the sessions' lock, which a revoke ends; `revoked`, set by ncclCommRevoke and kept until ncclCommDestroy,
-   failing every group after it; the three under `guard` */
+   failing every group after it; `peers`, its bootstrap's sockets while its init runs, which a revoke shuts down; the
+   four under `guard`.  A non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy
+   joins it), `async` ncclInProgress until it ends and `why` its failure's text */
 struct attach;
 struct ncclComm {
   struct mesh_link_map map;
@@ -267,12 +271,14 @@ struct ncclComm {
   ncclMeshForm *forms;
   uint32_t programs, splits, *members, form_count;
   int nranks, rank, listed;
-  char name[NCCL_UNIQUE_ID_BYTES + 1];
+  char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
   struct redop ops[OPS];
   ncclResult_t async;
   struct session *session, *opening;
   pthread_mutex_t guard;
-  int revoked;
+  int revoked, *peers, initing;
+  pthread_t init;
+  char why[sizeof last];
   void **scratch, **spent;
   size_t *scratch_bytes;
   uint32_t scratches, scratch_used, spents;
@@ -512,7 +518,8 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    the library that make other trees of one map disagree here, not as a MISMATCH later) and the table of programs.
    Programs are a function of these alone (every hop and tree reads a member pair's route and its links), so members
    whose digests agree run the same programs on the same routes, whatever map serial each read and whatever else the
-   map holds; 0 where a route does not reach */
+   map holds; 0 where a route does not reach.  The communicator's name too (its bytes), so ranks of two communicators
+   that one bootstrap port paired disagree here as a value (metal-microbench docs/elastic.md#call-delivery) */
 static uint64_t mix(uint64_t h, uint64_t word) {
   for (int b = 0; b < 8; b++) h = (h ^ ((word >> (8 * b)) & 0xff)) * UINT64_C(0x100000001b3);
   return h;
@@ -530,6 +537,7 @@ static uint64_t map_digest(const struct ncclComm *comm, const struct mesh_link_m
   const uint32_t n = (uint32_t)comm->nranks, N = map->nodes + map->relays;
   uint32_t *path = calloc((size_t)N + 1, sizeof *path);
   uint64_t h = mix(mix(mix(mix(mix(UINT64_C(0xcbf29ce484222325), MESH_PLAN_VERSION), comm->wire.slot), comm->wire.small), comm->wire.lag), n);
+  for (const char *c = comm->name; *c; c++) h = (h ^ (unsigned char)*c) * UINT64_C(0x100000001b3);
   for (uint32_t i = 0; i < n; i++) h = mix(h, comm->members[i]);
   for (uint32_t a = 0; path && a < n; a++)
     for (uint32_t b = a + 1; b < n; b++) {
@@ -649,35 +657,37 @@ static ncclResult_t attach_fail(int status, const char *format, ...) {
               "(etc/bridge/README.md)", what, strerror(status));
 }
 
-/* a communicator of `nranks` ranks named `name`, rank r on the bridge of node members[r] (NULL: filled by its caller),
-   its map read at the opening of its session (comm_read); the process's client attached where it has none and held,
-   and for two ranks or more with its members given its session's program slot taken there under its name (else by
-   its caller once it has them: comm_slot), no lane leased for it yet; 0, ENOMEM, or the attach's or the slot's
-   refusal (comm_fail) */
-static int comm_make(ncclComm_t *made, int nranks, const uint32_t *members, int rank, const char *name) {
-  *made = NULL;
+/* a communicator of `nranks` ranks named `name`, this process rank `rank`, its map read at the opening of its session
+   (comm_read), holding nothing of its bridge's yet (comm_attach); NULL where out of memory */
+static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
   struct ncclComm *comm = calloc(1, sizeof *comm);
-  if (comm) comm->members = calloc((size_t)nranks, sizeof *comm->members);
-  if (!comm || !comm->members) { free(comm); return ENOMEM; }
-  pthread_mutex_lock(&attach_lock);
-  int status = attach_current(&comm->attach);
-  if (!status && nranks > 1 && members) status = mesh_program_attach(&comm->slot, &comm->attach->context, name);
-  if (!status) comm->attach->comms++;
-  pthread_mutex_unlock(&attach_lock);
-  if (status) { free(comm->members); free(comm); return status; }
-  if (members) memcpy(comm->members, members, (size_t)nranks * sizeof *members);
+  if (comm && !(comm->members = calloc((size_t)nranks, sizeof *comm->members))) { free(comm); comm = NULL; }
+  if (!comm) return NULL;
   comm->nranks = nranks; comm->rank = rank;
   for (uint32_t k = 0; k < MESH_PORTS; k++) comm->chosen[k] = UINT32_MAX;
   pthread_mutex_init(&comm->guard, NULL);
   snprintf(comm->name, sizeof comm->name, "%s", name);
-  *made = comm;
-  return 0;
+  return comm;
+}
+/* comm's rank r on the bridge of node members[r] (NULL: its init's gather fills them); the process's client attached
+   where it has none and held, and for two ranks or more with its members given its session's program slot taken there
+   under its name (else by its init once the gather holds them: comm_slot), no lane leased for it yet; 0, or the
+   attach's or the slot's refusal (comm_fail), comm then holding nothing of the bridge's */
+static int comm_attach(struct ncclComm *comm, const uint32_t *members) {
+  pthread_mutex_lock(&attach_lock);
+  int status = attach_current(&comm->attach);
+  if (!status && comm->nranks > 1 && members) status = mesh_program_attach(&comm->slot, &comm->attach->context, comm->name);
+  if (!status) comm->attach->comms++;
+  else comm->attach = NULL;
+  pthread_mutex_unlock(&attach_lock);
+  if (!status && members) memcpy(comm->members, members, (size_t)comm->nranks * sizeof *members);
+  return status;
 }
 static ncclResult_t comm_fail(int status, const char *name) {
   return status == ENOMEM ? fail(ncclSystemError, "out of memory") : attach_fail(status, "communicator %s", name);
 }
-/* the session's program slot of a communicator made without its members (comm_make), under its name: 0, or the slot's
-   refusal */
+/* the session's program slot of a communicator attached without its members (comm_attach), under its name: 0, or the
+   slot's refusal */
 static int comm_slot(struct ncclComm *comm) {
   pthread_mutex_lock(&attach_lock);
   const int status = mesh_program_attach(&comm->slot, &comm->attach->context, comm->name);
@@ -766,31 +776,46 @@ const char *ncclGetErrorString(ncclResult_t result) {
 const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
 
 /* NCCL's bootstrap (NVIDIA/nccl src/bootstrap.cc): the unique id is the root's address, host:port (NCCL_COMM_ID where
-   set, else a listener this process opens); rank 0 takes every rank's report there and sends each the whole table, at
-   each gather of the init, on sockets it keeps until the init ends.  A non-root's connect is tried every 100 ms until
-   the root listens; the first gather has no deadline, the caller's process its canceller (these sockets carry no DMA
-   and enter no driver), and it holds no slot of the bridge.  The second holds this rank's claims, lease words its
-   bridge's other clients read, so each of its sends and receives is bounded by mesh.h MESH_PLATFORM_NS (ETIMEDOUT:
-   design/recovery.md#five-seconds).  A rank's report is its status (0, else why it cannot go on, so every rank fails alike), and its bridge's node and
-   the lane pairs free there toward each peer node (mesh-call.h mesh_lanes_free); at the second gather its status is
-   its slot's and its claim's.  The id is also the communicator's execution name, which its session's slot takes on
-   every member (mesh_program_attach). */
+   set, else a listener this process opens), and the root listens on that host alone where it is an IPv6 address (the
+   fabric's ULA; bootstrapCreateRoot listens on the id's address), else on every address; rank 0 takes every rank's
+   report there and sends each the whole table, at each gather of the init, on sockets it keeps until the init ends.
+   A non-root's connect is tried every 100 ms until the root listens, and the root looks for a ringer every 100 ms; each
+   reads a revoke of the communicator (ncclCommRevoke, ncclCommAbort, ncclCommDestroy: a non-blocking init's) at each
+   look, and the revoke shuts the init's sockets down (`peers`), so its gathers end.  The first gather has no deadline,
+   that revoke and the caller's process its cancellers (these sockets carry no DMA and enter no driver), and it holds no
+   slot of the bridge.  The second holds this rank's claims, lease words its bridge's other clients read, so each of its
+   sends and receives is bounded by mesh.h MESH_PLATFORM_NS (ETIMEDOUT: design/recovery.md#five-seconds).  A rank's
+   report is its status (0, else why it cannot go on, so every rank fails alike), and its bridge's node and the lane
+   pairs free there toward each peer node (mesh-call.h mesh_lanes_free); at the second gather its status is its slot's
+   and its claim's.  The id is also the communicator's name where its init names none, which its session's slot takes
+   on every member (mesh_program_attach). */
 struct report { int32_t rank, status; struct mesh_lane_report lanes; };
 static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
+
+/* a listener on `host` alone where it is an IPv6 address, else on every address, at *port (0: any, *port then the
+   one bound), non-blocking (bootstrap_open looks before it accepts): its descriptor, or -1 and errno */
+static int bootstrap_listen(const char *host, uint16_t *port) {
+  struct sockaddr_in6 at = {.sin6_len = sizeof at, .sin6_family = AF_INET6, .sin6_port = htons(*port)};
+  socklen_t length = sizeof at;
+  int on = 1, fd = socket(AF_INET6, SOCK_STREAM, 0);
+  if (inet_pton(AF_INET6, host, &at.sin6_addr) != 1) at.sin6_addr = in6addr_any;
+  if (fd >= 0 && !setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) && !bind(fd, (struct sockaddr *)&at, sizeof at) &&
+      !listen(fd, 64) && !getsockname(fd, (struct sockaddr *)&at, &length) && !fcntl(fd, F_SETFL, O_NONBLOCK)) {
+    *port = ntohs(at.sin6_port);
+    return fd;
+  }
+  const int error = errno;
+  if (fd >= 0) close(fd);
+  errno = error;
+  return -1;
+}
 
 ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
   if (!id) return fail(ncclInvalidArgument, "uniqueId is NULL");
   memset(id->internal, 0, sizeof id->internal);
   const char *given = getenv("NCCL_COMM_ID");
   if (given && *given) { snprintf(id->internal, sizeof id->internal, "%s", given); return ncclSuccess; }
-  struct sockaddr_in6 any = {.sin6_len = sizeof any, .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_ANY_INIT};
-  socklen_t length = sizeof any;
   char host[256] = {0};
-  if (root.fd >= 0) close(root.fd);
-  root.fd = socket(AF_INET6, SOCK_STREAM, 0);
-  if (root.fd < 0 || bind(root.fd, (struct sockaddr *)&any, sizeof any) || listen(root.fd, 64) ||
-      getsockname(root.fd, (struct sockaddr *)&any, &length) || gethostname(host, sizeof host - 1))
-    return fail(ncclSystemError, "the bootstrap root's listener: %s", strerror(errno));
   /* metal-microbench docs/asking-the-mesh.md: a cabled peer is reached on the fabric, never by a name that resolves to
      Wi-Fi or a LAN: the node's mesh identity (bin/mesh-router-init.sh, MESH_ULA_PREFIX on each fabric port) where it
      holds one, else its host name */
@@ -807,7 +832,11 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
     }
     freeifaddrs(interfaces);
   }
-  snprintf(id->internal, sizeof id->internal, "%s:%u", host, ntohs(any.sin6_port));
+  uint16_t port = 0;
+  if (root.fd >= 0) close(root.fd);
+  if ((root.fd = *host || !gethostname(host, sizeof host - 1) ? bootstrap_listen(host, &port) : -1) < 0)
+    return fail(ncclSystemError, "the bootstrap root's listener: %s", strerror(errno));
+  snprintf(id->internal, sizeof id->internal, "%s:%u", host, port);
   memcpy(root.id, id->internal, sizeof root.id);
   return ncclSuccess;
 }
@@ -821,48 +850,68 @@ static int whole(int fd, void *bytes, size_t size, int sending) {
   return 0;
 }
 
-/* the bootstrap's sockets, the root's to each rank r (peers[r], placed by the rank its first report names, that report
-   kept in `reports`) or a non-root's to the root (peers[0], its first report sent): 0, or the errno */
-static int bootstrap_open(const char *id, int nranks, int rank, struct report *reports, int *peers) {
+/* whether comm was revoked; a group on it failed naming it */
+static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __ATOMIC_SEQ_CST); }
+static ncclResult_t revoked_fail(ncclComm_t comm) {
+  return fail(ncclRemoteError, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
+}
+
+/* socket `fd` of comm's init placed at peers[r] (-1: the one there closed), blocking (an accepted one takes its
+   listener's O_NONBLOCK), under comm's guard, where a revoke shuts it down (ncclCommRevoke), a send on it after that or
+   a peer's reset an error, never SIGPIPE */
+static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
+  if (fd >= 0) { fcntl(fd, F_SETFL, 0); setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &(int){1}, sizeof(int)); }
+  pthread_mutex_lock(&comm->guard);
+  if (fd < 0 && comm->peers[r] >= 0) close(comm->peers[r]);
+  comm->peers[r] = fd;
+  pthread_mutex_unlock(&comm->guard);
+}
+
+/* the bootstrap's sockets of comm's init at `id`, the root's to each rank r (peers[r], placed by the rank its first
+   report names, that report kept in `reports`; a socket not yet placed waits at peers[0]) or a non-root's to the root
+   (peers[0], its first report sent), each placed before the revoke is read, so a revoke either finds it or is read: 0,
+   ECANCELED (comm revoked), or the errno */
+static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports) {
+  int *peers = comm->peers, status = 0;
   char host[NCCL_UNIQUE_ID_BYTES];
   snprintf(host, sizeof host, "%s", id);
   char *colon = strrchr(host, ':');
   if (!colon) return EINVAL;
   *colon = 0;
-  if (rank) {
+  if (comm->rank) {
     struct addrinfo hint = {.ai_socktype = SOCK_STREAM}, *addresses = NULL;
-    while (peers[0] < 0) {
+    while (peers[0] < 0 && !revoked(comm)) {
       if (!getaddrinfo(host, colon + 1, &hint, &addresses)) {
         for (struct addrinfo *a = addresses; a && peers[0] < 0; a = a->ai_next) {
-          peers[0] = socket(a->ai_family, SOCK_STREAM, 0);
-          if (peers[0] >= 0 && connect(peers[0], a->ai_addr, a->ai_addrlen)) { close(peers[0]); peers[0] = -1; }
+          bootstrap_put(comm, 0, socket(a->ai_family, SOCK_STREAM, 0));
+          if (peers[0] >= 0 && connect(peers[0], a->ai_addr, a->ai_addrlen)) bootstrap_put(comm, 0, -1);
         }
         freeaddrinfo(addresses);
       }
       if (peers[0] < 0) usleep(100000);
     }
-    return whole(peers[0], reports + rank, sizeof *reports, 1);
+    return peers[0] < 0 || revoked(comm) ? ECANCELED : whole(peers[0], reports + comm->rank, sizeof *reports, 1);
   }
-  int listener = !strcmp(root.id, id) ? root.fd : -1, status = 0;
-  if (listener < 0) {
-    struct sockaddr_in6 any = {.sin6_len = sizeof any, .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_ANY_INIT,
-                               .sin6_port = htons((uint16_t)atoi(colon + 1))};
-    int on = 1;
-    listener = socket(AF_INET6, SOCK_STREAM, 0);
-    if (listener < 0 || setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) ||
-        bind(listener, (struct sockaddr *)&any, sizeof any) || listen(listener, 64)) {
-      status = errno;
-      if (listener >= 0) close(listener);
-      return status;
-    }
-  }
-  for (int r = 1; r < nranks && !status; r++) {
+  uint16_t port = (uint16_t)atoi(colon + 1);
+  int listener = !strcmp(root.id, id) ? root.fd : -1;
+  if (listener < 0 && (listener = bootstrap_listen(host, &port)) < 0) return errno;
+  for (int r = 1; r < comm->nranks && !status; r++) {
     struct report heard;
-    const int fd = accept(listener, NULL, NULL);
-    if (fd < 0) status = errno;
-    else if (!(status = whole(fd, &heard, sizeof heard, 0)) && (heard.rank <= 0 || heard.rank >= nranks || peers[heard.rank] >= 0)) status = EPROTO;
-    if (!status) { peers[heard.rank] = fd; reports[heard.rank] = heard; }
-    else if (fd >= 0) close(fd);
+    struct pollfd look = {listener, POLLIN, 0};
+    int fd = -1;
+    while (fd < 0 && !status)
+      if (revoked(comm)) status = ECANCELED;
+      else if (poll(&look, 1, 100) < 0 && errno != EINTR) status = errno;
+      else if ((fd = accept(listener, NULL, NULL)) < 0 && errno != EWOULDBLOCK && errno != ECONNABORTED && errno != EINTR) status = errno;
+    if (!status) bootstrap_put(comm, 0, fd);
+    if (!status && revoked(comm)) status = ECANCELED;
+    if (!status && !(status = whole(fd, &heard, sizeof heard, 0)) && (heard.rank <= 0 || heard.rank >= comm->nranks || peers[heard.rank] >= 0))
+      status = EPROTO;
+    if (status) { bootstrap_put(comm, 0, -1); break; }
+    reports[heard.rank] = heard;
+    pthread_mutex_lock(&comm->guard);
+    peers[heard.rank] = fd; peers[0] = -1;
+    pthread_mutex_unlock(&comm->guard);
   }
   close(listener);
   if (listener == root.fd) root.fd = -1;
@@ -917,64 +966,123 @@ static ncclResult_t lease_fail(const char *name, int rank, int status) {
 }
 
 static void comm_advise(const struct ncclComm *comm);
-/* design/bridge-and-ipc.md#files, a communicator's init on NCCL's bootstrap: every rank's report gathered; every rank
+/* a communicator's table, the caller's operands (nccl.h ncclMeshCommInitRank): its small slot, its paths (NULL: none,
+   the map's shortest-path trees) and its programs copied (none: the structural table, comm_routes); 0, or ENOMEM */
+static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, const ncclMeshProgram *programs, int count, uint64_t small) {
+  made->small = small;
+  made->listed = count > 0;
+  if ((paths && trees_copy(&made->paths, paths)) || (count && !(made->entries = calloc((size_t)count, sizeof *made->entries)))) return ENOMEM;
+  for (int e = 0; e < count; e++) {
+    if (program_copy(&made->entries[e].program, programs[e].program)) return ENOMEM;
+    made->entries[made->programs++].below = programs[e].below;
+  }
+  return 0;
+}
+
+/* design/bridge-and-ipc.md#files, a communicator's init on NCCL's bootstrap at its id, the one path of every init
+   (ncclMeshCommInitRank, blocking or not): made attached (comm_attach) and every rank's report gathered; every rank
    taking its session's slot at its own bridge (comm_slot, once the gather holds its members) and leasing its row of
    the table there (lease_claim); a second gather confirming every claim (NCCL's own init exchanges each peer's
    connection through its bootstrap: ncclTransportP2pSetup).  A rank that cannot go on, a slot refused, a link with no
-   pair free at both ends (ENOSPC), a claim that found a word taken (EAGAIN) or a peer silent past the second gather's
-   bound (ETIMEDOUT: bootstrap_bound) fails the init as a value, every claim released; the next init reads the lease
-   words as they then stand.  Then the checker's thread (comm_advise) */
-ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank) {
-  if (!comm || nranks < 1 || rank < 0 || rank >= nranks) return fail(ncclInvalidArgument, "rank %d of %d", rank, nranks);
-  char id[sizeof commId.internal + 1];
-  memcpy(id, commId.internal, sizeof commId.internal);
-  id[sizeof commId.internal] = 0;
-  if (!*id) return fail(ncclInvalidArgument, "the unique id is empty (ncclGetUniqueId)");
+   pair free at both ends (ENOSPC), a claim that found a word taken (EAGAIN), a peer silent past the second gather's
+   bound (ETIMEDOUT: bootstrap_bound) or a revoke fails the init as a value, every claim released and made holding
+   nothing of its bridge's (comm_leave); the next init reads the lease words as they then stand.  Then the checker's
+   thread (comm_advise) */
+static ncclResult_t comm_init(struct ncclComm *made) {
+  const int nranks = made->nranks, rank = made->rank;
   struct report *reports = calloc((size_t)nranks, sizeof *reports);
   struct mesh_lane_report *lanes = calloc((size_t)nranks, sizeof *lanes);
   uint32_t *chosen = calloc((size_t)nranks * MESH_PORTS, sizeof *chosen);
   int *peers = calloc((size_t)nranks, sizeof *peers);
   if (!reports || !lanes || !chosen || !peers) { free(reports); free(lanes); free(chosen); free(peers); return fail(ncclSystemError, "out of memory"); }
   for (int r = 0; r < nranks; r++) peers[r] = -1;
-  struct ncclComm *made = NULL;
+  pthread_mutex_lock(&made->guard);
+  made->peers = peers;
+  pthread_mutex_unlock(&made->guard);
   struct report *mine = reports + rank;
-  const int making = comm_make(&made, nranks, NULL, rank, id);
+  const int making = comm_attach(made, NULL);
   *mine = (struct report){rank, making, {0}};
   if (!making) mine->status = mesh_lanes_free(made->attach->context.M, &mine->lanes);
-  int status = nranks > 1 ? bootstrap_open(id, nranks, rank, reports, peers) : 0;
+  int status = nranks > 1 ? bootstrap_open(made, made->id, reports) : 0;
   if (!status && nranks > 1) status = gather(peers, nranks, rank, reports, 1);
-  ncclResult_t result = status ? fail(ncclRemoteError, "the bootstrap at %s: %s", id, strerror(status)) : making ? comm_fail(making, id) : ncclSuccess;
+  ncclResult_t result = status ? fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status)) : making ? comm_fail(making, made->name) : ncclSuccess;
   for (int r = 0; !result && r < nranks; r++)
     if (reports[r].status)
-      result = r == rank ? fail(ncclSystemError, "communicator %s: the lane pairs free at this node's bridge (mesh_lanes_free): %s", id,
+      result = r == rank ? fail(ncclSystemError, "communicator %s: the lane pairs free at this node's bridge (mesh_lanes_free): %s", made->name,
                                 strerror(reports[r].status))
-                         : fail(ncclRemoteError, "communicator %s: rank %d could not join it: %s", id, r, strerror(reports[r].status));
+                         : fail(ncclRemoteError, "communicator %s: rank %d could not join it: %s", made->name, r, strerror(reports[r].status));
   for (int r = 0; !result && r < nranks; r++) { lanes[r] = reports[r].lanes; made->members[r] = reports[r].lanes.node; }
   if (!result && nranks > 1) {
     const int slotted = !(mine->status = comm_slot(made));
     if (slotted) mine->status = lease_claim(made, lanes, chosen);
     if ((status = bootstrap_bound(peers, nranks, rank)) && !mine->status) mine->status = status;
-    if ((status = gather(peers, nranks, rank, reports, 0))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", id, strerror(status));
-    else if (!slotted) result = comm_fail(mine->status, id);
+    if ((status = gather(peers, nranks, rank, reports, 0))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status));
+    else if (!slotted) result = comm_fail(mine->status, made->name);
     for (int r = 0; !result && r < nranks; r++)
-      if (reports[r].status) result = lease_fail(id, r, reports[r].status);
+      if (reports[r].status) result = lease_fail(made->name, r, reports[r].status);
     if (!result) lease_keep(made, lanes, chosen);
   }
+  pthread_mutex_lock(&made->guard);
   for (int r = 0; r < nranks; r++)
     if (peers[r] >= 0) close(peers[r]);
+  made->peers = NULL;
+  pthread_mutex_unlock(&made->guard);
   free(reports); free(lanes); free(chosen); free(peers);
-  if (result) {
+  if (revoked(made)) result = revoked_fail(made);
+  if (result) comm_leave(made);
+  else comm_advise(made);
+  return result;
+}
+
+/* a non-blocking init's thread (ncclMeshCommInitRank): comm_init, its failure's text kept in `why` before its result
+   is stored in `async` */
+static void *init_run(void *argument) {
+  struct ncclComm *comm = argument;
+  const ncclResult_t result = comm_init(comm);
+  if (result) memcpy(comm->why, last, sizeof comm->why);
+  __atomic_store_n(&comm->async, result, __ATOMIC_RELEASE);
+  return NULL;
+}
+
+/* nccl.h ncclMeshCommInitRank: the communicator made over the caller's operands (comm_table) and its init run
+   (comm_init), here, or with config->blocking 0 on a thread of its own (init_run), *comm set at once and ncclInProgress
+   returned: NCCL's non-blocking init (ncclConfig_t.blocking; ncclCommGetAsyncError ncclInProgress until it ends;
+   ncclCommRevoke, ncclCommAbort and ncclCommDestroy end it as a value, metal-microbench docs/elastic.md#call-delivery) */
+ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank, const struct mesh_trees *paths,
+                                  const ncclMeshProgram *programs, int count, uint64_t small, const char *name, ncclConfig_t *config) {
+  if (!comm || nranks < 1 || rank < 0 || rank >= nranks || count < 0 || (count && !programs) || (paths && paths->nodes != (uint32_t)nranks))
+    return fail(ncclInvalidArgument, "the init's arguments: rank %d of %d, %d programs", rank, nranks, count);
+  for (int e = 0; e < count; e++)
+    if (!programs[e].program || programs[e].program->nodes != (uint32_t)nranks) return fail(ncclInvalidArgument, "program %d is not of %d ranks", e, nranks);
+  char id[sizeof commId.internal + 1];
+  memcpy(id, commId.internal, sizeof commId.internal);
+  id[sizeof commId.internal] = 0;
+  if (!*id) return fail(ncclInvalidArgument, "the unique id is empty (ncclGetUniqueId)");
+  struct ncclComm *made = comm_new(nranks, rank, name && *name ? name : id);
+  if (!made || comm_table(made, paths, programs, count, small)) {
     if (made) comm_free(made);
-    return result;
+    return fail(ncclSystemError, "out of memory");
   }
-  comm_advise(made);
-  *comm = made;
-  return ncclSuccess;
+  memcpy(made->id, id, sizeof made->id);
+  if (config && !config->blocking) {
+    made->async = ncclInProgress;
+    *comm = made;
+    const int error = pthread_create(&made->init, NULL, init_run, made);
+    made->initing = !error;
+    return error ? (made->async = fail(ncclSystemError, "the thread of communicator %s's init: %s", made->name, strerror(error))) : ncclInProgress;
+  }
+  const ncclResult_t result = comm_init(made);
+  if (result) comm_free(made);
+  else *comm = made;
+  return result;
+}
+
+ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank) {
+  return ncclMeshCommInitRank(comm, nranks, commId, rank, NULL, NULL, 0, 0, NULL, NULL);
 }
 
 ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t *config) {
-  (void)config;
-  return ncclCommInitRank(comm, nranks, commId, rank);
+  return ncclMeshCommInitRank(comm, nranks, commId, rank, NULL, NULL, 0, 0, NULL, config);
 }
 
 ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
@@ -985,49 +1093,14 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
   return result ? result : ncclCommInitRank(comm, 1, id, 0);
 }
 
-/* a communicator over the caller's collectives (ncclMeshProgram), or over the paths every collective of its structural
-   table takes (comm_routes); as every communicator is, on the bridges' map read at the opening of its session.  It
-   makes no exchange, so it leases no lanes (an exchange chooses them: ncclCommInitRank's bootstrap, ncclCommSplit's
-   over its parent), and one of two ranks or more, whose session would run on none, is refused before its slot is
-   taken (ENOLCK) */
-ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, int rank, const struct mesh_trees *paths,
-                                  const ncclMeshProgram *programs, int count, uint64_t small, const int *node, const char *name) {
-  if (!comm || !node || rank < 0 || rank >= nranks || count < 0 || (count && !programs) || (paths && paths->nodes != (uint32_t)nranks))
-    return fail(ncclInvalidArgument, "ncclMeshCommInitRank's arguments: rank %d of %d, %d programs", rank, nranks, count);
-  if (nranks > 1)
-    return fail(ncclInvalidUsage, "communicator %s of %d ranks would hold no lane pair (ENOLCK): ncclMeshCommInitRank makes no exchange, and "
-                "only an exchange leases a communicator's lanes (ncclCommInitRank's bootstrap, ncclCommSplit over its parent)",
-                name && *name ? name : "nccl", nranks);
-  for (int e = 0; e < count; e++)
-    if (!programs[e].program || programs[e].program->nodes != (uint32_t)nranks) return fail(ncclInvalidArgument, "program %d is not of %d ranks", e, nranks);
-  uint32_t *members = calloc((size_t)nranks, sizeof *members);
-  if (!members) return fail(ncclSystemError, "out of memory");
-  for (int r = 0; r < nranks; r++) members[r] = (uint32_t)node[r];
-  const char *named = name && *name ? name : "nccl";
-  const int making = comm_make(comm, nranks, members, rank, named);
-  free(members);
-  if (making) return comm_fail(making, named);
-  struct ncclComm *made = *comm;
-  made->small = small;
-  made->listed = count > 0;
-  ncclResult_t result = ncclSuccess;
-  if (trees_copy(&made->paths, paths ? paths : &(struct mesh_trees){(uint32_t)nranks, 0, NULL, NULL, NULL}) ||
-      !(made->entries = calloc((size_t)count + 1, sizeof *made->entries)))
-    result = fail(ncclSystemError, "out of memory");
-  for (int e = 0; !result && e < count; e++)
-    if (program_copy(&made->entries[e].program, programs[e].program)) result = fail(ncclSystemError, "out of memory");
-    else made->entries[made->programs++].below = programs[e].below;
-  if (result) { comm_free(made); *comm = NULL; }
-  else comm_advise(made);
-  return result;
-}
-
 ncclResult_t ncclCommFinalize(ncclComm_t comm) { return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL"); }
 
 static void session_close(struct session *s);
 static void release_all(struct session *s, int result, const char *format, ...);
 static void session_retire(struct session *s);
-/* ncclCommRevoke: comm revoked for good (`revoked`, until ncclCommDestroy): its session's waits cancelled, its groups in
+/* ncclCommRevoke: comm revoked for good (`revoked`, until ncclCommDestroy): an init still running (a non-blocking one's)
+   ended, every socket of its bootstrap shut down and its connect and accept reading the revoke at their next look
+   (bootstrap_open), so it fails as a value with its claims released; its session's waits cancelled, its groups in
    flight failed (a host-path group returns the revoke, a GPU wait reads its word cancelled and ends, a completion
    through one returns the loss), a session opening (its start, its agreement awaiting its peers' digests) ended at
    once (its program's slot retired, which fails its peers' programs toward it; its agreement reads the revoke), a
@@ -1041,24 +1114,21 @@ ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
   if (!comm || revokeFlags != NCCL_REVOKE_DEFAULT) return fail(ncclInvalidArgument, "comm is NULL or revokeFlags is %d", revokeFlags);
   pthread_mutex_lock(&comm->guard);
   __atomic_store_n(&comm->revoked, 1, __ATOMIC_SEQ_CST);
+  for (int r = 0; comm->peers && r < comm->nranks; r++)
+    if (comm->peers[r] >= 0) shutdown(comm->peers[r], SHUT_RDWR);
   if (comm->opening) session_retire(comm->opening);
   if (comm->session) release_all(comm->session, ncclRemoteError, "its communicator %s was revoked (ncclCommRevoke)", comm->name);
   pthread_mutex_unlock(&comm->guard);
   return ncclSuccess;
 }
 
-/* whether comm was revoked; a group on it failed naming it */
-static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __ATOMIC_SEQ_CST); }
-static ncclResult_t revoked_fail(ncclComm_t comm) {
-  return fail(ncclRemoteError, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
-}
-
-/* comm revoked, then its session closed and comm freed once no session of it is opening (the opener reads the revoke and
-   returns its failure): its session's slot retired and its lanes' lease released, by its session's close or, where no
-   session took it, comm_free's (slot_end) */
+/* comm revoked, its init's thread joined (a non-blocking init's, which the revoke ends), then its session closed and
+   comm freed once no session of it is opening (the opener reads the revoke and returns its failure): its session's slot
+   retired and its lanes' lease released, by its session's close or, where no session took it, comm_free's (slot_end) */
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
   ncclCommRevoke(comm, NCCL_REVOKE_DEFAULT);
+  if (comm->initing) pthread_join(comm->init, NULL);
   pthread_mutex_lock(&session_lock);
   while (comm->opening) pthread_cond_wait(&opened, &session_lock);
   session_close(comm->session);
@@ -1070,11 +1140,14 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
 ncclResult_t ncclCommAbort(ncclComm_t comm) { return ncclCommDestroy(comm); }
 
 static ncclResult_t session_async(ncclComm_t comm);
-/* a launch's failure, else the failure of the communicator's session (the progress thread's: a link lost, its bridge
-   gone, or its program refused), which a group that had already returned, its work enqueued, could not report */
+/* a non-blocking init's state (ncclInProgress until it ends, then its failure, named again here) or a launch's failure,
+   else the failure of the communicator's session (the progress thread's: a link lost, its bridge gone, or its program
+   refused), which a group that had already returned, its work enqueued, could not report */
 ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
   if (!comm || !asyncError) return fail(ncclInvalidArgument, "comm or asyncError is NULL");
-  *asyncError = comm->async ? comm->async : session_async(comm);
+  const ncclResult_t async = __atomic_load_n(&comm->async, __ATOMIC_ACQUIRE);
+  if (async != ncclInProgress && *comm->why) fail(async, "%s", comm->why);
+  *asyncError = async ? async : session_async(comm);
   return ncclSuccess;
 }
 
@@ -1777,7 +1850,8 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
     if (theirs.version != mine.version || theirs.digest != mine.digest)
       return fail(ncclRemoteError, "the members' maps differ: this rank (node %u) planned %s on map serial %llu, digest %016llx, "
                   "planner version %llu, and node %u on serial %llu, digest %016llx, version %llu: the map changed as the session "
-                  "opened, or the members run different libraries; the group fails, and the communicator is made again on the map then",
+                  "opened, the members run different libraries, or ranks of two communicators met at one bootstrap (the digest holds "
+                  "each one's name); the group fails, and the communicator is made again on the map then",
                   (unsigned)mine.node, comm->name, (unsigned long long)mine.serial, (unsigned long long)mine.digest,
                   (unsigned long long)mine.version, (unsigned)theirs.node, (unsigned long long)theirs.serial,
                   (unsigned long long)theirs.digest, (unsigned long long)theirs.version);
@@ -2002,7 +2076,7 @@ static ncclResult_t session_open(ncclComm_t comm) {
     struct mesh_tx *tx = &client->tx[mesh_destination(client, s->channels[h].node)];
     if (pair == UINT32_MAX)
       result = fail(ncclInvalidUsage, "communicator %s holds no lane pair toward node %u (ENOLCK): only an exchange leases them "
-                    "(ncclCommInitRank's bootstrap, ncclCommSplit over its parent), and only toward a node on a cable of this node's bridge",
+                    "(an init's bootstrap, ncclCommSplit over its parent), and only toward a node on a cable of this node's bridge",
                     comm->name, s->channels[h].node);
     else { tx->lane[0] = MESH_LANE_FIRST + 2 * pair; tx->lane[1] = MESH_LANE_FIRST + 2 * pair + 1; }
   }
@@ -4038,8 +4112,9 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
     if (ranks[i] == comm->rank) rank = i;
   }
   snprintf(name, sizeof name, "%s/%u.%d", comm->name, split, color);
-  const int making = comm_make(made, count, members, rank, name);
+  const int making = (*made = comm_new(count, rank, name)) ? comm_attach(*made, members) : ENOMEM;
   ncclResult_t result = making ? comm_fail(making, name) : ncclSuccess;
+  if (making && *made) { comm_free(*made); *made = NULL; }
   if (!result) (*made)->small = comm->small;
   if (!result && comm->form_count && !((*made)->forms = forms_copy(comm->forms, comm->form_count, (uint32_t)comm->nranks))) {
     comm_free(*made); *made = NULL;
@@ -4120,7 +4195,7 @@ ncclResult_t ncclCommShrink(ncclComm_t comm, int *excludeRanksList, int excludeR
   const ncclResult_t result =
     !kept ? fail(ncclInvalidArgument, "rank %d is among the ranks it excludes", comm->rank)
     : count > 1 ? fail(ncclInvalidUsage, "a shrink of %s to %d ranks would hold no lane pair (ENOLCK): it makes no exchange among them, and only "
-                       "an exchange leases a communicator's lanes (ncclCommInitRank's bootstrap, ncclCommSplit over its parent)", comm->name, count)
+                       "an exchange leases a communicator's lanes (an init's bootstrap, ncclCommSplit over its parent)", comm->name, count)
     : comm_sub(comm, ranks, count, comm->splits++, -1, newcomm);
   free(ranks);
   return result;
