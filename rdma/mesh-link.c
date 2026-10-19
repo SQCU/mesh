@@ -21,8 +21,11 @@ static dispatch_queue_t finder;
    on), read on the event loop's turn once no window stands and no call is stuck (ports_find) */
 static int find_wanted;
 /* design/recovery.md#five-seconds B12: a port's job out past MESH_PLATFORM_NS, during which no port dispatches a driver
-   call and the devices are not read (ports_stalled's, each event-loop turn) */
+   call and the devices are not read (ports_stalled's, each event-loop turn); and the ports whose progress threads did
+   not hold for a settle or a guarded change within MESH_PLATFORM_NS (`unguarded`, a bit a port: port_wait), concluded
+   alike */
 static _Atomic int stalled;
+static _Atomic uint32_t unguarded;
 /* design/recovery.md#five-seconds B9b: the window of a peer interface's termination (`exit_at`), as every port's quiet
    window holds, before which the bridge does not exit nor read the devices nor dispatch a concluded link's flush or a
    flow's move to the error state */
@@ -57,6 +60,16 @@ struct known known[MESH_KNOWN];
 void wake(void){
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+}
+/* design/recovery.md#five-seconds: a port halted from any thread (a peer interface's termination heard, a raiser's wait
+   at its bound; atomics alone): its pairing lost, so no job of it makes a further call (B10), then no lane of its link
+   served, both sequentially consistent (link_turn's connect stores served and reads the pairing again), and its bit set
+   in `which` for the event loop's conclusion (terminations_turn, ports_stalled) */
+_Static_assert(MESH_PORTS<=32,"a bit a port");
+static void port_halt(struct port *port,_Atomic uint32_t *which){
+  atomic_fetch_add(&port->link.pairing,1);
+  atomic_store(&port->link.served,0);
+  atomic_fetch_or(which,UINT32_C(1)<<port->index);
 }
 
 /* design/bridge-and-ipc.md#ledger: whether the configuration keeps ledgers (its `ledger`), and the bridge's ledgers
@@ -552,6 +565,11 @@ static int link_receive(struct port *port,int listed){
   return moved;
 }
 
+/* a progress thread's tell (the epoch it has seen, the guard it holds at), its raiser woken (port_wait) */
+static void port_tell(_Atomic uint64_t *word,uint64_t value){
+  atomic_store_explicit(word,value,memory_order_release);
+  os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_NONE);
+}
 /* design/bridge-and-ipc.md#progress: one pass of a port's progress thread, `side` 0 its receives' and 1 its SENDs':
    every flow in the port's table it serves (while the flow is progressing and every lane it rides is served, `served`
    read once a pass: none posts on a lane its link no longer serves, design/recovery.md#five-seconds; the send thread
@@ -578,9 +596,9 @@ static int port_pass(struct port *port,int side,int *any,uint64_t *told){
   if(served){*any=1;moved|=side?link_send(port,listed):link_receive(port,listed);}
   if(side && !(served>>MESH_LANE_STRIPES&1) && (port->stripes.out.active || port->stripes.send_tail!=port->stripes.send_head))
     stripes_abandon(port);
-  /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it), so the line the two threads
-     read every pass (`high`, `epoch`) is not written by either each pass */
-  if(epoch!=*told){atomic_store_explicit(&port->seen[side],epoch,memory_order_release);*told=epoch;}
+  /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it, woken by the tell), so the
+     line the two threads read every pass (`high`, `epoch`) is not written by either each pass */
+  if(epoch!=*told){port_tell(port->seen+side,epoch);*told=epoch;}
   return moved;
 }
 static void *port_progress(void *argument){
@@ -596,13 +614,13 @@ static void *port_progress(void *argument){
     /* design/bridge-dataflow.md#stripes: while the port's guard stands, no pass (no post on any queue pair of its device)
        and no flow read, the thread parked on the guard word (design/recovery.md#five-seconds B13: a guarded call in the
        driver costs no core), woken by its lowering and by a settle (guard_wake), looking again every MESH_PAUSE_NS (the
-       stop's `closing`), the epoch told at each waking (port_settle inside a guarded job returns) */
+       stop's `closing`), the guard told and the epoch at each waking, each tell waking its raiser (port_tell) */
     const uint64_t guard=atomic_load_explicit(&port->guard,memory_order_acquire);
     if(guard&1){
-      atomic_store_explicit(&port->guarded[side],guard,memory_order_release);
+      port_tell(port->guarded+side,guard);
       while(atomic_load_explicit(&port->guard,memory_order_acquire)==guard && !atomic_load_explicit(&port->closing,memory_order_acquire)){
         const uint64_t epoch=atomic_load_explicit(&port->epoch,memory_order_acquire);
-        if(epoch!=told){atomic_store_explicit(&port->seen[side],epoch,memory_order_release);told=epoch;}
+        if(epoch!=told){port_tell(port->seen+side,epoch);told=epoch;}
         os_sync_wait_on_address_with_timeout(&port->guard,guard,sizeof port->guard,OS_SYNC_WAIT_ON_ADDRESS_NONE,
           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
       }
@@ -621,7 +639,10 @@ static void *port_progress(void *argument){
     atomic_store_explicit(&port->parked[side],1,memory_order_relaxed);
     atomic_thread_fence(memory_order_seq_cst);
     const uint64_t last=atomic_load_explicit(bell,memory_order_acquire);
-    if(port_pass(port,side,&any,&told)){atomic_store_explicit(&port->parked[side],0,memory_order_relaxed);empty=0;quiet=0;resting=0;continue;}
+    /* a guard raised before the ring this read took is held at once: its raiser rings once and parks (port_wait) */
+    if(port_pass(port,side,&any,&told) || atomic_load_explicit(&port->guard,memory_order_acquire)&1){
+      atomic_store_explicit(&port->parked[side],0,memory_order_relaxed);empty=0;quiet=0;resting=0;continue;
+    }
     resting=1;
     os_sync_wait_on_address_with_timeout(bell,last,sizeof *bell,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
       any?MESH_IDLE_POLL_NS:MESH_PAUSE_NS);
@@ -663,12 +684,25 @@ int port_list(struct flow *f){
   port_bell(port);
   return 0;
 }
-/* the port's table read by neither progress thread past a change made before: both tell an epoch past it */
-static void port_settle(struct port *port){
-  const uint64_t epoch=atomic_fetch_add(&port->epoch,1)+1;
+/* design/recovery.md#five-seconds: the raiser of a settle or a guard parked, never spinning, until each started
+   progress thread's word (`told`: the epoch it has seen, or the guard it holds at) reaches `value`, woken by the
+   thread's tell (port_tell), the port's bell and its guard's waiters rung as it begins and at each waking; at most
+   MESH_PLATFORM_NS: a thread that has not told by then is in a call that has not returned, and the port is halted for
+   the event loop to conclude as around a stuck call (`unguarded`, ports_stalled).  0, or ETIMEDOUT */
+static int port_wait(struct port *port,_Atomic uint64_t *told,uint64_t value){
+  const uint64_t until=clock_ns()+MESH_PLATFORM_NS;
   for(int side=0;side<port->threads;side++)
-    while(atomic_load_explicit(&port->seen[side],memory_order_acquire)<epoch){port_bell(port);guard_wake(port);sched_yield();}
+    for(uint64_t seen,at;(seen=atomic_load_explicit(told+side,memory_order_acquire))<value;){
+      if((at=clock_ns())>=until){port_halt(port,&unguarded);return ETIMEDOUT;}
+      port_bell(port);guard_wake(port);
+      os_sync_wait_on_address_with_timeout(told+side,seen,sizeof *told,OS_SYNC_WAIT_ON_ADDRESS_NONE,OS_CLOCK_MACH_ABSOLUTE_TIME,
+        until-at);
+    }
+  return 0;
 }
+/* the port's table read by neither progress thread past a change made before: both tell an epoch past it; 0, or
+   ETIMEDOUT (port_wait) */
+static int port_settle(struct port *port){ return port_wait(port,port->seen,atomic_fetch_add(&port->epoch,1)+1); }
 /* design/bridge-dataflow.md#stripes, design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": the guard of a
    port's device, on the port's queue, around a change of its verbs objects (queue pairs and completion queues made,
    connected or destroyed): raised, it returns once each started progress thread holds (it told the guard's value before
@@ -676,28 +710,29 @@ static void port_settle(struct port *port){
    is made, changed or destroyed (Apple's provider: a post on a long-lived queue pair across another's teardown stores
    to the device's shared doorbell mapping after it moved, tbt_post_recv); lowered, the threads parked on it woken and
    going on (design/recovery.md#five-seconds B13).  It stands for every change once the port's threads run, the link
-   lanes' long-lived queue pairs being posted on while the link is up */
-static void port_guard(struct port *port,int raise){
-  if(!raise){atomic_fetch_add_explicit(&port->guard,1,memory_order_release);guard_wake(port);port_bell(port);return;}
-  const uint64_t guard=atomic_fetch_add_explicit(&port->guard,1,memory_order_acq_rel)+1;
-  for(int side=0;side<port->threads;side++)
-    while(atomic_load_explicit(&port->guarded[side],memory_order_acquire)!=guard){port_bell(port);sched_yield();}
+   lanes' long-lived queue pairs being posted on while the link is up.  Raised: 1; 0 where no progress thread runs; -1
+   where one did not hold within MESH_PLATFORM_NS (port_wait), the guard lowered again and the change not to be made */
+static void guard_lower(struct port *port,int raised){
+  if(raised>0){atomic_fetch_add_explicit(&port->guard,1,memory_order_release);guard_wake(port);port_bell(port);}
 }
 static int guard_raise(struct port *port){
   if(!port->threads)return 0;
-  port_guard(port,1);
-  return 1;
+  if(!port_wait(port,port->guarded,atomic_fetch_add_explicit(&port->guard,1,memory_order_acq_rel)+1))return 1;
+  guard_lower(port,1);
+  return -1;
 }
-static void guard_lower(struct port *port,int raised){ if(raised)port_guard(port,0); }
 /* design/bridge-and-ipc.md#progress: a flow out of its port's table, on the port's queue, returning once neither
-   progress thread can read it nor take a completion as its lanes' holder (lanes_release clears the holders first) */
-void port_unlist(struct flow *f){
+   progress thread can read it nor take a completion as its lanes' holder (lanes_release clears the holders first); 0,
+   or ETIMEDOUT where one did not tell within MESH_PLATFORM_NS (port_settle): the flow still `listed`, kept with its
+   storage and rows (lanes_release) */
+static int port_unlist(struct flow *f){
   atomic_store_explicit(&f->progressing,0,memory_order_release);
-  if(!f->listed)return;
+  if(!f->listed)return 0;
   struct flow *held=f;
   atomic_compare_exchange_strong(&f->port->table[f->slot],&held,NULL);
-  port_settle(f->port);
+  if(port_settle(f->port))return ETIMEDOUT;
   f->listed=0;
+  return 0;
 }
 /* design/bridge-and-ipc.md#region: the queue pairs a port's device holds, told in its port table */
 static void port_pairs(struct port *port){
@@ -753,10 +788,11 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
 }
 
 /* design/bridge-and-ipc.md#lanes: a link job on the port's queue, guarded (no queue pair of the device is posted on while
-   one is made, connected or destroyed: port_guard), its verbs calls made on hearing the peer, and on a failure only
+   one is made, connected or destroyed: guard_raise), its verbs calls made on hearing the peer, and on a failure only
    past that conclusion's quiet window (LINK_JOB_FLUSH, design/recovery.md#five-seconds B6 (b)), from the peer's
    numbers as the job was started (`numbers`, its LID and GID among them: the event loop takes the peer's LINK and
-   hello meanwhile), and none once its pairing is lost (B10: read as the guard stands and between its steps): the lanes
+   hello meanwhile), and none once its pairing is lost (B10: read as the guard stands and between its steps; a guard
+   not held within MESH_PLATFORM_NS halts the port, its pairing with it, port_wait): the lanes
    made (LINK_JOB_MAKE: those of the link's last pairing moved to the error state and destroyed where the context
    answers, pairs_down, their handles kept where a destruction fails, B16, or forgotten where the context went with the
    peer, then MESH_LINK_LANES UC queue pairs in INIT, d6dceac's verbs_up; every lease word's DIRTY cleared, the moves
@@ -914,14 +950,16 @@ int lanes_take(const struct port *port,uint64_t owner,const uint32_t *lane,uint3
    (`stalled`, B12) or a peer interface's termination's window stands (`exit_at`, B9b), the move is put off to the
    window's end, never dropped (B9: a deferral, `deferred`, link_turn's LINK_JOB_MOVE).  A dirty lane not moved may
    still land a SEND in the flow's rows (`held`, B7: the flow kept until the lanes' `generation` moves past
-   `lane_epoch`, or until its put-off move moved them).  The lanes it left dirty */
+   `lane_epoch`, or until its put-off move moved them).  A settle or a guard not held within MESH_PLATFORM_NS
+   (port_wait: the port halted, served no more) makes no change: the move is not made, and a flow a thread may still
+   read (`kept`, still `listed`) has every lane of it dirty and its rows and storage held.  The lanes it left dirty */
 uint32_t lanes_release(struct flow *f,int lost){
   struct port *port=f->port;
   struct link *l=&port->link;
   for(uint32_t q=0;q<f->queues;q++)atomic_store_explicit(&l->holder[f->lane[q]],NULL,memory_order_release);
-  port_unlist(f);
-  uint32_t dirty=0,moved=0;
-  for(uint32_t q=0;q<f->queues;q++){
+  const int kept=port_unlist(f)!=0;
+  uint32_t dirty=kept?f->lanes:0,moved=0;
+  for(uint32_t q=0;!kept && q<f->queues;q++){
     const uint32_t k=f->lane[q];
     const struct send_gate *g=l->gate+k;
     if((f->rings && f->rings[q].outstanding) || __atomic_load_n(&g->posted,__ATOMIC_RELAXED)!=__atomic_load_n(&g->retired,__ATOMIC_RELAXED))
@@ -934,7 +972,7 @@ uint32_t lanes_release(struct flow *f,int lost){
   if(move){
     atomic_store(&port->moving_at,clock_ns());
     const int raised=guard_raise(port);
-    moved=pairs_error(&l->provider,move);
+    moved=raised<0?0:pairs_error(&l->provider,move);
     guard_lower(port,raised);
     atomic_store(&port->moving_at,0);
     say("link %u (%s): lanes %#x left dirty toward node %u: %#x moved to the error state, their requests flushed\n",port->index,
@@ -1015,8 +1053,8 @@ static void link_turn(struct port *port){
       /* port_silent: the frames' clock armed by this pairing's first frame heard; gates_turn: the stripes' clock unarmed */
       port->frame_at=0;port->frames=atomic_load_explicit(&l->alive_heard,memory_order_relaxed);port->stripes.held_at=0;
       atomic_store_explicit(&mesh_links(M)[port->index].lanes,MESH_LINK_LANES,memory_order_relaxed);
-      /* B9b: served, then the pairing read again (both sequentially consistent, as peer_terminated moves the pairing and
-         then clears served), so a termination heard between the job's end and here is never overwritten */
+      /* B9b: served, then the pairing read again (both sequentially consistent, as port_halt moves the pairing and then
+         clears served), so a halt between the job's end and here is never overwritten */
       atomic_store(&l->served,(UINT32_C(1)<<MESH_LINK_LANES)-1);
       if(atomic_load(&l->pairing)!=l->job_pairing)atomic_store(&l->served,0);
       port_bell(port);
@@ -1126,24 +1164,31 @@ static void gates_turn(struct port *port){
    once: open 0 and port_lost (ETIMEDOUT: its socket closed, the map's phase STOPPED), no move to the error state, and
    its programs' words ~0 from this thread (their stops wait behind the call on its queue).  The call itself cannot be
    ended.  While any port's job is so out, no port dispatches a driver call and the devices are not read (`stalled`:
-   port_open, link_turn, lanes_release, ports_find).  Read on the event loop's turn */
+   port_open, link_turn, lanes_release, ports_find); once the call returns the port opens again (`opening`, port_open
+   past its quiet window, B9; an open's own return is port_opened's) and so takes jobs again.  A port whose progress
+   threads did not hold for a settle or a guarded change within MESH_PLATFORM_NS (`unguarded`, port_wait: the change not
+   made) is concluded alike, once, unless already concluded around a call.  Read on the event loop's turn */
 static void ports_stalled(void){
   int any=0;
+  const uint32_t unheld=atomic_exchange(&unguarded,0);
   for(uint32_t p=0;p<port_count;p++){
     struct port *port=ports+p;
     const struct link *l=&port->link;
     const uint64_t at=atomic_load(&port->moving_at);
     const int opening=port->job && !atomic_load_explicit(&port->done,memory_order_acquire) && now-port->job_at>=MESH_PLATFORM_NS;
     const int linking=l->job && !atomic_load_explicit(&l->done,memory_order_acquire) && now-l->job_at>=MESH_PLATFORM_NS;
-    const int moving=at && now>at && now-at>=MESH_PLATFORM_NS;
-    any|=opening||linking||moving;
-    if(!opening && !linking && !moving){port->stuck=0;continue;}
-    if(port->stuck)continue;
-    port->stuck=1;
-    say("link %u (%s): its %s out %.1f s: its port concluded around it (design/recovery.md#five-seconds)\n",port->index,
-        port->name,opening?"open's job":moving?"stop's move to the error state":l->job==LINK_JOB_MAKE?"make job":
-        l->job==LINK_JOB_CONNECT?"connect job":l->job==LINK_JOB_MOVE?"move job":"flush job",
-        (double)(now-(opening?port->job_at:moving?at:l->job_at))/1e9);
+    const int moving=at && now>at && now-at>=MESH_PLATFORM_NS,out=opening||linking||moving,held=!port->stuck && unheld>>p&1;
+    any|=out;
+    if(!out && port->stuck){port->stuck=0;if(!port->job)port->opening=1;}
+    if(port->stuck || (!out && !held))continue;
+    port->stuck=(uint32_t)out;
+    if(!out)say("link %u (%s): a progress thread did not hold within %.1f s for a settle or a verbs change, which was not "
+                "made: its port concluded around it (design/recovery.md#five-seconds)\n",port->index,port->name,
+                (double)MESH_PLATFORM_NS/1e9);
+    else say("link %u (%s): its %s out %.1f s: its port concluded around it (design/recovery.md#five-seconds)\n",port->index,
+             port->name,opening?"open's job":moving?"stop's move to the error state":l->job==LINK_JOB_MAKE?"make job":
+             l->job==LINK_JOB_CONNECT?"connect job":l->job==LINK_JOB_MOVE?"move job":"flush job",
+             (double)(now-(opening?port->job_at:moving?at:l->job_at))/1e9);
     port->open=0;
     port_lost(port,ETIMEDOUT);
     port->link.flush_at=0;
@@ -1241,11 +1286,13 @@ static struct port *port_at(uint32_t interface){
   return NULL;
 }
 /* design/bridge-and-ipc.md#ports: a port's device opened, on its own queue (guarded), where it is to be (at the start,
-   at its link's coming on or its interface's attaching, and at a hello heard while it is not open, while it has no
-   peer), once its quiet window has ended and no port's job is out past MESH_PLATFORM_NS (design/recovery.md#five-seconds
-   B9, B12): the hellos' group joined on its interface, so the port hears them open or not (hello_heard, B16); its port
-   read; a context that fails with the port active is gone (the peer's power went with it): forgotten with every object
-   made on it, no verbs call (design/RDMA-KERNEL-RECOVERY.md "October 18"), and the device opened afresh */
+   at its link's coming on or its interface's attaching, at a hello heard while it is not open, while it has no peer,
+   and as the call its port was concluded around returns, ports_stalled), once its quiet window has ended and no port's
+   job is out past MESH_PLATFORM_NS (design/recovery.md#five-seconds B9, B12): the hellos' group joined on its
+   interface, so the port hears them open or not (hello_heard, B16); its port read (none where the guard was not held
+   within MESH_PLATFORM_NS: ETIMEDOUT, port_wait); a context that fails with the port active is gone (the peer's power
+   went with it): forgotten with every object made on it, no verbs call (design/RDMA-KERNEL-RECOVERY.md "October 18"),
+   and the device opened afresh */
 static void port_open(struct port *port){
   if(port->job || !port->opening || port->control>=0 || now<port->quiet_at || atomic_load_explicit(&stalled,memory_order_relaxed))return;
   port->opening=0;
@@ -1255,8 +1302,8 @@ static void port_open(struct port *port){
   port->job=1;port->job_at=now;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
     const int raised=guard_raise(port);
-    int refused=0,result=device_up(&port->device,&wire,&refused);
-    if(result && !refused && result!=ENETDOWN && port->device.context){
+    int refused=0,result=raised<0?ETIMEDOUT:device_up(&port->device,&wire,&refused);
+    if(raised>=0 && result && !refused && result!=ENETDOWN && port->device.context){
       say("link %u (%s): its device's context failed (%s): forgotten and opened afresh\n",port->index,port->name,strerror(result));
       pair_forget(&port->link.provider);
       down_device(&port->device);
@@ -1447,7 +1494,6 @@ static void network_heard(int stopping){
    Thunderbolt RDMA peer interface's termination, which IOKit tells in its first phase (kIOTerminatedNotification), on
    a queue of its own: the terminations heard (`terminations`), and the ports whose peer interface is terminating
    (`terminated`, a bit a port index), which the event loop concludes (terminations_turn) */
-_Static_assert(MESH_PORTS<=32,"a bit a port");
 static _Atomic uint32_t terminated,terminations;
 #ifndef MESH_LOOP_FABRIC
 /* the exit's window and every found port's held to `until` at least (a port found meanwhile takes `exit_at`'s as it is
@@ -1481,10 +1527,9 @@ static struct port *peer_port(io_service_t peer){
 }
 /* the iterator drained first, which arms the notification again: for each terminated service the exit's window and
    every port's held to MESH_PLATFORM_NS from now (no port job and no exit inside the termination, whichever port's it
-   is) and the event loop woken, before any property is read; then the port each maps to has its pairing lost (B10: a
-   job of it makes no further call) and then is served no more, both sequentially consistent (link_turn's connect, which
-   stores served and reads the pairing again, never overwrites it), and is marked for the event loop's conclusion; a
-   service that maps to no port holds the windows alone; each released */
+   is) and the event loop woken, before any property is read; then the port each maps to halted (port_halt: its
+   pairing lost, served no more, marked for the event loop's conclusion); a service that maps to no port holds the
+   windows alone; each released */
 static void peer_terminated(void *unused,io_iterator_t iterator){
   (void)unused;
   io_service_t services[MESH_PORTS];
@@ -1500,9 +1545,7 @@ static void peer_terminated(void *unused,io_iterator_t iterator){
     struct port *port=peer_port(services[k]);
     IOObjectRelease(services[k]);
     if(!port)continue;
-    atomic_fetch_add(&port->link.pairing,1);
-    atomic_store(&port->link.served,0);
-    atomic_fetch_or(&terminated,UINT32_C(1)<<port->index);
+    port_halt(port,&terminated);
     wake();
   }
 }
