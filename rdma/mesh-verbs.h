@@ -23,9 +23,9 @@
 #define MESH_BANK ((size_t)1<<32)
 #define MESH_REGION ((size_t)1<<30)
 struct wire_mapping { char *data; size_t length; };
-/* design/bridge-and-ipc.md#ports: a port's device: its context, protection domain and the whole window's `extents`
-   registered on it (design/prepared-machine.md#M09), the queue pairs it holds against those it can use (`max_pairs`:
-   its max_qp less one, RDMA-FIRST.md's "max_qp: 11 (10 usable)") */
+/* design/transport.md: a port's device: its context, protection domain and the whole window's `extents`
+   registered on it (design/transport.md), the queue pairs it holds against those it can use (`max_pairs`:
+   its max_qp less one, design/transport.md's "max_qp: 11 (10 usable)") */
 struct mesh_device {
   char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
@@ -46,8 +46,8 @@ static __attribute__((unused)) int device_gid(struct mesh_device *device){
   }
   return ENXIO;
 }
-/* design/prepared-machine.md#M09 */
-/* design/prepared-machine.md#M07 */
+/* design/transport.md */
+/* design/transport.md */
 /* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, which is a
    byte offset into the registered window because the window begins at data_off; a span never crosses
    a block, so it never crosses an extent. */
@@ -72,9 +72,9 @@ struct mesh_queue {
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
 /* a program's queue pairs on one port and their two completion queues */
 struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn; };
-/* design/prepared-machine.md#M07 */
+/* design/transport.md */
 /* design/algorithm-sources.md#programtensor */
-/* design/prepared-machine.md#M09 */
+/* design/transport.md */
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   wire->length=(size_t)mesh_arena_pages(m)*m->pgsz;
@@ -89,7 +89,7 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   return 0;
 }
-/* the region's name and the stop flag, defined once in mesh-link.c (design/bridge-and-ipc.md#files) */
+/* the region's name and the stop flag, defined once in mesh-link.c (design/transport.md) */
 extern const char *shm; extern _Atomic sig_atomic_t stop;
 /* design/RDMA-KERNEL-RECOVERY.md "October 18": a retired device's registrations, protection domain and context
    forgotten with no verbs call (ibv_dealloc_pd during the device's termination deadlocks Apple's driver, 09-05 and
@@ -102,7 +102,7 @@ static __attribute__((unused)) int down_device(struct mesh_device *device){
   return 1;
 }
 static __attribute__((unused)) void down(void){ if(shm)shm_unlink(shm); }
-/* design/recovery.md#diagnosis: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
+/* design/transport.md: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
 static __attribute__((unused)) void say(const char *format,...){
   struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
@@ -116,14 +116,14 @@ static __attribute__((unused)) void say(const char *format,...){
 static __attribute__((unused)) void die(const char*m){ say("%s\n",m); exit(1); }
 
 /* design/algorithm-sources.md#programcopy */
-/* design/prepared-machine.md#M09 */
-/* design/bridge-and-ipc.md#ports: the port's device opened (by its name, the device list read again) and its port
+/* design/transport.md */
+/* design/transport.md: the port's device opened (by its name, the device list read again) and its port
    active, its protection domain, the whole window registered on it and its capacities read once a context, before any
-   queue pair exists (design/prepared-machine.md#M09), on the port's own queue (design/recovery.md Q14).  0, or the
+   queue pair exists (design/transport.md), on the port's own queue (design/transport.md).  0, or the
    errno (ENETDOWN: the port is not active; ENODEV: no such device now).  A registration the device refuses sets
    *refused to its code (EFBIG: the window's extents past the device's max_mr; else ibv_reg_mr's errno), logged with
    the extent, and keeps the device and the extents it registered, so its next turn registers the rest
-   (design/recovery.md#registration). */
+   (design/transport.md). */
 static __attribute__((unused)) int device_up(struct mesh_device *device,struct wire_mapping *wire,int *refused){
   *refused=0;
   if(!device->context){
@@ -166,7 +166,7 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
   return 0;
 }
-/* design/prepared-machine.md#M11 */
+/* design/transport.md */
 /* queue pair q made on the provider's completion queues, UC, its capacities read, and moved to INIT (d6dceac verbs_up's
    attributes and mask, as every pairing since); the device's count of its queue pairs one more.  0, or the error */
 static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
@@ -188,7 +188,7 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
   return 0;
 }
 /* `count` UC queue pairs in INIT, against the device's usable queue pairs, on the provider's two completion queues, made
-   where it has none (a link's are made once a context and kept across its pairings: design/bridge-and-ipc.md#lanes).
+   where it has none (a link's are made once a context and kept across its pairings: design/transport.md).
    0, or the error (ENOSPC: the device holds no more queue pairs). */
 static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,int count){
   struct mesh_device *device=provider->device;
@@ -221,7 +221,7 @@ static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q)
   if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
   return 0;
 }
-/* design/recovery.md#five-seconds: the queue pairs of `lanes` (a bit a queue) moved to the error state, so the device
+/* design/transport.md: the queue pairs of `lanes` (a bit a queue) moved to the error state, so the device
    ends their posted receives and SENDs (flushed: their completions name no holder, taken as any lane's failure or by a
    destruction's poll), nothing waiting on what it flushes (4df30806 pair_flush's modify loop, without its drain).  The
    lanes moved */
@@ -233,13 +233,13 @@ static __attribute__((unused)) uint32_t pairs_error(struct mesh_verbs *provider,
   }
   return moved;
 }
-/* design/bridge-and-ipc.md#lanes: a link's queue pairs moved to the error state, whatever the move returns (none is
-   destroyed ready with receives posted: 0fb8eb54's down_pair, design/recovery.md#five-seconds), then destroyed at its
+/* design/transport.md: a link's queue pairs moved to the error state, whatever the move returns (none is
+   destroyed ready with receives posted: 0fb8eb54's down_pair, design/transport.md), then destroyed at its
    next pairing (d6dceac's down_pair, its completion queues kept, the context's own), then what those queues hold of
    them taken and dropped: a poll returns what is there and 0 once none is (no queue pair is left to add any).  0, or
    the destruction's error, every queue pair not destroyed kept with its count in the device's for the next pairing to
    destroy (4df30806 down_pair: "a failed destruction keeps its handle for the next retirement turn"; a live context is
-   never forgotten, design/recovery.md#five-seconds B16) */
+   never forgotten, design/transport.md B16) */
 static __attribute__((unused)) int pairs_down(struct mesh_verbs *provider){
   pairs_error(provider,UINT32_MAX);
   while(provider->qp_count){

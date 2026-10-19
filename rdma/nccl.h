@@ -85,10 +85,10 @@
    has come (woken by its session's watcher, within a millisecond of one) and holds no lock another communicator's
    groups take, so one may wait on a peer for as long as the peer takes, beside other communicators' groups.  A wait is a
    kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait_bounded), a word of the session's
-   that its canceller ends (design/recovery.md Q16: a lost or silent link, a revoke), and every wait is bounded: the
+   that its canceller ends (design/transport.md: a lost or silent link, a revoke), and every wait is bounded: the
    stream's `polls` is the most loads of the word a wait makes, the caller's bound for the group's crossings, which it
    derives from its plan (the lag it expects at them, over the period of one load on the node's GPU: rdma/NCCL.md
-   "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/recovery.md#five-seconds).  A wait
+   "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md).  A wait
    that reaches its bound leaves its position, its channel and its bound in the session's violation words, every later
    dispatch of the session does nothing, and the group fails as a value after its command buffer (ncclCommGetAsyncError,
    or the communicator's next group), the session's waits all ended (its words ~0).
@@ -113,7 +113,7 @@
    pages are no longer registered, and while the process holds such a lease its next ncclMemAlloc, communicator,
    session (a communicator's next group that crosses a link) and ncclCommRegister fail with ncclRemoteError naming it,
    as ncclMeshMemLive (below) does, until the process has freed every one (ncclMemFree); it then leases from the bridge
-   that runs, so a process never holds leases of two regions (design/recovery.md mandates 12 and 13).  Weights, KV and
+   that runs, so a process never holds leases of two regions (design/transport.md mandates 12 and 13).  Weights, KV and
    every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being outside of
    it means that they cannot be zero copy passed to peers."  A lease's Metal buffer is ncclMeshMemBuffer's (below), the
    buffer an MPS tensor or a kernel takes over the lease; a Metal-path collective whose send buffer is that buffer
@@ -124,13 +124,13 @@
    wire's bytes still cross through the session's rings (the bridges' pre-posted flows, bound when the session opened).
    The host path copies every operand through them, a lease or not.  The window is where a program that binds its own
    section (mesh-call.h mesh_transfer_bind) crosses without them, and ncclCommRegister refuses a buffer outside it.
-   Design: design/prepared-machine.md#M09.
+   Design: design/transport.md.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
    communicator whose session failed fails its later groups, made again on the map current then (ncclCommDestroy, then
    an init).  The session's progress thread is its waits' watcher, with no clock of its own: a landing that reads ~0
    (its bridge's, at a link lost or silent for mesh.h MESH_PLATFORM_NS, a SEND held that long, or its stop:
-   design/recovery.md#five-seconds; a revoke's) cancels every link of the session, and so does a bridge that stopped or
+   design/transport.md; a revoke's) cancels every link of the session, and so does a bridge that stopped or
    ended, or refused or failed its program toward a peer (that destination's status), ending every wait on it.  A
    group on a cancelled or lost link fails with ncclRemoteError; a failure the Metal path finds after its group returned (calls that
    do not pair, too) is the communicator's asynchronous error (ncclCommGetAsyncError) and the next group's result.  A
@@ -164,7 +164,7 @@ extern "C" {
 #include <stddef.h>
 #include "mesh-plan.h"
 
-/* design/recovery.md#five-seconds: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
+/* design/transport.md: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
    above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
    rises, rdma/NCCL.md "Bounded waits") */
 #define NCCL_MESH_POLLS 4500000u
@@ -948,7 +948,7 @@ uint64_t ncclMeshRetired(void);
    sharing none with its parent's.  What a relay's bridge leases for a route it forwards is ncclMeshRelayBytes's. */
 ncclResult_t ncclMeshSessionBytes(int peers, const struct mesh_wire* wire, uint64_t* bytes);
 /* The bytes of its node's window a relay's bridge leases for one direction of a session on `wire` that its route
-   crosses (mesh-program.c mirror, design/bridge-and-ipc.md#routes): the direction's two rings mirrored (mesh.h
+   crosses (mesh-program.c mirror, design/transport.md): the direction's two rings mirrored (mesh.h
    mesh_relay_slot), the lists of its two destinations and its SEND cells and targets, each a lease of whole blocks;
    one such lease, and one client slot of the relay's bridge (mesh.h MESH_CLIENTS), a direction a route crosses, both
    directions of every two members of a session whose route crosses the node, whatever their stripes. */

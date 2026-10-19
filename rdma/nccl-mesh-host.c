@@ -1,4 +1,4 @@
-/* The host executor (mesh 800fe6bc^, on HEAD's libnccl-mesh; design/bridge-dataflow.md#the-loopback-fabric): the walk's
+/* The host executor (mesh 800fe6bc^, on HEAD's libnccl-mesh; design/transport.md): the walk's
    kernels (nccl-mesh-metal.h) and the transport's Metal wrappers (mesh-metal.h) on the CPU, so libnccl-mesh's Metal
    path runs on host threads: N ranks on one host over mesh-flow-loop's bridges, with no GPU kernel anywhere (several
    ranks' spinning kernels on one GPU have no forward-progress guarantee: the no-cross-queue-spin rule).  Each kernel
@@ -7,7 +7,7 @@
    nccl-mesh.c exports hidden to this file where MESH_HOST_EXECUTOR is defined), publications release-stored, a wait for
    a landing a poll of its word (mesh.metal mesh_remote_wait_bounded: until it reaches 1 + the cycle or the session's
    canceller stores ~0, for at most the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, and
-   at most MESH_PLATFORM_NS, design/recovery.md#five-seconds; past them the position, the channel and the bound go to
+   at most MESH_PLATFORM_NS, design/transport.md; past them the position, the channel and the bound go to
    violation words [2], [3] and [4] and every later step gated on them does nothing), a landed wait's positions checked
    against the filler protocol (violation words [0] and [1]); a step naming no words is gated on the program's
    (metal_gate), as nccl-mesh-metal.m dispatch_as binds them.  A buffer is a host
@@ -143,7 +143,7 @@ static _Atomic uint64_t *words_of(struct metal_program *program, void *given, ui
 static int halted(_Atomic uint64_t *v, uint32_t polls) { return polls && v && atomic_load_explicit(v + 2, memory_order_acquire); }
 
 /* mesh_step_wait: the word until it reaches 1 + cycle (or ~0), at most `polls` looks (0: one) and at most
-   MESH_PLATFORM_NS, a host look being far slower than a GPU load (design/recovery.md#five-seconds) */
+   MESH_PLATFORM_NS, a host look being far slower than a GPU load (design/transport.md) */
 static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls) {
   const uint64_t target = 1 + cycle, deadline = now_ns() + MESH_PLATFORM_NS;
   uint64_t seen = atomic_load_explicit(word, memory_order_acquire);

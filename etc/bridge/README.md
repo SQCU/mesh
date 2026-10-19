@@ -16,23 +16,23 @@ A document has these keys:
 - `purpose`: one line stating what the configuration is for (required).
 - the window, exactly one of `window_gib` (GiB) or `window_percent` (of the node's physical memory).
 - `keepalive_us` (optional): the most microseconds an exclusive flow goes without a frame while it runs
-  (design/bridge-and-ipc.md#keepalive): each such flow takes one queue pair more, and its send side posts a one-frame
+  (design/transport.md): each such flow takes one queue pair more, and its send side posts a one-frame
   SEND on it that often, so a link's controller that slows after a quiet stretch (the Mac mini's, 6-10 us after 40 us of
   nothing) stays ready. Both ends of a flow state it for its frames to flow; a document that states none makes no such
   queue pair.
 
-The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
+The window is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
 when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
 checks the window against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a window of more
 extents than that device registers is refused for that port, logged with the extent, its bytes, the errno and the
 extents the device holds, and the port turns again 60 s later, doubling to 30 min, keeping its extents
-(design/recovery.md#registration). The bridge starts and serves the node either way; the window is never clamped. Clients lease
+(design/transport.md). The bridge starts and serves the node either way; the window is never clamped. Clients lease
 from it; a lease that does not fit fails at its start with an error naming the execution, and the window never grows.
 How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
 
 ## The loopback fabric's configurations
 
-A loop bridge (`rdma/.build/loop/mesh-flow-loop`, mesh design/bridge-dataflow.md#the-loopback-fabric), one of N on one
+A loop bridge (`rdma/.build/loop/mesh-flow-loop`, mesh design/transport.md), one of N on one
 host for running relays, forwarding and the library on 3 to 8 nodes before the hardware has them, reads the same
 canonical form with one key more, `loop`: its region's name, its node, the loopverbs fabric it shares with the host's
 other loop bridges, and its ports, each a loopverbs device and its cable's
@@ -83,7 +83,7 @@ library's, beside the computation), and the whole model alone. Beside the window
 window page, a row's page-table entry, buffer record and delivery word and its plane bits, and 0.5 MiB of header,
 ports and client slots, rdma/mesh.h `mesh_layout`, from MESH_VERSION 111: 0.06 GiB at 16 GiB, 0.056 at 14; at 110 every row
 also carried a publication's targets, 1,136.5 bytes a window page and 0.5 MiB, 1.11 GiB at 16 GiB, touched as rows were leased; a
-program's targets now follow its SEND cells in their lease, design/prepared-machine.md#M09), the node's base wired and macOS
+program's targets now follow its SEND cells in their lease, design/transport.md), the node's base wired and macOS
 memory, the rank's process, the Neural Engine's own copy of its columns, and a 2 GiB margin. A served engine (metal-microbench server/bridge.py) leases its model and pool
 from its node's window too; neither file holds one.
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # A node's user layers follow their upstreams' branch heads, each built at its upstream in a stage and installed by rename
-# (README.md, Convergence; design/recovery.md).  With no argument, one pass of the mesh's own layer: the mesh checkout
+# (README.md, Convergence; design/transport.md).  With no argument, one pass of the mesh's own layer: the mesh checkout
 # this script is in, built at its upstream in a stage, fast-forwarded, its images installed by rename (the libraries
 # first, the bridge's binary last, and the binary anew wherever libmesh changed) and bin/mesh-user.sh run on them; the
 # bridge restarts itself on its new binary between calls.  Its subcommands:

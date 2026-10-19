@@ -184,13 +184,9 @@ RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of
 this depends on the routing layer.
 
-> [RDMA-FIRST.md](RDMA-FIRST.md) is the design economics: what is cheap, what is
-> expensive, and why the usual backpressure and framing machinery is the wrong shape
-> here. Read it before designing; read RDMA-RULES.md before running.
-
-> Before writing or running anything that opens a verbs device, read
-> [RDMA-RULES.md](RDMA-RULES.md). Killing a stuck verbs process can wedge a node
-> badly enough to need a physical power cycle.
+> [design/transport.md](design/transport.md) is the transport: who owns which pages and addresses, why a
+> send or a receive does not fail, and which kernel calls can wedge a node (killing a verbs process can need a
+> physical power cycle). Read it before writing or running anything that opens a verbs device.
 
 ## Links, and knowing when you only have one
 
@@ -207,8 +203,8 @@ backwards, and the label hides a real dependency:
 So the fabric can be a node's *only* link, and control has to ride it when that is the
 case — `ssh` and `mesh-peers` both work over `fabric-adjacent` link-local
 addresses for exactly this reason. Breaking the fabric is a reachability failure, not
-an inconvenience, which is why [RDMA-RULES.md](RDMA-RULES.md) is a reachability
-document.
+an inconvenience, which is why the transport's stop (design/transport.md) is a reachability
+matter.
 
 The invariant is not "every link comes back" — that cannot be promised for a network
 that may not exist. It is: **a node comes back with every link the room actually
@@ -363,10 +359,10 @@ the node's uplink.
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
-| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** Every resident job is KeepAlive with `ThrottleInterval` 1 (launchd starts it again at once after an exit, at most once a second; its default is 10) and picks up a new program or configuration by exiting: the bridge on its binary (design/bridge-and-ipc.md); telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the updates) and the convergence's passes read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. Nothing boots a job out but the operator's `mesh-converge.sh off`, which removes definitions and lets each loop end. |
+| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** Every resident job is KeepAlive with `ThrottleInterval` 1 (launchd starts it again at once after an exit, at most once a second; its default is 10) and picks up a new program or configuration by exiting: the bridge on its binary (design/transport.md); telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the updates) and the convergence's passes read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. Nothing boots a job out but the operator's `mesh-converge.sh off`, which removes definitions and lets each loop end. |
 | `bin/mesh-converge.sh` | the node's convergence (Convergence, below): with no argument the mesh checkout's pass (`io.mesh.converge`); `held` and `stamp` are the node's convergence for any consumer's layer, `off` takes the node out. |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION. It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
-| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer, at each run, unless its link is the node's only one (design/recovery.md, port). Idempotent; run at boot and every keeper pass. |
+| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer, at each run, unless its link is the node's only one (design/transport.md, port). Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric record: RDMA enablement and each device's link, as boot found them. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
@@ -522,7 +518,7 @@ Nothing stops a bridge but the bridge. Its agent's definition names its program 
 it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the
 installation above, or `make all install` by hand, which installs the binary anew whenever libmesh changed) or a new
 configuration (`mesh-user.sh` renames it into place and then gives the binary a new file). The bridge stops at once on a
-new binary, its programs failing as values, and launchd starts the new one (design/bridge-and-ipc.md#stop); a process
+new binary, its programs failing as values, and launchd starts the new one (design/transport.md); a process
 already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
 
 Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what
@@ -562,13 +558,7 @@ library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-m
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
 different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's agent
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes
-(`bin/mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]`; etc/bridge/README.md, with the two didactic examples; no default; design/bridge-and-ipc.md; Convergence above). It is the one owner of
-the node's RDMA devices; it registers its window once and clients lease slices of it; it finds its links and pairs them
-again while it runs; it keeps the mesh's map, each bridge's record flooded to every bridge (`mesh-plan.h` `mesh_map`,
-`mesh-stat`); and it runs each program on the link lanes its communicator leased at NCCL's init. No DMA or network
-channel of it is used five seconds without something happening on it or its scope concluding
-(design/recovery.md#five-seconds). It forwards nothing, runs no command and carries no request.
+(`bin/mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]`; etc/bridge/README.md, with the two didactic examples; no default; design/transport.md; Convergence above). What it owns and does:
+design/transport.md. It forwards nothing, runs no command and carries no request.
 
-The data flow of each, every word and buffer with its writer, its waiter and its failure path, cited to file and
-function: [design/bridge-dataflow.md](design/bridge-dataflow.md) (the bridge) and
-[design/collectives-dataflow.md](design/collectives-dataflow.md) (libnccl-mesh and its clients).
+The transport, every page and word with its writer: [design/transport.md](design/transport.md).

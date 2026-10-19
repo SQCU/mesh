@@ -85,7 +85,7 @@ At the end of the initial audit, the Mini driver wedge remained and SSH still
 worked. A remote reboot had not yet been attempted, so its failure was not
 established. The operator subsequently requested that test; its evidence and
 outcome are tracked in `SSH-REBOOT-20260905.md`.
-`RDMA-RULES.md` records an earlier incident where shutdown hung on blocked verbs
+`design/transport.md` records an earlier incident where shutdown hung on blocked verbs
 processes and physical power cycling was necessary. That is evidence of a risk,
 not proof that a remote reboot of the current Mini cannot finish.
 No bridge SIGKILL, forced restart, region

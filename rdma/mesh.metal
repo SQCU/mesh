@@ -1,4 +1,4 @@
-// The GPU side of the words mesh-metal.m prepares (design/prepared-machine.md M04, M07, M10, M12, M30), and of the wire's
+// The GPU side of the words mesh-metal.m prepares (design/transport.md, M07, M10, M12, M30), and of the wire's
 // one small float format (FP8, nccl.h ncclFloat8e4m3 and ncclFloat8e5m2), defined once: a kernel that waits on a word,
 // reads a landed slot, releases a cell or decodes FP8 includes this file and calls these from its own source, and no
 // source splices them into another kernel's text (metal-microbench docs/acceptance-20261014.md A40, A54).
@@ -13,7 +13,7 @@
 // The word at `word` once it holds at least `target`, with mesh_wait_bounded's fence before each load and no bound: no
 // wait takes it, and it and mesh_remote_wait are kept only for a libnccl-mesh.dylib built before 4efbec2f, whose STEPS
 // call mesh_remote_wait (metal-microbench metal_runtime.swift joins a dylib's STEPS to this file); both go once no
-// node's dylib is older (design/recovery.md#five-seconds).
+// node's dylib is older (design/transport.md).
 template <typename W>
 __attribute__((always_inline)) static inline W mesh_wait(volatile coherent(system) device const W *word, ulong target) {
     W seen;
@@ -33,8 +33,8 @@ __attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coh
 // The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load), each after a
 // system-scope fence (without it the M4 did not observe the NIC's or the host's store: metal-microbench d8566be): every
 // wait, at most nccl.h NCCL_MESH_POLLS loads, which hold the GPU at most MESH_PLATFORM_NS
-// (design/recovery.md#five-seconds; a load's period the node GPU's, rdma/NCCL.md "Bounded waits"). The word is still a
-// canceller's (design/recovery.md Q16), and the caller tells a word short of `target` (the bound reached) from a
+// (design/transport.md; a load's period the node GPU's, rdma/NCCL.md "Bounded waits"). The word is still a
+// canceller's (design/transport.md), and the caller tells a word short of `target` (the bound reached) from a
 // landing. A reader orders its later loads after the observation with a system-scope fence of its own, after the
 // barrier that gives the observation to its threads.
 template <typename W>

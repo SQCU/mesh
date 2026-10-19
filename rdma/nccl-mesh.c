@@ -557,7 +557,7 @@ static uint64_t map_digest(const struct ncclComm *comm, const struct mesh_link_m
   return h ? h : 1;
 }
 
-/* -- the process's client of its node's bridge (design/bridge-and-ipc.md#clients, design/prepared-machine.md#M09):
+/* -- the process's client of its node's bridge (design/transport.md, design/transport.md):
    one attach of the node's region (mesh_attach), made at the process's first lease or first communicator, whichever
    comes first.  Its slot owns every lease the process takes (ncclMemAlloc: a section of the window, mesh-call.h
    mesh_section_create, whose rows' owner is the slot), and each communicator takes its session's program slot on it
@@ -783,7 +783,7 @@ const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
    no deadline, that revoke and the caller's process its cancellers (these sockets carry no DMA and enter no driver),
    and it holds no slot of the bridge.  The second holds this rank's claims, lease words its bridge's other clients
    read, so each of its sends and receives is bounded by mesh.h MESH_PLATFORM_NS (ETIMEDOUT:
-   design/recovery.md#five-seconds).  A rank's connect gives up MESH_PLATFORM_NS after its first try (ETIMEDOUT), so an
+   design/transport.md).  A rank's connect gives up MESH_PLATFORM_NS after its first try (ETIMEDOUT), so an
    init toward a root that does not listen fails as a value rather than trying for good.  A rank's report is
    its status (0, else why it cannot go on, so every rank fails alike), and its bridge's node and the lane pairs free
    there toward each peer node (mesh-call.h mesh_lanes_free) as its attach reads them; at the second gather its status
@@ -947,7 +947,7 @@ static int gather(const int *peers, int nranks, int rank, struct report *reports
   return status;
 }
 
-/* design/recovery.md#five-seconds: the second gather's sockets, each send and receive bounded by mesh.h
+/* design/transport.md: the second gather's sockets, each send and receive bounded by mesh.h
    MESH_PLATFORM_NS: 0, or the errno */
 static int bootstrap_bound(const int *peers, int nranks, int rank) {
   const struct timeval bound = {(time_t)(MESH_PLATFORM_NS / 1000000000u), 0};
@@ -957,7 +957,7 @@ static int bootstrap_bound(const int *peers, int nranks, int rank) {
   return 0;
 }
 
-/* design/bridge-and-ipc.md#files: the one rule applied to the reports of `made`'s ranks, in its rank order (mesh-call.h
+/* design/transport.md: the one rule applied to the reports of `made`'s ranks, in its rank order (mesh-call.h
    mesh_lanes_choose: on each link the lowest lane pair free at both ends), into `chosen`, and its own row claimed at
    its bridge for its session's slot (mesh_lanes_claim, a compare-exchange of each lease word): 0, ENOSPC (a link with
    no pair free at both ends) or EAGAIN (a word taken first, its claims released); kept once the confirming gather finds
@@ -990,7 +990,7 @@ static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, con
   return 0;
 }
 
-/* design/bridge-and-ipc.md#files, a communicator's init on NCCL's bootstrap at its id, the one path of every init
+/* design/transport.md, a communicator's init on NCCL's bootstrap at its id, the one path of every init
    (ncclMeshCommInitRank, blocking or not): its bootstrap's sockets opened (bootstrap_open), then made attached
    (comm_attach) and its lanes read (mesh_lanes_free), then every rank's report gathered; every rank taking its
    session's slot at its own bridge (comm_slot, once the gather holds its members) and leasing its row of the table
@@ -1328,7 +1328,7 @@ ncclResult_t ncclMeshMemUse(const void *ptr, size_t bytes, void *event, uint64_t
   return grown ? ncclSuccess : fail(ncclSystemError, "out of memory");
 }
 
-/* design/recovery.md#five-seconds: `event` reached `value`, the GPU's completion awaited with no deadline (every wait a
+/* design/transport.md: `event` reached `value`, the GPU's completion awaited with no deadline (every wait a
    session's programs make ends: at its landing, its bound, or the session's ~0, progress_run's included), each look at
    most MESH_PLATFORM_NS and looked again: it decides nothing */
 static void gpu_reached(void *event, uint64_t value) {
@@ -1561,7 +1561,7 @@ static void violated(struct session *s) {
               where & 1 ? "a piece" : "nothing", where & 1 ? "nothing" : "a piece");
 }
 
-/* design/recovery.md#five-seconds: the session's bridge is no longer the one it opened under: the region's bridge_pid
+/* design/transport.md: the session's bridge is no longer the one it opened under: the region's bridge_pid
    0 (its stop) or another, its boot another, or that pid no longer running (mesh_gone: an end by a fault stores no ~0,
    and as a bridge makes its region anew at each start, it changes no word of this one) */
 static int bridge_gone(const struct session *s) {
@@ -1569,7 +1569,7 @@ static int bridge_gone(const struct session *s) {
   return pid != s->pid || s->header->boot != s->boot || mesh_gone((pid_t)pid);
 }
 
-/* design/recovery.md#five-seconds: a destination of the session whose take its bridge refused, or whose program it
+/* design/transport.md: a destination of the session whose take its bridge refused, or whose program it
    failed (its status MESH_STOPPED with a code, told by the release of `prepared` after them: mesh-program.c
    status_failed), the node it was bound for, the node where it failed and the code (mesh-call.h mesh_transfers_start),
    which REFUSED names; 1, else 0 */
@@ -1603,7 +1603,7 @@ static ncclResult_t cancelled(const struct session *s, uint32_t node) {
    group, or an agreement, waits for), and where a landing reads ~0 (cancelled: by its bridge at a link's loss, a flow's
    failure or its stop, or by a revoke) or, with positions pending and none landing, its bridge is gone (bridge_gone)
    or refused or failed a destination's program (start_refused), every destination of the session is cancelled
-   (release_all), ending every wait on it.  No clock of its own decides (design/recovery.md#five-seconds: the bridge
+   (release_all), ending every wait on it.  No clock of its own decides (design/transport.md: the bridge
    concludes a silent link, B2, and a held SEND, B4; a GPU wait ends at its bound, W3a).  A cancelled word stays ~0
    while the session stands, as a landing never lowers a word (mesh-link.c record_landed). */
 /* how long the progress thread waits between its scans of a session's landings */
@@ -1724,7 +1724,7 @@ static size_t setting(const char *name, size_t otherwise) {
   return x > 0 ? (size_t)x : otherwise;
 }
 
-/* design/collectives-dataflow.md#advisories, the checker at a communicator's init: its programs as its table compiles
+/* design/transport.md, the checker at a communicator's init: its programs as its table compiles
    them on the bridges' map then (comm_read, on a copy of it) on its bridge's wire, read by mesh_program_advise at
    mesh-advise.c's operands, each below its entry's bound, every warning logged as NCCL logs one, on a thread of its
    own: nothing joins it, and it refuses nothing */
@@ -1768,7 +1768,7 @@ static void comm_advise(const struct ncclComm *comm) {
   else comm_free(copy);
 }
 
-/* design/bridge-and-ipc.md#files: the lane pair the communicator's init leased toward node `node` (UINT32_MAX none: no
+/* design/transport.md: the lane pair the communicator's init leased toward node `node` (UINT32_MAX none: no
    cable of this node joins it, or no bootstrap chose one), its report's first link to the node's, and how many links
    it leased that pair on (`cables`) */
 static uint32_t lane_pair(const struct ncclComm *comm, uint32_t node, uint32_t *cables) {
@@ -1832,9 +1832,9 @@ static ncclResult_t start_failure(struct session *s, int status) {
    opens), published on every channel and every peer's awaited there and compared, before any group runs, so the
    members of a session run the programs of one map or none, and the two ends of each link stripe its invocations over
    as many cables (4df30806 mesh-flow.c program_take's `f->stripes != n`, carried as data: position 0 rides the first
-   cable at both ends, design/bridge-and-ipc.md#cables), each end comparing the same two counts.  A leased cable a
+   cable at both ends, design/transport.md), each end comparing the same two counts.  A leased cable a
    bridge no longer pairs at the take (mesh-program.c program_take, after the start) is its link's loss, or leaves a
-   SEND held that fails its flow (design/recovery.md#five-seconds B2, B4).  A session the map changed under as it
+   SEND held that fails its flow (design/transport.md B2, B4).  A session the map changed under as it
    opened, or whose ends leased different cables, fails as a value at both ends naming the disagreement.  It is
    awaited as a landing is: position 0 is the progress thread's target, so the wait ends at its landing, a
    cancellation (its link lost, its bridge gone or its destination's take refused: progress_run, cancelled) or a
@@ -2722,7 +2722,7 @@ static struct metal_check check_of(struct session *s, struct channel *ch, uint64
 
 /* the GPU waits until `count` of the channel's positions have landed: a spin on each one's completion word not yet
    awaited, in order, each position checked against its role as its wait covers it (a program over several cables
-   lands its positions out of order, position t on cable t mod n: design/bridge-and-ipc.md#cables, so a later
+   lands its positions out of order, position t on cable t mod n: design/transport.md, so a later
    position's landing says nothing of an earlier one's) */
 static ncclResult_t arrive(struct metal_program *program, struct session *s, struct channel *ch, uint64_t count) {
   ncclResult_t result = ncclSuccess;

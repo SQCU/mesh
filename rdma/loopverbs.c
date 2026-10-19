@@ -1,4 +1,4 @@
-/* loopverbs (mesh 800fe6bc^, on the resident bridge; design/bridge-dataflow.md#the-loopback-fabric): the ibverbs entry
+/* loopverbs (mesh 800fe6bc^, on the resident bridge; design/transport.md): the ibverbs entry
    points the bridge uses (mesh-verbs.h, mesh-link.c, mesh-program.c), over shared memory between the processes of
    one machine, so N bridges on one host are N nodes (make mesh-flow-loop: the bridge's sources built with
    MESH_LOOP_FABRIC and linked with this in place of -lrdma; the deployed bridge is built from the same source without
@@ -10,7 +10,7 @@
    waiting for its receive as TB5's credit flow control holds it (TN3205), and completes each receive with its byte
    count, or IBV_WC_LOC_LEN_ERR where the SEND is longer than the receive.  A queue pair moved to the error state
    flushes its posted receives and pending SENDs (IBV_WC_WR_FLUSH_ERR), as mesh-verbs.h pair_flush expects.  A device
-   holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: RDMA-FIRST.md), a SEND at most half a ring
+   holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: design/transport.md), a SEND at most half a ring
    (the port's max_msg_sz).  Pairing is the bridges' own (their control sockets on the loopback interface).  Only the
    bridge's verbs are provided: one scatter-gather entry a request, SEND and RECV on unreliable-connected queue pairs,
    one port. */

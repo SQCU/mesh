@@ -15,7 +15,7 @@ a verbs call does not die when you SIGKILL it. It goes to STAT U, uninterruptibl
 kernel sleep, and stays there. The signal is not deferred; it is never delivered.
 The process keeps the PD and the QPs forever.
 
-What follows, in order, is observed and is in RDMA-RULES.md:
+What follows, in order, is observed and is in design/transport.md:
 
   1. ibv_alloc_pd starts failing for every process on the node, including
      Apple's own tools. The device has max_qp: 11. It does not take many leaks.

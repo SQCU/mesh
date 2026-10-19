@@ -1,7 +1,7 @@
 # Direct CPU contraction with half operands
 
 September 13, 2026. This is the source and compilation record for the CPU step of
-[Pallas-style lowering](async-collectives.md).
+[Pallas-style lowering](transport.md).
 Operational performance evidence remains to be collected through the existing
 streaming-algebra workflow.
 

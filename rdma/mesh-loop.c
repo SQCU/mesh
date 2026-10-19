@@ -1,4 +1,4 @@
-/* design/bridge-dataflow.md#the-loopback-fabric: N resident bridges on one host over loopverbs (mesh 800fe6bc^'s loop
+/* design/transport.md: N resident bridges on one host over loopverbs (mesh 800fe6bc^'s loop
    fabric, its driver metal-microbench b9dbc43^ tools/nccl_demo.py `loop`, on the resident bridge), each its own
    configuration (a canonical property list this tool writes: its node, region and cables), and the
    readings that exercise what two nodes cannot show: relays and forwarding on 3 to 8 node maps.

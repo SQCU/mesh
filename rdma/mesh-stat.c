@@ -2,12 +2,12 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-/* design/bridge-and-ipc.md#ports: the node's bridge as libmesh reads it (mesh-plan.h), one JSON line: whether it answers
+/* design/transport.md: the node's bridge as libmesh reads it (mesh-plan.h), one JSON line: whether it answers
    (`up`, else the errno), its node, its ports by index (mesh_observe: each port's peer node, phase and bandwidth) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
    numbers with its bandwidth in bits a second, null where none is reported), its window in bytes with the bytes no lease holds (mesh_window), and every node's
    record as the bridge holds it: its name, its bridge's window, its memory and hardware model, its boot and its
-   available memory (mesh_nodes_health, design/bridge-and-ipc.md#records) */
+   available memory (mesh_nodes_health, design/transport.md) */
 int main(void){
   struct mesh_link_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;

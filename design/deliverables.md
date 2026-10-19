@@ -205,8 +205,8 @@ ranges; nothing else about a partial exists at runtime.
 ## 0. Status of this document
 
 The operator's words above govern. Rows are requirements, not assignments, and gate nothing. Where a row's subject
-has a document of its own, that document holds its end state: the bridge, [bridge-and-ipc.md](bridge-and-ipc.md);
-recovery, [recovery.md](recovery.md); the collectives' API, [rdma/NCCL.md](../rdma/NCCL.md).
+has a document of its own, that document holds its end state: the bridge, [transport.md](transport.md);
+recovery, [transport.md](transport.md); the collectives' API, [rdma/NCCL.md](../rdma/NCCL.md).
 
 ## 1. Invariants (design reference; the check column gates nothing)
 
@@ -230,7 +230,7 @@ recovery, [recovery.md](recovery.md); the collectives' API, [rdma/NCCL.md](../rd
 | I16 | Size is evidence, as the operator's judgement of one failing library (2026-09-15, quoted above). There is no line cap and no revert rule; never delete code that reached Goal A or Goal B. | — |
 | I17 | Indexed dataflow on the hot path. Realize logical rows, consumer ranges, storage capacity and backend bindings before execution. Runtime uses compact arrays for page mappings, queues, counts and operands; arrival-derived page indices and asynchronous placement are permitted. Remove linked-list traversal, avoidable metadata reconstruction and software transport admission gates. Physical arrival order never defines tensor coordinates or collective semantics. | — (design heuristic; no gating force) |
 | I18 | No guards or blocks that withhold ready work. Producers publish on visibility and return; dedicated TX/RX threads continuously drain completions and post available work. Queue polling, queue-empty observations, indexed placement, native status handling and completion-driven dependency/refcount updates are permitted. No implicit barrier, acknowledgement, reuse guard, blocking retry or wait for a particular value may hold up independent publication, transfer or consumption. Layout conversion is asynchronous dataflow for its own operands. | — (measured by Goal A/B) |
-| I19 | Library backlog; not a gate for Goal A/B. Recovery happens between NFEs, never inside one. A link failure concludes the in-flight instances as `Result` values (N2) within one completion; no path in TX/RX/publish/invoke retries, re-sends, or waits for a link to return. Re-pairing is the bridge's own bounded loop; resumption is the driver's next `submit`. The bridge never exits and never wedges the provider on a lost link (`RDMA-RULES.md`: destroy QP/CQ, deregister, re-create; never leave a verbs call blocked). | a link failure concludes the affected instances within one completion (trace) and no retry/re-send exists on TX/RX/publish/invoke (the W audit's conditional enumeration); the bridge pid is unchanged across a cable pull |resend\|reconnect" rdma/mesh-flow.c rdma/mesh-call.c` hits only the bridge's link controller, never a data-path function; group R rows |
+| I19 | Library backlog; not a gate for Goal A/B. Recovery happens between NFEs, never inside one. A link failure concludes the in-flight instances as `Result` values (N2) within one completion; no path in TX/RX/publish/invoke retries, re-sends, or waits for a link to return. Re-pairing is the bridge's own bounded loop; resumption is the driver's next `submit`. The bridge never exits and never wedges the provider on a lost link (`design/transport.md`: destroy QP/CQ, deregister, re-create; never leave a verbs call blocked). | a link failure concludes the affected instances within one completion (trace) and no retry/re-send exists on TX/RX/publish/invoke (the W audit's conditional enumeration); the bridge pid is unchanged across a cable pull |resend\|reconnect" rdma/mesh-flow.c rdma/mesh-call.c` hits only the bridge's link controller, never a data-path function; group R rows |
 | I20 | Rebuilding or launching the bridge never raises a new networking permission. Every executable that accepts connections is one binary at one install path per node (`/usr/local/mesh/bin/mesh-flow`), signed with a persistent identity (`Mesh Bridge`) and a fixed identifier (`io.mesh.bridge`), allow-listed once; rebuilds replace it in place; the launchd plist never points into a worktree, `.build`, or scratch path; clients never `listen()`. | `codesign -dv /usr/local/mesh/bin/mesh-flow` shows `Identifier=io.mesh.bridge` and a non-adhoc signature on both nodes; `bin/mesh-bridge.sh` refuses worktree/build paths; `socketfilterfw --listapps` has exactly one mesh entry per node; a rebuild + restart raises no dialog and adds no entry; clients open no listening socket (`lsof -i -P` on a running client shows none) |
 | I21 | Superseded 2026-09-22 by Goal B (B = 1 decode TP on the M5 Max + M4 Pro pair, heads [7,1], FFN 7:1). | — |
 | I22 | One shm→L1 per event, ever. Every runtime decision (a completion, a publication, a submit, a consume, a result read) reads exactly ONE contiguous, aligned metadata record — a 32-byte block (or one 64/128-byte cache line where the platform line is wider) — precomputed at `start()` and indexed directly by the event's integer (`wr_id`, row, instance, call index). The record contains everything the event needs (addresses, lengths, queue, tag words, consumer range bounds, pending-count location, stamp address). No second dependent load, no table-of-tables, no struct-of-pointers, no page-table lookup, no hash probe, no string key, on any runtime path. Metadata that does not fit one record is a design error to be repacked, not chained. Algorithms are specified as wide-line loads and stores over these records, not as Python-shaped object graphs. | — (design heuristic; no gating force) |
@@ -310,17 +310,9 @@ chain paired CPU 675.0 invocations/s against 558.3 at world size 1 (+21%), Metal
 
 ## 4. Deliverables
 
+The transport (the bridge, its pages, links and failures) is design/transport.md; nothing here describes it.
+
 Each: **Signature** · **Reference** · **Check** · **Not it**.
-
-### S — substrate
-
-**S1. The bridge finds its ports and serves them all.** Nothing is configured: the bridge gives each RDMA device it finds an index, and its hellos find the node each one reaches ([bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)). Ref: JACCL hostfile (the full-mesh case of what the map holds). Check: a node with three cabled ports pairs three links (the port table shows each one's phase); the same program runs at world size 2 and 3 with nothing changed. Not it: a hostfile, or a configured peer list.
-
-**S2. TX/RX per link on dedicated threads; drain and refill immediately.** `rdma/mesh-flow.c` `tx_thread(link)`, `rx_thread(link)`; RX reposts before delivering. Ref: NCCL proxy; JACCL per-wire polling. Check: I6. Not it: a progress loop that also runs numerical callbacks.
-
-**S3. Chunked transport, invisible.** `mesh_section_create(ctx, bytes, count, receive, &section)`; internal `C`, `K = ceil(N/C)`. Ref: TN3205 frame matching; llama.cpp PR #26421 (128 KiB stride cost). Check: I10.
-
-**S4. Out-of-band pairing on the control socket; every use of a channel concluded within five seconds.** The link hello (node, boot, LID, GID, block size), the link's LINK, RECORD and FAREWELL, and no message per program ([bridge-and-ipc.md#protocol](bridge-and-ipc.md#protocol)); a control socket that never blocks and is heard within `MESH_PLATFORM_NS` or concluded ([recovery.md#five-seconds](recovery.md#five-seconds)). Ref: TN3205; `RDMA-RULES.md`. Check: `rdma/rule-zero-lint.sh` passes, and every scope of recovery.md#five-seconds names what concludes it.
 
 ### L — library core
 
@@ -359,161 +351,11 @@ record's, its last sentence the restored surfaces' names.
 
 ### T — topology and fleet
 
-**T1. The map is a graph value, observed.** `mesh-plan.h` `struct mesh_link_map` from `mesh_map`: the bridges' records of every node's ports, flooded to every bridge, two nodes linked where each holds a port paired with the other ([bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)). Ref: JACCL hostfile as the full-mesh case; OSPF flooding (RFC 2328 §13). Check: a tree, a ring with spurs and a full mesh run the same program with nothing configured; no code path assumes a link exists.
-
-**T2. Routes are the map's; the bridges forward.** `mesh_map` joins members the links leave apart along the whole mesh's path on fewest links; on each node of the route the program is a relay's two flows, a landed record releasing the next hop's SEND cell ([bridge-and-ipc.md#flows](bridge-and-ipc.md#flows)). Ref: Patarasuk–Yuan (spanning tree suffices); Monsoon. Check: leaf→leaf on a star is two SENDs with no process of the hub taking part; per-cut bytes equal declared traffic.
-
-**T3. Multi-link striping per pair.** `send(part, to:, queue:)` where `queue` selects among a pair's links; chunks round-robin when `queue == .all`. Ref: JACCL `ring_impl` wires; TN3205 10 QPs/device. Check: equal bytes per link of a pair in `report`. Restored surfaces: Swift `send(part, to:, queue:)` (a queue of the bridge's flows); Python `queue=` (a libnccl-mesh communicator of its own, its crossings progressing apart from other queues').
+**T1. The map is a graph value, observed.** `mesh-plan.h` `struct mesh_link_map` from `mesh_map`: the bridges' records of every node's ports, flooded to every bridge, two nodes linked where each holds a port paired with the other ([transport.md](transport.md)). Ref: JACCL hostfile as the full-mesh case; OSPF flooding (RFC 2328 §13). Check: a tree, a ring with spurs and a full mesh run the same program with nothing configured; no code path assumes a link exists.
 
 **T4. Bounds before runs.** `bounds(program, placement, topology, capability) -> {compute, memory, cut: {cut: s}, path: s, max}`, pure; `topology` is the T1 value (links, observed), `capability: [node: Capability(rate, bandwidth)]` the caller's sustained rates. Ref: `docs/amdahl_superiority.md` four lower bounds; Hockney; LogGP; COSMA. Check: reproduces the ten-minute table (1+3, 2+17, 1+1). Restored surfaces: `swift/Bounds.swift` `bounds(_:_:_:_:)`, `examples/bounds-table.swift`.
 
-**T5. A change of the map fails the executions it cuts; the next reads the map.** A lost link or relay fails each program across it, its status naming the node; nothing is resumed; the next execution's start reads the map as it is then ([recovery.md](recovery.md), mandates 11 and 13). Ref: fail-stop; Dean–Ghemawat; `RDMA-RULES.md`. Check: pull one cable mid-run on a ring: the failure names the node, the next execution completes on the remaining links, and the replug is in a later map.
-
 **T6. Replicas are placement, not protocol.** `Placement(…, replicas: [section: [rank, rank]])`: a replicated section is produced on every listed rank as an ordinary extra output edge; each consumer is bound at `start()` to ONE replica (the placement's primary for that consumer); loss of the primary's link is a T5 retopology event whose re-realization binds the next replica. No read-time choice, no "first present" branch. Ref: Legion physical instances; end-to-end. Check: no runtime conditional selects among replicas; losing a link changes `bounds()` and triggers T5, not a branch. Restored surfaces: none yet (`Placement` has no replicas).
-
-**T7. Many clients, by lease.** The node's bridge serves every client at once, none aware of another ([bridge-and-ipc.md#clients](bridge-and-ipc.md#clients)): rows and arena pages claimed by compare-exchange, an attach refused (EBUSY) where no slot is vacant, a lease refused as a value (ENOMEM, ENOSPC) where the node cannot give it. Ref: NCCL communicator per job; PMIx. Check: two users' programs run on disjoint rows and queue pairs; one client's exit leaves the other untouched; no `SIGKILL` path.
-
-### H — hot and cold data flow (the transport, as the machine executes it)
-
-H1–H6 are the design sketch of the simple collective. Their Check lines are
-descriptive and carry no pass/fail.
-
-The current intervention removes latency and dependent metadata loads in these
-runtime paths. Private transport details do not create new caller, tensor,
-collective or dispatch requirements.
-
-The engine owns memoization of address and function-target resolution. Setup
-stores the terminal results of immutable lookup chains in the record used by
-execution. A changing binding is resolved where that binding is established;
-it is not an instruction to make every downstream reader reconstruct it.
-Passing a compact descriptor whose fields lead to more descriptors does not
-satisfy this requirement. No caller acquires a binding-reconstruction task.
-
-The hot path is the set of stores and loads between "a value became ready" and "the NIC
-was told", and between "the NIC returned a completion" and "the consumer was told". It
-contains no load whose address depends on a previous load except one: the record named by
-the integer read from a ring. Everything else — presence stamps, pending counts, reference
-counts, lifecycle, status, results — is the cold path: it runs after the hot stores, on
-whichever thread reaches it, and nothing on the hot path waits for it.
-
-**H1. Index rings are the only inter-thread interface on the hot path.** A ring is a
-contiguous array of 32-bit integers, 8 per 32-byte line, with a producer tail and a
-consumer head, each a single word on its own line; the producer writes the integer and
-advances the tail with one release store; the consumer reads the head line and advances
-with one store. Rings: per link per direction `tx_ring` (producers: any thread completing
-a value; consumer: the TX spinner), per worker `fire_ring` (producers: RX spinner and any
-publisher; consumer: the worker), per link `free_ring` (producer: TX completion; consumer:
-the cold pass). Multi-producer rings use one `fetch_add` on the tail and a per-slot
-sequence word (Disruptor); no CAS loop, no list, no level. Check: the number of ring
-kinds is three; every hot-path hand-off is a ring store; no other shared structure is
-written on the hot path (source audit lists the stores).
-
-The ABI-67 implementation of that shared-tail prescription exposed a conflict:
-an unpublished reservation delayed unrelated published entries. ABI 68 removed
-that FIFO dependency using independent prepared slots. ABI 69 groups known
-single writers and dependency-ordered writers into independent index streams;
-setup rewrites every handle and discards its grouping maps. Its greedy grouping
-reduces polling from E bound locations to P streams, but P may still grow with
-the graph and each probe still reads stream state plus its slot. This does not
-meet H1's complete structure/cost target. Both immediate independent drainage
-and the original latency/load budgets remain required; this implementation is
-not a replacement definition of completion.
-
-ABI 70 carries the 32-bit invocation operand beside the 32-bit destination
-index in one atomic eight-byte event. The extra word removes TX/worker reads
-through source-buffer label pointers and lets persisted lifecycle labels follow
-publication. Event capacity and the native atomic-access size are accounted
-for in [the handoff analysis](pages-and-functions.md#publication-notifications).
-The one-line/dependency budgets and immediate-drainage requirement remain;
-neither the wider slot nor these two removed reads establishes full H1 completion.
-
-**H2. Records are directly indexed by the integer in the ring; native ABI sizes
-are explicit.**
-`send_record[i]` `{ibv_send_wr wr; ibv_sge sge; release_row}` prebuilt at `start()` (the
-WR and SGE are the record: the post is `ibv_post_send(qp, &send_record[i].wr, &bad)`);
-`receive_record[wr_id]` `{ibv_recv_wr wr; ibv_sge sge; row; stamp_index; use_first;
-use_count}` prebuilt at `start()`, page planned per chunk (`row = first[t] + k·block`, in
-posting order, so a transfer's chunks are contiguous and a consumer reads `.data`);
-`use_record[u]` `{call; pending_address}` contiguous per row; `call_record[c]`
-`{operand_array; worker; output_rows; pending}`; `instance_record[f]` `{status; first_row;
-row_count}` with `f` the frame integer `submit` hands out. Application records
-use `_Alignas(32)` and `_Static_assert(sizeof ≤ 32)`. Native request records use
-the actual provider ABI with asserted size/alignment: Apple's SEND WR is 128
-bytes, RECV WR 32 bytes and SGE 16 bytes. The former complete WR+SGE ≤ 64-byte
-requirement is withdrawn; it cannot describe that ABI. Report the common header
-footprint and full allocation separately, and count the actual loads before
-posting. Request extents are chosen before posting; neither native interface
-truncates them. No record contains a pointer to another record; no record is
-mutated after `start()` except the counters it names. Check: the asserts compile; the audit lists, per event,
-exactly one record load after the ring read.
-
-**H3. The hot flows, written out.**
-- Value ready (numerical completion, any thread): `tx_ring[link].push(send_index)` for
-  each declared send of the row (the indices are a start()-time contiguous range in
-  `send_record`, so this is `for i in first..<first+n: push(i)`) — then, and only then,
-  `presence[stamp_index] = 1` (release) and `fire_ring[w].push(use_range_index)` for the
-  local consumers. The wire is fed before any local bookkeeping.
-- TX spinner: `i = tx_ring.pop()`; `ibv_post_send(&send_record[i].wr)`; if the NIC refuses
-  (`ENOMEM/EAGAIN`, either sign) the index stays at the head and the spinner returns to
-  `ibv_poll_cq`; nothing else is read. On a send completion: `free_ring.push(send_record[wr_id].release_row)`.
-- RX spinner: `ibv_poll_cq`; on completion `fire_ring[w].push(wr_id)` where `w` is in
-  `receive_record[wr_id]` (one line); then `ibv_post_recv(&receive_record[wr_id].wr)` to
-  re-arm the same planned page for the next instance of that chunk (N1: the frame ring
-  guarantees the page's previous reader finished before the instance was resubmitted);
-  nothing else is read. Presence and pending are NOT touched by the RX spinner.
-- Worker: `x = fire_ring.pop()`; `r = receive_record[x]` (or the use range for a local
-  publication); `presence[r.stamp_index] = 1`; for `u in use_record[r.use_first ..< +r.use_count]`:
-  `if (--*u.pending_address == 0) launch(call_record[u.call])`. Three lines before a
-  launch: the record, the use range, the call record. The supplied function runs with
-  `call_record.operand_array` — pointers fixed at `start()`, no page-table resolution.
-- Cold pass (any thread, whenever it runs; typically the worker after its launches, or a
-  dedicated thread): drain `free_ring` → decrement reference counts → when a frame's last
-  reference goes, `frame_ring.push(f)` (N1); write `instance_record[f].status` on
-  completion or failure; lifecycle/event records for observers. None of these is read by
-  H1–H3 hot flows except `frame_ring` at `submit`.
-Check: the source audit produces this exact list per thread with file:line.
-
-**H4. Permission never costs a load.** There is no runtime decision "may I post / may I
-publish / may I consume" except the NIC's return value and a pending count reaching zero.
-Capacity is the ring size and the receive plan, fixed at `start()`; a full ring is a
-setup error reported by the plan printer (SDF balance), never a runtime branch. Check: the
-audit's conditional enumeration on the hot flows contains only: ring empty, verbs
-return, pending == 0.
-
-**H5. Dependent loads are last in line.** Any load whose address depends on a prior
-load — reference-count words by row, lifecycle records, status words, observer state,
-Swift-side bindings — occurs after the hot stores of its event have been issued, on the
-cold pass; the hot store is never conditioned on it. Check: in every hot function the
-first store to a ring precedes every dependent load in program order (read the source);
-in a trace the doorbell time is independent of cold-pass backlog.
-
-**H6. Contiguity by construction, not by placement.** A transfer's chunks are posted in
-chunk order on one queue (D5) into `receive_record` pages that are consecutive
-(`first[t] + k·block`); the consumer's operand is therefore contiguous and
-`operand_array` holds its address at `start()`. No page-table lookup, permutation,
-descriptor, compact list, alias slot or asynchronous placement copy exists on any path.
-Interleaving from multiple peers is different queues, not shuffled pages. Check: the
-number of runtime page-table reads on every path is zero; `mesh_page[]` and any
-successor exist only in `start()`.
-
-**H8. Deletions this group requires** (from the ontology audit; each is a named
-structure whose only function was permission or resolution): `mesh_wire_tag` beyond the
-row/frame word the WR already carries; `buffer.definition`, `buffer.invocation`,
-`buffer.mapping` and `mesh_buffer_pages()`; `receive.definitions[]`, `receive_binding.rows[]`,
-`receive.active[]`; the notice levels (`mesh_notice_reader`, summary words) → `fire_ring`;
-`mesh_use` + `program[]` → `use_record`; `mesh_join`, `matches[]`, `join_free`,
-`join_rows`, `mesh_hash`, `mesh_call_match/join` → `call_record[frame]`; per-function
-`available[]`/`values[slot]` → `slot = frame`; `mesh_operand.{row,invocation,pages,…}` +
-`mesh_operand_address` → a pointer; `rearm` allocation → pre-built command buffers per
-frame; the Swift `copies/chunks/sources/targets` placement copy. Check: none of these
-symbols has a runtime reader.
-
-### R — segmentation recovery (cable pulls, replugs, port moves; between NFEs only)
-
-Its definition is [recovery.md](recovery.md): its Q5-Q11 are this group's R1-R7 at their end state, R4 (a realized
-program surviving a link loss) dropped by mandate 13.
-
-**X9. Presence stamps are device-readable; consumers may be resident kernels.** Required (2026-10-17: the in-stream crossings are restored and measured; metal-microbench docs/principles.md section 6, the operator 2026-10-16, and docs/measurement.md, mb ea5954e). Signature: `TensorPart.stamp` — the address (in the same shared mapping the GPU sees via `bytesNoCopy`) of the section's per-instance presence word; the bridge/worker writes it with a release store after the data is visible (X1). A supplied `TensorFunction.metal` may encode one command buffer for a whole local step and wait *inside the kernel* on the stamps of the sections it consumes (device-scope atomic load loop), or use a Metal 4 queue-side `waitForEvent` that the RX thread signals — either way the dependent work is resident before the tile lands and the crossing costs the wire only. The in-kernel wait is the X2 firing rule executed on the device: presence only, no data-dependent branch, no retry; the GPU watchdog is the fail-stop (`Result.function` on timeout, I12/I19). Ref: MLX `fence_wait` (`MLX_METAL_FAST_SYNCH`); NCCL LL flags; MSCCL++ device semaphores; Gupta et al. 2012 persistent threads; Anukari (spin to keep the Apple GPU clocked). Check: `TensorPart.stamp` exists and `mesh_publish` stores it release-ordered after the payload; a caller example encodes one command buffer per step with in-kernel waits and completes with command buffers per step = O(segments), not O(tiles) or O(layers); measured µs-class arrival-to-consume on the pair.
 
 ### F — the scale-out structure as types and satisfaction constraints
 
@@ -539,8 +381,6 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 **F8. Asymptote.** Backlog; not a gate. `T(N) = T_rest + T_f / Σ r + c_exposed / K` per layer; `T(N+1) ≤ T(N)` always (diminishing, never negative); `T(∞) = T_rest + c_exposed / K`. Satisfied when: measured `T(2)` and `T(4)` on the fleet are within 15% of the formula with the rates from `report.py`, and no measured `T(N+1) > T(N)`.
 
 **F9. Memory per node is constant in N.** `arena_i = instances × Σ_sections bytes(tile)`; weights: the split sublayer's slice (`share_i`) plus the replicated remainder. Satisfied when: `start()` prints the arena and it is independent of `N`; the registered span fits the 4 GiB bank rule.
-
-**F10. Failure is per execution and between NFEs.** A link's loss fails the executions in flight over it, naming the node, and nothing else; nothing is resumed, and the next execution runs on the map as it is then ([recovery.md](recovery.md) Q1, Q3). Satisfied when: Q11's cable pull shows only those executions failing and the bridge pids unchanged.
 
 **X10 (superseded by H2/H3; kept for the record shapes).** Signature: `struct mesh_send_record` (per transfer chunk, indexed by the TX ring slot / `wr_id`): `{page, bytes, queue, tag[4], release_row}`; `struct mesh_receive_record` (per posted RECV, indexed by `wr_id`): `{row, stamp_index, use_first, use_count, publish_last_chunk}`; `struct mesh_use_record` (per consumer edge, contiguous per row): `{call, pending_address}`; `struct mesh_call_record` (per (call, instance)): `{operand_array_address, worker, pending, output_rows[k]}`; `struct mesh_instance_record`: `{status_word, first_row, row_count}`. Each `_Alignas(32)`, `sizeof ≤ 32` (or ≤ 64 documented), filled at `start()`, read once per event, never mutated except the counters they name. The receive completion is: `rec = receive_records[wr_id]; store presence[rec.stamp_index]; for u in uses[rec.use_first ..< +rec.use_count]: if(!--*u.pending_address) enqueue(u.call)` — one metadata line, one contiguous use range, one countdown. The send is: `rec = send_records[slot]; ibv_post_send(&rec.wr)` with the WR and SGE pre-built inside the record. Ref: LMAX Disruptor (preallocated ring of fixed records), Monsoon token store (presence next to the operand), Kalia ATC'16 (cache-line-sized WQEs, doorbell batching), NCCL LL (flag co-located with data). Check: the ontology audit's dependent-load count per event equals 1 metadata record + payload on every runtime path; `sizeof` and alignment of every runtime record asserted at compile time; a trace shows completion→consume within the wire + one record load.
 

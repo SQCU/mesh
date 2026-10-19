@@ -1,5 +1,5 @@
 #!/bin/bash
-# The substrate as its user's (design/bridge-and-ipc.md): the user's mesh checkout built and installed (make all install:
+# The substrate as its user's (design/transport.md): the user's mesh checkout built and installed (make all install:
 # the bridge and the libraries, each image that changed renamed into rdma/) with its Python bindings, ~/.venv-mesh-uv
 # with torch-mesh and the checkout's library on its path, and the bridge as the user's agent io.mesh.bridge, run from
 # the checkout with the node's bridge configuration, the operand CONFIGURATION (a JSON, TOML or YAML document,

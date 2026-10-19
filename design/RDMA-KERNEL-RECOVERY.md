@@ -309,7 +309,7 @@ state (mesh-verbs.h `down_pair`). The trigger is not established.
 After the 10-17 panic the Mini's bridge, started 11 s after boot, failed every queue pair's INIT to RTR ("Failed
 INIT→RTR kernel transition" in the provider's log; its lanes every 3 s, every program `code 5 domain 1`) for five
 minutes, until its binary was touched and a new bridge process connected at once. The bridge now retires and opens the
-device after three such refusals in a row (design/recovery.md#loss).
+device after three such refusals in a row (design/transport.md).
 
 Until the trigger is known, a substrate upgrade restarts the Mini's bridge with no program running and well apart
 from the M5's.
@@ -320,7 +320,7 @@ write at 0x100840008 (8 bytes into a 16 KiB page no longer mapped, beside a 16 K
 1.5 s after the previous call's flow was destroyed. Its bridge posted then on its lanes' long-lived queue pairs every
 5 us (mesh b21ced65, a keepalive); the call after the next teardown failed its first SENDs with IBV_WC_LOC_PROT_ERR
 (9e0b3a4a, kb1). Without posts on the lanes, hundreds of calls with the same teardowns ran clean. The keepalive now
-rides each flow's own queue pairs (design/bridge-and-ipc.md#keepalive), and nothing posts on a queue pair that
+rides each flow's own queue pairs (design/transport.md), and nothing posts on a queue pair that
 outlives a teardown of another.
 
 ## The stripe writes of October 1

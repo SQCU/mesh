@@ -163,7 +163,7 @@ It does not authorize SEND or RECV to reinterpret or shorten those messages.
 The current implementation prepares matching native request extents and retains
 padding; it does not implement padding-free wire tails. The incorrect requirement
 to shorten a SEND against an incompatible preposted RECV is withdrawn. See
-[prepared native requests](pages-and-functions.md#prepared-native-requests).
+[prepared native requests](transport.md).
 
 The user-selected continuation objective is the attachment
 `5701aa94-8d2a-4238-851b-7ad3af7e91bc/pasted-text-1.txt`. It reiterates these
@@ -171,12 +171,12 @@ requirements and actual integration through existing numerical implementations.
 
 The old executor, frontend and callers were deleted in mesh `5762898` and
 metal-microbench `e108f4b`. The replacement higher-order interface, collective
-relations and source operation chains are described in [the implementation](async-collectives.md).
+relations and source operation chains are described in [the implementation](transport.md).
 Finite indexed submissions now reuse the realized functions and routes.
 The small matrix example and its build target have been deleted at the user's
 instruction. They no longer serve as evidence of integration.
 The fixed scalar chain has also been deleted. Its replacement is the
-[configured function chain](function-chain.md), which uses supplied Core ML
+[configured function chain](transport.md), which uses supplied Core ML
 functions, reduce-scatter and supplied consumers at each declared depth. The
 function representation is shared by calls, maps and reductions; model stages
 remain caller code.
@@ -194,6 +194,6 @@ The subsequent peer-count clarification is authoritative:
 
 The one-peer restriction has now been removed from the Swift rank bound, endpoint
 binding, bridge configuration, connection ownership and send notification layout.
-The [configured links](async-collectives.md#configured-peers) share canonical
+The [configured links](transport.md) share canonical
 storage and device registrations, with independent TX/RX progress. Collective
 verbs remain explicit and are not inferred from rank count or tensor types.

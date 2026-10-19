@@ -14,7 +14,7 @@ The implementation realizes a finite storage capacity once. A section's
 stride. Working ABI 55 carries invocation labels separately from reusable slots.
 Submission publishes root indices into existing numerical-worker queues,
 while consumers are indexed by operand publication. No function scan or repeated
-realization is required. The [execution description](async-collectives.md#execution-and-ownership)
+realization is required. The [execution description](transport.md)
 separates shared function metadata from each value's operands and uses.
 
 **The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
@@ -59,7 +59,7 @@ Every list starts at its buffer's logical row, so chunk j is directly
 `mesh_page(m)[row + j]`. `mesh_row_page` selects that entry for existing native
 placement paths. Logical
 metadata extent is independent of payload-page extent, and retain/release acts
-on one buffer identity. The [compact-list derivation](pages-and-functions.md#prepared-compact-page-lists)
+on one buffer identity. The [compact-list derivation](transport.md)
 gives the address algebra, allocation counts and metadata cost. Neither the
 indexed scalar helper nor receive placement performs packing or allocation.
 The ABI-69 operand representation uses the canonical page array directly:
@@ -68,9 +68,9 @@ in-block offset; `mesh_operand_page` selects that same first entry. The Swift
 `data` and `page` accessors use these operations, while `invocation` reads the
 prepared sequence address. These replace dispatch's cached address/page copies
 and per-operand sequence writes. See the
-[explicit address algebra and costs](pages-and-functions.md#operand-addresses-and-sequence-values).
+[explicit address algebra and costs](transport.md).
 
-ABI 72's [prepared native view indices](pages-and-functions.md#prepared-native-view-indices)
+ABI 72's [prepared native view indices](transport.md)
 apply the same indexed-storage representation to backend view selection.
 `mesh_backing_bind` realizes local indices; receive placement supplies its already
 known pool index. A canonical 64-bit entry carries this result with its physical
@@ -86,7 +86,7 @@ same Pallas/Apple mapping mechanism, local setup and receive placement compute
 result; indexed reads add only their within-entry offset. The bridge receives
 the client's mapped base during setup and never dereferences the resulting
 client address. Native copy bindings precompute their source-entry pointers,
-destinations and extents. [Address preparation](pages-and-functions.md#prepared-operand-addresses)
+destinations and extents. [Address preparation](transport.md)
 accounts for the added producer store, storage and remaining canonical read.
 
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
@@ -97,7 +97,7 @@ while transient inputs retain one reference per indexed use. Native completion
 releases those input references after publishing outputs; downstream readers own
 the outputs separately. Each prepared call holds its frame's input countdown
 and output storage, selected by the realized consumer records.
-The [lifetime derivation](pages-and-functions.md#what-the-page-table-is) describes
+The [lifetime derivation](transport.md) describes
 completion, cancellation and destruction. This is an application of counted
 ownership to known lifetimes, not a new collection algorithm attributed to Collins.
 `TensorPart` contains primitive values and an optional C `mesh_section`, with no
@@ -122,7 +122,7 @@ owner; setup consumes the bit only after claiming the descriptor, and alone
 returns descriptor capacity. Allocation initializes atomic fields individually
 and publishes owner last. These are cold allocation/teardown operations, with
 no new reference category or claim on publication, consumption or RDMA progress.
-The [retirement mechanism and limits](pages-and-functions.md#client-retirement-has-one-owner)
+The [retirement mechanism and limits](transport.md)
 describe this handoff; it does not establish remote-value reuse or multi-client
 allocation.
 ABI 53 keeps received backing in its RX-owned pool, including when no live value
@@ -137,13 +137,13 @@ no longer adds ownership or clears presence; the first-chunk conditional and
 flag are deleted. Final-chunk publication stores the sequence before notifying
 consumers. Client/device retirement returns the entire
 receive pool, including zero-count posted rows, only after QP teardown.
-The [event derivation and limits](pages-and-functions.md#reclamation-events)
+The [event derivation and limits](transport.md)
 distinguish this bitmap pool from the still-required X5/N1 per-worker instance
 rings. Counted ownership follows Collins; the bitmap and teardown epoch are Mesh's
 representation, not a new algorithm attributed to that paper.
 Contiguous sections use chunk-indexed backing and relative numerical byte offsets,
 with one presence bit and ownership record per numerical value. The
-[address and ownership derivation](pages-and-functions.md#block-addressing)
+[address and ownership derivation](transport.md)
 shows the receive permutation and the producer's single initial reference.
 These are mesh's representation choices, not new algorithms attributed to Pallas
 or Collins. Transport chunk counts do not define tensor partitions.
@@ -172,7 +172,7 @@ the caller. The current `MeshError` reports native link/function failures and
 admission status. Its setup error `partialOperand` was deleted at `3bd1eaa`;
 the [restored L5 requirement](deliverables.md#l--library-core) remains unimplemented.
 The end-to-end argument does not authorize removing that requirement. See the
-[algebra and implementation account](distributed-reduce.md#l5-same-function-different-operand-scopes).
+[algebra and implementation account](transport.md).
 
 Restored 2026-10-17 with the module that cites it (swift/Mesh.swift, 71bced9e). The Python surface's `MeshError`
 (`python/mesh`) carries the same three kinds as an exception (`busy`, `link` with the member across it, `function`
@@ -237,10 +237,10 @@ count; receive setup assigns the publication and storage-return ranges. These ar
 applications of the same direct-address mechanism: completion does not reload
 an invocation label and divide it to reconstruct ownership. There is no hash,
 tombstone, label-to-frame search or
-submission-association event. [Completion ranges](pages-and-functions.md#completion-references-are-declared-at-setup)
+submission-association event. [Completion ranges](transport.md)
 record the exact events, storage cost and remaining limitations. The current selected-frame admission and missing
 whole-plan reuse proof are specified explicitly in
-[frame identity and reuse](pages-and-functions.md#invocation-identity-and-storage-reuse).
+[frame identity and reuse](transport.md).
 Neither the one-load result nor deleting a stack establishes safe unbounded reuse.
 
 Native post errors other than capacity refusal, CQ poll errors and unsuccessful
@@ -293,7 +293,7 @@ dead client now covers both. Retirement claims the exact old client identity
 before clearing its state, uses a fresh generation and the retiring process's live PID during cleanup,
 and publishes vacancy last. This prevents competing exit observers/replacements
 from clearing a newer client's state. The mechanism and limits are documented in
-[client retirement](pages-and-functions.md#client-retirement-has-one-owner).
+[client retirement](transport.md).
 Actual backing retains the existing device-close retirement rule.
 Link error alone still does not cancel unissued numerical uses
 or rearm the same program: those R2/R4 steps remain unfinished.
@@ -311,7 +311,7 @@ been a 1,088-byte table on every row of the region), publication sends the
 final index, and dispatch directly indexes the terminal record array. Numerical offset tables and TX cursor arrays are setup
 scratch. Mesh's ring software and compiler are not Monsoon hardware.
 
-ABI 76's [publication operands](pages-and-functions.md#direct-publication-operands)
+ABI 76's [publication operands](transport.md)
 apply the same explicit-address principle at the producer: the output and
 receive record hold the terminal publication pointer. A row's publications are
 a run of its program's targets, sorted by row and found by bisection at
@@ -333,7 +333,7 @@ the same preallocated circular-storage mechanism without a separate slot-address
 field. `mesh_stream_bytes` supplies the setup layout rule; reader initialization
 walks those extents once and records their terminal slot pointers. Shared
 producer streams, private reader arrays and numerical-worker mutable state are
-separated at 128-byte boundaries. The [allocation analysis](pages-and-functions.md#costs-and-remaining-work)
+separated at 128-byte boundaries. The [allocation analysis](transport.md)
 records the substantial reservation increase, actual layout formulas and the
 unchanged O(P) probe count. This is a layout specialization, not a new queue
 algorithm or a claim that padding alone solves handoff latency.
@@ -367,7 +367,7 @@ polling header fields in registers, with spills across native calls. The
 the removed reads and the increased stack frames; independent stream probing
 and its O(P) cost remain.
 
-The [handoff analysis](pages-and-functions.md#publication-notifications) gives
+The [handoff analysis](transport.md) gives
 the complete source flow, capacity assumption and remaining polling/metadata
 costs. ABI 67's shared-ticket FIFO is deleted: an unpublished reservation could
 delay unrelated published entries. ABI 68's O(E) individual-slot polling is
@@ -416,7 +416,7 @@ indirect-argument reabstraction thunk. Likewise, importing the launch as an Appl
 block introduces a context-retaining conversion thunk. Neither conversion is on
 the committed launch path. The concrete stored representation and the generated
 register assignment must agree; `native-audit` emits both sides for that review.
-See [direct Swift dispatch](pages-and-functions.md#direct-swift-dispatch).
+See [direct Swift dispatch](transport.md).
 
 The engine’s `encodePrefillOutput` extraction and `encodeDecodeOutput` binding
 reuse its existing normalization, projection, sampling and logprob functions.
@@ -426,7 +426,7 @@ Collins-style page references through Swift ARC; the
 [caller lifecycle](../../../metal-microbench/docs/compute_execution.md#mesh-output-and-session-lifetime)
 describes successful completion and the retained resources of failed work.
 
-The [direct return indices](pages-and-functions.md#direct-native-return-indices)
+The [direct return indices](transport.md)
 at ABI 74 apply Monsoon's explicit frame addressing to native-call reclamation.
 `mesh_call_bind` assigns each resident call a stable array index. Final-reference
 and native terminal events carry that index to the owning numerical worker;
@@ -436,7 +436,7 @@ reference count still supplies the final-use event; this is not a new ownership
 protocol. Array reservation, event bounds and the setup-only publisher/frame
 storage reuse are accounted for in the linked analysis.
 
-The [prepared completion record](pages-and-functions.md#memoized-numerical-completion)
+The [prepared completion record](transport.md)
 memoizes the arena and operand counts at binding. Output publication consumes
 those fields directly; shared function/worker ownership is followed only for
 the subsequent reference releases. This applies the same explicit-record
@@ -450,7 +450,7 @@ ABI 59 implements Monsoon's frame-indexed activation directly: the prepared
 consumer record includes the frame, its input updates that call's operand, and
 its countdown reaching zero invokes the supplied function in the same frame.
 The invocation hash, join/free tables and independent native-slot ring are deleted.
-The [current lifetime contract](pages-and-functions.md#native-slot-return) supersedes
+The [current lifetime contract](transport.md) supersedes
 the older slot-assignment descriptions below. N1 remains incomplete.
 
 Collins's reference counting releases a numerical input at the completion of its
@@ -467,7 +467,7 @@ existing indexed notification queues.
 Within publication, all declared TX notices precede the presence store and local
 consumer-mask load/notifications. Forwarded receives follow the same ordering;
 the wire-facing notification does not depend on local-consumer bookkeeping.
-The [chain and fan-out derivation](pages-and-functions.md#input-lifetime-ends-at-its-own-use)
+The [chain and fan-out derivation](transport.md)
 distinguishes this local storage fact from unfinished global frame reuse.
 
 Gregory M. Papadopoulos and David E. Culler,
@@ -485,7 +485,7 @@ backward shifting indices. Join and native indices have separate owner-managed
 rings. This is Mesh's software representation of operand matching, not an
 algorithm claimed to have been copied from Monsoon. Input ownership follows
 Collins's counted-lifetime mechanism through final output ownership. The
-[native-slot derivation](pages-and-functions.md#native-slot-return) proves the
+[native-slot derivation](transport.md) proves the
 join and native bounds and identifies the still-unfinished receive bound.
 ABI 50 separates lasting presence from the notification set: `mesh_presence`
 addresses one 32-bit word per logical row; `mesh_publish` release-stores one.
@@ -507,13 +507,13 @@ The supplied numerical function calls Accelerate's Level-3 BLAS `cblas_sgemm`;
 the supplied combine calls `vDSP_vadd`. The same composition implements the
 rectangular projections and both products of `R(RᵀH)`, with dimensions and
 transpose flags captured at declaration. Mesh contains none of that arithmetic.
-The [G1 derivation](function-chain.md#g1-gram-and-projection-chain) gives the
+The [G1 derivation](transport.md) gives the
 operand identities, placements and repeated residual composition.
 
 Apple's [Core ML Tools MIL builder](https://apple.github.io/coremltools/docs-guides/source/model-intermediate-language.html)
 and compiler create the supplied model artifacts in `examples/coreml-models.py`.
 The exporter composes existing `matmul`, `gelu` and `add` operations for the
-[documented FFN residual chain](function-chain.md), with caller-supplied dimensions
+[documented FFN residual chain](transport.md), with caller-supplied dimensions
 and owners. It does not generate numerical kernels or add model semantics to Mesh.
 
 Yousef Saad, [Iterative Methods for Sparse Linear Systems, second edition](https://www-users.cse.umn.edu/~saad/IterMethBook_2ndEd.pdf),
@@ -532,7 +532,7 @@ paths are removed. The original shared and unissued references end at the existi
 client/device retirement event after native callbacks, without caller release.
 `mesh_row_page` is the direct canonical row lookup used by native placement;
 the redundant section-to-page wrapper is removed. The [identity derivation and
-costs](pages-and-functions.md#invocation-identity-and-storage-reuse) separate this
+costs](transport.md) separate this
 finite implementation from unfinished N1 reuse.
 Row 19v realizes the consumer relation for every resident row. Dispatch indexes
 its CSR range directly by the event's row; the section-definition lookup and the
@@ -569,7 +569,7 @@ Collins's counted ownership applies to the complete declared use set:
 startup preserves the compiled output counts, and final output return restores
 them through the buffer's common reset before releasing the frame. This removes
 refcount increments and presence clearing from launch, as derived in
-[output ownership](pages-and-functions.md#output-ownership-is-prepared-before-launch).
+[output ownership](transport.md).
 The former `mesh_call_ready` and shared-input fan-out interpreter are deleted.
 These changes apply Monsoon's prepared activation
 addresses and Saad's contiguous row ranges; they do not complete H1's handoffs,
@@ -636,7 +636,7 @@ No other caller can occupy that queue, no command buffer is recommitted, and no
 callback mutates the command array. This is a capacity argument for the native
 factory, not a claim that command creation or encoding costs nothing.
 CPU functions have no rearm callback; Core ML retains and reuses its prepared
-feature providers and output options. The [native slot-return derivation](pages-and-functions.md#native-slot-return)
+feature providers and output options. The [native slot-return derivation](transport.md)
 accounts for return events, output lifetimes, non-submitting ranks, metadata cost,
 and the still-finite call/status namespace. Collins's counted ownership and the
 existing row-notification mechanism supply the return events; one numerical
@@ -679,7 +679,7 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 
 ## Program.copy
 
-The [direct TX publication path](pages-and-functions.md#direct-tx-publication)
+The [direct TX publication path](transport.md)
 uses the same Apple/rdma-core native posting interface cited below. The prepared
 requests reach that interface directly until the provider refuses one; only that
 unaccepted suffix enters the pending ring. One inlined posting body handles both
@@ -689,7 +689,7 @@ and counted ownership remain. Dedicated thread roles are selected during setup,
 and their poll target indices are constants. These are partial evaluation and
 removal of intermediate storage, not a replacement collective or transport.
 
-ABI 71's [prepared SEND operands](pages-and-functions.md#prepared-send-operands)
+ABI 71's [prepared SEND operands](transport.md)
 apply the native WR/SGE mechanism cited below to every native request at setup.
 `link_prepare` assigns contiguous request intervals before progress starts.
 Local address/key bindings are realized in configuration; receive bindings use
@@ -699,7 +699,7 @@ name the existing transfer contribution, so preparing separate requests adds
 no new buffer-ownership or completion protocol. This is Mesh's realization of
 the registered SEND/RECV interface, independent of the supplied tensor function.
 
-The [prepared receive forwarding](pages-and-functions.md#prepared-receive-forwarding)
+The [prepared receive forwarding](transport.md)
 step specializes those keys by the finite registration regions intersecting
 each queue's pool. Its native completion identifier carries the registered alias
 address itself. The alias map's fixed page arithmetic gives the canonical page
@@ -708,7 +708,7 @@ multiply/shift quotient for these exact multiples. This is setup specialization
 of the same Apple/rdma-core registered-memory mechanism, with no replacement
 provider, dynamic address cache or new ownership protocol.
 
-The subsequent [prepared physical receive values](pages-and-functions.md#prepared-physical-receive-values)
+The subsequent [prepared physical receive values](transport.md)
 remove that physical-page/address reconstruction from completion. The posted
 buffer's known pool index, physical page and client address are stored beside its
 existing local GPU address and received tag. Apple's shared `mmap` mechanism
@@ -723,20 +723,20 @@ Apple's installed SDK `infiniband/verbs.h` implements `ibv_post_send`,
 `context->ops` field. Mesh resolves those exact function pointers when the
 native handles are created, storing handles and functions together in its
 prepared queue record and the send target in its existing SEND record.
-The [memoized dispatch implementation](pages-and-functions.md#memoized-native-dispatch)
+The [memoized dispatch implementation](transport.md)
 calls those provider functions directly with the same arguments and return
 handling; it does not implement a replacement provider or completion protocol.
 Re-pairing fills these records again before progress starts. This is partial
 evaluation of upstream dispatch, not a new transport algorithm.
 
-The [direct completion address](pages-and-functions.md#direct-receive-completion-addresses)
+The [direct completion address](transport.md)
 uses the native `wr_id` return mechanism cited below to carry the prepared local
 tag address. Affine tag-address inversion recovers the physical page without
 reconstructing that address from the arena header. `link_receive_post` submits
 the same prepared native requests for initial posting and returned pages; it
 is inlined, and the return path posts before logical-row and instance cleanup.
 
-The [prepared receive publication](pages-and-functions.md#prepared-receive-publication)
+The [prepared receive publication](transport.md)
 uses the same direct-index mechanism to bind the exact chunk-entry address,
 completed section row and publication counts in the existing 32-byte receive
 record. Publication is one inline primitive with explicit counts; the separate
@@ -753,13 +753,13 @@ ABI 60's record supplies the destination row, buffer address, exact canonical
 page-entry address, reference count and chunk flags. This is direct addressing
 of the known transfer relation, applying
 the existing compressed-row/direct-index mechanisms; it introduces no collective
-algorithm or credit protocol. The [wire layout](pages-and-functions.md#explicit-section-identity-on-the-wire)
+algorithm or credit protocol. The [wire layout](transport.md)
 accounts for table storage, shared-tag writers and the unfinished N1 lifetime proof.
 
 Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt),
 MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h),
 and rdma-core's [ibv_post_recv](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_recv.3):
-registered SEND/RECV and work completion. The [hardware notes](collective-dependency-ledger.md)
+registered SEND/RECV and work completion. The [hardware notes](transport.md)
 distinguish substrate facts from the retained bridge's protocol decisions.
 TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
 `IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
@@ -768,7 +768,7 @@ for buffer lifetime. ABI 59 carries one `(sequence, sourceChunkRow)` word. ABI 6
 chunk's local row and page-entry address at setup, alongside its publication flag.
 TN3205 requires paired SEND and RECV requests to occupy the same number of
 4 KiB frames. Setup fixes their extents; posting submits the prepared requests.
-[Byte accounting](pages-and-functions.md#prepared-native-requests) records their
+[Byte accounting](transport.md) records their
 cost independently of numerical partial boundaries.
 
 `link_configure` prepares a native RECV WR and SGE per pool block and a native
@@ -786,7 +786,7 @@ the existing SEND record. `link_send_ready` reads those prepared operands. The
 selected registered span already starts at the shared tag word, so that same
 address supplies the CPU tag store; no second tag mapping is derived. This uses
 the existing shared alias, not a new mapping or transport operation. The
-[load accounting](pages-and-functions.md#direct-send-record-operands) records the
+[load accounting](transport.md) records the
 remaining indexed inputs and generated-code comparison.
 The send edge counts its signalled chunk completions before releasing its
 existing buffer reference. This is thread-local completion bookkeeping, with
@@ -803,13 +803,13 @@ The tag arrives in the payload's own work request. There is no index QP or
 cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
 on the local Thunderbolt devices. The alias representation uses one SGE and
 does not infer two-entry support from the general verbs API. The
-[record layout and execution path](async-collectives.md#execution-and-ownership)
+[record layout and execution path](transport.md)
 describe this mesh-specific representation. Receive storage is preallocated
 and reused by the owning RX thread at final reference release. The existing
 notification mechanism carries the return event; only RX writes its page and
 return ring. Each queue poll returns one completed section's backing,
 rotates unfinished sections and attempts an available post. It reposts actual pages without clearing them and
-indexes the prepared source-chunk record. The [receive-storage proof](pages-and-functions.md#receive-storage-return)
+indexes the prepared source-chunk record. The [receive-storage proof](transport.md)
 accounts for receive ownership, bounded metadata, teardown, repeated forwarding,
 and the finite caller namespace still awaiting N1. `link_receive_destroy`
 disposes this setup-owned metadata after its link worker stops. This is an
@@ -824,7 +824,7 @@ reserved tail padding. CPU and Core ML inputs use the system `memcpy` on their
 numerical worker. Setup resolves both dependency operands and their native input
 views, allocates the canonical placement outputs, and prepares chunk rows and
 views. This changes representation only, performs no tensor arithmetic, and
-adds no queue wait or native completion hop. The [data-flow and cost account](pages-and-functions.md#indexed-receive-runs-and-contiguous-consumers)
+adds no queue wait or native completion hop. The [data-flow and cost account](transport.md)
 covers ownership, finite-instance storage, and copies per consumer invocation.
 
 The dedicated TX worker consumes publication events and advances the associated
@@ -869,7 +869,7 @@ Barker, Gee and Stewart's [Disruptor technical paper](https://lmax-exchange.gith
 (2011), sections 3.1–3.3, describes preallocated ring storage and sequence indexing.
 ABI 50 uses that storage representation for each TX queue, with power-of-two
 capacity covering its configured edge count. One TX thread owns both positions;
-the [edge-lifetime bound](pages-and-functions.md#reusable-send-queue) replaces any
+the [edge-lifetime bound](transport.md) replaces any
 software fullness gate. No Disruptor wait strategy or sequence barrier is imported.
 Receive targets are grouped by source-chunk row with one advancing cursor per
 group, retaining a target for each declared copy. The contiguous receive page run
@@ -886,7 +886,7 @@ before execution, so its lookup is not transport or numerical work.
 The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)
 and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
 associate QPs and registered memory with a protection domain. The bridge keeps
-those device resources once per port it found (design/bridge-and-ipc.md#ports) and
+those device resources once per port it found (design/transport.md) and
 realizes a separate flow, with its own queue pairs and progress threads, for every
 program on a paired port. A peer is the node a port found; a program's destination
 nodes, queues and operand row ranges are resolved at setup. Publication scatters its
@@ -903,7 +903,7 @@ and [accept](https://developer.apple.com/library/archive/documentation/System/Co
 contracts supply the nonblocking socket mechanism. Expiry fails the flow with
 `ETIMEDOUT`; it does not end the bridge.
 The deadline is setup state only: TX, RX, numerical publication and consumer
-completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
+completion contain no clock check. As [design/transport.md](transport.md) explains,
 userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
 
 In the Python surface `Program.copy(source.on(sender), destination.on(receiver), *, queue=0)` (also `send`, `recv`)
@@ -1038,11 +1038,11 @@ Pitch Patarasuk and Xin Yuan,
 [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
 (2009), motivate sparse connected topologies. A route is the map's: `mesh_map` (mesh-plan.h) links members the
 links leave apart along the routing table's route between them ([Topology](#topology)), each node between them a
-member of the communicator with no contribution: the bridges forward nothing (design/bridge-and-ipc.md#routes). No
+member of the communicator with no contribution: the bridges forward nothing (design/transport.md). No
 route is chosen by a caller or guessed from rank count.
 
 For a section s on `v0 → v1 → … → vk`, each intermediate node's program receives on the rows it sends: a record
-landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)` (prepared-machine.md M08), with no numerical
+landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)` (transport.md), with no numerical
 function, consumer stamp or payload copy. For the distinct realized legs E and a cut C, payload traffic is
 `B(C) = sum(bytes(s) * count(s) for (u,v,s) in E crossing C)`.
 
@@ -1064,8 +1064,8 @@ costed as the relayed path it is: its links' α summed and the greatest β, a no
 lands (mesh-program.c receive_input, the index hand-off of a member with no contribution), not the betas summed; and
 its bytes charged to every link it crosses in the tree packing (a port's capacity shared by the hops whose routes cross
 it), so hops that share a cable share its time. The bridges forward nothing: a node between two members takes part as
-a member of their communicator with no contribution (design/bridge-and-ipc.md#routes). Several cables between one pair
-are links of their own, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is
+a member of their communicator with no contribution (design/transport.md). Several cables between one pair
+are links of their own, as the bridges carry them (design/transport.md): a program between the two is
 striped over the cables its communicator leased, position t on cable t mod n, so the hop runs at n times the slowest
 cable's bandwidth (round robin waits on the slowest), not at their bandwidths summed. The bridges' map lists a pair's
 cables as such, each at the slowest port's bandwidth at either end (mesh-dataflow.c mesh_joined).
@@ -1137,7 +1137,7 @@ cost is `mesh_map`'s from it (mesh-plan.h `MESH_ALPHA_US`, `MESH_BETA_NS`).
 `mesh_observe`, `mesh_map` and `mesh_map_wait`, the bridge's map reader (mesh-plan.h, mesh-dataflow.c): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
 `mesh_observe` copies the node's port table into plain `mesh_link_view` records, a
 port by its index, and returns the port count or negative errno. `mesh_map` copies
-the bridge's map (design/bridge-and-ipc.md#region), every node's newest record, as
+the bridge's map (design/transport.md), every node's newest record, as
 the seqlock's reader (Boehm, MSPC 2012): the serial read with acquire, the records
 copied, the copy kept where the serial was even and is unchanged (`mesh_map_whole`),
 else copied again. From that copy it makes the whole map, two nodes linked where each
@@ -1145,7 +1145,7 @@ one's record holds ports paired with the other, its table the routes the bridges
 forward along, and over the members the members' map of it (#topology).
 `mesh_map_wait` waits on the serial, within its bound, so a loop of executions
 takes the next map. The bridges keep their links paired with or without a client, so
-the map is current whether or not anything runs (design/recovery.md, mandate 14).
+the map is current whether or not anything runs (design/transport.md, mandate 14).
 
 ## Program.write
 
@@ -1186,7 +1186,7 @@ Dongarra, Du Croz, Hammarling and Duff, *A Set of Level 3 Basic Linear Algebra
 Subprograms* (1990), Apple [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication),
 [BNNS matmul](https://developer.apple.com/documentation/accelerate/bnnsfiltercreatelayerbroadcastmatmul(_:_:))
 and [Core ML MIL operations](https://apple.github.io/coremltools/source/coremltools.converters.mil.mil.ops.defs.html):
-existing contractions. The [reduction algebra](distributed-reduce.md) describes
+existing contractions. The [reduction algebra](transport.md) describes
 contributions without prescribing intermediate-buffer or launch counts.
 
 In the Python surface's examples `kernels.matmul` (a kernel over a (rows, K) and a (K, columns) Ref) and an
@@ -1330,7 +1330,7 @@ The configured function caller uses `Cij = Fij(Xi)` and `Yj = sum_i Cij`, then
 passes each `Yj` to its supplied consumer. For linear T, Fij is its input-i,
 output-j block. Reduce-scatter places each sum at its caller-selected owner;
 there is no assembled whole-tensor intermediate or global stage barrier.
-The [caller description](function-chain.md) distinguishes this source composition
+The [caller description](transport.md) distinguishes this source composition
 from model artifacts and runtime performance evidence.
 
 The engine's E1d binding uses the same FFN column decomposition with a direct

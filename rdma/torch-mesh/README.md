@@ -138,7 +138,7 @@ ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the 
 (`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
 (no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
 Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a flow's receives are posted
-ahead of the data on its communicator's leased lanes: [design/bridge-dataflow.md](../../design/bridge-dataflow.md)), and
+ahead of the data on its communicator's leased lanes: [design/transport.md](../../design/transport.md)), and
 the planning once is the communicator's compiled programs'. A training step's backward, run by autograd, is compiled
 but not batched.
 

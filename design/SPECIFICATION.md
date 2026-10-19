@@ -322,7 +322,7 @@ Operator instruction, September 14, 2026:
 
 > strict dependencies of this featureset are *required* and are to be written with *urgency* instead of procrastination and hand-wringing. use established literautre or canonical implementatinos of this sort of code instead of inlining or inventing algorithmic code.
 
-The mesh task is Megatron TP2 with Goals A and B in [collective-goals.md](collective-goals.md) (operator, 2026-09-22). [Asynchronous collectives](async-collectives.md) describes the deleted Swift executor.
+The mesh task is Megatron TP2 with Goals A and B in [collective-goals.md](collective-goals.md) (operator, 2026-09-22). [Asynchronous collectives](transport.md) describes the deleted Swift executor.
 
 ### The session's requirement lines (restored 2026-10-17)
 

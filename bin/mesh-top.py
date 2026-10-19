@@ -185,7 +185,7 @@ class Top:
             if f.get("error"): hints.append(("warn", f"{node.name}: telemetry fabric section failed: {f['error']}"))
             for alarm in keeper.get("alarms") or []: hints.append(("warn", f"{node.name}: keeper {alarm}"))
             for b in f.get("bridges") or []:
-                if str(b.get("state", "")).startswith("U"): hints.append(("bad", f"{node.name}: bridge pid {b['pid']} is in U (uninterruptible, blocked in a verbs call); never SIGKILL it and do not launch ibv_devinfo there (RDMA-RULES.md)"))
+                if str(b.get("state", "")).startswith("U"): hints.append(("bad", f"{node.name}: bridge pid {b['pid']} is in U (uninterruptible, blocked in a verbs call); never SIGKILL it and do not launch ibv_devinfo there (design/transport.md)"))
                 if b.get("log_error") and not b.get("exited_at"): hints.append(("warn", f"{node.name}: bridge log unreadable by telemetry ({b['log_error']}); no census"))
                 if b.get("errors") and not b.get("exited_at"): hints.append(("warn", f"{node.name}: bridge logged {b['errors']} error line(s), last: {b.get('last_error')}"))
             for port in f.get("ports") or []:

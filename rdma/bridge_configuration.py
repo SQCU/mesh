@@ -1,9 +1,9 @@
-"""The bridge's configuration, one operand its consumer passes (design/prepared-machine.md#M09, etc/bridge/README.md): a
+"""The bridge's configuration, one operand its consumer passes (design/transport.md, etc/bridge/README.md): a
 document in JSON, TOML or YAML, by its extension, read here into the one canonical form the bridge reads, a property
 list of its name (the document's stem), its purpose and its window in bytes.  A document states its `purpose` and its
 window, either `window_gib` (GiB) or `window_percent` (of the node's physical memory, read where this runs: the node's
 own bin/mesh-user.sh), and may state `keepalive_us`, the most microseconds its links' lanes go without a frame while
-an exclusive flow runs (design/bridge-and-ipc.md#keepalive; canonical `keepalive`, nanoseconds; a document that states
+an exclusive flow runs (design/transport.md; canonical `keepalive`, nanoseconds; a document that states
 none sends none), and nothing else; the window is at most the node's memory.  There is no default.
 
     python bridge_configuration.py DOCUMENT CANONICAL"""

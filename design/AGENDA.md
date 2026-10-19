@@ -265,7 +265,7 @@ curriculum, instruments)
 `E:run` The mesh transport reduced to the sealed 3-function kernel; self-healing
 proven live across sleep/replug/network-change; UC-only, no software ARQ; no
 code path initiates a reboot. Repo `SQCU/mesh`, `rdma/mesh-flow.c` + `mesh.h`;
-rules in `RDMA-RULES.md`. A5 remains `[~]`: streams are closure-converted, the
+rules in `design/transport.md`. A5 remains `[~]`: streams are closure-converted, the
 full nonblocking state-machine surface is not separately demonstrated.
 
 ### R2 — 2026-08-29 — B1, B3, B6, B7: partial → full

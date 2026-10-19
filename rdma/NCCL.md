@@ -9,7 +9,7 @@ how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md
 
 The node's user keeps the library in the user's mesh checkout (`~/mesh`): `bin/mesh-user.sh` builds the bridge, the
 libraries and the Python bindings there, keeps the user's torch environment with torch-mesh and the checkout's library on
-its path (`~/.venv-mesh-uv`), and runs the bridge as the user's agent (`io.mesh.bridge`, design/bridge-and-ipc.md) with
+its path (`~/.venv-mesh-uv`), and runs the bridge as the user's agent (`io.mesh.bridge`, design/transport.md) with
 the node's bridge configuration, its one operand (`bin/mesh-user.sh CONFIGURATION`, etc/bridge/README.md; there is no
 default); no part of it needs root. A program links or imports the checkout's library:
 
@@ -204,7 +204,7 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
 
 ### Bounded waits
 
-Every GPU wait is bounded (design/recovery.md#five-seconds; the operator, 2026-10-18: "you cannot be using a low level
+Every GPU wait is bounded (design/transport.md; the operator, 2026-10-18: "you cannot be using a low level
 kernel like a dma or networking send/rcv channel for more than 5 seconds without something happening/concluding").
 `ncclMeshStream.polls` is the most loads of a completion word one wait of the group makes (`rdma/mesh.metal`
 `mesh_remote_wait_bounded`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
@@ -240,7 +240,7 @@ Ops: sum, prod, max, min, avg; premul-sum takes a host immediate.
 
 The node's bridge registers its window, its configuration's share of the node's memory (etc/bridge/README.md), on
 every device when the device comes up, before any queue pair exists, and never again while the device is up
-(design/prepared-machine.md#M09). The operator, 2026-10-15: "the bridge's job is to allocate essentially all of the
+(design/transport.md). The operator, 2026-10-15: "the bridge's job is to allocate essentially all of the
 memory on the entire device so that there are large already 'pinned' buffers which are ready to receive surprise
 transfers in whatever order they happen from whatever peers and links are operational ... ontologically it must be
 the responsibility of client programs to know how much allocation they need ... the bridge is there to behave like a
@@ -267,7 +267,7 @@ system call".
   with `ncclRemoteError` naming it, and `ncclMeshMemLive()` says so for a process that makes no other call (a server
   between calls). Once the process has freed every such lease (`ncclMemFree`), its next call attaches to the bridge
   that runs then and leases from its window, so a process never holds leases of two regions. This is the recovery
-  doctrine (design/recovery.md, mandates 12 and 13, the operator, 2026-10-14): "functions can fail from any one operand
+  doctrine (design/transport.md, mandates 12 and 13, the operator, 2026-10-14): "functions can fail from any one operand
   becoming invalidatd, servers should not fail when any operand is invalidated (ideally)"; "within call failures
   cannot be resume and instead must return an error (which a caller can presumably retry against immediately if that's
   what they want)".
@@ -313,13 +313,13 @@ Porting:
 
 ## Routes between unlinked ranks
 
-The bridges forward nothing (design/bridge-and-ipc.md#routes). A communicator's init leases its lane pair toward each
+The bridges forward nothing (design/transport.md). A communicator's init leases its lane pair toward each
 peer only on a cable of its bridge, and its session binds a channel to every other member, so a member no cable of this
 node reaches fails the session at its first group that crosses a link (`ncclInvalidUsage`, ENOLCK), and a program toward
 it is refused by the bridge (EHOSTUNREACH). Nodes a route crosses between members a cable does not join take part as
 members of the communicator that contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`): such a member
 receives on the rows it sends, so each landing is handed to its SEND as it lands, with no copy
-(design/prepared-machine.md M08).
+(design/transport.md).
 
 ## Rules a program keeps
 
@@ -337,7 +337,7 @@ receives on the rows it sends, so each landing is handed to its SEND as it lands
 
 The library keeps no clock that fails a session. A session's waits end at their landings or at its words' `~0`: its
 bridge's where a link is lost, where a link is silent for `mesh.h` `MESH_PLATFORM_NS` or a SEND is held that long with no
-receive for it (design/recovery.md#five-seconds), and where the bridge stops; the progress thread's where the bridge is
+receive for it (design/transport.md), and where the bridge stops; the progress thread's where the bridge is
 gone or refused or failed the session's program toward a peer (that destination's status); and a revoke's. A GPU wait
 also ends at its bound ([Bounded waits](#bounded-waits)). A peer that is alive and has not yet published is waited for,
 a host-path group's wait on it until it publishes or the caller revokes the communicator. The failure is returned:

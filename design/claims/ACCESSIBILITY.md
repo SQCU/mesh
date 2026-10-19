@@ -2,7 +2,7 @@
 
 Controlling specifications: [`../../THREAT-MODEL.md`](../../THREAT-MODEL.md),
 [`../../AGENTS.md`](../../AGENTS.md), and
-[`../../RDMA-RULES.md`](../../RDMA-RULES.md), with network realization controlled by
+[`../transport.md`](../transport.md), with network realization controlled by
 [`../ACCESS-TOPOLOGY-SPEC.md`](../ACCESS-TOPOLOGY-SPEC.md).
 
 Implementation surfaces:

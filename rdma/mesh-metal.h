@@ -1,7 +1,7 @@
 #ifndef MESH_METAL_H
 #define MESH_METAL_H
 #include "mesh-call.h"
-/* design/prepared-machine.md#M07 */
+/* design/transport.md */
 struct mesh_metal_transport { void *publication,*inputs; struct mesh_cancellation *cancel; };
 struct mesh_metal_input { uint64_t offset,stride; };
 _Static_assert(sizeof(struct mesh_metal_transport)==24,"prepared Metal transport");

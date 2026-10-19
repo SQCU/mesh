@@ -2,7 +2,7 @@
 
 This records the September 2026 implementation at the time of the measurements.
 The stream protocols and caller ABI described below have since been removed.
-The current specification is the [asynchronous collective contract](async-collectives.md).
+The current specification is the [asynchronous collective contract](transport.md).
 
 ## Indexed retention under queue pressure, September 8, 2026
 

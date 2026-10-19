@@ -77,4 +77,4 @@ all configured block sizes.
 No bridge restart or workload was run for this source increment.
 
 Provider capacities and storage lifetimes are substrate constraints. This record
-adds no requirements beyond the [async contract](async-collectives.md).
+adds no requirements beyond the [async contract](transport.md).

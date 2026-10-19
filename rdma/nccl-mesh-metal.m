@@ -19,7 +19,7 @@
    form's sequence is 0, and it stores none), and, where it has them (p.polls, set wherever they are), goes on only
    while violation word [2] holds no failure.  mesh_step_wait: a wait on a completion word, at most p.polls loads
    (mesh_remote_wait_bounded; the program's bound, at most NCCL_MESH_POLLS: metal_begin), ended sooner by its landing
-   or the session's canceller (design/recovery.md#five-seconds); mesh_step_check: a word short of its target past the
+   or the session's canceller (design/transport.md); mesh_step_check: a word short of its target past the
    bound is recorded in violation words [2], [3] and [4], else the positions the record's check names have their slots
    checked against the filler protocol (the stamp; violation words [0] and [1]).
    mesh_step_await: a landing awaited by thread 0 and checked, then the threadgroup past a device barrier and a
@@ -263,7 +263,7 @@ void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
 
 /* a stream's polls as a program's bound: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS
-   (design/recovery.md#five-seconds) */
+   (design/transport.md) */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
 struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls) {

@@ -30,7 +30,7 @@ void *metal_retain(void *object);
    violation words [2], [3] and [4] (where [2] is still 0) and every later dispatch gated on those words reads them and
    does nothing, so the host finds the failure there after the command buffer (nccl-mesh.c violated) and the call fails
    as a value.  The bound is the caller's, carried per crossing (nccl.h ncclMeshStream polls); 0, or more than nccl.h
-   NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/recovery.md#five-seconds; nccl-mesh-metal.m bound_of).  A load's period,
+   NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md; nccl-mesh-metal.m bound_of).  A load's period,
    the time a bound stands for, is the node's GPU's: on the M4 Pro (the Mini) 251 to 265 ns once the GPU's clock has
    risen, about 1.0 to 1.1 us while it rises (an idle GPU's first ~4 ms of work), in either of the library's wait shapes
    (rdma/NCCL.md "Bounded waits"; metal-microbench output_data/library-20261015/round3, 2026-10-16); the M5 Max's is not

@@ -3,10 +3,10 @@
 #include "mesh-collective.h"
 
 /* design/algorithm-sources.md#resident-metal */
-/* design/prepared-machine.md#M07 */
+/* design/transport.md */
 int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mesh_metal_transport *transport){
   *transport=(struct mesh_metal_transport){0};
-  /* design/prepared-machine.md#M17 */
+  /* design/transport.md */
   transport->publication=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)context->M+context->send_off
     length:context->send_bytes
     options:MTLResourceStorageModeShared deallocator:nil];
@@ -21,7 +21,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
 }
 
 /* design/algorithm-sources.md#resident-metal */
-/* design/prepared-machine.md#M07 */
+/* design/transport.md */
 struct mesh_metal_input mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,struct mesh_section operand){
   struct mesh_delivery *delivery=mesh_delivery_at(context->M,operand.first+mesh_row_chunks(context->M,operand.first,operand.bytes)-1);
   return (struct mesh_metal_input){(uintptr_t)context->M+delivery->device_input-(uintptr_t)((id<MTLBuffer>)transport->inputs).contents,

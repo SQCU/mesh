@@ -33,7 +33,7 @@ nodes.setdefault(_self, {}).update({"self":True})
 hist.setdefault(_self, [])
 
 def members():
-    """The nodes this node's bridge holds a record of (mesh-stat's `nodes`, design/bridge-and-ipc.md#records): each one's
+    """The nodes this node's bridge holds a record of (mesh-stat's `nodes`, design/transport.md): each one's
     bridge number and its record, this node's own marked; the roster's other nodes stay its inventory."""
     try: stat = json.loads(output([STAT]).splitlines()[-1])
     except (OSError, ValueError, IndexError) as error: stat = {"up": False, "error": f"{type(error).__name__}: {error}"}
