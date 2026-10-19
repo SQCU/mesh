@@ -54,10 +54,10 @@ publish/arrive). The GPU code is `rdma/mesh.metal` (embedded as `.build/mesh_met
 | GPU | the caller's commit | kernels the library encoded, or the caller's kernels running the library's steps | none |
 | `atexit` | `session_open` registers `session_exit` once | closes every session | `session_lock` |
 
-Client-side threads that drive the library: metal-microbench's rank (`mesh_rank.m`): the door's thread
-(`MeshRankDoor`: a blocking two-rank init, "door", at its fabric address, again after each message), each message's
-thread (`ncclMeshBootstrapRecv`), a sender's thread (`MeshRankSend`: a non-blocking two-rank init and
-`ncclMeshBootstrapSend`), and `MetalReplaySubmit`'s completion handlers (Metal's threads; they touch no library state).
+Client-side threads that drive the library: metal-microbench's rank (`mesh_rank.m`): its calls' threads and
+`MetalReplaySubmit`'s completion handlers (Metal's threads; they touch no library state). Its door (`MeshRankDoor`,
+`MeshRankAsk`: a socket a message on the fabric's routes) makes no library call: a rank's wait for its next message is
+outside every session, as a host-path group spins holding `session_lock` and a GPU wait ends at `MESH_PLATFORM_NS`.
 torch-mesh calls the library on torch's MPS stream queue inside `dispatch_sync` (`torch_mesh/_stream.mm:on_stream`,
 `begin`, `complete`).
 
@@ -102,8 +102,7 @@ this path: `ncclCommInitRank` and `ncclCommInitRankConfig` are it with no paths,
   `ETIMEDOUT`, a revoke) fails the init on every rank as a value, its claims released (`comm_leave`) and its sockets
   closed.
 - Made: the leased pairs kept (`lease_keep`: `leased`, `chosen`), the bootstrap's sockets kept for the communicator's
-  life (`peers`: `ncclMeshBootstrapSend`, `ncclMeshBootstrapRecv`, each bounded by `MESH_PLATFORM_NS`), and the
-  advisor started. No map is read and no session opens.
+  life (`peers`, each bounded by `MESH_PLATFORM_NS`; a revoke shuts them down), and the advisor started. No map is read and no session opens.
 - A lone rank makes no bootstrap and takes no slot.
 - The name is the caller's, else the id, and enters the session's digest (`map_digest`), so ranks of two communicators
   that one bootstrap port paired fail the agreement as a value.

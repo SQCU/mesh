@@ -48,12 +48,8 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
 - A rank's connect and the root's accept hold nothing of the node's bridge: a rank attaches once its bootstrap has
   connected, or accepted every rank, and its report (the lane pairs free at its bridge) follows that attach. A blocking
   init's root waits in its accept.
-- `ncclMeshBootstrapSend(comm, peer, data, bytes)` and `ncclMeshBootstrapRecv(comm, peer, data, bytes)`: NCCL's
-  `bootstrapSend` and `bootstrapRecv`, the whole of `bytes` on a made communicator's bootstrap socket to `peer` (the
-  root's to each rank, a rank's to the root), which the init keeps for the communicator's life. No group runs and no
-  session opens, so no flow starts and no lane is ridden, and `ncclCommDestroy` gives the lane pairs back clean. Each
-  send and receive is bounded by `MESH_PLATFORM_NS`; a revoke shuts the socket down; a peer's close or reset, the bound
-  or a revoke is `ncclRemoteError`. A two-rank communicator and these two calls carry a message between nodes.
+- A rank's connect to its root gives up `MESH_PLATFORM_NS` after its first try: an init toward a root that does not
+  listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
 - `ncclCommSplit` takes the ranks of a color; `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those
   that departed, so a loop goes on with the ranks that remain and no new bootstrap.
 - Making a communicator, a lone rank's too, attaches the process's client of its node's bridge ([Memory](#memory)),

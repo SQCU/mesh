@@ -257,7 +257,7 @@ struct session;
    mesh_lanes_choose); its session (NULL until a group crosses a link); `opening` a session whose start and agreement
    run outside the sessions' lock, which a revoke ends; `revoked`, set by ncclCommRevoke and kept until ncclCommDestroy,
    failing every group after it; `peers`, its bootstrap's sockets, kept for its life once its init succeeds (NCCL's
-   bootstrapState: ncclMeshBootstrapSend), which a revoke shuts down and comm_free closes; the four under `guard`.  A
+   bootstrapState), which a revoke shuts down and comm_free closes; the four under `guard`.  A
    non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy joins it), `async`
    ncclInProgress until it ends and `why` its failure's text */
 struct attach;
@@ -800,7 +800,8 @@ const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
    no deadline, that revoke and the caller's process its cancellers (these sockets carry no DMA and enter no driver),
    and it holds no slot of the bridge.  The second holds this rank's claims, lease words its bridge's other clients
    read, so each of its sends and receives is bounded by mesh.h MESH_PLATFORM_NS (ETIMEDOUT:
-   design/recovery.md#five-seconds), as each later one on these sockets is (ncclMeshBootstrapSend).  A rank's report is
+   design/recovery.md#five-seconds).  A rank's connect gives up MESH_PLATFORM_NS after its first try (ETIMEDOUT), so an
+   init toward a root that does not listen fails as a value rather than trying for good.  A rank's report is
    its status (0, else why it cannot go on, so every rank fails alike), and its bridge's node and the lane pairs free
    there toward each peer node (mesh-call.h mesh_lanes_free) as its attach reads them; at the second gather its status
    is its slot's and its claim's.  The id is also the communicator's name where its init names none, which its session's
@@ -887,6 +888,7 @@ static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
    report names, that report kept in `reports`; a socket not yet placed waits at peers[0]) or a non-root's to the root
    (peers[0], placed once connected), each placed before the revoke is read, so a revoke either finds it or is read: 0,
    ECANCELED (comm revoked), or the errno */
+static double now_s(void);
 static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports) {
   int *peers = comm->peers, status = 0;
   char host[NCCL_UNIQUE_ID_BYTES];
@@ -896,7 +898,8 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   *colon = 0;
   if (comm->rank) {
     struct addrinfo hint = {.ai_socktype = SOCK_STREAM}, *addresses = NULL;
-    while (peers[0] < 0 && !revoked(comm)) {
+    const double until = now_s() + (double)MESH_PLATFORM_NS / 1e9;
+    while (peers[0] < 0 && !revoked(comm) && now_s() < until) {
       if (!getaddrinfo(host, colon + 1, &hint, &addresses)) {
         for (struct addrinfo *a = addresses; a && peers[0] < 0 && !revoked(comm); a = a->ai_next) {
           const int fd = socket(a->ai_family, SOCK_STREAM, 0);
@@ -915,7 +918,7 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
       }
       if (peers[0] < 0) usleep(100000);
     }
-    return peers[0] < 0 || revoked(comm) ? ECANCELED : 0;
+    return revoked(comm) ? ECANCELED : peers[0] < 0 ? ETIMEDOUT : 0;
   }
   uint16_t port = (uint16_t)atoi(colon + 1);
   int listener = !strcmp(root.id, id) ? root.fd : -1;
@@ -1121,8 +1124,7 @@ static void release_all(struct session *s, int result, const char *format, ...);
 static void session_retire(struct session *s);
 /* ncclCommRevoke: comm revoked for good (`revoked`, until ncclCommDestroy): every socket of its bootstrap shut down, so
    an init still running (a non-blocking one's), its connect and accept reading the revoke at their next look
-   (bootstrap_open), fails as a value with its claims released, and a bootstrap send or receive on a made one ends
-   (ncclMeshBootstrapSend); its session's waits cancelled, its groups in flight failed (a host-path group returns the
+   (bootstrap_open), fails as a value with its claims released; its session's waits cancelled, its groups in flight failed (a host-path group returns the
    revoke, a GPU wait reads its word cancelled and ends, a completion through one returns the loss), a session opening
    (its start, its agreement awaiting its peers' digests) ended at once (its program's slot retired, which fails its
    peers' programs toward it; its agreement reads the revoke), a session not yet opening never opened (session_open
@@ -1159,26 +1161,6 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
 }
 
 ncclResult_t ncclCommAbort(ncclComm_t comm) { return ncclCommDestroy(comm); }
-
-/* nccl.h ncclMeshBootstrapSend, ncclMeshBootstrapRecv: NCCL's bootstrapSend and bootstrapRecv, `bytes` whole on the
-   made communicator's bootstrap socket to `peer` (the root's to each rank, a rank's to the root), outside every group
-   and the sessions' lock: no session, so no flow and no lane (its lease given back clean at ncclCommDestroy); each send
-   and receive bounded by MESH_PLATFORM_NS (bootstrap_bound), a revoke shutting the socket down */
-static ncclResult_t bootstrap_move(ncclComm_t comm, int peer, void *data, size_t bytes, int sending) {
-  const int fd = comm && __atomic_load_n(&comm->async, __ATOMIC_ACQUIRE) != ncclInProgress && comm->peers && peer >= 0 &&
-                 peer < comm->nranks && (data || !bytes) ? comm->peers[peer] : -1;
-  if (fd < 0)
-    return fail(ncclInvalidArgument, "a bootstrap %s rank %d: no socket of a made communicator there (the root's to each rank, a rank's "
-                "to the root), or data is NULL", sending ? "send to" : "receive from", peer);
-  const int status = whole(fd, data, bytes, sending);
-  return status ? fail(ncclRemoteError, "communicator %s: the bootstrap %s rank %d: %s", comm->name, sending ? "send to" : "receive from",
-                       peer, strerror(status))
-                : ncclSuccess;
-}
-ncclResult_t ncclMeshBootstrapSend(ncclComm_t comm, int peer, const void *data, size_t bytes) {
-  return bootstrap_move(comm, peer, (void *)(uintptr_t)data, bytes, 1);
-}
-ncclResult_t ncclMeshBootstrapRecv(ncclComm_t comm, int peer, void *data, size_t bytes) { return bootstrap_move(comm, peer, data, bytes, 0); }
 
 static ncclResult_t session_async(ncclComm_t comm);
 /* a non-blocking init's state (ncclInProgress until it ends, then its failure, named again here) or a launch's failure,

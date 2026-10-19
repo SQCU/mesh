@@ -895,14 +895,6 @@ ncclResult_t pncclGroupEnd(void);
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, const struct mesh_trees* paths,
                                   const ncclMeshProgram* programs, int count, uint64_t small, const char* name, ncclConfig_t* config);
-/* NCCL's bootstrapSend and bootstrapRecv: `bytes` whole on a made communicator's bootstrap socket to `peer`, the root's
-   to each rank or a rank's to the root (the init keeps them for the communicator's life), outside every group: no
-   session opens, so no flow runs and no lane is ridden, and ncclCommDestroy gives the lane pairs its init leased back
-   clean.  Each send and receive is bounded by mesh.h MESH_PLATFORM_NS, and a revoke shuts the socket down.
-   ncclInvalidArgument where comm holds no such socket (a peer other than these, an init in progress or failed);
-   ncclRemoteError where the peer closed or reset it, the bound passed or comm was revoked. */
-ncclResult_t ncclMeshBootstrapSend(ncclComm_t comm, int peer, const void* data, size_t bytes);
-ncclResult_t ncclMeshBootstrapRecv(ncclComm_t comm, int peer, void* data, size_t bytes);
 /* A collective's form, an entry of a communicator's configuration (ncclMeshCommForms): `collective` (mesh-plan.h
    MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER) at `root` (a reduce's or a
    broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
