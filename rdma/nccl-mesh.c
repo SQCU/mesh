@@ -2411,6 +2411,13 @@ static void schedules_free(const struct session *s, struct schedule *plans) {
    each receive's first piece waits on the one before it) */
 static int ready(const struct steps *s, uint32_t k) { return s->before[k] < 0 || s->done[s->before[k]]; }
 
+/* a host-path group's passes over its channels' landing words with nothing landed before it parks: a landing within a
+   call arrives microseconds after its peer's SEND, and these passes (at most about the watcher's WATCH_NS) take it with
+   no watcher between; a group idle past them (a member waiting for its head's next call) parks.  Parked at once, each
+   landing waited for the watcher's next scan: LiteRT's stages form, a host-path call a crossing, took 84 ms a step
+   where it had taken 12 (metal-microbench output_data/phase2-20261019 base-litert-heads) */
+#define HOST_POLLS (1u << 14)
+
 /* a host-path group with nothing to do until a landing: parked until the progress thread finds a channel's landings past
    what the group consumed, or the session fails (landed_tell), so a group waiting on a peer takes no core and holds no
    lock but its own */
@@ -2429,6 +2436,7 @@ static void park(struct session *s) {
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct
    exchange's sums go to a copy, as its SENDs read the operand); the progress thread watches the landings */
 static ncclResult_t run(struct session *ses, struct schedule *plans) {
+  uint32_t idle = 0;
   for (;;) {
     if (atomic_load(&ses->failed)) return fail((ncclResult_t)atomic_load(&ses->failed), "%s", ses->failure);
     int open = 0, moved = 0;
@@ -2487,7 +2495,8 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
       open |= ch->sent < ch->end || ch->consumed < ch->end;
     }
     if (!open) return ncclSuccess;
-    if (!moved) park(ses);
+    if (moved) idle = 0;
+    else if (++idle >= HOST_POLLS) { park(ses); idle = 0; }
   }
 }
 
