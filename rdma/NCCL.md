@@ -185,8 +185,8 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
   - A wait is a kernel polling its position's completion word, a word of the session's that its canceller ends (a
-    link silent for `MESH_SILENT_NS`, a lost link, a revoke: design/recovery.md Q16), and the stream's `polls` bounds
-    it ([Bounded waits](#bounded-waits)).
+    lost link, or one silent for `MESH_PLATFORM_NS`, which its bridge concludes; a revoke: [Failures](#failures)), and
+    the stream's `polls` bounds it ([Bounded waits](#bounded-waits)).
 
 ### Bounded waits
 
@@ -289,7 +289,7 @@ Porting:
   all-reduce, the library's copies of the operand 16.78 MB to 0; tp 271.5-272.2 ms a step.
 - The host path copies every operand through the session's rings, a lease or not; `ncclMeshMemUse(ptr, bytes, event,
   value, write)` declares the caller's GPU work on a lease (an `MTLSharedEvent` and the value it reaches), which a
-  host-path group reading or writing that lease waits for (at most `MESH_SILENT_NS`). The window is where a program
+  host-path group reading or writing that lease waits for (until the GPU's work reaches the value). The window is where a program
   that binds its own section (`mesh-call.h` `mesh_transfer_bind`) crosses without the rings; `ncclCommRegister`
   refuses a buffer outside it.
 
@@ -316,9 +316,12 @@ programs'.
 
 ## Failures
 
-A destination with positions pending that lands nothing for `mesh.h` `MESH_SILENT_NS` (10 s, the library's one silent
-bound, with no setting) is cancelled: every wait on it ends, and a host-path group with nothing landing for as long
-fails. The failure is returned:
+The library keeps no clock that fails a session. A session's waits end at their landings or at its words' `~0`: its
+bridge's where a link is lost, where a link is silent for `mesh.h` `MESH_PLATFORM_NS` or a SEND is held that long with no
+receive for it (design/recovery.md#five-seconds), and where the bridge stops; the progress thread's where the bridge is
+gone or refused or failed the session's program toward a peer (that destination's status); and a revoke's. A GPU wait
+also ends at its bound ([Bounded waits](#bounded-waits)). A peer that is alive and has not yet published is waited for,
+a host-path group's wait on it until it publishes or the caller revokes the communicator. The failure is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued,
