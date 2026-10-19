@@ -1456,8 +1456,8 @@ struct session {
   void *violation_buffer;
   _Atomic uint64_t *violation;
   pthread_t progress;
-  pthread_mutex_t lock, park;
-  pthread_cond_t wake, landed;
+  pthread_mutex_t lock;
+  pthread_cond_t wake;
   _Atomic int stop, failed, claimed, runs;
   char failure[512];
   struct session *next;
@@ -1486,14 +1486,6 @@ static void cancel_all(struct session *s) {
   for (uint32_t d = 0; s->transport.cancel && d < MESH_DESTINATIONS && client->tx[d].node; d++) mesh_cancel(s->header, s->transport.cancel, d);
 }
 
-/* a host-path group parked on the session (park) woken: a channel's landings moved (the progress thread) or the session
-   failed (release_all) */
-static void landed_tell(struct session *s) {
-  pthread_mutex_lock(&s->park);
-  pthread_cond_broadcast(&s->landed);
-  pthread_mutex_unlock(&s->park);
-}
-
 /* every destination of the session with pending words cancelled (cancel_all) and the failure kept for its next group:
    its text written before `failed` is stored, so a reader that loads `failed` reads the whole of it */
 static void release_all(struct session *s, int result, const char *format, ...) {
@@ -1507,7 +1499,6 @@ static void release_all(struct session *s, int result, const char *format, ...) 
   }
   cancel_all(s);
   for (uint32_t h = 0; h < s->count; h++) atomic_store(&s->channels[h].signaled, atomic_load(&s->channels[h].target));
-  landed_tell(s);
 }
 
 /* the communicator's session's failure, where no group holds the sessions' lock (a group in progress returns its own) */
@@ -1636,7 +1627,6 @@ static void *progress_run(void *argument) {
       }
       if (at > from && !atomic_load(&s->failed)) { atomic_store(&ch->signaled, at); moved = 1; }
     }
-    if (moved) landed_tell(s);
     if (waiting && !moved && !atomic_load(&s->failed)) {
       if (bridge_gone(s))
         release_all(s, ncclRemoteError, "this node's bridge (pid %llu) stopped or ended while the session waited (its waits cancelled)",
@@ -1709,8 +1699,6 @@ static void session_close(struct session *s) {
     if (*at == s) { *at = s->next; break; }
   pthread_mutex_destroy(&s->lock);
   pthread_cond_destroy(&s->wake);
-  pthread_mutex_destroy(&s->park);
-  pthread_cond_destroy(&s->landed);
   free(s->channels);
   free(s);
 }
@@ -1976,8 +1964,6 @@ static ncclResult_t session_open(ncclComm_t comm) {
   s->attach = comm->attach;
   pthread_mutex_init(&s->lock, NULL);
   pthread_cond_init(&s->wake, NULL);
-  pthread_mutex_init(&s->park, NULL);
-  pthread_cond_init(&s->landed, NULL);
   s->comm = comm;
   const struct hdr *m = s->header = s->context.M;
   s->pid = atomic_load(&s->header->bridge_pid); s->boot = m->boot;
@@ -2411,35 +2397,13 @@ static void schedules_free(const struct session *s, struct schedule *plans) {
    each receive's first piece waits on the one before it) */
 static int ready(const struct steps *s, uint32_t k) { return s->before[k] < 0 || s->done[s->before[k]]; }
 
-/* run: a host-path group with nothing landed polls its channels' landing words for the watcher's period WATCH_NS before
-   it parks, so a landing within it is taken with no watcher between and a longer wait (a member waiting for its head's
-   next call) costs at most one period more.  Parked at once, each landing waited for the watcher's next scan: LiteRT's
-   stages form, a host-path call a crossing, took 84 ms a step where it had taken 12 (metal-microbench
-   output_data/phase2-20261019 base-litert-heads); a host-path all-reduce of one float on the loopback fabric took 717
-   us, 701 polled 2^14 passes, 43 polled 2^20 (hostlat-before, -after, -wide) */
-
-/* a host-path group with nothing to do until a landing: parked until the progress thread finds a channel's landings past
-   what the group consumed, or the session fails (landed_tell), so a group waiting on a peer takes no core and holds no
-   lock but its own */
-static void park(struct session *s) {
-  pthread_mutex_lock(&s->park);
-  for (;;) {
-    int ready = atomic_load(&s->failed) != 0;
-    for (uint32_t h = 0; h < s->count && !ready; h++) ready = atomic_load(&s->channels[h].signaled) > s->channels[h].consumed;
-    if (ready) break;
-    pthread_cond_wait(&s->landed, &s->park);
-  }
-  pthread_mutex_unlock(&s->park);
-}
-
 /* every channel's positions published and consumed: a SEND's piece copied into its slot, a REDUCE's
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct
    exchange's sums go to a copy, as its SENDs read the operand); the progress thread watches the landings */
 static ncclResult_t run(struct session *ses, struct schedule *plans) {
-  uint64_t idle = 0;
   for (;;) {
     if (atomic_load(&ses->failed)) return fail((ncclResult_t)atomic_load(&ses->failed), "%s", ses->failure);
-    int open = 0, moved = 0;
+    int open = 0;
     for (uint32_t h = 0; h < ses->count; h++) {
       struct channel *ch = ses->channels + h;
       struct schedule *p = plans + h;
@@ -2469,7 +2433,6 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
           if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
         }
         ch->consumed++;
-        moved = 1;
       }
       while (ch->sent < ch->end && ch->sent < ch->consumed + LAG) {
         const uint64_t at = ch->sent;
@@ -2490,15 +2453,10 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
         }
         mesh_host_publish(&ses->context, ch->out, at);
         ch->sent++;
-        moved = 1;
       }
       open |= ch->sent < ch->end || ch->consumed < ch->end;
     }
     if (!open) return ncclSuccess;
-    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (moved) idle = 0;
-    else if (!idle) idle = now;
-    else if (now - idle >= (uint64_t)WATCH_NS) { park(ses); idle = 0; }
   }
 }
 
