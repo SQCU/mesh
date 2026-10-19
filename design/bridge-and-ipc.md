@@ -26,9 +26,9 @@ the five-second rule:
    something happening on it or its scope concluding (design/recovery.md#five-seconds).
 
 Its wire is HELLO, LINK, FAREWELL and RECORD. It carries no request, runs no command, keeps no service and forwards no
-program (`#routes`). A node's facts beyond its record, and calls to its programs, are its resident rank's to answer
-(metal-microbench docs/elastic.md#call-delivery: a rank's door, a two-rank communicator on leased lanes like any
-other); every communicator meets at NCCL's own bootstrap (rdma/NCCL.md).
+program (`#routes`). A node's facts beyond its record are its own resident rank's, and each member node's own driver
+starts its ranks' part of a call (metal-microbench docs/elastic.md#call-delivery); a call's communicators meet at
+NCCL's own bootstrap (rdma/NCCL.md), and nothing else passes between nodes.
 
 Operator, 2026-10-14 (D10): "clients are clients, bridge services are bridge services. clients shouldn't know anything
 about other clients on the same mesh. ... clients *ask*, bridges *do*". And (D3), on whether the bridge keeps links

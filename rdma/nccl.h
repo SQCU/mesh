@@ -80,10 +80,7 @@
    issue->published says whether anything was published (the caller then commits, so the peers' waits progress), and the
    issue pointer stays valid until ncclGroupEnd returns.  ncclMeshComplete completes it, with every group issued before
    it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
-   once, with every group before it; a host-path group fails while its own communicator's groups are issued and not
-   complete, and waits only for its own communicator's GPU work.  A host-path group parks while no landing of its own
-   has come (woken by its session's watcher, within a millisecond of one) and holds no lock another communicator's
-   groups take, so one may wait on a peer for as long as the peer takes, beside other communicators' groups.  A wait is a
+   once, with every group before it; a host-path group fails while groups are issued and not complete.  A wait is a
    kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait_bounded), a word of the session's
    that its canceller ends (design/recovery.md Q16: a lost or silent link, a revoke), and every wait is bounded: the
    stream's `polls` is the most loads of the word a wait makes, the caller's bound for the group's crossings, which it

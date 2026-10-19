@@ -1473,9 +1473,9 @@ struct session {
   void *violation_buffer;
   _Atomic uint64_t *violation;
   pthread_t progress;
-  pthread_mutex_t lock, park;
-  pthread_cond_t wake, landed;
-  _Atomic int stop, failed, claimed, runs;
+  pthread_mutex_t lock;
+  pthread_cond_t wake;
+  _Atomic int stop, failed, claimed;
   char failure[512];
   struct session *next;
 };
@@ -1503,14 +1503,6 @@ static void cancel_all(struct session *s) {
   for (uint32_t d = 0; s->transport.cancel && d < MESH_DESTINATIONS && client->tx[d].node; d++) mesh_cancel(s->header, s->transport.cancel, d);
 }
 
-/* a host-path group parked on the session (park) woken: a channel's landings moved (the progress thread) or the session
-   failed (release_all) */
-static void landed_tell(struct session *s) {
-  pthread_mutex_lock(&s->park);
-  pthread_cond_broadcast(&s->landed);
-  pthread_mutex_unlock(&s->park);
-}
-
 /* every destination of the session with pending words cancelled (cancel_all) and the failure kept for its next group:
    its text written before `failed` is stored, so a reader that loads `failed` reads the whole of it */
 static void release_all(struct session *s, int result, const char *format, ...) {
@@ -1524,7 +1516,6 @@ static void release_all(struct session *s, int result, const char *format, ...) 
   }
   cancel_all(s);
   for (uint32_t h = 0; h < s->count; h++) atomic_store(&s->channels[h].signaled, atomic_load(&s->channels[h].target));
-  landed_tell(s);
 }
 
 /* the communicator's session's failure, where no group holds the sessions' lock (a group in progress returns its own) */
@@ -1653,7 +1644,6 @@ static void *progress_run(void *argument) {
       }
       if (at > from && !atomic_load(&s->failed)) { atomic_store(&ch->signaled, at); moved = 1; }
     }
-    if (moved) landed_tell(s);
     if (waiting && !moved && !atomic_load(&s->failed)) {
       if (bridge_gone(s))
         release_all(s, ncclRemoteError, "this node's bridge (pid %llu) stopped or ended while the session waited (its waits cancelled)",
@@ -1690,11 +1680,11 @@ static void progress_targets(struct session *s, uint64_t ahead) {
   pthread_mutex_unlock(&s->lock);
 }
 
-/* every GPU program that touched session s finished (`last`, awaited on `finished`: program_end signals each program's
-   count), before a host-path group runs on it (launch); another communicator's GPU work is not waited for */
-static void drain(struct session *s) {
+/* every GPU program the caller was told to commit finished, awaited on `finished` (each such program's end signals its
+   count, `issued`: program_end): gpu_reached, before a host-path group runs (launch) */
+static void drain(void) {
   if (!finished) return;
-  if (s && s->last) gpu_reached(finished, s->last);
+  gpu_reached(finished, issued);
   metal_collect(finished);
 }
 
@@ -1726,8 +1716,6 @@ static void session_close(struct session *s) {
     if (*at == s) { *at = s->next; break; }
   pthread_mutex_destroy(&s->lock);
   pthread_cond_destroy(&s->wake);
-  pthread_mutex_destroy(&s->park);
-  pthread_cond_destroy(&s->landed);
   free(s->channels);
   free(s);
 }
@@ -1736,14 +1724,10 @@ static void session_close(struct session *s) {
    peers' programs toward it */
 static void session_retire(struct session *s) { mesh_retire(s->header, s->context.client); }
 
-/* the process's exit: every session closed but one a host-path group waits in (session_run: `runs`), which the process's
-   exit releases with the rest of its memory */
+/* the process's exit: every session closed */
 static void session_exit(void) {
   pthread_mutex_lock(&session_lock);
-  for (struct session *s = sessions, *next; s; s = next) {
-    next = s->next;
-    if (!atomic_load(&s->runs)) session_close(s);
-  }
+  while (sessions) session_close(sessions);
   pthread_mutex_unlock(&session_lock);
 }
 
@@ -2062,8 +2046,6 @@ static ncclResult_t session_open(ncclComm_t comm) {
   s->attach = comm->attach;
   pthread_mutex_init(&s->lock, NULL);
   pthread_cond_init(&s->wake, NULL);
-  pthread_mutex_init(&s->park, NULL);
-  pthread_cond_init(&s->landed, NULL);
   s->comm = comm;
   const struct hdr *m = s->header = s->context.M;
   s->pid = atomic_load(&s->header->bridge_pid); s->boot = m->boot;
@@ -2497,27 +2479,13 @@ static void schedules_free(const struct session *s, struct schedule *plans) {
    each receive's first piece waits on the one before it) */
 static int ready(const struct steps *s, uint32_t k) { return s->before[k] < 0 || s->done[s->before[k]]; }
 
-/* a host-path group with nothing to do until a landing: parked until the progress thread finds a channel's landings past
-   what the group consumed, or the session fails (landed_tell), so a group waiting on a peer takes no core and holds no
-   lock but its own */
-static void park(struct session *s) {
-  pthread_mutex_lock(&s->park);
-  for (;;) {
-    int ready = atomic_load(&s->failed) != 0;
-    for (uint32_t h = 0; h < s->count && !ready; h++) ready = atomic_load(&s->channels[h].signaled) > s->channels[h].consumed;
-    if (ready) break;
-    pthread_cond_wait(&s->landed, &s->park);
-  }
-  pthread_mutex_unlock(&s->park);
-}
-
 /* every channel's positions published and consumed: a SEND's piece copied into its slot, a REDUCE's
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct
    exchange's sums go to a copy, as its SENDs read the operand); the progress thread watches the landings */
 static ncclResult_t run(struct session *ses, struct schedule *plans) {
   for (;;) {
     if (atomic_load(&ses->failed)) return fail((ncclResult_t)atomic_load(&ses->failed), "%s", ses->failure);
-    int open = 0, moved = 0;
+    int open = 0;
     for (uint32_t h = 0; h < ses->count; h++) {
       struct channel *ch = ses->channels + h;
       struct schedule *p = plans + h;
@@ -2547,7 +2515,6 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
           if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
         }
         ch->consumed++;
-        moved = 1;
       }
       while (ch->sent < ch->end && ch->sent < ch->consumed + LAG) {
         const uint64_t at = ch->sent;
@@ -2568,12 +2535,10 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
         }
         mesh_host_publish(&ses->context, ch->out, at);
         ch->sent++;
-        moved = 1;
       }
       open |= ch->sent < ch->end || ch->consumed < ch->end;
     }
     if (!open) return ncclSuccess;
-    if (!moved) park(ses);
   }
 }
 
@@ -2624,11 +2589,7 @@ static ncclResult_t session_run(struct session *s, struct call *list, size_t n) 
   if (result) return result;
   progress_targets(s, 0);
   mesh_transfers_wake(&s->context);
-  atomic_fetch_add(&s->runs, 1);
-  pthread_mutex_unlock(&session_lock);
   result = run(s, plans);
-  pthread_mutex_lock(&session_lock);
-  atomic_fetch_sub(&s->runs, 1);
   schedules_free(s, plans);
   if (result) { session_close(s); return result; }
   for (uint32_t h = 0; h < s->count; h++) {
@@ -2767,9 +2728,8 @@ static ncclResult_t launch(struct call *list, size_t n) {
   }
   pthread_mutex_lock(&session_lock);
   if (remote) result = session_ensure(comm);
-  if (!result && remote && session_issued(comm->session))
-    result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
-  if (!result && remote) drain(comm->session);
+  if (!result && remote && inflight) result = fail(ncclInvalidUsage, "a host-path group while GPU groups are issued and not complete (ncclMeshComplete)");
+  if (!result && remote) drain();
   if (!result) result = plan_calls(comm, list, n);
   for (size_t i = 0; i < n && !result; i++) {
     struct call *c = list + i;
