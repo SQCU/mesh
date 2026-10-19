@@ -15,7 +15,6 @@ except (TypeError, OSError, ValueError, KeyError) as error:
 NODE_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 KEEP = int(os.environ.get("MESH_KEEP", "600"))
 ESTIMATE = int(os.environ.get("MESH_ESTIMATE_WINDOW", "60"))
-ASK = "import sys; sys.path.insert(0, sys.argv[1]); import mesh; code, out = mesh.run(int(sys.argv[2]), \"curl -fsS '\" + sys.argv[3] + \"'\"); sys.stdout.buffer.write(out); raise SystemExit(code)"
 
 with open(os.path.join(ROOT, "etc", "mesh-capacity.json")) as f: CAPACITY = json.load(f)
 with open(os.environ.get("MESH_NODES", os.path.join(ROOT, "etc", "mesh-nodes.json"))) as f: ROSTER = json.load(f)
@@ -59,26 +58,10 @@ def unavailable(name, node, error):
     model = node.get("model") or (node.get("record") or {}).get("model")
     return {"schema":1,"up":False,"reachable":False,"name":name,"host":{"model":model},"capacity":{"kind":"characterized","source":CAPACITY.get("source"),"metrics":CAPACITY.get("models", {}).get(model)},"error":error}
 
-def bridge_rdma():
-    """The directory of this user's running bridge, whose library a request through it loads (as bin/mesh-stat runs the
-    reader beside it), else None."""
-    pid = output(["/usr/bin/pgrep", "-nx", "-U", str(os.getuid()), "mesh-flow"])
-    return os.path.dirname(output(["/bin/ps", "-o", "comm=", "-p", pid])) or None if pid else None
-
 def telemetry(node, path):
-    """A node's telemetry at `path`: this node's over loopback, another's through its bridge's exec (curl there, at
-    127.0.0.1), a process of its own each time so its library is the running bridge's."""
-    url = f"http://127.0.0.1:{NODE_PORT}{path}"
-    if node.get("self"):
-        with urllib.request.urlopen(url) as response: return json.load(response), "127.0.0.1"
-    rdma = bridge_rdma()
-    if not rdma: raise RuntimeError("no bridge of this user runs here to ask through")
-    if node.get("number") is None: raise RuntimeError("this node's bridge holds no record of it")
-    result = subprocess.run([sys.executable, "-c", ASK, rdma, str(node["number"]), url], capture_output=True)
-    if result.returncode:
-        said = (result.stderr or result.stdout).decode(errors="replace").strip().splitlines()
-        raise RuntimeError(said[-1] if said else f"exit {result.returncode}")
-    return json.loads(result.stdout), f"bridge node {node['number']}"
+    """This node's telemetry at `path`, over loopback; another node's stays on that node, its record its facts here."""
+    if not node.get("self"): raise RuntimeError("its telemetry is read on its own node; this observer serves this node's")
+    with urllib.request.urlopen(f"http://127.0.0.1:{NODE_PORT}{path}") as response: return json.load(response), "127.0.0.1"
 
 def node_sample(name, node):
     sequence = stream_sequences.get(name)
@@ -302,8 +285,9 @@ def record(name, node, started):
             del h[:-KEEP]
 
 def poll():
-    """Every PERIOD: the bridge's records read, and each node's telemetry asked for where no ask of it is under way, so a
-    node that answers slowly delays only its own samples."""
+    """Every PERIOD: the bridge's records read, and each node recorded where no recording of it is under way: this node's
+    telemetry, another node's record alone (its telemetry unavailable here), so a slow telemetry read delays only its own
+    samples."""
     asked = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
         while True:
