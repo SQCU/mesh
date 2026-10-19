@@ -146,7 +146,10 @@ enum { HELLO=1, FAREWELL, RECORD, LINK, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_R
        CHANNEL_CLOSE };
 struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code; uint32_t block,port,from,to,bytes;
   uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
-#define XMAGIC (0x4d595048u+MESH_VERSION)
+/* the wire's magic: its base, MESH_VERSION and the wire's revision (1<<12, past any base and version's: every link heard
+   within MESH_PLATFORM_NS or concluded, design/recovery.md#five-seconds B1, B2, B3, which a bridge of the same version
+   without them breaks), so bridges of different versions or revisions drop each other's hellos and never pair */
+#define XMAGIC (0x4d595048u+MESH_VERSION+(1u<<12))
 /* design/bridge-and-ipc.md#cables: the cables a program toward one node spans, at most the node's ports */
 #define MESH_STRIPES MESH_PORTS
 /* design/bridge-and-ipc.md#flows: the flows a port's table holds, by their index (a flow's index and the index's generation
@@ -163,8 +166,9 @@ struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code
    is `progressing` and its lanes are served (the receive thread posts its rings' first records, `armed`).  It has
    ended (`ended`) once it failed or its program ended; its stop runs on the port's queue (`stopping`; `stopped` 1 once
    it ran, 2 where a lane it left dirty may still land a SEND in its rows, `held`: the flow, and with it a retired
-   client's rows, kept until its link's lanes' `generation` moves past `lane_epoch`, design/recovery.md#five-seconds
-   B7), and the event loop frees it.  Where the configuration keeps them, its ledger (`ledger`, #ledger) */
+   client's rows, kept until its link's lanes' `generation` moves past `lane_epoch`, or until the move a window put off
+   moved every lane it holds, design/recovery.md#five-seconds B7, B6 (a)), and the event loop frees it.  Where the
+   configuration keeps them, its ledger (`ledger`, #ledger) */
 struct port;
 struct flow {
   struct flow *next;
@@ -203,7 +207,9 @@ struct flow {
    LINK_MADE; connecting; up), its job on the port's queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled;
    LINK_JOB_FLUSH the lanes of a link concluded while connected or up moved to the error state at the end of that
    conclusion's quiet window, `flush_at`, 0 for none, and of any termination's, design/recovery.md#five-seconds B6 (b),
-   B9b) and a registration its make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss and as
+   B9b; LINK_JOB_MOVE the lanes `move` of flows' stops whose move to the error state a window or a stuck call put off,
+   `deferred`, a bit a lane, the port queue's to set and the event loop's to take, cleared as the link is made, B6 (a),
+   B9) and a registration its make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss and as
    its peer interface's termination is heard, mesh-link.c peer_terminated, so a job of a pairing gone makes no call and
    is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`), its largest stripe piece;
    the lanes the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to
@@ -211,8 +217,9 @@ struct flow {
    (`broken`, the event loop's to take) and those found so here (`dirty`: none is made again while the link is up;
    once no lane of the link is leased here, its control socket is closed and both ends pair it afresh, every lane made
    again: link_turn), and the count of its lanes'
-   destructions (`generation`, link_make's, past which no request of an earlier pairing lands: a flow kept for a lane it
-   left dirty is freed then, design/recovery.md#five-seconds B7).  Each lane's SEND gate (`gate`:
+   destructions (`generation`, link_make's and a LINK_JOB_FLUSH's that moved every queue pair to the error state, past
+   which no request of an earlier pairing lands: a flow kept for a lane it left dirty is freed then,
+   design/recovery.md#five-seconds B7).  Each lane's SEND gate (`gate`:
    the frames posted and retired, the send thread's; its capacity, set as the lane connects) and the flow whose program
    rides it (`holder`: the event loop's to set as the flow is made, the port's queue's to clear as it stops; a lane's
    completions go to its holder, and none is read once it has none).  Lane MESH_LANE_KEEPALIVE's frames
@@ -221,7 +228,7 @@ struct flow {
    and its census `alive_posted`, the receive thread's `alive_heard`, which the event loop reads: mesh-link.c port_silent),
    and its pages: the keepalive's block and the stripes' descriptors */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
-enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT, LINK_JOB_FLUSH };
+enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT, LINK_JOB_FLUSH, LINK_JOB_MOVE };
 #define LINK_ALIVE_SENT (UINT64_C(3)<<56)
 #define LINK_ALIVE_HEARD (UINT64_C(4)<<56)
 #define LINK_ALIVE_BYTES 16u
@@ -230,8 +237,8 @@ struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,refused;
   _Atomic int done;
-  _Atomic uint32_t served,broken,generation,pairing;
-  uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],peer_piece,share,page,pages,job_pairing,dirty;
+  _Atomic uint32_t served,broken,generation,pairing,deferred;
+  uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],peer_piece,share,page,pages,job_pairing,dirty,move;
   struct send_gate gate[MESH_LINK_LANES];
   struct flow *_Atomic holder[MESH_LINK_LANES];
   uint64_t alive_at,job_at,flush_at;
@@ -250,7 +257,9 @@ struct link {
    stripe's last its word, value, writer and ring), their frames, the descriptors sent and completed, the stripe being
    cut (`out`) and the ring it looks at next; the receive thread's: the descriptors landed, by their slot in arrival
    order, the pieces posted, their frames, the stripe being received (`in`).  `flight`: requests taken and not yet
-   completed or failed, which hold a retired client's rows (clients_turn).  A request is one ring entry's: the bytes at
+   completed or failed, which hold a retired client's rows (clients_turn).  The event loop's alone: the SENDs completed
+   as its turn last read them and when it last found none held or one completed (`seen`, `held_at`:
+   design/recovery.md#five-seconds, mesh-link.c gates_turn).  A request is one ring entry's: the bytes at
    `offset` of this node's window to the same offset of the peer's, cut alike at both ends (stripe_length) (the one
    header-driven receive the bridge keeps, for stripes alone: design/bridge-and-ipc.md#lanes) */
 #define MESH_DESCRIPTORS 256u
@@ -275,12 +284,14 @@ struct stripes {
   uint64_t receive_head,receive_tail,arrived_head,arrived_tail;
   uint32_t receive_frames,receive_capacity,arrived[MESH_DESCRIPTORS];
   struct stripe_cut in;
+  uint64_t seen,held_at;
 };
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue (its
-   open's job `job`, dispatched at `job_at`; `stuck` once a job of the port outlived MESH_PLATFORM_NS and the port was
-   concluded around it: design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window
-   (`quiet_at`, MESH_PLATFORM_NS past its last conclusion, a peer interface's termination heard or a fault, B9b, B19,
-   moved only later and by any thread, before which no port job but an earlier conclusion's flush, struct link
+   open's job `job`, dispatched at `job_at`; a flow stop's move to the error state, begun at `moving_at`, 0 while none
+   is out; `stuck` once a job or move of the port outlived MESH_PLATFORM_NS and the port was concluded around it:
+   design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window (`quiet_at`,
+   MESH_PLATFORM_NS past its last conclusion or a peer interface's termination heard, B9b, moved only later and by any
+   thread, before which no port job but an earlier conclusion's flush, struct link
    `flush_at`, is dispatched on it and the bridge does not exit: B9), whether its device is to be opened
    (`opening`: at the start, at its link's coming on, and at a hello heard while it is not open, B16; never on a
    clock), the queue pairs its link lanes hold (`committed`, of the device's usable queue pairs), its link lanes, its
@@ -292,8 +303,8 @@ struct stripes {
    whether this end closed its control socket so both ends pair its link afresh (`cycling`, link_turn), and the event
    loop's reading of what its control socket
    heard (design/recovery.md#five-seconds, mesh-link.c port_silent: when it last heard anything, `heard_at`, the link's
-   keepalive frames heard as last read, `frames`, and its frame in flight, `flight` its census as last read and
-   `flight_at` when) */
+   keepalive frames heard as last read, `frames`, and when the last was heard, `frame_at`, 0 until this pairing's first,
+   and its frame in flight, `flight` its census as last read and `flight_at` when) */
 struct port {
   struct mesh_device device;
   uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,flows,committed,cycling,stuck;
@@ -301,8 +312,8 @@ struct port {
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
   _Atomic int done,closing;
-  uint64_t next,bandwidth,heard_at,frames,flight,flight_at,job_at;
-  _Atomic uint64_t quiet_at;
+  uint64_t next,bandwidth,heard_at,frames,frame_at,flight,flight_at,job_at;
+  _Atomic uint64_t quiet_at,moving_at;
   struct message heard;
   uint16_t lid;
   uint8_t gid[16];

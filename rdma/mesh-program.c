@@ -582,22 +582,24 @@ static void flow_job(struct flow *f){
     wake();
   });
 }
-/* design/algorithm-sources.md#meshresult: a flow stopped on its port's queue, after its job: its lanes let go
+/* design/algorithm-sources.md#meshresult: a flow stopped: where it failed, its program's pending words toward the far
+   end cancelled (M12) and its status the failure naming the node `where`, stored here on the event loop as
+   programs_stop stores them (no queue waited on: design/recovery.md#five-seconds B4's order, ~0 and the status before
+   B6, never behind a call held on the port's queue); then on its port's queue, after its job, its lanes let go
    (lanes_release: no completion of them is taken as its own after it, and a lane it left with positions outstanding
-   stays DIRTY, moved to the error state unless the stop is its link's loss, `lost`), then, where it failed, its
-   program's pending words toward the far end cancelled (M12) and its status the failure naming the node `where`; the
-   census printed (each of its queues' lane: the SEND requests and frames posted and retired through its gate, and its
-   ring's records posted and landed and their bytes), its ledger written (#ledger), and its storage freed; `stopped` 2
-   where a dirty lane's requests may still land in its rows (design/recovery.md#five-seconds B7), else 1 */
+   stays DIRTY, moved to the error state unless the stop is its link's loss, `lost`); the census printed (each of its
+   queues' lane: the SEND requests and frames posted and retired through its gate, and its ring's records posted and
+   landed and their bytes), its ledger written (#ledger), and its storage freed; `stopped` 2 where a dirty lane's
+   requests may still land in its rows (design/recovery.md#five-seconds B7), else 1 */
 static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where,int lost){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;struct mesh_cancellation *cancel=f->cancel;
   f->stopping=1;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);
+  if(code && owned(owner)){
+    if(cancel)mesh_cancel(M,cancel,destination);
+    status_failed(&mesh_client_at(M,owner)->status[destination],owner,code,domain,where);
+  }
   dispatch_async(f->port->work,^{
     const uint32_t dirty=lanes_release(f,lost);
-    if(code && owned(owner)){
-      if(cancel)mesh_cancel(M,cancel,destination);
-      status_failed(&mesh_client_at(M,owner)->status[destination],owner,code,domain,where);
-    }
     const struct link *l=&f->port->link;
     for(uint32_t q=0;f->rings && q<f->queues;q++){
       const struct send_gate *g=l->gate+f->lane[q];
@@ -1487,7 +1489,8 @@ void clients_turn(int liveness){
   if(unreleased && !zombie){unreleased=0;mesh_retired_release(M);}
 }
 /* design/bridge-and-ipc.md#flows: every flow's turn: its job's end taken, a stopped flow freed (one kept for a lane it
-   left dirty once its link's lanes' generation moved: design/recovery.md#five-seconds B7, 4df30806 flow_release's
+   left dirty once its link's lanes' generation moved, link_make's or a flush's that moved every queue pair, or once the
+   move a window put off moved its lanes and stopped it: design/recovery.md#five-seconds B7, 4df30806 flow_release's
    rule), and a progress thread's finding (a post or a completion that failed) its failure; nothing here waits on a
    clock */
 void flows_turn(void){
