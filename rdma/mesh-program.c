@@ -18,7 +18,7 @@ static uint64_t available_now(void){
 
 /* design/recovery.md#diagnosis: this node's health (mesh-plan.h struct mesh_health), sampled on the event loop from
    cheap reads only: sysctl, the host's VM statistics and the notify states of thermal pressure and of the power
-   sources, whose description is read only when their notify state moved */
+   sources, whose description is read only when their notify state moved, and then on a queue of its own (power_ask) */
 static struct mesh_health health;
 static int power_token=-1,thermal_token=-1;
 static uint64_t health_sent;
@@ -49,6 +49,24 @@ static void power_read(struct mesh_health *h){
   if(list)CFRelease(list);
   CFRelease(info);
 }
+/* design/recovery.md#five-seconds B14: the power sources' description (IOPSCopyPowerSourcesInfo, an answer from
+   another process) read on a queue of its own, never on the event loop, the canceller of every scope (as mesh-link.c
+   host_read asks configd): asked where their notify state moved (`wanted`) and no reading is out or untaken, taken by
+   health_sample as it ends */
+static dispatch_queue_t power_queue;
+static struct mesh_health power_heard;
+static _Atomic int power_reading,power_read_done;
+static int power_wanted;
+static void power_ask(void){
+  if(!power_wanted || atomic_load(&power_read_done) || atomic_exchange(&power_reading,1))return;
+  power_wanted=0;
+  dispatch_async(power_queue,^{
+    power_read(&power_heard);
+    atomic_store_explicit(&power_read_done,1,memory_order_release);
+    atomic_store(&power_reading,0);
+    wake();
+  });
+}
 static void health_sample(struct mesh_health *h){
   h->sampled=clock_gettime_nsec_np(CLOCK_REALTIME);
   vm_statistics64_data_t vm;mach_msg_type_number_t count=HOST_VM_INFO64_COUNT;
@@ -61,7 +79,12 @@ static void health_sample(struct mesh_health *h){
   uint64_t state=0;
   if(thermal_token>=0 && notify_get_state(thermal_token,&state)==NOTIFY_STATUS_OK)h->thermal=(uint32_t)state;
   int changed=0;
-  if(power_token>=0 && notify_check(power_token,&changed)==NOTIFY_STATUS_OK && changed)power_read(h);
+  if(power_token>=0 && notify_check(power_token,&changed)==NOTIFY_STATUS_OK && changed)power_wanted=1;
+  if(atomic_load_explicit(&power_read_done,memory_order_acquire)){
+    h->power=power_heard.power;h->charge=power_heard.charge;h->minutes=power_heard.minutes;
+    atomic_store_explicit(&power_read_done,0,memory_order_release);
+  }
+  power_ask();
 }
 /* design/recovery.md#diagnosis: whether a power controller's record (`length` bytes of the ring kern.shutdownreason
    holds) is of `class`, the text before its comma */
@@ -90,9 +113,11 @@ static uint32_t reset_read(const char *ring,char *out,size_t room){
   }
   return sagged && reset!=MESH_RESET_WATCHDOG?MESH_RESET_SAG:reset;
 }
-/* the boot's facts, read once: when the node booted, its boot session, and why it last restarted (reset_read) */
+/* the boot's facts, read once: when the node booted, its boot session, and why it last restarted (reset_read); the
+   power sources read here once, before any device is opened (as the node's name is, mesh-link.c host_name) */
 void health_init(void){
   host_port=mach_host_self();
+  power_queue=dispatch_queue_create("mesh.power",DISPATCH_QUEUE_SERIAL);
   struct timeval booted;size_t size=sizeof booted;
   if(!sysctlbyname("kern.boottime",&booted,&size,NULL,0))health.booted=(uint64_t)booted.tv_sec*1000000000u+(uint64_t)booted.tv_usec*1000u;
   sysctl_text("kern.bootsessionuuid",health.session,sizeof health.session);

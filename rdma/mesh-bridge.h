@@ -285,7 +285,8 @@ struct stripes {
    table of flows (`table`, the indices reserved and their generations, the highest reserved plus one), and its
    progress threads (#progress: the epochs each has seen of `epoch`, which a flow leaving the table moves, and whether
    each is parked on the port's bell); its stripe writes (design/bridge-dataflow.md#stripes), the guard of its
-   device's verbs objects (`guard`, odd while raised, and the value each progress thread last held at: port_guard),
+   device's verbs objects (`guard`, odd while raised, the word the progress threads park on while it stands,
+   design/recovery.md#five-seconds B13, and the value each progress thread last held at: port_guard),
    whether this end closed its control socket so both ends pair its link afresh (`cycling`, link_turn), and the event
    loop's reading of what its control socket
    heard (design/recovery.md#five-seconds, mesh-link.c port_silent: when it last heard anything, `heard_at`, the link's
