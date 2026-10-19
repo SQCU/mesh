@@ -1,5 +1,6 @@
 #import <Metal/Metal.h>
 #include "nccl-mesh-metal.h"
+#include "nccl.h"
 #include "mesh_metal.h"
 #include <errno.h>
 #include <stdio.h>
@@ -15,11 +16,12 @@
    group handed it (ncclMeshFused: a product's finish that publishes its piece, a layer's finish that lands its peer's).
    mesh_step_enter: in the Metal 4 form a kernel first stores its record's sequence in `progress` (every dispatch before
    it has finished: a barrier stands between each two), whether or not its program has violation words (the classic
-   form's sequence is 0, and it stores none), and, where it has them (p.polls), goes on only while violation word [2]
-   holds no failure.  mesh_step_wait: a wait on a completion word is mesh_remote_wait (which the session's canceller
-   ends) or, where p.polls is set (a bounded program, metal_begin), mesh_remote_wait_bounded; mesh_step_check: a word
-   short of its target past the bound is recorded in violation words [2], [3] and [4], else the positions the record's
-   check names have their slots checked against the filler protocol (the stamp; violation words [0] and [1]).
+   form's sequence is 0, and it stores none), and, where it has them (p.polls, set wherever they are), goes on only
+   while violation word [2] holds no failure.  mesh_step_wait: a wait on a completion word, at most p.polls loads
+   (mesh_remote_wait_bounded; the program's bound, at most NCCL_MESH_POLLS: metal_begin), ended sooner by its landing
+   or the session's canceller (design/recovery.md#five-seconds); mesh_step_check: a word short of its target past the
+   bound is recorded in violation words [2], [3] and [4], else the positions the record's check names have their slots
+   checked against the filler protocol (the stamp; violation words [0] and [1]).
    mesh_step_await: a landing awaited by thread 0 and checked, then the threadgroup past a device barrier and a
    system-scope fence (its payload then read with mesh_payload).  mesh_step_release: a piece the threadgroup stored
    into its slot, its cell released by thread 0 after a device barrier.  One threadgroup a step.  A caller's kernel
@@ -33,8 +35,7 @@ static NSString *const STEPS =
   "static inline bool mesh_step_enter(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first) { "
   "if (p.sequence && first) *progress = p.sequence; return !(p.polls && ((volatile device const ulong *)vb)[2]); }\n"
   "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, ulong cycle) { "
-  "return p.polls ? mesh_remote_wait_bounded((volatile coherent(system) device const ulong *)word, cycle, p.polls) "
-  ": mesh_remote_wait((volatile coherent(system) device const ulong *)word, cycle); }\n"
+  "return mesh_remote_wait_bounded((volatile coherent(system) device const ulong *)word, cycle, p.polls); }\n"
   "static inline void mesh_step_check(constant mesh_args &p, ulong status, device uchar *ring, device uchar *vb, ulong cycle) { "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
   "if (p.polls && status != ~0UL && status < 1 + cycle) { if (v[2] == 0) { v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); } } "
@@ -160,7 +161,8 @@ ARGS(args, uint64_t, uint32_t);
 /* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
    keeps until the program's end; or the Metal 4 form's caller's encoder, argument table and residency set, the
    device's argument ring, and whether a buffer was made resident since the set's last commit; and either form's
-   session's violation words and its waits' bound (`polls`; no words or 0: the waits unbounded and nothing recorded) */
+   session's violation words (none: nothing recorded or halted, and no wait, which nccl-mesh.c encodes only with a
+   check of the session's words) and its waits' bound (`polls`, never 0) */
 struct ring;
 struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed;
                        id<MTL4ComputeCommandEncoder> encoder4; id<MTL4ArgumentTable> table; id<MTLResidencySet> residency;
@@ -264,6 +266,10 @@ int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLShared
 void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
 
+/* a stream's polls as a program's bound: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS
+   (design/recovery.md#five-seconds) */
+static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
+
 struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls) {
   struct metal_program *program = calloc(1, sizeof *program);
   if (!program) return NULL;
@@ -271,7 +277,7 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *vio
   if (encoder) { program->encoder = [(id<MTLComputeCommandEncoder>)encoder retain]; program->borrowed = 1; }
   program->kept = [NSMutableArray new];
   program->violation = [(id<MTLBuffer>)violation retain];
-  program->polls = polls;
+  program->polls = bound_of(polls);
   return program;
 }
 
@@ -283,7 +289,7 @@ struct metal_program *metal_begin4(void *encoder, void *table, void *residency, 
   program->table = [(id<MTL4ArgumentTable>)table retain];
   program->residency = [(id<MTLResidencySet>)residency retain];
   program->violation = [(id<MTLBuffer>)violation retain];
-  program->polls = polls;
+  program->polls = bound_of(polls);
   program->ring = ring;
   program->borrowed = 1;
   metal_resident(program, ring->records);
@@ -351,8 +357,8 @@ static int dispatch4(struct metal_program *program, id<MTLComputePipelineState> 
   return 0;
 }
 
-/* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v the program's violation words where
-   its waits are bounded) and the arguments p (2, its polls the program's where v is such words), the progress word
+/* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the program's
+   violation words) and the arguments p (2, its polls the program's where v is such words), the progress word
    (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`) as one threadgroup of up to
    1024 threads over a block's piece, any other over `units` threads */
 static int dispatch_as(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units,
@@ -370,7 +376,7 @@ static int dispatch_as(struct metal_program *program, NSString *name, void *d, v
     if (program->encoder4) return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, group);
     if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
     id<MTLComputeCommandEncoder> encoder = program->encoder;
-    if (!v && program->polls) v = (void *)program->violation;
+    if (!v) v = (void *)program->violation;
     p.polls = v && v != d ? program->polls : 0;
     [encoder setComputePipelineState:state];
     [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:0];

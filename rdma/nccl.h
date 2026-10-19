@@ -73,13 +73,14 @@
    issue pointer stays valid until ncclGroupEnd returns.  ncclMeshComplete completes it, with every group issued before
    it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
    once, with every group before it; a host-path group fails while groups are issued and not complete.  A wait is a
-   kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait), a word of the session's that its
-   canceller ends (design/recovery.md Q16: a lost or silent link, a revoke).  The stream's `polls` bounds it: the most
-   loads of the word a wait makes (mesh_wait_bounded), the caller's bound for the group's crossings, which it derives
-   from its plan (the lag it expects at them, over the period of one load on the node's GPU: rdma/NCCL.md "Bounded
-   waits"); a wait that reaches it leaves its position, its channel and its bound in the session's violation words, every
-   later dispatch of the session does nothing, and the group fails as a value after its command buffer
-   (ncclCommGetAsyncError, or the communicator's next group).  0: a wait ends only at its landing or its cancellation.
+   kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait_bounded), a word of the session's
+   that its canceller ends (design/recovery.md Q16: a lost or silent link, a revoke), and every wait is bounded: the
+   stream's `polls` is the most loads of the word a wait makes, the caller's bound for the group's crossings, which it
+   derives from its plan (the lag it expects at them, over the period of one load on the node's GPU: rdma/NCCL.md
+   "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/recovery.md#five-seconds).  A wait
+   that reaches its bound leaves its position, its channel and its bound in the session's violation words, every later
+   dispatch of the session does nothing, and the group fails as a value after its command buffer (ncclCommGetAsyncError,
+   or the communicator's next group), the session's waits all ended (its words ~0).
    The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
    id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
    classic form's: ncclMeshEncodeMetal4, below.
@@ -147,9 +148,9 @@ extern "C" {
 #include <stddef.h>
 #include "mesh-plan.h"
 
-/* design/recovery.md#five-seconds: the most loads any GPU wait makes, a stream's polls of 0 included:
-   MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock rises,
-   rdma/NCCL.md "Bounded waits") */
+/* design/recovery.md#five-seconds: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
+   above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
+   rises, rdma/NCCL.md "Bounded waits") */
 #define NCCL_MESH_POLLS 4500000u
 /* The stream: NULL (the host path) or an ncclMeshStream (the Metal path, above). */
 typedef void *cudaStream_t;
@@ -931,10 +932,9 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
    of the library's ring), on pipelines of the caller's device (the residency set's), every buffer of the library's it
    touches added to the caller's id<MTLResidencySet> `residency` (committed where one was added).  Nothing is committed
    or signalled: the caller commits its command buffer.  Its waits poll the words the bridge writes, which the session's
-   canceller ends (a lost or silent link, a revoke), never a spin on another queue's work, as the classic form's: `polls`
-   0, a wait ends at its landing or its cancellation, as the in-stream crossings of 2026-10-13 (metal-microbench Q5P);
-   else the bound above.  A failure is a value: ncclCommGetAsyncError (or the communicator's next group) after the
-   window.  The group completes in the encoder: with no workspace
+   canceller ends (a lost or silent link, a revoke), never a spin on another queue's work, each bounded by `polls` as
+   the classic form's (0: NCCL_MESH_POLLS; Metal path, above).  A failure is a value: ncclCommGetAsyncError (or the
+   communicator's next group) after the window.  The group completes in the encoder: with no workspace
    its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm is any
    communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program its table's (above).  The same as
    ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency,
@@ -1075,7 +1075,8 @@ ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, v
    and landed are ncclMeshBuffers (counts read on the GPU, every row's place computed there from them: no host reads a
    count), and received and arrived host pointers in this process's leases (ncclMemAlloc), which the GPU writes
    (system-coherent, the word last); its waits are the session's in-stream waits on the bridge's completion words
-   (rdma/mesh.metal mesh_remote_wait, ended by the canceller), as every Metal-path group's.  A word a call in flight. */
+   (rdma/mesh.metal mesh_remote_wait_bounded, ended by the canceller or the stream's bound), as every Metal-path
+   group's.  A word a call in flight. */
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
                                      size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,
                                      ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
