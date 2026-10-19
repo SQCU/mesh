@@ -159,13 +159,15 @@ struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code
    its lanes' completions come to it as their holder.  Its one job (`job`, `done`) runs on its port's queue: its rings
    and cells prepared, then it is listed in the port's table, where the port's two progress threads serve it while it
    is `progressing` and its lanes are served (the receive thread posts its rings' first records, `armed`).  It has
-   ended (`ended`) once it failed or its program ended; its stop runs on the port's queue and frees it (`stopping`,
-   `stopped`).  Where the configuration keeps them, its ledger (`ledger`, #ledger) */
+   ended (`ended`) once it failed or its program ended; its stop runs on the port's queue (`stopping`; `stopped` 1 once
+   it ran, 2 where a lane it left dirty may still land a SEND in its rows, `held`: the flow, and with it a retired
+   client's rows, kept until its link's lanes' `generation` moves past `lane_epoch`, design/recovery.md#five-seconds
+   B7), and the event loop frees it.  Where the configuration keeps them, its ledger (`ledger`, #ledger) */
 struct port;
 struct flow {
   struct flow *next;
   uint32_t stream_count,far,queues,stripe,stripes,destination,invocations,lane[2];
-  uint32_t slot,generation,lanes;
+  uint32_t slot,generation,lanes,held,lane_epoch;
   _Atomic int progressing,done,stopped;
   _Atomic int64_t failed;
   _Atomic uint32_t domain;
@@ -201,7 +203,9 @@ struct flow {
    progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to clear where it
    found its lane failed), the lanes a progress thread found failed (`broken`, the event loop's to take) and those found
    so here (`dirty`: none is made again while the link is up; once no lane of the link is leased here, its control
-   socket is closed and both ends pair it afresh, every lane made again: link_turn).  Each lane's SEND gate (`gate`:
+   socket is closed and both ends pair it afresh, every lane made again: link_turn), and the count of its lanes'
+   destructions (`generation`, link_make's, past which no request of an earlier pairing lands: a flow kept for a lane it
+   left dirty is freed then, design/recovery.md#five-seconds B7).  Each lane's SEND gate (`gate`:
    the frames posted and retired, the send thread's; its capacity, set as the lane connects) and the flow whose program
    rides it (`holder`: the event loop's to set as the flow is made, the port's queue's to clear as it stops; a lane's
    completions go to its holder, and none is read once it has none).  Lane MESH_LANE_KEEPALIVE's frames
@@ -219,7 +223,7 @@ struct link {
   struct mesh_verbs provider;
   int state,job,result,heard;
   _Atomic int done;
-  _Atomic uint32_t served,broken;
+  _Atomic uint32_t served,broken,generation;
   uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],peer_piece,share,page,pages,pairing,job_pairing,dirty;
   struct send_gate gate[MESH_LINK_LANES];
   struct flow *_Atomic holder[MESH_LINK_LANES];
@@ -419,8 +423,9 @@ int port_list(struct flow *f);
 void port_unlist(struct flow *f);
 void port_say(struct port *port,struct message said,const void *payload,uint32_t bytes);
 int lanes_leased(const struct port *port,uint64_t owner,const uint32_t *lane,uint32_t queues);
-uint32_t lanes_release(struct flow *f);
-void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t where);
+int lanes_take(const struct port *port,uint64_t owner,const uint32_t *lane,uint32_t queues);
+uint32_t lanes_release(struct flow *f,int lost);
+void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t where,const struct port *lost);
 void programs_stop(int64_t code);
 void record_changed(void);
 void record_retell(void);

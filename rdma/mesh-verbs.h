@@ -221,11 +221,25 @@ static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q)
   if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
   return 0;
 }
-/* design/bridge-and-ipc.md#lanes: a link's queue pairs destroyed at its next pairing (d6dceac's down_pair, its completion
-   queues kept, the context's own), then what those queues hold of them taken and dropped: a poll returns what is there
-   and 0 once none is (no queue pair is left to add any).  0, or the destruction's error (the context gone: forgotten
-   instead, pair_forget) */
+/* design/recovery.md#five-seconds: the queue pairs of `lanes` (a bit a queue) moved to the error state, so the device
+   ends their posted receives and SENDs (flushed: their completions name no holder, taken as any lane's failure or by a
+   destruction's poll), nothing waiting on what it flushes (4df30806 pair_flush's modify loop, without its drain).  The
+   lanes moved */
+static __attribute__((unused)) uint32_t pairs_error(struct mesh_verbs *provider,uint32_t lanes){
+  uint32_t moved=0;
+  for(int q=0;q<provider->qp_count && q<32;q++)if((lanes>>q&1) && provider->queues[q].pair){
+    struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
+    if(!ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE))moved|=UINT32_C(1)<<q;
+  }
+  return moved;
+}
+/* design/bridge-and-ipc.md#lanes: a link's queue pairs moved to the error state, whatever the move returns (none is
+   destroyed ready with receives posted: 0fb8eb54's down_pair, design/recovery.md#five-seconds), then destroyed at its
+   next pairing (d6dceac's down_pair, its completion queues kept, the context's own), then what those queues hold of
+   them taken and dropped: a poll returns what is there and 0 once none is (no queue pair is left to add any).  0, or
+   the destruction's error (the context gone: forgotten instead, pair_forget) */
 static __attribute__((unused)) int pairs_down(struct mesh_verbs *provider){
+  pairs_error(provider,UINT32_MAX);
   while(provider->qp_count){
     struct ibv_qp *q=provider->queues[provider->qp_count-1].pair;
     if(q && ibv_destroy_qp(q))return errno?errno:EIO;
