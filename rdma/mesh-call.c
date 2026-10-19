@@ -2,7 +2,6 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
@@ -191,11 +190,11 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
 
 /* design/prepared-machine.md#M06 */
 /* design/algorithm-sources.md#programcopy */
-/* design/bridge-and-ipc.md#clients: the program handed to the node's bridge, which pairs it toward each destination
-   node, over a port paired with it or along the map's route, or fails it (that destination's status names the code and
-   the node where it failed): 0 once every destination is paired, else the first failed destination's code; ESRCH where
-   the bridge is gone, ECANCELED once the program's own slot is retired while it waits (mesh_retire wakes it: a revoke,
-   nccl-mesh.c session_retire), and ETIMEDOUT where it answers within none of its own windows (design/recovery.md#first) */
+/* design/bridge-and-ipc.md#clients: the program handed to the node's bridge, which takes it toward each destination
+   node on the lanes its slot leased, or fails it as a value (that destination's status names the code and the node
+   where it failed); nothing waited for: TN3205's credit holds a SEND until its receive is posted, so the program's
+   first wait is its first landing (design/recovery.md#five-seconds, C1).  0; ECANCELED where the slot was started or
+   retired already; ESRCH where the bridge is gone */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
@@ -204,24 +203,7 @@ int mesh_transfers_start(struct mesh_ctx *context){
   if(!atomic_compare_exchange_strong_explicit(&client->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
   /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
-  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS;
-  const uint32_t destinations=mesh_destination(client,0);
-  int failed=0;
-  for(uint32_t d=0;d<destinations;d++){
-    if(!mesh_destination_transfers(m,context->client,d))continue;
-    struct mesh_port_info *status=&client->status[d];
-    for(uint64_t seen;(seen=atomic_load_explicit(&status->prepared,memory_order_acquire))!=context->client;){
-      if(atomic_load_explicit(&client->owner,memory_order_acquire)!=context->client)return ECANCELED;
-      if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed)))return ESRCH;
-      uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-      if(at>deadline)return ETIMEDOUT;
-      os_sync_wait_on_address_with_timeout(&status->prepared,seen,sizeof seen,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-        OS_CLOCK_MACH_ABSOLUTE_TIME,deadline-at<MESH_PAUSE_NS?deadline-at:MESH_PAUSE_NS);
-    }
-    if(!failed && atomic_load_explicit(&status->phase,memory_order_relaxed)==MESH_STOPPED)
-      failed=(int)atomic_load_explicit(&status->code,memory_order_relaxed);
-  }
-  return failed;
+  return mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed))?ESRCH:0;
 }
 
 /* design/bridge-and-ipc.md#progress: the bell of each port the program's flows ride */
@@ -255,9 +237,8 @@ int mesh_transfers_cyclic(struct mesh_ctx *context){
   return 0;
 }
 
-/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from, which every READY of it carries and
-   every peer's program of its execution must name alike (0: none, compared with nothing; mesh_transfers_prepare sets
-   0).  Called after mesh_transfers_prepare, before mesh_transfers_start. */
+/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from, in its slot (0: none;
+   mesh_transfers_prepare sets 0).  Called after mesh_transfers_prepare, before mesh_transfers_start. */
 int mesh_transfers_digest(struct mesh_ctx *context,uint64_t digest){
   struct mesh_client *client=mesh_client_at(context->M,context->client);
   if(atomic_load_explicit(&client->configured,memory_order_acquire))return EBUSY;
@@ -455,7 +436,7 @@ struct mesh_call_landing {
   const struct prepared_publication *publications;
   uint32_t first,count,publication_count,slot,instances,counted,identity;
 };
-/* hot-path-loads M22 */
+/* hot-path-loads M22; `completed`, its calls completed, two each (mesh_worker_settle) */
 struct mesh_call_worker {
   _Alignas(128) struct mesh_calls *calls;
   uint32_t index;
@@ -846,6 +827,16 @@ static void mesh_route_arrival(struct mesh_calls *calls,uint32_t event,uint64_t 
   if(s->prepared && s->candidates==d->candidates && s->delivered==d->consumers)mesh_route_reset(d,s);
 }
 
+/* design/recovery.md#five-seconds C2: a worker leaves at running 0, its reference passing to the calls it submitted
+   that are still out.  Each completion adds 2 to the worker's count, which is even until the worker leaves and adds 1
+   less twice its submissions: the count is then odd and reaches 1 as the last of them completes, and whichever of the
+   worker or that call made it 1 releases the worker's reference, so no thread waits on a call and no call's records are
+   freed under it */
+static void mesh_worker_settle(_Atomic uint32_t *completed,uint32_t add){
+  if(atomic_fetch_add_explicit(completed,add,memory_order_acq_rel)+add!=1)return;
+  mesh_calls_release(((struct mesh_call_worker *)(void *)((char *)completed-offsetof(struct mesh_call_worker,completed)))->calls,1);
+}
+
 /* design/algorithm-sources.md#programkernel_call */
 static void *mesh_call_progress(void *argument){
   struct mesh_call_worker *worker=argument;
@@ -863,7 +854,7 @@ static void *mesh_call_progress(void *argument){
   pthread_setname_np("mesh.numerical");
   /* hot-path-loads M25 */
   atomic_store_explicit(&worker->frame,(uintptr_t)__builtin_frame_address(0),memory_order_release);
-  while(atomic_load_explicit(&calls->running,memory_order_acquire) || atomic_load_explicit(&worker->completed,memory_order_acquire)!=submitted){
+  while(atomic_load_explicit(&calls->running,memory_order_acquire)){
     /* hot-path-loads M18: FIRE where a pending count reaches 0 */
     for(uint32_t visited=0;visited<count;visited++){
       struct mesh_arrival *cell=arrivals+cursor;
@@ -908,7 +899,7 @@ static void *mesh_call_progress(void *argument){
       mesh_instance_complete(record->result,1);
     }
   }
-  mesh_calls_release(calls,1);
+  mesh_worker_settle(&worker->completed,1-2*submitted);
   return NULL;
 }
 
@@ -1301,7 +1292,7 @@ uint32_t mesh_calls_node(struct mesh_calls *calls,uint32_t identity){
 static __attribute__((noinline)) void mesh_call_cleanup(struct mesh_call *call,int error){
   if(error)mesh_result_conclude(&call->instance->status,MESH_RESULT(MESH_RESULT_FUNCTION,call->identity,error));
   else mesh_instance_complete(call->instance,1);
-  atomic_fetch_add_explicit(call->completed,1,memory_order_release);
+  mesh_worker_settle(call->completed,2);
 }
 
 /* design/algorithm-sources.md#programkernel_call */
