@@ -982,11 +982,6 @@ void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
    their programs.  A caller that times its work across a session's opening takes this out of it: what a peer's late
    start or a flow's pairing held it, not its own work (metal-microbench tools/mesh/rates.py measured). */
 void ncclMeshSessionWaits(uint64_t* ns);
-/* Whether this process's node's bridge waits to stop (its binary changed: the region's `stopping`), so a caller that
-   holds communicators past their execution (metal-microbench docs/placement.md#retention-and-protention-the-next-
-   execution-planned-ahead) destroys them between executions and holds none after: 1, else 0 (no attach, or a bridge
-   that runs on). */
-int ncclMeshBridgeStopping(void);
 /* A held communicator taken up by a new execution (metal-microbench docs/placement.md#retention-and-protention-the-next-
    execution-planned-ahead): every member that takes it up agrees on `ticket`, the execution's identity (the same on every
    member), at its session's next position, so the members run one execution on one session or none.  ncclSuccess where
