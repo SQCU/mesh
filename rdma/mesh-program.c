@@ -323,8 +323,8 @@ static void flow_job(struct flow *f){
    stays DIRTY, moved to the error state unless the stop is its link's loss, `lost`); once no progress thread reads it
    (`listed` 0: a flow a thread may still read is kept whole, mesh-link.c lanes_release), the census printed (each of
    its queues' lane: the SEND requests and frames posted and retired through its gate, and its ring's records posted and
-   landed and their bytes); `stopped` 2 where a dirty lane's requests may still land
-   in its rows (design/recovery.md#five-seconds B7), else 1; its storage freed with it (flow_free) */
+   landed and their bytes); `stopped` 2 where a dirty lane's requests may still land in its rows
+   (design/recovery.md#five-seconds B7), else 1; its storage freed with it (flow_free) */
 static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where,int lost){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;struct mesh_cancellation *cancel=f->cancel;
   f->stopping=1;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);

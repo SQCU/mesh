@@ -1,6 +1,6 @@
 /* design/bridge-dataflow.md#the-loopback-fabric: N resident bridges on one host over loopverbs (mesh 800fe6bc^'s loop
    fabric, its driver metal-microbench b9dbc43^ tools/nccl_demo.py `loop`, on the resident bridge), each its own
-   configuration (a canonical property list this tool writes: its node, region, loopback service and cables), and the
+   configuration (a canonical property list this tool writes: its node, region and cables), and the
    readings that exercise what two nodes cannot show: relays and forwarding on 3 to 8 node maps.
 
      mesh-loop up FAMILY N WINDOW_MIB DIRECTORY
@@ -10,9 +10,6 @@
      mesh-loop relay DIRECTORY BYTES
        every ordered pair of nodes, one after another: a program of one transfer of BYTES from the one to the other, the
        bridges routing it through the nodes between where the two are not cabled (relays, lanes); every word checked
-     mesh-loop stripes DIRECTORY BYTES
-       every cable, each way: a stripe of BYTES written at the same offset of the far window (mesh-call.h mesh_write) with
-       no program at the far end but a reader of its word; every word checked
      mesh-loop nccl DIRECTORY COUNT host|walk
        N ranks, one a node: all-reduce, all-gather, reduce-scatter, broadcast and reduce from each root, and a send and
        receive around the ring, of COUNT float32 each, every value exact; `host` the host path (a NULL stream), `walk`
@@ -46,14 +43,14 @@
 #define LOOP_MAGIC UINT64_C(0x6c6f6f702d6d6573)
 extern char **environ;
 
-struct loop_node { uint32_t node; char region[32]; uint16_t service; pid_t pid; };
+struct loop_node { uint32_t node; char region[32]; pid_t pid; };
 struct loop_cable { int a, b; uint16_t listen[2]; };
 struct loop_map { char family[16]; int n, cables; uint64_t window; struct loop_node node[LOOP_NODES]; struct loop_cable cable[LOOP_CABLES]; };
 
 static uint64_t clock_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int usage(void) {
-  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | relay DIRECTORY BYTES | stripes DIRECTORY BYTES | "
-                  "nccl DIRECTORY COUNT host|walk | down DIRECTORY\n");
+  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | relay DIRECTORY BYTES | nccl DIRECTORY COUNT host|walk | "
+                  "down DIRECTORY\n");
   return 2;
 }
 
@@ -99,7 +96,7 @@ static int map_write(const char *directory, const struct loop_map *map) {
   if (!f) return errno;
   fprintf(f, "%s %d %d %llu\n", map->family, map->n, map->cables, (unsigned long long)map->window);
   for (int i = 0; i < map->n; i++)
-    fprintf(f, "%u %s %u %d\n", map->node[i].node, map->node[i].region, map->node[i].service, (int)map->node[i].pid);
+    fprintf(f, "%u %s %d\n", map->node[i].node, map->node[i].region, (int)map->node[i].pid);
   for (int c = 0; c < map->cables; c++)
     fprintf(f, "%d %d %u %u\n", map->cable[c].a, map->cable[c].b, map->cable[c].listen[0], map->cable[c].listen[1]);
   return fclose(f) ? errno : 0;
@@ -114,9 +111,9 @@ static int map_read(const char *directory, struct loop_map *map) {
            map->cables >= 0 && map->cables <= LOOP_CABLES;
   map->window = window;
   for (int i = 0; ok && i < map->n; i++) {
-    unsigned node, service; int pid;
-    ok = fscanf(f, "%u %31s %u %d", &node, map->node[i].region, &service, &pid) == 4;
-    map->node[i].node = node; map->node[i].service = (uint16_t)service; map->node[i].pid = (pid_t)pid;
+    unsigned node; int pid;
+    ok = fscanf(f, "%u %31s %d", &node, map->node[i].region, &pid) == 3;
+    map->node[i].node = node; map->node[i].pid = (pid_t)pid;
   }
   for (int c = 0; ok && c < map->cables; c++) {
     unsigned x, y;
@@ -136,11 +133,10 @@ static int plist_write(const char *directory, const struct loop_map *map, int i)
   fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
              "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n"
              "<key>name</key><string>loop%d</string>\n<key>purpose</key><string>node %d of a %s of %d on the loopback fabric "
-             "(mesh-loop)</string>\n<key>window</key><integer>%llu</integer>\n<key>exec</key><false/>\n"
+             "(mesh-loop)</string>\n<key>window</key><integer>%llu</integer>\n"
              "<key>loop</key><dict>\n<key>region</key><string>%s</string>\n<key>fabric</key><string>%s</string>\n"
-             "<key>node</key><integer>%u</integer>\n<key>service</key><integer>%u</integer>\n<key>ports</key><array>\n",
-          i, i, map->family, map->n, (unsigned long long)map->window, map->node[i].region, LOOP_FABRIC, map->node[i].node,
-          map->node[i].service);
+             "<key>node</key><integer>%u</integer>\n<key>ports</key><array>\n",
+          i, i, map->family, map->n, (unsigned long long)map->window, map->node[i].region, LOOP_FABRIC, map->node[i].node);
   for (int c = 0; c < map->cables; c++) {
     const struct loop_cable *k = map->cable + c;
     if (k->a != i && k->b != i) continue;
@@ -194,7 +190,7 @@ static int converged(const struct loop_map *map, double seconds) {
       struct mesh_link_view links[MESH_PORTS];
       uint32_t node = 0;
       int paired = 0;
-      if (mesh_loop_bind(map->node[i].region, map->node[i].service)) return EINVAL;
+      if (mesh_loop_bind(map->node[i].region)) return EINVAL;
       const int records = mesh_nodes_health(health, LOOP_NODES + 1), ports = mesh_observe(links, MESH_PORTS, &node);
       for (int p = 0; p < ports && p < MESH_PORTS; p++) paired += links[p].phase == MESH_PAIRED;
       done = records == map->n && paired == degree(map, i);
@@ -213,7 +209,7 @@ static int loop_up(const char *family, int n, uint64_t window_mib, const char *d
   mkdir(directory, 0755);
   shm_unlink(LOOP_FABRIC);
   for (int i = 0; i < n; i++) {
-    map.node[i] = (struct loop_node){.node = (uint32_t)(i + 1), .service = free_port()};
+    map.node[i] = (struct loop_node){.node = (uint32_t)(i + 1)};
     snprintf(map.node[i].region, sizeof map.node[i].region, "/meshloop%d", i);
   }
   for (int c = 0; c < map.cables; c++) { map.cable[c].listen[0] = free_port(); map.cable[c].listen[1] = free_port(); }
@@ -235,9 +231,9 @@ static int loop_up(const char *family, int n, uint64_t window_mib, const char *d
   if (map_write(directory, &map)) return 1;
   const int status = converged(&map, 60);
   for (int i = 0; i < n; i++)
-    printf("{\"loop\":\"up\",\"family\":\"%s\",\"nodes\":%d,\"index\":%d,\"node\":%u,\"region\":\"%s\",\"service\":%u,\"pid\":%d,"
-           "\"cables\":%d,\"converged\":%s}\n", family, n, i, map.node[i].node, map.node[i].region, map.node[i].service,
-           (int)map.node[i].pid, degree(&map, i), status ? "false" : "true");
+    printf("{\"loop\":\"up\",\"family\":\"%s\",\"nodes\":%d,\"index\":%d,\"node\":%u,\"region\":\"%s\",\"pid\":%d,"
+           "\"cables\":%d,\"converged\":%s}\n", family, n, i, map.node[i].node, map.node[i].region, (int)map.node[i].pid,
+           degree(&map, i), status ? "false" : "true");
   return status ? 1 : 0;
 }
 
@@ -266,7 +262,7 @@ static int relay_end(const struct loop_map *map, int self, int peer, int receive
   struct mesh_ctx context = {0};
   char name[64];
   snprintf(name, sizeof name, "loop-relay-%d-%d", receive ? peer : self, receive ? self : peer);
-  int status = mesh_loop_bind(map->node[self].region, map->node[self].service);
+  int status = mesh_loop_bind(map->node[self].region);
   if (!status) status = mesh_attach(&context, name);
   if (status) { if (ready >= 0) close(ready); return status; }
   struct hdr *m = context.M;
@@ -284,7 +280,7 @@ static int relay_end(const struct loop_map *map, int self, int peer, int receive
   if (!status) status = mesh_transfers_start(&context);
   struct mesh_client *client = mesh_client_at(m, context.client);
   struct mesh_port_info *far = &client->status[mesh_destination(client, map->node[peer].node)];
-  const uint64_t deadline = clock_ns() + MESH_PAIR_NS;
+  const uint64_t deadline = clock_ns() + MESH_PLATFORM_NS;
   if (!status && !receive) {
     mesh_host_publish(&context, section, 0);
     mesh_transfers_wake(&context);
@@ -350,79 +346,11 @@ static int loop_relay(const char *directory, uint64_t bytes) {
   return failed != 0;
 }
 
-/* one end of a stripe across cable a-b: the writer at `self` toward `peer`, or the reader at `self`; both lease the same
-   exact pages near their windows' tops (mesh_section_at), the stripe's bytes then a block holding the word */
-static int stripe_end(const struct loop_map *map, int self, int peer, int writer, uint64_t bytes, int ready) {
-  struct mesh_ctx context = {0};
-  char name[64];
-  snprintf(name, sizeof name, "loop-stripe-%d-%d", writer ? self : peer, writer ? peer : self);
-  int status = mesh_loop_bind(map->node[self].region, map->node[self].service);
-  if (!status) status = mesh_attach(&context, name);
-  if (status) { if (ready >= 0) close(ready); return status; }
-  struct hdr *m = context.M;
-  const uint64_t block = (uint64_t)m->block * m->pgsz, blocks = bytes / block, words = block / sizeof(uint64_t);
-  const uint32_t pages = (uint32_t)((bytes + block) / m->pgsz), arena = mesh_arena_pages(m);
-  const uint32_t page = arena > pages + m->block ? (arena - pages - m->block) / m->block * m->block : 0;
-  struct mesh_section section;
-  if (!blocks || bytes % block || !page) status = EINVAL;
-  if (!status) status = mesh_section_at(&context, page, bytes + block, &section);
-  unsigned char *data = status ? NULL : mesh_section_address(&context, section, 0);
-  _Atomic uint64_t *word = data ? (_Atomic uint64_t *)(data + bytes) : NULL;
-  if (word) atomic_store_explicit(word, 0, memory_order_release);
-  for (uint64_t p = 0; data && p < blocks; p++)
-    for (uint64_t w = 0; w < words; w++) ((uint64_t *)(data + p * block))[w] = writer ? pattern(p, w) : 0;
-  if (ready >= 0) { if (write(ready, "r", 1) != 1) status = status ? status : EPIPE; close(ready); }
-  const uint64_t deadline = clock_ns() + MESH_PAIR_NS, offset = (uint64_t)page * m->pgsz, at = (uint64_t)((char *)word - (char *)m);
-  if (!status && writer) {
-    struct mesh_requests *ring = NULL;
-    status = mesh_requests_create(&context, 16, &ring);
-    while (!status && (status = mesh_write(ring, map->node[peer].node, offset, bytes, at, LOOP_MAGIC)) == EAGAIN) usleep(100);
-  }
-  while (!status && atomic_load_explicit(word, memory_order_acquire) != LOOP_MAGIC && clock_ns() < deadline) {
-    if (atomic_load_explicit(word, memory_order_acquire) == UINT64_MAX) { status = ECANCELED; break; }
-    usleep(100);
-  }
-  if (!status && atomic_load_explicit(word, memory_order_acquire) != LOOP_MAGIC) status = ETIMEDOUT;
-  uint64_t mismatches = 0;
-  for (uint64_t p = 0; !status && !writer && p < blocks; p++)
-    for (uint64_t w = 0; w < words; w++) mismatches += ((const uint64_t *)(data + p * block))[w] != pattern(p, w);
-  if (mismatches) status = EIO;
-  mesh_detach(&context);
-  return status;
-}
-
-static int loop_stripes(const char *directory, uint64_t bytes) {
-  struct loop_map map;
-  if (map_read(directory, &map) || !bytes) return usage();
-  int failed = 0;
-  for (int c = 0; c < map.cables; c++) for (int way = 0; way < 2; way++) {
-    const int a = way ? map.cable[c].b : map.cable[c].a, b = way ? map.cable[c].a : map.cable[c].b;
-    int ready[2];
-    if (pipe(ready)) return 1;
-    const int heard = ready[0], told = ready[1];
-    const uint64_t begin = clock_ns();
-    const int bad = children(2, ^(int i) {
-      if (i == 0) { close(heard); return stripe_end(&map, b, a, 0, bytes, told); }
-      close(told);
-      char r;
-      if (read(heard, &r, 1) != 1) return EPIPE;
-      close(heard);
-      return stripe_end(&map, a, b, 1, bytes, -1);
-    });
-    close(heard); close(told);
-    failed += bad != 0;
-    printf("{\"loop\":\"stripes\",\"family\":\"%s\",\"from\":%d,\"to\":%d,\"bytes\":%llu,\"seconds\":%.6f,\"status\":\"%s\"}\n", map.family, a, b,
-           (unsigned long long)bytes, (double)(clock_ns() - begin) / 1e9, bad ? "failed" : "ok");
-    fflush(stdout);
-  }
-  return failed != 0;
-}
-
 /* a rank's NCCL calls, each checked exactly (every value an integer a float32 holds): rank r's element k is r + k mod 97 */
 static float value_of(int rank, uint64_t k) { return (float)(rank + (int)(k % 97)); }
 static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int walk, uint16_t root_port) {
   const int n = map->n;
-  if (mesh_loop_bind(map->node[rank].region, map->node[rank].service)) return 1;
+  if (mesh_loop_bind(map->node[rank].region)) return 1;
   ncclUniqueId id = {{0}};
   snprintf(id.internal, sizeof id.internal, "::1:%u", root_port);
   ncclComm_t comm;
@@ -487,7 +415,6 @@ int main(int argc, char **argv) {
   if (!strcmp(argv[1], "up") && argc == 6) return loop_up(argv[2], atoi(argv[3]), strtoull(argv[4], NULL, 0), argv[5]);
   if (!strcmp(argv[1], "down") && argc == 3) return loop_down(argv[2]);
   if (!strcmp(argv[1], "relay") && argc == 4) return loop_relay(argv[2], strtoull(argv[3], NULL, 0));
-  if (!strcmp(argv[1], "stripes") && argc == 4) return loop_stripes(argv[2], strtoull(argv[3], NULL, 0));
   if (!strcmp(argv[1], "nccl") && argc == 5 && (!strcmp(argv[4], "host") || !strcmp(argv[4], "walk")))
     return loop_nccl(argv[2], strtoull(argv[3], NULL, 0), !strcmp(argv[4], "walk"));
   return usage();

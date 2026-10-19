@@ -7,26 +7,20 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 static void mesh_reclaim(struct hdr *);
 #ifdef MESH_LOOP_FABRIC
-/* design/bridge-dataflow.md#the-loopback-fabric: a loop client's bridge, its region and its requests' loopback port (the
-   host build of libmesh alone: make host); the region MESH_NAME and MESH_PORT until bound */
+/* design/bridge-dataflow.md#the-loopback-fabric: a loop client's bridge, its region (the host build of libmesh alone:
+   make host); MESH_NAME until bound */
 static char mesh_loop_region[32]=MESH_NAME;
-static uint16_t mesh_loop_service;
-int mesh_loop_bind(const char *region,uint16_t service){
-  if(!region || region[0]!='/' || strlen(region)>=sizeof mesh_loop_region || !service)return EINVAL;
-  strcpy(mesh_loop_region,region);mesh_loop_service=service;
+int mesh_loop_bind(const char *region){
+  if(!region || region[0]!='/' || strlen(region)>=sizeof mesh_loop_region)return EINVAL;
+  strcpy(mesh_loop_region,region);
   return 0;
 }
 #define MESH_REGION_NAME mesh_loop_region
-#define MESH_SERVICE_PORT (mesh_loop_service?mesh_loop_service:(uint16_t)atoi(MESH_PORT))
 #else
 #define MESH_REGION_NAME MESH_NAME
-#define MESH_SERVICE_PORT ((uint16_t)atoi(MESH_PORT))
 #endif
 
 /* design/bridge-and-ipc.md#region: the node's region mapped, `writable` (a client's) or read-only (a reader's, which
@@ -233,7 +227,6 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
     out[i].window=r[i].window;out[i].memory=r[i].memory;
     memcpy(out[i].model,r[i].model,MESH_MODEL_BYTES);out[i].model[MESH_MODEL_BYTES-1]=0;
     out[i].health=r[i].health;
-    out[i].health.session[sizeof out[i].health.session-1]=0;out[i].health.shutdown[sizeof out[i].health.shutdown-1]=0;
   }
   free(r);
   return count;
@@ -261,25 +254,6 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   return error;
 }
 
-uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path){
-  struct mesh_record *r=NULL;
-  int count=mesh_records_read(m,m->length,&r);
-  uint32_t hops=0,a=UINT32_MAX,b=UINT32_MAX,*nodes=count>0?malloc(((size_t)count+1)*sizeof *nodes):NULL;
-  struct mesh_whole w={0};
-  if(nodes && !mesh_whole_make(r,(uint32_t)count,&w)){
-    const uint32_t n=(uint32_t)count;
-    for(uint32_t k=0;k<n;k++){if(r[k].node==from)a=k;if(r[k].node==to)b=k;}
-    /* the table's route between a and b (mesh-plan.h mesh_route_path: the one from b to a reversed) */
-    hops=a<n && b<n?mesh_route_path(&w.map,a,b,nodes):0;
-    for(uint32_t i=0;i<hops;i++)nodes[i]=r[nodes[i]].node;
-    if(hops && nodes[hops-1]!=to)hops=0;
-  }
-  mesh_whole_free(&w);free(r);
-  if(!hops){free(nodes);nodes=NULL;}
-  *path=nodes;
-  return hops;
-}
-
 /* design/algorithm-sources.md#programtensor */
 /* design/bridge-and-ipc.md#clients: a client's slot given up (by its detach, or by the bridge where its process is
    gone): its program stopped, its rows closed for the bridge to release once its programs left the ports */
@@ -294,13 +268,6 @@ void mesh_retire(struct hdr *m,uint64_t client){
       if(buffer->pages)atomic_store_explicit(&buffer->closed,1,memory_order_release);
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
-  }
-  /* design/bridge-dataflow.md#stripes: its request rings deregistered (the bridge takes none of them past here) */
-  _Atomic uint64_t *rings=mesh_rings(m);
-  for(uint32_t r=0;r<MESH_RINGS;r++){
-    uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
-    if(at && at>=m->data_off && at<=m->length-sizeof(struct mesh_requests) && ((const struct mesh_requests *)((char *)m+at))->owner==client)
-      atomic_compare_exchange_strong(rings+r,&at,0);
   }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
   /* design/prepared-machine.md#M26 */
@@ -432,19 +399,6 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
 }
 
-/* design/bridge-dataflow.md#stripes: the exact pages a stripe's two ends place alike, claimed as a scan's are; a range a
-   returned lease still holds hot is reclaimed first, as mesh_allocate's last scan does */
-uint32_t mesh_arena_claim(struct mesh_ctx *c,uint32_t first,uint32_t pages){
-  const uint32_t arena=mesh_arena_pages(c->M);
-  if(!pages || first>arena || pages>arena-first){ errno=EINVAL; return MESH_ABSENT; }
-  _Atomic uint64_t *bits=mesh_arena_bits(c->M);
-  if(mesh_claim(bits,bits,first,pages))return first;
-  mesh_reclaim(c->M);
-  if(mesh_claim(bits,bits,first,pages))return first;
-  errno=ENOMEM;
-  return MESH_ABSENT;
-}
-
 /* design/prepared-machine.md#M09 */
 uint32_t mesh_arena_free(struct hdr *m){
   const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);
@@ -535,47 +489,4 @@ uint32_t mesh_publication_prepare(struct mesh_ctx *c,uint32_t row,struct prepare
     records[i]=(struct prepared_publication){.destination=(uintptr_t)cell,.argument=cell->request.wr_id};
   }
   return count;
-}
-
-/* design/bridge-and-ipc.md#requests: a connection to this node's bridge that has sent `request` and read the bridge's
-   answer: its descriptor where the answer is 0, else -errno */
-static int bridge_ask(const struct mesh_request *request){
-  int fd=socket(AF_INET6,SOCK_STREAM,0),on=1;
-  if(fd<0)return -errno;
-  struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(MESH_SERVICE_PORT),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
-  int32_t answer=0;
-  size_t got=0;
-  if(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) || setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&on,sizeof on) ||
-     connect(fd,(struct sockaddr *)&to,sizeof to) || send(fd,request,sizeof *request,0)!=(ssize_t)sizeof *request){
-    const int error=errno==ECONNREFUSED?ESRCH:errno;close(fd);return -error;
-  }
-  while(got<sizeof answer){
-    ssize_t n=recv(fd,(char *)&answer+got,sizeof answer-got,0);
-    if(n<0 && errno==EINTR)continue;
-    if(n<=0){const int error=n?errno:ECONNRESET;close(fd);return -error;}
-    got+=(size_t)n;
-  }
-  if(answer){close(fd);return -answer;}
-  return fd;
-}
-int mesh_request(uint32_t node,const char *service,uint64_t bytes){
-  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_OPEN,.node=node,.bytes=bytes};
-  if(!service || strlen(service)>=sizeof request.service)return -EINVAL;
-  strcpy(request.service,service);
-  return bridge_ask(&request);
-}
-int mesh_ledger(const char *name,const char *path){
-  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_LEDGER,.bytes=mesh_key(name)};
-  if(!name || !*name || !path || strlen(path)>=sizeof request.path || path[0]!='/')return -EINVAL;
-  strcpy(request.service,"ledger");strcpy(request.path,path);
-  const int fd=bridge_ask(&request);
-  if(fd<0)return fd;
-  close(fd);
-  return 0;
-}
-int mesh_serve(const char *service,const char *path){
-  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_SERVE};
-  if(!service || !path || strlen(service)>=sizeof request.service || strlen(path)>=sizeof request.path || path[0]!='/')return -EINVAL;
-  strcpy(request.service,service);strcpy(request.path,path);
-  return bridge_ask(&request);
 }

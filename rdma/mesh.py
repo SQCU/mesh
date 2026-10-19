@@ -168,7 +168,7 @@ def current(members=None):
     """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
     node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
     `map` the members' map as libnccl-mesh reads it (its relays, a link a cable, at its bandwidth, `mark` each node's
-    bridge node number, `next` the routing table the bridges forward along; members(map, ...) of the whole map is the
+    bridge node number, `next` the routing table; members(map, ...) of the whole map is the
     map over any of them), `nodes` and `names` each map node's (then each relay's) bridge
     node and name, `node` this node's bridge's (mesh_observe).  The whole map (members None) is the records as they are,
     a node no cable joins among its nodes (joined() names two it leaves apart).  OSError naming the bridge where it is
@@ -186,11 +186,9 @@ def current(members=None):
 
 def nodes():
     """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node and
-    name, its bridge's window and its memory (bytes), its model, and its health as its bridge last sampled it (`sampled`
-    and `booted`, ns since the epoch; `free` and `wired` bytes, and `available`, what the kernel can give without
-    pressure, its reclaimable cache counted; the kernel's memory `pressure`, 1 normal, 2 warning, 4
-    critical; `thermal`; why it last restarted, `reset` and `shutdown`; its `power`, `charge` and `minutes`; its boot
-    `session`).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
+    name, its bridge's window and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
+    `available` memory as its bridge last sampled it (what the kernel can give without pressure, its reclaimable cache
+    counted).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
     bridges, never probed over another network.  OSError naming the bridge where it is unreachable."""
     held, own = ffi.new('struct mesh_node_health[64]'), ffi.new('uint32_t *')
     count = lib.mesh_nodes_health(held, 64)
@@ -199,60 +197,7 @@ def nodes():
     lib.mesh_observe(ffi.NULL, 0, own)
     text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
     return [{'node': r.node, 'name': text(r.name), 'window': r.window, 'memory': r.memory, 'model': text(r.model),
-             'sampled': r.health.sampled, 'booted': r.health.booted, 'free': r.health.free, 'wired': r.health.wired,
-             'available': r.health.available,
-             'reset': r.health.reset, 'power': r.health.power, 'pressure': r.health.pressure, 'thermal': r.health.thermal,
-             'charge': r.health.charge, 'minutes': r.health.minutes, 'session': text(r.health.session),
-             'shutdown': text(r.health.shutdown), 'own': r.node == own[0]} for r in held[0:count]]
-
-
-def request(node, service, need=0):
-    """design/bridge-and-ipc.md#requests: a channel to `service` at `node` (its bridge number; this node's own too),
-    opened through this node's bridge and carried by the bridges along the map's route: a connected socket whose bytes
-    reach the service and whose reads are the service's, each direction ended by a half close (shutdown(SHUT_WR)); a
-    channel that fails resets it.  `need`: the bytes outside the window the request will take at the node, admitted
-    against its available memory there (#admission).  OSError naming the node and service where the bridge refuses it
-    (EHOSTUNREACH: no path to the node; ENOENT: no such service there; ENOMEM: the node's memory short of `need`;
-    ESRCH: this node's bridge is not running)."""
-    import socket
-    fd = lib.mesh_request(int(node), service.encode(), int(need))
-    if fd < 0:
-        raise OSError(-fd, f"node {node}'s {service}: {os.strerror(-fd)}")
-    return socket.socket(fileno=fd)
-
-
-def ask(node, service, data, timeout=None, need=0):
-    """request(node, service, need) given `data` whole and half closed, the service's answer read to its end: bytes."""
-    with request(node, service, need) as channel:
-        channel.settimeout(timeout)
-        channel.sendall(data)
-        channel.shutdown(1)
-        out = bytearray()
-        while chunk := channel.recv(1 << 16):
-            out += chunk
-        return bytes(out)
-
-
-def run(node, command, data=b'', timeout=None):
-    """`command` run by the user's shell at `node` through its bridge's service `exec` (design/bridge-and-ipc.md#exec,
-    where the node's bridge configuration serves it), `data` its standard input: (its exit code, or -signal where a
-    signal ended it; its standard output and error, bytes).  OSError where no channel opened (EACCES: the node serves no
-    exec) or it failed, TimeoutError past `timeout`."""
-    out = ask(node, 'exec', command.encode() + b'\n' + data, timeout)
-    if len(out) < 4:
-        raise OSError(errno.EPROTO, f"node {node}'s exec ended without its status")
-    return os.waitstatus_to_exitcode(int.from_bytes(out[-4:], 'little', signed=True)), out[:-4]
-
-
-def serve(service, path):
-    """`service` registered with this node's bridge as the Unix socket at `path` (a channel to it is a connection
-    there): the socket whose life the registration lasts (closing it ends it; it reads end of file once the bridge
-    stops, and is registered again by serving again)."""
-    import socket
-    fd = lib.mesh_serve(service.encode(), str(path).encode())
-    if fd < 0:
-        raise OSError(-fd, f'{service} at {path}: {os.strerror(-fd)}')
-    return socket.socket(fileno=fd)
+             'booted': r.health.booted, 'available': r.health.available, 'own': r.node == own[0]} for r in held[0:count]]
 
 
 def footprint(pid=0):

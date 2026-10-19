@@ -6,8 +6,8 @@
    (`up`, else the errno), its node, its ports by index (mesh_observe: each port's peer node, phase and bandwidth) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
    numbers with its bandwidth in bits a second, null where none is reported), its window in bytes with the bytes no lease holds (mesh_window), and every node's
-   record as the bridge holds it: its name, its bridge's window, its memory and hardware model and its health
-   (mesh_nodes_health, design/bridge-and-ipc.md#records, design/recovery.md#diagnosis) */
+   record as the bridge holds it: its name, its bridge's window, its memory and hardware model, its boot and its
+   available memory (mesh_nodes_health, design/bridge-and-ipc.md#records) */
 int main(void){
   struct mesh_link_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
@@ -43,7 +43,6 @@ int main(void){
     }
     printf("]}");
   }
-  static const char *resets[]={"unknown","supply","watchdog","other","sag"},*powers[]={"unknown","AC","battery","UPS"};
   struct mesh_node_health health[64];
   const int known=mesh_nodes_health(health,64);
   printf(",\"nodes\":[");
@@ -53,12 +52,7 @@ int main(void){
     for(const char *c=health[i].name;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
     printf("\",\"window\":%llu,\"memory\":%llu,\"model\":\"",(unsigned long long)health[i].window,(unsigned long long)health[i].memory);
     for(const char *c=health[i].model;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
-    printf("\",\"sampled\":%llu,\"booted\":%llu,\"session\":\"%.36s\",\"reset\":\"%s\",\"shutdown\":\"",
-           (unsigned long long)h->sampled,(unsigned long long)h->booted,h->session,h->reset<5?resets[h->reset]:"unknown");
-    for(const char *c=h->shutdown;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
-    printf("\",\"power\":\"%s\",\"charge\":%d,\"minutes\":%d,\"free\":%llu,\"available\":%llu,\"wired\":%llu,\"pressure\":%u,\"thermal\":%u}",
-           h->power<4?powers[h->power]:"unknown",h->charge,h->minutes,(unsigned long long)h->free,(unsigned long long)h->available,(unsigned long long)h->wired,
-           h->pressure,h->thermal);
+    printf("\",\"booted\":%llu,\"available\":%llu}",(unsigned long long)h->booted,(unsigned long long)h->available);
   }
   printf("]}\n");
   free(nodes);free(link);free(bandwidth);

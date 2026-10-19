@@ -35,20 +35,12 @@ static inline uint64_t mesh_transfer_cells(const struct mesh_transfer *out,uint3
 void mesh_retire(struct hdr *,uint64_t client);
 /* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records, the count of cables between them (0:
    none; the ports each one's record holds paired with the other, the fewer of the two ends' counts), *beta 8e9 over
-   the least bandwidth any of those ports at either end reports (0 where none reports one); and the route
-   between nodes `from` and `to` on the map of region `m`, its routing table's (mesh-plan.h mesh_routes over the
-   records' whole map, each node marked by its bridge's number, as mesh_map's; mesh_route_path: the route from `to`
-   to `from` reversed), from `from` to `to` in a path the caller frees: its node count, 0 where none */
+   the least bandwidth any of those ports at either end reports (0 where none reports one) */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
-uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 /* design/prepared-machine.md#M09 */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
-/* design/bridge-dataflow.md#stripes (mesh 8fc27cbe): exactly arena pages [first, first + pages), claimed by
-   compare-exchange as mesh_arena_alloc's are; MESH_ABSENT (errno ENOMEM) where a page of them is held, EINVAL past the
-   arena */
-uint32_t mesh_arena_claim(struct mesh_ctx *,uint32_t first,uint32_t pages);
 /* design/prepared-machine.md#M09: the window's arena pages no lease holds */
 uint32_t mesh_arena_free(struct hdr *);
 /* design/prepared-machine.md#M09: a lease its client returns while it holds it (mesh-call.h mesh_section_create's
@@ -62,9 +54,8 @@ void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 uint32_t mesh_publication_prepare(struct mesh_ctx *,uint32_t row,struct prepared_publication *);
 void mesh_retired_release(struct hdr *);
 #ifdef MESH_LOOP_FABRIC
-/* design/bridge-dataflow.md#the-loopback-fabric: the loop bridge this process is a client of, before its first attach or
-   request (the host build of libmesh alone, make host): its region (a loop bridge's configuration's `region`) and its
-   requests' loopback port (its `service`); 0, or EINVAL */
-int mesh_loop_bind(const char *region,uint16_t service);
+/* design/bridge-dataflow.md#the-loopback-fabric: the loop bridge this process is a client of, before its first attach
+   (the host build of libmesh alone, make host): its region (a loop bridge's configuration's `region`); 0, or EINVAL */
+int mesh_loop_bind(const char *region);
 #endif
 #endif

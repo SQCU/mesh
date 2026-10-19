@@ -1,5 +1,5 @@
-/* design/transport-one-gib-2026-09-10.md, design/bridge-dataflow.md#streams: the one-way stream reading of a link, a
-   client's program of one transfer on a lane pair of the link, every payload word checked at the receiver (mesh
+/* design/transport-one-gib-2026-09-10.md: the one-way stream reading of a link, a client's program of one transfer on
+   a lane pair of the link, every payload word checked at the receiver (mesh
    554a3793^ mesh-verbs-stream.c and cea7fce7^ mesh-page-stream.c; the bridge's own raw stream, its own queue pair and
    its STREAM messages, is gone with the per-program queue pairs: design/bridge-and-ipc.md#lanes).
 

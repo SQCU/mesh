@@ -1363,8 +1363,7 @@ static void *control_watch(void *unused){
 
 /* design/prepared-machine.md#M09: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
    the consumer's document (rdma/bridge_configuration.py): its name and its window in bytes, and its `keepalive` in
-   nanoseconds where it states one (#keepalive); NULL, or why it is
-   refused */
+   nanoseconds where it states one (#keepalive); NULL, or why it is refused */
 #ifdef MESH_LOOP_FABRIC
 /* design/bridge-dataflow.md#the-loopback-fabric: a loop bridge's `loop` (a dictionary: `region`, `fabric`, `node` and
    `ports`, each port a dictionary of `device`, `listen` and `peer`); NULL, or why it is refused */
@@ -1681,13 +1680,13 @@ int main(int argc,char **argv){
   say("bridge node %u: stopping (%s)\n",node,why);
   /* design/bridge-and-ipc.md#stop: FAREWELL on every control socket (queued as the socket takes it; the kernel sends
      what it holds after the close), every program's words ~0 and its status the stop, stored from this thread, then the
-     bridge gone; no queue, thread or verbs call waited on,
-     and every object the kernel's to release at the exit (design/RDMA-KERNEL-RECOVERY.md "October 18"), the exit no
-     sooner than every port's quiet window ends (design/recovery.md#five-seconds B9: its reclaim never inside the
-     termination a conclusion may follow) and a peer interface's termination's (`exit_at`, B9b), the kernel's link events
-     read meanwhile, so a link going off then extends its port's (network_heard), as a termination then extends them all
-     (peer_terminated), each no later than MESH_PLATFORM_NS past the stop's start (`held_to`: every window set before the
-     stop ends by then, so the hold is the one 5 s budget, well inside launchd's ExitTimeOut) */
+     bridge gone; no queue, thread or verbs call waited on, and every object the kernel's to release at the exit
+     (design/RDMA-KERNEL-RECOVERY.md "October 18"), the exit no sooner than every port's quiet window ends
+     (design/recovery.md#five-seconds B9: its reclaim never inside the termination a conclusion may follow) and a peer
+     interface's termination's (`exit_at`, B9b), the kernel's link events read meanwhile, so a link going off then
+     extends its port's (network_heard), as a termination then extends them all (peer_terminated), each no later than
+     MESH_PLATFORM_NS past the stop's start (`held_to`: every window set before the stop ends by then, so the hold is
+     the one 5 s budget, well inside launchd's ExitTimeOut) */
   for(uint32_t p=0;p<port_count;p++){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
     if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}

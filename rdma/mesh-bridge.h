@@ -207,27 +207,23 @@ struct link {
    open's job `job`, dispatched at `job_at`; a flow stop's move to the error state, begun at `moving_at`, 0 while none
    is out; `stuck` once a job or move of the port outlived MESH_PLATFORM_NS, or a progress thread did not hold within
    it, and the port was concluded around it, until the call returns and each progress thread has told the conclusion's
-   epoch: design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window
-   (`quiet_at`,
+   epoch: design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window (`quiet_at`,
    MESH_PLATFORM_NS past its last conclusion or a peer interface's termination heard, B9b, moved only later and by any
-   thread, before which no port job but an earlier conclusion's flush, struct link
-   `flush_at`, is dispatched on it and the bridge does not exit: B9), whether its device is to be opened
-   (`opening`: at the start, at its link's coming on, at a hello heard while it is not open, B16, and as the call it was
-   concluded around returns, B12; never on a clock), the queue pairs its link lanes hold (`committed`, of the device's
-   usable queue pairs), its link lanes, its
-   table of flows (`table`, the indices reserved and their generations, the highest reserved plus one), and its
-   progress threads (#progress: the epochs each has seen of `epoch`, which a flow leaving the table moves, and whether
-   each is parked on the port's bell); the guard of its
-   device's verbs objects (`guard`, odd while raised, the word the progress threads park on while it stands,
-   design/recovery.md#five-seconds B13, and the value each progress thread last held at: mesh-link.c guard_raise; each
-   epoch and guard told wakes the raiser parked on it, port_tell, port_wait), the threads that post on its queue pairs
-   (`thread`: its two progress threads, each storing itself as it starts, and its link job's while one runs, by which a
-   provider's fault names its port, mesh-link.c fault_heard),
-   whether this end closed its control socket so both ends pair its link afresh (`cycling`, link_turn), and the event
-   loop's reading of what its control socket
-   heard (design/recovery.md#five-seconds, mesh-link.c port_silent: when it last heard anything, `heard_at`, the link's
-   keepalive frames heard as last read, `frames`, and when the last was heard, `frame_at`, 0 until this pairing's first,
-   and its frame in flight, `flight` its census as last read and `flight_at` when) */
+   thread, before which no port job but an earlier conclusion's flush, struct link `flush_at`, is dispatched on it and
+   the bridge does not exit: B9), whether its device is to be opened (`opening`: at the start, at its link's coming on,
+   at a hello heard while it is not open, B16, and as the call it was concluded around returns, B12; never on a clock),
+   the queue pairs its link lanes hold (`committed`, of the device's usable queue pairs), its link lanes, its table of
+   flows (`table`, the indices reserved and their generations, the highest reserved plus one), and its progress threads
+   (#progress: the epochs each has seen of `epoch`, which a flow leaving the table moves, and whether each is parked on
+   the port's bell); the guard of its device's verbs objects (`guard`, odd while raised, the word the progress threads
+   park on while it stands, design/recovery.md#five-seconds B13, and the value each progress thread last held at:
+   mesh-link.c guard_raise; each epoch and guard told wakes the raiser parked on it, port_tell, port_wait), the threads
+   that post on its queue pairs (`thread`: its two progress threads, each storing itself as it starts, and its link
+   job's while one runs, by which a provider's fault names its port, mesh-link.c fault_heard), whether this end closed
+   its control socket so both ends pair its link afresh (`cycling`, link_turn), and the event loop's reading of what its
+   control socket heard (design/recovery.md#five-seconds, mesh-link.c port_silent: when it last heard anything,
+   `heard_at`, the link's keepalive frames heard as last read, `frames`, and when the last was heard, `frame_at`, 0
+   until this pairing's first, and its frame in flight, `flight` its census as last read and `flight_at` when) */
 struct port {
   struct mesh_device device;
   uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,flows,committed,cycling,stuck;
@@ -261,11 +257,10 @@ struct port {
    with its record (mesh-program.c health_turn) */
 #define MESH_HEALTH_NS UINT64_C(10000000000)
 
-/* design/recovery.md#diagnosis; design/bridge-and-ipc.md#records: the nodes this bridge has heard of, when it last heard
-   each one's record (this node's clock), when it lost each, and the newest record it ever heard of each (its boot and
-   sequence), held apart from the map:
-   RFC 2328 s13's database, so a record the map dropped is never taken, nor sent on, again (a node's later boot is
-   always newer); a full table gives the longest unheard of those its place */
+/* design/recovery.md#diagnosis; design/bridge-and-ipc.md#records: the nodes this bridge has heard of, when it last
+   heard each one's record (this node's clock), when it lost each, and the newest record it ever heard of each (its boot
+   and sequence), held apart from the map: RFC 2328 s13's database, so a record the map dropped is never taken, nor sent
+   on, again (a node's later boot is always newer); a full table gives the longest unheard of those its place */
 struct known { uint32_t node; uint64_t heard,gone,boot,sequence; };
 #define MESH_KNOWN 256
 /* design/bridge-and-ipc.md#progress: a port's progress thread: passes while anything moves, and with nothing moved for

@@ -98,7 +98,7 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
    other (the fewer of the two ends' counts), each at the bandwidth of the slowest of those ports at either end (the
    least any of them reports; 0 where none reports one; the bridge stripes a program between the two over every
    cable, a routed one end to end, design/bridge-and-ipc.md#cables), each node marked by its bridge's number, its
-   table mesh_routes' (the routes the bridges forward along, mesh-dataflow.c mesh_route);
+   table mesh_routes';
    then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
    i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its
    bridge's record holds it, NUL-terminated ("" for a node with no record).  MESH_NAME_BYTES: a LocalHostName of up
@@ -317,25 +317,10 @@ uint32_t mesh_cyclic_advise(const struct mesh_cyclic *,void (*warn)(void *,const
    carries whole elements (mesh_wire_pieces). */
 #define MESH_PLAN_VERSION 5u
 
-/* design/recovery.md#diagnosis: a node's health as its bridge last sampled it, carried in its record to every bridge.
-   `sampled` the wall clock of the sample and `booted` of the node's boot (ns since the epoch); `session` its boot session
-   (kern.bootsessionuuid); why it last restarted, `reset` (MESH_RESET_*) read from `shutdown`, the head of
-   kern.shutdownreason, its power controller's records newest first ("wdog,..." its watchdog reset it; a "uv,..." record
-   among the reset's own, its supply sagged under the controller's watch, an unplug or a rail under lockout; else
-   "por,..." its supply was cut); its power source (`power`, MESH_POWER_*, with `charge` percent and `minutes` to empty, -1 where
-   none is reported); its `free` and `wired` memory in bytes, its `available` memory (the bytes the kernel can give
-   without pressure, the measure jetsam keeps: kern.memorystatus_level percent of hw.memsize; `free` counts none of the
-   cache the kernel reclaims), and the kernel's memory `pressure`
-   (kern.memorystatus_vm_pressure_level: 1 normal, 2 warning, 4 critical); its thermal pressure (`thermal`,
-   com.apple.system.thermalpressurelevel: 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping). */
-enum { MESH_RESET_UNKNOWN, MESH_RESET_SUPPLY, MESH_RESET_WATCHDOG, MESH_RESET_OTHER, MESH_RESET_SAG };
-enum { MESH_POWER_UNKNOWN, MESH_POWER_AC, MESH_POWER_BATTERY, MESH_POWER_UPS };
-struct mesh_health {
-  uint64_t sampled,booted,free,wired,available;
-  uint32_t reset,power,pressure,thermal;
-  int32_t charge,minutes;
-  char session[40],shutdown[80];
-};
+/* design/bridge-and-ipc.md#records: what a node's record carries of its health to every bridge: `booted`, the wall
+   clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes
+   the kernel can give without pressure, the measure jetsam keeps: kern.memorystatus_level percent of hw.memsize). */
+struct mesh_health { uint64_t booted,available; };
 /* A node's record as its bridge last sent it: its bridge's node and host name, its bridge's window (bytes), the node's
    memory (hw.memsize) and model (hw.model, NUL-terminated, MESH_MODEL_BYTES with its NUL; mesh.h struct mesh_record),
    and its health. */
@@ -345,37 +330,6 @@ struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; uint64_t wi
 /* Every node's record the bridge holds (mesh_map's nodes, this node's own among them): their count (at most `capacity`
    written), or -errno where the bridge is unreachable. */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
-/* design/bridge-and-ipc.md#requests: a channel from a client of this node to a service of a node (RFC 4254 s5, its
-   direct-streamlocal channel), carried by the bridges over their links' control sockets, hop by hop along the map's
-   route. A client connects to its own bridge at [::1]:MESH_PORT, sends a struct mesh_request (MESH_REQUEST_OPEN, the
-   node's bridge number, this node's own too, the service's name, and the `bytes` of memory outside its bridge's window
-   the request will take there, 0 for none) and reads the bridge's int32 answer: 0 once the service's end is open, else
-   an errno (EHOSTUNREACH: the map holds no path to the node; ENOENT: the node serves no such service; ECONNREFUSED: the
-   service's socket refused; ENOMEM: the node's available memory, read at the request, is short of its `bytes`;
-   ETIMEDOUT). The connection then carries the client's
-   bytes to the service and the service's back, each direction ended by its writer's half close (shutdown SHUT_WR);
-   a channel that fails anywhere resets the connection. A service registers its listening Unix socket
-   (MESH_REQUEST_SERVE, its name and its socket's path) on a connection it holds open: the registration lasts while
-   that connection does, and a newer one of the same name replaces it. The bridge serves `hold` itself (#holds).
-   MESH_REQUEST_LEDGER (#ledger, where the bridge's configuration keeps ledgers): `bytes` a program's key, `path` a file
-   the bridge appends each running flow of that program's events to, those since the latest such request, each flow's
-   after its header line; the answer 0, ENOENT where no running flow of the key keeps a ledger, ENOTSUP where the
-   configuration keeps none, EINVAL for a path not absolute; the connection then closed. */
-#define MESH_SERVICE_BYTES 48
-#define MESH_SERVICE_PATH 104
-/* MESH_REQUEST_STREAM: a raw one-way stream to a neighbour inside the bridge (design/bridge-dataflow.md#streams;
-   mesh-dataflow.h mesh_stream) */
-enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3, MESH_REQUEST_STREAM=4 };
-struct mesh_request { uint32_t magic,kind,node,reserved; uint64_t bytes; char service[MESH_SERVICE_BYTES]; char path[MESH_SERVICE_PATH]; };
-#define MESH_REQUEST_MAGIC 0x4d524551u
-/* a channel to `service` at `node`, admitted for `bytes` there, open: its connection's descriptor, or -errno */
-int mesh_request(uint32_t node,const char *service,uint64_t bytes);
-/* `service` registered as the Unix socket at `path`: the descriptor of the connection whose life the registration
-   lasts (closing it ends the registration; it reads end of file once the bridge stops), or -errno */
-int mesh_serve(const char *service,const char *path);
-/* design/bridge-and-ipc.md#ledger: the program `name`'s ledger since its latest cut appended to `path` by this node's
-   bridge (MESH_REQUEST_LEDGER): 0, or -errno */
-int mesh_ledger(const char *name,const char *path);
 
 #ifdef __cplusplus
 }

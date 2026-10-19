@@ -330,11 +330,10 @@ void mesh_lanes_release(struct hdr *m,uint64_t owner){
   }
 }
 
-/* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the window has them
-   (`exactly` MESH_ABSENT) or exactly from arena page `exactly` (mesh_section_at, design/bridge-dataflow.md#stripes) */
-static int mesh_section_place(struct mesh_ctx *context,size_t bytes,uint32_t count,uint32_t exactly,struct mesh_section *section){
+/* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the window has them */
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
   struct hdr *m=context->M;
-  if(!bytes || !count || (exactly!=MESH_ABSENT && (count!=1 || exactly%m->block)))return EINVAL;
+  if(!bytes || !count)return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz,capacity=mesh_arena_pages(m);
   if(bytes>capacity*(size_t)m->pgsz)return ENOMEM;
   size_t span=(bytes+quantum-1)/quantum*m->block;
@@ -349,7 +348,7 @@ static int mesh_section_place(struct mesh_ctx *context,size_t bytes,uint32_t cou
   mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
   /* design/prepared-machine.md#M01 */
   /* design/prepared-machine.md#M03 */
-  uint32_t page=exactly==MESH_ABSENT?mesh_arena_alloc(context,(uint32_t)span*count,m->block):mesh_arena_claim(context,exactly,(uint32_t)span);
+  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
   if(page==MESH_ABSENT){
     int error=errno;
     mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);
@@ -361,58 +360,9 @@ static int mesh_section_place(struct mesh_ctx *context,size_t bytes,uint32_t cou
   *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride};
   return 0;
 }
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
-  return mesh_section_place(context,bytes,count,MESH_ABSENT,section);
-}
-int mesh_section_at(struct mesh_ctx *context,uint32_t page,size_t bytes,struct mesh_section *section){
-  return mesh_section_place(context,bytes,1,page,section);
-}
 
 /* design/algorithm-sources.md#programtensor */
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return (char *)context->M+atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,index)].address,memory_order_relaxed);}
-
-/* ---- Stripe requests (mesh 8fc27cbe; mesh.h struct mesh_requests, design/bridge-dataflow.md#stripes) ---------- */
-int mesh_requests_create(struct mesh_ctx *context,uint32_t entries,struct mesh_requests **requests){
-  struct hdr *m=context->M;
-  if(entries<4 || (entries&(entries-1)) || !requests)return EINVAL;
-  struct mesh_section section;
-  const size_t bytes=sizeof(struct mesh_requests)+(size_t)entries*sizeof(struct mesh_stripe);
-  int status=mesh_section_create(context,bytes,1,&section);
-  if(status)return status;
-  struct mesh_requests *ring=mesh_section_address(context,section,0);
-  memset(ring,0,bytes);
-  const uint64_t at=(uint64_t)((char *)ring-(char *)m);
-  ring->entries=entries;ring->owner=context->client;ring->at=at;
-  _Atomic uint64_t *rings=mesh_rings(m);
-  for(uint32_t r=0;r<MESH_RINGS;r++){
-    uint64_t vacant=0;
-    if(!atomic_compare_exchange_strong_explicit(rings+r,&vacant,at,memory_order_acq_rel,memory_order_relaxed))continue;
-    *requests=ring;
-    return 0;
-  }
-  mesh_lease_return(context,section.first);
-  return EBUSY;
-}
-void mesh_requests_wake(struct mesh_requests *ring,uint32_t node){
-  struct hdr *m=(struct hdr *)((char *)ring-ring->at);
-  for(uint32_t p=0;p<m->links && p<MESH_PORTS;p++)
-    if(atomic_load_explicit(&mesh_links(m)[p].phase,memory_order_acquire)==MESH_PAIRED &&
-       atomic_load_explicit(&mesh_links(m)[p].peer,memory_order_relaxed)==node)mesh_notify(&m->bell[p]);
-  mesh_notify(&m->control);
-}
-int mesh_write(struct mesh_requests *ring,uint32_t node,uint64_t offset,uint64_t bytes,uint64_t word,uint64_t value){
-  const struct hdr *m=(const struct hdr *)((const char *)ring-ring->at);
-  const uint64_t window=(uint64_t)mesh_arena_pages(m)*m->pgsz;
-  if(offset>window || bytes>window-offset || (word && ((word&7) || word<m->data_off || word>m->length-sizeof(uint64_t))))return EINVAL;
-  uint64_t k=atomic_load_explicit(&ring->head,memory_order_relaxed);
-  do if(k-atomic_load_explicit(&ring->taken,memory_order_acquire)>=ring->entries)return EAGAIN;
-  while(!atomic_compare_exchange_weak_explicit(&ring->head,&k,k+1,memory_order_acq_rel,memory_order_relaxed));
-  struct mesh_stripe *entry=&ring->request[k&(ring->entries-1)];
-  entry->offset=offset;entry->bytes=bytes;entry->word=word;entry->value=value;entry->node=node;
-  atomic_store_explicit(&entry->ready,k+1,memory_order_release);
-  mesh_requests_wake(ring,node);
-  return 0;
-}
 
 /* ---- The numerical executor (mesh 2b49f3c6^; mesh-call.h) ------------------------------------------------------ */
 

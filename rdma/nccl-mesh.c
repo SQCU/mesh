@@ -1913,29 +1913,6 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
   return ncclSuccess;
 }
 
-/* nccl.h ncclMeshLedger */
-ncclResult_t ncclMeshLedger(ncclComm_t comm, const char *path) {
-  if (!comm || !path) return fail(ncclInvalidArgument, "comm or path is NULL");
-  if (!comm->session) return fail(ncclInvalidUsage, "communicator %s: no open session, so no ledger", comm->name);
-  const int asked = mesh_ledger(comm->name, path);
-  return asked ? fail(ncclRemoteError, "communicator %s: its bridge kept no ledger of it at %s: %s", comm->name, path, strerror(-asked)) : ncclSuccess;
-}
-
-/* nccl.h ncclMeshPosition */
-ncclResult_t ncclMeshPosition(ncclComm_t comm, int peer, uint64_t *position) {
-  if (!comm || !position || peer < 0 || peer >= comm->nranks) return fail(ncclInvalidArgument, "comm, peer or position");
-  pthread_mutex_lock(&session_lock);
-  const struct session *s = comm->session;
-  for (uint32_t h = 0; s && h < s->count; h++)
-    if (s->channels[h].node == comm->members[peer] && !s->channels[h].large) {
-      *position = s->channels[h].end;
-      pthread_mutex_unlock(&session_lock);
-      return ncclSuccess;
-    }
-  pthread_mutex_unlock(&session_lock);
-  return fail(ncclInvalidUsage, "communicator %s: no open session's channel toward rank %d", comm->name, peer);
-}
-
 /* nccl.h ncclMeshCommAgree: the members' agreement on taking up a held communicator, one position of every channel
    (its `end`) carrying {MESH_PLAN_VERSION, digest, ticket, node}, published and awaited as a landing is, the progress
    thread's target, with session_lock released (a peer still preparing is waited for; a revoke, a cancelled landing,

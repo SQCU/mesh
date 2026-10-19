@@ -1,5 +1,4 @@
-"""A node's node-info sample, as its bridge's service `nodeinfo` answers it (mesh.ask(node, 'nodeinfo', b''): the channel
-reaches the node by its bridge number, design/bridge-and-ipc.md#requests), read into its facts."""
+"""A node's node-info sample (bin/mesh-nodeinfo.sh's lines, `end` last), read into its facts."""
 from __future__ import annotations
 
 import re
@@ -8,15 +7,9 @@ import uuid
 def sample(data: bytes, limit: int) -> str:
     if len(data) > limit:
         raise ValueError("nodeinfo exceeds local byte limit")
-    header, separator, body = data.partition(b"\n")
-    if header.startswith(b"mesh1 "):
-        if not separator or len(body) != int(header.split()[1]):
-            raise ValueError("incomplete nodeinfo frame")
-    else:
-        body = data
-    if not body.rstrip().endswith(b"end"):
+    if not data.rstrip().endswith(b"end"):
         raise ValueError("incomplete nodeinfo sample")
-    return body.decode()
+    return data.decode()
 
 def node_number(node_id: str) -> int:
     """The bridge node number of the host whose IOPlatformUUID is `node_id` (node-info's node_id): mesh-link.c main's

@@ -1025,15 +1025,6 @@ void ncclMeshSessionWaits(uint64_t* ns);
    execution is waited for (design/collectives-dataflow.md, held and adopted communicators).  A communicator with no open
    session agrees at once: its first group opens one, whose own agreement is at position 0 (session_agree). */
 ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket);
-/* The communicator's program's ledger (design/bridge-dataflow.md, the ledger: when this node's bridge saw each of the
-   rank's publications and each peer's landing here, its own clock), the events since the latest such call appended to
-   `path` (absolute) by this node's bridge (mesh-plan.h MESH_REQUEST_LEDGER), where its configuration keeps ledgers:
-   ncclSuccess, ncclInvalidUsage where the communicator has no open session, ncclRemoteError naming the bridge's reason.
-   A caller's stretches are read from it instead of GPU timestamps, which drain the encoder where they stand. */
-ncclResult_t ncclMeshLedger(ncclComm_t comm, const char* path);
-/* The position the communicator's next group starts at on its small channel toward rank `peer` (a crossing of a small
-   piece takes one; the ledger names positions as cycle x 32 + invocation): ncclInvalidUsage without an open session. */
-ncclResult_t ncclMeshPosition(ncclComm_t comm, int peer, uint64_t* position);
 /* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */
