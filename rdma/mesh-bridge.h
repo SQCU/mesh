@@ -213,7 +213,8 @@ struct flow {
    its peer interface's termination is heard, mesh-link.c peer_terminated, so a job of a pairing gone makes no call and
    is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`), its largest stripe piece;
    the lanes the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to
-   clear where it found its lane failed, and the termination's queue's, B9b), the lanes a progress thread found failed
+   clear where it found its lane failed, every lane at a failed completion, mesh-link.c link_failed, and the
+   termination's queue's, B9b), the lanes a progress thread found failed
    (`broken`, the event loop's to take) and those found so here (`dirty`: none is made again while the link is up;
    once no lane of the link is leased here, its control socket is closed and both ends pair it afresh, every lane made
    again: link_turn), and the count of its lanes'

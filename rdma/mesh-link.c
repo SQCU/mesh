@@ -468,30 +468,40 @@ static __attribute__((always_inline)) inline uint32_t link_lane(const struct lin
   while(k<MESH_LINK_LANES && l->qpn[k]!=qp_num)k++;
   return k;
 }
-/* a lane's failed completion: served no more (lane_lost), and the flow its program rides failed */
-static void lane_failed(struct port *port,uint32_t lane,int64_t code,uint32_t domain){
-  lane_lost(port,lane,code);
-  struct flow *f=atomic_load_explicit(&port->link.holder[lane],memory_order_acquire);
-  if(f)flow_lost(f,code,domain);
+/* design/recovery.md#five-seconds: the link's first failed completion, on any lane, or a failed poll: no lane of the
+   link served from here, so nothing is posted on it again, every lane it served dirty (the event loop takes `broken`)
+   and each one's holder failed; made again once nothing rides the link and both ends pair it afresh (link_turn).  1 */
+static int link_failed(struct port *port,int64_t code,uint32_t domain){
+  struct link *l=&port->link;
+  const uint32_t served=atomic_exchange_explicit(&l->served,0,memory_order_acq_rel);
+  if(served)say("link %u (%s): a completion failed (code %lld): no lane served, made again once nothing rides the link toward "
+                "node %u\n",port->index,port->name,(long long)code,port->peer);
+  atomic_fetch_or_explicit(&l->broken,served,memory_order_release);
+  for(uint32_t k=0;k<MESH_LINK_LANES;k++){
+    struct flow *f=served>>k&1?atomic_load_explicit(&l->holder[k],memory_order_acquire):NULL;
+    if(f)flow_lost(f,code,domain);
+  }
+  wake();
+  return 1;
 }
 /* design/bridge-and-ipc.md#lanes: the link's SENDs, one pass of the port's send thread: its SEND completions taken (a
-   lane no longer served, or a queue pair of an earlier pairing, drops its own): a program's lane's frames retired
-   through its gate (each request names its lane and the frames posted through it), the keepalive's frame, a stripe's
-   descriptor or piece; then lane MESH_LANE_KEEPALIVE's frame (`listed`: a flow of the port listed, link_alive) and the
-   stripes' requests posted while their lanes are served.  Whether anything moved, a keepalive frame only at the
-   listed pace */
+   lane no longer served, or a queue pair of an earlier pairing, drops its own; a failed one fails the link, link_failed):
+   a program's lane's frames retired through its gate (each request names its lane and the frames posted through it),
+   the keepalive's frame, a stripe's descriptor or piece; then lane MESH_LANE_KEEPALIVE's frame (`listed`: a flow of the
+   port listed, link_alive) and the stripes' requests posted while their lanes are served.  Whether anything moved, a
+   keepalive frame only at the listed pace */
 static int link_send(struct port *port,int listed){
   struct link *l=&port->link;
-  uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
+  const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   struct ibv_wc done[16];
   const int count=l->provider.queues[0].poll(l->provider.sent,16,done);
-  if(count<0){for(uint32_t k=0;k<MESH_LINK_LANES;k++)if(served>>k&1)lane_failed(port,k,EIO,2);return 1;}
+  if(count<0)return link_failed(port,EIO,2);
   int moved=0;
   for(int i=0;i<count;i++){
     const uint32_t lane=link_lane(l,done[i].qp_num);
     if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
     moved|=lane!=MESH_LANE_KEEPALIVE || (listed && keepalive_ns);
-    if(done[i].status){lane_failed(port,lane,(int64_t)done[i].status,2);served&=~(UINT32_C(1)<<lane);moved=1;continue;}
+    if(done[i].status)return link_failed(port,(int64_t)done[i].status,2);
     const uint64_t id=done[i].wr_id;
     if(lane==MESH_LANE_KEEPALIVE)atomic_store_explicit(&l->alive_flight,0,memory_order_relaxed);
     else if(lane==MESH_LANE_STRIPES)stripe_sent(&port->stripes,id);
@@ -509,14 +519,15 @@ static int link_send(struct port *port,int listed){
 }
 /* the link's receive completions, one pass of the port's receive thread: a record of a program's lane landed (its
    holder's: a lane with none drops what comes), a keepalive frame heard (counted, its receive posted again), a
-   stripe's descriptor or piece landed; then the stripes' receives posted.  Whether anything moved, a keepalive frame
-   only while a flow of the port is listed here and the configuration states a keepalive (`listed`, link_alive) */
+   stripe's descriptor or piece landed, a failed one failing the link (link_failed); then the stripes' receives posted.
+   Whether anything moved, a keepalive frame only while a flow of the port is listed here and the configuration states a
+   keepalive (`listed`, link_alive) */
 static int link_receive(struct port *port,int listed){
   struct link *l=&port->link;
   uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
   struct ibv_wc done[16];
   const int count=l->provider.queues[0].poll(l->provider.completion,16,done);
-  if(count<0){for(uint32_t k=0;k<MESH_LINK_LANES;k++)if(served>>k&1)lane_failed(port,k,EIO,3);return 1;}
+  if(count<0)return link_failed(port,EIO,3);
   if(count)atomic_thread_fence(memory_order_acquire);
   int moved=0;
   for(int i=0;i<count;i++){
@@ -525,7 +536,7 @@ static int link_receive(struct port *port,int listed){
     moved|=lane!=MESH_LANE_KEEPALIVE || (listed && keepalive_ns);
     uint64_t status_opcode;
     memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
-    if((uint32_t)status_opcode){lane_failed(port,lane,(uint32_t)status_opcode,2);served&=~(UINT32_C(1)<<lane);moved=1;continue;}
+    if((uint32_t)status_opcode)return link_failed(port,(uint32_t)status_opcode,2);
     if(lane==MESH_LANE_KEEPALIVE){
       atomic_store_explicit(&l->alive_heard,atomic_load_explicit(&l->alive_heard,memory_order_relaxed)+1,memory_order_relaxed);
       const int error=link_alive_listen(port,1);
@@ -1151,11 +1162,12 @@ static void link_heard(struct port *port,const struct message *heard){
 
 int exec_served;
 
-/* design/bridge-and-ipc.md#protocol: the bridge's wire, a message a kind: a record, the peer's farewell, its LINK, a
-   channel's; any other kind is a protocol error */
+/* design/bridge-and-ipc.md#protocol: the bridge's wire, a message a kind: a record, the peer's farewell (its "release
+   everything": the link lost at once, so nothing is posted toward it again, design/recovery.md#five-seconds), its LINK,
+   a channel's; any other kind is a protocol error */
 static void message_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(heard->kind==RECORD)record_heard(port,payload,heard->bytes);
-  else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;}
+  else if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;port_lost(port,ECONNRESET);}
   else if(heard->kind==LINK)link_heard(port,heard);
   else if(heard->kind>=CHANNEL_OPEN && heard->kind<=CHANNEL_CLOSE)channel_heard(port,heard,payload);
   else port_lost(port,EPROTO);
@@ -1207,8 +1219,8 @@ void port_lost(struct port *port,int64_t code){
     else if(port->peer)say("link %u (%s): node %u lost: code %lld\n",port->index,port->name,port->peer,(long long)code);
     else say("link %u (%s): lost: code %lld\n",port->index,port->name,(long long)code);
   }
-  for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_fail(f,port->parted?ECONNRESET:code,4,port->peer,port);
-  requests_lost(port,port->parted?ECONNRESET:code);
+  for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_fail(f,code,4,port->peer,port);
+  requests_lost(port,code);
   port->greeted=port->parted=port->connecting=port->writing=port->cycling=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
   link_set(port,0,port->open?MESH_PAIRING:MESH_STOPPED,code);
 }
@@ -1342,7 +1354,7 @@ static void control_heard(struct port *port){
     if(port->held<need){
       ssize_t got=recv(port->control,port->in+port->held,need-port->held,0);
       if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-      if(got<=0){port_lost(port,got?errno:(port->parted?ECONNRESET:ENETRESET));return;}
+      if(got<=0){port_lost(port,got?errno:ENETRESET);return;}
       port->held+=(size_t)got;
       if(port->held<need || need==sizeof(struct message))continue;
     }
