@@ -265,6 +265,84 @@ int mesh_transfers_digest(struct mesh_ctx *context,uint64_t digest){
   return 0;
 }
 
+/* ---- The link lanes' leases (mesh-call.h; design/bridge-and-ipc.md#files) -------------------------------------- */
+int mesh_lanes_free(struct hdr *m,struct mesh_lane_report *report){
+  if(!m || !report)return EINVAL;
+  *report=(struct mesh_lane_report){.node=m->node};
+  for(uint32_t p=0;p<m->links && p<MESH_PORTS;p++){
+    const struct mesh_link_info *link=mesh_links(m)+p;
+    const uint32_t peer=atomic_load_explicit(&link->peer,memory_order_relaxed);
+    if(!peer || atomic_load_explicit(&link->lanes,memory_order_acquire)!=MESH_LINK_LANES)continue;
+    uint32_t free=0;
+    for(uint32_t pair=0;pair<MESH_LANE_PAIRS;pair++){
+      const _Atomic uint64_t *word=m->lanes[p]+MESH_LANE_FIRST+2*pair;
+      free|=(uint32_t)(!atomic_load_explicit(word,memory_order_acquire) && !atomic_load_explicit(word+1,memory_order_acquire))<<pair;
+    }
+    report->link[report->count++]=(struct mesh_lane_link){.peer=peer,.port=p,.free=free};
+  }
+  return 0;
+}
+int mesh_lanes_choose(const struct mesh_lane_report *reports,uint32_t ranks,uint32_t *chosen){
+  for(uint32_t r=0;r<ranks;r++){
+    if(reports[r].count>MESH_PORTS)return EINVAL;
+    for(uint32_t k=0;k<MESH_PORTS;k++){
+      chosen[(size_t)r*MESH_PORTS+k]=UINT32_MAX;
+      if(k<reports[r].count && reports[r].link[k].port>=MESH_PORTS)return EINVAL;
+    }
+  }
+  int status=0;
+  for(uint32_t r=0;r<ranks;r++){
+    const struct mesh_lane_report *own=reports+r;
+    uint32_t *row=chosen+(size_t)r*MESH_PORTS;
+    for(uint32_t k=0;k<own->count;k++){
+      const uint32_t node=own->node,peer=own->link[k].peer;
+      if(row[k]!=UINT32_MAX || peer==node)continue;
+      uint32_t free=(UINT32_C(1)<<MESH_LANE_PAIRS)-1,occupied=0,heard=0,ports=0;
+      for(uint32_t q=0;q<ranks;q++){
+        occupied|=reports[q].node==peer;
+        for(uint32_t j=0;j<reports[q].count;j++){
+          const struct mesh_lane_link *l=reports[q].link+j;
+          if(reports[q].node==node && l->peer==peer)free&=l->free;
+          if(reports[q].node==peer && l->peer==node){free&=l->free;heard=1;}
+        }
+      }
+      if(!occupied)continue;
+      for(uint32_t j=0;j<own->count;j++)if(own->link[j].peer==peer)ports|=UINT32_C(1)<<own->link[j].port;
+      for(uint32_t q=0;q<r;q++)if(reports[q].node==node)for(uint32_t j=0;j<reports[q].count;j++){
+        const uint32_t taken=chosen[(size_t)q*MESH_PORTS+j];
+        if(ports>>reports[q].link[j].port&1 && taken!=UINT32_MAX)free&=~(UINT32_C(1)<<taken);
+      }
+      if(!heard || !free){status=ENOSPC;continue;}
+      for(uint32_t j=0;j<own->count;j++)if(own->link[j].peer==peer)row[j]=(uint32_t)__builtin_ctz(free);
+    }
+  }
+  return status;
+}
+int mesh_lanes_claim(struct hdr *m,uint64_t owner,const struct mesh_lane_report *mine,const uint32_t *chosen){
+  if(!owner || (owner&MESH_LANE_DIRTY) || mine->count>MESH_PORTS)return EINVAL;
+  for(uint32_t k=0;k<mine->count;k++)
+    if(chosen[k]!=UINT32_MAX && (chosen[k]>=MESH_LANE_PAIRS || mine->link[k].port>=MESH_PORTS))return EINVAL;
+  for(uint32_t k=0;k<mine->count;k++)for(uint32_t j=0;chosen[k]!=UINT32_MAX && j<2;j++){
+    uint64_t free=0;
+    if(atomic_compare_exchange_strong_explicit(m->lanes[mine->link[k].port]+MESH_LANE_FIRST+2*chosen[k]+j,&free,owner,
+                                               memory_order_acq_rel,memory_order_relaxed))continue;
+    mesh_lanes_release(m,owner);
+    return EAGAIN;
+  }
+  return 0;
+}
+/* design/recovery.md#five-seconds W3b: each word let go by compare-exchange on the word observed, never a store, so a
+   DIRTY the bridge set before or during the release stands */
+void mesh_lanes_release(struct hdr *m,uint64_t owner){
+  owner&=~MESH_LANE_DIRTY;
+  for(uint32_t p=0;owner && p<MESH_PORTS;p++)for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES;k++){
+    _Atomic uint64_t *word=m->lanes[p]+k;
+    uint64_t was=atomic_load_explicit(word,memory_order_acquire);
+    while((was&~MESH_LANE_DIRTY)==owner &&
+          !atomic_compare_exchange_weak_explicit(word,&was,was&MESH_LANE_DIRTY,memory_order_acq_rel,memory_order_acquire));
+  }
+}
+
 /* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the window has them
    (`exactly` MESH_ABSENT) or exactly from arena page `exactly` (mesh_section_at, design/bridge-dataflow.md#stripes) */
 static int mesh_section_place(struct mesh_ctx *context,size_t bytes,uint32_t count,uint32_t exactly,struct mesh_section *section){
