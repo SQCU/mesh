@@ -1312,6 +1312,18 @@ int main(int argc,char **argv){
   if(refused){say("bridge configuration %s refused: %s\n",argv[1],refused);exit(1);}
   struct stat binary,current;
   if(stat(argv[0],&binary))memset(&binary,0,sizeof binary);
+  /* design/bridge-and-ipc.md#stop: every catchable signal whose default ends the process takes the stop, its filter
+     added before its default is ignored, so none is lost (one arriving before takes its default action, before anything
+     shared is made) */
+  struct kevent64_s event;
+  static const int stopping[]={SIGINT,SIGTERM,SIGHUP,SIGQUIT,SIGUSR1,SIGUSR2,SIGALRM,SIGVTALRM,SIGPROF,SIGXCPU,SIGXFSZ};
+  if((events=kqueue())<0)die("bridge events");
+  for(size_t i=0;i<sizeof stopping/sizeof *stopping;i++){
+    EV_SET64(&event,(uint64_t)stopping[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);
+    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
+    signal(stopping[i],SIG_IGN);
+  }
+  signal(SIGPIPE,SIG_IGN);
   uuid_t uuid;struct timespec bound={5,0};
   if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
   uint32_t node=0;
@@ -1333,7 +1345,6 @@ int main(int argc,char **argv){
   if(window<pg || window/pg>UINT32_MAX){say("bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
   struct hdr geometry={0};
   uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
-  signal(SIGPIPE,SIG_IGN);signal(SIGINT,SIG_IGN);signal(SIGTERM,SIG_IGN);signal(SIGHUP,SIG_IGN);
   atexit(down);
   shm_unlink(region);int fd=shm_open(region,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");
   if(ftruncate(fd,(off_t)length))die("ftruncate");fchmod(fd,MESH_MODE);
@@ -1354,12 +1365,10 @@ int main(int argc,char **argv){
   size_t size=sizeof memory;
   if(sysctlbyname("hw.memsize",&memory,&size,NULL,0))memory=0;
   sysctl_text("hw.model",model,sizeof model);
-  events=kqueue();
   health_init();
   record_changed();
   if(!atomic_load(&M->map_nodes))die("the map's lease");
   link_reserve();
-  struct kevent64_s event;
   int on=1;
   struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
 #ifdef MESH_LOOP_FABRIC
@@ -1368,7 +1377,7 @@ int main(int argc,char **argv){
   listener=socket(AF_INET6,SOCK_STREAM,0);hello=socket(AF_INET6,SOCK_DGRAM,0);network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
   struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
   unsigned loop=0;
-  if(events<0 || listener<0 || hello<0 || network<0 || setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) ||
+  if(listener<0 || hello<0 || network<0 || setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) ||
      setsockopt(hello,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) || setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_LOOP,&loop,sizeof loop) ||
      bind(listener,(struct sockaddr *)&any,sizeof any) || listen(listener,SOMAXCONN) || bind(hello,(struct sockaddr *)&any,sizeof any) ||
      fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
@@ -1377,8 +1386,6 @@ int main(int argc,char **argv){
   for(int i=0;i<3;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
   EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
-  int signals[3]={SIGINT,SIGTERM,SIGHUP};
-  for(int i=0;i<3;i++){EV_SET64(&event,(uint64_t)signals[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);}
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
   __sync_synchronize();M->magic=MESH_MAGIC;
   requests_init();
@@ -1415,7 +1422,7 @@ int main(int argc,char **argv){
       link_turn(port);
     }
     flows_turn();
-    stripes_requests_turn();
+    stripes_requests_turn(0);
     requests_turn();
     health_turn();
     host_taken();
@@ -1489,9 +1496,9 @@ int main(int argc,char **argv){
   char why[96];farewell_text(stop_reason,why,sizeof why);
   say("bridge node %u: stopping (%s)\n",node,why);
   /* design/bridge-and-ipc.md#stop: FAREWELL on every control socket (queued as the socket takes it; the kernel sends
-     what it holds after the close), every program's words ~0 and its status the stop, stored from this thread, then the
-     bridge gone; no queue, thread or verbs call waited on, and every object the kernel's to release at the exit
-     (design/RDMA-KERNEL-RECOVERY.md "October 18") */
+     what it holds after the close), every program's words ~0 and its status the stop, and every stripe request not yet
+     taken failed (ESHUTDOWN), stored from this thread, then the bridge gone; no queue, thread or verbs call waited on,
+     and every object the kernel's to release at the exit (design/RDMA-KERNEL-RECOVERY.md "October 18") */
   requests_stop();
   for(uint32_t p=0;p<port_count;p++){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
@@ -1499,6 +1506,7 @@ int main(int argc,char **argv){
     atomic_store_explicit(&ports[p].closing,1,memory_order_release);
   }
   programs_stop(ESHUTDOWN);
+  stripes_requests_turn(ESHUTDOWN);
   atomic_store(&M->bridge_pid,0);
   mesh_notify(&M->control);
   return 0;

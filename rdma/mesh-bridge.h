@@ -415,7 +415,7 @@ void record_changed(void);
 struct mesh_record *record_held(uint32_t node);
 void health_turn(void);
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes);
-void stripes_requests_turn(void);
+void stripes_requests_turn(int64_t stopping);
 void fd_answer(int fd,int32_t code);
 void child_heard(pid_t pid);
 void asking_accepted(int fd);

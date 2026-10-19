@@ -57,7 +57,7 @@ stage() {
     rm -rf "$st"; git -C "$M" worktree prune
     git -C "$M" worktree add -q --detach "$st" "$1" 2>"$log" || { why="git worktree add failed ($log)"; return 1; }; }
   st=$(cd "$st" && pwd -P)
-  taskpolicy -b make -C "$st/rdma" all > "$log" 2>&1 || { why="make -C rdma all failed ($log)"; return 1; }
+  taskpolicy -b make -C "$st/rdma" all install > "$log" 2>&1 || { why="make -C rdma all install failed ($log)"; return 1; }
   taskpolicy -b "$venv/bin/python" "$st/rdma/mesh_c_build.py" >> "$log" 2>&1 || { why="the bindings do not build ($log)"; return 1; }
   sum=$(cat "$st"/rdma/libnccl-mesh.dylib "$st"/rdma/torch-mesh/setup.py "$st"/rdma/torch-mesh/torch_mesh/* 2>/dev/null | shasum)
   if [ "$sum" != "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" ]; then
