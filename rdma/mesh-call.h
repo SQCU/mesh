@@ -51,16 +51,20 @@ int mesh_transfers_start(struct mesh_ctx *);
    bell), a group of it about to publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks
    again within 1 ms anyway while a flow is its port's) */
 void mesh_transfers_wake(struct mesh_ctx *);
-/* design/bridge-and-ipc.md#files, the link lanes (declared at MESH_VERSION 124, defined with the communicators' lanes):
-   a rank's report, gathered at a communicator's init through NCCL's bootstrap, of its bridge's node and, toward the peer
-   node of each of its paired ports, the lane pairs free there (`free`, a bit a pair: pair p is lanes MESH_LANE_FIRST +
-   2 p and + 2 p + 1), read wait-free from the region's lease words (mesh_lanes_free; 0, or EINVAL); the rule every rank
-   applies alike to the gathered reports (mesh_lanes_choose): for each rank r's link k, the lowest pair free at both of
-   its ends, into chosen[r * MESH_PORTS + k] (UINT32_MAX where the rank has no such link), 0, or ENOSPC where a link of
-   the communicator has none free at both ends (its init fails as a value; the next init reads the words as they then
-   stand); a rank's claim of its chosen pairs (its row of `chosen`) at its own bridge, each lane's word 0 to `owner` by
-   compare-exchange (0, or EAGAIN where a word was taken first: its claims released and the init failed as a value),
-   and their release, each word `owner` to 0 */
+/* design/bridge-and-ipc.md#files, the link lanes: a rank's report, gathered at a communicator's init through NCCL's
+   bootstrap, of its bridge's node and of each port whose link has its MESH_LINK_LANES lanes made and a peer (`peer`,
+   `port`), the lane pairs free there (`free`, a bit a pair: pair p is lanes MESH_LANE_FIRST + 2 p and + 2 p + 1, free
+   where both lease words are 0, a DIRTY one not), read wait-free from the region's lease words (mesh_lanes_free; 0, or
+   EINVAL).  The rule every rank applies alike to the gathered reports (mesh_lanes_choose, a pure function), in rank
+   order: for rank r's links toward a node another rank occupies, the lowest pair free in every report of either end
+   for every cable between the two nodes (the reports do not match the cables port to port) that no earlier rank of r's
+   node chose on one of those ports, into chosen[r * MESH_PORTS + k] for each such link k (UINT32_MAX for every other
+   k); 0, EINVAL where a report holds more than MESH_PORTS links or a port past them, or ENOSPC where such a link has
+   none (its init fails as a value; the next init reads the words as they then stand).  A rank's claim of its chosen
+   pairs (its row of `chosen`) at its own bridge, each lane's word 0 to `owner` by compare-exchange: 0, EINVAL, or EAGAIN
+   where a word was taken first (its claims released and the init failed as a value).  The release of every word
+   `owner` holds, by compare-exchange on the word observed: `owner` to 0, `owner` with DIRTY to DIRTY alone, the
+   bridge's mark kept until the link pairs afresh (design/recovery.md#five-seconds W3b) */
 struct mesh_lane_link { uint32_t peer,port,free,padding; };
 struct mesh_lane_report { uint32_t node,count; struct mesh_lane_link link[MESH_PORTS]; };
 int mesh_lanes_free(struct hdr *,struct mesh_lane_report *);
