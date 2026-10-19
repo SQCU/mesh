@@ -237,7 +237,9 @@ static __attribute__((unused)) uint32_t pairs_error(struct mesh_verbs *provider,
    destroyed ready with receives posted: 0fb8eb54's down_pair, design/recovery.md#five-seconds), then destroyed at its
    next pairing (d6dceac's down_pair, its completion queues kept, the context's own), then what those queues hold of
    them taken and dropped: a poll returns what is there and 0 once none is (no queue pair is left to add any).  0, or
-   the destruction's error (the context gone: forgotten instead, pair_forget) */
+   the destruction's error, every queue pair not destroyed kept with its count in the device's for the next pairing to
+   destroy (4df30806 down_pair: "a failed destruction keeps its handle for the next retirement turn"; a live context is
+   never forgotten, design/recovery.md#five-seconds B16) */
 static __attribute__((unused)) int pairs_down(struct mesh_verbs *provider){
   pairs_error(provider,UINT32_MAX);
   while(provider->qp_count){
