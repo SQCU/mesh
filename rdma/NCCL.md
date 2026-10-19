@@ -189,14 +189,15 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
 
 ### Bounded waits
 
+Every GPU wait is bounded (design/recovery.md#five-seconds; the operator, 2026-10-18: "you cannot be using a low level
+kernel like a dma or networking send/rcv channel for more than 5 seconds without something happening/concluding").
 `ncclMeshStream.polls` is the most loads of a completion word one wait of the group makes (`rdma/mesh.metal`
-`mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing, not a constant of the
-library's. A wait that reaches it records its position, its channel and the bound in the session's violation words,
-every later dispatch of the session does nothing, and the group fails as a value after its command buffer
-(`ncclCommGetAsyncError`, or the communicator's next group: "landed nothing within N polls"). 0, in either form,
-leaves a wait to its landing or its cancellation, as torch-mesh's waits are and the engine's encoded crossings are (a
-silent peer holds such a wait for at most `MESH_SILENT_NS`, when the canceller ends it; until a44b88e the Metal 4 form
-refused 0 with `ncclInvalidArgument`). `ncclMeshComplete` bounds the completion's waits by the stream it is given.
+`mesh_remote_wait_bounded`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
+`NCCL_MESH_POLLS` (nccl.h), is `NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings
+pass 0. A wait that reaches its bound records its position, its channel and the bound in the session's violation
+words, every later dispatch of the session does nothing, and the group fails as a value after its command buffer
+(`ncclCommGetAsyncError`, or the communicator's next group: "landed nothing within N polls"), every wait of the session
+ended (its words `~0`). `ncclMeshComplete` bounds the completion's waits by the stream it is given.
 
 The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
 margin its plan names) over the period of one load on the node's GPU. That period, read on the idle Mini (M4 Pro,
@@ -210,7 +211,10 @@ both of the library's shapes, one thread and thread 0 of a 1,024-thread group, 2
 | M5 Max | not read (its GPU runs the operator's work) | |
 
 So a bound stands for at least polls x 251 ns on the Mini (the time past which a late peer fails the call) and holds
-the GPU at most about polls x 1.1 us (a wait that never lands, before the canceller's 10 s).
+the GPU at most about polls x 1.1 us (a wait that never lands). `NCCL_MESH_POLLS` is `MESH_PLATFORM_NS` over the
+slowest period read, 4.5 x 10^6 loads: at most 4.95 s of the GPU, and about 1.2 s at the Mini's working clock, past
+which a peer that has not yet published fails the call. The M5's period is not read; if it is slower than 1.1 us, the
+bound passes 5 s there.
 
 Types: the Metal path moves the integer types, float16, float32, bfloat16 and fp8 (e4m3fn, e5m2: decoded, combined in
 float32 and encoded to nearest even as the host does, overflow to NaN or infinity; metal-microbench docs/kernels.md
