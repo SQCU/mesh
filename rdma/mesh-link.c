@@ -561,14 +561,17 @@ static void *port_progress(void *argument){
   int resting=0,any=0;
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
     /* design/bridge-dataflow.md#stripes: while the port's guard stands, no pass (no post on any queue pair of its device)
-       and no flow read, so the epoch is told as it moves (port_settle inside a guarded job returns) */
+       and no flow read, the thread parked on the guard word (design/recovery.md#five-seconds B13: a guarded call in the
+       driver costs no core), woken by its lowering and by a settle (guard_wake), looking again every MESH_PAUSE_NS (the
+       stop's `closing`), the epoch told at each waking (port_settle inside a guarded job returns) */
     const uint64_t guard=atomic_load_explicit(&port->guard,memory_order_acquire);
     if(guard&1){
       atomic_store_explicit(&port->guarded[side],guard,memory_order_release);
       while(atomic_load_explicit(&port->guard,memory_order_acquire)==guard && !atomic_load_explicit(&port->closing,memory_order_acquire)){
         const uint64_t epoch=atomic_load_explicit(&port->epoch,memory_order_acquire);
         if(epoch!=told){atomic_store_explicit(&port->seen[side],epoch,memory_order_release);told=epoch;}
-        sched_yield();
+        os_sync_wait_on_address_with_timeout(&port->guard,guard,sizeof port->guard,OS_SYNC_WAIT_ON_ADDRESS_NONE,
+          OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
       }
       empty=0;quiet=0;resting=0;
       continue;
@@ -596,6 +599,8 @@ static void *port_progress(void *argument){
 }
 /* the port's bell rung: its parked progress threads look again */
 static void port_bell(struct port *port){ mesh_notify(&M->bell[port->index]); }
+/* design/recovery.md#five-seconds B13: the progress threads parked on the port's guard look again */
+static void guard_wake(struct port *port){ os_sync_wake_by_address_all(&port->guard,sizeof port->guard,OS_SYNC_WAKE_BY_ADDRESS_NONE); }
 /* design/bridge-and-ipc.md#progress: the port's two progress threads started, once; 0, or pthread_create's error */
 static int port_threads(struct port *port){
   int error=0;
@@ -629,17 +634,18 @@ int port_list(struct flow *f){
 static void port_settle(struct port *port){
   const uint64_t epoch=atomic_fetch_add(&port->epoch,1)+1;
   for(int side=0;side<port->threads;side++)
-    while(atomic_load_explicit(&port->seen[side],memory_order_acquire)<epoch){port_bell(port);sched_yield();}
+    while(atomic_load_explicit(&port->seen[side],memory_order_acquire)<epoch){port_bell(port);guard_wake(port);sched_yield();}
 }
 /* design/bridge-dataflow.md#stripes, design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": the guard of a
    port's device, on the port's queue, around a change of its verbs objects (queue pairs and completion queues made,
    connected or destroyed): raised, it returns once each started progress thread holds (it told the guard's value before
    its next pass, and passes no more while the guard stands), so no queue pair of the device is posted on while another
    is made, changed or destroyed (Apple's provider: a post on a long-lived queue pair across another's teardown stores
-   to the device's shared doorbell mapping after it moved, tbt_post_recv); lowered, the threads go on.  It stands for
-   every change once the port's threads run, the link lanes' long-lived queue pairs being posted on while the link is up */
+   to the device's shared doorbell mapping after it moved, tbt_post_recv); lowered, the threads parked on it woken and
+   going on (design/recovery.md#five-seconds B13).  It stands for every change once the port's threads run, the link
+   lanes' long-lived queue pairs being posted on while the link is up */
 static void port_guard(struct port *port,int raise){
-  if(!raise){atomic_fetch_add_explicit(&port->guard,1,memory_order_release);port_bell(port);return;}
+  if(!raise){atomic_fetch_add_explicit(&port->guard,1,memory_order_release);guard_wake(port);port_bell(port);return;}
   const uint64_t guard=atomic_fetch_add_explicit(&port->guard,1,memory_order_acq_rel)+1;
   for(int side=0;side<port->threads;side++)
     while(atomic_load_explicit(&port->guarded[side],memory_order_acquire)!=guard){port_bell(port);sched_yield();}
