@@ -320,7 +320,7 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
     uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
     if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->key=key;
-    atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);
+    atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);atomic_store(&slot->configured,0);
     slot->targets=0;slot->target_count=0;
     memset(slot->tx,0,sizeof slot->tx);memset(slot->status,0,sizeof slot->status);
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
