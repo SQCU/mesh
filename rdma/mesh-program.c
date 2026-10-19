@@ -635,11 +635,18 @@ void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t where,const 
   flow_stop(f,code,domain,where,f->port==lost);
   for(struct flow *g=flows;g;g=g->next)if(g->owner==f->owner && g->destination==f->destination)flow_fail(g,code,domain,where,lost);
 }
-/* a client's program toward its destination `d` failed as a value naming the node `where`: its flows failed, and its
-   status the failure */
+/* design/algorithm-sources.md#meshresult: a client's program toward its destination `d` refused or failed as a value
+   naming the node `where`: its status the failure, then ~0 into its cancel words (M12), so a client reading a landing
+   of it reads the status the ~0 names */
+static void program_refused(struct mesh_client *client,uint64_t owner,uint32_t d,int64_t code,uint32_t where){
+  status_failed(&client->status[d],owner,code,4,where);
+  if(client->tx[d].cancel)mesh_cancel(M,(void *)((char *)M+client->tx[d].cancel),d);
+}
+/* a client's program toward its destination `d` failed as a value naming the node `where`: its flows failed, and the
+   program refused (program_refused) */
 static void program_fail(uint64_t owner,uint32_t d,int64_t code,uint32_t where){
   for(struct flow *g=flows;g;g=g->next)if(g->owner==owner && g->destination==d)flow_fail(g,code,4,where,NULL);
-  if(owned(owner))status_failed(&mesh_client_at(M,owner)->status[d],owner,code,4,where);
+  if(owned(owner))program_refused(mesh_client_at(M,owner),owner,d,code,where);
 }
 /* a program that ended, its client gone or its slot given back: its flows stopped, nothing told */
 static void flow_end(struct flow *f){
@@ -713,22 +720,23 @@ static uint32_t cables(uint32_t node,struct port **out){
    program's invocations t with t mod n = j; no message is sent, the peer's program of the communicator riding the same
    lanes from the other end, each end posting its receives in its program's order and TN3205's credit holding a SEND
    until its receive is posted.  A program reaches only a node on a cable (a relay is a member rank of the communicator
-   with no contribution: DESIGN.md decision 1).  Refused as a value naming the node where it is this node (EINVAL) or no
-   cable reaches it (EHOSTUNREACH); naming this node where its shape is not a lane pair's (EINVAL), no cable carries its
-   lease or a lease was let go as its flow was made (ENOLCK), or a port's table is full (E2BIG) */
+   with no contribution: DESIGN.md decision 1).  Refused as a value (program_refused: its status, then ~0 into its
+   cancel words) naming the node where it is this node (EINVAL) or no cable reaches it (EHOSTUNREACH); naming this node
+   where its shape is not a lane pair's (EINVAL), no cable carries its lease or a lease was let go as its flow was made
+   (ENOLCK), or a port's table is full (E2BIG) */
 static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
   const uint32_t node=client->tx[d].node,queues=program_queues(owner,d);
   const uint32_t lane[2]={client->tx[d].lane[0],client->tx[d].lane[1]};
-  if(!node || node==M->node){status_failed(&client->status[d],owner,EINVAL,4,node);return;}
+  if(!node || node==M->node){program_refused(client,owner,d,EINVAL,node);return;}
   if(client->tx[d].slots!=1 || !queues || queues>2 || (queues==2 && lane[0]==lane[1])){
-    status_failed(&client->status[d],owner,EINVAL,4,M->node);return;
+    program_refused(client,owner,d,EINVAL,M->node);return;
   }
   struct port *cable[MESH_PORTS];
   const uint32_t n=cables(node,cable);
-  if(!n){status_failed(&client->status[d],owner,EHOSTUNREACH,4,node);return;}
+  if(!n){program_refused(client,owner,d,EHOSTUNREACH,node);return;}
   uint32_t leased=0;
   for(uint32_t j=0;j<n;j++)if(lanes_leased(cable[j],owner,lane,queues))cable[leased++]=cable[j];
-  if(!leased){status_failed(&client->status[d],owner,ENOLCK,4,M->node);return;}
+  if(!leased){program_refused(client,owner,d,ENOLCK,M->node);return;}
   atomic_store_explicit(&client->status[d].phase,MESH_PAIRING,memory_order_relaxed);
   for(uint32_t j=0;j<leased;j++){
     int64_t refused;

@@ -58,9 +58,10 @@ def deploy(args):
         if remote != revision:
             raise RuntimeError(f'git revision mismatch: local={revision}, remote={remote}')
     with ThreadPoolExecutor(max_workers=2) as pool:
-        builds = [pool.submit(command, ['make', '-C', source / 'rdma', 'all'], stdout=sys.stderr)]
+        builds = [pool.submit(command, ['make', '-C', source / 'rdma', 'all', 'install'], stdout=sys.stderr)]
         if args.host:
-            builds.append(pool.submit(command, ['make', '-C', destination / 'rdma', 'all'], args.host, stdout=sys.stderr))
+            builds.append(pool.submit(command, ['make', '-C', destination / 'rdma', 'all', 'install'], args.host,
+                                      stdout=sys.stderr))
         for build in builds: build.result()
     if args.host:
         command([destination / 'bin/mesh-python', destination / 'bin/mesh-application.py', 'activate',
