@@ -55,9 +55,12 @@ publish/arrive). The GPU code is `rdma/mesh.metal` (embedded as `.build/mesh_met
 | `atexit` | `session_open` registers `session_exit` once | closes every session | `session_lock` |
 
 Client-side threads that drive the library: metal-microbench's rank (`mesh_rank.m`): its calls' threads and
-`MetalReplaySubmit`'s completion handlers (Metal's threads; they touch no library state). Its door (`MeshRankDoor`,
-`MeshRankAsk`: a socket a message on the fabric's routes) makes no library call: a rank's wait for its next message is
-outside every session, as a host-path group spins holding `session_lock` and a GPU wait ends at `MESH_PLATFORM_NS`.
+`MetalReplaySubmit`'s completion handlers (Metal's threads; they touch no library state). Its door's threads
+(`MeshRankDoor`, `MeshRankAsk`) wait in host-path `ncclRecv`s on their two-rank communicators for as long as no call
+comes: `session_run` releases `session_lock` around `run`, which parks on its session's `landed` until the progress
+thread's scan finds a landing (`landed_tell`, also on a failure or a revoke), and a host-path launch waits for, and is
+refused beside, its own session's GPU groups alone (`session_issued`, `drain`); process exit leaves a session a
+host-path group waits in (`runs`) to the exit.
 torch-mesh calls the library on torch's MPS stream queue inside `dispatch_sync` (`torch_mesh/_stream.mm:on_stream`,
 `begin`, `complete`).
 
