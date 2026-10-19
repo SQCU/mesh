@@ -559,15 +559,16 @@ static void flow_job(struct flow *f){
 }
 /* design/algorithm-sources.md#meshresult: a flow stopped on its port's queue, after its job: its lanes let go
    (lanes_release: no completion of them is taken as its own after it, and a lane it left with positions outstanding
-   is DIRTY), then, where it failed, its program's pending words toward the far end cancelled (M12) and its status the
-   failure naming the node `where`; the census printed (each of its queues' lane: the SEND requests and frames posted
-   and retired through its gate, and its ring's records posted and landed and their bytes), its ledger written
-   (#ledger), and its storage freed.  No verbs call is made */
-static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where){
+   stays DIRTY, moved to the error state unless the stop is its link's loss, `lost`), then, where it failed, its
+   program's pending words toward the far end cancelled (M12) and its status the failure naming the node `where`; the
+   census printed (each of its queues' lane: the SEND requests and frames posted and retired through its gate, and its
+   ring's records posted and landed and their bytes), its ledger written (#ledger), and its storage freed; `stopped` 2
+   where a dirty lane's requests may still land in its rows (design/recovery.md#five-seconds B7), else 1 */
+static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where,int lost){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;struct mesh_cancellation *cancel=f->cancel;
   f->stopping=1;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);
   dispatch_async(f->port->work,^{
-    const uint32_t dirty=lanes_release(f);
+    const uint32_t dirty=lanes_release(f,lost);
     if(code && owned(owner)){
       if(cancel)mesh_cancel(M,cancel,destination);
       status_failed(&mesh_client_at(M,owner)->status[destination],owner,code,domain,where);
@@ -578,12 +579,12 @@ static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where
       say("link %u census queue=%u requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu "
           "lane=%u%s\n",f->port->index,q,(unsigned long long)g->requests,(unsigned long long)g->posted,(unsigned long long)g->retired,
           (unsigned long long)g->completions,f->rings[q].count,f->rings[q].posted,(unsigned long long)f->rings[q].landed,
-          (unsigned long long)f->rings[q].bytes,f->lane[q],dirty>>f->lane[q]&1?" dirty":"");
+          (unsigned long long)f->rings[q].bytes,f->lane[q],f->held>>f->lane[q]&1?" dirty, its rows held":dirty>>f->lane[q]&1?" dirty, flushed":"");
     }
     ledger_write(f);
     free(f->receive);free(f->streams);free(f->rings);free(f->requests);
     f->receive=NULL;f->streams=NULL;f->rings=NULL;f->requests=NULL;
-    atomic_store_explicit(&f->stopped,1,memory_order_release);
+    atomic_store_explicit(&f->stopped,f->held?2:1,memory_order_release);
     wake();
   });
 }
@@ -596,28 +597,29 @@ static void flow_free(struct flow *f){
   flow_count--;busy_tell();
 }
 /* design/algorithm-sources.md#meshresult: a program on a port failed as a value, its status the failure naming the node
-   `where`, and every flow of the same client program toward the node (its other cables) with it.  No message tells
-   the peer: its programs end by what ends them at that end (the link's loss there, its caller's revoke as its words,
+   `where`, and every flow of the same client program toward the node (its other cables) with it; a flow on `lost`, the
+   port whose link was lost (port_lost's; NULL none), stops with no verbs call.  No message tells the peer: its programs
+   end by what ends them at that end (the link's loss there, its caller's revoke as its words,
    design/bridge-and-ipc.md#protocol) */
-void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t where){
+void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t where,const struct port *lost){
   if(f->ended)return;
   f->ended=1;
   say("link %u: program %016llx toward node %u (stripe %u of %u) failed at node %u: code %lld domain %u\n",f->port->index,
     (unsigned long long)f->key,f->far,f->stripe,f->stripes,where,(long long)code,domain);
-  flow_stop(f,code,domain,where);
-  for(struct flow *g=flows;g;g=g->next)if(g->owner==f->owner && g->destination==f->destination)flow_fail(g,code,domain,where);
+  flow_stop(f,code,domain,where,f->port==lost);
+  for(struct flow *g=flows;g;g=g->next)if(g->owner==f->owner && g->destination==f->destination)flow_fail(g,code,domain,where,lost);
 }
 /* a client's program toward its destination `d` failed as a value naming the node `where`: its flows failed, and its
    status the failure */
 static void program_fail(uint64_t owner,uint32_t d,int64_t code,uint32_t where){
-  for(struct flow *g=flows;g;g=g->next)if(g->owner==owner && g->destination==d)flow_fail(g,code,4,where);
+  for(struct flow *g=flows;g;g=g->next)if(g->owner==owner && g->destination==d)flow_fail(g,code,4,where,NULL);
   if(owned(owner))status_failed(&mesh_client_at(M,owner)->status[d],owner,code,4,where);
 }
 /* a program that ended, its client gone or its slot given back: its flows stopped, nothing told */
 static void flow_end(struct flow *f){
   if(f->ended)return;
   f->ended=1;
-  flow_stop(f,0,0,0);
+  flow_stop(f,0,0,0,0);
 }
 /* design/bridge-and-ipc.md#clients: a client program's status once every flow of it toward the node runs */
 static void program_paired(struct flow *f){
@@ -633,21 +635,24 @@ static void program_paired(struct flow *f){
 static void flow_done(struct flow *f){
   f->job=0;
   if(f->ended)return;
-  if(f->result){flow_fail(f,f->result,1,M->node);return;}
+  if(f->result){flow_fail(f,f->result,1,M->node,NULL);return;}
   f->running=1;
   program_paired(f);
 }
 /* design/bridge-and-ipc.md#flows: a flow made on a port toward `far` for the client's program `owner`'s destination `d`
-   (its execution `key`), its `queues` queues on the lanes `lane` (held by it from now: lanes_leased found them free),
-   the program's invocations t with t mod stripes = stripe (#cables), an index of the port's table its own (MESH_FLOWS
-   a port); NULL where the table is full */
+   (its execution `key`), its `queues` queues on the lanes `lane` (held by it from now, their lease words DIRTY:
+   lanes_take, lanes_leased having found them `owner`'s), the program's invocations t with t mod stripes = stripe
+   (#cables), an index of the port's table its own (MESH_FLOWS a port); NULL where the table is full (*refused E2BIG)
+   or a lease was let go meanwhile (ENOLCK) */
 static struct flow *flow_make(struct port *port,uint64_t owner,uint32_t d,uint64_t key,uint32_t far,uint32_t queues,const uint32_t *lane,
-                              uint32_t stripe,uint32_t stripes){
+                              uint32_t stripe,uint32_t stripes,int64_t *refused){
   uint32_t slot=0;
   while(slot<MESH_FLOWS && port->reserved[slot/64]>>(slot%64)&1)slot++;
+  *refused=E2BIG;
   if(slot==MESH_FLOWS)return NULL;
   struct flow *f=calloc(1,sizeof *f);
   if(!f)return NULL;
+  if(!lanes_take(port,owner,lane,queues)){free(f);*refused=ENOLCK;return NULL;}
   const struct mesh_queue *queue=port->link.provider.queues+lane[0];
   const uint64_t cancel=mesh_client_at(M,owner)->tx[d].cancel;
   *f=(struct flow){.next=flows,.far=far,.queues=queues,.stripe=stripe,.stripes=stripes,.destination=d,.lane={lane[0],queues>1?lane[1]:0},
@@ -684,7 +689,7 @@ static uint32_t cables(uint32_t node,struct port **out){
    until its receive is posted.  A program reaches only a node on a cable (a relay is a member rank of the communicator
    with no contribution: DESIGN.md decision 1).  Refused as a value naming the node where it is this node (EINVAL) or no
    cable reaches it (EHOSTUNREACH); naming this node where its shape is not a lane pair's (EINVAL), no cable carries its
-   lease (ENOLCK), or a port's table is full (E2BIG) */
+   lease or a lease was let go as its flow was made (ENOLCK), or a port's table is full (E2BIG) */
 static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
   const uint32_t node=client->tx[d].node,queues=program_queues(owner,d);
   const uint32_t lane[2]={client->tx[d].lane[0],client->tx[d].lane[1]};
@@ -700,8 +705,9 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
   if(!leased){status_failed(&client->status[d],owner,ENOLCK,4,M->node);return;}
   atomic_store_explicit(&client->status[d].phase,MESH_PAIRING,memory_order_relaxed);
   for(uint32_t j=0;j<leased;j++){
-    struct flow *f=flow_make(cable[j],owner,d,client->key,node,queues,lane,j,leased);
-    if(!f){program_fail(owner,d,E2BIG,M->node);return;}
+    int64_t refused;
+    struct flow *f=flow_make(cable[j],owner,d,client->key,node,queues,lane,j,leased,&refused);
+    if(!f){program_fail(owner,d,refused,M->node);return;}
     atomic_fetch_or_explicit(&client->ports,UINT32_C(1)<<cable[j]->index,memory_order_release);
     flow_job(f);
   }
@@ -1421,7 +1427,9 @@ void programs_stop(int64_t code){
    seen (its exit retires every slot it holds, the event loop's EVFILT_PROC), one already gone retired at once, and on a
    liveness turn any client whose process exited retired; a program that ended (its slot given back or retired) has its
    flows stopped; a program started is taken toward each destination it binds, once no flow of the slot's earlier client
-   remains.  Rows of a retired client are released once no flow of one remains and no stripe is in flight */
+   runs or stops (one kept for a dirty lane, its stop run, touches no word of the slot).  Rows of a retired client are
+   released once no flow of one remains (one kept for a dirty lane among them: design/recovery.md#five-seconds B7) and
+   no stripe is in flight */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0,zombie=0;
@@ -1439,7 +1447,8 @@ void clients_turn(int liveness){
     changed|=owner!=owners[s];owners[s]=owner;
     if(!owner || (owner&MESH_RETIRING) || atomic_load_explicit(&client->configured,memory_order_acquire)!=owner || accepted[s]==owner)continue;
     int earlier=0;
-    for(struct flow *f=flows;f;f=f->next)earlier|=f->owner!=owner && ((f->owner>>32)&(MESH_CLIENTS-1))==s;
+    for(struct flow *f=flows;f;f=f->next)
+      earlier|=f->owner!=owner && ((f->owner>>32)&(MESH_CLIENTS-1))==s && atomic_load_explicit(&f->stopped,memory_order_acquire)!=2;
     if(earlier)continue;
     accepted[s]=owner;
     atomic_store_explicit(&client->ports,0,memory_order_relaxed);
@@ -1451,18 +1460,22 @@ void clients_turn(int liveness){
   unreleased|=changed;
   if(unreleased && !zombie){unreleased=0;mesh_retired_release(M);}
 }
-/* design/bridge-and-ipc.md#flows: every flow's turn: its job's end taken, a stopped flow freed, and a progress thread's
-   finding (a post or a completion that failed) its failure; nothing here waits on a clock */
+/* design/bridge-and-ipc.md#flows: every flow's turn: its job's end taken, a stopped flow freed (one kept for a lane it
+   left dirty once its link's lanes' generation moved: design/recovery.md#five-seconds B7, 4df30806 flow_release's
+   rule), and a progress thread's finding (a post or a completion that failed) its failure; nothing here waits on a
+   clock */
 void flows_turn(void){
   for(struct flow *f=flows,*next;f;f=next){
     next=f->next;
     if(f->job && atomic_load_explicit(&f->done,memory_order_acquire))flow_done(f);
     if(f->stopping){
-      if(!f->job && atomic_load_explicit(&f->stopped,memory_order_acquire))flow_free(f);
+      const int stopped=atomic_load_explicit(&f->stopped,memory_order_acquire);
+      if(!f->job && (stopped==1 || (stopped==2 && atomic_load_explicit(&f->port->link.generation,memory_order_acquire)!=f->lane_epoch)))
+        flow_free(f);
       continue;
     }
     if(f->ended)continue;
     const int64_t failed=atomic_load(&f->failed);
-    if(failed)flow_fail(f,failed,atomic_load(&f->domain),M->node);
+    if(failed)flow_fail(f,failed,atomic_load(&f->domain),M->node,NULL);
   }
 }
