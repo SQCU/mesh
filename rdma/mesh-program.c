@@ -651,8 +651,8 @@ static struct flow *flow_make(struct port *port,uint64_t owner,uint32_t d,uint64
   const struct mesh_queue *queue=port->link.provider.queues+lane[0];
   const uint64_t cancel=mesh_client_at(M,owner)->tx[d].cancel;
   *f=(struct flow){.next=flows,.far=far,.queues=queues,.stripe=stripe,.stripes=stripes,.destination=d,.lane={lane[0],queues>1?lane[1]:0},
-    .slot=slot,.generation=++port->generation[slot],.key=key,.owner=owner,.M=M,.port=port,.post_send=queue->send,.post_receive=queue->receive,
-    .cancel=cancel?(void *)((char *)M+cancel):NULL};
+    .slot=slot,.generation=++port->generation[slot],.lanes=UINT32_C(1)<<lane[0]|(queues>1?UINT32_C(1)<<lane[1]:0),.key=key,.owner=owner,
+    .M=M,.port=port,.post_send=queue->send,.post_receive=queue->receive,.cancel=cancel?(void *)((char *)M+cancel):NULL};
   port->reserved[slot/64]|=UINT64_C(1)<<(slot%64);
   if(slot>=atomic_load(&port->high))atomic_store(&port->high,slot+1);
   for(uint32_t q=0;q<queues;q++)atomic_store_explicit(&port->link.holder[lane[q]],f,memory_order_release);
@@ -794,6 +794,16 @@ void record_changed(void){
   struct mesh_record *held=record_held(M->node);
   if(held && record_links_same(held,&own))health_put(held,&own);
   else map_put(&own);
+  for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
+}
+/* design/recovery.md#five-seconds: this node's record told again at its current sequence on every greeted port, each
+   liveness turn (MESH_PAUSE_NS), so each control socket carries a message well within its peer's MESH_PLATFORM_NS
+   (mesh-link.c port_silent); a receiver drops a record no newer than its newest (record_heard, RFC 2328 s13), its map and
+   serials unmoved.  Told from a copy: a port lost meanwhile may write the map */
+void record_retell(void){
+  const struct mesh_record *held=record_held(M->node);
+  if(!held)return;
+  struct mesh_record own;memcpy(&own,held,sizeof own);
   for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
 }
 static uint64_t low_told;
