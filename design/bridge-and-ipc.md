@@ -64,7 +64,7 @@ The link lanes and their leases:
   word of the client slot whose program rides it (a communicator's session slot), which its client claims and
   releases with a compare-exchange on the word it observes: at the release an owner word becomes 0, or
   `MESH_LANE_DIRTY` alone where the bridge set it. The bridge sets `MESH_LANE_DIRTY` as a flow takes the lane and
-  clears it once the flow's stop has reset the lane's queue pair (`#lanes`) or the link has paired afresh, so no
+  clears it once the flow's stop finds nothing posted on the lane (`#lanes`) or the link has paired afresh, so no
   client leases a lane on which a stopped program's receives are still posted; it lets go of the lease of a client
   gone (its DIRTY kept).
 - **A program's lanes** toward a destination: struct mesh_tx `lane`.
@@ -215,7 +215,7 @@ the client holds its lease (`#flows`), or fails that destination as a value, its
 its rows (a program's, or the leases of a lease-owning slot) are closed; once no port holds a flow of the client the
 bridge releases them and returns their pages to the window in the same turn (`mesh_retired_release`, then
 `mesh_reclaim`'s `mesh_buffer_reclaim`), so the window's unleased bytes (`mesh_window`, node-info) count them free as
-soon as the client is gone; a flow whose lanes its stop could not reset keeps them until the link's next pairing has
+soon as the client is gone; a flow that left a lane with receives posted keeps them until the link's next pairing has
 destroyed those queue pairs, so no receive posted into them is left on the device. A lease that finds no room reclaims again before it fails. The bridge watches each
 slot's process from the turn it first sees the slot (a kqueue `NOTE_EXIT` on its pid, registered again for each new
 slot of the process, since the kernel keeps one watch per pid; a pid already gone at that turn is retired then), and a
@@ -287,9 +287,9 @@ B12).
 A flow fails alone: its client's pending words toward the node `~0` and its status `MESH_STOPPED` with the failure's
 code and domain and the node where it failed, stored from the event loop at once, and its program's flows on its other
 cables with it. Its stop (`flow_stop`, on its port's queue) then lets go of its lanes (`lanes_release`: the holders
-cleared, the flow out of the port's table once neither thread reads it, and each of its lanes reset in place where
-its link is served: `#lanes`), and frees it; a flow whose lanes were not reset is kept with its rows until the link's
-next pairing. No peer is told. A served lane whose SENDs none retire for `MESH_PLATFORM_NS` fails
+cleared, the flow out of the port's table once neither thread reads it, a lane it left with nothing posted freed, and
+its link concluded where it left one with requests posted: `#lanes`), and frees it; a flow so held is kept with its
+rows until the link's next pairing. No peer is told. A served lane whose SENDs none retire for `MESH_PLATFORM_NS` fails
 its holder (B4). A failed flow is never resumed; the next program is a new flow, on the map as it is then.
 
 ## lanes
@@ -328,16 +328,15 @@ the end of its own conclusion's window (design/recovery.md#five-seconds B9, B6 (
   holder's flow failed, and the link concluded at once (`link_turn` reads `broken`, `port_lost`): both ends pair it
   afresh on hearing each other, every lane made again. **A post refused**: its flow alone fails (on lane 0, the
   keepalive's lane: the link concluded, `lane_lost`).
-- **A program's stop** (`lanes_release`, on the port's queue): its ring posted receives ahead into its own rows, and a
-  SEND may not have completed. While the link is served, each of its lanes is reset in place under the port's guard
-  (`pairs_reset`: RESET, where the device holds no work request and drops what was posted with no completion; then
-  INIT, RTR and RTS toward the same peer queue pair with the pairing's numbers), its reset count moved, its gate
-  emptied and its `MESH_LANE_DIRTY` cleared. A request carries its lane's reset count in its wr_id's top byte, so a
-  completion of one posted before the reset is dropped (`lane_stale`). Both ends' programs on a leased pair stop, and
-  the pair is leased again only by both ends at once (the next init's agreement), so both have reset it and both run
-  from the pairing's sequence numbers. The next communicator that leases the pair posts on it at once. Where the link
-  is not served, a port's call is stuck, a peer interface is terminating or the guard was not held, no lane is reset:
-  the link is concluded and the flow keeps its rows until the next pairing destroys the queue pairs.
+- **A program's stop** (`lanes_release`, on the port's queue): a lane on which it left nothing posted (every receive
+  its ring posted landed, every SEND retired) has its `MESH_LANE_DIRTY` cleared, and the next communicator that leases
+  the pair posts on it at once. A lane it left with a request posted could still land a SEND in its rows, and no
+  verbs call is made at a stop: the flow keeps its rows, and the link is concluded (`broken`, `port_lost`) unless it
+  was lost already, so both ends pair it afresh by the pairing's own sequence (d6dceac's: every queue pair destroyed and
+  made again, the sequence proven on both devices), after which the rows are released. A communicator's session runs
+  from its first group to its destroy and its rings post ahead without end, so a communicator kept for the process's
+  life (as NCCL programs keep theirs; metal-microbench's rank keeps a call set's) leaves nothing posted between calls,
+  and its destroy (a failure, a revoke, the process's exit) concludes the link once.
 - **A link job that fails** concludes the link, which pairs again on hearing the peer (B16); where its make's
   registration was refused, the port is down until its link next comes on (design/recovery.md#registration).
 

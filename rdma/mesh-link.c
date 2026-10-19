@@ -153,8 +153,7 @@ static int flow_send(struct flow *link){
            gate's frames posted through it */
         struct ibv_send_wr posting=*request;
         posting.next=NULL;posting.send_flags=IBV_SEND_SIGNALED;
-        posting.wr_id=(uint64_t)atomic_load_explicit(&link->port->link.reset[cell->queue],memory_order_relaxed)<<LANE_RESET_SHIFT|
-                      ((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
+        posting.wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
         int error=post((struct ibv_qp *)cell->pair,&posting,&bad);
         if(error){flow_lost(link,error<0?-error:error,1);return 1;}
         stream->next=request->next;stream->remaining--;gate->requests++;moved=1;
@@ -246,14 +245,9 @@ static int link_failed(struct port *port,int64_t code,uint32_t domain){
   wake();
   return 1;
 }
-/* whether a completion on program lane `lane` is of a request posted before the lane's last reset (its wr_id's top byte
-   another reset count than the lane's: struct link `reset`), so dropped */
-static __attribute__((always_inline)) inline int lane_stale(const struct link *l,uint32_t lane,uint64_t id){
-  return lane!=MESH_LANE_KEEPALIVE && (uint8_t)(id>>LANE_RESET_SHIFT)!=atomic_load_explicit(&l->reset[lane],memory_order_relaxed);
-}
 /* design/bridge-and-ipc.md#lanes: the link's SENDs, one pass of the port's send thread: its SEND completions taken (a
-   lane no longer served, a queue pair of an earlier pairing, or a request posted before its lane's reset drops its own;
-   a failed one fails the link, link_failed): a program's lane's frames retired through its gate (each request names its
+   lane no longer served, or a queue pair of an earlier pairing, drops its own; a failed one fails the link,
+   link_failed): a program's lane's frames retired through its gate (each request names its
    lane and the frames posted through it), the keepalive's frame; then lane MESH_LANE_KEEPALIVE's frame (`listed`: a
    flow of the port listed, link_alive) while it is served.  Whether anything moved, a keepalive frame only at the
    listed pace */
@@ -266,7 +260,7 @@ static int link_send(struct port *port,int listed){
   int moved=0;
   for(int i=0;i<count;i++){
     const uint32_t lane=link_lane(l,done[i].qp_num);
-    if(lane>=MESH_LINK_LANES || !(served>>lane&1) || lane_stale(l,lane,done[i].wr_id))continue;
+    if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
     moved|=lane!=MESH_LANE_KEEPALIVE || (listed && keepalive_ns);
     if(done[i].status)return link_failed(port,(int64_t)done[i].status,2);
     const uint64_t id=done[i].wr_id;
@@ -277,7 +271,7 @@ static int link_send(struct port *port,int listed){
   return moved;
 }
 /* the link's receive completions, one pass of the port's receive thread: a record of a program's lane landed (its
-   holder's: a lane with none, or a receive posted before the lane's reset, drops what comes), a keepalive frame heard
+   holder's: a lane with none drops what comes), a keepalive frame heard
    (counted, its receive posted again), a failed one failing the link (link_failed).  Whether anything moved, a
    keepalive frame only while a flow of the port is listed here and the configuration states a keepalive (`listed`,
    link_alive) */
@@ -291,7 +285,7 @@ static int link_receive(struct port *port,int listed){
   int moved=0;
   for(int i=0;i<count;i++){
     const uint32_t lane=link_lane(l,done[i].qp_num);
-    if(lane>=MESH_LINK_LANES || !(served>>lane&1) || lane_stale(l,lane,done[i].wr_id))continue;
+    if(lane>=MESH_LINK_LANES || !(served>>lane&1))continue;
     moved|=lane!=MESH_LANE_KEEPALIVE || (listed && keepalive_ns);
     uint64_t status_opcode;
     memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
@@ -303,7 +297,7 @@ static int link_receive(struct port *port,int listed){
     }
     else if((status_opcode>>32)&IBV_WC_RECV){
       struct flow *f=atomic_load_explicit(&l->holder[lane],memory_order_acquire);
-      if(f)record_landed(f,(struct prepared_receive *)(uintptr_t)(done[i].wr_id&LANE_ID_MASK),done[i].byte_len);
+      if(f)record_landed(f,(struct prepared_receive *)(uintptr_t)done[i].wr_id,done[i].byte_len);
     }
   }
   return moved;
@@ -662,7 +656,8 @@ int lanes_leased(const struct port *port,uint64_t owner,const uint32_t *lane,uin
 }
 /* design/bridge-and-ipc.md#lanes: a flow's lanes taken as it is made, on the event loop: each lease word `owner` made
    owner|DIRTY by compare-exchange, so no word reads free, or another program's owner, from the flow's first post on the
-   lane until its stop has reset the lane (its client's let-go leaves DIRTY alone; lanes_release clears it).  1; 0 where
+   lane until its stop finds nothing posted on it (its client's let-go leaves DIRTY alone; lanes_release clears it, or
+   the link's next pairing).  1; 0 where
    a word no longer reads `owner` (let go meanwhile), each word taken given back */
 int lanes_take(const struct port *port,uint64_t owner,const uint32_t *lane,uint32_t queues){
   for(uint32_t q=0;q<queues;q++){
@@ -675,46 +670,34 @@ int lanes_take(const struct port *port,uint64_t owner,const uint32_t *lane,uint3
 }
 /* design/bridge-and-ipc.md#lanes: a stopping flow's lanes let go, on its port's queue: its holders cleared, then the
    flow out of its port's table (port_unlist: once neither progress thread reads it, no completion of its lanes is taken
-   as its own).  Its ring posted receives ahead into its own rows and may have SENDs not completed; where its link is
-   served, each lane is reset in place under the port's guard (pairs_reset: the device drops what is posted on it, and
-   the queue pair is ready again toward the same peer queue pair), its reset count moved so a completion of a request
-   posted before is dropped (lane_stale), its gate emptied and its DIRTY cleared: the next communicator to lease it
-   posts on it at once.  Where the link is not served (lost, failed: no verbs call on a failure), a port's call is out
-   past MESH_PLATFORM_NS (`stalled`), a peer interface's termination's window stands (`exit_at`), the guard was not held
-   within MESH_PLATFORM_NS, or a progress thread may still read the flow (`kept`), no lane is reset: its receives may
-   still land in the flow's rows, so the flow is held (`held`) until the link's next pairing destroys those queue pairs
-   (`generation` past `lane_epoch`), and a served link is concluded (`broken`) so that pairing comes.  The lanes reset */
+   as its own, and its rings and its lanes' gates stand still).  A lane on which it left nothing posted (its ring's
+   receives all landed, its gate's SENDs all retired) has its DIRTY cleared: the next lease takes it at once.  A lane it
+   left with a request posted could still land a SEND in its rows, and no verbs call is made here: the flow is held
+   (`held`) until the link's next pairing destroys those queue pairs (`generation` past `lane_epoch`), and a link it was
+   not lost with is concluded (`broken`: link_turn, port_lost), so that pairing comes, every lane made again by the
+   pairing's own sequence (d6dceac's: destroy, create, INIT, RTR, RTS).  A flow a progress thread may still read
+   (`kept`: the port halted, port_wait) is held whole.  The lanes it left with requests posted */
 uint32_t lanes_release(struct flow *f,int lost){
   struct port *port=f->port;
   struct link *l=&port->link;
   for(uint32_t q=0;q<f->queues;q++)atomic_store_explicit(&l->holder[f->lane[q]],NULL,memory_order_release);
   const int kept=port_unlist(f)!=0;
-  const uint32_t mine=f->lanes;
-  uint32_t reset=0;
-  if(!kept && !lost && (atomic_load_explicit(&l->served,memory_order_acquire)&mine)==mine &&
-     !atomic_load_explicit(&stalled,memory_order_relaxed) && clock_ns()>=atomic_load(&exit_at)){
-    atomic_store(&port->moving_at,clock_ns());
-    const int raised=guard_raise(port);
-    if(raised>=0){
-      reset=pairs_reset(&l->provider,mine,(const uint32_t (*)[2])l->peer,port->heard.lid,port->heard.gid);
-      for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES;k++)if(reset>>k&1){
-        atomic_fetch_add_explicit(&l->reset[k],1,memory_order_relaxed);
-        l->gate[k].retired=l->gate[k].posted;
-      }
-    }
-    guard_lower(port,raised);
-    atomic_store(&port->moving_at,0);
+  uint32_t dirty=kept?f->lanes:0;
+  for(uint32_t q=0;!kept && q<f->queues;q++){
+    const uint32_t k=f->lane[q];
+    const struct send_gate *g=l->gate+k;
+    if((f->rings && f->rings[q].outstanding) || __atomic_load_n(&g->posted,__ATOMIC_RELAXED)!=__atomic_load_n(&g->retired,__ATOMIC_RELAXED))
+      dirty|=UINT32_C(1)<<k;
+    else atomic_fetch_and_explicit(&M->lanes[port->index][k],~MESH_LANE_DIRTY,memory_order_acq_rel);
   }
-  for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES;k++)
-    if(reset>>k&1)atomic_fetch_and_explicit(&M->lanes[port->index][k],~MESH_LANE_DIRTY,memory_order_acq_rel);
-  if(mine&~reset){
-    say("link %u (%s): lanes %#x toward node %u not reset at program %016llx's stop: its rows held until the link pairs again\n",
-        port->index,port->name,mine&~reset,f->far,(unsigned long long)f->key);
-    if(!lost && !kept)atomic_fetch_or_explicit(&l->broken,mine&~reset,memory_order_release);
+  if(dirty && !lost && !kept){
+    say("link %u (%s): lanes %#x toward node %u left with requests posted by program %016llx: the link concluded, its rows held "
+        "until it pairs again\n",port->index,port->name,dirty,f->far,(unsigned long long)f->key);
+    atomic_fetch_or_explicit(&l->broken,dirty,memory_order_release);
   }
-  f->held=mine&~reset;
+  f->held=dirty;
   f->lane_epoch=atomic_load_explicit(&l->generation,memory_order_acquire);
-  return reset;
+  return dirty;
 }
 /* the leases of clients gone let go, their DIRTY kept: a lane whose lease word names a slot no longer its owner's (its
    process exited, its slot retired); a lane a flow holds keeps its DIRTY (lanes_take) until the flow's stop clears it */
@@ -846,13 +829,12 @@ static void gates_turn(struct port *port){
   }
 }
 /* design/recovery.md#five-seconds B12 (22891630^ mesh-flight.h's pending-operation age, per port: its dispatch's
-   `job_at` in place of flight_begin's stamp, its `done` in place of flight_end's; a flow stop's move to the error state
-   stamped at the call itself, `moving_at`, lanes_release, stops running one at a time on the port's queue): a port
-   whose open's or link's job, or a flow stop's move, is still out MESH_PLATFORM_NS after it began is concluded around
+   `job_at` in place of flight_begin's stamp, its `done` in place of flight_end's): a port whose open's or link's job
+   is still out MESH_PLATFORM_NS after it began is concluded around
    it, once: open 0 and port_lost (ETIMEDOUT: its socket closed, the map's phase STOPPED), no move to the error state,
    and its programs' words ~0 from this thread (their stops wait behind the call on its queue).  The call itself cannot
    be ended.  While any port's job is so out, no port dispatches a driver call and the devices are not read (`stalled`:
-   port_open, link_turn, lanes_release, ports_find).  A port whose progress threads did not hold for a settle or a
+   port_open, link_turn, ports_find).  A port whose progress threads did not hold for a settle or a
    guarded change within MESH_PLATFORM_NS (`unguarded`, port_wait: the change not made) is concluded alike, once, unless
    already concluded around a call.  Each conclusion moves the port's epoch and rings its bell; the port stays `stuck`
    until the call returns and each progress thread has told the conclusion's epoch (a thread tells it on its first pass
@@ -865,10 +847,9 @@ static void ports_stalled(void){
   for(uint32_t p=0;p<port_count;p++){
     struct port *port=ports+p;
     const struct link *l=&port->link;
-    const uint64_t at=atomic_load(&port->moving_at);
     const int opening=port->job && !atomic_load_explicit(&port->done,memory_order_acquire) && now-port->job_at>=MESH_PLATFORM_NS;
     const int linking=l->job && !atomic_load_explicit(&l->done,memory_order_acquire) && now-l->job_at>=MESH_PLATFORM_NS;
-    const int moving=at && now>at && now-at>=MESH_PLATFORM_NS,out=opening||linking||moving,held=unheld>>p&1;
+    const int out=opening||linking,held=unheld>>p&1;
     any|=out;
     if(port->stuck){
       int returned=!out;
@@ -883,9 +864,8 @@ static void ports_stalled(void){
                 "made: its port concluded around it (design/recovery.md#five-seconds)\n",port->index,port->name,
                 (double)MESH_PLATFORM_NS/1e9);
     else say("link %u (%s): its %s out %.1f s: its port concluded around it (design/recovery.md#five-seconds)\n",port->index,
-             port->name,opening?"open's job":moving?"stop's lane reset":l->job==LINK_JOB_MAKE?"make job":
-             l->job==LINK_JOB_CONNECT?"connect job":"flush job",
-             (double)(now-(opening?port->job_at:moving?at:l->job_at))/1e9);
+             port->name,opening?"open's job":l->job==LINK_JOB_MAKE?"make job":l->job==LINK_JOB_CONNECT?"connect job":"flush job",
+             (double)(now-(opening?port->job_at:l->job_at))/1e9);
     port->open=0;
     port_lost(port,ETIMEDOUT);
     port->link.flush_at=0;

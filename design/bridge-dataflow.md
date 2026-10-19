@@ -63,7 +63,7 @@ bridge gives `ESRCH`.
 | `health` | bridge (`health_put`) | `mesh_nodes_health` | a second seqlock for record changes that leave the map as it is |
 | `busy`, `idle_since` | bridge (`busy_tell`) | `mesh_busy`, `mesh-stat` | flows; wall-clock ns at which the count last reached 0 |
 | `stopping` | nothing | nothing | — |
-| `lanes[8][10]` | clients claim a lane's word (CAS 0 to the owner word of the slot whose program rides it: `mesh_lanes_claim`) and release it (CAS on the word observed: the owner word to 0, owner\|DIRTY to DIRTY: `mesh_lanes_release`); bridge (`lanes_take` makes it owner\|DIRTY as a flow takes it, `lanes_release` clears DIRTY once it has reset the lane, `lanes_reap` lets go of a gone owner's with its DIRTY kept, `link_make` clears DIRTY) | `lanes_leased` (`program_take`), the clients' init (`mesh_lanes_free`) | a lane's lease (§3) |
+| `lanes[8][10]` | clients claim a lane's word (CAS 0 to the owner word of the slot whose program rides it: `mesh_lanes_claim`) and release it (CAS on the word observed: the owner word to 0, owner\|DIRTY to DIRTY: `mesh_lanes_release`); bridge (`lanes_take` makes it owner\|DIRTY as a flow takes it, `lanes_release` clears DIRTY on a lane its flow left with nothing posted, `lanes_reap` lets go of a gone owner's with its DIRTY kept, `link_make` clears DIRTY) | `lanes_leased` (`program_take`), the clients' init (`mesh_lanes_free`) | a lane's lease (§3) |
 | `bell[8]` | clients (`mesh_transfers_wake`); bridge (`port_bell`, `send_wake`) | port p's progress threads, when parked | a futex-like word; this is not a hardware doorbell |
 
 **A client slot** (`mesh.h struct mesh_client`, 64 slots):
@@ -112,7 +112,7 @@ block a port, the keepalive's frames' source and sink, for all `MESH_PORTS`, tak
 |---|---|---|---|---|
 | context, PD | device (port) | `mesh-verbs.h device_up` on the port's queue (`port_open`) | never by a call: `down_device` forgets the handles where the device failed with its link active; the kernel releases them at exit | `struct port.device` |
 | MRs | device: the window in 1 GiB extents (`MESH_REGION`), `IBV_ACCESS_LOCAL_WRITE` only | `device_up`, before any QP exists; checked against `max_mr` (`EFBIG`) | the kernel, at exit | `device.regions[]` |
-| the link's lanes: `MESH_LINK_LANES` (10) UC QPs on 2 CQs (receive `completion`, send `sent`), the CQs made once a context | port | `link_job(LINK_JOB_MAKE)` on hearing the peer's hello: `pair_up` (INIT); `LINK_JOB_CONNECT`: `queue_receive` (RTR), `queue_send` (RTS) for every lane | reset in place (`pairs_reset`: RESET, INIT, RTR, RTS) at a flow's stop (B6 (a)); moved to the error state (`pairs_error`) at a concluded link's flush (`LINK_JOB_FLUSH`, B6 (b)), and at the next pairing's `link_make` before `pairs_down` destroys each (B6 (c); one whose destruction fails kept for the next, B16; the CQs kept and drained), or forgotten (`pair_forget`) where the context is gone | `port.link.provider` |
+| the link's lanes: `MESH_LINK_LANES` (10) UC QPs on 2 CQs (receive `completion`, send `sent`), the CQs made once a context | port | `link_job(LINK_JOB_MAKE)` on hearing the peer's hello: `pair_up` (INIT); `LINK_JOB_CONNECT`: `queue_receive` (RTR), `queue_send` (RTS) for every lane | moved to the error state (`pairs_error`) at a concluded link's flush (`LINK_JOB_FLUSH`, B6 (b)), and at the next pairing's `link_make` before `pairs_down` destroys each (B6 (c); one whose destruction fails kept for the next, B16; the CQs kept and drained), or forgotten (`pair_forget`) where the context is gone | `port.link.provider` |
 | a flow | — | no verbs object: its rings and streams post on its lanes' QPs | — | — |
 
 All QPs are `IBV_QPT_UC` (`mesh-verbs.h pair_make`), with MTU 4096, a GRH with hop limit 1 and the port's GID
@@ -189,7 +189,7 @@ the peer's numbers copied at its dispatch and its pairing compared as it starts 
 |---|---|---|---|
 | `LINK_DOWN` (greeted, no job, past its quiet window, no call stuck) | its link block leased (`ENOMEM` concludes the link where the window has none) | `LINK_JOB_MAKE`: the last pairing's lanes to the error state and destroyed, or forgotten with the context; every DIRTY cleared, the lanes' `generation` moved; 10 QPs in INIT | `LINK_MADE`, LINK sent |
 | `LINK_MADE` | the peer's LINK heard (`link_heard`: 10 lanes, once, else `EPROTO`) | `LINK_JOB_CONNECT`: every lane RTR, then every lane RTS, each gate's capacity set, the keepalive's receives posted, the progress threads started | `LINK_UP`: every lane served, the port table's `lanes` 10, a new record |
-| `LINK_UP` | lanes found failed, or not reset at a flow's stop (`broken`) | none: `port_lost(EIO)`, the control socket closed | both ends pair afresh |
+| `LINK_UP` | lanes found failed, or left with requests posted at a flow's stop (`broken`) | none: `port_lost(EIO)`, the control socket closed | both ends pair afresh |
 | any | `flush_at` reached (its conclusion's window ended), no termination window, no call stuck | `LINK_JOB_FLUSH`: every lane to the error state; the `generation` moved where every QP moved (B6 (b), B7) | — |
 | any | a job's failure | none | `port_lost(code)`, paired again on hearing the peer (B16); a refused registration's port down until its link comes on |
 
@@ -271,9 +271,9 @@ Each turn (`main`), at most 250 ms apart:
    owner gets a kqueue `NOTE_EXIT` watch; if the pid is already gone (`ESRCH`), it is retired. In the event loop,
    `NOTE_EXIT` retires every slot of that pid.
 3. A slot with `configured == owner`, not yet in `accepted[s]`, and with no flow of an earlier owner of the same slot
-   running or stopping (one held for lanes its stop could not reset, its stop run, touches no word of the slot), is accepted:
+   running or stopping (one held for lanes it left with requests posted, its stop run, touches no word of the slot), is accepted:
    `ports = 0`, and `program_take(client, owner, d)` runs for each destination with transfers.
-4. Once no flow references a non-owned owner (`zombie == 0`, a flow held for lanes not reset among them: B7),
+4. Once no flow references a non-owned owner (`zombie == 0`, a flow so held among them: B7),
    `mesh_retired_release` returns closed rows to the window, and `mesh_reclaim` frees their arena pages.
 
 **Retiring** (`mesh-dataflow.c mesh_retire`, called by the client's `mesh_detach`, by `nccl-mesh.c session_retire` for
@@ -413,8 +413,7 @@ their communicator's lanes. Each step names the word written, its writer and its
    own `request.wr_id` stays 1, the producer's argument. When the chain is done, `stream->cell = successor`; on
    reaching the first cell again, `stream->cycle++`.
 6. **SEND completion.** `link_send` polls the link's `sent` CQ, names the lane by the QP's number and sets its gate's
-   `retired` from the `wr_id` (a completion whose `wr_id` top byte is not its lane's reset count is of a SEND posted
-   before the lane's reset, dropped: `lane_stale`). An error status stops the whole link (`link_failed`): every lane
+   `retired` from the `wr_id`. An error status stops the whole link (`link_failed`): every lane
    served no more, each lane's holder failed (`flow_lost(status, 2)`), the link concluded. The device completes every SEND (`mesh-verbs.h struct
    mesh_queue`).
 7. **Hardware credit.** TN3205's credit flow control holds each SEND until the peer has posted its matching receive
@@ -482,15 +481,12 @@ end.
 1. On the event loop: if `code != 0` and the owner is still owned, `mesh_cancel` that destination's words, then
    `status_failed` (phase `MESH_STOPPED`, `code`, `domain`, `failed = where`, `prepared` stored).
 2. On the port's queue, `lanes_release`: the flow's lanes' `holder` cleared, then `port_unlist` (once neither progress
-   thread reads it, no completion of its lanes is taken as its own). Unless the stop is its link's loss (`lost`), and
-   while every lane of it is served, no call of any port is stuck and no termination's window stands, each of its
-   lanes is reset in place under the guard (`pairs_reset`: RESET drops the receives its ring posted ahead and any SEND
-   not completed, with no completion; INIT, RTR, RTS toward the same peer queue pair with the pairing's numbers; the
-   reset stamped `moving_at` for B12), its reset count moved (`lane_stale` drops a completion of an earlier request),
-   its gate emptied (`retired = posted`) and its `MESH_LANE_DIRTY` cleared. A lane not reset (the link lost or not
-   served, a window, the guard not held, a step refused) is `broken`: the event loop concludes the link.
-3. The census line of each queue (its lane's gate and its ring, `reset` or `not reset`); `stopped` 2 where a lane was not
-   reset (its rows held until the lanes' `generation` moves: B7), else 1.
+   thread reads it, no completion of its lanes is taken as its own). A lane whose ring has every receive landed and
+   whose gate has every SEND retired has its `MESH_LANE_DIRTY` cleared. A lane left with a request posted makes no verbs
+   call here: unless the stop is its link's loss (`lost`) or a progress thread may still read the flow (`kept`), it is
+   `broken`, and the event loop concludes the link (`port_lost`), which pairs again by the pairing's own sequence.
+3. The census line of each queue (its lane's gate and its ring, `requests posted` where so); `stopped` 2 where a lane was
+   left with requests posted (its rows held until the lanes' `generation` moves: B7), else 1.
 
 Domains: 1 = a post, ring or job error (`flow_lost(...,1)`, `flow_done`); 2 = an error completion status, a failed
 SEND poll, or a SEND held the bound (B4); 3 = a failed receive poll; 4 = a program-level failure or a link's loss.
@@ -505,7 +501,7 @@ SEND poll, or a SEND held the bound (B4); 3 = a failed receive poll; 4 = a progr
 | the peer's program ended (`mesh_detach`, exit, revoke) | nothing here: the peer's flow stops at its end and resets its lanes there | this end's SENDs toward it are held and fail at the bound (B4); its other waits end by that or its caller's revoke | — |
 | a program not a lane pair's shape, no lease on any cable, no cable, a table full | `program_take`: `program_refused` (EINVAL, ENOLCK, EHOSTUNREACH: its status, then `~0`) or `program_fail` (E2BIG, ENOLCK) | the code, as its status and its words' `~0` | — |
 | a link lost: its socket's end or error, a send's failure, `EPROTO`, `KEV_DL_LINK_OFF` / `IF_DETACHED` (`ENETDOWN`, the port down until its link comes on), a FAREWELL (`ECONNRESET`), five seconds unheard (`ETIMEDOUT`, B2) | `port_lost`: its quiet window (B9) and, where the link was connected, its flush at the window's end (B6 (b)); `link_lost` (`served = 0` before the socket closes, the pairing moved, no verbs call); the socket closed; `flow_fail(code, 4, where = peer, lost)` on every flow of the port; `link_set(PAIRING` or `STOPPED)` → RECORD → map serial; a paired port says hello at once | words `~0`; status naming the peer; libnccl-mesh fails `ncclRemoteError` ("the link to node N was lost") and cancels all its destinations; the next session reads the new map | the same, on the other end (its socket's end, or its own five seconds) |
-| a program's stop with receives posted ahead or SENDs not completed | its lanes reset in place at its stop (`pairs_reset`, B6 (a)); DIRTY cleared once reset; earlier completions dropped by reset count; where no reset can be made, the link concluded | — | the same |
+| a program's stop with receives posted ahead or SENDs not completed | the link concluded at once (`broken`, B6 (a)); the flow's rows held until the next pairing destroys the queue pairs (B7); a communicator kept across calls stops only at its destroy | — | the same |
 | a link job fails (making or connecting) | `link_turn`: `port_lost(code)`, paired again on hearing the peer (B16); a refused registration's port down until its link next comes on | as a link lost | the link lost |
 | a verbs call out the bound, or a guard not held within it (B12) | `ports_stalled`: `open = 0`, `port_lost(ETIMEDOUT)`, no flush, `programs_stop(ETIMEDOUT, port)`; no port dispatches a driver call while any is out; the port opens again once it returns | words `~0`, ETIMEDOUT | the link lost |
 | the peer interface terminating (B9b) | `peer_terminated`: every port's and the exit's window held the bound, the port halted; `terminations_turn`: `port_lost(ETIMEDOUT)`, no flush | words `~0`, ETIMEDOUT | — |

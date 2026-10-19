@@ -420,7 +420,6 @@ int ibv_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attributes, int mask) {
   if (mask & IBV_QP_STATE) {
     qp->state = attributes->qp_state;
     if (attributes->qp_state == IBV_QPS_ERR) flush(q);
-    if (attributes->qp_state == IBV_QPS_RESET) q->posted_count = q->pending_count = 0, q->connected = 0;
   }
   pthread_mutex_unlock(&lock_);
   return 0;

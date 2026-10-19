@@ -319,11 +319,12 @@ static void flow_job(struct flow *f){
    end cancelled (M12) and its status the failure naming the node `where`, stored here on the event loop as
    programs_stop stores them (no queue waited on: design/recovery.md#five-seconds B4's order, ~0 and the status before
    B6, never behind a call held on the port's queue); then on its port's queue, after its job, its lanes let go
-   (lanes_release: no completion of them is taken as its own after it, and each lane reset in place where its link is
-   served, `lost` 0); once no progress thread reads it (`listed` 0: a flow a thread may still read is kept whole,
-   mesh-link.c lanes_release), the census printed (each of its queues' lane: the SEND requests and frames posted and
-   retired through its gate, and its ring's records posted and landed and their bytes); `stopped` 2 where a lane was not
-   reset, so a receive its ring posted may still land in its rows, else 1; its storage freed with it (flow_free) */
+   (lanes_release: no completion of them is taken as its own after it, a lane left with nothing posted freed, and the
+   link concluded where one was left with requests posted, `lost` 0); once no progress thread reads it (`listed` 0: a
+   flow a thread may still read is kept whole, mesh-link.c lanes_release), the census printed (each of its queues' lane:
+   the SEND requests and frames posted and retired through its gate, and its ring's records posted and landed and their
+   bytes); `stopped` 2 where a lane was left with requests posted, so a receive its ring posted may still land in its
+   rows, else 1; its storage freed with it (flow_free) */
 static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where,int lost){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;struct mesh_cancellation *cancel=f->cancel;
   f->stopping=1;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);
@@ -332,14 +333,14 @@ static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where
     status_failed(&mesh_client_at(M,owner)->status[destination],owner,code,domain,where);
   }
   dispatch_async(f->port->work,^{
-    const uint32_t reset=lanes_release(f,lost);
+    const uint32_t posted=lanes_release(f,lost);
     const struct link *l=&f->port->link;
     for(uint32_t q=0;f->rings && !f->listed && q<f->queues;q++){
       const struct send_gate *g=l->gate+f->lane[q];
       say("link %u census queue=%u requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu "
           "lane=%u%s\n",f->port->index,q,(unsigned long long)g->requests,(unsigned long long)g->posted,(unsigned long long)g->retired,
           (unsigned long long)g->completions,f->rings[q].count,f->rings[q].posted,(unsigned long long)f->rings[q].landed,
-          (unsigned long long)f->rings[q].bytes,f->lane[q],reset>>f->lane[q]&1?" reset":" not reset, its rows held");
+          (unsigned long long)f->rings[q].bytes,f->lane[q],posted>>f->lane[q]&1?" requests posted, its rows held":"");
     }
     atomic_store_explicit(&f->stopped,f->held?2:1,memory_order_release);
     wake();
@@ -627,7 +628,7 @@ void programs_stop(int64_t code,const struct port *port){
    seen (its exit retires every slot it holds, the event loop's EVFILT_PROC), one already gone retired at once, and on a
    liveness turn any client whose process exited retired; a program that ended (its slot given back or retired) has its
    flows stopped; a program started is taken toward each destination it binds, once no flow of the slot's earlier client
-   runs or stops (one held for a lane its stop could not reset, its stop run, touches no word of the slot).  Rows of a
+   runs or stops (one held for a lane it left with requests posted, its stop run, touches no word of the slot).  Rows of a
    retired client are released once no flow of one remains (one so held among them) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
@@ -657,8 +658,8 @@ void clients_turn(int liveness){
   unreleased|=changed;
   if(unreleased && !zombie){unreleased=0;mesh_retired_release(M);}
 }
-/* design/bridge-and-ipc.md#flows: every flow's turn: its job's end taken, a stopped flow freed (one held for a lane its
-   stop could not reset once its link's lanes' generation moved, link_make's or a flush's that moved every queue pair,
+/* design/bridge-and-ipc.md#flows: every flow's turn: its job's end taken, a stopped flow freed (one held for a lane it
+   left with requests posted once its link's lanes' generation moved, link_make's or a flush's that moved every queue pair,
    so no receive it posted is left on the device: 4df30806 flow_release's rule), and a progress thread's finding (a post
    or a completion that failed) its failure */
 void flows_turn(void){
