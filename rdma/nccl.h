@@ -147,6 +147,10 @@ extern "C" {
 #include <stddef.h>
 #include "mesh-plan.h"
 
+/* design/recovery.md#five-seconds: the most loads any GPU wait makes, a stream's polls of 0 included:
+   MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock rises,
+   rdma/NCCL.md "Bounded waits") */
+#define NCCL_MESH_POLLS 4500000u
 /* The stream: NULL (the host path) or an ncclMeshStream (the Metal path, above). */
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
