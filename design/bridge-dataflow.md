@@ -133,7 +133,7 @@ or READ, because TB5 offers only SEND and RECEIVE (bridge-and-ipc.md#lanes, TN32
  │       mesh_host_publish ->     │   │   signals, EVFILT_USER <- control_watch)       │       │             │
  │       cell.ready = 1+cycle     │   │ port p: work queue (verbs objects)             │       │             │
  │ GPU:  mesh_publish -> ready    │   │   send thread:  poll cell.ready -> post SEND ──┼─UC────┼─> RECV ─┐   │
- │       mesh_remote_wait <- word │   │   recv thread:  poll CQ -> store word, repost  │ TB5   │ recv thread │
+ │       mesh_wait_bounded <- word│   │   recv thread:  poll CQ -> store word, repost  │ TB5   │ recv thread │
  │ mesh_transfers_wake -> bell[p] │   │   parked on hdr.bell[p]                        │       │ stores word │
  │ mesh_transfers_start -> control│   │ control socket TCP [fe80::%enN]:18519 ─────────┼─TCP───┼─ control    │
  └──────────┬─────────────────────┘   └──────────┬─────────────────────────────────────┘       └──────┬──────┘
@@ -403,9 +403,9 @@ their communicator's lanes. Each step names the word written, its writer and its
     order on one lane (`mesh_host_arrived`, `mesh_metal_receive_prepare`).
     - Host: `mesh_host_arrived(ctx, ch->in, at)`, an acquire load. Landed means `word != ~0 && word >= 1 + c`
       (`nccl-mesh.c landed`).
-    - GPU: `mesh_remote_wait(inputs + ch->word + (at % 32) * ch->word_stride, c)` spins with a system-scope fence
-      until `word >= 1 + c` (`mesh.metal`). `~0` also satisfies the wait, and the caller tells the two apart. In the
-      bounded form, `polls` loads are allowed, and past them the position is written into violation words [2..4].
+    - GPU: `mesh_remote_wait_bounded(inputs + ch->word + (at % 32) * ch->word_stride, c, polls)` spins with a
+      system-scope fence until `word >= 1 + c` (`mesh.metal`), for at most `polls` loads; past them the position is
+      written into violation words [2..4]. `~0` also satisfies the wait, and the caller tells the three apart.
 12. **Consumption.** The host copies or combines from `ch->receiving + (at % 16) * slot`; `METAL_STAMP` mismatches
     are role violations. This frees the client to publish `at + LAG` (step 2).
 
@@ -574,7 +574,7 @@ change, so the binary-change stop (§5) applies.
 | When are receives posted? | `receives_configure`, `ring_advance` |
 | Which word does a landing store? | `receive_input`; `record_landed` |
 | How does a relay hand a landing on? | `receive_input` (`release`), `send_wake` |
-| How does the client see a landing? | `mesh-collective.c mesh_host_arrived`; `mesh.metal mesh_remote_wait`; `nccl-mesh.c landed`, `run` |
+| How does the client see a landing? | `mesh-collective.c mesh_host_arrived`; `mesh.metal mesh_remote_wait_bounded`; `nccl-mesh.c landed`, `run` |
 | How do the link's lanes work? | `link_job`, `link_turn`, `link_heard`, `link_remake`, `link_send`, `link_receive`, `lane_lost` |
 | When do progress threads sleep or wake? | `port_progress`, `port_pass`, `port_list`, `port_unlist`, `mesh-call.c mesh_transfers_wake` |
 | What happens on failure? | `flow_lost`, `lane_failed`, `flow_fail`, `flow_stop`, `lanes_release`, `flow_free`, `port_lost`, `link_turn` (the idle cycle) |
@@ -769,9 +769,9 @@ are the deployed bridge's. Its name is its configuration's (`host_read` reads no
 `mesh_loop_bind(region, service)` names the bridge a process attaches to and asks, before its first attach or
 request) and `rdma/.build/host/libnccl-mesh.dylib` (nccl-mesh.c with `MESH_HOST_EXECUTOR` and nccl-mesh-host.c in
 place of nccl-mesh-metal.m and mesh-metal.m: every function of nccl-mesh-metal.h run on the CPU in the walk's order,
-transcribed from the kernels, its waits polls of the words the bridge stores, bounded by the program's polls where it
-has violation words, so the Metal path's walk runs with no GPU kernel; the Metal 4 form's own steps are refused as the
-classic form refuses them). Deviation from 800fe6bc^: HEAD's Metal half (bounded waits, the violation words, combine3,
+transcribed from the kernels, its waits polls of the words the bridge stores, every wait bounded (the program's polls,
+and at most `MESH_PLATFORM_NS`), so the Metal path's walk runs with no GPU kernel; the Metal 4 form's own steps are
+refused as the classic form refuses them). Deviation from 800fe6bc^: HEAD's Metal half (bounded waits, the violation words, combine3,
 counted all-to-all, split-KV partials, retain and contents) transcribed; the arithmetic is nccl-mesh.c's own
 (`nccl_mesh_combine`, `nccl_mesh_premultiply`, `nccl_mesh_truncdiv`, hidden, where `MESH_HOST_EXECUTOR` is defined).
 

@@ -180,8 +180,9 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     the caller's device, the library's buffers added to the caller's `residencySet`; nothing is committed or
     signalled. `ncclMeshEncodeMetal4(comm, op, send, recv, count, type, encoder, table, residency, polls)` is the
     all-reduce spelled so; every collective and group takes the stream. Its waits are bounded by the stream's `polls`
-    as the classic form's are, 0 leaving a wait to its landing or its cancellation ([Bounded waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such
-    a group completes in its encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
+    as the classic form's are, 0, or more than `NCCL_MESH_POLLS`, being `NCCL_MESH_POLLS` ([Bounded
+    waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such a group completes in its
+    encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
   - A wait is a kernel polling its position's completion word, a word of the session's that its canceller ends (a
     link silent for `MESH_SILENT_NS`, a lost link, a revoke: design/recovery.md Q16), and the stream's `polls` bounds

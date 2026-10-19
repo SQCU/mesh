@@ -5,11 +5,12 @@
    runs as the walk encodes it, in the walk's order, its body transcribed from nccl-mesh-metal.m's: copies and combines
    in host memory (the host path's arithmetic, nccl-mesh.c combine_into, premultiply, truncdiv and partials_layout, which
    nccl-mesh.c exports hidden to this file where MESH_HOST_EXECUTOR is defined), publications release-stored, a wait for
-   a landing a poll of its word (mesh.metal mesh_remote_wait: until it reaches 1 + the cycle or the session's canceller
-   stores ~0; bounded by the program's polls where it has violation words, mesh_remote_wait_bounded, past which the
-   position, the channel and the bound go to violation words [2], [3] and [4] and every later step of the program does
-   nothing), a landed wait's positions checked against the filler protocol (violation words [0] and [1]).  An unbounded
-   wait that sees nothing for twice MESH_SILENT_NS (the session's canceller ends it first) fails ETIMEDOUT.  A buffer is a host
+   a landing a poll of its word (mesh.metal mesh_remote_wait_bounded: until it reaches 1 + the cycle or the session's
+   canceller stores ~0, for at most the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, and
+   at most MESH_PLATFORM_NS, design/recovery.md#five-seconds; past them the position, the channel and the bound go to
+   violation words [2], [3] and [4] and every later step gated on them does nothing), a landed wait's positions checked
+   against the filler protocol (violation words [0] and [1]); a step naming no words is gated on the program's
+   (metal_gate), as nccl-mesh-metal.m dispatch_as binds them.  A buffer is a host
    address (metal_wrap returns its address; metal_contents it); what metal_scratch and metal_event made is counted and
    freed with its last release.  The Metal 4 form's own steps (a caller's kernel running a step: metal_send_deferred,
    metal_land_deferred) are refused as the classic form refuses them.  Built as .build/host/libnccl-mesh.dylib (make
@@ -17,6 +18,7 @@
 #include "mesh-metal.h"
 #include "mesh-collective.h"
 #include "nccl-mesh-metal.h"
+#include "nccl.h"
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -112,10 +114,13 @@ void metal_release(void *object) {
 
 void *metal_retain(void *object) { hold(object); return object; }
 
+/* nccl-mesh-metal.m bound_of: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS */
+static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
+
 struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls) {
   (void)command_buffer; (void)encoder;
   struct metal_program *program = calloc(1, sizeof *program);
-  if (program) { program->violation = violation; program->polls = polls; }
+  if (program) { program->violation = violation; program->polls = bound_of(polls); }
   return program;
 }
 
@@ -126,32 +131,28 @@ struct metal_program *metal_begin4(void *encoder, void *table, void *residency, 
 }
 int metal_metal4(const struct metal_program *program) { (void)program; return 0; }
 void metal_resident(struct metal_program *program, void *buffer) { (void)program; (void)buffer; }
+void metal_gate(struct metal_program *program, void *violation) { program->violation = violation; }
 
-/* a step's violation words: those it names (a wait's check), else the program's where its waits are bounded, and the
-   bound that holds with them (nccl-mesh-metal.m dispatch_as: p.polls is the program's where there are such words) */
+/* a step's violation words: those it names (a wait's check), else the program's, and the bound that holds with them
+   (nccl-mesh-metal.m dispatch_as: p.polls is the program's where there are such words) */
 static _Atomic uint64_t *words_of(struct metal_program *program, void *given, uint32_t *polls) {
-  _Atomic uint64_t *v = given ? given : program->polls ? program->violation : NULL;
+  _Atomic uint64_t *v = given ? given : program->violation;
   *polls = v ? program->polls : 0;
   return v;
 }
-/* mesh_step_enter: a bounded program whose violation word [2] holds a failure does nothing more */
+/* mesh_step_enter: a step whose violation words' [2] holds a failure does nothing */
 static int halted(_Atomic uint64_t *v, uint32_t polls) { return polls && v && atomic_load_explicit(v + 2, memory_order_acquire); }
 
-/* mesh_step_wait: the word until it reaches 1 + cycle (or ~0), at most `polls` looks where bounded */
-static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls, int *timed_out) {
-  const uint64_t target = 1 + cycle, deadline = now_ns() + 2 * MESH_SILENT_NS;
+/* mesh_step_wait: the word until it reaches 1 + cycle (or ~0), at most `polls` looks (0: one) and at most
+   MESH_PLATFORM_NS, a host look being far slower than a GPU load (design/recovery.md#five-seconds) */
+static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls) {
+  const uint64_t target = 1 + cycle, deadline = now_ns() + MESH_PLATFORM_NS;
   uint64_t seen = atomic_load_explicit(word, memory_order_acquire);
-  for (uint64_t k = 1; seen < target; k++) {
-    if (polls && k >= polls) break;
+  for (uint64_t k = 1; seen < target && k < polls; k++) {
+    if (!(k & 63) && now_ns() > deadline) break;
     /* N ranks share the host's cores with N bridges: a wait that runs long yields them */
     if (k > 4096) usleep(20);
     else if (k > 256) sched_yield();
-    if (!polls && !(k & 63) && now_ns() > deadline) {
-      snprintf(error_, sizeof error_, "a wait for a landing: the word stayed at %llu below %llu", (unsigned long long)seen,
-               (unsigned long long)target);
-      *timed_out = 1;
-      break;
-    }
     seen = atomic_load_explicit(word, memory_order_acquire);
   }
   return seen;
@@ -255,10 +256,7 @@ int metal_spin(struct metal_program *program, void *words, size_t offset, uint64
   uint32_t polls;
   _Atomic uint64_t *v = words_of(program, check ? check->violation : NULL, &polls);
   if (halted(v, polls)) return 0;
-  int timed_out = 0;
-  const uint64_t status = step_wait((_Atomic uint64_t *)at(words, offset), cycle, polls, &timed_out);
-  if (timed_out) return ETIMEDOUT;
-  step_check(check, v, polls, status, cycle);
+  step_check(check, v, polls, step_wait((_Atomic uint64_t *)at(words, offset), cycle, polls), cycle);
   return 0;
 }
 
@@ -277,10 +275,7 @@ int metal_land(struct metal_program *program, int type, int op, void *dst, size_
   _Atomic uint64_t *v = words_of(program, check ? check->violation : NULL, &polls);
   if (type >= 0 && !walked(type)) return EINVAL;
   if (halted(v, polls)) return 0;
-  int timed_out = 0;
-  const uint64_t status = step_wait((_Atomic uint64_t *)at(words, word_offset), cycle, polls, &timed_out);
-  if (timed_out) return ETIMEDOUT;
-  step_check(check, v, polls, status, cycle);
+  step_check(check, v, polls, step_wait((_Atomic uint64_t *)at(words, word_offset), cycle, polls), cycle);
   if (halted(v, polls) || !n) return 0;
   atomic_thread_fence(memory_order_acquire);
   if (type < 0) memmove(at(dst, dst_offset), at(slot, slot_offset), n);
