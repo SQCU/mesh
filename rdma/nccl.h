@@ -18,22 +18,24 @@
    steps, nccl-mesh-metal.m's kernels) is the only code that publishes a piece, lands or combines it, and waits on it.
 
    Communicators.  ncclCommInitRank is NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else the
-   listener ncclGetUniqueId opens; the bindings take MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets
-   them), every rank's node (mesh_observe) meets there; the id is its name.  Its two gathers lease the communicator's
-   lane pair toward each peer on a cable of its bridge (the first unbounded, the second, which holds the claims,
-   bounded by mesh.h MESH_PLATFORM_NS a send or receive), so an init fails as a value where a link has no pair free at
-   both ends or a peer is silent past that bound.  Every communicator reads its bridge's map over its members
+   listener ncclGetUniqueId opens, on the node's fabric address where it holds one; the bindings take
+   MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets them), every rank's node (mesh_observe) meets there,
+   the root listening on that host alone where it is an IPv6 address; the id is its name.  ncclCommInitRankConfig with
+   config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Its two gathers lease the
+   communicator's lane pair toward each peer on a cable of its bridge (the first unbounded, the second, which holds the
+   claims, bounded by mesh.h MESH_PLATFORM_NS a send or receive), so an init fails as a value where a link has no pair
+   free at both ends or a peer is silent past that bound.  Every communicator reads its bridge's map over its members
    (mesh-plan.h mesh_map: the other nodes its relays, with the routing table the bridges forward along) each time its
-   session opens.  ncclMeshCommInitRank (below) is for a program that passes its own programs or paths.  ncclCommSplit
-   and ncclCommShrink make communicators of the ranks they take, on the bridges' map like any other; Split leases its
-   children's lanes over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to two ranks or more,
-   as an ncclMeshCommInitRank of two ranks or more, leases none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow
+   session opens.  ncclMeshCommInitRank (below) is the same init for a program that passes its own programs or paths.
+   ncclCommSplit and ncclCommShrink make communicators of the ranks they take, on the bridges' map like any other;
+   Split leases its children's lanes over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to two
+   ranks or more leases none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow
    meets at the bootstrap of the id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.
-   ncclCommRevoke revokes comm for good: its session's waits end, its groups in flight fail, a session opening (its
-   start, or its agreement awaiting its peers') ends and none opens after it, and every later group on comm fails at
-   once (ncclRemoteError), until ncclCommDestroy closes the session;
-   from any thread, under comm's own lock alone, never one a group of any communicator holds while it waits.  Making a
-   communicator (a lone rank's too) attaches the process's client of its node's bridge where it
+   ncclCommRevoke revokes comm for good: an init still running (a non-blocking one's) ends as a value, its session's
+   waits end, its groups in flight fail, a session opening (its start, or its agreement awaiting its peers') ends and
+   none opens after it, and every later group on comm fails at once (ncclRemoteError), until ncclCommDestroy closes
+   the session; from any thread, under comm's own lock alone, never one a group of any communicator holds while it
+   waits.  Making a communicator (a lone rank's too) attaches the process's client of its node's bridge where it
    has none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot
    held, no region of a bridge that runs, or a lease of a bridge that stopped still held.
 
@@ -50,9 +52,10 @@
    ncclCollConfig_t.algSelection is not read.  The members
    agree before any group runs: each publishes its digest of what its programs are made from (the route between each
    two members and the bandwidth of the links it crosses, the planner's version, the session's wire, the paths and
-   trees, the programs) on every channel at the session's opening and compares its peers', so members that read
-   the map on either side of a change fail the session as a value naming the disagreement (ncclRemoteError), never run
-   programs of two maps, and the next group opens on the map then.  A group
+   trees, the programs) and of the communicator's name on every channel at the session's opening and compares its
+   peers', so members that read the map on either side of a change, or ranks of two communicators that one bootstrap
+   port paired, fail the session as a value naming the disagreement (ncclRemoteError), never run programs of two
+   maps, and the next group opens on the map then.  A group
    (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps; a
    point-to-point call one step) on its communicator's session: its program's own slot on the process's client of its
    node's bridge (Memory, below), taken under its name at its first group that crosses a link and again after a
@@ -868,20 +871,30 @@ ncclResult_t pncclGroupStart(void);
 ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);
 
-/* A communicator over a program's own operands: `programs` its compiled collectives (mesh-plan.h struct mesh_program,
-   copied, kept for its life; a call runs the first whose collective, and a rooted one's root, is the call's and whose
-   `below` its bytes are under, 0 any size), or with none (count 0) the structural table (above), every collective
-   along `paths` (its routing tables: each member's trees; NULL: the map's shortest-path trees), checked against the
-   map at each session; `small` the bytes of its small class's slot (mesh-plan.h mesh_wire: a step's piece of at most
-   lag of them takes that class, each position that many bytes on the wire, its frames the receive's; 0: the bridges'
-   block), which its splits and shrinks keep; rank r of `nranks` on the bridge of node node[r]; `name` the
-   communicator's (NULL: "nccl").  Like every communicator, it reads the bridges' map at each opening of its session.
-   Every rank passes the same nranks, paths, programs, small, nodes and name.  It makes no exchange, so it leases no
-   lane pair: of two ranks or more it is refused before its slot is taken (ncclInvalidUsage, ENOLCK; ncclCommInitRank's
-   bootstrap leases them). */
+/* A communicator over a program's own operands, made as ncclCommInitRank makes one (Communicators, above): NCCL's
+   bootstrap at `commId`, the root's host:port (ncclGetUniqueId, or NCCL_COMM_ID's form; the root listens on that host
+   alone where it is an IPv6 address), which the caller hands every rank, its two gathers leasing the communicator's
+   lane pairs, rank `rank` of `nranks` on the bridge of its own node (each rank's node its bridge's, gathered there).
+   `programs` its compiled collectives (mesh-plan.h struct mesh_program, copied, kept for its life; a call runs the
+   first whose collective, and a rooted one's root, is the call's and whose `below` its bytes are under, 0 any size), or
+   with none (count 0) the structural table (above), every collective along `paths` (its routing tables: each member's
+   trees; NULL: the map's shortest-path trees), checked against the map at each session; `small` the bytes of its small
+   class's slot (mesh-plan.h mesh_wire: a step's piece of at most lag of them takes that class, each position that many
+   bytes on the wire, its frames the receive's; 0: the bridges' block), which its splits and shrinks keep; `name` the
+   communicator's, its session's slot's on every member and in its members' digest (NULL: commId's).  Like every
+   communicator, it reads the bridges' map at each opening of its session.  Every rank passes the same commId, nranks,
+   paths, programs, small and name.  `config` NULL, or its `blocking` not 0, is a blocking init.  With `blocking` 0 it is
+   NCCL's non-blocking init: *comm is set at once and the init runs on a thread of its own, the call returning
+   ncclInProgress (ncclSystemError where no thread could run it); ncclCommGetAsyncError gives ncclInProgress until the
+   init ends, then its result, its failure named (ncclGetLastError).  No call takes comm before then but
+   ncclCommGetAsyncError, ncclCommRevoke, ncclCommAbort and ncclCommDestroy: a revoke shuts its bootstrap's sockets
+   down, and its connect and its root's accept read the revoke at each 100 ms look, so the init ends as a value with
+   its claims released; ncclCommAbort or ncclCommDestroy then joins its thread and frees comm, failed or not.
+   ncclCommInitRank is this call with no paths, no programs, small 0, no name and no config, and ncclCommInitRankConfig
+   the same with the caller's config (of which only `blocking` is read). */
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
-ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const struct mesh_trees* paths,
-                                  const ncclMeshProgram* programs, int count, uint64_t small, const int* node, const char* name);
+ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, const struct mesh_trees* paths,
+                                  const ncclMeshProgram* programs, int count, uint64_t small, const char* name, ncclConfig_t* config);
 /* A collective's form, an entry of a communicator's configuration (ncclMeshCommForms): `collective` (mesh-plan.h
    MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER) at `root` (a reduce's or a
    broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
