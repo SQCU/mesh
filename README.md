@@ -121,14 +121,11 @@ gone <name>                         an announcement withdrawn
 ```
 
 The fabric's nodes are the bridge's map, so a node cabled to this one is known along its cable and never asked over
-Wi-Fi (the operator, 2026-10-16); its facts are node-info's, which a client reads through its own bridge
-(`mesh.ask(node, 'nodeinfo', b'')`, rdma/mesh.py). Discovery on the shared LAN is its mDNS (git 1587656: control
+Wi-Fi (the operator, 2026-10-16); its facts are node-info's, which its resident rank answers (metal-microbench
+docs/elastic.md#call-delivery). Discovery on the shared LAN is its mDNS (git 1587656: control
 traffic needs no fabric), so it is not limited to one cable hop; a node on no shared LAN is found only over its own
 cables. Every line arrives when its event does: a slow node delays only its own lines, and a node that is not there
 is simply absent. The consumer reads a stream and deals with out-of-order arrival.
-
-`mesh-run` follows the same shape: every node runs in parallel and each output line is
-prefixed with its node, streaming as it arrives.
 
 **`io.mesh.update` re-converges from the branch every 15 minutes**, as root. Before
 this existed, every fix required a human at a keyboard typing `sudo` on each node —
@@ -150,23 +147,9 @@ parts that change often do not need root:
 ./install-user.sh
 ```
 
-It installs a node-identity responder as a **user LaunchAgent** on port 8100 and puts
-`mesh-peers` / `mesh-run` in `~/.local/mesh/bin`. Nothing touches `/usr` or `/Library`.
-
-Port 8100 rather than 8099 because the system `io.mesh.nodeinfo` holds 8099 in the
-root domain; a node with no root install is identified by its userspace responder alone.
-The bridge's `nodeinfo` service and `mesh-run` ask both.
-
-`inetdCompatibility` does **not** work in the GUI/user domain — launchd accepts the
-connection, closes it, and never runs the program (`runs = 0`), while the socket looks
-perfectly healthy. Hence a plain listener under `KeepAlive` instead.
+It puts `mesh-peers` in `~/.local/mesh/bin`. Nothing touches `/usr` or `/Library`.
 
 ### Reaching a node does not require routing
-
-`mesh-run` takes its targets from the routing table (each `fd6d:6573:68::` identity babeld learned) and from `ndp`'s
-neighbours on each fabric port, and asks each for its record, for as long as it takes to answer; an address that gives
-none is named on standard error and the command is not run there. Its ssh is the one job ssh keeps: administering the
-substrate (metal-microbench docs/principles.md section 4); a node asks its own bridge for everything else.
 
 Adjacency is knowable from the kernel with no protocol involved, so a node is findable
 over a cable even if it never advertises a routable address. Relaying is independent of
@@ -222,7 +205,7 @@ backwards, and the label hides a real dependency:
   we own. It needs no infrastructure that anyone else controls.
 
 So the fabric can be a node's *only* link, and control has to ride it when that is the
-case — `ssh`, `mesh-peers` and `mesh-run` all work over `fabric-adjacent` link-local
+case — `ssh` and `mesh-peers` both work over `fabric-adjacent` link-local
 addresses for exactly this reason. Breaking the fabric is a reachability failure, not
 an inconvenience, which is why [RDMA-RULES.md](RDMA-RULES.md) is a reachability
 document.
@@ -259,7 +242,6 @@ position does not matter and nothing records it. Then verify, from either end:
 ```
 mesh-status                     # rdma_enX PORT_ACTIVE, io.mesh.* all loaded
 mesh-peers                      # the new node appears: in its bridge's map, and its announcement
-mesh-run all 'sysctl -n hw.model'
 ```
 
 What each step proves, in order, so a failure tells you where to look:
@@ -270,9 +252,8 @@ What each step proves, in order, so a failure tells you where to look:
 | some `rdma_enX` is `PORT_ACTIVE` | a cable is in, both ends RDMA-enabled | cable, or the far end never had `rdma_ctl enable` |
 | `ifconfig <port>` has an `fe80::` address | `mesh-fabric-init` ran | check `/usr/local/mesh/log/fabric.log` |
 | the peer appears in `mesh-peers` | its bridge's record reached this one, or its beacon announced it | check `~/Library/Logs/io.mesh.bridge.log`, `/usr/local/mesh/log/router.log`; confirm both nodes advertise |
-| `mesh-run <name> true` succeeds | the roster reached the node | re-run `install.sh`; keys merge, they never truncate |
 
-A node that answers `mesh-peers` and `mesh-run` is administrable and workloadable.
+A node that answers `mesh-peers` is administrable and workloadable.
 Nothing else is required of it.
 
 ## Is anything missing?
@@ -381,11 +362,10 @@ the node's uplink.
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
-| `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, sampled by `io.mesh.nodeinfo` (`user/mesh-nodeinfod.py`) and served on 8099. |
-| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** Every resident job is KeepAlive with `ThrottleInterval` 1 (launchd starts it again at once after an exit, at most once a second; its default is 10) and picks up a new program or configuration by exiting: the bridge on its binary (design/bridge-and-ipc.md); node-info, telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the updates) and the convergence's passes read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. Nothing boots a job out but the operator's `mesh-converge.sh off`, which removes definitions and lets each loop end. |
+| `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
+| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** Every resident job is KeepAlive with `ThrottleInterval` 1 (launchd starts it again at once after an exit, at most once a second; its default is 10) and picks up a new program or configuration by exiting: the bridge on its binary (design/bridge-and-ipc.md); telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the updates) and the convergence's passes read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL. Nothing boots a job out but the operator's `mesh-converge.sh off`, which removes definitions and lets each loop end. |
 | `bin/mesh-converge.sh` | the node's convergence (Convergence, below): with no argument the mesh checkout's pass (`io.mesh.converge`); `held` and `stamp` are the node's convergence for any consumer's layer, `off` takes the node out. |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION. It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
-| `bin/mesh-run.sh` | run a command on one node, `all`, or `others`. Installed as `mesh-run`. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer, at each run, unless its link is the node's only one (design/recovery.md, port). Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric record: RDMA enablement and each device's link, as boot found them. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
@@ -393,7 +373,7 @@ the node's uplink.
 | `viz/` | the whole-fabric observer (`io.mesh.observer`, :8787) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-flow.c`, `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh-metal.m`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
-| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions and their one silent bound, `mesh.h` `MESH_SILENT_NS`), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
+| `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its sessions), `nccl-mesh-metal.m`/`.h`, `mesh-collective.c`/`.h`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
 | `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_observe`, `mesh_map`, `mesh_map_wait`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
@@ -439,8 +419,7 @@ So every node takes a routable identity address and the fabric is routed:
   per-node configuration, and uses every link rather than blocking one the way a
   spanning tree would — which is the whole reason to cable a ring.
 - **Enumeration**: the bridges' map names every node on the fabric, `mesh-peers` adds the shared LAN's (above), and
-  each node's record lists its routes; `mesh-run` reaches a node over the LAN or its
-  routed identity address, at any hop count.
+  each node's record lists its routes.
 
 babeld is vendored as a prebuilt arm64 binary — see [vendor/PROVENANCE.md](vendor/PROVENANCE.md)
 for the source, hashes, and the one-line build fix. A node must never need a
@@ -465,14 +444,10 @@ path <self> kind=fabric-routed addr=fd6d:6573:68:<c>
 ```
 
 A node's own facts (`name=<peer> node_id=... boot_id=... ula=fd6d:6573:68:<d>` and the rest below) come from
-`io.mesh.nodeinfo`, read through the asking node's bridge (its `nodeinfo` service), a Python service on port 8099 (8100 for the user
-service). One sampler runs `mesh-nodeinfo.sh`, at its start and again after each request it has not yet sampled for,
-never two at once, as the admin user (the system responder on 8099 is that user's, launchd `UserName`), so no root process runs the user's
-checkouts or bridge reader. Every value is one token (a space in it is written `_`: `chip=Apple_M4_Pro`), so a reader
+`mesh-nodeinfo.sh`, which the node's resident rank runs for a `{"facts"}` request (metal-microbench
+docs/elastic.md#call-delivery), as the rank's user, so no root process runs the user's checkouts or bridge reader. Every value is one token (a space in it is written `_`: `chip=Apple_M4_Pro`), so a reader
 that splits a line on whitespace reads it whole; `rdma/peers.py` `fields` reads a value to the next `key=` of its line
 and takes either form.
-Clients receive its latest completed output at once, each in a connection of its own, with `sample_status` and
-`sample_updated`; a request asks for the next sample but never waits for it, and the sampler opens no device.
 Each node reports its name, hardware (its chip and GPU core count among it), macOS, RDMA enablement and SDK state, its
 bridge's window (`window`, mesh-stat's own top-level figure: since mesh-stat prints every node's record, the last
 `"window"` of its line was another node's, and from 67d50f2 each of the pair published the other's), its admin account,
@@ -491,17 +466,9 @@ port was `PORT_ACTIVE`. A port's address and neighbours are telemetry's (`io.mes
 The RDMA graph is the bridges' map: each bridge floods its ports' record to every other, so every node holds the
 whole graph (`mesh-plan.h` `mesh_map`) — no central registry, no multicast, no hop limit.
 
-Running work anywhere:
-
-```
-mesh-run all      'sysctl -n hw.model'
-mesh-run others   'uptime'
-mesh-run <name>   'ls /usr/local/mesh'
-```
-
 Job submission needs no new machinery. Every node already runs sshd and trusts the
-operator roster; the only missing piece was knowing which nodes exist, which the bridge's map, `mesh-peers` (the LAN)
-and `mesh-run` (the routing table and the neighbour cache) answer.
+operator roster; the only missing piece was knowing which nodes exist, which the bridge's map and `mesh-peers` (the
+LAN) answer.
 
 > If you write a plist to `/Library/LaunchDaemons` with `inetdCompatibility`, do not
 > also set `StandardOutPath`. It overrides the socket launchd dups onto stdout, and

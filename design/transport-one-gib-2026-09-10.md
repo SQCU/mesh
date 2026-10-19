@@ -105,7 +105,7 @@ numeric LAN address in the measurement command.
 
 The 2026-09-10 recipe below named `mesh-page-stream` and `mesh-verbs-stream`, deleted on 2026-09-12 (mesh f92e9eee,
 554a3793), and a bridge each reading started and stopped. On the resident bridge (MESH_VERSION 124, WP2), the reading
-is a client program on a lane pair of the link (mesh design/bridge-dataflow.md#streams); the bridge's own raw stream
+is a client program on a lane pair of the link (mesh rdma/mesh-stream.c); the bridge's own raw stream
 of MESH_VERSION 118 is deleted with the per-program queue pairs, so the raw denominator is no longer read by this
 tool. Build it beside the bridges as they run (a client of libmesh):
 

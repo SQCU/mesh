@@ -139,10 +139,6 @@ its link active (its context gone with the peer's power) is forgotten with no ve
 releasing the old one at the bridge's exit. A flow's own failure is told to no one: the peer's program ends by what
 ends it at its own end (its link's loss, its caller's revoke).
 
-A port's stripes (design/bridge-dataflow.md#stripes) ride the link's lane 1 and fail as it does: the requests in flight
-fail as values (each writer's word `UINT64_MAX`, its ring's code), failed by the send thread that holds them, and the
-lane is made again with the link or on its own as above.
-
 ### farewell
 
 A bridge that stops sends FAREWELL on every link before closing it, carrying why it stops (the signal it took, or its
@@ -247,9 +243,9 @@ recovery with its duration and count, goes to `fabric.log` and the unified log, 
    failing. No path here runs a program again after a cut: a failed execution's process prepares its programs again,
    their counts starting at zero.
 
-4. **The stripe flow's guard and flush are unverified.** A move to the error state and its flushed completions have
-   never run on Apple's provider, and the guard's pause of a port's progress threads during another flow's verbs
-   work is unmeasured; integration reads both first (design/bridge-dataflow.md#stripes).
+4. **The guard and the flush are unverified.** A move to the error state and its flushed completions have never run
+   on Apple's provider, and the guard's pause of a port's progress threads during a link's verbs work is unmeasured;
+   integration reads both first.
 
 ## Failures by kind and topology
 

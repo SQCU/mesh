@@ -388,7 +388,7 @@ receives in RTS queue pairs as the device closed (2).
 
 ### The restored service's answer to each
 
-The stripe service restored at MESH_VERSION 118 (design/bridge-dataflow.md#stripes) is built so that none of the
+The stripe service restored at MESH_VERSION 118 (deleted at MESH_VERSION 125; its guard stays) is built so that none of the
 three can happen:
 - **One owner of every teardown.** Its queue pairs are a flow of the port, made, connected and destroyed only by jobs on
   the port's serial queue, where every flow's and the lanes' are; its posts run on the port's two progress threads, as
@@ -402,7 +402,7 @@ three can happen:
   flushed completions (`pair_flush`, 65,536 empty polls at most) before `down_pair`, so the device holds no posted
   receive of it when it is destroyed, at a stripe flow's reset (the bridge's stop releases nothing, October 18, below).
 
-What integration testing reads first (design/bridge-dataflow.md#stripes): "stripes closed (N completions flushed)" with
+What integration testing was to read first: "stripes closed (N completions flushed)" with
 N > 0 where receives were posted (the provider's flush works; with N = 0 the move to the error state did nothing here,
 and the queue pairs were destroyed as before); a session's teardown on a port with stripes up crashing nothing; the
 Mini's bridge stopped with a stripe flow up, then the M5's, apart, with each extent deregistered once in the kernel log

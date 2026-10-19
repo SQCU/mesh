@@ -36,8 +36,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   Separate `isend`/`irecv` calls in the same order on both sides do not pair; the library reports it, and on MPS
   tensors the next call raises.
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group.
-- A link that lands nothing for the library's one bound (`mesh.h` `MESH_SILENT_NS`, 10 s) is cancelled, and the
-  collective waiting on it fails; the group's `timeout` is not the library's to read.
+- The group's `timeout` is not the library's to read: a collective's waits end at a landing, a cancellation or a
+  revoke.
 - Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
   `gather`, `scatter`, a collective's crossings) are forwarded by the bridges on their route
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
@@ -374,9 +374,4 @@ w = s["lm_head"].to("cpu")                        # decoded
   them), and the graph's end commits what it left open, so a compiled collective does not pay the command-buffer floor
   of its own commit. Reproduction target: metal-microbench `crossing.py` with `COMPILE=1 COMPILER=mesh`, 12.7 us
   a crossing (mesh 3c00d37; 17.4 us eager). A graph's backward, run from autograd, is not batched.
-- Resident ranks: metal-microbench `tools/torch_parallel/pair.py up | call | down` keeps one torch process a node
-  (`resident.py`: the process group, each program's weights, reference and recorded step), its service registered with
-  its own bridge and every call carried through the bridges, so a check costs its function and a round trip; a call
-  that fails is a value and the next opens its sessions on the map as it is then. `timeline.py` gives each call's
-  terms (gate, network, tail, the peer's lateness, overhead) from the bridges' ledgers (`rdma/ledger.py`).
 - Readings and their records: metal-microbench `docs/measurement.md`.
