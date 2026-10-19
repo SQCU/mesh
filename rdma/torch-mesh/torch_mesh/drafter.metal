@@ -276,12 +276,20 @@ kernel void mesh_saguaro_keys(device const uint *state [[buffer(0)]], device con
     own[8] = key == 0xffffffffu ? state[8] : key;
 }
 
-// A product's output zeroed before a drafting member's share of it (metal-microbench docs/kernels.md#the-drafter-as-a-share)
-// writes its rows: the export orders a product's rows by their energy, so a member's run of coded rows lands scattered
-// over the product's natural rows, and the members' partials, zeros outside each one's rows, are summed by the product's
-// point; `n` the output's halves over 4.
-kernel void mesh_draft_zero(device half4 *y [[buffer(0)]], constant uint &n [[buffer(1)]], uint i [[thread_position_in_grid]]) {
-    if (i < n) y[i] = half4(0.0h);
+// A coded product's rows gathered from its drafting members (metal-microbench docs/kernels.md#the-drafter-as-a-share) placed
+// at their natural rows: the export orders a product's rows by their energy, so each member writes its run of coded rows
+// in code order, [rows][its run], the runs end to end in member order (`starts`: each run's first coded row, then the
+// product's rows, `members` + 1 words), all-gathered into `runs`; coded row j of row r goes to y's row r at its natural
+// row `order[j]`.  Thread (j, r).
+kernel void mesh_draft_place(device half *y [[buffer(0)]], device const half *runs [[buffer(1)]], device const int *order [[buffer(2)]],
+                             device const uint *starts [[buffer(3)]], constant uint &members [[buffer(4)]], uint2 at [[thread_position_in_grid]],
+                             uint2 grid [[threads_per_grid]]) {
+    const uint n = starts[members], j = at.x, r = at.y;
+    if (j >= n) return;
+    uint k = 0;
+    while (k + 1 < members && j >= starts[k + 1]) k++;
+    const uint a = starts[k], b = starts[k + 1];
+    y[ulong(r) * n + uint(order[j])] = runs[ulong(grid.y) * a + ulong(r) * (b - a) + (j - a)];
 }
 
 // E2B's own trained MTP drafter (metal-microbench docs/kernels.md#the-drafter, E2B's MTP drafter: the LiteRT-LM export's
