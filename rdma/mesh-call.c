@@ -198,9 +198,15 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
-  /* design/prepared-machine.md#M12 */
-  uint64_t idle=0;
-  if(!atomic_compare_exchange_strong_explicit(&client->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
+  /* design/prepared-machine.md#M12; a retired slot reads another owner (mesh_retire marks it before it clears
+     `configured`, mesh_slot_take clears it again), and a word set on one is taken back, never a new owner's */
+  uint64_t idle=0,mine=context->client;
+  if(atomic_load_explicit(&client->owner,memory_order_acquire)!=mine)return ECANCELED;
+  if(!atomic_compare_exchange_strong_explicit(&client->configured,&idle,mine,memory_order_acq_rel,memory_order_relaxed))return ECANCELED;
+  if(atomic_load_explicit(&client->owner,memory_order_acquire)!=mine){
+    atomic_compare_exchange_strong_explicit(&client->configured,&mine,0,memory_order_acq_rel,memory_order_relaxed);
+    return ECANCELED;
+  }
   /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
   return mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed))?ESRCH:0;
@@ -833,7 +839,8 @@ static void mesh_route_arrival(struct mesh_calls *calls,uint32_t event,uint64_t 
    worker or that call made it 1 releases the worker's reference, so no thread waits on a call and no call's records are
    freed under it */
 static void mesh_worker_settle(_Atomic uint32_t *completed,uint32_t add){
-  if(atomic_fetch_add_explicit(completed,add,memory_order_acq_rel)+add!=1)return;
+  if(atomic_fetch_add_explicit(completed,add,memory_order_release)+add!=1)return;
+  atomic_thread_fence(memory_order_acquire);
   mesh_calls_release(((struct mesh_call_worker *)(void *)((char *)completed-offsetof(struct mesh_call_worker,completed)))->calls,1);
 }
 
