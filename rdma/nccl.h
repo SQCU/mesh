@@ -122,10 +122,11 @@
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
    communicator whose session failed fails its later groups, made again on the map current then (ncclCommDestroy, then
-   an init).  The session's progress thread is its waits' watcher: a link with positions pending that delivers none for
-   mesh.h MESH_SILENT_NS is cancelled, and so is every link of a session whose bridge stopped or ended, or refused or
-   failed its program toward a peer (that destination's status), ending every wait on it.  A group on a cancelled,
-   silent or lost link fails with ncclRemoteError; a failure the Metal path finds after its group returned (calls that
+   an init).  The session's progress thread is its waits' watcher, with no clock of its own: a landing that reads ~0
+   (its bridge's, at a link lost or silent for mesh.h MESH_PLATFORM_NS, a SEND held that long, or its stop:
+   design/recovery.md#five-seconds; a revoke's) cancels every link of the session, and so does a bridge that stopped or
+   ended, or refused or failed its program toward a peer (that destination's status), ending every wait on it.  A
+   group on a cancelled or lost link fails with ncclRemoteError; a failure the Metal path finds after its group returned (calls that
    do not pair, too) is the communicator's asynchronous error (ncclCommGetAsyncError) and the next group's result.  A
    Metal-path group that returns a failure signals nothing the library waits for: the commands it left in the stream's
    command buffer are not committed after the communicator's ncclCommDestroy or ncclCommAbort, which wait for none of

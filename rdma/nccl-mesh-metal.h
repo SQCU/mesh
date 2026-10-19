@@ -2,8 +2,8 @@
    buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A wait for a landing is rdma/mesh.metal's
    mesh_remote_wait_bounded (nccl-mesh-metal.m mesh_step_wait) on its completion word at the position's cycle, ended by
    the landing, by the session's canceller (every word a dispatch waits on is the session's, in its cancellation
-   ranges: the progress thread cancels a link that lands nothing for mesh.h MESH_SILENT_NS, a lost link's bridge and a
-   revoke cancel theirs; the word ~0, mesh_cancel), or by its program's bound (metal_begin's polls). */
+   ranges: a lost or silent link's bridge, the progress thread where the session's bridge is gone or refused its
+   program, and a revoke cancel theirs; the word ~0, mesh_cancel), or by its program's bound (metal_begin's polls). */
 #ifndef NCCL_MESH_METAL_H
 #define NCCL_MESH_METAL_H
 #include <stddef.h>

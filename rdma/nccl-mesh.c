@@ -28,7 +28,6 @@
 
 enum { WHAT_SEND = 16, WHAT_RECV, WHAT_COUNTED };
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
-#define SILENT_S (MESH_SILENT_NS * 1e-9)
 #define OPS 64
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
@@ -1071,9 +1070,8 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
 ncclResult_t ncclCommAbort(ncclComm_t comm) { return ncclCommDestroy(comm); }
 
 static ncclResult_t session_async(ncclComm_t comm);
-/* a launch's failure, else the failure of the communicator's session (the progress thread's: a link lost or silent,
-   its bridge gone, or its program refused), which a group that had already returned, its work enqueued, could not
-   report */
+/* a launch's failure, else the failure of the communicator's session (the progress thread's: a link lost, its bridge
+   gone, or its program refused), which a group that had already returned, its work enqueued, could not report */
 ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
   if (!comm || !asyncError) return fail(ncclInvalidArgument, "comm or asyncError is NULL");
   *asyncError = comm->async ? comm->async : session_async(comm);
@@ -1362,9 +1360,8 @@ struct channel {
 
 /* a communicator's session: its program's slot on the process's client of the node's bridge (`context` on `attach`), the
    bridge it opened under (`pid` and `boot`, the region's then), its channels, its progress thread and its failure once
-   one is kept (`failed`, stored once `failure` is written, by the one release_all that `claimed` it); `held` while its
-   targets are a held communicator's take-up (progress_targets); `next`, the process's other sessions, closed at its
-   exit */
+   one is kept (`failed`, stored once `failure` is written, by the one release_all that `claimed` it); `next`, the
+   process's other sessions, closed at its exit */
 struct session {
   struct ncclComm *comm;
   struct mesh_ctx context;
@@ -1381,7 +1378,7 @@ struct session {
   pthread_t progress;
   pthread_mutex_t lock;
   pthread_cond_t wake;
-  _Atomic int stop, failed, claimed, held;
+  _Atomic int stop, failed, claimed;
   char failure[512];
   struct session *next;
 };
@@ -1514,22 +1511,21 @@ static int start_refused(const struct session *s, uint32_t *node, uint32_t *wher
 }
 
 /* the progress thread, the session's watcher: it follows each channel's landings up to its target (the positions a
-   group, or an agreement, waits for), and where a landing reads ~0 (cancelled: by its bridge at a link's loss or its
-   stop, or by a revoke) or, with positions pending and none landing, its bridge is gone (bridge_gone), its bridge
-   refused or failed a destination's program (start_refused), or a channel but a held take-up's (`held`) landed nothing
-   for mesh.h MESH_SILENT_NS (design/recovery.md#five-seconds: until the bridge concludes a silent link itself), every
-   destination of the session is cancelled (release_all), ending every wait on it.  A cancelled word stays ~0 while
-   the session stands, as a landing never lowers a word (mesh-link.c record_landed). */
+   group, or an agreement, waits for), and where a landing reads ~0 (cancelled: by its bridge at a link's loss, a flow's
+   failure or its stop, or by a revoke) or, with positions pending and none landing, its bridge is gone (bridge_gone)
+   or refused or failed a destination's program (start_refused), every destination of the session is cancelled
+   (release_all), ending every wait on it.  No clock of its own decides (design/recovery.md#five-seconds: the bridge
+   concludes a silent link, B2, and a held SEND, B4; a GPU wait ends at its bound, W3a).  A cancelled word stays ~0
+   while the session stands, as a landing never lowers a word (mesh-link.c record_landed). */
 /* how long the progress thread waits between its scans of a session's landings */
 #define WATCH_NS 1000000L
 
 static void *progress_run(void *argument) {
   struct session *s = argument;
-  double idle = now_s() + SILENT_S;
   while (!atomic_load(&s->stop)) {
     violated(s);
     int waiting = 0, moved = 0;
-    uint32_t silent = 0, node = 0, where = 0;
+    uint32_t node = 0, where = 0;
     int64_t code = 0;
     for (uint32_t h = 0; h < s->count && !atomic_load(&s->failed); h++) {
       struct channel *ch = s->channels + h;
@@ -1538,18 +1534,15 @@ static void *progress_run(void *argument) {
       for (; at < target; at++) {
         const uint64_t arrived = mesh_host_arrived(&s->context, ch->in, (uint32_t)at);
         if (arrived == UINT64_MAX) { release_all(s, ncclRemoteError, "the link to node %u was lost (its landings cancelled)", ch->node); break; }
-        if (!landed(arrived, at)) { if (!waiting) silent = ch->node; waiting = 1; break; }
+        if (!landed(arrived, at)) { waiting = 1; break; }
       }
       if (at > from && !atomic_load(&s->failed)) { atomic_store(&ch->signaled, at); moved = 1; }
     }
-    if (moved) idle = now_s() + SILENT_S;
-    else if (waiting && !atomic_load(&s->failed)) {
+    if (waiting && !moved && !atomic_load(&s->failed)) {
       if (bridge_gone(s))
         release_all(s, ncclRemoteError, "this node's bridge (pid %llu) stopped or ended while the session waited (its waits cancelled)",
                     (unsigned long long)s->pid);
       else if (start_refused(s, &node, &where, &code)) release_all(s, ncclRemoteError, REFUSED, s->comm->name, node, where, strerror((int)code));
-      else if (!atomic_load(&s->held) && now_s() > idle)
-        release_all(s, ncclRemoteError, "node %u landed nothing in %.0f s (mesh.h MESH_SILENT_NS): its links cancelled", silent, SILENT_S);
     }
     /* a watcher, never on a landing's path (the GPU and the host waits read the words themselves): between scans it
        waits WATCH_NS or a wake (new targets, a failure, the stop), so it takes no core from the progress threads that
@@ -1567,18 +1560,15 @@ static void *progress_run(void *argument) {
       pthread_mutex_lock(&s->lock);
       while (!atomic_load(&s->stop) && (atomic_load(&s->failed) || !outstanding(s))) pthread_cond_wait(&s->wake, &s->lock);
       pthread_mutex_unlock(&s->lock);
-      idle = now_s() + SILENT_S;
     }
   }
   return NULL;
 }
 
 /* each channel's target its end, `ahead` positions past it (an agreement's position, published outside a group), the
-   progress thread woken to watch them; `held`, a held communicator's take-up (ncclMeshCommAgree), which waits for its
-   peers however long they prepare (nccl.h), so no silent bound */
-static void progress_targets(struct session *s, uint64_t ahead, int held) {
+   progress thread woken to watch them */
+static void progress_targets(struct session *s, uint64_t ahead) {
   pthread_mutex_lock(&s->lock);
-  atomic_store(&s->held, held);
   for (uint32_t h = 0; h < s->count; h++) atomic_store(&s->channels[h].target, s->channels[h].end + ahead);
   pthread_cond_signal(&s->wake);
   pthread_mutex_unlock(&s->lock);
@@ -1750,8 +1740,8 @@ static ncclResult_t start_failure(struct session *s, int status) {
    design/bridge-and-ipc.md#cables): a peer's count against this rank's.  A session the map changed under as it
    opened, or whose ends bound different cables, fails as a value at both ends naming the disagreement.  It is awaited
    as a landing is (design/recovery.md#five-seconds): position 0 is the progress thread's target, so the wait ends at
-   its landing, a cancellation (its link lost, its bridge gone, its destination's take refused or nothing landed for
-   mesh.h MESH_SILENT_NS: progress_run) or a revoke; `serial`, the map serial this rank read its map at, names it */
+   its landing, a cancellation (its link lost, its bridge gone or its destination's take refused: progress_run) or a
+   revoke; `serial`, the map serial this rank read its map at, names it */
 struct agreement { uint64_t digest, serial; uint32_t version, node, cables, padding; };
 _Static_assert(sizeof(struct agreement) <= MESH_SMALL_LEAST, "a small slot carries the agreement");
 static ncclResult_t session_agree(struct session *s, uint64_t serial) {
@@ -1763,7 +1753,7 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
     memcpy(s->channels[h].sending, &mine, sizeof mine);
     mesh_host_publish(&s->context, s->channels[h].out, 0);
   }
-  progress_targets(s, 1, 0);
+  progress_targets(s, 1);
   for (uint32_t h = 0; h < s->count;) {
     struct channel *ch = s->channels + h;
     const uint64_t arrived = mesh_host_arrived(&s->context, ch->in, 0);
@@ -1820,9 +1810,8 @@ ncclResult_t ncclMeshPosition(ncclComm_t comm, int peer, uint64_t *position) {
 
 /* nccl.h ncclMeshCommAgree: the members' agreement on taking up a held communicator, one position of every channel
    (its `end`) carrying {MESH_PLAN_VERSION, digest, ticket, node}, published and awaited as a landing is, the progress
-   thread's target (`held`: no silent bound), with session_lock released (a peer still preparing is waited for; a
-   revoke, a cancelled landing, its bridge gone, its program refused or a disagreement ends it), every cursor then
-   past it */
+   thread's target, with session_lock released (a peer still preparing is waited for; a revoke, a cancelled landing,
+   its bridge gone, its program refused or a disagreement ends it), every cursor then past it */
 struct taken { uint64_t version, digest, ticket, node; };
 _Static_assert(sizeof(struct taken) <= MESH_SMALL_LEAST, "a small slot carries the agreement");
 ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
@@ -1856,7 +1845,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
     memcpy(ch->sending + (ch->end % DEPTH) * ch->pitch, &mine, sizeof mine);
     mesh_host_publish(&s->context, ch->out, ch->end);
   }
-  progress_targets(s, 1, 1);
+  progress_targets(s, 1);
   pthread_mutex_unlock(&session_lock);
   for (uint32_t h = 0; h < s->count;) {
     struct channel *ch = s->channels + h;
@@ -2511,7 +2500,7 @@ static ncclResult_t session_run(struct session *s, struct call *list, size_t n) 
   struct schedule *plans;
   ncclResult_t result = session_schedule(s, list, n, &plans);
   if (result) return result;
-  progress_targets(s, 0, 0);
+  progress_targets(s, 0);
   mesh_transfers_wake(&s->context);
   result = run(s, plans);
   schedules_free(s, plans);
@@ -3591,7 +3580,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
         inflight_last = g;
         scheduled = 1;
         result = order_group(comm, g);
-        progress_targets(s, 0, 0);
+        progress_targets(s, 0);
         mesh_transfers_wake(&s->context);
         if (list[0].fused) {
           const int what = list[0].what, rooted = comm->rank == list[0].root;
