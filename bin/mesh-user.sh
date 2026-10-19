@@ -1,8 +1,9 @@
 #!/bin/bash
-# The substrate as its user's (design/bridge-and-ipc.md): the user's mesh checkout built (the bridge, the library and its
-# Python bindings), ~/.venv-mesh-uv with torch-mesh and the checkout's library on its path, and the bridge as the user's
-# agent io.mesh.bridge, run from the checkout with the node's bridge configuration, the operand CONFIGURATION (a JSON,
-# TOML or YAML document, etc/bridge/README.md): rdma/bridge_configuration.py writes its canonical form, which the agent's
+# The substrate as its user's (design/bridge-and-ipc.md): the user's mesh checkout built and installed (make all install:
+# the bridge and the libraries, each image that changed renamed into rdma/) with its Python bindings, ~/.venv-mesh-uv
+# with torch-mesh and the checkout's library on its path, and the bridge as the user's agent io.mesh.bridge, run from
+# the checkout with the node's bridge configuration, the operand CONFIGURATION (a JSON, TOML or YAML document,
+# etc/bridge/README.md): rdma/bridge_configuration.py writes its canonical form, which the agent's
 # definition names, so the keeper's load at boot keeps it.  There is no default configuration.  With CONVERGENCE, the
 # node's convergence document (etc/converge/README.md), the checkout follows its upstream by itself: the user's agent
 # io.mesh.converge runs bin/mesh-converge.sh follow, a pass every period_s, which builds each upstream revision in a
@@ -24,7 +25,7 @@ convergence=; [ $# -lt 3 ] || convergence=$(cd "$(dirname "$3")" && pwd -P)/$(ba
 venv=$HOME/.venv-mesh-uv
 support="$HOME/Library/Application Support"; state=$HOME/.cache/mesh
 uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
-[ -n "${MESH_USER_BUILT:-}" ] || make -C "$source/rdma" all >/dev/null || exit 1
+[ -n "${MESH_USER_BUILT:-}" ] || make -C "$source/rdma" all install >/dev/null || exit 1
 [ -x "$venv/bin/python" ] || "$uv" venv -q --python "$(cat "$source/.python-version")" "$venv" || exit 1
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
 "$venv/bin/python" "$source/rdma/mesh_c_build.py" >/dev/null || exit 1

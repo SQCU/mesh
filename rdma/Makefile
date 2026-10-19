@@ -1,4 +1,6 @@
-BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh_swift.dylib
+# design/recovery.md#install: the node's images, built in .build by `all`, which installs nothing; `install` renames
+# each that changed into rdma/, in this order: the libraries first, the bridge's binary last (bin/mesh-converge.sh swap's)
+IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib libmesh_swift.dylib mesh-stat mesh-flow
 # the Swift module (../swift: the numerical executor's API, mesh-call.h) and its callers (../examples)
 SWIFT = ../swift/Mesh.swift ../swift/Bounds.swift ../swift/Topology.swift
 EXAMPLES = linear-chain sync-on-remote-fill bounds-table coreml-chain indexed-gather gram-chain
@@ -6,7 +8,7 @@ MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
 # one's deprecation must not leave a node's bridge unbuilt); native-audit keeps every warning an error
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
-all: $(BINS)
+all: $(IMAGES:%=.build/%)
 examples: $(EXAMPLES)
 native-audit: .build/mesh-link.s .build/mesh-program.s .build/mesh-call.s .build/mesh-dataflow.s .build/Mesh.s
 .build/Mesh.s: $(SWIFT) mesh.h mesh-plan.h mesh-call.h mesh-collective.h mesh-dataflow.h module.modulemap Makefile
@@ -15,21 +17,27 @@ native-audit: .build/mesh-link.s .build/mesh-program.s .build/mesh-call.s .build
 .build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-bridge.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
-# the bridge and mesh-stat read the region through libmesh: beside them here, and at ../rdma from $MESH_ROOT/bin
-LIBMESH = -L. -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
+# the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
+LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 # design/bridge-and-ipc.md#files: the bridge, mesh-link.c and mesh-program.c over mesh-bridge.h
-mesh-flow: mesh-link.c mesh-program.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h libmesh.dylib Makefile
-	mkdir -p .build
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o .build/$@ mesh-link.c mesh-program.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation -framework IOKit
-	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
-	mv -f .build/$@ $@
-mesh-stat: mesh-stat.c mesh.h mesh-plan.h libmesh.dylib Makefile
+.build/mesh-flow: mesh-link.c mesh-program.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib Makefile
+	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-program.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation -framework IOKit
+	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
+.build/mesh-stat: mesh-stat.c mesh.h mesh-plan.h .build/libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stat.c $(LIBMESH)
+# design/recovery.md#install (README.md, Convergence; bin/mesh-converge.sh swap's form): each built image whose bytes
+# differ from the installed one's copied beside it and renamed into place, in IMAGES' order, and the bridge's binary
+# anew wherever libmesh changed (the bridge watches its binary alone); a running process keeps the files it mapped
+install: all
+	@moved=; for f in $(IMAGES); do \
+	  if cmp -s .build/$$f $$f; then [ $$f = mesh-flow ] && [ -n "$$moved" ] || continue; \
+	  else [ $$f != libmesh.dylib ] || moved=1; fi; \
+	  cp .build/$$f $$f.install && mv -f $$f.install $$f || exit 1; echo "rdma/$$f installed"; \
+	done
 # the one-way stream readings (design/transport-one-gib-2026-09-10.md): the bridge's raw stream and its own path, a
-# client of libmesh, at .build/mesh-stream (it finds libmesh at ../rdma from there); built on its own, not in `all`
+# client of libmesh, at .build/mesh-stream beside the built libmesh; built on its own, not in `all`
 mesh-stream: .build/mesh-stream
-.build/mesh-stream: mesh-stream.c mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h mesh-collective.h libmesh.dylib Makefile
-	mkdir -p .build
+.build/mesh-stream: mesh-stream.c mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h mesh-collective.h .build/libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stream.c $(LIBMESH)
 .PHONY: mesh-stream
 # design/collectives-dataflow.md#advisories: the compiled collectives' advisories (mesh_program_advise) over the loopback
@@ -79,33 +87,38 @@ NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitR
 .build/mesh_metal.h: mesh.metal
 	mkdir -p .build
 	xxd -i mesh.metal > $@
-libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl-mesh-metal.h mesh-metal.m mesh-metal.h .build/mesh_metal.h nccl.h \
-  mesh-collective.h mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h libmesh.dylib Makefile
+.build/libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl-mesh-metal.h mesh-metal.m mesh-metal.h .build/mesh_metal.h nccl.h \
+  mesh-collective.h mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
 	cc -fblocks -O2 $(WARN) -dynamiclib -I .build -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
-	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-metal.m mesh-metal.m -L. -lmesh \
+	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-metal.m mesh-metal.m -L.build -lmesh \
 	  -framework Metal -framework Foundation
-libmesh-coreml.dylib: mesh-coreml.m Makefile
+.build/libmesh-coreml.dylib: mesh-coreml.m Makefile
+	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation
-libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
+.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
+	mkdir -p .build
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
-libmesh_swift.dylib: $(SWIFT) libmesh.dylib module.modulemap mesh.h mesh-plan.h mesh-call.h mesh-collective.h mesh-dataflow.h Makefile
-	swiftc -O -whole-module-optimization -emit-library -emit-module -module-name Mesh -I . -L . -lmesh -Xlinker -rpath -Xlinker @loader_path -Xlinker -install_name -Xlinker @rpath/libmesh_swift.dylib $(SWIFT) -o $@
-linear-chain: ../examples/linear-chain.swift libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
-sync-on-remote-fill: ../examples/sync-on-remote-fill.swift libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
-bounds-table: ../examples/bounds-table.swift libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
-coreml-chain: ../examples/coreml-chain.swift libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
-indexed-gather: ../examples/indexed-gather.swift libmesh_swift.dylib
-	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
-gram-chain: ../examples/gram-chain.swift libmesh_swift.dylib
-	swiftc -O -parse-as-library -Xcc -DACCELERATE_NEW_LAPACK -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+# the Swift module Mesh beside its library in .build; the examples are built here, against it, and run on the installed
+# libraries (make install)
+.build/libmesh_swift.dylib: $(SWIFT) .build/libmesh.dylib module.modulemap mesh.h mesh-plan.h mesh-call.h mesh-collective.h mesh-dataflow.h Makefile
+	swiftc -O -whole-module-optimization -emit-library -emit-module-path .build/Mesh.swiftmodule -module-name Mesh -I . -L .build -lmesh -Xlinker -rpath -Xlinker @loader_path -Xlinker -install_name -Xlinker @rpath/libmesh_swift.dylib $(SWIFT) -o $@
+linear-chain: ../examples/linear-chain.swift .build/libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+sync-on-remote-fill: ../examples/sync-on-remote-fill.swift .build/libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+bounds-table: ../examples/bounds-table.swift .build/libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+coreml-chain: ../examples/coreml-chain.swift .build/libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+indexed-gather: ../examples/indexed-gather.swift .build/libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+gram-chain: ../examples/gram-chain.swift .build/libmesh_swift.dylib
+	swiftc -O -parse-as-library -Xcc -DACCELERATE_NEW_LAPACK -I . -I .build -L .build -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+# the built images and examples; never an installed image (the launchd job's binary and the libraries clients map)
 clean:
-	rm -f $(BINS) $(EXAMPLES) Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
-.PHONY: all examples clean native-audit
+	rm -rf $(IMAGES:%=.build/%) .build/Mesh.* $(EXAMPLES)
+.PHONY: all install examples clean native-audit
 
 # _mesh_c: the headers as one Python module (mesh_c_build.py), for the interpreter that imports it
 PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python

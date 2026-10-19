@@ -890,8 +890,9 @@ static uint32_t stripe_cables(uint32_t node){
    to the send threads of those ports, which take it; any other fails as a value at once (its writer's word UINT64_MAX,
    its ring's code): its node this node (EINVAL), or no cable's with its stripe lane served (EHOSTUNREACH: a stripe
    goes over one link, its node a neighbour whose link is up).  Nothing waits for a link to pair or its stripe lane to
-   be made again (the wait had no event that ends it: output_data/structural-20261018/WAITS.md) */
-void stripes_requests_turn(void){
+   be made again (the wait had no event that ends it: output_data/structural-20261018/WAITS.md).  At the stop
+   (`stopping` its code, design/bridge-and-ipc.md#stop) every request not yet taken fails with it */
+void stripes_requests_turn(int64_t stopping){
   _Atomic uint64_t *rings=mesh_rings(M);
   for(uint32_t r=0;r<MESH_RINGS;r++){
     uint64_t at=atomic_load_explicit(rings+r,memory_order_acquire);
@@ -901,18 +902,20 @@ void stripes_requests_turn(void){
       atomic_compare_exchange_strong(rings+r,&at,0);
       continue;
     }
-    uint64_t k=atomic_load_explicit(&q->taken,memory_order_acquire);
-    const struct mesh_stripe *e=q->request+(k&(q->entries-1));
-    if(atomic_load_explicit(&e->ready,memory_order_acquire)!=k+1)continue;
-    const uint32_t node=e->node;
-    const uint32_t n=node==M->node?0:stripe_cables(node);
-    const int64_t code=node==M->node?EINVAL:EHOSTUNREACH;
-    if(n)continue;
-    const uint64_t word=e->word,owner=q->owner;
-    if(!atomic_compare_exchange_strong_explicit(&q->taken,&k,k+1,memory_order_acq_rel,memory_order_relaxed))continue;
-    if(atomic_load_explicit(&q->code,memory_order_relaxed)!=code)
-      say("stripes: a request of client %llx toward node %u refused: %s\n",(unsigned long long)owner,node,strerror((int)code));
-    stripe_failed(at,owner,word,code);
+    for(uint64_t looked=0;looked<q->entries;looked++){
+      uint64_t k=atomic_load_explicit(&q->taken,memory_order_acquire);
+      const struct mesh_stripe *e=q->request+(k&(q->entries-1));
+      if(atomic_load_explicit(&e->ready,memory_order_acquire)!=k+1)break;
+      const uint32_t node=e->node;
+      const int64_t code=stopping?stopping:node==M->node?EINVAL:EHOSTUNREACH;
+      if(!stopping && node!=M->node && stripe_cables(node))break;
+      const uint64_t word=e->word,owner=q->owner;
+      if(!atomic_compare_exchange_strong_explicit(&q->taken,&k,k+1,memory_order_acq_rel,memory_order_relaxed))continue;
+      if(atomic_load_explicit(&q->code,memory_order_relaxed)!=code)
+        say("stripes: a request of client %llx toward node %u refused: %s\n",(unsigned long long)owner,node,strerror((int)code));
+      stripe_failed(at,owner,word,code);
+      if(!stopping)break;
+    }
   }
 }
 static struct channel channels[MESH_CHANNELS];
