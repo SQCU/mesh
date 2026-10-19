@@ -17,6 +17,9 @@ uint64_t now,sequence;
 char host[MESH_NAME_BYTES];
 struct mesh_ctx bridge={.fd=-1};
 static dispatch_queue_t finder;
+/* design/recovery.md#five-seconds B12: a port's job out past MESH_PLATFORM_NS, during which no port dispatches a driver
+   call (ports_stalled's, each event-loop turn) */
+static _Atomic int stalled;
 _Atomic int found;
 static char devices[MESH_PORTS][32];
 static uint32_t device_count;
@@ -711,27 +714,38 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
 }
 
 /* design/bridge-and-ipc.md#lanes: a link job on the port's queue, guarded (no queue pair of the device is posted on while
-   one is made, connected or destroyed: port_guard), its verbs calls made on hearing the peer and never on a failure,
-   from the peer's numbers as the job was started (`numbers`: the event loop takes the peer's LINK meanwhile): the lanes
+   one is made, connected or destroyed: port_guard), its verbs calls made on hearing the peer, and on a failure only
+   past that conclusion's quiet window (LINK_JOB_FLUSH, design/recovery.md#five-seconds B6 (b)), from the peer's
+   numbers as the job was started (`numbers`, its LID and GID among them: the event loop takes the peer's LINK and
+   hello meanwhile), and none once its pairing is lost (B10: read as the guard stands and between its steps): the lanes
    made (LINK_JOB_MAKE: those of the link's last pairing moved to the error state and destroyed where the context
-   answers, pairs_down, or forgotten where it went with the peer, then MESH_LINK_LANES UC queue pairs in INIT, d6dceac's
-   verbs_up; every lease word's DIRTY cleared and the lanes' generation moved, its lanes being fresh: the stops of the
-   last pairing's flows ran before it on the same queue, and a flow kept for a lane it left dirty is freed, B7);
-   or connected to the peer's (LINK_JOB_CONNECT: RTR, then RTS, each lane's number and gate set, the keepalive's and the
-   stripes' first receives posted, and the port's progress threads started) */
-struct link_numbers { uint32_t peer[MESH_LINK_LANES][2],piece; };
+   answers, pairs_down, their handles kept where a destruction fails, B16, or forgotten where the context went with the
+   peer, then MESH_LINK_LANES UC queue pairs in INIT, d6dceac's verbs_up; every lease word's DIRTY cleared and the lanes'
+   generation moved, its lanes being fresh: the stops of the last pairing's flows ran before it on the same queue, and a
+   flow kept for a lane it left dirty is freed, B7); or connected to the peer's (LINK_JOB_CONNECT: RTR, then RTS, each
+   lane's number and gate set, the keepalive's and the stripes' first receives posted, and the port's progress threads
+   started); or a concluded link's lanes moved to the error state (LINK_JOB_FLUSH: the lanes it moved) */
+struct link_numbers { uint32_t peer[MESH_LINK_LANES][2],piece,pairing; uint16_t lid; uint8_t gid[16]; };
+static int link_lapsed(const struct link *l,const struct link_numbers *numbers){
+  return atomic_load_explicit(&l->pairing,memory_order_relaxed)!=numbers->pairing?ECANCELED:0;
+}
 static int link_make(struct port *port){
   struct link *l=&port->link;
   struct mesh_verbs *p=&l->provider;
   int error=0;
   struct ibv_port_attr attributes;
-  if(p->queues && (ibv_query_port(port->device.context,1,&attributes)?(error=errno?errno:EIO):(error=pairs_down(p)))){
-    say("link %u (%s): the lanes of its last pairing not destroyed (%s): the device's context forgotten and opened afresh\n",
-        port->index,port->name,strerror(error));
+  l->refused=0;
+  if(p->queues && ibv_query_port(port->device.context,1,&attributes)){
+    error=errno?errno:EIO;
+    say("link %u (%s): its device's context gone (%s): forgotten and opened afresh\n",port->index,port->name,strerror(error));
     pair_forget(p);
     down_device(&port->device);
-    int refused=0;
-    if((error=device_up(&port->device,&wire,&refused)) || (error=device_gid(&port->device)))return error;
+    if((error=device_up(&port->device,&wire,&l->refused)) || (error=device_gid(&port->device)))return error;
+  }
+  else if(p->queues && (error=pairs_down(p))){
+    say("link %u (%s): the lanes of its last pairing not destroyed (%s): kept, destroyed at its next pairing\n",port->index,
+        port->name,strerror(error));
+    return error;
   }
   for(uint32_t k=0;k<MESH_LINK_LANES;k++){
     atomic_fetch_and_explicit(&M->lanes[port->index][k],~MESH_LANE_DIRTY,memory_order_acq_rel);
@@ -746,28 +760,33 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
   struct link *l=&port->link;
   struct mesh_verbs *p=&l->provider;
   int error=0;
-  for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)error=queue_receive(p,(int)k,numbers->peer[k],port->heard.lid,port->heard.gid);
+  for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)error=queue_receive(p,(int)k,numbers->peer[k],numbers->lid,numbers->gid);
+  if(!error)error=link_lapsed(l,numbers);
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)error=queue_send(p,(int)k);
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++){
     l->qpn[k]=p->queues[k].pair->qp_num;
     l->gate[k]=(struct send_gate){.capacity=MIN(p->queues[k].send_capacity,l->share>1?l->share:1)};
   }
-  if(!error){
+  if(!error && !(error=link_lapsed(l,numbers))){
     atomic_store_explicit(&l->alive_flight,0,memory_order_relaxed);l->alive_at=0;
     error=link_alive_listen(port,MIN(LINK_ALIVE_RECEIVES,l->share>1?l->share-1:1));
   }
-  if(!error)error=stripes_ready(port,numbers->piece);
+  if(!error && !(error=link_lapsed(l,numbers)))error=stripes_ready(port,numbers->piece);
   return error;
 }
 static void link_job(struct port *port,int job){
   struct link *l=&port->link;
-  struct link_numbers numbers={.piece=l->peer_piece};
-  memcpy(numbers.peer,l->peer,sizeof numbers.peer);
-  l->job=job;l->job_pairing=l->pairing;atomic_store_explicit(&l->done,0,memory_order_relaxed);
+  struct link_numbers numbers={.piece=l->peer_piece,.pairing=atomic_load_explicit(&l->pairing,memory_order_relaxed),.lid=port->heard.lid};
+  memcpy(numbers.peer,l->peer,sizeof numbers.peer);memcpy(numbers.gid,port->heard.gid,sizeof numbers.gid);
+  l->job=job;l->job_pairing=numbers.pairing;l->job_at=now;atomic_store_explicit(&l->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
     const int raised=guard_raise(port);
-    int result=job==LINK_JOB_MAKE?link_make(port):link_connect(port,&numbers);
-    if(!result && job==LINK_JOB_CONNECT)result=port_threads(port);
+    int result=link_lapsed(l,&numbers);
+    if(!result)switch(job){
+      case LINK_JOB_MAKE:result=link_make(port);break;
+      case LINK_JOB_CONNECT:if(!(result=link_connect(port,&numbers)))result=port_threads(port);break;
+      default:result=(int)pairs_error(&l->provider,(UINT32_C(1)<<MESH_LINK_LANES)-1);
+    }
     guard_lower(port,raised);
     l->result=result;
     port_pairs(port);
@@ -786,12 +805,13 @@ static void link_tell(struct port *port){
   port_say(port,said,NULL,0);
 }
 /* the link of a port lost (its peer's loss, a failure, the bridge stopping, this end's own closing to pair it afresh):
-   its lanes served no more and left as they are, no verbs call made (its next pairing moves them to the error state,
-   destroys and makes them again, link_make); a job of this pairing still on the port's queue is dropped as it ends; the send thread fails the stripes
-   it holds (port_pass) */
+   its lanes served no more and left as they are, no verbs call made here (once its port's quiet window ends they are
+   moved to the error state where the link was connected and its interface did not go off, LINK_JOB_FLUSH, and its
+   next pairing moves them so, destroys and makes them again, link_make); a job of this pairing still on the port's
+   queue makes no call and is dropped as it ends (B10); the send thread fails the stripes it holds (port_pass) */
 static void link_lost(struct port *port){
   struct link *l=&port->link;
-  l->pairing++;l->state=LINK_DOWN;l->heard=0;l->dirty=0;
+  atomic_fetch_add_explicit(&l->pairing,1,memory_order_relaxed);l->state=LINK_DOWN;l->heard=0;l->dirty=0;
   atomic_store_explicit(&l->served,0,memory_order_release);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
   atomic_store_explicit(&mesh_links(M)[port->index].lanes,0,memory_order_relaxed);
@@ -837,10 +857,11 @@ int lanes_take(const struct port *port,uint64_t owner,const uint32_t *lane,uint3
    completion of its lanes is taken as its own, and its rings and its lanes' gates stand still).  A lane its program
    left with a receive posted and not landed, or a SEND posted and not completed, is dirty and keeps its DIRTY, out of
    use until its link pairs afresh (link_turn); a clean lane's DIRTY (lanes_take's) is cleared.  Where the stop is not
-   its link's loss (`lost`, port_lost's: no verbs call) and the link is still served (port_lost clears `served` first,
-   link_lost), each dirty lane's queue pair is moved to the error state under the port's guard (B6 (a): its requests
-   flushed); a dirty lane not moved may still land a SEND in the flow's rows (`held`, B7: the flow kept until the lanes'
-   `generation` moves past `lane_epoch`).  The lanes it left dirty */
+   its link's loss (`lost`, port_lost's: no verbs call), the link is still served (port_lost clears `served` first,
+   link_lost) and no port's job is out past MESH_PLATFORM_NS (`stalled`, B12), each dirty lane's queue pair is moved
+   to the error state under the port's guard (B6 (a): its requests flushed); a dirty lane not moved may still land a
+   SEND in the flow's rows (`held`, B7: the flow kept until the lanes' `generation` moves past `lane_epoch`).  The lanes
+   it left dirty */
 uint32_t lanes_release(struct flow *f,int lost){
   struct port *port=f->port;
   struct link *l=&port->link;
@@ -854,7 +875,7 @@ uint32_t lanes_release(struct flow *f,int lost){
       dirty|=UINT32_C(1)<<k;
     else atomic_fetch_and_explicit(&M->lanes[port->index][k],~MESH_LANE_DIRTY,memory_order_acq_rel);
   }
-  const uint32_t move=lost || !atomic_load_explicit(&l->served,memory_order_acquire)?0:dirty;
+  const uint32_t move=lost || atomic_load_explicit(&stalled,memory_order_relaxed) || !atomic_load_explicit(&l->served,memory_order_acquire)?0:dirty;
   if(move){
     const int raised=guard_raise(port);
     moved=pairs_error(&l->provider,move);
@@ -885,24 +906,32 @@ static int link_idle(const struct port *port){
   return !atomic_load_explicit(&port->stripes.flight,memory_order_acquire) && !requests_held(port);
 }
 /* design/bridge-and-ipc.md#lanes: the link's turn, on the event loop: a job's end taken (made: LINK told the peer every
-   lane; connected: up, every lane served); a job that failed takes the link down and leaves the port down until its
-   link next comes on (no retry: design/recovery.md#loss); while it is up, the lanes the progress threads found failed
-   taken (dirty), the leases of clients gone let go, and, where a lane is dirty (failed here, or left with positions
-   outstanding by a program, its lease word's DIRTY) and nothing rides the link, its control socket closed: both ends
-   lose the link and pair it afresh on hearing each other, every lane made again (no lane is made again while its link
-   is up, and no message asks for it: the 09-08 record, AGENTS.md); then the lanes made once the port is paired, and
-   connected once both ends' are made */
+   lane; connected: up, every lane served; a concluded link's lanes moved to the error state); a job that failed
+   concludes the link, which pairs again on hearing the peer (design/recovery.md#five-seconds B16: the port stays open,
+   but where its make's registration was refused, down until its link next comes on, design/recovery.md#registration);
+   while it is up, the lanes the progress threads found failed taken (dirty), the leases of clients gone let go, and,
+   where a lane is dirty (failed here, or left with positions outstanding by a program, its lease word's DIRTY) and
+   nothing rides the link, its control socket closed: both ends lose the link and pair it afresh on hearing each other,
+   every lane made again (no lane is made again while its link is up, and no message asks for it: the 09-08 record,
+   AGENTS.md); then, while no port's job is out past MESH_PLATFORM_NS (B12), a concluded link's lanes moved to the error
+   state once its conclusion's quiet window has ended (B6 (b): a later conclusion's window does not defer it, so its
+   requests conclude within the bound; that later conclusion's own port jobs wait for its window), and once the port's
+   last quiet window has ended (B9) the lanes made once the port is paired, and connected once both ends' are made */
 static void link_turn(struct port *port){
   struct link *l=&port->link;
   if(l->job){
     if(!atomic_load_explicit(&l->done,memory_order_acquire))return;
     const int job=l->job,result=l->result;
     l->job=0;
-    if(l->job_pairing!=l->pairing){}
+    if(l->job_pairing!=atomic_load_explicit(&l->pairing,memory_order_relaxed)){}
+    else if(job==LINK_JOB_FLUSH)
+      say("link %u (%s): lanes %#x of its concluded link moved to the error state, their requests flushed\n",port->index,port->name,
+          (unsigned)result);
     else if(result){
-      say("link %u (%s): lanes toward node %u not %s: %s; the port is down until its link next comes on\n",port->index,port->name,
-          port->peer,job==LINK_JOB_MAKE?"made":"connected",strerror(result));
-      port->open=0;
+      const int refused=job==LINK_JOB_MAKE && l->refused;
+      say("link %u (%s): lanes toward node %u not %s: %s; %s\n",port->index,port->name,port->peer,job==LINK_JOB_MAKE?"made":"connected",
+          strerror(result),refused?"the port is down until its link next comes on":"paired again on hearing the peer");
+      if(refused){port->open=0;port->refused=l->refused;}
       port_lost(port,result);
       return;
     }
@@ -920,6 +949,8 @@ static void link_turn(struct port *port){
       record_changed();
     }
   }
+  const int stalls=atomic_load_explicit(&stalled,memory_order_relaxed),held=stalls || now<port->quiet_at;
+  if(l->flush_at && now>=l->flush_at && !stalls){l->flush_at=0;link_job(port,LINK_JOB_FLUSH);return;}
   if(!port->greeted)return;
   /* design/bridge-dataflow.md#stripes: the peer's window, its record's: no stripe request passes it */
   const struct mesh_record *r=record_held(port->peer);
@@ -937,12 +968,11 @@ static void link_turn(struct port *port){
       return;
     }
   }
-  if(l->job)return;
+  if(l->job || held)return;
   if(l->state==LINK_DOWN){
     if(l->page==MESH_ABSENT && (l->page=mesh_arena_alloc(&bridge,l->pages,M->block))==MESH_ABSENT){
-      say("link %u (%s): lanes not made: the window holds no %u pages for their blocks; the port is down until its link next comes on\n",
+      say("link %u (%s): lanes not made: the window holds no %u pages for their blocks; paired again on hearing the peer\n",
           port->index,port->name,l->pages);
-      port->open=0;
       port_lost(port,ENOMEM);
       return;
     }
@@ -991,6 +1021,33 @@ static void gates_turn(struct port *port){
     flow_lost(f,ETIMEDOUT,2);
   }
 }
+/* design/recovery.md#five-seconds B12 (22891630^ mesh-flight.h's pending-operation age, per port: its dispatch's `job_at`
+   in place of flight_begin's stamp, its `done` in place of flight_end's): a port whose open's or link's job is still
+   out MESH_PLATFORM_NS after its dispatch is concluded around it, once: open 0 and port_lost (ETIMEDOUT: its socket
+   closed, the map's phase STOPPED), no move to the error state, and its programs' words ~0 from this thread (their
+   stops wait behind the call on its queue).  The call itself cannot be ended.  While any port's job is so out, no port
+   dispatches a driver call (`stalled`: port_open, link_turn, lanes_release).  Read on the event loop's turn */
+static void ports_stalled(void){
+  int any=0;
+  for(uint32_t p=0;p<port_count;p++){
+    struct port *port=ports+p;
+    const struct link *l=&port->link;
+    const int opening=port->job && !atomic_load_explicit(&port->done,memory_order_acquire) && now-port->job_at>=MESH_PLATFORM_NS;
+    const int linking=l->job && !atomic_load_explicit(&l->done,memory_order_acquire) && now-l->job_at>=MESH_PLATFORM_NS;
+    any|=opening||linking;
+    if(!opening && !linking){port->stuck=0;continue;}
+    if(port->stuck)continue;
+    port->stuck=1;
+    say("link %u (%s): its %s job out %.1f s: its port concluded around it (design/recovery.md#five-seconds)\n",port->index,
+        port->name,opening?"open":l->job==LINK_JOB_MAKE?"make":l->job==LINK_JOB_CONNECT?"connect":"flush",
+        (double)(now-(opening?port->job_at:l->job_at))/1e9);
+    port->open=0;
+    port_lost(port,ETIMEDOUT);
+    port->link.flush_at=0;
+    programs_stop(ETIMEDOUT,port);
+  }
+  atomic_store_explicit(&stalled,any,memory_order_relaxed);
+}
 /* a peer's LINK: every lane of its pairing, heard once, before this end's connect (any other is a protocol error) */
 static void link_heard(struct port *port,const struct message *heard){
   struct link *l=&port->link;
@@ -1033,11 +1090,17 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
 
 /* design/recovery.md#detection, #loss: a link lost fails every program on it, naming its peer, their stops making no
    verbs call (lanes_release's `lost`); its lanes are served no more before its control socket closes
-   (design/recovery.md#five-seconds: no post on them once the peer can read the loss); the port keeps its device's context, protection domain and registration and its link lanes as they are, no
-   verbs call made (design/RDMA-KERNEL-RECOVERY.md "October 18"), and a port that was paired says hello at once where it
-   is open (port_hello: a dial or a greeting that failed keeps the hellos' pace, so nothing is tried faster than they
-   go) */
+   (design/recovery.md#five-seconds: no post on them once the peer can read the loss); the port keeps its device's
+   context, protection domain and registration and its link lanes as they are, no verbs call made
+   (design/RDMA-KERNEL-RECOVERY.md "October 18"), and a port that was paired says hello at once where it is open
+   (port_hello: a dial or a greeting that failed keeps the hellos' pace, so nothing is tried faster than they go).  Its
+   quiet window begins (B9: no port job on it, and no exit, for MESH_PLATFORM_NS, the operator's bound on the
+   termination a conclusion may follow), and a link that was connected or up has its lanes moved to the error state
+   once that window ends (`flush_at`, B6 (b), never moved by a later conclusion; its interface going off meanwhile, or
+   a call out past the bound, takes it back: network_heard, ports_stalled) */
 void port_lost(struct port *port,int64_t code){
+  port->quiet_at=now+MESH_PLATFORM_NS;
+  if(!port->link.flush_at && port->link.state>=LINK_CONNECTING)port->link.flush_at=port->quiet_at;
   link_lost(port);
   if(port->control>=0){close(port->control);port->control=-1;}
   if(port->greeted)port->next=now;
@@ -1072,15 +1135,19 @@ static struct port *port_at(uint32_t interface){
   for(uint32_t p=0;interface && p<port_count;p++)if(ports[p].interface==interface)return ports+p;
   return NULL;
 }
-/* design/bridge-and-ipc.md#ports: a port's device opened, on its own queue (guarded), where it is to be (at the start, and
-   at its link's coming on or its interface's attaching, while it has no peer): its port read; a context that fails with
-   the port active is gone (the peer's power went with it): forgotten with every object made on it, no verbs call
-   (design/RDMA-KERNEL-RECOVERY.md "October 18"), and the device opened afresh */
+/* design/bridge-and-ipc.md#ports: a port's device opened, on its own queue (guarded), where it is to be (at the start,
+   at its link's coming on or its interface's attaching, and at a hello heard while it is not open, while it has no
+   peer), once its quiet window has ended and no port's job is out past MESH_PLATFORM_NS (design/recovery.md#five-seconds
+   B9, B12): the hellos' group joined on its interface, so the port hears them open or not (hello_heard, B16); its port
+   read; a context that fails with the port active is gone (the peer's power went with it): forgotten with every object
+   made on it, no verbs call (design/RDMA-KERNEL-RECOVERY.md "October 18"), and the device opened afresh */
 static void port_open(struct port *port){
-  if(port->job || !port->opening || port->control>=0)return;
+  if(port->job || !port->opening || port->control>=0 || now<port->quiet_at || atomic_load_explicit(&stalled,memory_order_relaxed))return;
   port->opening=0;
   port->interface=if_nametoindex(port->name);
-  port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
+  struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=port->interface};
+  if(port->interface)setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
+  port->job=1;port->job_at=now;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
     const int raised=guard_raise(port);
     int refused=0,result=device_up(&port->device,&wire,&refused);
@@ -1099,7 +1166,8 @@ static void port_open(struct port *port){
 }
 /* design/recovery.md#registration: a port's opening taken: a device whose registration of the window it refused keeps
    the extents it took and opens again at its link's next coming on (device_up logged the extent and why); a device
-   that failed otherwise, likewise; one opened says hello at once (port_hello) */
+   that failed otherwise, likewise, or at the next hello heard on it (hello_heard, design/recovery.md#five-seconds B16);
+   one opened says hello at once (port_hello) */
 static void port_opened(struct port *port){
   const int result=port->result;
   port->job=0;
@@ -1135,21 +1203,22 @@ static void port_hello(struct port *port){
   }
   return;
 #endif
-  struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=port->interface};
-  setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
   setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_IF,&port->interface,sizeof port->interface);
   struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=everyone,.sin6_scope_id=port->interface};
   struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
   sendto(hello,&said,sizeof said,0,(struct sockaddr *)&to,sizeof to);
 }
 /* design/bridge-and-ipc.md#ports: a node heard on a port: the lower node dials the higher's listener on the address
-   it heard from, the higher answers its hello so the lower hears it at once */
+   it heard from, the higher answers its hello so the lower hears it at once; a port not open is opened (its open's job
+   out, or its registration refused, aside: design/recovery.md#five-seconds B16, #registration), so a port whose link
+   job or open failed pairs again on hearing its peer, never on a clock */
 static void hello_heard(void){
   struct message heard;struct sockaddr_in6 from;socklen_t length=sizeof from;
   while(recvfrom(hello,&heard,sizeof heard,0,(struct sockaddr *)&from,&length)==(ssize_t)sizeof heard){
     struct port *port=port_at(from.sin6_scope_id);
     length=sizeof from;
-    if(!port || heard.magic!=XMAGIC || heard.kind!=HELLO || heard.node==M->node || port->control>=0 || !port->open)continue;
+    if(!port || heard.magic!=XMAGIC || heard.kind!=HELLO || heard.node==M->node || port->control>=0)continue;
+    if(!port->open){if(!port->job && !port->refused)port->opening=1;continue;}
     if(M->node>heard.node){
       struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
       sendto(hello,&said,sizeof said,0,(struct sockaddr *)&from,sizeof from);
@@ -1236,10 +1305,13 @@ static void ports_found(void){
     link_set(port,0,MESH_STOPPED,0);
   }
 }
-/* design/prepared-machine.md#M24: a port's link off or its interface detached (the link lost, the port down until its
-   link comes on: its device opened then, port_open); an interface that attached or whose link came on and is no port
-   yet: the node's devices read again */
-static void network_heard(void){
+/* design/prepared-machine.md#M24: a port's link off or its interface detached (the link lost, its lanes left as they
+   are, design/recovery.md#five-seconds B6 (b), and the port down until its link comes on: its device opened then,
+   port_open); an Ethernet interface (en<N>, the Thunderbolt ports' kind) that attached or whose link came on and is no
+   port yet: the node's devices read again (B11: awdl, llw, utun, bridge and the rest never enter the driver; a link's
+   coming on stays a reading, for a device registered after its interface attached).  At the stop (`stopping`), a
+   port's link going off only extends its quiet window, which the exit waits out (B9) */
+static void network_heard(int stopping){
   union mesh_network_event event;
   int unknown=0;
   while(recv(network,event.bytes,sizeof event,0)>=(ssize_t)(KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data))){
@@ -1250,12 +1322,14 @@ static void network_heard(void){
     int known=0;
     for(uint32_t p=0;p<port_count;p++)if(!strcmp(name,ports[p].name)){
       known=1;
-      if(code==KEV_DL_LINK_OFF || code==KEV_DL_IF_DETACHED){ports[p].open=0;port_lost(ports+p,ENETDOWN);}
-      else if(code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED)ports[p].opening=1;
+      if(code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED)ports[p].opening=1;
+      else if(code!=KEV_DL_LINK_OFF && code!=KEV_DL_IF_DETACHED){}
+      else if(stopping)ports[p].quiet_at=now+MESH_PLATFORM_NS;
+      else{ports[p].open=0;port_lost(ports+p,ENETDOWN);ports[p].link.flush_at=0;}
     }
-    unknown|=!known && (code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED);
+    unknown|=!known && (code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED) && !strncmp(interface->if_name,"en",sizeof interface->if_name);
   }
-  if(unknown)ports_find();
+  if(unknown && !stopping)ports_find();
 }
 
 /* design/prepared-machine.md#M26: the clients' control word, watched for the event loop */
@@ -1480,6 +1554,14 @@ int main(int argc,char **argv){
     if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
   }
 #endif
+#ifndef MESH_LOOP_FABRIC
+  /* design/recovery.md#five-seconds B9: the devices first read once IOKit's registry is quiet (no termination in its
+     course: XNU's waitForState, its deadline MESH_PLATFORM_NS), else as they stand at the bound */
+  mach_timespec_t quiet={(unsigned)(MESH_PLATFORM_NS/1000000000u),(clock_res_t)(MESH_PLATFORM_NS%1000000000u)};
+  const kern_return_t busy=IOKitWaitQuiet(kIOMainPortDefault,&quiet);
+  if(busy)say("bridge node %u: IOKit's registry not quiet within %.1f s (%#x): its devices read as they stand\n",node,
+              (double)MESH_PLATFORM_NS/1e9,(unsigned)busy);
+#endif
   ports_find();
   char alive[192]="";
   if(keepalive_ns)snprintf(alive,sizeof alive,", a keepalive frame every %llu ns on each link's keepalive lane while a flow of its port is listed "
@@ -1491,6 +1573,7 @@ int main(int argc,char **argv){
   while(!stop){
     now=clock_ns();
     if(atomic_load_explicit(&found,memory_order_acquire))ports_found();
+    ports_stalled();
     for(uint32_t p=0;p<port_count;p++){
       struct port *port=ports+p;
       port_silent(port);
@@ -1543,7 +1626,7 @@ int main(int argc,char **argv){
         }
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)hello)hello_heard();
-      else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard();
+      else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard(0);
 #ifdef MESH_LOOP_FABRIC
       /* design/bridge-dataflow.md#the-loopback-fabric: a cable's lower end dialed: its port's control socket, as a link's
          listener takes the lower node's dial */
@@ -1578,16 +1661,29 @@ int main(int argc,char **argv){
   /* design/bridge-and-ipc.md#stop: FAREWELL on every control socket (queued as the socket takes it; the kernel sends
      what it holds after the close), every program's words ~0 and its status the stop, and every stripe request not yet
      taken failed (ESHUTDOWN), stored from this thread, then the bridge gone; no queue, thread or verbs call waited on,
-     and every object the kernel's to release at the exit (design/RDMA-KERNEL-RECOVERY.md "October 18") */
+     and every object the kernel's to release at the exit (design/RDMA-KERNEL-RECOVERY.md "October 18"), the exit no
+     sooner than every port's quiet window ends (design/recovery.md#five-seconds B9: its reclaim never inside the
+     termination a conclusion may follow), the kernel's link events read meanwhile, so a link going off then extends its
+     port's (network_heard) */
   requests_stop();
   for(uint32_t p=0;p<port_count;p++){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
     if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
     atomic_store_explicit(&ports[p].closing,1,memory_order_release);
   }
-  programs_stop(ESHUTDOWN);
+  programs_stop(ESHUTDOWN,NULL);
   stripes_requests_turn(ESHUTDOWN);
   atomic_store(&M->bridge_pid,0);
   mesh_notify(&M->control);
+  for(int told=0;;){
+    now=clock_ns();
+    uint64_t latest=0;
+    for(uint32_t p=0;p<port_count;p++)latest=MAX(latest,ports[p].quiet_at);
+    if(latest<=now)break;
+    if(!told++)say("bridge node %u: its exit held %.1f s, to its ports' quiet windows' end (design/recovery.md#five-seconds)\n",node,
+                   (double)(latest-now)/1e9);
+    struct pollfd heard={.fd=network,.events=POLLIN};
+    if(poll(&heard,1,(int)((latest-now+999999)/1000000))>0)network_heard(1);
+  }
   return 0;
 }

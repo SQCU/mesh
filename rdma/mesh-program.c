@@ -1413,12 +1413,13 @@ int requests_held(const struct port *port){
   return 0;
 }
 
-/* design/bridge-and-ipc.md#stop: the bridge stopping: every program's words toward its destinations cancelled (~0) and
-   its status the stop's code, stored from the event loop's thread as plain memory stores, no queue, thread or verbs
-   call waited on */
-void programs_stop(int64_t code){
+/* design/bridge-and-ipc.md#stop: the bridge stopping (`port` NULL), or a port concluded around a call out past
+   MESH_PLATFORM_NS (design/recovery.md#five-seconds B12: its flows whose stops have not run, those waiting behind the
+   call): every such program's words toward its destinations cancelled (~0) and its status the code, stored from the
+   event loop's thread as plain memory stores, no queue, thread or verbs call waited on */
+void programs_stop(int64_t code,const struct port *port){
   for(struct flow *f=flows;f;f=f->next){
-    if(!owned(f->owner))continue;
+    if(!owned(f->owner) || (port && (f->port!=port || atomic_load_explicit(&f->stopped,memory_order_acquire))))continue;
     if(f->cancel)mesh_cancel(M,f->cancel,f->destination);
     status_failed(&mesh_client_at(M,f->owner)->status[f->destination],f->owner,code,4,M->node);
   }
