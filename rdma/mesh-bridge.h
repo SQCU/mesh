@@ -202,14 +202,15 @@ struct flow {
    lane's queue pair number (`qpn`, by which a completion names its lane).  Its state (LINK_DOWN; made and told,
    LINK_MADE; connecting; up), its job on the port's queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled;
    LINK_JOB_FLUSH the lanes of a link concluded while connected or up moved to the error state at the end of that
-   conclusion's quiet window, `flush_at`, 0 for none, design/recovery.md#five-seconds B6 (b)) and a registration its
-   make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss, so a job of a pairing gone makes no
-   call and is dropped as it ends, B10), the peer's lanes (`peer`, heard in its LINK: `heard`), its largest stripe
-   piece; the lanes the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a
-   thread's to clear where it found its lane failed), the lanes a progress thread found failed (`broken`, the event
-   loop's to take) and those found
-   so here (`dirty`: none is made again while the link is up; once no lane of the link is leased here, its control
-   socket is closed and both ends pair it afresh, every lane made again: link_turn), and the count of its lanes'
+   conclusion's quiet window, `flush_at`, 0 for none, and of any termination's, design/recovery.md#five-seconds B6 (b),
+   B9b) and a registration its make refused (`refused`), the pairing it belongs to (`pairing`, moved at each loss and as
+   its peer interface's termination is heard, mesh-link.c peer_terminated, so a job of a pairing gone makes no call and
+   is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`), its largest stripe piece;
+   the lanes the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to
+   clear where it found its lane failed, and the termination's queue's, B9b), the lanes a progress thread found failed
+   (`broken`, the event loop's to take) and those found so here (`dirty`: none is made again while the link is up;
+   once no lane of the link is leased here, its control socket is closed and both ends pair it afresh, every lane made
+   again: link_turn), and the count of its lanes'
    destructions (`generation`, link_make's, past which no request of an earlier pairing lands: a flow kept for a lane it
    left dirty is freed then, design/recovery.md#five-seconds B7).  Each lane's SEND gate (`gate`:
    the frames posted and retired, the send thread's; its capacity, set as the lane connects) and the flow whose program
@@ -278,8 +279,9 @@ struct stripes {
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue (its
    open's job `job`, dispatched at `job_at`; `stuck` once a job of the port outlived MESH_PLATFORM_NS and the port was
    concluded around it: design/recovery.md#five-seconds B12, mesh-link.c ports_stalled), the end of its quiet window
-   (`quiet_at`, MESH_PLATFORM_NS past its last conclusion, before which no port job but an earlier conclusion's flush,
-   struct link `flush_at`, is dispatched on it and the bridge does not exit: B9), whether its device is to be opened
+   (`quiet_at`, MESH_PLATFORM_NS past its last conclusion, a peer interface's termination heard or a fault, B9b, B19,
+   moved only later and by any thread, before which no port job but an earlier conclusion's flush, struct link
+   `flush_at`, is dispatched on it and the bridge does not exit: B9), whether its device is to be opened
    (`opening`: at the start, at its link's coming on, and at a hello heard while it is not open, B16; never on a
    clock), the queue pairs its link lanes hold (`committed`, of the device's usable queue pairs), its link lanes, its
    table of flows (`table`, the indices reserved and their generations, the highest reserved plus one), and its
@@ -299,7 +301,8 @@ struct port {
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
   _Atomic int done,closing;
-  uint64_t next,bandwidth,heard_at,frames,flight,flight_at,quiet_at,job_at;
+  uint64_t next,bandwidth,heard_at,frames,flight,flight_at,job_at;
+  _Atomic uint64_t quiet_at;
   struct message heard;
   uint16_t lid;
   uint8_t gid[16];
