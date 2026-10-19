@@ -20,6 +20,12 @@ static dispatch_queue_t finder;
 /* design/recovery.md#five-seconds B12: a port's job out past MESH_PLATFORM_NS, during which no port dispatches a driver
    call (ports_stalled's, each event-loop turn) */
 static _Atomic int stalled;
+/* design/recovery.md#five-seconds B19: the bridge's exit held to `exit_at` at least, as to every port's quiet window;
+   a fault's signal (SIGSEGV, SIGBUS: a provider's doorbell store to a page its driver unmapped, a termination's by
+   construction), and the pipe by which its handler tells the event loop */
+static uint64_t exit_at;
+static volatile sig_atomic_t faulted;
+static int fault_pipe[2]={-1,-1};
 _Atomic int found;
 static char devices[MESH_PORTS][32];
 static uint32_t device_count;
@@ -1338,6 +1344,37 @@ static void network_heard(int stopping){
   if(unknown && !stopping)ports_find();
 }
 
+/* design/recovery.md#five-seconds B19 (FIVE-SECONDS.md change 6; EXIT-RECLAIM.md P4's narrow form): a fault is never
+   absorbed nor recovered from, and it ends the process no sooner than MESH_PLATFORM_NS after it.  The handler does
+   async-signal-safe work alone: the signal stored and one byte written to the event loop's pipe (fault_taken); then a
+   thread other than the event loop's parks for good, its store never made again, and the stop ends the process; the
+   event loop's own sleeps MESH_PLATFORM_NS and returns with the default action restored, so the fault recurs and ends
+   the process */
+static void fault_heard(int number){
+  faulted=number;
+  const unsigned char byte=(unsigned char)number;
+  if(write(fault_pipe[1],&byte,1)<0){}
+  if(!pthread_main_np())for(;;)pause();
+  struct timespec left={(time_t)(MESH_PLATFORM_NS/1000000000u),(long)(MESH_PLATFORM_NS%1000000000u)};
+  while(nanosleep(&left,&left)==-1 && errno==EINTR){}
+  signal(number,SIG_DFL);
+}
+/* B19 on the event loop, at the fault's byte: logged, no lane of any port served (nothing posts again), every port's
+   quiet window and the exit's from now, and the stop, whose exit waits them out and is not 0 (launchd starts the bridge
+   again) */
+static void fault_taken(void){
+  unsigned char byte;
+  while(read(fault_pipe[0],&byte,1)==1){}
+  say("bridge node %u: %s on one of its threads, the thread parked: no lane served, the bridge stopping, its exit %.1f s "
+      "from now (design/recovery.md#five-seconds)\n",M->node,faulted==SIGBUS?"SIGBUS":"SIGSEGV",(double)MESH_PLATFORM_NS/1e9);
+  exit_at=MAX(exit_at,now+MESH_PLATFORM_NS);
+  for(uint32_t p=0;p<port_count;p++){
+    atomic_store_explicit(&ports[p].link.served,0,memory_order_release);
+    ports[p].quiet_at=MAX(ports[p].quiet_at,now+MESH_PLATFORM_NS);
+  }
+  stop=1;stop_reason=faulted;
+}
+
 /* design/prepared-machine.md#M26: the clients' control word, watched for the event loop */
 static void *control_watch(void *unused){
   (void)unused;
@@ -1481,6 +1518,14 @@ int main(int argc,char **argv){
     signal(stopping[i],SIG_IGN);
   }
   signal(SIGPIPE,SIG_IGN);
+  /* design/recovery.md#five-seconds B19: the faults' handler, its pipe read by the event loop, installed before any
+     device is opened */
+  struct sigaction faults={.sa_handler=fault_heard};
+  sigemptyset(&faults.sa_mask);
+  if(pipe(fault_pipe) || fcntl(fault_pipe[0],F_SETFL,O_NONBLOCK) || fcntl(fault_pipe[1],F_SETFL,O_NONBLOCK))die("bridge fault pipe");
+  EV_SET64(&event,(uint64_t)fault_pipe[0],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
+  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL) || sigaction(SIGSEGV,&faults,NULL) || sigaction(SIGBUS,&faults,NULL))
+    die("bridge events");
   uuid_t uuid;struct timespec bound={5,0};
   if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
   uint32_t node=0;
@@ -1613,6 +1658,7 @@ int main(int argc,char **argv){
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
       if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
+      else if(e->filter==EVFILT_READ && e->ident==(uint64_t)fault_pipe[0]){fault_taken();break;}
       else if(e->filter==EVFILT_PROC){
         child_heard((pid_t)e->ident);
         for(uint32_t s=0;s<MESH_CLIENTS;s++){
@@ -1669,8 +1715,9 @@ int main(int argc,char **argv){
      taken failed (ESHUTDOWN), stored from this thread, then the bridge gone; no queue, thread or verbs call waited on,
      and every object the kernel's to release at the exit (design/RDMA-KERNEL-RECOVERY.md "October 18"), the exit no
      sooner than every port's quiet window ends (design/recovery.md#five-seconds B9: its reclaim never inside the
-     termination a conclusion may follow), the kernel's link events read meanwhile, so a link going off then extends its
-     port's (network_heard) */
+     termination a conclusion may follow) and the exit's own (`exit_at`, B19), the kernel's link events read meanwhile, so a
+     link going off then extends its port's (network_heard), as a fault then extends them all (fault_taken); a stop a
+     fault took exits 128 and its signal's number, launchd starting the bridge again */
   requests_stop();
   for(uint32_t p=0;p<port_count;p++){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
@@ -1683,13 +1730,16 @@ int main(int argc,char **argv){
   mesh_notify(&M->control);
   for(int told=0;;){
     now=clock_ns();
-    uint64_t latest=0;
+    uint64_t latest=exit_at;
     for(uint32_t p=0;p<port_count;p++)latest=MAX(latest,ports[p].quiet_at);
     if(latest<=now)break;
-    if(!told++)say("bridge node %u: its exit held %.1f s, to its ports' quiet windows' end (design/recovery.md#five-seconds)\n",node,
+    if(!told++)say("bridge node %u: its exit held %.1f s, to its quiet windows' end (design/recovery.md#five-seconds)\n",node,
                    (double)(latest-now)/1e9);
-    struct pollfd heard={.fd=network,.events=POLLIN};
-    if(poll(&heard,1,(int)((latest-now+999999)/1000000))>0)network_heard(1);
+    struct pollfd heard[2]={{.fd=network,.events=POLLIN},{.fd=fault_pipe[0],.events=POLLIN}};
+    if(poll(heard,2,(int)((latest-now+999999)/1000000))<=0)continue;
+    now=clock_ns();
+    if(heard[0].revents)network_heard(1);
+    if(heard[1].revents)fault_taken();
   }
-  return 0;
+  return faulted?128+faulted:0;
 }
