@@ -315,7 +315,8 @@ struct mesh_unmasked {
 // head); part j of J over the pages [base, base + pages) of the rows' union, each part's (m, l, O) at Q's row times `parts`
 // plus j, through F and F4 (coherent(device) pointers where the last of a row's parts to arrive merges them in the same
 // dispatch). layout() places the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places)
-// and span() the pages and J.
+// and span() the pages of the rows' union and J, the configuration's part count (each part written: an empty one's l = 0,
+// which the merge passes over).
 template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *, typename M = mesh_unmasked>
 struct mesh_tile {
     enum : uint { dims = D, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
@@ -341,14 +342,14 @@ struct mesh_tile {
         diag = d; places = p; stage = region;
     }
 
-    __attribute__((always_inline)) void span(uint splits, bool every) {
+    __attribute__((always_inline)) void span(uint splits) {
         uint low = 0xFFFFFFFFu, high = 0u;
         for (uint r = 0; r < 8; ++r)
             if (rows[r] != 0xFFFFFFFFu && hi[r] > lo[r]) { low = min(low, lo[r]); high = max(high, hi[r]); }
         if (high == 0u) low = 0u;
         base = low / 16;
         pages = (high + 15) / 16 - base;
-        J = every ? splits : max(min(splits, (pages + simdgroups - 1) / simdgroups), 1u);
+        J = splits;
     }
 
     __attribute__((always_inline)) void load_q() {
@@ -401,14 +402,14 @@ struct mesh_tile {
 //   The shared part (845838e^'s shared kernel, split 0): a task is 8 of the rows sharing the range, of any streams and
 //   query heads of one KV head (the old kernel's 4 slots times 2 heads), over the range's pages through a KV type that
 //   maps them (any sharing row's block table), each row's keys [lo, hi) cut to [lo, min(hi, end)) (mesh_shared_part);
-//   every one of its `splits` parts written (span every: an empty one l = 0, which the merge passes over), at slots
-//   [0, splits) of each row's parts. Each shared page's K and V lines are read once a task for all its rows: the range
+//   every one of its `splits` parts written (an empty one l = 0, which the merge passes over), at slots [0, splits) of
+//   each row's parts. Each shared page's K and V lines are read once a task for all its rows: the range
 //   ceil(R / 8) times a KV head for the R rows sharing it, where the per-row path reads it once in each stream's task
 //   (ceil(S HG / 8) for a stream's S rows of HG query heads), so it reads less where a stream holds fewer than 8 rows of
 //   a KV head (a member holding few of a KV head's query heads; a model of fewer query heads a KV head).
 //   The tail (845838e^'s tail kernel, split 1): a sharing stream's task as the per-row path makes it, its rows' keys cut
 //   to [max(lo, end), max(hi, end)), its parts at slots [splits, splits + J) (the partial pointers offset by `splits`
-//   parts), J its span's (mesh_shared_tail returns the row's part count splits + J, the counted merge's). A stream
+//   parts), J the tail's part count (mesh_shared_tail returns the row's, splits + J, the counted merge's). A stream
 //   outside the sharing rows keeps the per-row path whole (its parts from slot 0).
 //   The merge (845838e^'s paged_attn_split_reduce over 2 splits): mesh_merge_row over a row's splits + J parts, after both
 //   parts' dispatches (a shared task holds several streams' rows, so no part of a row knows itself the last to arrive).
@@ -421,7 +422,7 @@ struct mesh_shared {
 // The shared part's task `item`: rows [8 item, 8 item + 8) of the `count` rows sharing the range, row e's Q row and keys
 // (over all its positions, its mask mod's) given by row(e, query) as uint3(Q row, lo, hi) with its (batch row, query head)
 // in query, each cut to the range; the pages of
-// their union, every one of the range's `splits` parts (span every). The task's other members are the caller's
+// their union, every one of the range's `splits` parts. The task's other members are the caller's
 // (layout, scale, stride, s, lane, t, j, parts), its KV type mapping the range's pages.
 template <uint D, typename KV, typename F, typename F4, typename M, typename Row>
 __attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_tile<D, KV, F, F4, M> &task, mesh_shared range, uint item, uint count,
@@ -436,14 +437,14 @@ __attribute__((always_inline)) static inline void mesh_shared_part(thread mesh_t
         task.hi[r] = keys.y;
         task.query[r] = query;
     }
-    task.span(range.splits, true);
+    task.span(range.splits);
 }
 
 // A sharing stream's tail on its task (rows and keys as the per-row path fills them): each row's keys cut to past the
-// range, its parts at slots [range.splits, range.splits + J) (the partial pointers offset), J the span's of `splits`
-// (every: span's); the row's part count range.splits + J, the merge's.
+// range, its parts at slots [range.splits, range.splits + J) (the partial pointers offset), J = `splits`; the row's part
+// count range.splits + J, the merge's.
 template <uint D, typename KV, typename F, typename F4, typename M>
-__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4, M> &task, mesh_shared range, uint splits, bool every) {
+__attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_tile<D, KV, F, F4, M> &task, mesh_shared range, uint splits) {
     for (uint r = 0; r < 8; ++r) {
         const uint2 keys = range.tail(uint2(task.lo[r], task.hi[r]));
         task.lo[r] = keys.x;
@@ -452,7 +453,7 @@ __attribute__((always_inline)) static inline uint mesh_shared_tail(thread mesh_t
     task.mp += range.splits;
     task.lp += range.splits;
     task.op += ulong(range.splits) * (D / 4);
-    task.span(splits, every);
-    return range.splits + task.J;
+    task.span(splits);
+    return range.splits + splits;
 }
 #endif
