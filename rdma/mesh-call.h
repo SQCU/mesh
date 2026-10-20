@@ -6,9 +6,8 @@
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
-/* design/transport.md section 14: the nodes this node's bridge has a live stream toward (a cable joins them, its link
-   up), each with its link's bandwidth, at most `room`; their count */
-struct mesh_reach { uint32_t node,padding; uint64_t bandwidth; };
+/* design/transport.md section 14: the nodes this node's bridge has a live stream toward, each with its stream's
+   bandwidth (mesh-plan.h struct mesh_reach), at most `room`; their count */
 uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
 /* design/transport.md section 14: the stream toward node `node`, held by this client as its rows are: taken while it is
    free (its owner word 0 to the client's own), each class's first unit then the stream's `next` (next[0] large,

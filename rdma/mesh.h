@@ -26,9 +26,12 @@
    14).  The wire is HELLO, FAREWELL, RECORD and LINK */
 #define MESH_VERSION 128u
 #define MESH_ABSENT UINT32_MAX
-/* design/transport.md: the node's ports and its client slots */
-#define MESH_PORTS 8
+/* design/transport.md section 14: the most nodes a bridge reaches (a stream toward each), and its client slots; and the
+   bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
+   (`bridge_off`, mesh-observe.h) */
+#define MESH_STREAMS 8
 #define MESH_CLIENTS 64
+#define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
 /* design/transport.md section 14: a stream's two classes, its large units (the window's block) and its small units
    (one frame), each a ring of MESH_STREAM_LARGE_UNITS or MESH_STREAM_SMALL_UNITS units; an owner word leaves bit 63 clear
@@ -76,16 +79,13 @@ struct mesh_stream {
   _Atomic uint64_t owner,declared[2],deadline;
 };
 _Static_assert(sizeof(struct mesh_stream)==152,"mesh_stream");
-/* design/transport.md: a port of the node, by the index the bridge gave it (its peer node while paired, its
-   phase, MESH_UNKNOWN where the bridge has no such port, the code it last stopped with, its bandwidth and the pairings
-   it made); and a node's record, the newest of which every bridge floods to
-   the mesh (its node, name and boot, the record's sequence in that boot, the bytes of its bridge's window its clients may
-   hold (the window less what the bridge holds itself: the map, the links' pages and rings, the duds' block) and the
-   node's memory in bytes and hardware model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), and its `ports` ports by index) */
-struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; };
-_Static_assert(sizeof(struct mesh_link_info)==32,"mesh_link_info");
-struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t window,memory;
-  char model[MESH_MODEL_BYTES]; struct mesh_link_info port[MESH_PORTS]; struct mesh_health health; };
+/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
+   the record's sequence in that boot, the bytes of its bridge's window its clients may hold (the window less what the
+   bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
+   model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), and the `reached` nodes its bridge reaches (mesh-plan.h
+   struct mesh_reach) */
+struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t window,memory;
+  char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant) under its execution's key (`key`) */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
@@ -94,8 +94,8 @@ struct mesh_client {
 /* design/transport.md; `busy`: the streams held (0 between calls) and since when none has been (`idle_since`, the
    wall clock in ns; 0 while any is) */
 struct hdr {
-  uint32_t magic,version,pgsz,block,rows,node,links,clients;
-  uint64_t planes_off,arena_off,page_off,buffer_off,link_off,stream_off,client_off,data_off,length,boot;
+  uint32_t magic,version,pgsz,block,rows,node,streams,clients;
+  uint64_t planes_off,arena_off,page_off,buffer_off,bridge_off,stream_off,client_off,data_off,length,boot;
   _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
 };
 /* the header within its own first page at any page size (mesh_layout) */
@@ -120,8 +120,6 @@ static inline int mesh_map_whole(struct hdr *m,uint64_t before){
   atomic_thread_fence(memory_order_acquire);
   return !(before&1) && atomic_load_explicit(&m->map,memory_order_relaxed)==before;
 }
-/* design/algorithm-sources.md#programcopy */
-static inline struct mesh_link_info *mesh_links(struct hdr *m){return (struct mesh_link_info *)((char *)m+m->link_off);}
 /* design/transport.md: an owner word is its generation, slot and process: (generation << 38) | (slot << 32) | pid */
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
 /* design/transport.md section 14: the stream of the node's link `p` */
@@ -161,19 +159,19 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
 /* design/algorithm-sources.md#programkernel_call; design/transport.md */
 /* design/transport.md; design/transport.md: the node's region: `pages` arena pages of `block`
    pages a block (the bridge's window, its node's configured share of its memory), a page-table row a block (its page
-   entry and buffer, and a bit in each plane), the node's ports, their streams and the client slots; the map's records
-   and the streams' rings are leases the bridge takes from the arena (mesh_records, mesh_stream_at); the arena is registered
-   whole on every port's device before any queue pair exists (mesh-verbs.h device_up) */
+   entry and buffer, and a bit in each plane), the bridge's own pages, the streams and the client slots; the map's
+   records and the streams' rings are leases the bridge takes from the arena (mesh_records, mesh_stream_at), which the
+   bridge registers whole once */
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages){
   uint32_t arena=pages/block*block,rows=arena/block;
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64;
-  h->pgsz=pgsz; h->block=block; h->rows=rows; h->links=MESH_PORTS; h->clients=MESH_CLIENTS;
+  h->pgsz=pgsz; h->block=block; h->rows=rows; h->streams=MESH_STREAMS; h->clients=MESH_CLIENTS;
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->arena_off=at; at+=(((uint64_t)arena+63)/64)*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->link_off=at; at+=(uint64_t)MESH_PORTS*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
-  h->stream_off=at; at+=(uint64_t)MESH_PORTS*sizeof(struct mesh_stream); at=(at+pgsz-1)/pgsz*pgsz;
+  h->bridge_off=at; at+=MESH_BRIDGE_BYTES; at=(at+pgsz-1)/pgsz*pgsz;
+  h->stream_off=at; at+=(uint64_t)MESH_STREAMS*sizeof(struct mesh_stream); at=(at+pgsz-1)/pgsz*pgsz;
   h->client_off=at; at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_client);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)arena*pgsz;

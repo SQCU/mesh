@@ -6,6 +6,7 @@
 #define MESH_BRIDGE_H
 #include "mesh-verbs.h"
 #include "mesh-call.h"
+#include "mesh-observe.h"
 #include <dispatch/dispatch.h>
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <sys/event.h>

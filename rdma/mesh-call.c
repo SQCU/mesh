@@ -10,7 +10,7 @@ static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){ret
 /* ---- The streams toward nodes (mesh-call.h; design/transport.md section 14) ------------------------- */
 /* the live stream toward `node`, NULL where none goes there */
 static struct mesh_stream *stream_toward(struct hdr *m,uint32_t node){
-  for(uint32_t p=0;node && p<m->links && p<MESH_PORTS;p++){
+  for(uint32_t p=0;node && p<m->streams && p<MESH_STREAMS;p++){
     struct mesh_stream *x=mesh_stream_at(m,p);
     if(atomic_load_explicit(&x->live,memory_order_acquire) && atomic_load_explicit(&x->peer,memory_order_relaxed)==node)return x;
   }
@@ -18,7 +18,7 @@ static struct mesh_stream *stream_toward(struct hdr *m,uint32_t node){
 }
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
-  for(uint32_t p=0;m && p<m->links && p<MESH_PORTS && count<room;p++){
+  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
     const struct mesh_stream *x=mesh_stream_at(m,p);
     const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed);
     if(!node || !atomic_load_explicit(&x->live,memory_order_acquire))continue;
@@ -41,7 +41,7 @@ int mesh_stream_take(struct mesh_ctx *context,uint32_t node,uint64_t next[2]){
 }
 void mesh_stream_give(struct mesh_ctx *context,uint32_t node){
   if(!context || !context->client)return;
-  for(uint32_t p=0;p<context->M->links && p<MESH_PORTS;p++){
+  for(uint32_t p=0;p<context->M->streams && p<MESH_STREAMS;p++){
     struct mesh_stream *x=mesh_stream_at(context->M,p);
     uint64_t mine=context->client;
     if(atomic_load_explicit(&x->peer,memory_order_relaxed)==node)atomic_compare_exchange_strong(&x->owner,&mine,0);

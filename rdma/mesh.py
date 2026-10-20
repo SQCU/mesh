@@ -166,15 +166,15 @@ def wait(serial=0, seconds=None):
 def current(members=None):
     """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
     node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
-    `map` the members' map as libnccl-mesh reads it (its relays, a link a cable, at its bandwidth, `mark` each node's
+    `map` the members' map as libnccl-mesh reads it (its relays, a link where two nodes' bridges reach each other, at its bandwidth, `mark` each node's
     bridge node number, `next` the routing table; members(map, ...) of the whole map is the
     map over any of them), `nodes` and `names` each map node's (then each relay's) bridge
-    node and name, `node` this node's bridge's (mesh_observe).  The whole map (members None) is the records as they are,
-    a node no cable joins among its nodes (joined() names two it leaves apart).  OSError naming the bridge where it is
+    node and name, `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
+    a node no bridge reaches among its nodes (joined() names two it leaves apart).  OSError naming the bridge where it is
     unreachable; ValueError naming two members no route joins, where `members` are given and the map leaves them apart
     (no session runs on it: nccl-mesh.c comm_read)."""
     serial, own = wait(), ffi.new('uint32_t *')
-    lib.mesh_observe(ffi.NULL, 0, own)
+    lib.mesh_reached(ffi.NULL, 0, own)
     count, lmap, nodes, names = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
@@ -193,7 +193,7 @@ def nodes():
     count = lib.mesh_nodes_health(held, 64)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    lib.mesh_observe(ffi.NULL, 0, own)
+    lib.mesh_reached(ffi.NULL, 0, own)
     text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
     return [{'node': r.node, 'name': text(r.name), 'window': r.window, 'memory': r.memory, 'model': text(r.model),
              'booted': r.health.booted, 'available': r.health.available, 'own': r.node == own[0]} for r in held[0:count]]

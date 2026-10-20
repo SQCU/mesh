@@ -11,13 +11,12 @@ extern "C" {
    declarations and integer constants only.  Every execution reads its node's bridge here when it starts, and no
    consumer gathers, parses or joins bridge records itself. */
 
-/* This node's bridge (design/algorithm-sources.md#meshobserve): its node, and its ports, view i the port it gave index
-   i: the peer node while the link is paired (0 else), the link's phase and the port's bandwidth in bits a second (the
-   RDMA port's active speed and width); returns the port count (at most `capacity` written; 0: the node alone), or
-   -errno where the bridge is unreachable. */
-enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
-struct mesh_link_view { uint32_t peer,phase; uint64_t bandwidth; };
-int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
+/* This node's bridge (design/transport.md section 14): its node, and the nodes it reaches, each with the bandwidth of
+   its stream toward it in bits a second; returns their count (at most `capacity` written; 0: the node alone), or
+   -errno where the bridge is unreachable.  A node is all a client names of the mesh: never a link, port or queue pair
+   (design/rubrics.md, Three kinds of source). */
+struct mesh_reach { uint32_t node,padding; uint64_t bandwidth; };
+int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node);
 /* The node's bridge's window as its region holds it: its bytes (the arena its configuration registered at device up) and
    the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
 int mesh_window(uint64_t *bytes,uint64_t *unleased);
@@ -33,7 +32,8 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
      MESH_LINKS_GRAPH  the links as given, either way, any connected graph (a ring, a tree or a mesh's links
                        among them, unoriented)
    bandwidth (NULL: none given) is link i's bandwidth either way in bits a second, a hardware fact (mesh_map's: the
-   slowest of its two ends' ports as their bridges report them, mesh_observe; 0 where none reports one), which the
+   lesser of its two ends' streams' bandwidths as their bridges report them, mesh_reached; 0 where none reports one),
+   which the
    routes and the packed trees read: of routes of equally few links the one over the faster hops (mesh_routes), and a
    hop's capacity (mesh_trees_pack).
    `relays` (a graph's, with a table) more nodes, numbered from `nodes`, forward and hold no rank: a collective's ranks
@@ -92,12 +92,10 @@ uint32_t mesh_route_path(const struct mesh_link_map *,uint32_t a,uint32_t b,uint
    needed; EINVAL: a member twice, relays and map->next or map->mark NULL, or a whole map with relays; ENOMEM).  The
    one rule mesh_map reads the bridges' records by. */
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map);
-/* The map of the node's bridge (design/transport.md) as of one map serial, from its records of every
-   node's ports (mesh_observe's views), so the same records give every member the same map: the whole map, its nodes
-   the records' ascending by bridge, two joined by a link a cable where each one's bridge holds ports paired with the
-   other (the fewer of the two ends' counts), each at the bandwidth of the slowest of those ports at either end (the
-   least any of them reports; 0 where none reports one; the bridge stripes a program between the two over every
-   cable, a routed one end to end, design/transport.md), each node marked by its bridge's number, its
+/* The map of the node's bridge (design/transport.md) as of one map serial, from its records of the nodes every node's
+   bridge reaches (mesh_reached's views), so the same records give every member the same map: the whole map, its nodes
+   the records' ascending by bridge, two joined by one link where each one's bridge reaches the other, at the lesser
+   of the two ends' bandwidths (0 where either reports none), each node marked by its bridge's number, its
    table mesh_routes';
    then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
    i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its

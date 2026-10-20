@@ -93,24 +93,19 @@ static void map_put(const struct mesh_record *record){
   }
   free(next);free(reached);free(order);
 }
-/* design/transport.md: a record whose links (each port's peer, phase and bandwidth), name, boot and facts are
-   the held one's changes only its health, sequence and ports' counts (their codes, pairings and queue pairs), written
-   under the region's health serial and never the map's: the map serial moves only where the mesh changes (a
-   communicator's session reads the map again where it moved, and reopens only where its own routes or their links'
-   costs changed: nccl-mesh.c map_digest, session_ensure), and neither a health sample nor a queue pair is a change of
-   the mesh */
+/* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), name, boot and facts are the
+   held one's changes only its health and sequence, written under the region's health serial and never the map's: the
+   map serial moves only where the mesh changes, and a health sample is no change of the mesh */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
-  int same=a->node==b->node && a->ports==b->ports && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
+  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
     a->window==b->window && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
-  for(uint32_t p=0;same && p<MESH_PORTS;p++)
-    same=atomic_load(&a->port[p].peer)==atomic_load(&b->port[p].peer) && atomic_load(&a->port[p].phase)==atomic_load(&b->port[p].phase) &&
-      atomic_load(&a->port[p].bandwidth)==atomic_load(&b->port[p].bandwidth);
+  for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
+    same=a->reach[k].node==b->reach[k].node && a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
 }
 static void health_put(struct mesh_record *held,const struct mesh_record *record){
   mesh_notify(&M->health);
   held->sequence=record->sequence;held->health=record->health;
-  memcpy(held->port,record->port,sizeof held->port);
   mesh_notify(&M->health);
 }
 struct mesh_record *record_held(uint32_t node){
@@ -118,10 +113,10 @@ struct mesh_record *record_held(uint32_t node){
   return NULL;
 }
 void record_changed(void){
-  struct mesh_record own={.node=M->node,.ports=port_count,.boot=M->boot,.sequence=++sequence,.window=wire.length-held_pages*M->pgsz,.memory=memory};
+  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.window=wire.length-held_pages*M->pgsz,.memory=memory};
   memcpy(own.name,host,sizeof own.name);
   memcpy(own.model,model,sizeof own.model);
-  memcpy(own.port,mesh_links(M),sizeof own.port);
+  own.reached=mesh_nodes_reached(M,own.reach,MESH_STREAMS);
   own.health=health;
   struct mesh_record *held=record_held(M->node);
   if(held && record_links_same(held,&own))health_put(held,&own);
@@ -148,7 +143,7 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   if(bytes!=sizeof heard)return;
   memcpy(&heard,payload,sizeof heard);
   heard.name[sizeof heard.name-1]=0;
-  if(!heard.node || heard.node==M->node || heard.ports>MESH_PORTS)return;
+  if(!heard.node || heard.node==M->node || heard.reached>MESH_STREAMS)return;
   heard.model[sizeof heard.model-1]=0;
   struct mesh_record *held=record_held(heard.node);
   struct known *k=known_at(heard.node);

@@ -161,6 +161,18 @@ static int degree(const struct loop_map *map, int i) {
   for (int c = 0; c < map->cables; c++) d += map->cable[c].a == i || map->cable[c].b == i;
   return d;
 }
+/* the nodes node i's cables reach, each once: what its bridge's streams reach once every cable has paired */
+static int neighbours(const struct loop_map *map, int i) {
+  int d = 0;
+  for (int c = 0; c < map->cables; c++) {
+    const int other = map->cable[c].a == i ? map->cable[c].b : map->cable[c].b == i ? map->cable[c].a : -1;
+    int seen = other < 0;
+    for (int e = 0; !seen && e < c; e++)
+      seen = (map->cable[e].a == i && map->cable[e].b == other) || (map->cable[e].b == i && map->cable[e].a == other);
+    d += !seen;
+  }
+  return d;
+}
 /* every bridge's map holding the n nodes and its own cables paired, within `seconds` */
 static int converged(const struct loop_map *map, double seconds) {
   const uint64_t deadline = clock_ns() + (uint64_t)(seconds * 1e9);
@@ -169,13 +181,11 @@ static int converged(const struct loop_map *map, double seconds) {
     done = 1;
     for (int i = 0; i < map->n && done; i++) {
       struct mesh_node_health health[LOOP_NODES + 1];
-      struct mesh_link_view links[MESH_PORTS];
+      struct mesh_reach reached[MESH_STREAMS];
       uint32_t node = 0;
-      int paired = 0;
       if (mesh_loop_bind(map->node[i].region)) return EINVAL;
-      const int records = mesh_nodes_health(health, LOOP_NODES + 1), ports = mesh_observe(links, MESH_PORTS, &node);
-      for (int p = 0; p < ports && p < MESH_PORTS; p++) paired += links[p].phase == MESH_PAIRED;
-      done = records == map->n && paired == degree(map, i);
+      const int records = mesh_nodes_health(health, LOOP_NODES + 1), count = mesh_reached(reached, MESH_STREAMS, &node);
+      done = records == map->n && count == neighbours(map, i);
     }
     if (!done) usleep(100000);
   }

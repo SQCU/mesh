@@ -23,9 +23,9 @@ static int mesh_joins(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   return 0;
 }
 
-/* The links joining u and x (either way), a pair's cables (design/transport.md): their count, and *slowest
+/* The links of the map joining u and x (either way, parallel where the map lists several): their count, and *slowest
    the least bandwidth the map gives any of them (0: none given) */
-static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t x,uint64_t *slowest){
+static uint32_t mesh_parallel(const struct mesh_link_map *map,uint32_t u,uint32_t x,uint64_t *slowest){
   uint32_t count=0;
   *slowest=0;
   for(uint32_t l=0;l<map->links;l++)
@@ -36,12 +36,12 @@ static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t 
     }
   return count;
 }
-/* A pair's hop striped over its n cables (design/transport.md: a direct program's position t on cable t mod
-   n), its inverse bandwidth in whole fs a byte: 8e15 over n times its slowest cable's bits a second; 0 where the map
-   gives none of them a bandwidth */
+/* A pair's hop over its n parallel links of the map, which together carry n times the slowest one's bandwidth: its
+   inverse bandwidth in whole fs a byte, 8e15 over n times its slowest link's bits a second; 0 where the map gives none
+   of them a bandwidth */
 static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   uint64_t slowest;
-  const uint32_t n=mesh_cables(map,u,x,&slowest);
+  const uint32_t n=mesh_parallel(map,u,x,&slowest);
   if(!slowest)return 0;
   double inverse=8e9/(double)slowest;
   if(n>1)inverse/=n;
@@ -198,8 +198,8 @@ static void mesh_distances(uint32_t N,const unsigned char *joined,const uint64_t
     }
   }
 }
-/* Each root's in-tree of shortest routes (fewest links, then the least inverse bandwidths, a pair's cables striped,
-   mesh_hop_inverse): each node's parent among those one equal step nearer the root, the least hash of its mark, the
+/* Each root's in-tree of shortest routes (fewest links, then the least inverse bandwidths, a pair's parallel links
+   together, mesh_hop_inverse): each node's parent among those one equal step nearer the root, the least hash of its mark, the
    parent's and the root's.  A node's parent reads its own candidates alone, so a route is a function of
    the shortest routes between its ends.  Integers throughout. */
 int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
@@ -211,8 +211,8 @@ int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
   unsigned char *joined=calloc(pairs,1),*done=malloc(N);
   struct mesh_length *length=malloc(N*sizeof *length);
   const int status=inverse && joined && done && length?0:ENOMEM;
-  /* a pair's hop: joined where a link joins it (a mesh's every pair), at its cables' inverse bandwidth striped (none
-     given counts none) */
+  /* a pair's hop: joined where a link joins it (a mesh's every pair), at its parallel links' inverse bandwidth
+     together (none given counts none) */
   for(uint32_t u=0;!status && map->kind==MESH_LINKS_MESH && u<N;u++)for(uint32_t x=0;x<N;x++)joined[(size_t)u*N+x]=u!=x;
   for(uint32_t l=0;!status && l<map->links;l++){
     const uint32_t u=map->link[l][0],x=map->link[l][1];
@@ -239,8 +239,8 @@ int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map){
   const uint32_t W=whole->nodes,N=n?n:W;
   if(whole->relays || (whole->links && !whole->link) || whole->kind>MESH_LINKS_GRAPH)return -EINVAL;
-  /* the whole map's links as listed, or a mesh's every pair: each of its listed links (cables) at its bandwidth, one
-     at none where it lists none */
+  /* the whole map's links as listed, or a mesh's every pair: each of its listed links at its bandwidth, one at none
+     where it lists none */
   const int every=whole->kind==MESH_LINKS_MESH;
   uint32_t L=every?W*(W?W-1:0)/2:whole->links;
   for(uint32_t a=0;every && a<W;a++)for(uint32_t b=a+1;b<W;b++){
@@ -797,41 +797,41 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
   if(!(eps>0 && eps<1))eps=0.1;
   uint32_t m=0,P=0;
   for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)m+=mesh_link_between(map,a,b);
-  /* hop v -> w (v's parent w): edge e, from[e] = w, to[e] = v, the ports its route crosses crossing[through[e] ..
-     through[e + 1]); port k (one way of a link, u to x, numbered as first met) its pair's cables and their least
-     bandwidth */
+  /* hop v -> w (v's parent w): edge e, from[e] = w, to[e] = v, the directed hops its route crosses crossing[through[e]
+     .. through[e + 1]); directed hop k (one way of a pair, u to x, numbered as first met) its pair's parallel links and
+     their least bandwidth */
   uint32_t *from=malloc((m+1)*sizeof *from),*to=malloc((m+1)*sizeof *to),*through=malloc((m+2)*sizeof *through);
-  uint32_t *crossing=malloc(((size_t)m*N+1)*sizeof *crossing),*port=malloc((size_t)N*N*sizeof *port),*uses=calloc((size_t)m*N+1,sizeof *uses);
+  uint32_t *crossing=malloc(((size_t)m*N+1)*sizeof *crossing),*hop=malloc((size_t)N*N*sizeof *hop),*uses=calloc((size_t)m*N+1,sizeof *uses);
   double *capacity=malloc(((size_t)m*N+1)*sizeof *capacity),*length=malloc(((size_t)m*N+1)*sizeof *length),*weight=malloc((m+1)*sizeof *weight);
-  uint32_t *cables=malloc(((size_t)m*N+1)*sizeof *cables);
+  uint32_t *parallel=malloc(((size_t)m*N+1)*sizeof *parallel);
   uint64_t *slowest=malloc(((size_t)m*N+1)*sizeof *slowest);
   int32_t *chosen=malloc(n*sizeof *chosen);
   struct mesh_packed *packed=NULL;
   size_t trees=0,room=0;
   uint32_t written=0,path[N+1];
-  if(!from || !to || !through || !crossing || !port || !uses || !capacity || !length || !weight || !chosen || !cables || !slowest)goto done;
-  for(size_t k=0;k<(size_t)N*N;k++)port[k]=UINT32_MAX;
+  if(!from || !to || !through || !crossing || !hop || !uses || !capacity || !length || !weight || !chosen || !parallel || !slowest)goto done;
+  for(size_t k=0;k<(size_t)N*N;k++)hop[k]=UINT32_MAX;
   m=0;through[0]=0;
   for(uint32_t v=0;v<n;v++)for(uint32_t w=0;w<n;w++)if(mesh_link_between(map,v,w)){
     const uint32_t hops=mesh_route_nodes(map,v,w,path);
     through[m+1]=through[m];
     for(uint32_t i=0;i+1<hops;i++){
-      uint32_t *k=port+(size_t)path[i]*N+path[i+1];
+      uint32_t *k=hop+(size_t)path[i]*N+path[i+1];
       if(*k==UINT32_MAX){
-        const uint32_t c=mesh_cables(map,path[i],path[i+1],slowest+P);
-        cables[P]=c?c:1;*k=P++;
+        const uint32_t c=mesh_parallel(map,path[i],path[i+1],slowest+P);
+        parallel[P]=c?c:1;*k=P++;
       }
       crossing[through[m+1]++]=*k;
     }
     from[m]=w;to[m]=v;m++;
   }
-  /* a port's capacity in bytes a ns: its cables' count times the slowest one's bandwidth where the map gives every
-     port one, else its cables' count (every cable alike) */
+  /* a directed hop's capacity in bytes a ns: its parallel links' count times the slowest one's bandwidth where the map
+     gives every hop one, else its parallel links' count (every link alike) */
   int known=P>0;
   for(uint32_t k=0;k<P;k++)known=known && slowest[k];
   for(uint32_t k=0;k<P;k++){
     double inverse=known?8e9/(double)slowest[k]:1;
-    if(cables[k]>1)inverse/=cables[k];
+    if(parallel[k]>1)inverse/=parallel[k];
     capacity[k]=1/inverse;
   }
   const double delta=mesh_exp(-mesh_log(P/(1-eps))/eps);
@@ -840,7 +840,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
   while(D<1)for(uint32_t r=0;r<n && D<1;r++)for(double demand=1;demand>0 && D<1;){
     for(uint32_t e=0;e<m;e++){weight[e]=0;for(uint32_t i=through[e];i<through[e+1];i++)weight[e]+=length[crossing[i]];}
     if(mesh_arborescence(n,r,m,from,to,weight,chosen))goto done;
-    /* the tree's flow: its demand, at most each port's capacity over the tree's hops crossing it */
+    /* the tree's flow: its demand, at most each directed hop's capacity over the tree's edges crossing it */
     for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)uses[crossing[i]]++;
     double f=demand;
     for(uint32_t v=0;v<n;v++)if(v!=r)for(uint32_t i=through[chosen[v]];i<through[chosen[v]+1];i++)
@@ -889,8 +889,8 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
   }
 done:
   for(size_t t=0;t<trees;t++)free(packed[t].parent);
-  free(packed);free(from);free(to);free(through);free(crossing);free(port);free(uses);free(capacity);free(length);free(weight);free(chosen);
-  free(cables);free(slowest);
+  free(packed);free(from);free(to);free(through);free(crossing);free(hop);free(uses);free(capacity);free(length);free(weight);free(chosen);
+  free(parallel);free(slowest);
   return written;
 }
 
