@@ -2,8 +2,8 @@
    is one client of its node's bridge (an attach, whose slot owns the process's leases of the window, ncclMemAlloc, and
    which holds the bridge's stream toward each node its communicators reach, as it holds rows: mesh-call.h
    mesh_stream_take).  A communicator's init holds the stream toward each other member's node and exchanges each
-   stream's first units through NCCL's bootstrap; its channels are those streams, shared by every communicator of the
-   process in the order their groups are called, and its map the nodes its members' bridges reach.  It names nodes,
+   stream's first units through NCCL's bootstrap; its channels are those streams, one communicator a stream (comm_hold),
+   and its map the nodes its members' bridges reach.  It names nodes,
    never a link, port, lane or queue pair.  A group's calls are planned by the one collective planner, laid on the
    channels as runs of the streams' units, declared to the bridge, supplied and awaited, the receives combined on the
    host or the GPU. */
@@ -235,8 +235,8 @@ struct entry { uint64_t below; struct mesh_program program; };
    mesh_wire_large), on that class of the stream toward that node its process holds (mesh-call.h mesh_stream_view: its
    rings and words), and the Metal buffer over them (`buffer`: its in ring, out ring, ready words and landed words at
    `in`, `out`, `ready` and `landed` in it).  Its positions: `sent` published, `consumed` consumed, `end` laid by the
-   groups scheduled, `waited` awaited by the GPU work encoded; its units, the stream's, shared by every communicator of
-   the process on it (struct hold): `laid` the first of the next out run, `taken` the first of the next in run (the
+   groups scheduled, `waited` awaited by the GPU work encoded; its units, the stream's (struct hold): `laid` the first of
+   the next out run, `taken` the first of the next in run (the
    bridge sends a stream's units in order), `declared` those declared to the bridge (mesh_stream_declare) */
 struct channel {
   int peer, large;
@@ -564,7 +564,7 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    one attach of the node's region (mesh_attach), made at the process's first lease or first communicator, whichever
    comes first.  Its slot owns every lease the process takes (ncclMemAlloc: a section of the window, mesh-call.h
    mesh_section_create, whose rows' owner is the slot), and it holds the stream toward each node its communicators reach
-   (`holds`, mesh-call.h mesh_stream_take), shared by those communicators.  The leases'
+   (`holds`, mesh-call.h mesh_stream_take), each for one communicator at a time.  The leases'
    bookkeeping is the region's, where the bridge sees it: the bridge retires the slot of a process gone and returns its
    leases' pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A
    lease is an operand of the window it was taken from, and a bridge that stops takes its region with it: while the
@@ -580,10 +580,9 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    that work is done, whether the work writes the lease), which a host-path group waits for (lease_wait) */
 struct point { void *event; uint64_t value; int write; };
 struct lease { void *address; uint32_t row; size_t bytes; void *buffer; struct point *points; size_t npoints; };
-/* design/transport.md section 14: the stream toward node `node` the process holds (`users` its communicators on it, 0
+/* design/transport.md section 14: the stream toward node `node` the process holds (`users` the communicator on it, 0
    none: the hold vacant), each class's view (0 large, 1 small), and each class's units: `laid` the first of the next out
-   run, `taken` the first of the next in run, `declared` those declared to the bridge; laid and taken under the groups'
-   lock, as its communicators' groups are laid in the order they are called */
+   run, `taken` the first of the next in run, `declared` those declared to the bridge */
 struct hold { uint32_t node, users; struct mesh_stream_view view[2]; uint64_t laid[2], taken[2], declared[2]; };
 struct attach {
   struct mesh_ctx context;
@@ -994,7 +993,7 @@ static ncclResult_t apart_fail(const char *name) {
   return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (a rank a node: a bridge's streams join nodes)", name);
 }
 static ncclResult_t hold_fail(const char *name, int rank, int status) {
-  return fail(ncclSystemError, "communicator %s: rank %d could not hold its streams at its bridge (%s: EBUSY, a stream another process holds, "
+  return fail(ncclSystemError, "communicator %s: rank %d could not hold its streams at its bridge (%s: EBUSY, a stream another communicator holds, "
               "or whose last holder's units are still going; ENOLINK, no stream toward a member's node); a communicator made next "
               "reads the streams as they then stand", name, rank, strerror(status));
 }
@@ -1020,12 +1019,15 @@ static struct hold *hold_of(struct attach *a, uint32_t node) {
     if (a->holds[k].users && a->holds[k].node == node) return a->holds + k;
   return NULL;
 }
-/* design/transport.md section 14: the stream toward each member's node this rank is joined to (joined) held for comm:
-   the attach's hold where its process holds it already (its communicators' runs laid in the order their groups are
-   called), else taken from the bridge as rows are (mesh-call.h mesh_stream_take: its classes' first units the stream's
-   `next`, and `fresh` its bit in this rank's report), comm a user of each (`held`, comm_unbind lets them go); each
-   class's first unit of the next out run into this rank's report (`start`, by the index of the node in its reach).
-   0, or ENOSPC (no hold vacant), or mesh_stream_take's refusal; what it took is let go with comm (comm_leave) */
+/* design/transport.md section 14: the stream toward each member's node this rank is joined to (joined) held for comm,
+   taken from the bridge as rows are (mesh-call.h mesh_stream_take: its classes' first units the stream's `next`, and
+   `fresh` its bit in this rank's report), comm its one user (`held`, comm_unbind lets it go); each class's first unit
+   of the next out run into this rank's report (`start`, by the index of the node in its reach).  One communicator a
+   stream: the head credit that keeps a ring's units from being written again before they are read is a channel's own
+   (a position published once the peer's LAG back is consumed, its ring sized for 2 LAG positions), so two
+   communicators' channels on one ring could overrun it (metal-microbench output_data/bridge-20261019/FLOWS.md 7.4e).
+   0, or EBUSY (another communicator of the process holds a stream it needs), ENOSPC (no hold vacant), or
+   mesh_stream_take's refusal; what it took is let go with comm (comm_leave) */
 static int comm_hold(struct ncclComm *comm, const struct report *reports, struct report *mine) {
   const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   struct attach *a = comm->attach;
@@ -1038,7 +1040,8 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     const uint32_t node = reports[q].node, k = reach_of(mine, node);
     struct hold *h = hold_of(a, node);
     int fresh = 0;
-    if (!h) {
+    if (h) status = EBUSY;
+    else {
       for (uint32_t s = 0; !h && s < MESH_PORTS; s++)
         if (!a->holds[s].users) h = a->holds + s;
       uint64_t next[2];
@@ -1080,7 +1083,7 @@ static int channel_buffer(struct channel *ch) {
    rank's report and first units as the second gather gave them: toward each rank it is joined to, a channel of each
    class on that class of the stream toward the rank's node, its out units from this end's hold and its in units from
    the peer's first out (the bridge sends a stream's units in order): taken from the peer's report where either end took
-   the stream at this init, else as the holds stand (every communicator of each process laid alike before it); its map
+   the stream at this init (comm_hold takes every stream it holds); its map
    (map_of), its wire (its bridge's block: every paired bridge's is one) and its failure words.  0, or ENOMEM; EPROTO
    where a stream is not the wire's or no hold is of a joined node */
 static int comm_join(struct ncclComm *comm, const struct report *reports) {
@@ -3613,7 +3616,7 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
 
 /* ncclCommSplit: every rank's (color, key) and its report (reach_read; none for NCCL_SPLIT_NOCOLOR) all-gathered on comm,
    the ranks of this color ordered by key, then rank; two ranks of a color on one node refused alike (comm_apart), each
-   rank's streams toward its color's nodes held (comm_hold: those its process holds already, its parent's among them),
+   rank's streams toward its color's nodes held (comm_hold: a stream its parent holds refuses it, EBUSY),
    and a second all-gather on comm carrying each rank's holding's status and its streams' first units, from which the
    child's channels are made (comm_join): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
    two gathers.  A failure at any rank of a color fails that color's split on each of its ranks as a value, what it held

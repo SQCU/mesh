@@ -289,7 +289,9 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   (`mesh_stream_take`), and gives it back to 0 when its last communicator on it ends (`mesh_stream_give`). The bridge
   answers nothing; it lets go the word of a client whose process is gone (`streams_let_go`).
 - The holder's first units are the stream's `next`, which its communicator's init tells its peers through NCCL's
-  bootstrap. A process's communicators on one stream lay their runs in the order their groups are called.
+  bootstrap. One communicator holds a stream at a time; a second is refused (EBUSY). Each channel's head credit (a
+  position published once the peer's position LAG back is consumed) sizes the ring for that channel alone, so two
+  communicators on one ring could write a slot before it is read.
 - The holder declares how far it will supply each class (`declared`) and by when (`deadline`, uptime ns, at most
   `MESH_PLATFORM_NS` on).
 
