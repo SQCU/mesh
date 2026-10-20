@@ -755,6 +755,8 @@ static void link_turn(struct port *port){
         atomic_store_explicit(&x->peer,port->peer,memory_order_relaxed);
         atomic_store_explicit(&x->bandwidth,port->bandwidth/MESH_LINK_STREAMS,memory_order_relaxed);
         atomic_store_explicit(&x->wire,l->wire[s],memory_order_relaxed);
+        atomic_store_explicit(&x->next[0],0,memory_order_relaxed);atomic_store_explicit(&x->next[1],0,memory_order_relaxed);
+        atomic_store_explicit(&x->free,1,memory_order_relaxed);
         atomic_store_explicit(&x->live,1,memory_order_release);
       }
       /* B9b: served, then the pairing read again (both sequentially consistent, as port_halt moves the pairing and then

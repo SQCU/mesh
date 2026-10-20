@@ -2422,6 +2422,19 @@ static struct inflight *inflight_at(struct ncclComm *comm, uint32_t h, uint64_t 
     if (g->comm == comm && at < g->end[h]) return at >= g->start[h] ? g : NULL;
   return NULL;
 }
+/* channel h's position `at` in none of comm's groups in flight, failed naming the channel's counts and each group's
+   positions on it */
+static ncclResult_t outside_groups(struct ncclComm *comm, uint32_t h, uint64_t at) {
+  const struct channel *ch = comm->channels + h;
+  char spans[256] = "";
+  size_t used = 0;
+  for (struct inflight *g = inflight; g && used < sizeof spans - 48; g = g->next_group)
+    if (g->comm == comm)
+      used += (size_t)snprintf(spans + used, sizeof spans - used, " [%llu, %llu)", (unsigned long long)g->start[h], (unsigned long long)g->end[h]);
+  return fail(ncclInternalError, "position %llu of channel %u is in no group (sent %llu, consumed %llu, waited %llu; groups in flight on it:%s)",
+              (unsigned long long)at, h, (unsigned long long)ch->sent, (unsigned long long)ch->consumed, (unsigned long long)ch->waited,
+              *spans ? spans : " none");
+}
 
 /* channel h's position `at`'s in run as a GPU wait awaits it (nccl-mesh-metal.h struct metal_wait): its last unit's
    landed word, its first unit's slot (a dud's check, and a landing's piece), its communicator's failure words */
@@ -2446,7 +2459,7 @@ static ncclResult_t arrive(struct metal_program *program, struct ncclComm *comm,
   ncclResult_t result = ncclSuccess;
   for (uint64_t at = ch->waited; at < count && !result; at++) {
     const struct inflight *g = inflight_at(comm, h, at);
-    if (!g) return fail(ncclInternalError, "position %llu of channel %u is in no group", (unsigned long long)at, h);
+    if (!g) return outside_groups(comm, h, at);
     ch->waited = at + 1;
     const struct metal_wait wait = wait_of(comm, h, g->plans[h].runs + 2 * (at - g->start[h]) + 1, at);
     result = gpu(metal_spin(program, &wait), "a wait");
@@ -2695,7 +2708,7 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   while (ch->consumed < end && !result) {
     const uint64_t at = ch->consumed;
     struct inflight *g = inflight_at(comm, h, at);
-    if (!g) return fail(ncclInternalError, "position %llu of channel %u is in no group", (unsigned long long)at, h);
+    if (!g) return outside_groups(comm, h, at);
     struct schedule *p = g->plans + h;
     struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
     if (m && at == m->first && m->c->bound->before[m->step] >= 0) {
@@ -2749,6 +2762,7 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
         if (counted(m->c) && st->steps[m->step].buffer == 2) result = counted_landed(program, m->c, q, comm->violation);
       }
     }
+    if (!m && ch->waited <= at && (result = arrive(program, comm, ch, at + 1))) break;
     ch->consumed++;
   }
   return result;
@@ -2762,7 +2776,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
   struct channel *ch = comm->channels + h;
   const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
   struct inflight *g = inflight_at(comm, h, at);
-  if (!g) return fail(ncclInternalError, "position %llu of channel %u is in no group", (unsigned long long)at, h);
+  if (!g) return outside_groups(comm, h, at);
   struct schedule *p = g->plans + h;
   struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
   const struct run *r = p->runs + 2 * (at - p->start);

@@ -98,6 +98,9 @@ ranking.
 - Latency more than 3 times the hardware's per hop is forbidden.
 - No DMA or network channel goes 5 s without something happening on it.
 - At least 1,000 normal frames per transport error.
+- A collective client errs at most once in 10⁵ transmits, and no dud is ever read where the producer lives. The
+  operator, 10-20: "collective clients can only have an error one in 10000 (yes, 1e5) transmits'; duds *should not
+  happen*." A dud read is a read of memory its producer was not yet allowed to write, caught by the bridge.
 - Testing takes about 12 s an hour; an investigation runs at most 10 s of intensive work.
 - No collective has fewer than 2 members.
 - After a backend's first build, switching to it costs under 1 s.
@@ -307,6 +310,9 @@ ranking.
 - The operator's pair: lower, "synchronic temporal logic (e.g. mutating somethin during a call based on a timing
   estimate or measurement)"; upper, "diachronic temporal logic: allowed, uses known buffer depth, effectively free if
   you pipeline it" (10-18).
+- Ranked: a group's units declared once with one deadline from its encode, so a live producer's later units are
+  nil-sent when the group runs long or its command buffer starts late ≺ no dud for a live producer: "duds *should not
+  happen*" (10-20).
 
 **C6. Failure's reach.**
 - Ranks higher: the form in which a failure ends less (the call alone) and leaves less for the next call.
