@@ -295,8 +295,8 @@ static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int 
     }
     failed += result || wrong;
     printf("{\"loop\":\"nccl\",\"path\":\"%s\",\"rank\":%d,\"ranks\":%d,\"call\":\"%s\",\"root\":%d,\"count\":%llu,\"result\":\"%s\","
-           "\"wrong\":%llu}\n", walk ? "walk" : "host", rank, n, names[call], root, (unsigned long long)count,
-           result ? ncclGetErrorString(result) : "ok", (unsigned long long)wrong);
+           "\"wrong\":%llu,\"why\":\"%s\"}\n", walk ? "walk" : "host", rank, n, names[call], root, (unsigned long long)count,
+           result ? ncclGetErrorString(result) : "ok", (unsigned long long)wrong, result ? ncclGetLastError(comm) : "");
     fflush(stdout);
   }
   ncclCommDestroy(comm);

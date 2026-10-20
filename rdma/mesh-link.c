@@ -687,9 +687,10 @@ static int lane_drained(const struct port *port,uint32_t k){
   return sent>=seen && sent>=final && atomic_load_explicit(lane_words(x->ready)+sent%x->units,memory_order_acquire)<1+sent/x->units;
 }
 /* design/transport.md section 14: the data lanes' turn of a port, on the event loop.  A binding whose client unbound it
-   (`want` 0 or another), or whose slot is no longer its client's, ends: the declaration the slot holds is kept as the
-   lane's `final` (the send thread sends what is undeclared no more and the rest as duds), the lanes unbound, and the
-   answer 0.  A lane no live ring runs on and no binding holds (one held across the link's loss) is reset and served
+   (`want` 0 or another), or whose slot is no longer its client's, ends: its lanes' `final` the declaration the slot
+   holds, or the most the send thread read, and one unit more, at least one past the units sent (the send thread sends
+   the declared units not supplied, and that one, as duds: the peer's wait on anything the binding will not supply ends
+   at a dud, whatever it was declared), the lanes unbound, and the answer 0.  A lane no live ring runs on and no binding holds (one held across the link's loss) is reset and served
    while the link is up.  A pair is free while the link is up, both lanes live, unbound and drained (lane_drained), and
    the port's free pairs are published (struct hdr `free`).  Every slot's request for one of the port's pairs is then
    answered: bound, its lanes' first units the lanes' `sent`, where the pair is free, else refused (EBUSY; ENOLINK while
@@ -710,8 +711,9 @@ void lanes_turn(struct port *port){
       if(want && atomic_load_explicit(&b->answer,memory_order_relaxed)==want)continue;
       for(uint32_t j=0;j<2;j++){
         struct lane_state *s=l->lane+k+j;
-        const uint64_t declared=held?atomic_load_explicit(&b->declared[j],memory_order_acquire):0;
-        if(declared>atomic_load_explicit(&s->final,memory_order_relaxed))atomic_store_explicit(&s->final,declared,memory_order_relaxed);
+        const uint64_t seen=atomic_load_explicit(&s->seen,memory_order_relaxed),read=held?atomic_load_explicit(&b->declared[j],memory_order_acquire):0,
+          declared=(read>seen?read:seen)+1,sent=__atomic_load_n(&s->sent,__ATOMIC_ACQUIRE),end=declared>sent+1?declared:sent+1;
+        if(end>atomic_load_explicit(&s->final,memory_order_relaxed))atomic_store_explicit(&s->final,end,memory_order_relaxed);
         atomic_store_explicit(&s->owner,0,memory_order_release);
       }
       if(held && !want)atomic_store_explicit(&b->answer,0,memory_order_release);

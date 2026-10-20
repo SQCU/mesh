@@ -2037,6 +2037,7 @@ static int ready(const struct steps *s, uint32_t k) { return s->before[k] < 0 ||
 static void supply(const struct channel *ch, const struct run *r, const void *bytes, size_t length) {
   const uint64_t units = ch->view.units;
   unsigned char *slot = ch->view.out + (r->first % units) * ch->view.unit;
+  for (uint64_t u = r->first - r->skip; u < r->first; u++) memset(ch->view.out + (u % units) * ch->view.unit, 0, sizeof(uint64_t));
   if (!bytes || length < sizeof(uint64_t)) memset(slot, 0, sizeof(uint64_t));
   if (bytes) memcpy(slot, bytes, length);
   atomic_thread_fence(memory_order_release);
@@ -2045,30 +2046,37 @@ static void supply(const struct channel *ch, const struct run *r, const void *by
 }
 
 /* a channel's in run on the host: 1 once it has landed (its last unit's landed word at least 1 + its cycle: a lane's
-   units land in order), 0 before; -1 where its link was lost (the word ~0), -2 where the peer supplied nothing (a dud:
-   its first eight bytes all ones, design/transport.md section 10) */
+   units land in order), 0 before; -1 where its link was lost (a word ~0), -2 where the peer supplied nothing: a dud
+   (design/transport.md section 10: all ones; a supplied unit's first eight bytes are never all ones but in data that
+   is) at the first unit it skips or its first, read as each lands, so a binding's end at the peer, whose last dud is one
+   unit, ends the wait as soon as it lands */
 static int landing(const struct channel *ch, const struct run *r) {
   const uint64_t units = ch->view.units, last = r->first + r->units - 1;
+  for (uint64_t u = r->first - r->skip;; u = r->first) {
+    const uint64_t word = atomic_load_explicit(ch->view.landed + u % units, memory_order_acquire);
+    if (word == UINT64_MAX) return -1;
+    if (word < 1 + u / units) return 0;
+    uint64_t head;
+    memcpy(&head, ch->view.in + (u % units) * ch->view.unit, sizeof head);
+    if (head == UINT64_MAX) return -2;
+    if (u == r->first) break;
+  }
   const uint64_t word = atomic_load_explicit(ch->view.landed + last % units, memory_order_acquire);
   if (word == UINT64_MAX) return -1;
-  if (word < 1 + last / units) return 0;
-  uint64_t head;
-  memcpy(&head, ch->view.in + (r->first % units) * ch->view.unit, sizeof head);
-  return head == UINT64_MAX ? -2 : 1;
+  return word >= 1 + last / units;
 }
 
 /* every channel's positions published and consumed on the host: a SEND's piece supplied into its run, a REDUCE's
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct exchange's
    sums go to a copy, as its SENDs read the operand); a landing that reads the link's loss or a dud fails it, and so does
-   a revoke, at its next look, and MESH_PLATFORM_NS with nothing landed and nothing to publish (design/transport.md: the
-   platform's deadline, a host wait's bound).  Every look spins: nothing parks.  Its positions then count as awaited
-   for the GPU work after it (`waited`) */
+   a revoke, at its next look: a peer's process gone or its communicator revoked ends its bindings, whose duds land here
+   (design/transport.md sections 5 and 14: a client's wait is a loop that stops on a word, never on a clock; a peer that
+   computes for long is waited for).  Every look spins: nothing parks.  Its positions then count as awaited for the GPU
+   work after it (`waited`) */
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
-  uint64_t since = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
-    int open = 0, moved = 0;
-    const struct channel *waiting = NULL;
+    int open = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
       struct schedule *p = plans + h;
@@ -2097,7 +2105,6 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
           if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
         }
         ch->consumed++;
-        moved = 1;
       }
       while (ch->sent < ch->end && ch->sent < ch->consumed + LAG) {
         const uint64_t at = ch->sent;
@@ -2114,18 +2121,11 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
           if (at + 1 == m->first + m->pieces) p->out_at++;
         } else supply(ch, r, NULL, 0);
         ch->sent++;
-        moved = 1;
       }
-      if (!waiting && (ch->sent < ch->end || ch->consumed < ch->end)) waiting = ch;
       open |= ch->sent < ch->end || ch->consumed < ch->end;
     }
     for (uint32_t h = 0; !open && h < comm->count; h++) comm->channels[h].waited = comm->channels[h].end;
     if (!open) return ncclSuccess;
-    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (moved) since = now;
-    else if (now - since > MESH_PLATFORM_NS)
-      return fail(ncclRemoteError, "nothing landed from node %u at position %llu, and nothing could be published, for the platform's deadline "
-                  "(MESH_PLATFORM_NS): its peer has not reached the group", waiting->node, (unsigned long long)waiting->consumed);
   }
 }
 
