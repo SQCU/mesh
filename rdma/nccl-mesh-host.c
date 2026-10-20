@@ -7,8 +7,8 @@
    MESH_HOST_EXECUTOR is defined), a run's ready words release-stored, a wait for a landing a poll of its run's last
    unit's landed word (mesh.metal mesh_wait_bounded: until it reaches 1 + the cycle or the bridge stores ~0, for at most
    the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, at most MESH_PLATFORM_NS, and until
-   the communicator's stop word [6] is set, design/transport.md), its failure (the bound reached, the link lost, a dud,
-   a revoke) recorded in the failure words [0], [3], [4] and the gate [2], and every later step gated on them doing
+   the communicator's stop word [6] is set, design/transport.md), its failure (the bound reached, the link lost, a
+   revoke) recorded in the failure words [0], [3], [4] and the gate [2], and every later step gated on them doing
    nothing; a step naming no words is gated on the program's (metal_gate), as nccl-mesh-metal.m dispatch_as binds them.
    A buffer is a host address (metal_wrap returns its address; metal_contents it); what metal_scratch, metal_shared and
    metal_event made is counted and freed with its last release.  The Metal 4 form's own steps (a caller's kernel running
@@ -161,15 +161,12 @@ static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls
   return seen;
 }
 
-/* mesh_step_check: a wait's failure recorded where the gate is clear: a revoke, the link lost (~0), the bound reached,
-   or a dud (its run's first eight bytes all ones) */
+/* mesh_step_check: a wait's failure recorded where the gate is clear: a revoke, the link lost (~0) or the bound reached;
+   a landing is none, whatever its bytes */
 static void step_check(const struct metal_wait *w, _Atomic uint64_t *v, uint32_t polls, uint64_t status) {
   if (!v || !polls || atomic_load_explicit(v + 2, memory_order_acquire)) return;
-  atomic_thread_fence(memory_order_acquire);
-  uint64_t head;
-  memcpy(&head, at(w->buffer, w->slot), sizeof head);
   const uint64_t cause = atomic_load_explicit(v + 6, memory_order_acquire) ? METAL_REVOKED : status == UINT64_MAX ? METAL_LOST
-                       : status < 1 + w->cycle ? METAL_BOUND : head == UINT64_MAX ? METAL_DUD : 0;
+                       : status < 1 + w->cycle ? METAL_BOUND : 0;
   if (!cause) return;
   atomic_store_explicit(v, cause, memory_order_relaxed);
   atomic_store_explicit(v + 3, w->channel, memory_order_relaxed);
@@ -193,7 +190,7 @@ static void step_release(const struct metal_release *r) {
 
 /* a step as the walk encodes it: its kind and arguments, and the failure words and bound it names (words_of, read
    where it is made, as a dispatch binds them where it is encoded) */
-enum { OP_COPY, OP_COMBINE, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OP_PUBLISH, OP_FILLER, OP_SPIN, OP_SEND_SMALL, OP_LAND, OP_COUNTED };
+enum { OP_COPY, OP_COMBINE, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OP_PUBLISH, OP_SPIN, OP_SEND_SMALL, OP_LAND, OP_COUNTED };
 struct op {
   int kind, mode, type, op;
   void *dst, *src, *with;
@@ -243,7 +240,6 @@ static void run_counted(int kind, const struct metal_counted *k) {
     const uint64_t place = counted_rows(c, 0, k->first) * k->row + k->scalar, rows = counted_rows(c, k->first, k->entries) * k->row;
     const uint64_t bytes = rows > k->scalar ? least(rows - k->scalar, k->bytes) : 0, length = place >= k->limit ? 0 : least(bytes, k->limit - place);
     if (kind == METAL_COUNTED_SEND) {
-      if (length < sizeof(uint64_t)) memset(d + k->dst, 0, sizeof(uint64_t));
       memmove(d + k->dst, s + k->src + place, length);
       atomic_thread_fence(memory_order_release);
     }
@@ -256,7 +252,7 @@ static void run_counted(int kind, const struct metal_counted *k) {
 static void run_op(const struct op *o) {
   _Atomic uint64_t *v = o->v;
   const uint32_t polls = o->polls;
-  const int writes = o->kind == OP_PUBLISH || o->kind == OP_FILLER || o->kind == OP_SEND_SMALL || (o->kind == OP_COPY && o->mode == METAL_SEND) ||
+  const int writes = o->kind == OP_PUBLISH || o->kind == OP_SEND_SMALL || (o->kind == OP_COPY && o->mode == METAL_SEND) ||
                      (o->kind == OP_COUNTED && o->mode == METAL_COUNTED_SEND);
   if (writes ? stopped(v, polls) : halted(v, polls)) return;
   switch (o->kind) {
@@ -284,13 +280,8 @@ static void run_op(const struct op *o) {
     if (o->n) nccl_mesh_truncdiv(o->type, at(o->dst, o->dst_offset), at(o->src, o->src_offset), o->n, o->scalar);
     return;
   case OP_PUBLISH: step_release(&o->release); return;
-  case OP_FILLER:
-    memset(at(o->release.buffer, o->release.slot), 0, sizeof(uint64_t));
-    step_release(&o->release);
-    return;
   case OP_SPIN: step_await(&o->wait, v, polls); return;
   case OP_SEND_SMALL:
-    if (o->n < sizeof(uint64_t)) memset(at(o->release.buffer, o->release.slot), 0, sizeof(uint64_t));
     memmove(at(o->release.buffer, o->release.slot), at(o->src, o->src_offset), o->n);
     step_release(&o->release);
     return;
@@ -372,11 +363,6 @@ int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t ds
 
 int metal_publish(struct metal_program *program, const struct metal_release *r) {
   struct op o = {.kind = OP_PUBLISH, .release = *r};
-  return step(program, &o, NULL);
-}
-
-int metal_publish_filler(struct metal_program *program, const struct metal_release *r) {
-  struct op o = {.kind = OP_FILLER, .release = *r};
   return step(program, &o, NULL);
 }
 

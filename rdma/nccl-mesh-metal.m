@@ -26,9 +26,9 @@
    loads (mesh_wait_bounded, STEP_LOOK at a time with the stop word [6] read between them; the program's bound, at most
    NCCL_MESH_POLLS: metal_begin), ended sooner by the landing, the link's loss (~0) or a revoke.  mesh_step_check: the
    wait's failure recorded in failure words [0] (its cause, nccl-mesh-metal.h METAL_*), [3] and [4] and then the gate
-   [2], where the gate is still clear: a revoke, the link lost, the bound reached, or a dud, its run's first eight bytes
-   (at p.src) all ones (the peer supplied nothing there: design/transport.md section 10); a landing reads its first
-   eight bytes alone, as HEAD's stamp check read them, and the failure words and the fence only where it failed.  mesh_step_await: a landing
+   [2], where the gate is still clear: a revoke, the link lost or the bound reached; a landing is no failure, whatever its
+   bytes (a dud's among them: placed where a send must happen and its producer is gone, never a value a consumer reads
+   as a signal, design/rubrics.md M4), and it reads the failure words and the fence only where it failed.  mesh_step_await: a landing
    awaited by thread 0 and checked, then the threadgroup past a device barrier and a system-scope fence (its payload
    then read with mesh_payload).  mesh_step_release: a piece the threadgroup stored into its run's slots, then its
    units' ready words (p.count from p.aux, each p.scalar) released by thread 0 after a device barrier.  One threadgroup
@@ -51,9 +51,8 @@ static NSString *const STEPS =
   "if (!p.polls) return; "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
   "ulong cause; "
-  "if (status != ~0UL && status >= 1 + p.scalar) { "
-  "if (mesh_payload((volatile coherent(system) device const ulong *)(ring + p.src)) != ~0UL) return; cause = " XSTR(METAL_DUD) "UL; } "
-  "else cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
+  "(void)ring; if (status != ~0UL && status >= 1 + p.scalar) return; "
+  "cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
   "if (v[2]) return; "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
@@ -123,9 +122,8 @@ static NSString *const KERNELS =
   "FLOAT8(e4m3, false)\n"
   "FLOAT8(e5m2, true)\n"
   "GROUP(publish) { ENTER_G GROUP_STOP mesh_step_release(p, d, i); }\n"
-  "GROUP(publish_filler) { ENTER_G GROUP_STOP if (i == 0) *(volatile coherent(system) device ulong *)(d + p.dst) = 0UL; mesh_step_release(p, d, i); }\n"
   "GROUP(send_small) { ENTER_G GROUP_STOP volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); "
-  "if (i == 0 && p.n < 8) *(volatile coherent(system) device ulong *)x = 0UL; threadgroup_barrier(mem_flags::mem_device); LOOP x[k] = y[k]; "
+  "LOOP x[k] = y[k]; "
   "mesh_step_release(p, a, i); }\n"
   "GROUP(land_copy) { ENTER_G AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
   "GROUP(spin) { ENTER_G if (i == 0) mesh_step_check(p, mesh_step_wait(p, d + p.aux, vb), s, vb); }\n"
@@ -145,7 +143,6 @@ static NSString *const KERNELS =
   "#define COUNTED(Z, W) "
   "GROUP(counted_send_##Z) { ENTER_G GROUP_STOP device const long *c = (device const long *)(a + p.aux); PLACE(counted_rows(c, 0, p.first), counted_rows(c, p.first, p.count), p.at) "
   "volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src + place[0]); "
-  "if (i == 0 && place[1] < 8) *(volatile coherent(system) device ulong *)x = 0UL; threadgroup_barrier(mem_flags::mem_device); "
   "for (ulong k = i; k < place[1] / sizeof(W); k += g) x[k] = y[k]; } "
   "GROUP(counted_land_##Z) { ENTER_G device const long *c = (device const long *)(a + p.aux); PLACE(counted_rows(c, 0, p.first), counted_rows(c, p.first, p.count), p.at) "
   "device W *x = (device W *)(d + p.dst + place[0]); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); "
@@ -178,7 +175,7 @@ static const char *const KIND[] = {
   "combine_f16", "land_f16", "combine3_f16", "premul_f16", "combine_f32", "land_f32", "combine3_f32", "premul_f32",
   "combine_bf16", "land_bf16", "combine3_bf16", "premul_bf16", "combine_e4m3", "land_e4m3", "combine3_e4m3", "premul_e4m3",
   "combine_e5m2", "land_e5m2", "combine3_e5m2", "premul_e5m2",
-  "publish", "publish_filler", "send_small", "land_copy", "spin",
+  "publish", "send_small", "land_copy", "spin",
   "counted_start", "counted_check", "counted_arrived", "counted_send_4", "counted_land_4", "counted_own_4", "counted_send_1", "counted_land_1",
   "counted_own_1", "combine_merge", "land_merge"};
 enum { KINDS = sizeof KIND / sizeof *KIND };
@@ -546,7 +543,7 @@ int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t ds
 }
 
 /* a wait's arguments (nccl-mesh-metal.h struct metal_wait): its word at aux for 1 + scalar, its run's first unit at src
-   (a dud's check, and a landing's piece), its position and channel for its failure's record */
+   (a landing's piece), its position and channel for its failure's record */
 static struct args wait_args(const struct metal_wait *w, size_t dst_offset, size_t n, int op) {
   return (struct args){.dst = dst_offset, .src = w->slot, .n = n, .scalar = w->cycle, .aux = w->word, .op = (uint32_t)op, .at = w->at,
                        .channel = w->channel};
@@ -559,10 +556,6 @@ static struct args release_args(const struct metal_release *r, size_t src_offset
 
 int metal_publish(struct metal_program *program, const struct metal_release *r) {
   return dispatch(program, @"publish", r->buffer, NULL, NULL, NULL, release_args(r, 0, 1), 1);
-}
-
-int metal_publish_filler(struct metal_program *program, const struct metal_release *r) {
-  return dispatch(program, @"publish_filler", r->buffer, NULL, NULL, NULL, release_args(r, 0, 1), 1);
 }
 
 int metal_spin(struct metal_program *program, const struct metal_wait *w) {

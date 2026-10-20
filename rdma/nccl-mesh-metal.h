@@ -34,8 +34,8 @@ void *metal_retain(void *object);
    or metal_gate's, or those a wait names): at most `polls` loads of a landed word (rdma/mesh.metal mesh_wait_bounded),
    past which the dispatch records a failure, and every later dispatch gated on those words reads it and does nothing,
    so the host finds the failure there after the command buffer (nccl-mesh.c comm_failure) and the call fails as a
-   value.  The failure words: [0] the cause (METAL_BOUND the bound reached, METAL_LOST the link's ~0, METAL_DUD a dud's
-   all-ones first eight bytes, METAL_REVOKED a revoke), [2] 1 + the position (the gate, stored last, by the GPU alone, so
+   value.  The failure words: [0] the cause (METAL_BOUND the bound reached, METAL_LOST the link's ~0, METAL_REVOKED a
+   revoke; a landing is none, whatever its bytes), [2] 1 + the position (the gate, stored last, by the GPU alone, so
    every thread of a dispatch reads it alike), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow, and
    [6] the host's stop (a revoke's), which every wait reads and records.  The bound is the caller's, carried per crossing (nccl.h
    ncclMeshStream polls); 0, or more than nccl.h NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md;
@@ -46,7 +46,6 @@ void *metal_retain(void *object);
    halts on nothing, and its wait makes one load. */
 #define METAL_BOUND 1
 #define METAL_LOST 2
-#define METAL_DUD 3
 #define METAL_REVOKED 4
 struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls);
 /* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
@@ -78,19 +77,16 @@ int metal_combine3(struct metal_program *, int type, int op, void *dst, size_t d
 int metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar);
 int metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor);
 /* A wait on a run's landing (design/transport.md section 14): in `buffer` (a channel's stream class), the landed word of the
-   run's last unit at `word`, landed once it holds at least 1 + `cycle`, and the run's first unit at `slot`, whose first
-   eight bytes all ones are a dud (the peer supplied nothing there); its failure recorded in `violation`'s words at
-   position `at` of channel `channel`. */
+   run's last unit at `word`, landed once it holds at least 1 + `cycle`, and the run's first unit at `slot` (the landed
+   piece); its failure recorded in `violation`'s words at position `at` of channel `channel`. */
 struct metal_wait { void *buffer, *violation; size_t word, slot; uint64_t cycle, at; uint32_t channel; };
 /* A run's release: in `buffer` (a channel's stream class), `count` ready words from `word`, each stored `value` (1 plus the
    units' cycle) after every store before it; its first unit's slot of the out ring at `slot`. */
 struct metal_release { void *buffer; size_t word, slot; uint64_t value; uint32_t count; };
+/* a run's release, its slots as they are (an empty position's too) */
 int metal_publish(struct metal_program *, const struct metal_release *);
-/* an empty position's release: its slot's first eight bytes 0 (no dud), then its words */
-int metal_publish_filler(struct metal_program *, const struct metal_release *);
 int metal_spin(struct metal_program *, const struct metal_wait *);
-/* a piece in one kernel: copied into its run's slot (a piece of fewer than eight bytes after eight bytes of 0) and its
-   words released (send), or awaited and combined (an ncclDataType_t, op as combine_into) or copied (type -1, n bytes)
+/* a piece in one kernel: copied into its run's slot and its words released (send), or awaited and combined (an ncclDataType_t, op as combine_into) or copied (type -1, n bytes)
    where it landed, the wait's slot (land) */
 int metal_send_small(struct metal_program *, void *src, size_t src_offset, size_t bytes, const struct metal_release *);
 int metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
@@ -113,7 +109,7 @@ int metal_land_deferred(struct metal_program *, int op, void *dst, size_t dst_of
              then failure word [5] set (nccl-mesh.c comm_failure: the communicator fails as a value);
      SEND    (d a slot, s the rows, a the counts at aux) bytes [scalar, scalar + bytes) of the rows the counts' entries
              [first, first + entries) send, after the rows of the entries before them, stored system-coherent at
-             d + dst, within `limit` bytes of s + src (fewer than eight after eight bytes of 0: no dud);
+             d + dst, within `limit` bytes of s + src;
      LAND    (d the receive buffer, s a landed slot, a the landed counts at aux) the slot's bytes the same way into the
              rows of entries [first, first + entries) after those before them, within `limit` bytes of d + dst;
      OWN     (d the receive buffer, s the rows, a the landed counts at aux) the rank's own rows (entries [first, first

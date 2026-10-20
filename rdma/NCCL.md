@@ -211,7 +211,7 @@ NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place of one s
 - **Tracks.** Each channel's remaining positions are a track with two cursors: its publications and its consumptions,
   each in position order.
   - A publication runs once its track has consumed the position LAG back (the ring's credit).
-  - A consumption runs once its landing came. Its dud is checked, and it is combined or copied where it belongs.
+  - A consumption runs once its landing came, and it is combined or copied where it belongs.
   - A step's first piece that has a receive before it (`mesh_group_before`) waits on that receive's channel having
     consumed it.
   - Neither cursor waits on the other beyond the credit.
@@ -348,27 +348,28 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
 - One rank a node.
 - A bidirectional exchange with one peer is one group (`ncclGroupStart`/`End`; torch's `batch_isend_irecv`).
   Separate send then receive calls in the same order on both sides do not pair: a channel has one position axis for
-  both directions. The library does not detect it, nor unequal counts or different collectives on two ranks: a landed
-  position's one check is a dud's (its first eight bytes all ones), so these are the caller's error.
+  both directions. The library does not detect it, nor unequal counts or different collectives on two ranks: no landed
+  payload is checked, so these are the caller's error.
 - Communicators know nothing of one another, and no two hold one stream: a link has four, so four communicators use
   a node pair at once, and a fifth is refused (EBUSY) until one of them is destroyed.
 
 ## Failures
 
 The library keeps no clock that fails a group. A host-path group's waits end at their landings, at a landed word's
-`~0` (its bridge's, where the link is lost or the bridge stops), at a dud, or at a revoke; a GPU wait also ends at its
-bound ([Bounded waits](#bounded-waits)). A group declares its units to its bridge as it is issued, to be supplied
-within `MESH_PLATFORM_NS` (`ncclMeshComplete` declares an issued group's remaining units anew); a unit declared and not
-supplied by then, or by the end of its communicator's hold of the stream, goes as a dud, all ones, which fails the
-peer's group as a value (design/transport.md section 10). A peer that has not yet issued its group is waited for, a
-host-path group's wait on it until a landing, a dud or a revoke. The failure is returned:
+`~0` (its bridge's, where the link is lost or the bridge stops), or at a revoke; a GPU wait also ends at its bound
+([Bounded waits](#bounded-waits)). A group declares its units to its bridge as it is issued, with no deadline while its
+member lives. A member that fails, is revoked or ends has the units it declared and did not supply sent at once as
+duds: all ones, placed where a send must happen and its producer is gone (design/transport.md section 10). Its peers
+land them as bytes like any other. A dud is no signal and fails nothing at the consumer; the failure is the
+producer's own (design/rubrics.md M4: "nothing else changes"; M10). A peer that has not yet issued its group is waited
+for, a host-path group's wait on it until a landing or a revoke. The failure is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued,
 
 and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
-fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, so theirs fail
-too. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
+fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, which they
+land and complete with: the failure stays with the member that failed. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
 init) on the map as it is then (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of
 returning if the link topo changed mid function execution"). A communicator keeps the map its init made, so a change
 that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator

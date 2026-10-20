@@ -1267,8 +1267,8 @@ static void comm_stop(struct ncclComm *comm) {
 }
 
 /* ncclCommRevoke, NCCL's: comm's operations in flight revoked and its resources kept (comm_stop alone: its streams stay
-   held, the units its groups declared and supplied nothing for going at once as duds, nil_send, so its peers' groups
-   fail as values), a host-path group of its returning at its next look and its GPU work ending at its next wait, every later
+   held, the units its groups declared and supplied nothing for going at once as duds, nil_send, so its peers' positions
+   land rather than wait), a host-path group of its returning at its next look and its GPU work ending at its next wait, every later
    group refused (ncclInvalidUsage), ncclCommGetAsyncError reading ncclSuccess once the revoke is done; from any thread,
    under comm's own lock alone, never one a group holds while it waits.  ncclCommDestroy then gives its streams back
    (comm_free) and frees it */
@@ -1590,12 +1590,8 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
   return fail(comm->failed, "%s", comm->failure);
 }
 
-/* a dud's landing, a client's failure (design/transport.md section 10) */
-#define DUD "node %u supplied nothing at position %llu on its channel: a dud landed there (all ones: its call failed, or it " \
-            "was revoked or ended)"
-
 /* the communicator's failure: the one it kept; a revoke; else one its GPU work recorded in its failure words (a wait's
-   bound reached, its link lost, a dud landed: nccl-mesh-metal.h METAL_*; a counted all-to-all past its layout), kept
+   bound reached, its link lost: nccl-mesh-metal.h METAL_*; a counted all-to-all past its layout), kept
    now (comm_fail); ncclSuccess where none.  Under group_lock */
 static ncclResult_t comm_failure(struct ncclComm *comm) {
   if (comm->failed) return comm_fail(comm, comm->failed, "%s", comm->failure);
@@ -1609,7 +1605,6 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
     if (cause == METAL_LOST)
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost (its stream's landed words ~0) at position %llu", node,
                        (unsigned long long)(at - 1));
-    if (cause == METAL_DUD) return comm_fail(comm, ncclRemoteError, DUD, node, (unsigned long long)(at - 1));
     return comm_fail(comm, ncclRemoteError, "position %llu on the channel to node %u landed nothing within %llu polls of a GPU wait (its "
                      "stream's bound, ncclMeshStream polls): the peer's work there began that much later, or its link was lost",
                      (unsigned long long)(at - 1), node, (unsigned long long)atomic_load_explicit(v + 4, memory_order_relaxed));
@@ -2035,7 +2030,8 @@ static void declare(struct ncclComm *comm, int again) {
 
 /* design/transport.md section 14: a communicator that can no longer supply what it declared (its group failed, or it
    was revoked or destroyed): every channel's declared units given the deadline now, so the bridge sends at once, as
-   duds, each one no group supplied, and its peers' groups end as values rather than wait; a live holder's units are
+   duds, each one no group supplied, and its peers' positions land rather than wait (a dud is what is placed where a
+   send must happen and its producer is gone: not a value any consumer reads as a signal, design/rubrics.md M4); a live holder's units are
    never given a deadline (declare: UINT64_MAX), so no dud reaches a peer of a producer still at work (design/rubrics.md
    C5, Quantities, the operator 10-20) */
 static void nil_send(struct ncclComm *comm) {
@@ -2066,13 +2062,11 @@ static ncclResult_t schedule(struct ncclComm *comm, struct call *list, size_t n,
 static int ready(const struct steps *s, uint32_t k) { return s->before[k] < 0 || s->done[s->before[k]]; }
 
 /* a channel's out run supplied on the host (design/transport.md section 14): `length` bytes into its run's slots of the
-   out ring (fewer than eight after eight bytes of 0, and a filler's, `bytes` NULL, eight bytes of 0, so neither reads
-   as a dud), then, after a release fence, each unit's ready word 1 + its cycle, the units the run skips first, in order */
+   out ring (a filler's, `bytes` NULL, none), then, after a release fence, each unit's ready word 1 + its cycle, the units
+   the run skips first, in order */
 static void supply(const struct channel *ch, const struct run *r, const void *bytes, size_t length) {
   const uint64_t units = ch->view.units;
   unsigned char *slot = ch->view.out + (r->first % units) * ch->view.unit;
-  for (uint64_t u = r->first - r->skip; u < r->first; u++) memset(ch->view.out + (u % units) * ch->view.unit, 0, sizeof(uint64_t));
-  if (!bytes || length < sizeof(uint64_t)) memset(slot, 0, sizeof(uint64_t));
   if (bytes) memcpy(slot, bytes, length);
   atomic_thread_fence(memory_order_release);
   for (uint64_t u = r->first - r->skip; u < r->first + r->units; u++)
@@ -2080,21 +2074,10 @@ static void supply(const struct channel *ch, const struct run *r, const void *by
 }
 
 /* a channel's in run on the host: 1 once it has landed (its last unit's landed word at least 1 + its cycle: the bridge releases a
-   stream's units in order), 0 before; -1 where its link was lost (a word ~0), -2 where the peer supplied nothing: a dud
-   (design/transport.md section 10: all ones; a supplied unit's first eight bytes are never all ones but in data that
-   is) at the first unit it skips or its first, read as each lands, so a binding's end at the peer, whose last dud is one
-   unit, ends the wait as soon as it lands */
+   stream's units in order), 0 before; -1 where its link was lost (a word ~0).  What landed is the run's bytes, a dud's
+   among them, which no consumer reads as anything but bytes (design/rubrics.md M4) */
 static int landing(const struct channel *ch, const struct run *r) {
   const uint64_t units = ch->view.units, last = r->first + r->units - 1;
-  for (uint64_t u = r->first - r->skip;; u = r->first) {
-    const uint64_t word = atomic_load_explicit(ch->view.landed + u % units, memory_order_acquire);
-    if (word == UINT64_MAX) return -1;
-    if (word < 1 + u / units) return 0;
-    uint64_t head;
-    memcpy(&head, ch->view.in + (u % units) * ch->view.unit, sizeof head);
-    if (head == UINT64_MAX) return -2;
-    if (u == r->first) break;
-  }
   const uint64_t word = atomic_load_explicit(ch->view.landed + last % units, memory_order_acquire);
   if (word == UINT64_MAX) return -1;
   return word >= 1 + last / units;
@@ -2102,7 +2085,7 @@ static int landing(const struct channel *ch, const struct run *r) {
 
 /* every channel's positions published and consumed on the host: a SEND's piece supplied into its run, a REDUCE's
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct exchange's
-   sums go to a copy, as its SENDs read the operand); a landing that reads the link's loss or a dud fails it, and so does
+   sums go to a copy, as its SENDs read the operand); a landing that reads the link's loss fails it, and so does
    a revoke, at its next look: a peer's process gone or its communicator revoked ends its bindings, whose duds land here
    (design/transport.md sections 5 and 14: a client's wait is a loop that stops on a word, never on a clock; a peer that
    computes for long is waited for).  Every look spins: nothing parks.  Its positions then count as awaited for the GPU
@@ -2120,9 +2103,7 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
         const int landed = landing(ch, r);
         if (!landed) break;
         if (landed < 0)
-          return landed == -1 ? fail(ncclRemoteError, "the link to node %u was lost at position %llu (its stream's landed words ~0)", ch->node,
-                                     (unsigned long long)at)
-                              : fail(ncclRemoteError, DUD, ch->node, (unsigned long long)at);
+          return fail(ncclRemoteError, "the link to node %u was lost at position %llu (its stream's landed words ~0)", ch->node, (unsigned long long)at);
         struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
         if (m) {
           struct steps *s = m->c->bound;
@@ -2449,7 +2430,7 @@ static ncclResult_t outside_groups(struct ncclComm *comm, uint32_t h, uint64_t a
 }
 
 /* channel h's position `at`'s in run as a GPU wait awaits it (nccl-mesh-metal.h struct metal_wait): its last unit's
-   landed word, its first unit's slot (a dud's check, and a landing's piece), its communicator's failure words */
+   landed word, its first unit's slot (a landing's piece), its communicator's failure words */
 static struct metal_wait wait_of(const struct ncclComm *comm, uint32_t h, const struct run *r, uint64_t at) {
   const struct channel *ch = comm->channels + h;
   const uint64_t units = ch->view.units, last = r->first + r->units - 1;
@@ -2465,7 +2446,7 @@ static struct metal_release release_of(const struct channel *ch, const struct ru
 }
 
 /* the GPU waits until `count` of the channel's positions have landed: a wait on each one's in run not yet awaited, in
-   order (its landing checked for a dud) */
+   order */
 static ncclResult_t arrive(struct metal_program *program, struct ncclComm *comm, struct channel *ch, uint64_t count) {
   const uint32_t h = (uint32_t)(ch - comm->channels);
   ncclResult_t result = ncclSuccess;
@@ -2558,7 +2539,7 @@ static int fused_piece(const struct message *m, size_t offset, size_t length) {
 }
 
 /* channel h's next position consumed, as its track's item (metal_record; rdma/NCCL.md "Per-channel progress"): a
-   piece's landing awaited (its run's last unit's, a dud checked) and combined or copied where it belongs, an empty
+   piece's landing awaited (its run's last unit's) and combined or copied where it belongs, an empty
    position's landing awaited alone, a receive's first piece after the receive before it (metal_depend: that receive's
    channel, track `base` + its index, consumed to its last); the fused call's landing of its whole operand recorded for
    its caller's kernel (metal_land_deferred) */
@@ -2665,8 +2646,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
     }
     if (at + 1 == m->first + m->pieces) p->out_at++;
   }
-  if (!result && !released && m) result = gpu(metal_publish(program, &out), "a publication");
-  else if (!result && !released) result = gpu(metal_publish_filler(program, &out), "an empty publication");
+  if (!result && !released) result = gpu(metal_publish(program, &out), m ? "a publication" : "an empty publication");
   if (!result) { ch->sent++; *published = 1; }
   return result;
 }
