@@ -254,3 +254,48 @@ What HEAD did against the sections above, by section:
 
 The bridge is reviewed by design/rubrics.md, rubric M; libnccl-mesh and the schedule compiler by rubric C; the
 programs that use them by rubric D.
+
+## 14. The data path, decided by rubric M and C
+
+The forms the rewrite chose between, ranked by design/rubrics.md, and the form the code takes.
+
+| Question | Ranked | Rubric |
+|---|---|---|
+| Who takes a queue pair | a client's compare-and-swap on `hdr->lanes` (HEAD, 126) ≺ the bridge binds it at the client's asking | M5, C6 |
+| Where receives go | into a communicator's rows, restarted per communicator (HEAD) ≺ into the lane's in ring, posted by the bridge for the whole pairing (126) | M4, M9 |
+| How a communicator's stream ends | the link concluded (HEAD) ≺ the stream left wherever it stopped (126) ≺ every unit it declared sent, the unsupplied ones as duds | M4, M10 |
+| Where the next stream starts | read back from the words (126's `mesh_lane_next`) ≺ the bridge's count of units sent, told in the binding's answer and exchanged at init through NCCL's bootstrap | M9, C7 |
+| A queue pair's re-pairing | destroyed and made again, its completion queues drained (126) ≺ moved to RESET and through INIT, RTR and RTS again | M3, M2 |
+| The binary changing | the bridge stops itself (HEAD, 126) ≺ it stops on the installer's SIGTERM alone | M3 |
+
+**The binding.**
+- Each data lane pair of a link (a large lane and a small lane) is held by at most one client at a time.
+- A client asks for a pair through its own slot: `bind[port][pair].want`, a serial of its own. The bridge's event loop
+  answers in the same entry:
+  - `answer` is the serial once the pair is bound to this client, or `MESH_BIND_REFUSED` with the reason.
+  - `start[j]` is the first unit the client's lane j will release, the bridge's count of units sent on it.
+- The bridge binds a pair only while both of its lanes are live and unbound, and while the previous binding's units have
+  all been sent. It publishes the free pairs of each port in the record (`struct mesh_link_info` `free`), which is all a
+  client reads to choose.
+- Clients never write a lane word.
+
+**Declarations and duds.**
+- A bound client writes, in its own slot, how far it has declared each lane (`declared[j]`, an absolute unit sequence)
+  and the deadline by which every declared unit is supplied (`deadline`, uptime ns, at most `MESH_PLATFORM_NS` past
+  the declaration).
+- The send thread posts unit u when its supplied word reads `1 + u / units`. Where u is declared, not supplied, and the
+  deadline has passed, it posts a dud instead: a SEND from the bridge's all-ones block.
+- When a binding ends, every declared unit not yet supplied goes as a dud at once. A binding ends at the client's
+  unbinding (`want` 0), its process's exit, or its slot's retirement. The bridge keeps the last declaration it read in
+  its own state, since the slot may be reused.
+- The pair is free again once the lane's sent count reaches that final declaration.
+- The peer's receives are posted for the whole pairing, so every unit lands, and nothing is left posted against a
+  communicator.
+
+**What a client sees.**
+- Its slot's binding entries.
+- A bound pair's rings and words (`mesh_lane_view`): the out ring and supplied words are its own while it holds the pair,
+  and the in ring and landed words are the bridge's to write.
+- The port's free pairs.
+- It names no queue pair, request or completion, and writes no word the bridge reads except in its own slot and its bound
+  out ring.
