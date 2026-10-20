@@ -570,11 +570,10 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    bookkeeping is the region's, where the bridge sees it: the bridge retires the slot of a process gone and returns its
    leases' pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A
    lease is an operand of the window it was taken from, and a bridge that stops takes its region with it: while the
-   process holds a lease of a bridge that stopped (no longer registered on any device), its next lease and every use of
-   such a lease (ncclCommRegister, a group's buffer) fail naming it (ESTALE, attach_fail), until the process has freed
-   every such lease, after which the next lease attaches to the bridge that runs then, so a process never holds leases of
-   two regions; a communicator attaches the bridge that runs whatever leases the process holds (attach_current), and one
-   made on a bridge that stopped fails (comm_failure).
+   process holds a lease of a bridge that stopped (no longer registered on any device), its next lease, communicator
+   (ncclInvalidUsage: comm_refused) and ncclCommRegister fail naming it (ESTALE, attach_fail), until the process has freed
+   every such lease; the next attaches to the bridge that runs then, so a process never holds leases of two regions
+   (attach_current), and a communicator made on a bridge that stopped fails (comm_failure).
    The attach of a bridge gone stays mapped while a lease of it is held or a communicator holds it (until
    ncclCommDestroy), then is detached. --- */
 
@@ -621,12 +620,13 @@ static int attaches_stale(void) {
   return 0;
 }
 
-/* the attach whose bridge lives, made where there is none: 0; for a lease (`leasing`), ESTALE where a lease of a bridge
-   that stopped is still held (the process's own frees lift it); or mesh_attach's refusal.  A communicator is refused by
-   no lease: one process's leases never keep the group another party needs from being made (design/rubrics.md M3, M4) */
-static int attach_current(struct attach **out, int leasing) {
+/* the attach whose bridge lives, made where there is none: 0; ESTALE where a lease of a bridge that stopped is still
+   held, whatever attach lives (a process never holds leases of two regions: a node's window is most of its memory, and
+   GPU work on a stopped region's leases beside the new window's registration wired the Mini's whole memory, 2026-10-20,
+   metal-microbench output_data/bridge-20261019/REVIEW-131.md); or mesh_attach's refusal */
+static int attach_current(struct attach **out) {
   attaches_prune();
-  const int stale = leasing ? attaches_stale() : 0;
+  const int stale = attaches_stale();
   if (stale) return stale;
   if (attaches && attach_live(attaches)) { *out = attaches; return 0; }
   struct attach *a = calloc(1, sizeof *a);
@@ -683,14 +683,20 @@ static struct ncclComm *comm_new(int nranks, int rank, const char *name) {
    where it has none and held; 0, or the attach's refusal (comm_refused), comm then holding nothing of the bridge's */
 static int comm_attach(struct ncclComm *comm, const uint32_t *members) {
   pthread_mutex_lock(&attach_lock);
-  const int status = attach_current(&comm->attach, 0);
+  const int status = attach_current(&comm->attach);
   if (!status) comm->attach->comms++;
   else comm->attach = NULL;
   pthread_mutex_unlock(&attach_lock);
   if (!status && members) memcpy(comm->members, members, (size_t)comm->nranks * sizeof *members);
   return status;
 }
+/* a communicator's init refused by its attach: ENOMEM; ESTALE, the process's own leases of a bridge that stopped, which
+   only it can free (ncclInvalidUsage, told apart from a peer's failure: the caller frees them and inits again); else
+   attach_fail's */
 static ncclResult_t comm_refused(int status, const char *name) {
+  if (status == ESTALE)
+    return fail(ncclInvalidUsage, "communicator %s: this node's bridge stopped while this process holds leases of its window, which "
+                "are no longer registered memory; free every one (ncclMemFree) and make the communicator again", name);
   return status == ENOMEM ? fail(ncclSystemError, "out of memory") : attach_fail(status, "communicator %s", name);
 }
 
@@ -1356,23 +1362,17 @@ ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank) {
 }
 
 /* a buffer in the window of this node's bridge (a lease's): its handle the buffer, the window registered on every
-   device of the bridge at device up; a buffer in the window of a bridge that stopped is refused naming it (ESTALE), any
-   other buffer refused.  The process's other leases refuse nothing here */
+   device of the bridge at device up; any other buffer is refused, and every buffer while a lease of a bridge that
+   stopped is held */
 ncclResult_t ncclCommRegister(const ncclComm_t comm, void *buff, size_t size, void **handle) {
   if (!comm || !handle) return fail(ncclInvalidArgument, "comm or handle is NULL");
   pthread_mutex_lock(&attach_lock);
-  const uintptr_t at = (uintptr_t)buff;
-  int live = 0, stale = 0;
-  for (const struct attach *a = attaches; a && !live && !stale; a = a->next) {
-    const struct hdr *m = a->context.M;
-    const uintptr_t first = (uintptr_t)m + m->data_off, end = (uintptr_t)m + m->length;
-    if (at < first || at > end || size > end - at) continue;
-    if (attach_live(a)) live = 1;
-    else stale = ESTALE;
-  }
+  const int stale = attaches_stale();
+  const struct hdr *m = attaches && attach_live(attaches) ? attaches->context.M : NULL;
+  const uintptr_t at = (uintptr_t)buff, first = m ? (uintptr_t)m + m->data_off : 0, end = m ? (uintptr_t)m + m->length : 0;
   pthread_mutex_unlock(&attach_lock);
   if (stale) return attach_fail(stale, "ncclCommRegister of %zu bytes at %p", size, buff);
-  if (!live)
+  if (!m || at < first || at > end || size > end - at)
     return fail(ncclInvalidArgument, "ncclCommRegister of %zu bytes at %p: not in the window of this node's bridge; a buffer "
                 "collectives move is leased from the window (ncclMemAlloc)", size, buff);
   *handle = buff;
@@ -1393,7 +1393,7 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   struct mesh_section lease = {0};
   const size_t bytes = size ? size : 1;
   ncclResult_t result = ncclSuccess;
-  int status = attach_current(&a, 1);
+  int status = attach_current(&a);
   if (status)
     result = attach_fail(status, "ncclMemAlloc of %zu bytes", size);
   else if (a->count == a->room && lease_room(a))

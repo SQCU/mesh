@@ -51,9 +51,11 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
   `MESH_PLATFORM_NS` after its first rank met (the root's first accept, a non-root's connect) for the rest of it; the
   second gather has its own `MESH_PLATFORM_NS`. A root that no rank meets therefore fails as a value and is made again
   by its caller; nothing waits on a peer that never comes.
-- A lease the process still holds of a bridge that stopped refuses no communicator: a communicator attaches the bridge
-  that runs. That lease's own uses fail naming it (ESTALE), and so does the process's next `ncclMemAlloc` until the
-  process has freed every such lease.
+- While the process holds a lease of a bridge that stopped, its next lease (`ncclRemoteError`), communicator
+  (`ncclInvalidUsage`: the process's own leases, which only it can free) and `ncclCommRegister` are refused naming it,
+  until it has freed every such lease: a process never holds leases of two regions. A node's window is most of its
+  memory, and GPU work on a stopped region's leases beside the new window's registration wired the Mini's whole memory
+  (10-20, metal-microbench output_data/bridge-20261019/REVIEW-131.md).
 - A non-blocking init sets `comm` at once, runs on a thread of its own and returns `ncclInProgress`;
   `ncclCommGetAsyncError` gives `ncclInProgress` until it ends, then its result. `ncclCommRevoke`, `ncclCommAbort` and
   `ncclCommDestroy` end it as a value with what it held let go: the revoke shuts its bootstrap's sockets down, and its
