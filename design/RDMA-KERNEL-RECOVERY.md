@@ -171,7 +171,7 @@ reclaim DMA mappings owned by a thread still blocked in the kernel.
 
 `bin/mesh-bridge.sh` includes the `launchctl bootout` request in its thirty-second
 observation window. Pending stop reports both PIDs and restart does not replace
-the live owner's region. The kill guard and full configured memory fractions stay
+the live owner's region. Full configured memory fractions stay
 in force. Each added lifecycle branch either schedules the next attempt or keeps
 hardware-owned state intact until retirement; none chooses a reduced capability.
 

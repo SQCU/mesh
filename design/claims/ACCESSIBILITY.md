@@ -10,8 +10,6 @@ Implementation surfaces:
 - `bootstrap.sh`, `install.sh`, `install-user.sh`, and `enable-autologin.sh` realize the
   same reachability posture on every node.
 - `bin/mesh-bridge.sh` performs catchable bridge teardown and restart.
-- `bin/mesh-kill-guard.sh`, `bin/guard/`, and `bin/mesh-shell-guard.sh` prevent the
-  observed uninterruptible RDMA-driver demotion while retaining orderly teardown.
 - `networks.conf`, `install.sh`, and `bin/mesh-networks.sh` carry one noninteractive
   network inventory into every node's credential store and preferred-network set.
 - `rdma/mesh-flow.c` retains the configured registration and page capacity across every

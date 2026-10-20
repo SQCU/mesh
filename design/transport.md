@@ -110,9 +110,11 @@ seconds without something happening/concluding."
 
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A
 process in that state (STAT `U`) ignores every signal, SIGKILL included. Observed:
-- **September 5 (the Mini).** Five SIGKILLed test processes stayed in `U` inside verbs calls, holding their protection
-  domains and queue pairs. `ibv_alloc_pd` then failed for every process, all three ports went down with cables
-  attached, `ibv_devinfo` hung, `shutdown -r now` never completed, and the machine needed a power cycle.
+- **September 5 (the Mini).** Test processes stayed in `U` in the release of their verbs objects, holding their
+  protection domains and queue pairs. `ibv_alloc_pd` then failed for every process, all three ports went down with
+  cables attached, `ibv_devinfo` hung, `shutdown -r now` never completed, and the machine needed a power cycle. Some
+  had been sent SIGKILL. The kill did not make the wait: a process's exit releases its verbs objects whatever ended
+  it, SIGTERM and a return from main included, and a release that waits on a terminating device waits the same way.
 - **September 5 and October 18 (the M5).** `ibv_dealloc_pd`, called while a peer's device was terminating, entered
   `deallocPD`, which holds the provider's work-loop gate while it waits for the device's termination, whose thread needs
   that gate. On October 18 this held IOKit's termination for 17 hours, and the Wi-Fi/Bluetooth manager panicked the M5
@@ -120,14 +122,20 @@ process in that state (STAT `U`) ignores every signal, SIGKILL included. Observe
 
 So the bridge makes no call that can wait on a termination: no `ibv_dealloc_pd`, `ibv_dereg_mr`, `ibv_destroy_qp`,
 `ibv_destroy_cq`, `ibv_close_device`, no drain. A device or queue pair it no longer uses is forgotten; the kernel
-releases it at the process's exit. And nobody sends SIGKILL to a process that has opened a verbs device
-(`bin/mesh-kill-guard.sh` refuses it).
+releases it at the process's exit.
+
+Every process of ours can be ended by any signal at any time, SIGKILL included. A guard that keeps a process from
+being killed is a second failure added to compensate for the first: it presumes the deadlock will happen, it does not
+prevent it (an exit by SIGTERM or by main's return makes the same release), and it leaves a process nobody can stop.
+The first failure is removed where it is: our code makes no release call, and nothing of ours waits forever, so a
+kill always finds a process that can end. The one exposure left is the kernel's own release at an exit that coincides
+with a device's termination (section 9).
 
 ## 6. Who looped forever
 
 | date | what spun or blocked | whose |
 |---|---|---|
-| 2026-09-05 | test processes SIGKILLed inside verbs calls (state U) | ours: the kill |
+| 2026-09-05 | test processes in the release of their verbs objects (state U) | the provider's release, entered by our processes' exits during the fault |
 | 2026-09-05, 10-18 | `deallocPD` waiting on a termination that waits on its gate | the provider's deadlock, entered by our teardown call |
 | 2026-10-02 | a GPU kernel spinning with no bound on a word only another command queue wrote; the M5 crashed | ours |
 | 2026-10-17 | `pair_flush` spinning for `ib_drain_qp` markers the provider accepts and never completes | ours: waiting on something never promised |
@@ -244,25 +252,5 @@ What HEAD did against the sections above, by section:
 
 ## 13. Reviewing transport code
 
-A change is scored on each of these separately; failing one is enough.
-
-1. **Scope.** The code's lifetime matches the state it touches: device and link state is the bridge's, a call's state
-   is the call's. No client knows another client exists.
-2. **Reference parity.** NCCL, c10d, verbs and the cited literature have the object, or the deviation is argued from
-   the hardware's interface.
-3. **Minimal state.** Every object is a row, an address, a request or a readiness word. Phases, handshakes, tokens,
-   gates, caches and timers are defects unless the kernel interface forces them.
-4. **Failure as data.** Failure travels in band (duds, ~0) and never degrades another client or shared state. Every
-   wait has an exit the platform guarantees.
-5. **No inference at run time.** Parameters come from configuration made when it loads; nothing is derived, defaulted,
-   estimated or fallen back on inside a function. A missing value fails.
-6. **One form.** One implementation per computation and per path.
-7. **Hardware bound.** Latency against the hardware's (about 2-3 us a hop; three times that is forbidden); throughput
-   in tok/s; slower than the last measured form is a regression; under 3% is noise.
-8. **Mechanical naming.** Terms name objects: pointer, offset, row, request, word. Docs give data flow.
-9. **Complete mediation.** A client can name only what it was given (section 2).
-
-Mesh-specific: SEND and RECV only, frames matched; receives posted before their SENDs arrive; no verbs call at a
-client's end, a link's loss or the bridge's stop; the 5 s deadline on any DMA or network channel; never break state
-other services use; the control socket carries HELLO, LINK, FAREWELL and RECORD only; the window registered once at
-the start.
+The bridge is reviewed by design/rubrics.md, rubric M; libnccl-mesh and the schedule compiler by rubric C; the
+programs that use them by rubric D.
