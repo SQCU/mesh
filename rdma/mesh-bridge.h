@@ -143,9 +143,6 @@ struct link {
   _Atomic int done;
   _Atomic uint32_t served,broken,pairing;
   uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing,psn;
-  /* a stream a holder of a previous pairing still held at this pairing's connect: its words left ~0 for that holder, and
-     made new and freed once it lets go (the agent's send thread, mesh-link.c stream_turn_one) */
-  int stale[MESH_LINK_STREAMS];
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2],released[MESH_LINK_STREAMS][2];

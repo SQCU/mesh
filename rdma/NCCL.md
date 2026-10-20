@@ -39,21 +39,29 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
     and `ncclCommInitRankConfig` the same with its config.
 - Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
   nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
-  it holds rows (the stream's owner word taken while the stream is free). The second, bounded by `MESH_PLATFORM_NS` a
-  send or receive, carries each rank's holding's status and where its streams' units start. A communicator names
+  it holds rows (the stream's owner word taken while the stream is free). The second carries each rank's holding's
+  status and where its streams' units start. A communicator names
   nodes alone. An init fails as a value where two ranks are on one node (`ncclInvalidUsage`), where no stream
   toward a member's node is free at both ends (EBUSY: a link has four, each held by one communicator) or the link is
   gone (ENOLINK)
-  (`ncclSystemError`), or where a peer is silent past that bound; what it held is let go, and the next init reads the
-  streams as they then stand.
+  (`ncclSystemError`), or where its bootstrap's phase passes its bound (`ncclRemoteError`, ETIMEDOUT); what it held is
+  let go, and the next init reads the streams as they then stand.
+- Every wait of a bootstrap, blocking init or not, is a 100 ms slice after which the revoke and the phase's end are read
+  again (design/rubrics.md M3, C5). A phase ends `MESH_PLATFORM_NS` after the init began where no rank was met, and
+  `MESH_PLATFORM_NS` after its first rank met (the root's first accept, a non-root's connect) for the rest of it; the
+  second gather has its own `MESH_PLATFORM_NS`. A root that no rank meets therefore fails as a value and is made again
+  by its caller; nothing waits on a peer that never comes.
+- A lease the process still holds of a bridge that stopped refuses no communicator: a communicator attaches the bridge
+  that runs. That lease's own uses fail naming it (ESTALE), and so does the process's next `ncclMemAlloc` until the
+  process has freed every such lease.
 - A non-blocking init sets `comm` at once, runs on a thread of its own and returns `ncclInProgress`;
   `ncclCommGetAsyncError` gives `ncclInProgress` until it ends, then its result. `ncclCommRevoke`, `ncclCommAbort` and
   `ncclCommDestroy` end it as a value with what it held let go: the revoke shuts its bootstrap's sockets down, and its
-  connect and its root's accept read the revoke at each 100 ms look. `ncclCommAbort` or `ncclCommDestroy` then frees the
+  connect, its root's accept and its gathers read the revoke at each 100 ms slice. `ncclCommAbort` or `ncclCommDestroy` then frees the
   communicator, failed or not; no call but these four takes it before its init has ended.
 - A rank's connect and the root's accept hold nothing of the node's bridge: a rank attaches once its bootstrap has
   connected, or accepted every rank, and its report (its node and the nodes its bridge reaches) follows that attach. A
-  blocking init's root waits in its accept.
+  blocking init's root waits in its accept, at most its phase's bound.
 - A rank's connect to its root gives up `MESH_PLATFORM_NS` after its first try: an init toward a root that does not
   listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
 - `ncclCommSplit` takes the ranks of a color and holds the child's streams over comm (NCCL's bootstrapSplit, with the
@@ -365,7 +373,9 @@ producer's own (design/rubrics.md M4: "nothing else changes"; M10). A peer that 
 for, a host-path group's wait on it until a landing or a revoke. The failure is returned:
 
 - by the group, or
-- by `ncclCommGetAsyncError` for work already enqueued,
+- by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
+  streams is no longer its own (its link lost and paired again opens every stream new: design/transport.md section 14),
+  before any group runs on it,
 
 and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
 fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, which they

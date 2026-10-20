@@ -56,6 +56,11 @@ void mesh_stream_give(struct mesh_ctx *context,uint32_t stream){
   uint64_t mine=context->client;
   if(x)atomic_compare_exchange_strong(&x->owner,&mine,0);
 }
+int mesh_stream_held(struct mesh_ctx *context,uint32_t stream,uint64_t wire){
+  const struct mesh_stream *x=context?stream_held(context->M,stream):NULL;
+  return x && context->client && atomic_load_explicit(&x->live,memory_order_acquire) &&
+         atomic_load_explicit(&x->owner,memory_order_acquire)==context->client && atomic_load_explicit(&x->wire,memory_order_relaxed)==wire;
+}
 int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,int large,struct mesh_stream_view *view){
   if(!context || !context->client || !view)return EINVAL;
   struct hdr *m=context->M;

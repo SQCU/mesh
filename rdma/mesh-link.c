@@ -180,7 +180,6 @@ static void stream_turn_one(struct port *port,uint32_t s){
     if(atomic_load_explicit(&x->free,memory_order_acquire)){atomic_store_explicit(&x->free,0,memory_order_relaxed);l->held[s]=owner;}
     return;
   }
-  if(l->stale[s]){stream_words_reset(port,s);l->stale[s]=0;}
   if(atomic_load_explicit(&x->free,memory_order_relaxed) || !atomic_load_explicit(&x->live,memory_order_acquire))return;
   uint64_t next[2];
   for(uint32_t c=0;c<2;c++){
@@ -597,23 +596,24 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
   return error;
 }
 /* design/transport.md section 14, "A process a port": the link's streams opened as its lanes connect, by the agent
-   before any lane is served: each told its peer node, its share of the link's bandwidth and its identity; one no holder
-   holds made new and free (its next units 0: a client takes it only while free, so none takes it between the owner's
-   read and its words' making); one a holder of a previous pairing still holds left as that holder reads it (its landed
-   words ~0, the loss) and not free until it lets go (`stale`: stream_turn_one makes it new then); every one live */
+   before any lane is served, every one new: a holding of a lost pairing ended with it (its owner word 0: its holder's
+   give, a compare-and-swap from its own client, then matches nothing, and its communicator reads its holding gone,
+   mesh-call.h mesh_stream_held), its ready and landed words 0, its next units 0, its peer node, its share of the link's
+   bandwidth and its identity told, then free and live.  None is kept for a holder of a lost pairing: no holder can, by
+   letting go or by never letting go, keep a stream of the link from its next pairing (design/rubrics.md M4).  Nothing of
+   the lost pairing is sent on it: that pairing's groups ended at their next look at a landed word ~0 (streams_cancel),
+   this connect comes MESH_PLATFORM_NS and an agent's exit after the loss, and its communicators start no group after it */
 static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
   struct link *l=&port->link;
   for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
     struct mesh_stream *x=stream_of(port,s);
+    atomic_store_explicit(&x->owner,0,memory_order_release);
+    stream_words_reset(port,s);
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
     atomic_store_explicit(&x->bandwidth,bandwidth/MESH_LINK_STREAMS,memory_order_relaxed);
     atomic_store_explicit(&x->wire,l->wire[s],memory_order_relaxed);
-    l->stale[s]=atomic_load_explicit(&x->owner,memory_order_acquire)!=0;
-    if(!l->stale[s]){
-      stream_words_reset(port,s);
-      atomic_store_explicit(&x->next[0],0,memory_order_relaxed);atomic_store_explicit(&x->next[1],0,memory_order_relaxed);
-      atomic_store_explicit(&x->free,1,memory_order_relaxed);
-    }
+    atomic_store_explicit(&x->next[0],0,memory_order_relaxed);atomic_store_explicit(&x->next[1],0,memory_order_relaxed);
+    atomic_store_explicit(&x->free,1,memory_order_release);
     atomic_store_explicit(&x->live,1,memory_order_release);
   }
 }
@@ -681,7 +681,7 @@ static void lane_reset(struct port *port,uint32_t k){
 }
 /* design/transport.md section 14, "A process a port": stream s's words made new, every slot's ready and landed word 0,
    then a release fence: a stream no holder of this pairing has yet held, and on which nothing crosses until both ends
-   free it */
+   free it (streams_open) */
 static void stream_words_reset(struct port *port,uint32_t s){
   const struct mesh_stream *x=stream_of(port,s);
   for(uint32_t c=0;c<2;c++)

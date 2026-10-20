@@ -20,6 +20,10 @@ uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t r
    after which its bridge sends every unit it declared, the unsupplied ones as duds */
 int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream,uint64_t next[2]);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
+/* design/transport.md section 14, "A process a port": whether stream `stream` is still this client's holding of identity
+   `wire`: live, its owner word this client's, its identity the one taken.  A pairing lost and made again opens every
+   stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
+int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
 /* design/transport.md section 14: a held stream's class (`large` 1: its large units, 0: its small), as the client maps
    it: its in and out rings, a ready word and a landed word a unit, its unit's bytes and its units; 0, EINVAL, EPERM
    where the client does not hold it, or ENOLINK.  The holder supplies unit u (its sequence in the class, from the

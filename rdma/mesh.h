@@ -16,7 +16,7 @@
    (as rows are), so as many communicators as a link has streams use a node pair at once, the client naming the node
    alone (design/transport.md section 14; the versions before it, this file's history).  The wire is HELLO, FAREWELL,
    RECORD and LINK */
-#define MESH_VERSION 130u
+#define MESH_VERSION 131u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads

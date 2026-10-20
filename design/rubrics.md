@@ -162,7 +162,14 @@ ranking.
     and released only by the process's exit (10-20): "why do you think you're 'allowed' to do 'teardowns' in the
     operation of any code we are discussing?"; "every single time a claudemade code artifact has tried to introduce
     'revocation' or 'destruction' it has resulted in a null pointer access and an unscheduled reboot, or an infinite
-    loop and a watchdog OS restart" (10-20).
+    loop and a watchdog OS restart" (10-20);
+  - a wait whose end depends on an event that may never come (a poll or socket read with no timeout, a refusal only
+    another party's action lifts) ≺ every wait ending in finite time: "it is your own responsibility to write code which
+    doesn't stallblock unboundedly. semaphores allow all waits in all programs to termiante in finite time, e.g. 0.1ms
+    or 5s. it is your own choice to not use semaphores in potentially infinite waits, a hcoice which the literal rubric
+    was written to emphasize as an exercise of decision, and a poor discretion wherever it happens" (10-20).  A wait
+    that spins and reads a stop flag ends when the flag is set (M8, C4 rank its parking lower); what this ranks lowest
+    is a wait nothing can end.
 
 **M4. Containment.**
 - Ranks higher: the form in which a failure's effects stay with the party that failed, and in which no mechanism is added
@@ -181,7 +188,11 @@ ranking.
     "duds aren't a protocol and are there to prevent the limit case of 'send must happen, remote client doesn't exist
     anymore, omething has to be placed there'. type inferences are not required and you do'nt need to do anything
     here. 'duds' are not sentinel values." (10-20);
-  - a node shutting down for an unknown reason during DMA ≺ a node that stays up (10-15).
+  - a node shutting down for an unknown reason during DMA ≺ a node that stays up (10-15);
+  - a layer whose user can, by an action or by doing nothing, leave one of the layer's resources unrecoverable (a stream
+    a lost pairing's holder keeps until it lets go; communicators refused while the process keeps a lease of a bridge
+    that stopped) ≺ a layer that recovers every resource whatever its users do: "userse of a lower level driver may
+    never by action or inaction cause a resource to be unrecoverable" (10-20).
 - Also: "attempts to add statefulness to functions that don't need it, and in so doing create contagious brittleness"
   (10-18).
 
@@ -579,6 +590,9 @@ without exception superfluous and wrapping or preserving another errorful featur
 - **No design choices.** "there is a single and particular hardware implementation available. it is poorly abstracted,
   wrapped, or scheduled by other code. therefore we have to abstract, wrap, and schedule it" (10-16).
 - **Fix what you find.** "fix problems when you find them instead of remarking on them" (10-19).
+- **Reviewed before built.** "the thing called a rubric is not metaphorical. all code needs to be reviewed in terms of
+  the rubric before being built and compiled from this point onwards" (10-20): a change's ranked pairs, dimension by
+  dimension, are written before it is compiled.
 
 ## Where HEAD sits (2026-10-20), as ranked pairs
 

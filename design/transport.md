@@ -325,7 +325,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   the unsupplied ones as duds, and one unit more. Once every lane has sent them, the stream is free again, its `next`
   the first unit after them.
 
-**A process a port** (version 130; the operator's choice of 10-20).
+**A process a port** (version 130, its streams new at every pairing from 131; the operator's choice of 10-20).
 - The bridge is a parent and an agent a port. The parent, launchd's job, holds the region, the map and records, the
   clients' slots, device discovery, hellos and the control sockets. A port's agent is `mesh-flow` spawned again by the
   parent: the same image (its LC_UUID checked, so a binary replaced on disk is no agent of a running parent), in a
@@ -351,15 +351,19 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one agent's at
   a time and no make meets the device's ceiling. At the bridge's stop every agent is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
-- Streams across agents. A port's rings and words are the parent's, leased once. A new agent opens each stream as its
-  link connects: one nobody holds is made new and free; one a holder of the previous pairing still holds keeps its
-  landed words ~0 for that holder and is not free until it lets go, when the send thread makes it new and frees it. A
-  holder takes a stream only while it is free, and the two ends of a communicator take only an identity free at both
-  (`wire`, a digest of this pairing's queue pair numbers and addresses), so no byte of one pairing is sent in the next.
+- Streams across agents. A port's rings and words are the parent's, leased once. A new agent opens every stream new as
+  its link connects: owner word 0, ready and landed words 0, `next` 0, free and live. A holding of the lost pairing
+  ended with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator
+  reads its holding gone (mesh-call.h `mesh_stream_held`: live, its owner word its client's, its identity the one it
+  took) and starts no group on it (libnccl-mesh `comm_failure`, `ncclCommGetAsyncError`). No holder keeps a stream from
+  the link's next pairing by letting go or by never letting go (design/rubrics.md M4, 10-20). Nothing of the lost
+  pairing is sent on the new one: that pairing's groups ended at their next look at a landed word ~0, the connect comes
+  `MESH_PLATFORM_NS` and an agent's exit after the loss, and the two ends of a communicator take only an identity free
+  at both (`wire`, a digest of this pairing's queue pair numbers and addresses).
 - A LINK names the address its lanes were made on (a make reads the port's address again, as a peer's restart can move
   its GID table); the connect and each stream's identity take the peer's address from its LINK.
 - Calls in flight on a lost link fail as values (ncclRemoteError) and the next call takes a stream of the new pairing:
   "a bridge crashing on a computer two hops down should result in the bridge being restarted, not crashing again of
   course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
   calls-in-flight failed and ought to be retried" (the operator, 10-20).
-- XMAGIC carries MESH_VERSION, so bridges of 129 and 130 never pair: both ends of a link run the rule.
+- XMAGIC carries MESH_VERSION, so bridges of different versions never pair (129, 130, 131), and a client refuses a region of another version: both ends of a link, and every client, run the rule.
