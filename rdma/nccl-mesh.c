@@ -872,7 +872,7 @@ static int whole(int fd, void *bytes, size_t size, int sending) {
 /* whether comm was revoked; a group on it failed naming it */
 static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __ATOMIC_SEQ_CST); }
 static ncclResult_t revoked_fail(ncclComm_t comm) {
-  return fail(ncclRemoteError, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
+  return fail(ncclInvalidUsage, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
 }
 
 /* socket `fd` of comm's init placed at peers[r] (-1: the one there closed), blocking (an accepted one takes its
@@ -1225,7 +1225,10 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
   return result ? result : ncclCommInitRank(comm, 1, id, 0);
 }
 
-ncclResult_t ncclCommFinalize(ncclComm_t comm) { return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL"); }
+ncclResult_t ncclCommFinalize(ncclComm_t comm) {
+  if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
+  return revoked(comm) ? fail(ncclInvalidUsage, "ncclCommFinalize after ncclCommRevoke (NCCL: not supported)") : ncclSuccess;
+}
 
 static void inflight_lose(struct ncclComm *comm);
 static ncclResult_t comm_failure(struct ncclComm *comm);
@@ -1242,17 +1245,15 @@ static void comm_stop(struct ncclComm *comm) {
   pthread_mutex_unlock(&comm->guard);
 }
 
-/* ncclCommRevoke: comm stopped (comm_stop) and no longer a user of its streams (comm_unbind: a stream none uses let go,
-   the bridge sending every unit declared on it that no group supplied as a dud, so its peers' groups fail as values
-   rather than wait; one another communicator uses sends its declared units, as duds by their deadline), a host-path
-   group of its returning the revoke at its next look and its GPU work ending at its next wait; from any thread, under
-   comm's own lock and the attaches' alone, never one a group holds while it waits.  ncclCommDestroy then frees it */
+/* ncclCommRevoke, NCCL's: comm's operations in flight revoked and its resources kept (comm_stop alone: its streams stay
+   held, the units its groups declared and supplied nothing for going as duds at their deadline, so its peers' groups fail
+   as values), a host-path group of its returning at its next look and its GPU work ending at its next wait, every later
+   group refused (ncclInvalidUsage), ncclCommGetAsyncError reading ncclSuccess once the revoke is done; from any thread,
+   under comm's own lock alone, never one a group holds while it waits.  ncclCommDestroy then gives its streams back
+   (comm_free) and frees it */
 ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
   if (!comm || revokeFlags != NCCL_REVOKE_DEFAULT) return fail(ncclInvalidArgument, "comm is NULL or revokeFlags is %d", revokeFlags);
   comm_stop(comm);
-  pthread_mutex_lock(&attach_lock);
-  if (comm->attach) comm_unbind(comm);
-  pthread_mutex_unlock(&attach_lock);
   return ncclSuccess;
 }
 
@@ -1288,6 +1289,7 @@ ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
   const ncclResult_t async = __atomic_load_n(&comm->async, __ATOMIC_ACQUIRE);
   if (async != ncclInProgress && *comm->why) fail(async, "%s", comm->why);
   if (async) { *asyncError = async; return ncclSuccess; }
+  if (revoked(comm)) { *asyncError = ncclSuccess; return ncclSuccess; }
   pthread_mutex_lock(&group_lock);
   *asyncError = comm_failure(comm);
   pthread_mutex_unlock(&group_lock);
@@ -1584,7 +1586,7 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
 static ncclResult_t comm_failure(struct ncclComm *comm) {
   if (comm->failed) return comm_fail(comm, comm->failed, "%s", comm->failure);
   if (revoked(comm))
-    return comm_fail(comm, ncclRemoteError, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
+    return comm_fail(comm, ncclInvalidUsage, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
   _Atomic uint64_t *v = comm->words;
   const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0, over = v ? atomic_load_explicit(v + 5, memory_order_acquire) : 0;
   if (at) {

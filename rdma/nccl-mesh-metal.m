@@ -1,7 +1,9 @@
 #import <Metal/Metal.h>
 #include "nccl-mesh-metal.h"
 #include "nccl.h"
+#pragma GCC visibility push(hidden)
 #include "mesh_metal.h"
+#pragma GCC visibility pop
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>

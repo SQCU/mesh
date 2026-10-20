@@ -10,6 +10,8 @@
 #define NCCL_MESH_METAL_H
 #include <stddef.h>
 #include <stdint.h>
+/* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, What a client cannot reach) */
+#pragma GCC visibility push(hidden)
 
 enum { METAL_PLAIN, METAL_LAND, METAL_SEND };
 struct metal_program;
@@ -129,4 +131,5 @@ void metal_keep(struct metal_program *, void *object);
 void metal_end(struct metal_program *, void *event, uint64_t value);
 void metal_collect(void *event);
 const char *metal_error(void);
+#pragma GCC visibility pop
 #endif

@@ -9,7 +9,6 @@ TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 LATEST = "/v1/latest?measures=scalars"
 RESIDENT = ("beacon", "bridge", "router", "telemetry", "observer")
 SPARK = " ▁▂▃▄▅▆▇█"
-PHASES = {getattr(mesh.lib, "MESH_" + name): name for name in ("UNKNOWN", "PAIRING", "PAIRED", "STOPPED")}
 USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html FILE]   keys: q quit, j/k scroll"
 
 class Node:
@@ -156,7 +155,7 @@ class Top:
             b = self.live(node)
             if b:
                 stat = b.get("stat") or {}
-                phases = "/".join(PHASES.get(p.get("phase"), "?") for p in stat.get("peers") or []) or ("up" if stat.get("up") else "no region")
+                phases = "/".join(str(p.get("phase", "?")) for p in stat.get("peers") or []) or ("up" if stat.get("up") else "no region")
                 bridge = (f"pid {b['pid']} {phases}", "ok" if "PAIRED" in phases else "warn")
             elif f.get("bridges"):
                 b = max(f["bridges"], key=lambda x: x["exited_at"])
@@ -199,7 +198,7 @@ class Top:
         toward = self.toward(own)
         if not toward: add(("  " + ("no port of this node's bridge" if bridge else "no bridge runs on this node"), "warn"))
         for peer, ports in sorted(toward.items()):
-            phases = "/".join(PHASES.get(q.get("phase"), "?") for q in ports)
+            phases = "/".join(str(q.get("phase", "?")) for q in ports)
             add(("  ", ""), (f"{own.name} port {'/'.join(str(q.get('port')) for q in ports)}", "bold"), " <-> ", (peer, "bold"), "   ", (phases, "ok" if "PAIRED" in phases else "warn"))
             recv, send = self.rates((peer, own.name, "recv"), W), self.rates((own.name, peer, "send"), W)
             if recv:

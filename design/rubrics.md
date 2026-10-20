@@ -48,7 +48,7 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 - Lays positions as runs of stream units and declares them.
 - Writes units and their ready words, and reads landed words and the in ring.
 - Combines on the host or the GPU, and paces itself by NCCL's head credit.
-- Ends a communicator by revoke or destroy, which gives back its stream.
+- Ends a communicator by destroy, which gives back its stream. A revoke, NCCL's, stops its groups and keeps the stream until the destroy.
 
 **What a client cannot reach: not in its headers or its link.**
 - Ports, links, cables, lanes, queue pairs, pairings, completion queues, work requests, scatter entries or keys.

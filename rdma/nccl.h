@@ -36,14 +36,14 @@
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
    Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
    two ranks or more holds none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow meets at the bootstrap of the
-   id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke revokes comm for
-   good: an init still running (a non-blocking one's) ends as a value, comm is no longer a user of its streams at once
-   (a stream none uses let go: the bridge sends every unit declared on it and no group supplied as a dud, so its peers'
-   groups fail rather than wait), its host-path groups return at their next
-   look and its GPU waits end at their next look at its stop word, and every later group on comm fails at once
-   (ncclRemoteError), until ncclCommDestroy frees it; from any thread, under comm's own lock and the attaches', never
-   one a group holds while it waits.  ncclCommDestroy waits for comm's GPU work at most MESH_PLATFORM_NS, then unbinds
-   its pairs.  Making a communicator (a lone rank's too) attaches the process's client of its node's bridge where it has
+   id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke is NCCL's: comm's
+   operations in flight are revoked and its resources kept (its streams stay held; the units its groups declared and
+   supplied nothing for go as duds at their deadline, so its peers' groups fail rather than wait), an init still
+   running (a non-blocking one's) ends as a value, its host-path groups return at their next look and its GPU waits end
+   at their next look at its stop word, every later group on comm is refused (ncclInvalidUsage), ncclCommFinalize after
+   it is not supported, and ncclCommGetAsyncError reads ncclSuccess once it is done; from any thread, under comm's own
+   lock, never one a group holds while it waits.  ncclCommDestroy waits for comm's GPU work at most MESH_PLATFORM_NS,
+   then gives its streams back and frees it.  Making a communicator (a lone rank's too) attaches the process's client of its node's bridge where it has
    none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot held,
    no region of a bridge that runs, or a lease of a bridge that stopped still held.
 
@@ -160,7 +160,8 @@ extern "C" {
 #include <limits.h>
 #include <stdint.h>
 #include <stddef.h>
-#include "mesh-plan.h"
+struct mesh_program;
+struct mesh_trees;
 
 /* design/transport.md: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
    above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
