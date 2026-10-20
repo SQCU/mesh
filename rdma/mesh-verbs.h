@@ -91,16 +91,6 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
 }
 /* the region's name and the stop flag, defined once in mesh-link.c (design/transport.md) */
 extern const char *shm; extern _Atomic sig_atomic_t stop;
-/* design/RDMA-KERNEL-RECOVERY.md "October 18": a retired device's registrations, protection domain and context
-   forgotten with no verbs call (ibv_dealloc_pd during the device's termination deadlocks Apple's driver, 09-05 and
-   10-18); the kernel releases them at the process's exit */
-static __attribute__((unused)) int down_device(struct mesh_device *device){
-  free(device->regions);device->regions=NULL;device->extents=0;
-  device->domain=NULL;
-  device->context=NULL;
-  device->frame_capacity=0;device->pairs=0;
-  return 1;
-}
 static __attribute__((unused)) void down(void){ if(shm)shm_unlink(shm); }
 /* design/transport.md: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
@@ -187,9 +177,10 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
   if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   return 0;
 }
-/* `count` UC queue pairs in INIT, against the device's usable queue pairs, on the provider's two completion queues, made
-   where it has none (a link's are made once a context and kept across its pairings: design/transport.md).
-   0, or the error (ENOSPC: the device holds no more queue pairs). */
+/* `count` UC queue pairs in INIT, against the device's usable queue pairs, on the provider's two completion queues: a
+   link's, made once in the bridge's life (design/transport.md section 14: no queue pair is moved to another state,
+   destroyed or forgotten; the kernel releases them at the process's exit).  0, or the error (ENOSPC: the device holds
+   no more queue pairs). */
 static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,int count){
   struct mesh_device *device=provider->device;
   if(device->pairs+(uint32_t)count>device->max_pairs)return ENOSPC;
@@ -220,42 +211,6 @@ static __attribute__((unused)) int queue_send(struct mesh_verbs *provider,int q)
   struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
   if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
   return 0;
-}
-/* design/transport.md: the queue pairs of `lanes` (a bit a queue) moved to the error state, so the device
-   ends their posted receives and SENDs (flushed: their completions name no holder, taken as any lane's failure or by a
-   destruction's poll), nothing waiting on what it flushes (4df30806 pair_flush's modify loop, without its drain).  The
-   lanes moved */
-static __attribute__((unused)) uint32_t pairs_error(struct mesh_verbs *provider,uint32_t lanes){
-  uint32_t moved=0;
-  for(int q=0;q<provider->qp_count && q<32;q++)if((lanes>>q&1) && provider->queues[q].pair){
-    struct ibv_qp_attr error={.qp_state=IBV_QPS_ERR};
-    if(!ibv_modify_qp(provider->queues[q].pair,&error,IBV_QP_STATE))moved|=UINT32_C(1)<<q;
-  }
-  return moved;
-}
-/* design/transport.md section 14: a link's queue pairs, kept across its pairings, made ready for the next: each moved
-   to RESET (which drops what it held) and to INIT again (pair_make's attributes), a fresh first sequence number drawn,
-   and what its completion queues hold of the last pairing taken and dropped (a poll returns at once, 0 once none is).
-   No queue pair is destroyed (design/transport.md section 5).  0, or the move's error */
-static __attribute__((unused)) int pairs_reset(struct mesh_verbs *provider){
-  for(int q=0;q<provider->qp_count;q++){
-    struct ibv_qp *pair=provider->queues[q].pair;
-    if(!pair)continue;
-    struct ibv_qp_attr reset={.qp_state=IBV_QPS_RESET},init={.qp_state=IBV_QPS_INIT,.port_num=1};
-    if(ibv_modify_qp(pair,&reset,IBV_QP_STATE) ||
-       ibv_modify_qp(pair,&init,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
-  }
-  provider->psn=arc4random()&0xffffff;
-  struct ibv_wc stale[32];
-  struct ibv_cq *queues[2]={provider->completion,provider->sent};
-  for(int c=0;c<2;c++)while(queues[c] && ibv_poll_cq(queues[c],32,stale)>0){}
-  return 0;
-}
-/* a provider whose context is gone forgotten with no verbs call: its queue pairs and completion queues are the kernel's
-   to release at the process's exit (design/RDMA-KERNEL-RECOVERY.md "October 18") */
-static __attribute__((unused)) void pair_forget(struct mesh_verbs *provider){
-  free(provider->queues);provider->queues=NULL;provider->count=provider->qp_count=0;
-  provider->completion=provider->sent=NULL;
 }
 /* design/algorithm-sources.md#link */
 static __attribute__((unused)) uint64_t port_bandwidth(const struct ibv_port_attr *port){

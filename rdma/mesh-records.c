@@ -1,11 +1,10 @@
 #include "mesh-bridge.h"
 
-/* design/transport.md: the data lanes bound, told in the region (`busy`), and the wall clock at which none
+/* design/transport.md section 14: the streams held, told in the region (`busy`), and the wall clock at which none
    last came to be (`idle_since`, 0 while any is) */
 static void busy_tell(void){
   uint64_t busy=0;
-  for(uint32_t p=0;p<port_count;p++)
-    for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES;k++)busy+=atomic_load_explicit(&ports[p].link.lane[k].owner,memory_order_relaxed)!=0;
+  for(uint32_t p=0;p<port_count;p++)busy+=atomic_load_explicit(&mesh_stream_at(M,p)->owner,memory_order_relaxed)!=0;
   if(busy)atomic_store_explicit(&M->idle_since,0,memory_order_relaxed);
   else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
   atomic_store_explicit(&M->busy,busy,memory_order_release);
@@ -130,8 +129,8 @@ void record_changed(void){
   for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
 }
 /* design/transport.md: this node's record told again at its current sequence on every greeted port, each
-   liveness turn (MESH_PAUSE_NS), so each control socket carries a message well within its peer's MESH_PLATFORM_NS
-   (mesh-link.c port_silent); a receiver drops a record no newer than its newest (record_heard, RFC 2328 s13), its map and
+   liveness turn (MESH_PAUSE_NS), so each control socket carries a message well within MESH_PLATFORM_NS; a receiver drops
+   a record no newer than its newest (record_heard, RFC 2328 s13), its map and
    serials unmoved.  Told from a copy: a port lost meanwhile may write the map */
 void record_retell(void){
   const struct mesh_record *held=record_held(M->node);
@@ -178,8 +177,8 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
 /* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first
    seen (its exit retires every slot it holds, the event loop's EVFILT_PROC), one already gone retired at once, and on a
    liveness turn any client whose process exited retired; the rows of a retired client released (no DMA lands in a
-   client's rows: a lane's rings are the bridge's), and the lanes bound told (busy_tell; a gone client's bindings end
-   on its port's turn, mesh-link.c lanes_turn) */
+   client's rows: a stream's rings are the bridge's), a stream a gone client held let go (mesh-link.c streams_let_go:
+   its port's send thread ends the holding), and the streams held told (busy_tell) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0;
@@ -196,5 +195,6 @@ void clients_turn(int liveness){
   }
   unreleased|=changed;
   if(unreleased){unreleased=0;mesh_retired_release(M);}
+  streams_let_go();
   busy_tell();
 }

@@ -7,117 +7,65 @@
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
 
-/* ---- The lane pairs' bindings (mesh-call.h; design/transport.md section 14) ------------------------- */
-int mesh_lanes_free(struct hdr *m,struct mesh_lane_report *report){
-  if(!m || !report)return EINVAL;
-  *report=(struct mesh_lane_report){.node=m->node};
-  for(uint32_t p=0;p<m->links && p<MESH_PORTS;p++){
-    const struct mesh_link_info *link=mesh_links(m)+p;
-    const uint32_t peer=atomic_load_explicit(&link->peer,memory_order_relaxed);
-    if(!peer || atomic_load_explicit(&link->lanes,memory_order_acquire)!=MESH_LINK_LANES)continue;
-    const uint32_t free=(uint32_t)atomic_load_explicit(&m->free[p],memory_order_acquire)&((UINT32_C(1)<<MESH_LANE_PAIRS)-1);
-    report->link[report->count++]=(struct mesh_lane_link){.peer=peer,.port=p,.free=free};
+/* ---- The streams toward nodes (mesh-call.h; design/transport.md section 14) ------------------------- */
+/* the live stream toward `node`, NULL where none goes there */
+static struct mesh_stream *stream_toward(struct hdr *m,uint32_t node){
+  for(uint32_t p=0;node && p<m->links && p<MESH_PORTS;p++){
+    struct mesh_stream *x=mesh_stream_at(m,p);
+    if(atomic_load_explicit(&x->live,memory_order_acquire) && atomic_load_explicit(&x->peer,memory_order_relaxed)==node)return x;
   }
+  return NULL;
+}
+uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
+  uint32_t count=0;
+  for(uint32_t p=0;m && p<m->links && p<MESH_PORTS && count<room;p++){
+    const struct mesh_stream *x=mesh_stream_at(m,p);
+    const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed);
+    if(!node || !atomic_load_explicit(&x->live,memory_order_acquire))continue;
+    int seen=0;
+    for(uint32_t k=0;k<count;k++)seen|=reach[k].node==node;
+    if(!seen)reach[count++]=(struct mesh_reach){.node=node,.bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)};
+  }
+  return count;
+}
+int mesh_stream_take(struct mesh_ctx *context,uint32_t node,uint64_t next[2]){
+  if(!context || !context->client || !next)return EINVAL;
+  struct mesh_stream *x=stream_toward(context->M,node);
+  if(!x)return ENOLINK;
+  uint64_t vacant=0;
+  if(!atomic_load_explicit(&x->free,memory_order_acquire) ||
+     !atomic_compare_exchange_strong_explicit(&x->owner,&vacant,context->client,memory_order_acq_rel,memory_order_acquire))return EBUSY;
+  next[0]=atomic_load_explicit(&x->next[0],memory_order_relaxed);next[1]=atomic_load_explicit(&x->next[1],memory_order_relaxed);
+  atomic_store_explicit(&x->declared[0],next[0],memory_order_relaxed);atomic_store_explicit(&x->declared[1],next[1],memory_order_release);
   return 0;
 }
-int mesh_lanes_choose(const struct mesh_lane_report *reports,uint32_t ranks,uint32_t *chosen){
-  for(uint32_t r=0;r<ranks;r++){
-    if(reports[r].count>MESH_PORTS)return EINVAL;
-    for(uint32_t k=0;k<MESH_PORTS;k++){
-      chosen[(size_t)r*MESH_PORTS+k]=UINT32_MAX;
-      if(k<reports[r].count && reports[r].link[k].port>=MESH_PORTS)return EINVAL;
-    }
-  }
-  int status=0;
-  for(uint32_t r=0;r<ranks;r++){
-    const struct mesh_lane_report *own=reports+r;
-    uint32_t *row=chosen+(size_t)r*MESH_PORTS;
-    for(uint32_t k=0;k<own->count;k++){
-      const uint32_t node=own->node,peer=own->link[k].peer;
-      if(row[k]!=UINT32_MAX || peer==node)continue;
-      uint32_t free=(UINT32_C(1)<<MESH_LANE_PAIRS)-1,occupied=0,heard=0,ports=0;
-      for(uint32_t q=0;q<ranks;q++){
-        occupied|=reports[q].node==peer;
-        for(uint32_t j=0;j<reports[q].count;j++){
-          const struct mesh_lane_link *l=reports[q].link+j;
-          if(reports[q].node==node && l->peer==peer)free&=l->free;
-          if(reports[q].node==peer && l->peer==node){free&=l->free;heard=1;}
-        }
-      }
-      if(!occupied)continue;
-      for(uint32_t j=0;j<own->count;j++)if(own->link[j].peer==peer)ports|=UINT32_C(1)<<own->link[j].port;
-      for(uint32_t q=0;q<r;q++)if(reports[q].node==node)for(uint32_t j=0;j<reports[q].count;j++){
-        const uint32_t taken=chosen[(size_t)q*MESH_PORTS+j];
-        if(ports>>reports[q].link[j].port&1 && taken!=UINT32_MAX)free&=~(UINT32_C(1)<<taken);
-      }
-      if(!heard || !free){status=ENOSPC;continue;}
-      for(uint32_t j=0;j<own->count;j++)if(own->link[j].peer==peer)row[j]=(uint32_t)__builtin_ctz(free);
-    }
-  }
-  return status;
-}
-static struct mesh_bind *bind_entry(struct mesh_ctx *context,uint32_t port,uint32_t pair){
-  return mesh_client_at(context->M,context->client)->bind[port]+pair;
-}
-void mesh_lanes_unbind(struct mesh_ctx *context,const struct mesh_lane_report *mine,const uint32_t *chosen){
+void mesh_stream_give(struct mesh_ctx *context,uint32_t node){
   if(!context || !context->client)return;
-  for(uint32_t k=0;k<mine->count && k<MESH_PORTS;k++)if(chosen[k]<MESH_LANE_PAIRS && mine->link[k].port<MESH_PORTS)
-    atomic_store_explicit(&bind_entry(context,mine->link[k].port,chosen[k])->want,0,memory_order_release);
-  mesh_notify(&context->M->control);
-}
-int mesh_lanes_bind(struct mesh_ctx *context,const struct mesh_lane_report *mine,const uint32_t *chosen,uint64_t (*start)[2]){
-  if(!context || !context->client || mine->count>MESH_PORTS)return EINVAL;
-  for(uint32_t k=0;k<mine->count;k++)
-    if(chosen[k]!=UINT32_MAX && (chosen[k]>=MESH_LANE_PAIRS || mine->link[k].port>=MESH_PORTS))return EINVAL;
-  uint64_t serial[MESH_PORTS]={0};
-  for(uint32_t k=0;k<mine->count;k++)if(chosen[k]!=UINT32_MAX){
-    struct mesh_bind *b=bind_entry(context,mine->link[k].port,chosen[k]);
-    const uint64_t answered=mesh_bind_serial(atomic_load_explicit(&b->answer,memory_order_acquire)),
-      wanted=atomic_load_explicit(&b->want,memory_order_relaxed);
-    serial[k]=(answered>wanted?answered:wanted)+1;
-    atomic_store_explicit(&b->declared[0],0,memory_order_relaxed);atomic_store_explicit(&b->declared[1],0,memory_order_relaxed);
-    atomic_store_explicit(&b->want,serial[k],memory_order_release);
+  for(uint32_t p=0;p<context->M->links && p<MESH_PORTS;p++){
+    struct mesh_stream *x=mesh_stream_at(context->M,p);
+    uint64_t mine=context->client;
+    if(atomic_load_explicit(&x->peer,memory_order_relaxed)==node)atomic_compare_exchange_strong(&x->owner,&mine,0);
   }
-  mesh_notify(&context->M->control);
-  const uint64_t until=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+MESH_PLATFORM_NS;
-  int status=0;
-  for(uint32_t k=0;k<mine->count && !status;k++)if(chosen[k]!=UINT32_MAX){
-    struct mesh_bind *b=bind_entry(context,mine->link[k].port,chosen[k]);
-    uint64_t answer;
-    while(mesh_bind_serial(answer=atomic_load_explicit(&b->answer,memory_order_acquire))!=serial[k] &&
-          clock_gettime_nsec_np(CLOCK_UPTIME_RAW)<until)usleep(20);
-    if(answer==serial[k]){
-      start[k][0]=atomic_load_explicit(&b->start[0],memory_order_relaxed);
-      start[k][1]=atomic_load_explicit(&b->start[1],memory_order_relaxed);
-    }
-    else status=mesh_bind_serial(answer)==serial[k]?(int)(answer&0xffff):ETIMEDOUT;
-  }
-  if(status)mesh_lanes_unbind(context,mine,chosen);
-  return status;
 }
-/* ---- A bound lane's rings as its client maps them (mesh-call.h; design/transport.md section 14) -------- */
-int mesh_lane_view(struct mesh_ctx *context,uint32_t port,uint32_t lane,struct mesh_lane_view *view){
-  if(!context || !context->client || port>=MESH_PORTS || lane<MESH_LANE_FIRST || lane>=MESH_LINK_LANES || !view)return EINVAL;
-  const struct mesh_bind *b=bind_entry(context,port,(lane-MESH_LANE_FIRST)/2);
-  const uint64_t want=atomic_load_explicit(&b->want,memory_order_relaxed);
-  if(!want || atomic_load_explicit(&b->answer,memory_order_acquire)!=want)return EPERM;
+int mesh_stream_view(struct mesh_ctx *context,uint32_t node,int large,struct mesh_stream_view *view){
+  if(!context || !context->client || !view)return EINVAL;
   struct hdr *m=context->M;
-  const struct mesh_lane *x=mesh_lane_at(m,port,lane);
-  if(!x->units)return ENOLCK;
-  *view=(struct mesh_lane_view){.in=(unsigned char *)m+x->in,.out=(unsigned char *)m+x->out,.ready=(_Atomic uint64_t *)((char *)m+x->ready),
-    .landed=(_Atomic uint64_t *)((char *)m+x->landed),.unit=x->unit,.units=x->units,.port=port,.lane=lane};
+  const struct mesh_stream *x=stream_toward(m,node);
+  if(!x)return ENOLINK;
+  if(atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client)return EPERM;
+  const uint32_t c=!large;
+  *view=(struct mesh_stream_view){.in=(unsigned char *)m+x->in[c],.out=(unsigned char *)m+x->out[c],.ready=(_Atomic uint64_t *)((char *)m+x->ready[c]),
+    .landed=(_Atomic uint64_t *)((char *)m+x->landed[c]),.unit=x->unit[c],.units=x->units[c]};
   return 0;
 }
-int mesh_lane_declare(struct mesh_ctx *context,uint32_t port,uint32_t lane,uint64_t declared,uint64_t deadline){
-  if(!context || !context->client || port>=MESH_PORTS || lane<MESH_LANE_FIRST || lane>=MESH_LINK_LANES)return EINVAL;
-  struct mesh_bind *b=bind_entry(context,port,(lane-MESH_LANE_FIRST)/2);
-  const uint32_t j=(lane-MESH_LANE_FIRST)&1;
-  atomic_store_explicit(&b->deadline,deadline,memory_order_relaxed);
-  atomic_store_explicit(&b->declared[j],declared,memory_order_release);
-  mesh_notify(&context->M->bell[port]);
+int mesh_stream_declare(struct mesh_ctx *context,uint32_t node,int large,uint64_t declared,uint64_t deadline){
+  if(!context || !context->client)return EINVAL;
+  struct mesh_stream *x=stream_toward(context->M,node);
+  if(!x)return ENOLINK;
+  atomic_store_explicit(&x->deadline,deadline,memory_order_relaxed);
+  atomic_store_explicit(&x->declared[!large],declared,memory_order_release);
   return 0;
 }
-void mesh_lane_wake(struct hdr *m,uint32_t port){ if(port<MESH_PORTS)mesh_notify(&m->bell[port]); }
 
 /* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the window has them */
 int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){

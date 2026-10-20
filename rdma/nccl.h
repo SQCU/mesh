@@ -22,24 +22,24 @@
    MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets them), every rank's node (mesh_observe) meets there,
    the root listening on that host alone where it is an IPv6 address; the id is its name.  ncclCommInitRankConfig with
    config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Its first gather carries each rank's
-   node and the lane pairs its bridge publishes free on each of its links (mesh-call.h mesh_lanes_free); every rank
-   chooses alike from them (mesh_lanes_choose) and asks its own bridge to bind its row of the choice through its client
-   slot (mesh_lanes_bind: design/transport.md section 14), on the cable toward each other member's node; the second
-   gather, bounded by mesh.h MESH_PLATFORM_NS a send or receive, carries each rank's binding's status and the first
-   unit of each lane it bound, the peer's first unit out being this end's first in.  An init fails as a value where two
-   ranks are on one node, a link has no pair free at both ends, two ranks' nodes are joined by more than one cable (no
-   bridge publishes a link's far port, so the ends could not stripe alike), a pair is refused or unanswered, or a peer
-   is silent past that bound; its pairs are then unbound and the next init reads them as they stand.  A communicator's
-   map is its members joined by the cables their reports name, made alike by every member from the same reports and
-   kept for its life: no node outside the communicator is on it, since the bridges forward nothing, so two members no
-   path of cables between members joins fail a collective, and a call between two members no cable joins fails, as
-   values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program that passes its own programs
-   or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take; Split binds its children's
-   lanes over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to two ranks or more binds none
-   and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow meets at the bootstrap of the id that ncclCommGetUniqueId
-   gives comm's root, which the root broadcasts on comm.  ncclCommRevoke revokes comm for good: an init still running (a
-   non-blocking one's) ends as a value, its lane pairs are unbound at once (the bridge sends every unit they declared and
-   no group supplied as a dud, so its peers' groups fail rather than wait), its host-path groups return at their next
+   node and the nodes its bridge reaches (mesh-call.h mesh_nodes_reached); each rank then holds its bridge's stream toward each
+   other member's node it is joined to, as it holds rows (mesh_stream_take: design/transport.md section 14), a stream
+   its process holds already shared by its communicators in the order their groups are called; the second gather,
+   bounded by mesh.h MESH_PLATFORM_NS a send or receive, carries each rank's holding's status and its streams' first
+   units, the peer's first unit out being this end's first in.  A communicator names nodes, never a link, port, lane
+   or queue pair.  An init fails as a value where two ranks are on one node, a stream is held by another process or
+   gone, or a peer is silent past that bound; what it held is then let go and the next init reads the streams as they
+   stand.  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
+   every member from the same reports and kept for its life: no node outside the communicator is on it, since the
+   bridges forward nothing, so two members no path between members joins fail a collective, and a call between two
+   members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
+   that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
+   Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
+   two ranks or more holds none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow meets at the bootstrap of the
+   id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke revokes comm for
+   good: an init still running (a non-blocking one's) ends as a value, comm is no longer a user of its streams at once
+   (a stream none uses let go: the bridge sends every unit declared on it and no group supplied as a dud, so its peers'
+   groups fail rather than wait), its host-path groups return at their next
    look and its GPU waits end at their next look at its stop word, and every later group on comm fails at once
    (ncclRemoteError), until ncclCommDestroy frees it; from any thread, under comm's own lock and the attaches', never
    one a group holds while it waits.  ncclCommDestroy waits for comm's GPU work at most MESH_PLATFORM_NS, then unbinds
@@ -60,10 +60,10 @@
    ncclCollConfig_t.algSelection is not read.  Every member compiles the same programs from the same map and the same
    operands (every rank passes the same paths, programs and forms), so nothing is compared at run time.  A group
    (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps; a
-   point-to-point call one step) on its communicator's channels: toward each member a cable joins, a lane of each class
-   of the pair its init bound there, each position of a channel a run of the lane's units both ends lay alike
-   (mesh-plan.h mesh_group_lay, mesh_wire), declared to the bridge as the group is issued (mesh-call.h
-   mesh_lane_declare, its deadline MESH_PLATFORM_NS on), so a member that fails, is revoked or ends mid-group is
+   point-to-point call one step) on its communicator's channels: toward each member it is joined to, each class of the
+   stream its init held toward the member's node, each position of a channel a run of the stream's units both ends lay
+   alike (mesh-plan.h mesh_group_lay, mesh_wire), declared to the bridge as the group is issued (mesh-call.h
+   mesh_stream_declare, its deadline MESH_PLATFORM_NS on), so a member that fails, is revoked or ends mid-group is
    replaced at its peers by duds, all ones, which fail their groups as values (ncclRemoteError: design/transport.md
    section 10).  A landed position whose first eight bytes are all ones is read as a dud; that is the only check of a
    payload, so calls that do not pair (a separate send and receive in the same order on two ranks, unequal counts,
@@ -71,7 +71,7 @@
    (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
 
    Host path: a NULL stream.  Buffers are host pointers (unified memory, e.g. an MTLBuffer's contents), copied through
-   the lanes' rings and combined on the host; every call returns once its group has run.  Metal path: a stream that
+   the streams' rings and combined on the host; every call returns once its group has run.  Metal path: a stream that
    is an ncclMeshStream.  The group is encoded into its commandBuffer (the caller commits it), every buffer argument an
    ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type but
    float64.  With commandEncoder, the kernels go into that open compute encoder, left open with nothing signalled at the
@@ -99,8 +99,8 @@
    classic form's: ncclMeshEncodeMetal4, below.
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
-   ncclMemAlloc or communicator, whose slot owns the process's leases and through which each communicator binds its lane
-   pairs; a communicator takes no bytes of the window (its rings are its lanes', the bridge's).  ncclMemAlloc is the lease,
+   ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
+   communicator takes no bytes of the window (its rings are its streams', the bridge's).  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the window covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
@@ -123,7 +123,7 @@
    of such a range writes send op piece, the ranges of the result no step writes are copied from it after the
    publications, and no staging copy or scratch copy of the operand is made: its scratch buffers that no step writes
    are never made), every read in the group's own command buffer (an issued group stages its operand as ever), and a
-   wire's bytes still cross through its lanes' rings.  The host path copies every operand through them, a lease or not.
+   wire's bytes still cross through its streams' rings.  The host path copies every operand through them, a lease or not.
    ncclCommRegister refuses a buffer outside the window.  Design: design/transport.md.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
@@ -874,13 +874,13 @@ ncclResult_t pncclGroupEnd(void);
 
 /* A communicator over a program's own operands, made as ncclCommInitRank makes one (Communicators, above): NCCL's
    bootstrap at `commId`, the root's host:port (ncclGetUniqueId, or NCCL_COMM_ID's form; the root listens on that host
-   alone where it is an IPv6 address), which the caller hands every rank, its two gathers binding the communicator's
-   lane pairs, rank `rank` of `nranks` on the bridge of its own node (each rank's node its bridge's, gathered there).
+   alone where it is an IPv6 address), which the caller hands every rank, its two gathers holding the communicator's
+   streams, rank `rank` of `nranks` on the bridge of its own node (each rank's node its bridge's, gathered there).
    `programs` its compiled collectives (mesh-plan.h struct mesh_program, copied, kept for its life; a call runs the
    first whose collective, and a rooted one's root, is the call's and whose `below` its bytes are under, 0 any size), or
    with none (count 0) the structural table (above), every collective along `paths` (its routing tables: each member's
    trees; NULL: the map's shortest-path trees), checked against its map; `small` not read (the wire's classes are its
-   lanes', mesh-plan.h mesh_wire_of); `name` the communicator's (NULL: commId's).  Every rank passes the same commId,
+   streams', mesh-plan.h mesh_wire_of); `name` the communicator's (NULL: commId's).  Every rank passes the same commId,
    nranks, paths, programs and name.  `config` NULL, or its `blocking` not 0, is a blocking init.  With `blocking` 0 it
    is NCCL's non-blocking init: *comm is set at once and the init runs on a thread of its own, the call returning
    ncclInProgress (ncclSystemError where no thread could run it); ncclCommGetAsyncError gives ncclInProgress until the
@@ -945,7 +945,7 @@ uint64_t ncclMeshRetired(void);
    classic form's (0: NCCL_MESH_POLLS; Metal path, above).  A failure is a value: ncclCommGetAsyncError (or the
    communicator's next group) after the window.  The group completes in the encoder: with no workspace
    its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm is any
-   communicator (one whose lanes an exchange bound: Communicators, above), its program its table's (above).  The same as
+   communicator (one whose streams an exchange held: Communicators, above), its program its table's (above).  The same as
    ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency,
    .polls = polls}, which every other collective and group also takes. */
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,
@@ -988,8 +988,8 @@ const char* ncclMeshMetalSteps(void);
    EOVERFLOW mid-group (a failed group), so a caller that encodes several windows ahead bounds each window's records by it (the
    records a step encodes, read across one step's encode). */
 void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
-/* The nanoseconds this process's communicators' inits and splits have spent binding their lane pairs (counting from
-   its first): each one's wait for its bridge's answers (mesh-call.h mesh_lanes_bind).  A caller that times its work
+/* The nanoseconds this process's communicators' inits and splits have spent holding their streams (counting from its
+   first: mesh-call.h mesh_stream_take, which waits on nothing).  A caller that times its work
    across an init takes this out of it (metal-microbench tools/mesh/rates.py measured). */
 void ncclMeshInitWaits(uint64_t* ns);
 /* This node's fabric address, NUL-terminated in `address` (`room` bytes): the first address under mesh.h

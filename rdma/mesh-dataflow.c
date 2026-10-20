@@ -256,7 +256,8 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
 
 /* design/algorithm-sources.md#programtensor */
 /* design/transport.md: a client's slot given up (by its detach, or by the bridge where its process is
-   gone): its rows closed for the bridge to release (its lane leases are let go on their ports' turns) */
+   gone): its rows closed for the bridge to release (the streams it held are let go on the bridge's turn:
+   mesh-link.c streams_let_go) */
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_client *slot=mesh_client_at(m,client);
   if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;

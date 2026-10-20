@@ -172,9 +172,9 @@ No warning at all: the hardware is gone before any event says so. This is tenabl
 - **No teardown.** The surviving bridge makes no call that waits on the termination (section 5), so the termination
   completes and the node stays responsive. On 2026-10-19 the Mini lost power with the M5 running a bridge that makes
   no teardown call, and the M5 stayed up; the 2026-10-18 hang had a teardown call in it.
-- **The port forgotten, the others kept.** Each Thunderbolt port is a separate device context. The bridge stops
-  serving the crushed port, keeps its handles unused, and reopens a fresh context if the port ever comes back. The map
-  drops the link, and the next calls plan over the remaining cables (two thirds, five sixths).
+- **The port left, the others kept.** Each Thunderbolt port is a separate device context. The bridge stops serving
+  the crushed port and keeps its handles unused; the link pairs again at the bridge's next launch (section 14). The
+  map drops the link, and the next calls plan over the remaining cables (two thirds, five sixths).
 - **A post racing the loss.** A post issued in the instant the hardware went may touch a doorbell mapping that no
   longer exists. Recorded only with a queue pair being destroyed by our own call at the same time (October 16-17);
   with no destroy calls it has not been seen. Where it happens, the post's thread faults, and the port is lost, as
@@ -259,43 +259,49 @@ programs that use them by rubric D.
 
 The forms the rewrite chose between, ranked by design/rubrics.md, and the form the code takes.
 
+The algorithm analysis these rows rest on is metal-microbench `output_data/bridge-20261019/FLOWS.md` section 7.
+
 | Question | Ranked | Rubric |
 |---|---|---|
-| Who takes a queue pair | a client's compare-and-swap on `hdr->lanes` (HEAD, 126) ≺ the bridge binds it at the client's asking | M5, C6 |
-| Where receives go | into a communicator's rows, restarted per communicator (HEAD) ≺ into the lane's in ring, posted by the bridge for the whole pairing (126) | M4, M9 |
-| How a communicator's stream ends | the link concluded (HEAD) ≺ the stream left wherever it stopped (126) ≺ every unit it declared sent, the unsupplied ones as duds | M4, M10 |
-| Where the next stream starts | read back from the words (126's `mesh_lane_next`) ≺ the bridge's count of units sent, told in the binding's answer and exchanged at init through NCCL's bootstrap | M9, C7 |
-| A queue pair's re-pairing | destroyed and made again, its completion queues drained (126) ≺ moved to RESET and through INIT, RTR and RTS again | M3, M2 |
-| The binary changing | the bridge stops itself (HEAD, 126) ≺ it stops on the installer's SIGTERM alone | M3 |
+| What a client names | a port and a lane pair (`bind[port][pair]`, 127) ≺ a node | M5, D7 |
+| Who takes a queue pair | a client's compare-and-swap on `hdr->lanes` (HEAD before 127) ≺ the bridge binds it at the client's asking (127) ≺ no client takes one: the bridge stripes a node's stream over the link's lane pairs | M5, M2, M9 |
+| How a client holds the stream | a request and an answer in its slot (127) ≺ its owner word taken while the stream is free, as rows are | M2 |
+| Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life | M4, M9 |
+| How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more | M4, M10 |
+| Where the next holding starts | the bridge's answer in the client's slot (127) ≺ the stream's `next`, published once free, exchanged at init through NCCL's bootstrap | M2, C7 |
+| A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life | M3, M4 |
+| A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
+| The binary changing | the bridge stops itself ≺ it stops on the installer's SIGTERM alone | M3 |
 
-**The binding.**
-- Each data lane pair of a link (a large lane and a small lane) is held by at most one client at a time.
-- A client asks for a pair through its own slot: `bind[port][pair].want`, a serial of its own. The bridge's event loop
-  answers in the same entry:
-  - `answer` is the serial once the pair is bound to this client, or `MESH_BIND_REFUSED` with the reason.
-  - `start[j]` is the first unit the client's lane j will release, the bridge's count of units sent on it.
-- The bridge binds a pair only while both of its lanes are live and unbound, and while the previous binding's units have
-  all been sent. It publishes the free pairs of each port in the record (`struct mesh_link_info` `free`), which is all a
-  client reads to choose.
-- Clients never write a lane word.
+**The stream.**
+- Each link carries one stream toward its peer node, in two classes: large units (the window's block) and small units
+  (one frame). Each class is a ring of units in the bridge's arena, with a ready word and a landed word per unit
+  (`struct mesh_stream`).
+- The bridge stripes each class over the link's lane pairs: unit u rides lane pair u mod 4 as that lane's
+  (u div 4)-th unit, alike at both ends.
+- The receive thread posts receives into the in ring for the link's life, and raises a unit's landed word only once it
+  and every unit before it have landed. A run has landed once its last unit's word says so, whichever lanes it rode.
+- Clients see the stream's rings and words, its `peer` node, `live`, `free` and `next`. They never see a port, lane,
+  queue pair, request or completion.
 
-**Declarations and duds.**
-- A bound client writes, in its own slot, how far it has declared each lane (`declared[j]`, an absolute unit sequence)
-  and the deadline by which every declared unit is supplied (`deadline`, uptime ns, at most `MESH_PLATFORM_NS` past
-  the declaration).
-- The send thread posts unit u when its supplied word reads `1 + u / units`. Where u is declared, not supplied, and the
-  deadline has passed, it posts a dud instead: a SEND from the bridge's all-ones block.
-- When a binding ends, every declared unit not yet supplied goes as a dud at once. A binding ends at the client's
-  unbinding (`want` 0), its process's exit, or its slot's retirement. The bridge keeps the last declaration it read in
-  its own state, since the slot may be reused.
-- The pair is free again once the lane's sent count reaches that final declaration.
-- The peer's receives are posted for the whole pairing, so every unit lands, and nothing is left posted against a
-  communicator.
+**Holding it.**
+- A process holds a stream as it holds rows: it takes the owner word from 0 to its own while `free` reads 1
+  (`mesh_stream_take`), and gives it back to 0 when its last communicator on it ends (`mesh_stream_give`). The bridge
+  answers nothing; it lets go the word of a client whose process is gone (`streams_let_go`).
+- The holder's first units are the stream's `next`, which its communicator's init tells its peers through NCCL's
+  bootstrap. A process's communicators on one stream lay their runs in the order their groups are called.
+- The holder declares how far it will supply each class (`declared`) and by when (`deadline`, uptime ns, at most
+  `MESH_PLATFORM_NS` on).
 
-**What a client sees.**
-- Its slot's binding entries.
-- A bound pair's rings and words (`mesh_lane_view`): the out ring and supplied words are its own while it holds the pair,
-  and the in ring and landed words are the bridge's to write.
-- The port's free pairs.
-- It names no queue pair, request or completion, and writes no word the bridge reads except in its own slot and its bound
-  out ring.
+**Duds, and a holding's end.**
+- The send thread posts unit u when its ready word reads `1 + u / units`. Where u is declared, not supplied, and the
+  deadline has passed, it posts a dud: a SEND from the bridge's all-ones block.
+- When the owner word changes, the send thread ends the holding: every unit up to the most declared or supplied goes,
+  the unsupplied ones as duds, and one unit more. Once every lane has sent them, the stream is free again, its `next`
+  the first unit after them.
+
+**Pairing once.**
+- A link's ten queue pairs are made once and connected once in the bridge's life. None is moved to another state,
+  destroyed or forgotten; the kernel releases them at the process's exit.
+- A link lost after it connected stays lost until the bridge's next launch. A LINK heard from a peer whose bridge
+  launched since is taken by no lane.

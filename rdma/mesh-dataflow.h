@@ -8,7 +8,7 @@
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_cursor,arena_cursor; int fd; };
 /* design/transport.md: a process's client slot of this node's one region under its execution `name`, taken
    vacant by one compare-exchange (mesh_slot_take, which the bridge's own leases take too): the owner of its leases of
-   the window and of the link lanes it claims.  A client takes a vacant slot only: it never retires, waits for or names
+   the window and of the streams it holds.  A client takes a vacant slot only: it never retires, waits for or names
    another's, and a slot whose process is gone is the bridge's to retire.  0, EBUSY as a value where none is vacant,
    ESRCH where the node's bridge is gone */
 int mesh_attach(struct mesh_ctx *,const char *name);

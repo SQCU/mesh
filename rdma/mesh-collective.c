@@ -898,7 +898,7 @@ done:
 
 void mesh_wire_of(uint64_t block,struct mesh_wire *wire){
   const uint64_t b=block?block:MESH_FRAME,runs=2*MESH_LAG+1;
-  *wire=(struct mesh_wire){(MESH_LANE_LARGE_UNITS-1)/runs*b,(MESH_LANE_SMALL_UNITS-1)/runs*MESH_FRAME,b,MESH_LAG,0};
+  *wire=(struct mesh_wire){(MESH_STREAM_LARGE_UNITS-1)/runs*b,(MESH_STREAM_SMALL_UNITS-1)/runs*MESH_FRAME,b,MESH_LAG,0};
 }
 uint64_t mesh_wire_units(const struct mesh_wire *wire,int large,uint64_t bytes){
   const uint64_t unit=large?wire->block:MESH_FRAME;

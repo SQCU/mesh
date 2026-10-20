@@ -1,8 +1,9 @@
 /* libnccl-mesh's Metal half (nccl-mesh-metal.m): a group's work on the GPU, encoded into the caller's command
-   buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A channel's lane (mesh-call.h mesh_lane_view: its out
-   ring and ready words, its in ring and landed words) is one buffer over the region's pages the bridge took for it.  A
-   wait for a landing is rdma/mesh.metal's mesh_wait_bounded (nccl-mesh-metal.m mesh_step_wait) on the landed word of its
-   run's last unit at that unit's cycle (a lane's units land in order), ended by the landing, by the link's loss (the
+   buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A channel's stream class (mesh-call.h
+   mesh_stream_view: its out ring and ready words, its in ring and landed words) is one buffer over the region's pages
+   the bridge took for it.  A wait for a landing is rdma/mesh.metal's mesh_wait_bounded (nccl-mesh-metal.m
+   mesh_step_wait) on the landed word of its run's last unit at that unit's cycle (the bridge releases a stream's units
+   in order), ended by the landing, by the link's loss (the
    bridge's ~0), by its communicator's gate (failure word [2]: another wait's failure, a revoke) or by its program's
    bound (metal_begin's polls). */
 #ifndef NCCL_MESH_METAL_H
@@ -74,12 +75,12 @@ int metal_combine3(struct metal_program *, int type, int op, void *dst, size_t d
                    size_t with_offset, size_t n);
 int metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar);
 int metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor);
-/* A wait on a run's landing (design/transport.md section 14): in `buffer` (a channel's lane), the landed word of the
+/* A wait on a run's landing (design/transport.md section 14): in `buffer` (a channel's stream class), the landed word of the
    run's last unit at `word`, landed once it holds at least 1 + `cycle`, and the run's first unit at `slot`, whose first
    eight bytes all ones are a dud (the peer supplied nothing there); its failure recorded in `violation`'s words at
    position `at` of channel `channel`. */
 struct metal_wait { void *buffer, *violation; size_t word, slot; uint64_t cycle, at; uint32_t channel; };
-/* A run's release: in `buffer` (a channel's lane), `count` ready words from `word`, each stored `value` (1 plus the
+/* A run's release: in `buffer` (a channel's stream class), `count` ready words from `word`, each stored `value` (1 plus the
    units' cycle) after every store before it; its first unit's slot of the out ring at `slot`. */
 struct metal_release { void *buffer; size_t word, slot; uint64_t value; uint32_t count; };
 int metal_publish(struct metal_program *, const struct metal_release *);
