@@ -11,6 +11,16 @@ Convergence): its running calls are never ended for it. There
 is no default anywhere in the code: without a configuration the bridge and `mesh-user.sh` refuse to start, naming what
 they need.
 
+Servicing a node (design/transport.md section 2, the heartbeat): the bridge's job runs its heartbeat, which opens and
+closes the bridge.
+- `launchctl kill SIGUSR1 user/$(id -u)/io.mesh.bridge` releases the bridge and its window: every device object
+  freed at once, and the window's memory once none of its holders lives (each client's next lease or communicator returns the
+  expiry; the heartbeat's log names the processes that still hold it);
+- `launchctl kill SIGHUP user/$(id -u)/io.mesh.bridge` opens it again (once a released window is unlinked), or
+  restarts it keeping the window (a changed window size replaces it, as a release does);
+- `launchctl kill SIGTERM user/$(id -u)/io.mesh.bridge` releases it and ends the heartbeat, which launchd then leaves
+  stopped until `launchctl kickstart user/$(id -u)/io.mesh.bridge`.
+
 A document has these keys:
 
 - `purpose`: one line stating what the configuration is for (required).

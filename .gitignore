@@ -2,6 +2,7 @@
 *.log
 networks.conf
 rdma/mesh-flow
+rdma/mesh-heartbeat
 rdma/mesh-stat
 rdma/*.dylib
 rdma/Mesh.swiftmodule

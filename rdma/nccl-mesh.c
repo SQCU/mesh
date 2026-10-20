@@ -354,12 +354,12 @@ static void bootstrap_close(struct ncclComm *comm) {
 static void comm_leave(struct ncclComm *comm);
 static void comm_free(struct ncclComm *comm) {
   bootstrap_close(comm);
-  comm_leave(comm);
   routes_free(comm, 1);
   for (uint32_t k = 0; k < comm->scratches; k++) metal_release(comm->scratch[k]);
   for (uint32_t k = 0; k < comm->spents; k++) metal_release(comm->spent[k]);
   for (uint32_t h = 0; h < comm->count; h++) metal_release(comm->channels[h].buffer);
   if (comm->violation) metal_release(comm->violation);
+  comm_leave(comm);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->toward);
   pthread_mutex_destroy(&comm->guard);
   free(comm->members); free(comm->forms);
@@ -571,8 +571,12 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    bookkeeping is the region's, where the bridge sees it: the bridge retires the slot of a process gone and returns its
    leases' pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A
    lease is an operand of the node's window, which outlives its bridge (design/transport.md section 2: a bridge that
-   restarts adopts it), so a lease, and every buffer over it, stands across a bridge's restart; the process attaches
-   the window once, for its life (attach_current).  The attach stays mapped until the process ends. --- */
+   restarts adopts it), so a lease, and every buffer over it, stands across a bridge's restart.  A window a stop released
+   (or a bridge of another layout replaced) is expired (its layout version 0): each new lease or communicator then
+   returns the expiry (ncclRemoteError) while the process holds a lease or communicator of it, and the attach is let go
+   (unmapped, its descriptor closed: attach_settle) once it holds none, so the next lease or communicator attaches the
+   bridge's next window; what the process holds of the expired one stays mapped and valid until it frees it.  No
+   process ever holds two windows (design/transport.md section 2, the heartbeat). --- */
 
 /* a lease: its address, its first row, its bytes, the Metal buffer over it (lease_buffer, made at its first use; NULL
    until then), and the points its caller's GPU work on it declared (ncclMeshMemUse: an event, the value it reaches once
@@ -589,6 +593,10 @@ struct attach {
   struct lease *leases;
   size_t count, room;
   uint64_t comms;
+  /* whether the library made a Metal buffer over the window (a lease's, lease_buffer; a channel's, channel_buffer):
+     the caller's GPU work, and its residency set, may hold those pages after the buffer is released, so such an attach
+     is never let go and its process ends to leave the window (attach_settle) */
+  _Atomic int wrapped;
   struct hold holds[MESH_STREAMS];
   struct attach *next;
 };
@@ -596,12 +604,30 @@ struct attach {
 static struct attach *attaches;
 static pthread_mutex_t attach_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* the process's attach, made at its first use: 0, or mesh_attach's error (the window not there: no bridge has made it) */
+/* whether attach `a`'s window is expired (released or replaced: its layout version 0) */
+static int attach_expired(const struct attach *a) {
+  return __atomic_load_n(&a->context.M->version, __ATOMIC_ACQUIRE) != MESH_LAYOUT;
+}
+/* the process's attach let go where its window is expired, it holds no lease and no communicator of it, and the library
+   made no Metal buffer over it (`wrapped`: a process that did ends to leave it): its slot retired, its mapping and
+   descriptor released (mesh_detach), so the heartbeat unlinks that window once no holder lives; under attach_lock */
+static void attach_settle(void) {
+  struct attach *a = attaches;
+  if (!a || a->count || a->comms || atomic_load(&a->wrapped) || !attach_expired(a)) return;
+  mesh_detach(&a->context);
+  free(a->leases);
+  free(a);
+  attaches = NULL;
+}
+/* the process's attach, made at its first use and again after an expired one is let go: 0, ESTALE where the process
+   holds leases or communicators of an expired window, or mesh_attach's error (no window: none is named, or the named
+   one is expired) */
 static int attach_current(struct attach **out) {
-  if (attaches) { *out = attaches; return 0; }
+  attach_settle();
+  if (attaches) { *out = attaches; return attach_expired(attaches) ? ESTALE : 0; }
   struct attach *a = calloc(1, sizeof *a);
   if (!a) return ENOMEM;
-  const int status = mesh_attach(&a->context, NULL);
+  const int status = mesh_attach(&a->context);
   if (status) { free(a); return status; }
   a->next = attaches;
   attaches = a;
@@ -627,6 +653,11 @@ static ncclResult_t attach_fail(int status, const char *format, ...) {
   vsnprintf(what, sizeof what, format, arguments);
   va_end(arguments);
   if (status == EBUSY) return fail(ncclSystemError, "%s: every client slot of this node's bridge is held (mesh.h MESH_CLIENTS)", what);
+  if (status == ESTALE)
+    return fail(ncclRemoteError, "%s: the window of this node's bridge was released or replaced while this process holds leases "
+                "or communicators of it; a process that held a communicator or a lease's Metal buffer ends, any other frees its "
+                "leases (ncclMemFree), and its next lease or communicator then attaches the bridge's next window "
+                "(ncclMeshWindowExpired; design/transport.md section 2)", what);
   return fail(ncclSystemError, "%s: this process attaches no region of this node's bridge "
               "(%s); the node's bridge must run, with a configuration whose window holds this client's footprint "
               "(etc/bridge/README.md)", what, strerror(status));
@@ -683,6 +714,7 @@ static void comm_leave(struct ncclComm *comm) {
     comm_let_go(comm);
     comm->attach->comms--;
     comm->attach = NULL;
+    attach_settle();
   }
   pthread_mutex_unlock(&attach_lock);
 }
@@ -1121,6 +1153,7 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
           ch->view.units != (large ? MESH_STREAM_LARGE_UNITS : MESH_STREAM_SMALL_UNITS))
         status = EPROTO;
       if (!status) status = channel_buffer(ch);
+      if (!status) atomic_store(&comm->attach->wrapped, 1);
     }
   }
   return status;
@@ -1372,6 +1405,16 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   return result;
 }
 
+/* nccl.h ncclMeshWindowExpired */
+ncclResult_t ncclMeshWindowExpired(int *expired) {
+  if (!expired) return fail(ncclInvalidArgument, "ncclMeshWindowExpired: expired is NULL");
+  pthread_mutex_lock(&attach_lock);
+  attach_settle();
+  *expired = attaches && attach_expired(attaches);
+  pthread_mutex_unlock(&attach_lock);
+  return ncclSuccess;
+}
+
 /* the lease at `ptr` returned to the window (mesh_lease_return): its pages free for any client's next lease */
 ncclResult_t ncclMemFree(void *ptr) {
   if (!ptr) return ncclSuccess;
@@ -1389,6 +1432,7 @@ ncclResult_t ncclMemFree(void *ptr) {
         status = mesh_lease_return(&a->context, row);
         a->leases[i] = a->leases[--a->count];
       }
+  attach_settle();
   pthread_mutex_unlock(&attach_lock);
   if (!found) return fail(ncclInvalidArgument, "ncclMemFree of %p: no lease of this process (ncclMemAlloc)", ptr);
   if (status) return fail(ncclInternalError, "ncclMemFree of %p: row %u of this node's region heads no lease of this process", ptr, row);
@@ -1405,7 +1449,7 @@ static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
       struct lease *l = a->leases + i;
       const uintptr_t at = (uintptr_t)ptr, first = (uintptr_t)l->address;
       if (at < first || at >= first + l->bytes) continue;
-      if (!l->buffer) l->buffer = metal_wrap(l->address, l->bytes);
+      if (!l->buffer && (l->buffer = metal_wrap(l->address, l->bytes))) atomic_store(&a->wrapped, 1);
       status = l->buffer ? 0 : ENOMEM;
       if (!status) { *buffer = l->buffer; *offset = (size_t)(at - first); }
     }

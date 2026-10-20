@@ -28,8 +28,10 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
   - It raises each landed word in order.
   - When the link is lost, it writes ~0 into the landed words.
 - It retires the slot of a client whose process ended: it releases the client's rows and lets go of its stream.
-- It ends when a signal arrives, and its exit releases everything it holds of the devices. The window is the node's
-  memory and outlives it: the next bridge adopts it, its clients' leases standing (design/transport.md section 2).
+- It ends when a signal arrives, and its exit releases everything it holds of the devices. Its window outlives it, and
+  the next bridge adopts it, its clients' leases standing; a release is its heartbeat's: once the bridge has ended, the
+  window expires and is unlinked once none of its holders lives, so its memory returns to the system
+  (design/transport.md section 2, the heartbeat).
 - It never reads or writes a payload byte.
 
 **What the bridge cannot do: no API exists for it.**
@@ -635,6 +637,99 @@ The positions, in every kind:
    or handler that changes data code from outside a call. Nothing is set up per call to survive a rare event; whatever
    would be faster kept is kept (M8, 10-20). A bridge is not restarted thousands of times a second, minute, hour or
    day.
+6. **Every program can be shut down whole, and a client transduces its lower layer's end as a value.** The operator,
+   10-20, verbatim:
+   - "we need to be able to service and maintain these machines, incl. to deliberately free memory because a bridge is
+     holding too much for reasons we do not anticipate."
+   - "1: do not stop meshes hundreds of times per second, minute, or hour 2: allow programs to be completely shut down
+     and release all resources they are reserving from lower level kernels, e.g. os level kernels or firmware for i/o
+     devices 3: 3 nines of reliability is a higher standard than infallible, as attempts to write infallible code have
+     produced programs with 10% uptime or lower."
+   - "clients have to transduce errors to the data processing code using them for collectives. it's up to you to decide
+     how this works procedurally, but it isn't going to be by stack manipulation or an exception which tries to violate
+     or interrupt code in a different interface, rather than by a return-with-a-value, an explicit and different error
+     channel instead of a sentinel value, and the client either closing if it cannot accept a new memory allocation from
+     a new bridge or continuing to exist without access to the allocation or memory mapping object it used that referred
+     to the old expired bridge."
+   - On launchd's relaunch of the bridge racing a release: "launchd launches mesh_heartbeat. mesh_heartbeat is a service
+     which is on a different thread than mesh. mesh_heartbeat uses polite opens and polite closes on the actual mesh
+     service."
+
+   So: a release stops the bridge (its agents' exits free every device object) and expires its window; no party signals
+   a client for it; each client's next lease or communicator returns the expiry as a value (ncclRemoteError, and
+   ncclMeshWindowExpired), and the client frees what it holds of that window or ends; the window is unlinked, and its
+   memory the system's, once none of its holders lives. One supervisor (the heartbeat) opens and closes the bridge on kernel
+   events (a delay only bounds how soon a bridge that ended unasked opens again), and no second window is made beside a holder of the first. Ranked: a deliberate stop
+   that leaves memory held until reboot ≺ a release that frees it; launchd relaunching a stopped bridge ≺ a heartbeat
+   that closes it and keeps it closed; a bridge ending its clients for a window change ≺ clients that receive the expiry
+   as a value and let go; a restart policy of one second ≺ one bridge start a minute at most (REOPEN_S).
+
+## Strings are messages
+
+The operator, 10-20, verbatim:
+- "consider that an error which is not an exception or kernel fault within the calling context is literally nothing but
+  a message to transduce along a 'rail' of functions which return a value and either an empty message or a nonempty
+  message, and that code should not sympathetically shit its pants because a string happens to have `error` in utf8
+  somewehre in nromal operation."
+- "functions with operands of type string ought not produce side effects. functions with operands of type string ought
+  not return anything but a string. does this mean that we don't write code like 'lenstring(*)->int'? yes. we do not
+  write code like that and do not use it anywhere inside of the three scopes of concern: bridge, client, dataprocessor.
+  other unrelated programs which do tabulation, visualization, bouncy gummy three dimensional solids which tilt and
+  jiggle with the direction and size of rdma wire crossings are unaffected as they are not identifeid by the three
+  programkinds in the rubric."
+- "to make this even more pair rankable in the rubric's terms: lenstring(*)->string #expect ascii printed string of
+  number, e.g. `four`, `fourhundred`, `fourtythree`. a function with the type just described would be allowed, as it
+  would not be parseable as an integer by badly behaved or dispositionally evil kernel functions; we can imagine a
+  logger which writes numbers as strings of chars to avoid even the superficial apperance of possible misconduct."
+
+The positions rank; they are not rules of total exclusion. The operator, 10-20, verbatim: "we might have a narrow
+exception to the topic we are discussing if we are talking about 'how we will load a safetensors file given that
+safetensors use graphs of strings as metadata (fine actually idc)'; this is why the rubric keeps talking about
+rankability rather than rules of total exclusion or inclusion". A format whose metadata is text (a safetensors header's
+tensor table, a model's config.json, GGUF keys) is read at its load, once, into typed values (offsets, shapes, dtypes,
+the declared structure); that ranks above text read again on a recurring path, and above structure inferred from names
+where a declaration exists.
+
+The positions, in M, C and D:
+1. **A string is a message.** It is carried, composed (string to string), and returned beside a value. No function
+   takes a string and returns anything but a string, and none has a side effect. So nothing measures, compares,
+   searches, parses, hashes, looks up by, or converts a string into a value, and no branch reads a message's content.
+2. **Every function's result is a value and a message**, the message empty or not. A fault is an exception or a
+   kernel fault in the calling context; anything else is a message on the rail, and no code changes what it does
+   because of what a message says.
+3. **What crosses into these programs as a value arrives as a typed value**: configuration, requests, identities and
+   outcomes are never text that the program parses.
+4. **Programs outside the three kinds** (tabulation, visualization, renderers of the wire's crossings) read and write
+   text as they like.
+
+5. **Types and structure are declared, never inferred at run time.** The operator, 10-20, verbatim: "how is a
+   model.config.file written in the huggingface et al dialect? i do not think it is by type inferenec at runtime.
+   figure out why the user is being picky about type inferences and then act on it". A model's configuration declares
+   its structure as typed fields (gemma-4-E2B's `num_hidden_layers` 35, `layer_types`, `num_attention_heads`,
+   `num_key_value_heads`, `head_dim`, `intermediate_size`, `num_kv_shared_layers`, `enable_moe_block`,
+   `attention_k_eq_v`), read once into a typed object that the code reads by field. Inferring the same facts while the
+   program runs (a layer's index from a regex over a tensor's name, MoE from whether a tensor of some name exists, a
+   value's type from a cast that may fail, a format from a file's suffix) is a guess: it costs work at every load or
+   call where a declared value costs one read, and when the names or the shapes change it yields a different program
+   rather than an error (the operator, 10-19: no parameter derived or guessed inside a function). A declaration is
+   read once, at the boundary, into a typed value; every consumer takes that value.
+6. **What a call returns is a value a consumer matches exactly**: a word or bit vector compared against the expected
+   one, never text formatted by one program and parsed by another. The operator, 10-20: "i do not understand why
+   serializing or deserializing or checking strings is the exact same expected overhead as a bitvector exact match in
+   a kernel which takes a return and does something in response...?"
+
+Ranked by where the text is read, lowest first: text read or compared on a recurring path (per frame, dispatch,
+window, step or call) ≺ text read once per load or start into typed values (a safetensors header, a declaration) ≺ no
+text.
+
+Ranked, in every kind: `lenstring(*)->int` ≺ `lenstring(*)->string`, its number spelled in words (`fourtythree`), which
+nothing can parse back into a value; structure inferred from names, presence or casts while the program runs ≺ structure declared and read
+once into a typed value; a call's outcome as text the driver parses (`'committed'`, `{"failed": {"error": …}}`) ≺ a
+word each member sets that the driver matches exactly; a message whose numbers are digits another program reads back as values ≺ one
+whose numbers no program can read back (the operator's imagined logger); a rank reply's `"error"` key moving an
+allocation ≺ a typed outcome value; a request parsed from
+JSON text inside the rank ≺ a typed request; `strcmp`, `strlen`, `atoi` or a name's hash in the bridge or the library ≺
+a numeric constant or a typed operand; logging on a change found by comparing strings ≺ no comparison.
 
 ## How the operator reviews
 
@@ -693,3 +788,10 @@ The positions, in every kind:
   member retiring its residents at the refusal. A process still never holds leases of two regions: removing that rule
   (9add4cbe's P3) wired all of the Mini's memory and its watchdog panicked it (10-20 18:27 UTC). On the pair after
   ab2e5192, the Mini's bridge restart failed one call and the next two committed, its wired memory steady.
+- **M3, M4, rubrics 6 (10-20):** a window unlinked and made again at every bridge start, its clients' leases left in a
+  dead window beside the new one (through version 131) ≺ a window adopted across a restart (923d73fd, layout 132: on
+  the pair the Mini's bridge restarted and the next call committed, wired memory 20.0 GB throughout) ≺ that, with a
+  release that frees it: a heartbeat opens and closes the bridge on kernel events, a release expires the window, each
+  client receives the expiry as a value and lets go or ends, and the heartbeat unlinks the window once none of its
+  holders (bridge, agents, clients, recorded by pid and start) lives, before any bridge makes another; a bridge that
+  ended unasked opens again a minute later.

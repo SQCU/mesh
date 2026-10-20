@@ -33,15 +33,15 @@ Nothing else is needed to move data: rows, requests naming rows, completions, an
 
 ## 2. Who owns what
 
-**The bridge** (`rdma/mesh-flow`: a resident parent per node, started by launchd, and an agent per port that the
+**The bridge** (`rdma/mesh-flow`: a resident parent per node, opened by its heartbeat, and an agent per port that the
 parent spawns, section 14) owns the device contexts, the protection domains, the registration, every queue pair and
 completion queue, every request it posts, which rows a receive or a SEND names, and in what order a link's queue pairs
 carry which call's positions. Its port agents are the only processes that hold a device's objects or post on them; the
 parent reads the device list alone.
 
-**The window outlives its bridge** (layout version MESH_LAYOUT, apart from the wire's MESH_VERSION). A bridge that stops
-leaves its window: it never unlinks it. The next bridge adopts the window, the same memory, where its layout is that
-bridge's:
+**The window outlives a restart of its bridge** (layout version MESH_LAYOUT, apart from the wire's MESH_VERSION). A
+bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash leaves its window as it is. The next
+bridge adopts the window, the same memory, where its layout is that bridge's:
 - clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
 - the port agents register the same pages again, so nothing is wired twice and nothing is reloaded;
 - the bridge's own pages (each port's link page and rings, the duds' block, the map) are recorded in the window and
@@ -50,11 +50,48 @@ bridge's:
   made again, and the next pairing opens each stream new;
 - a retirement a dead process left half done is finished.
 
-A window a live bridge serves is never touched. A window of another layout is replaced only once every process holding
-it open has ended (SIGTERM, then SIGKILL, each bounded by MESH_PLATFORM_NS): its version is first made 0 so no client
-attaches it again, and its name is unlinked only then. A second window is never made beside a live client of the first,
-because on the Mini (24 GB, a 17 GB window) GPU work on one window beside another's registration wired all its memory
-and its watchdog halted the node (2026-10-20).
+A window a live bridge serves is never touched: a second bridge of the node ends at its port's bind, before it reads
+the window.
+
+**A release frees it** (design/rubrics.md "Failure across interfaces" 6). Every stop of the bridge keeps its window; a
+release is the heartbeat's: it stops the bridge by SIGTERM (its agents end, so the kernel frees every object of their
+devices), and once the bridge has ended it makes the window *expire*, its layout version made 0. A bridge that finds a window of another layout expires it the same way and ends
+(EX_TEMPFAIL). No party signals a client. An expired window is:
+- attached by no new client (mesh_open refuses its version);
+- returned to each client that holds a lease or communicator of it as a value, at its next lease or communicator
+  (ncclRemoteError, and ncclMeshWindowExpired: nccl.h Memory); a client the library made no Metal buffer for frees what
+  it holds of it, or ends, and the library then unmaps it and closes its descriptor; a client with Metal buffers over
+  it (its GPU work and residency set may hold those pages after they are released) ends; what a client still holds
+  stays mapped and valid until it frees it or ends;
+- unlinked by the heartbeat once none of its holders lives, and its memory is then the system's. Its holders are
+  recorded in the window, each by its pid and its process's start (so a pid the system gives again is no holder): the
+  bridge (`bridge_pid` and `bridge_start`), each agent a bridge spawned (the agents register the window and hold it
+  until their exit, which can outlast their bridge's), and each client slot's process (its owner's pid and `start`).
+  Fields of the header, the slots and the bridge's area are only ever appended, so the heartbeat reads the holders of
+  a window of any layout.
+
+A second window is never made beside a holder of the first, because on the Mini (24 GB, a 17 GB window) GPU work on
+one window beside another's registration wired all its memory and its watchdog halted the node (2026-10-20): the
+heartbeat opens a bridge only once no expired window is named. A process that maps the window without a slot (a reader,
+or a child forked by a client without exec) is not recorded; none registers it or makes it resident.
+
+**The heartbeat** (rdma/mesh-heartbeat, the job launchd keeps alive, `io.mesh.bridge`) supervises the bridge. It holds no
+device, window or socket of the mesh. It opens the bridge (a child in a process group of its own, so the bridge serves
+on if the heartbeat ends), closes it on the operator's signal and hears its end as a kernel event (EVFILT_PROC
+NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an expired window. Its signals, sent with
+`launchctl kill SIG user/$(id -u)/io.mesh.bridge`:
+- SIGHUP opens the bridge, or restarts it: the bridge closes by SIGHUP (its window kept), the heartbeat runs its own
+  image again (a deploy's new binaries both, bin/mesh-user.sh), and the bridge opens and adopts the window;
+- SIGUSR1 releases: the bridge closes by SIGTERM, the window is unlinked once none of its holders lives, and no bridge
+  opens until SIGHUP;
+- SIGTERM and SIGINT (launchd's stop of the job, a shutdown) release and end the heartbeat, which exits 0, and launchd's
+  KeepAlive {SuccessfulExit: false} does not start it again.
+
+A bridge that ends unasked opens again 60 s later, so the mesh is never restarted more than once a minute (rubrics 6: "do
+not stop meshes hundreds of times per second, minute, or hour"); nothing else is built for a crash (rubrics position
+5). A bridge that ended finding its window expired opens again once the heartbeat has unlinked that window. A job whose
+definition predates the heartbeat runs the bridge directly until the job's next load (launchd keeps a loaded
+definition): its stops keep the window as ever, and it has no release.
 
 **A client** (a rank, a tensor function, torch) owns its rows, and for each of its calls the positions it sends and
 receives. It reads and writes its own rows and its readiness words. It names nothing else.
@@ -205,7 +242,8 @@ Positions in flight on the crushed link are transport errors (section 11). Nothi
 ## 9. Should the bridge ever stop on its own?
 
 No. It does not stop because of a peer, a link, a client, a call, a time or a fault. A stop exists only to replace
-its binary, and it is started from outside (the upgrade's SIGTERM). The stop is: a flag; the port threads see it and
+its binary, or to release the node's memory, and it is started from outside (its heartbeat's SIGHUP, or its SIGTERM:
+section 2). The stop is: a flag; the port threads see it and
 post nothing more; FAREWELL on every paired port; exit. It makes no verbs call, needs no interrupt handler (the signal
 handler only sets the flag), and cannot enter the October 18 deadlock, which needs a deallocation call in flight.
 
@@ -303,7 +341,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | Where the next holding starts | the bridge's answer in the client's slot (127) ≺ the stream's `next`, published once free, exchanged at init through NCCL's bootstrap | M2, C7 |
 | A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life, a lost link down until a person relaunched it (129) ≺ none in a process: made and connected once in a port agent's life, released by its exit, the link paired again by the port's next agent (130) | M3, M4, M6 |
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
-| The binary changing | the bridge stops itself ≺ it stops on the installer's SIGTERM alone | M3 |
+| The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
 
 **The stream.**
 - Each link carries `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own, since a
@@ -343,7 +381,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   the first unit after them.
 
 **A process a port** (version 130, its streams new at every pairing from 131; the operator's choice of 10-20).
-- The bridge is a parent and an agent a port. The parent, launchd's job, holds the region, the map and records, the
+- The bridge is a parent and an agent a port. The parent, its heartbeat's child, holds the region, the map and records, the
   clients' slots, device discovery, hellos and the control sockets. A port's agent is `mesh-flow` spawned again by the
   parent: the same image (its LC_UUID checked, so a binary replaced on disk is no agent of a running parent), in a
   process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the window,

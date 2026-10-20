@@ -10,8 +10,8 @@
 # stage, installs its images by rename and runs this script again on them (MESH_USER_BUILT) (README.md, Convergence).
 # A definition this script writes never changes with what it runs: a loaded agent is left running (bin/mesh-agent.sh).  Each document's path is recorded
 # beside its canonical form, so the convergence and the keeper keep the node's own.  The bridge's definition names its
-# program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename, the
-# bridge stopped by SIGTERM, and launchd starts it on them (design/transport.md section 9).  The install records what it installed
+# program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename, and the
+# bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its window kept (design/transport.md section 2).  The install records what it installed
 # (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes) and the inputs it converged to.
 # Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]  (~/mesh)
 set -u
@@ -67,23 +67,23 @@ PY
   printf '%s\n' "$convergence" > "$support/io.mesh.converge/document"
 fi
 agents=$HOME/Library/LaunchAgents; mkdir -p "$agents" "$HOME/Library/Logs" "$state/facts" "$state/converge"
-images=$(cat "$source/rdma/mesh-flow" "$source/rdma/libmesh.dylib" | shasum -a 256 | cut -d' ' -f1)
+images=$(cat "$source/rdma/mesh-heartbeat" "$source/rdma/mesh-flow" "$source/rdma/libmesh.dylib" | shasum -a 256 | cut -d' ' -f1)
 before=$(sed -n 's/^images=//p' "$state/facts/io.mesh.bridge" 2>/dev/null)
 [ -z "$renew" ] || { cp "$source/rdma/mesh-flow" "$source/rdma/mesh-flow.renew" && mv -f "$source/rdma/mesh-flow.renew" "$source/rdma/mesh-flow"; } || exit 1
 cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- the node's bridge (bin/mesh-user.sh): a new binary or configuration is installed by rename, the bridge stopped by SIGTERM, and launchd starts it on them (design/transport.md section 9) -->
+<!-- the node's bridge (bin/mesh-user.sh): its heartbeat (rdma/mesh-heartbeat), which opens and closes the bridge; a new binary or configuration is installed by rename and the heartbeat's SIGHUP restarts both on them, the window kept; SIGUSR1 releases the bridge and its window, SIGTERM releases them and ends the heartbeat (design/transport.md section 2) -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
-<key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
-<key>LimitLoadToSessionType</key><string>Background</string>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>1</integer><key>ExitTimeOut</key><integer>60</integer>
+<key>ProgramArguments</key><array><string>$source/rdma/mesh-heartbeat</string><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
+<key>LimitLoadToSessionType</key><string>Background</string><key>AbandonProcessGroup</key><true/>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>60</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
 PL
 out=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
-  || { launchctl kill SIGTERM "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
-       echo "io.mesh.bridge: its new binary or configuration is installed; the bridge stopped by SIGTERM, launchd starts it on them"; }
+  || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
+       echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the window kept"; }
 printf 'revision=%s\nimages=%s\n' "$(git -C "$source" rev-parse HEAD 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
 if [ -f "$support/io.mesh.converge/configuration.plist" ]; then
   cat > "$agents/io.mesh.converge.plist.new" <<PL

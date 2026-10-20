@@ -296,9 +296,16 @@ system call".
 - `ncclMemFree(ptr)` returns the lease's pages at once.
 - `ncclCommRegister` takes a buffer in the window (its handle is the buffer itself) and refuses any other with
   `ncclInvalidArgument` (lease it with `ncclMemAlloc`). `ncclCommDeregister` releases nothing.
-- A lease is an operand of the node's window, which outlives its bridge: a bridge that stops leaves the window, and the
-  next bridge adopts it (design/transport.md section 2), so a lease, its pages and every buffer over them stand across a
-  bridge's restart, and nothing is reloaded. A process attaches the window once, for its life. A communicator whose
+- A lease is an operand of the node's window, which outlives a restart of its bridge: the next bridge adopts it
+  (design/transport.md section 2), so a lease, its pages and every buffer over them stand across a bridge's restart,
+  and nothing is reloaded. A window a release (or a bridge of another layout) expired is returned as a value: while the
+  process holds a lease or communicator of it, its next `ncclMemAlloc` and communicator fail with `ncclRemoteError`
+  naming the expiry, and `ncclMeshWindowExpired` reads 1; once the process has freed every one (`ncclMemFree`,
+  `ncclCommDestroy`), or ended, the library lets that window go and its next lease attaches the bridge's next window;
+  a process that held a communicator or a lease's `ncclMeshMemBuffer` ends instead, since the library made Metal
+  buffers over the window for them, which its GPU work and residency set may hold; a caller's own Metal buffers over a
+  lease are released, with their residency, before `ncclMemFree`, or the caller ends. A process never
+  holds two windows. A communicator whose
   streams a restart or a new pairing opened again reports its failure through `ncclCommGetAsyncError` before any group
   runs on it, and is made again. This is the recovery
   doctrine (design/transport.md, mandates 12 and 13, the operator, 2026-10-14): "functions can fail from any one operand

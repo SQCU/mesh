@@ -213,6 +213,7 @@ struct port {
      read (`agent_in`, `agent_held` bytes of it), and an agent of its device from an earlier launch last found alive
      (`elsewhere`: mesh-link.c agent_elsewhere) */
   pid_t agent,elsewhere;
+  uint32_t holder;
   int agent_fd,recycle,ending;
   uint32_t aborts,agent_held;
   uint64_t agent_at,hold_to;

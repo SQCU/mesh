@@ -3,6 +3,7 @@
 #include <sys/wait.h>
 #include <crt_externs.h>
 #include <libproc.h>
+#include <sysexits.h>
 
 /* mesh-verbs.h: the region's name, unlinked at exit (down), and the stop flag every loop reads */
 const char *shm;
@@ -98,7 +99,8 @@ static __attribute__((unused)) void boots_hold(const char *configuration){
 uint64_t memory;
 static int64_t stop_reason;
 static void farewell_text(int64_t code,char *out,size_t room){
-  if(code==SIGTERM)snprintf(out,room,"SIGTERM: its agent was unloaded or restarted");
+  if(code==SIGHUP)snprintf(out,room,"SIGHUP: its heartbeat restarts it");
+  else if(code==SIGTERM)snprintf(out,room,"SIGTERM: its heartbeat's release or stop");
   else if(code>0)snprintf(out,room,"signal %lld",(long long)code);
   else snprintf(out,room,"no reason given");
 }
@@ -1383,6 +1385,12 @@ static int agent_spawn(struct port *port){
     port->elsewhere=elsewhere;
     return EBUSY;
   }
+  /* design/transport.md section 2: the agent's entry among the window's holders, one no live agent holds; where every
+     one is held, the agent waits as for an earlier launch's (a holder of the window is never left unrecorded) */
+  struct mesh_holder *holders=mesh_bridge_pages(M)->agent;
+  uint32_t entry=0;
+  while(entry<2*MESH_PORTS && mesh_holds((pid_t)holders[entry].pid,holders[entry].start))entry++;
+  if(entry==2*MESH_PORTS){port->hold_to=now+MESH_PAUSE_NS;return EBUSY;}
   if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)){
     const int error=errno?errno:EIO;
     say("link %u (%s): its agent not spawned: %s\n",port->index,port->name,strerror(error));
@@ -1415,6 +1423,8 @@ static int agent_spawn(struct port *port){
     return error;
   }
   port->agent=pid;port->agent_fd=pair[0];port->agent_at=now;port->agent_held=0;port->ending=0;
+  holders[entry]=(struct mesh_holder){(uint32_t)pid,0,mesh_started(pid)};
+  port->holder=entry;
   say("link %u (%s): its agent %d spawned\n",port->index,port->name,(int)pid);
   struct kevent64_s watch;
   EV_SET64(&watch,(uint64_t)pair[0],EVFILT_READ,EV_ADD,0,0,TAG_AGENT|port->index,0,0);
@@ -1499,6 +1509,8 @@ static void agent_reaped(struct port *port){
   if(port->agent_fd>=0){close(port->agent_fd);port->agent_fd=-1;}
   while(waitpid(pid,&status,0)<0 && errno==EINTR){}
   port->agent=0;
+  if(port->holder<2*MESH_PORTS && mesh_bridge_pages(M)->agent[port->holder].pid==(uint32_t)pid)
+    mesh_bridge_pages(M)->agent[port->holder]=(struct mesh_holder){0};
   const int asked=port->ending;
   port->ending=port->recycle=0;
   if(asked){port->aborts=0;say("link %u (%s): its agent %d ended\n",port->index,port->name,(int)pid);}
@@ -1805,67 +1817,24 @@ static int agent_main(char **argv){
   }
 }
 
-/* design/transport.md section 2, the window outlives its bridge: the node's window opened at `region`.  The region a
-   bridge before this one left is adopted where its magic, layout version (MESH_LAYOUT) and layout (`geometry`, mesh_layout
-   of this configuration's window) are this bridge's: the same memory, its clients' slots, rows and leases standing and
-   the GPU buffers over them valid, its pages registered again by the port agents (the same pages: nothing is wired
-   twice, nothing reloaded).  A window a live bridge serves (its `bridge_pid` a live mesh-flow) is never touched: this
-   bridge ends.  A window of another layout is replaced only once every process holding it open has ended
-   (window_end), its layout version first made 0 so no client's mesh_open takes it again, and its name unlinked only
-   then: no second window is ever made beside a live client of the first (the 2026-10-20 watchdog panic,
-   design/rubrics.md "Failure across interfaces").  A window that cannot be
-   read is left as it is, and this bridge ends.  1 adopted, 0 made; *out its descriptor */
+/* design/transport.md section 2, the window and the heartbeat: the node's window opened at `region`.  The region a
+   bridge before this one kept (a restart, SIGHUP; a crash) is adopted where its magic, layout version (MESH_LAYOUT) and
+   layout (`geometry`, mesh_layout of this configuration's window) are this bridge's: the same memory, its clients'
+   slots, rows and leases standing and the GPU buffers over them valid, its pages registered again by the port agents
+   (the same pages: nothing is wired twice, nothing reloaded).  A window a live bridge serves is never read: a second
+   bridge of the node ends at its port's bind, before window_open (the loop build binds any port and has no such
+   bound: its harness, mesh-loop, runs one bridge a region).  A window of another layout, or one a stop released (layout version
+   0), is made expired (its layout version 0: no client's mesh_open takes it, and each client's next lease or
+   communicator returns the expiry, nccl-mesh.c attach_expired) and left named, and this bridge ends with EX_TEMPFAIL:
+   its heartbeat unlinks it once no process holds it and opens a bridge again, so no second window is ever made beside
+   a live client of the first (the 2026-10-20 watchdog panic, design/rubrics.md "Failure across interfaces"); a bridge
+   unlinks only a region that never became a window (no magic: a bridge ended while making it).  A window that cannot
+   be read is left as it is, and this bridge ends.  1 adopted, 0 made; *out its descriptor */
 static int window_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->streams==b->streams && a->clients==b->clients &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->client_off==b->client_off && a->data_off==b->data_off &&
          a->length==b->length;
-}
-/* whether process `pid` holds the shared memory object `region` open, as a client does (mesh_attach keeps its
-   descriptor): its descriptors read (libproc PROC_PIDLISTFDS, PROC_PIDFDPSHMINFO) */
-static int window_client(pid_t pid,const char *region){
-  const int need=proc_pidinfo(pid,PROC_PIDLISTFDS,0,NULL,0);
-  struct proc_fdinfo *fds=need>0?malloc((size_t)need):NULL;
-  const int bytes=fds?proc_pidinfo(pid,PROC_PIDLISTFDS,0,fds,need):0;
-  int holds=0;
-  for(int i=0;i<bytes/(int)sizeof *fds && !holds;i++){
-    struct pshm_fdinfo info;
-    holds=fds[i].proc_fdtype==PROX_FDTYPE_PSHM &&
-          proc_pidfdinfo(pid,fds[i].proc_fd,PROC_PIDFDPSHMINFO,&info,(int)sizeof info)==(int)sizeof info &&
-          !strcmp(info.pshminfo.pshm_name,region);
-  }
-  free(fds);
-  return holds;
-}
-/* a replaced window's clients ended, every holder of its descriptor found again each round (one that attached between
-   two rounds is found at the next): SIGTERM, MESH_PLATFORM_NS for their exits, then SIGKILL and as long again (each
-   relaunches, as a data process may, on the new window); where any still lives this bridge ends with the window's name
-   kept, marked never to be adopted, so the next bridge ends its clients again rather than make a second window */
-static void window_end(struct hdr *old,size_t size,const char *region){
-  pid_t clients[MESH_CLIENTS];
-  for(int round=0;;round++){
-    uint32_t count=0;
-    for(uint32_t c=0;c<old->clients && c<MESH_CLIENTS && old->client_off+(uint64_t)(c+1)*sizeof(struct mesh_client)<=size;c++){
-      const pid_t pid=(pid_t)(uint32_t)atomic_load(&((struct mesh_client *)((char *)old+old->client_off))[c].owner);
-      if(pid && pid!=getpid() && !mesh_gone(pid) && window_client(pid,region))clients[count++]=pid;
-    }
-    if(!count)return;
-    if(round==2){
-      say("bridge: %u client%s of the replaced window %s still live: this bridge ends, the window kept, rather than make a second "
-          "window beside them\n",count,count==1?"":"s",region);
-      exit(1);
-    }
-    for(uint32_t k=0;k<count;k++){
-      say("bridge: process %d, a client of the replaced window %s, asked to end (%s); it relaunches on the new window\n",
-          (int)clients[k],region,round?"SIGKILL":"SIGTERM");
-      kill(clients[k],round?SIGKILL:SIGTERM);
-    }
-    for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;count && clock_ns()<until;){
-      uint32_t live=0;
-      for(uint32_t k=0;k<count;k++)if(!mesh_gone(clients[k]))clients[live++]=clients[k];
-      if((count=live))poll(NULL,0,50);
-    }
-  }
 }
 static int window_open(const char *region,const struct hdr *geometry,int *out){
   int fd=shm_open(region,O_RDWR,0);
@@ -1877,21 +1846,18 @@ static int window_open(const char *region,const struct hdr *geometry,int *out){
     struct hdr *old=size>=sizeof(struct hdr)?mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0):NULL;
     if(old==MAP_FAILED){say("bridge: window %s not mapped (%s): this bridge ends without touching it\n",region,strerror(errno));exit(1);}
     if(old && old->magic==MESH_MAGIC){
-      const pid_t was=(pid_t)atomic_load(&old->bridge_pid);
-      char path[PROC_PIDPATHINFO_MAXSIZE];
-      const char *base=was && was!=getpid() && !mesh_gone(was) && proc_pidpath(was,path,sizeof path)>0?strrchr(path,'/'):NULL;
-      if(base && !strncmp(base+1,"mesh-flow",9)){
-        say("bridge: process %d serves window %s: this bridge ends without touching it\n",(int)was,region);exit(1);}
-      if(old->version==MESH_LAYOUT && window_same(old,geometry)){M=old;*out=fd;return 1;}
-      old->version=0;
-      atomic_thread_fence(memory_order_seq_cst);
-      window_end(old,size,region);
+      if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && window_same(old,geometry)){M=old;*out=fd;return 1;}
+      __atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);
+      say("bridge: window %s is expired (another layout, or released): this bridge ends, and its heartbeat unlinks it once no "
+          "holder of it lives and opens a bridge again\n",region);
+      boots_clear();
+      exit(EX_TEMPFAIL);
     }
     if(old)munmap(old,size);
     close(fd);
     shm_unlink(region);
   }
-  if((fd=shm_open(region,O_CREAT|O_RDWR,MESH_MODE))<0)die("shm");
+  if((fd=shm_open(region,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
   if(ftruncate(fd,(off_t)geometry->length))die("ftruncate");
   fchmod(fd,MESH_MODE);
   M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
@@ -1904,6 +1870,7 @@ static int window_open(const char *region,const struct hdr *geometry,int *out){
   *out=fd;
   return 0;
 }
+
 /* the adopted window's bridge state made this bridge's, before any client reads it as live (`bridge_pid` set last): every
    stream not live, not free and held by none, its landed words ~0 (a lost pairing's holding ended with its bridge, and a
    wait on it reads the loss; the next pairing opens each new, streams_open), the links' table cleared, a client slot
@@ -1992,6 +1959,22 @@ int main(int argc,char **argv){
   if(window<pg || window/pg>UINT32_MAX){say("bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
   struct hdr geometry={0};
   mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
+  /* design/transport.md section 2: the bridge's port bound before its window is read, so a second bridge of the node
+     (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the window; a loop
+     bridge binds any port, so its harness alone keeps one bridge a region */
+  int on=1;
+  struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
+#ifdef MESH_LOOP_FABRIC
+  any.sin6_addr=in6addr_loopback;
+#endif
+  listener=socket(AF_INET6,SOCK_STREAM,0);hello=socket(AF_INET6,SOCK_DGRAM,0);network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
+  struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
+  unsigned loop=0;
+  if(listener<0 || hello<0 || network<0 || setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) ||
+     setsockopt(hello,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) || setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_LOOP,&loop,sizeof loop) ||
+     bind(listener,(struct sockaddr *)&any,sizeof any) || listen(listener,SOMAXCONN) || bind(hello,(struct sockaddr *)&any,sizeof any) ||
+     fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
+    die("bridge sockets");
   int fd=-1;
   const int adopted=window_open(region,&geometry,&fd);
   shm=region;
@@ -2015,23 +1998,11 @@ int main(int argc,char **argv){
   record_changed();
   if(!atomic_load(&M->map_nodes))die("the map's lease");
   link_reserve();
-  int on=1;
-  struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
-#ifdef MESH_LOOP_FABRIC
-  any.sin6_addr=in6addr_loopback;
-#endif
-  listener=socket(AF_INET6,SOCK_STREAM,0);hello=socket(AF_INET6,SOCK_DGRAM,0);network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
-  struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
-  unsigned loop=0;
-  if(listener<0 || hello<0 || network<0 || setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) ||
-     setsockopt(hello,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) || setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_LOOP,&loop,sizeof loop) ||
-     bind(listener,(struct sockaddr *)&any,sizeof any) || listen(listener,SOMAXCONN) || bind(hello,(struct sockaddr *)&any,sizeof any) ||
-     fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
-    die("bridge sockets");
   int watched[3]={listener,hello,network};
   for(int i=0;i<3;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
   EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
+  mesh_bridge_pages(M)->bridge_start=mesh_started(getpid());
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
   __sync_synchronize();M->magic=MESH_MAGIC;
   pthread_t watcher;
@@ -2158,13 +2129,15 @@ int main(int argc,char **argv){
      interface's termination's (`exit_at`, B9b), the kernel's link events read meanwhile, so a link going off then
      extends its port's (network_heard), as a termination then extends them all (peer_terminated), each no later than
      MESH_PLATFORM_NS past the stop's start (`held_to`: every window set before the stop ends by then, so the hold is
-     the one 5 s budget, well inside launchd's ExitTimeOut) */
+     the one 5 s budget, well inside its heartbeat's bound of 3 MESH_PLATFORM_NS) */
   for(uint32_t p=0;p<port_count;p++){
     agent_send(ports+p,(struct agent_message){.kind=AGENT_HALT});
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
     if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
   }
   streams_cancel(NULL);
+  /* design/transport.md section 2: every stop keeps the window for the next bridge to adopt; a release is the
+     heartbeat's, which expires the window once this bridge has ended (mesh-heartbeat.c window_expire) */
   atomic_store(&M->bridge_pid,0);
   mesh_notify(&M->control);
   const uint64_t held_to=clock_ns()+MESH_PLATFORM_NS;

@@ -14,7 +14,8 @@
        the collectives run over the family's cables (its trees), and a send around the ring between two ranks no cable
        joins (a line's ends, a star's leaves, a torus's) fails as a value
      mesh-loop down DIRECTORY
-       every bridge stopped (SIGTERM, as launchd stops one), the fabric unlinked
+       every bridge stopped (SIGTERM, a release: design/transport.md section 2), the fabric and every node's region
+       unlinked
 
    A JSON line a reading, with its status; the exit status is nonzero where any failed. */
 #include "nccl.h"
@@ -203,6 +204,7 @@ static int loop_up(const char *family, int n, uint64_t window_mib, const char *d
   for (int i = 0; i < n; i++) {
     map.node[i] = (struct loop_node){.node = (uint32_t)(i + 1)};
     snprintf(map.node[i].region, sizeof map.node[i].region, "/meshloop%d", i);
+    shm_unlink(map.node[i].region);
   }
   for (int c = 0; c < map.cables; c++) { map.cable[c].listen[0] = free_port(); map.cable[c].listen[1] = free_port(); }
   for (int i = 0; i < n; i++) {

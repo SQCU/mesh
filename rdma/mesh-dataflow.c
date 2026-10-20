@@ -26,7 +26,8 @@ int mesh_loop_bind(const char *region){
 
 /* design/transport.md: the node's window mapped, `writable` (a client's) or read-only (a reader's, which attaches no
    client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge
-   runs on it now (it outlives its bridge, design/transport.md section 2): 0, EINVAL where it is no window of this layout,
+   runs on it now (it outlives a restart of its bridge, design/transport.md section 2): 0, EINVAL where it is no window
+   of this layout, or one expired,
    else the errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
   int file=shm_open(MESH_REGION_NAME,writable?O_RDWR:O_RDONLY,0);
@@ -260,34 +261,31 @@ void mesh_retire(struct hdr *m,uint64_t client){
   mesh_notify(&m->control);
 }
 
-static uint64_t mesh_key(const char *name){
-  uint64_t key=UINT64_C(0xcbf29ce484222325);
-  for(const char *p=name;p && *p;p++)key=(key^(unsigned char)*p)*UINT64_C(0x100000001b3);
-  return name && *name?key:0;
-}
-
-int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
+int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
   uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1);
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
     uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
     if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
-    slot->key=key;
+    slot->start=mesh_started(getpid());
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     return 0;
   }
   return EBUSY;
 }
 
-int mesh_attach(struct mesh_ctx *c,const char *name){
+int mesh_attach(struct mesh_ctx *c){
   if(c->M) return 0;
   struct hdr *m;size_t length;int file;
   int error=mesh_open(1,&m,&length,&file);
   if(error)return error;
   *c=(struct mesh_ctx){.len=length,.fd=file};
-  error=mesh_slot_take(c,m,mesh_key(name));
-  if(error){munmap(m,length);close(file);*c=(struct mesh_ctx){0};}
-  return error;
+  error=mesh_slot_take(c,m);
+  if(error){munmap(m,length);close(file);*c=(struct mesh_ctx){0};return error;}
+  /* design/transport.md section 2: the expiry (a store, seq_cst) read again after the slot's compare-exchange
+     (seq_cst): a slot the heartbeat's read of the holders missed reads it expired here, and is let go */
+  if(__atomic_load_n(&m->version,__ATOMIC_SEQ_CST)!=MESH_LAYOUT){mesh_detach(c);return EINVAL;}
+  return 0;
 }
 
 int mesh_detach(struct mesh_ctx *c){

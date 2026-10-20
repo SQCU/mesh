@@ -83,10 +83,13 @@ _Static_assert(sizeof(struct mesh_stream)==160,"mesh_stream");
    struct mesh_reach) */
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t window,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
-/* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant) under its execution's key (`key`) */
+/* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
+   that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The
+   slot's fields, as the header's, are only ever appended to, so any later bridge or heartbeat reads a window's holders
+   at these offsets (design/transport.md section 2) */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
-  uint64_t key,padding[6];
+  uint64_t start,padding[6];
 };
 /* design/transport.md; `busy`: the streams held (0 between calls) and since when none has been (`idle_since`, the
    wall clock in ns; 0 while any is) */
