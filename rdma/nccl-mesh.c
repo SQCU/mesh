@@ -1722,6 +1722,11 @@ struct call {
   struct where counts_at, received_at, landed_at, arrived_at, got_at;
   uint32_t counting;
   int ended;
+  /* a counted all-to-all whose every rank's segments follow from its arguments (ncclAlltoAll, ncclGather, ncclScatter:
+     `each` from rank `from` to rank `to`, -1 every rank; routed), so every rank plans every rank's steps of it
+     (order_group) */
+  int uniform, from, to;
+  size_t each;
   /* a call reading its send buffer in place (plan_direct): the ranges of its result no step writes, copied from it after
      its publications are encoded (`complement`, triples: the result's byte offset, the send buffer's, the bytes) */
   uint64_t *complement;
@@ -1781,6 +1786,12 @@ static uint64_t seg_first(const uint64_t *seg, int q) {
   for (int r = 0; r < q; r++) at += seg[r];
   return at;
 }
+/* a uniform counted call's (struct call `uniform`) segments of rank r toward and from rank q, from its arguments alone,
+   so every rank computes every rank's alike (routed, order_group) */
+static void uniform_segments(const struct call *c, int r, int q, uint64_t *send, uint64_t *recv) {
+  *send = (c->from < 0 || c->from == r) && (c->to < 0 || c->to == q) ? c->each : 0;
+  *recv = (c->from < 0 || c->from == q) && (c->to < 0 || c->to == r) ? c->each : 0;
+}
 static size_t row_bytes(const struct call *c) { return c->row * SIZE[c->type]; }
 static size_t counted_bound(const struct call *c) { return c->rows < c->capacity ? c->rows : c->capacity; }
 /* the rows of int64 counts [first, first + entries), a negative count none */
@@ -1830,17 +1841,21 @@ static void steps_free(struct steps *s) {
    landed counts at q's place in rank order), and then from each its rows (buffer 3, the receive buffer, at the place the
    landed counts give), each after every counts receive (mesh_steps_before: a receive's first piece after the one
    before it), so a rank's k-th SEND to a peer is that peer's k-th receive from it; *counting the counts receives */
+static uint32_t hosted_steps(int n, int me, ncclDataType_t type, const uint64_t *segments, struct mesh_step *steps) {
+  uint32_t k = 0;
+  for (int q = 0; q < 2 * n; q++)
+    if (q % n != me && segments[q])
+      steps[k++] = (struct mesh_step){q < n ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)(q % n), 0, q >= n, seg_first(segments + (q < n ? 0 : n), q % n),
+                                      {(uint32_t)type + 1, (uint32_t)SIZE[type], segments[q]}};
+  return k;
+}
 static uint32_t counted_steps(ncclComm_t comm, struct call *c, struct mesh_step *steps) {
   const int n = comm->nranks, me = comm->rank;
   const uint64_t *sseg = c->segments, *rseg = c->segments + n, bound = counted_bound(c);
   const struct mesh_operand counts = {(uint32_t)ncclInt64 + 1, 8, 0}, rows = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], bound * c->row};
   uint32_t k = 0;
   c->counting = 0;
-  for (int q = 0; hosted(c) && q < 2 * n; q++)
-    if (q % n != me && c->segments[q])
-      steps[k++] = (struct mesh_step){q < n ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)(q % n), 0, q >= n, seg_first(c->segments + (q < n ? 0 : n), q % n),
-                                      {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->segments[q]}};
-  if (hosted(c)) return k;
+  if (hosted(c)) return hosted_steps(n, me, c->type, c->segments, steps);
   for (int q = 0; q < n; q++) {
     if (q == me || !sseg[q]) continue;
     steps[k++] = (struct mesh_step){MESH_STEP_SEND, (uint32_t)q, 0, 0, seg_first(sseg, q), {counts.type, counts.element_bytes, sseg[q]}};
@@ -2500,7 +2515,11 @@ static int event_order(const void *x, const void *y) {
    piece lands, a receive's first piece after the receive before it.  A publication's level is one more than its
    predecessors' largest, a consumption's that largest.  This rank's publications go to g->order by level; the walk
    encodes a consumption only where a publication (or the group's end) needs it, so a wait is on a publication of a level
-   below the next one encoded, and the lowest level not yet published always can be */
+   below the next one encoded, and the lowest level not yet published always can be.  Every rank plans every rank's steps
+   of a collective and of a uniform counted call (uniform_segments); a point-to-point call only its own, its positions
+   last on each channel (mesh_group_lay) and one step with no receive before it, so no other node follows from them and
+   every level is the same on every rank; a counted call of per-rank counts only its own: its receives' chains on the
+   channels of two other ranks are unknown here, so among three or more ranks its levels may differ between ranks */
 static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
   const int N = comm->nranks, me = comm->rank;
   struct call *list = g->list;
@@ -2508,7 +2527,9 @@ static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
   for (size_t i = 0; i < g->n; i++) {
     if (list[i].bound && list[i].bound->program && list[i].bound->program->first[N] + 1 > S) S = list[i].bound->program->first[N] + 1;
     if (list[i].bound && list[i].bound->count + 1 > S) S = list[i].bound->count + 1;
+    if (list[i].bound && list[i].uniform && 2 * (size_t)N + 1 > S) S = 2 * (size_t)N + 1;
   }
+  uint64_t *segments = calloc(2 * (size_t)N + 1, sizeof *segments);
   const size_t n = g->n, E = (size_t)N * (N - 1);
   const struct mesh_step **steps = calloc((size_t)N * n + 1, sizeof *steps);
   struct mesh_step *planned = calloc((size_t)N * n * S + 1, sizeof *planned);
@@ -2520,7 +2541,7 @@ static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
   struct mesh_place *scratch = calloc(S + 1, sizeof *scratch);
   int32_t *before = calloc((size_t)N * n * S + 1, sizeof *before);
   struct mesh_group group;
-  ncclResult_t result = steps && planned && counts && lane && first && pieces && length && offset && calls && made && scratch && before
+  ncclResult_t result = steps && planned && counts && lane && first && pieces && length && offset && calls && made && scratch && before && segments
                           ? ncclSuccess : fail(ncclSystemError, "out of memory");
   /* a channel: the pair a < b (its index among the pairs) and the class; an end's side 0 for a, 1 for b; rank r's steps
      of call i at steps[i * N + r] */
@@ -2535,6 +2556,10 @@ static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
       else if (!p2p(list + i) && !counted(list + i)) {
         steps[STEPS(r, i)] = planned + AT(r, i, 0);
         counts[STEPS(r, i)] = mesh_program_steps_cut(own->program, (uint32_t)r, own->operand, own->segments, planned + AT(r, i, 0));
+      } else if (list[i].uniform) {
+        for (int q = 0; q < N; q++) uniform_segments(list + i, r, q, segments + q, segments + N + q);
+        steps[STEPS(r, i)] = planned + AT(r, i, 0);
+        counts[STEPS(r, i)] = hosted_steps(N, r, list[i].type, segments, planned + AT(r, i, 0));
       }
     }
   if (!result) group_of(list, n, (uint32_t)N, steps, counts, calls, &group);
@@ -2638,7 +2663,7 @@ static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
   if (!result) qsort(g->order, g->events, sizeof *g->order, event_order);
   free(steps); free(planned); free(counts); free(lane); free(first); free(pieces); free(length); free(offset); free(calls); free(made); free(scratch);
   free(before); free(after_send); free(after_receive); free(sends); free(lands); free(pred); free(level); free(queue); free(degree); free(successors);
-  free(edge);
+  free(edge); free(segments);
   return result;
 }
 
@@ -3565,11 +3590,12 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *s
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
   const int n = comm->nranks, me = comm->rank, root = from < 0 ? to : from;
   if (root < -1 || root >= n) return fail(ncclInvalidArgument, "root %d of %d ranks", root, n);
-  struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream};
+  struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream,
+                   .uniform = !sendcounts && !recvcounts, .from = from, .to = to, .each = count};
   if (!(c.segments = malloc(2 * (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
   for (int q = 0; q < n; q++) {
-    c.segments[q] = sendcounts ? sendcounts[q] : (from < 0 || from == me) && (to < 0 || to == q) ? count : 0;
-    c.segments[n + q] = recvcounts ? recvcounts[q] : (from < 0 || from == q) && (to < 0 || to == me) ? count : 0;
+    if (c.uniform) uniform_segments(&c, me, q, c.segments + q, c.segments + n + q);
+    else { c.segments[q] = sendcounts[q]; c.segments[n + q] = recvcounts[q]; }
     if (q != me) c.count += c.segments[q] + c.segments[n + q];
   }
   const unsigned long long sent = c.segments[me], received = c.segments[n + me];
