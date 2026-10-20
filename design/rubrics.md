@@ -19,6 +19,48 @@ with separate namespaces and separate interfaces:
 
 Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mixture would.
 
+**What the bridge does (M), one process per node.**
+- At its launch, it maps the node's window and registers it once on every RDMA device.
+- When it first hears a peer on a cable, it makes that link's queue pairs and exchanges their numbers once. It connects them once in its life. That exchange, and the map records it floods, are its only messages.
+- On each link it keeps one stream toward the peer node:
+  - It posts receives into the stream's in ring for the link's life.
+  - For each unit the holder declared, it posts a SEND when the unit's ready word is set. If the deadline passes or the holding ends first, it posts the same SEND from its all-ones block instead.
+  - It raises each landed word in order.
+  - When the link is lost, it writes ~0 into the landed words.
+- It retires the slot of a client whose process ended: it releases the client's rows and lets go of its stream.
+- It ends when a signal arrives, and its exit releases everything.
+- It never reads or writes a payload byte.
+
+**What the bridge cannot do: no API exists for it.**
+- Answer a request: it reads words and writes words.
+- Know a communicator, rank, call, collective, schedule, position or route.
+- Compute, combine or copy data.
+- Deliver a call or take a command.
+- Re-pair, reset, flush or destroy a queue pair, or declare a quiet peer lost.
+
+**What a client does (C), libnccl-mesh in its process.**
+- Attaches one slot of its node's region.
+- Takes rows of the window by compare-and-swap on the shared bitmaps (`ncclMemAlloc`).
+- Reads which nodes its bridge reaches.
+- Meets its peers through NCCL's bootstrap, on its own sockets.
+- Compiles the same schedule as every member.
+- Holds the stream toward each member's node by taking its owner word while the stream is free, and tells its peers where its units start.
+- Lays positions as runs of stream units and declares them.
+- Writes units and their ready words, and reads landed words and the in ring.
+- Combines on the host or the GPU, and paces itself by NCCL's head credit.
+- Ends a communicator by revoke or destroy, which gives back its stream.
+
+**What a client cannot reach: not in its headers or its link.**
+- Ports, links, cables, lanes, queue pairs, pairings, completion queues, work requests, scatter entries or keys.
+- No verbs call: libnccl-mesh and libmesh do not link the RDMA library, and mesh.h does not include its header.
+- A request to the bridge, or a way to wake its threads.
+- Another client's rows or slot.
+- The words only the bridge writes: landed, `live`, `free`, `next`.
+
+**What data code (D) reaches:** the NCCL API, the device-function header and `ncclMemAlloc`. It reaches nothing of the bridge's or the region's.
+
+The region is mapped whole into every client, so nothing in the hardware enforces the lists above. Only the headers enforce them, which is why the headers expose nothing else (design/transport.md section 2).
+
 **For agents, subagents and reviewers:**
 1. Name the kind of every file a change touches, from the table under Quantities.
 2. Rank the change against the form it replaces, using that kind's dimensions only, each dimension separately. Give the

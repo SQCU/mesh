@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
-#include <infiniband/verbs.h>
 #include <os/os_sync_wait_on_address.h>
 #include "mesh-plan.h"
 /* design/transport.md */
