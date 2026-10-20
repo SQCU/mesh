@@ -222,6 +222,7 @@ static void lane_send(struct port *port,uint32_t k){
     int dud=0;
     if(atomic_load_explicit(ready+u%units,memory_order_acquire)<1+u/units){
       if(holding){
+        if(deadline==UINT64_MAX)break;
         if(!clock)clock=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         if(clock<deadline)break;
       }

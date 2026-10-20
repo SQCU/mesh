@@ -352,7 +352,7 @@ that leaves its links working (a link lost elsewhere, a node that joins) reaches
 `ncclCommShrink` (to one rank: [Communicators](#communicators)), and a joining one taken in with `ncclCommGetUniqueId`
 and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding streams of its own as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and the units its groups
-declared and supplied nothing for go as duds at their deadline, so its peers' groups fail rather than wait); an init
+declared and supplied nothing go at once as duds, so its peers' groups fail rather than wait); an init
 still running (a non-blocking one's) ends as a value, its host-path groups return at their next look and its GPU waits
 end at their next look at its stop word, and every later group on it is refused (`ncclInvalidUsage`, "revoked") until
 `ncclCommDestroy` gives its streams back.

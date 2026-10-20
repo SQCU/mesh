@@ -40,7 +40,7 @@
    two ranks or more holds none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow meets at the bootstrap of the
    id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke is NCCL's: comm's
    operations in flight are revoked and its resources kept (its streams stay held; the units its groups declared and
-   supplied nothing for go as duds at their deadline, so its peers' groups fail rather than wait), an init still
+   supplied nothing for go at once as duds, so its peers' groups fail rather than wait), an init still
    running (a non-blocking one's) ends as a value, its host-path groups return at their next look and its GPU waits end
    at their next look at its stop word, every later group on comm is refused (ncclInvalidUsage), ncclCommFinalize after
    it is not supported, and ncclCommGetAsyncError reads ncclSuccess once it is done; from any thread, under comm's own
@@ -65,8 +65,8 @@
    point-to-point call one step) on its communicator's channels: toward each member it is joined to, each class of the
    stream its init held toward the member's node, each position of a channel a run of the stream's units both ends lay
    alike (mesh-plan.h mesh_group_lay, mesh_wire), declared to the bridge as the group is issued (mesh-call.h
-   mesh_stream_declare, its deadline MESH_PLATFORM_NS on), so a member that fails, is revoked or ends mid-group is
-   replaced at its peers by duds, all ones, which fail their groups as values (ncclRemoteError: design/transport.md
+   mesh_stream_declare, with no deadline while its member lives: no dud reaches the peer of a producer still at
+   work), so a member that fails, is revoked or ends mid-group is replaced at its peers by duds, at once, all ones, which fail their groups as values (ncclRemoteError: design/transport.md
    section 10).  A landed position whose first eight bytes are all ones is read as a dud; that is the only check of a
    payload, so calls that do not pair (a separate send and receive in the same order on two ranks, unequal counts,
    different collectives) are the caller's error and are not detected.  Uneven segments are their own calls
@@ -935,8 +935,7 @@ typedef struct {
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
-   whether a publication was encoded, the units still to publish declared anew (their deadline MESH_PLATFORM_NS from
-   now).  A ticket already complete encodes nothing; one whose communicator failed returns the failure. */
+   whether a publication was encoded, the units still to publish declared anew.  A ticket already complete encodes nothing; one whose communicator failed returns the failure. */
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
 /* The highest ticket through which every issued group is complete (or lost with a failed communicator): its
    workspace may be reused in the stream's order. */

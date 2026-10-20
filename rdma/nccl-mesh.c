@@ -1255,9 +1255,11 @@ static ncclResult_t comm_failure(struct ncclComm *comm);
    socket of its bootstrap shut down, so an init still running (a non-blocking one's), its connect and accept reading the
    revoke at their next look (bootstrap_open), fails as a value; and its failure words' stop (word [6]) set, which every
    GPU wait of its reads and records as its failure, every later dispatch of it then doing nothing; under its guard */
+static void nil_send(struct ncclComm *comm);
 static void comm_stop(struct ncclComm *comm) {
   pthread_mutex_lock(&comm->guard);
   __atomic_store_n(&comm->revoked, 1, __ATOMIC_SEQ_CST);
+  nil_send(comm);
   for (int r = 0; comm->peers && r < comm->nranks; r++)
     if (comm->peers[r] >= 0) shutdown(comm->peers[r], SHUT_RDWR);
   if (comm->words) atomic_store_explicit(comm->words + 6, 1, memory_order_release);
@@ -1265,8 +1267,8 @@ static void comm_stop(struct ncclComm *comm) {
 }
 
 /* ncclCommRevoke, NCCL's: comm's operations in flight revoked and its resources kept (comm_stop alone: its streams stay
-   held, the units its groups declared and supplied nothing for going as duds at their deadline, so its peers' groups fail
-   as values), a host-path group of its returning at its next look and its GPU work ending at its next wait, every later
+   held, the units its groups declared and supplied nothing for going at once as duds, nil_send, so its peers' groups
+   fail as values), a host-path group of its returning at its next look and its GPU work ending at its next wait, every later
    group refused (ncclInvalidUsage), ncclCommGetAsyncError reading ncclSuccess once the revoke is done; from any thread,
    under comm's own lock alone, never one a group holds while it waits.  ncclCommDestroy then gives its streams back
    (comm_free) and frees it */
@@ -1582,14 +1584,15 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
     vsnprintf(comm->failure, sizeof comm->failure, format, arguments);
     va_end(arguments);
     comm->failed = result;
+    nil_send(comm);
   }
   inflight_lose(comm);
   return fail(comm->failed, "%s", comm->failure);
 }
 
 /* a dud's landing, a client's failure (design/transport.md section 10) */
-#define DUD "node %u supplied nothing at position %llu on its channel: a dud landed there (all ones: its call failed, was " \
-            "revoked or ended, or missed its deadline)"
+#define DUD "node %u supplied nothing at position %llu on its channel: a dud landed there (all ones: its call failed, or it " \
+            "was revoked or ended)"
 
 /* the communicator's failure: the one it kept; a revoke; else one its GPU work recorded in its failure words (a wait's
    bound reached, its link lost, a dud landed: nccl-mesh-metal.h METAL_*; a counted all-to-all past its layout), kept
@@ -2016,16 +2019,30 @@ static void schedules_free(const struct ncclComm *comm, struct schedule *plans) 
 }
 
 /* design/transport.md section 14: each channel's stream class declared through the units laid on it
-   (mesh_stream_declare), to be supplied within the platform's deadline from now, before any of them is supplied, so a
-   member that fails, is revoked or ends mid-group is replaced at its peers by duds; with `again`, each with positions
-   still to publish declared anew (a completion's, ncclMeshComplete: its deadline from then) */
+   (mesh_stream_declare) before any of them is supplied, with no deadline (UINT64_MAX: a live producer's unit is never
+   a dud), so a member that fails, is revoked or ends mid-group is replaced at its peers by duds when it says so
+   (nil_send) or its holding ends; with `again`, each with positions still to publish declared anew (a completion's,
+   ncclMeshComplete) */
 static void declare(struct ncclComm *comm, int again) {
-  const uint64_t deadline = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + MESH_PLATFORM_NS;
   for (uint32_t h = 0; h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
     if (*ch->laid <= *ch->declared && !(again && ch->sent < ch->end)) continue;
-    mesh_stream_declare(&comm->attach->context, ch->stream, ch->large, *ch->laid, deadline);
+    mesh_stream_declare(&comm->attach->context, ch->stream, ch->large, *ch->laid, UINT64_MAX);
     *ch->declared = *ch->laid;
+  }
+}
+
+/* design/transport.md section 14: a communicator that can no longer supply what it declared (its group failed, or it
+   was revoked or destroyed): every channel's declared units given the deadline now, so the bridge sends at once, as
+   duds, each one no group supplied, and its peers' groups end as values rather than wait; a live holder's units are
+   never given a deadline (declare: UINT64_MAX), so no dud reaches a peer of a producer still at work (design/rubrics.md
+   C5, Quantities, the operator 10-20) */
+static void nil_send(struct ncclComm *comm) {
+  if (!comm->attach || !comm->channels) return;
+  const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    if (ch->declared) mesh_stream_declare(&comm->attach->context, ch->stream, ch->large, *ch->declared, now);
   }
 }
 

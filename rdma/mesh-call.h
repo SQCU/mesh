@@ -27,8 +27,9 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
    after a release fence; unit u from the peer has landed in slot u mod units of the in ring once landed[u mod units]
    reads at least 1 + u / units (~0: the link lost); the peer's units begin at the peer's `next`, which the
    communicator's init exchanges.  The holder declares the units of a class it will supply, up to `declared`
-   (absolute) by `deadline` (uptime ns, at most MESH_PLATFORM_NS away): mesh_stream_declare; a declared unit not
-   supplied by then, or by the holding's end, goes as a dud (all ones) */
+   (absolute) and its `deadline` (uptime ns): mesh_stream_declare; a live holder's is UINT64_MAX, never reached, and a
+   holder that can supply no more sets it to now; a declared unit not supplied by its deadline, or by the holding's
+   end, goes as a dud (all ones) */
 struct mesh_stream_view { unsigned char *in,*out; _Atomic uint64_t *ready,*landed; uint32_t unit,units; };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,int large,struct mesh_stream_view *);
 int mesh_stream_declare(struct mesh_ctx *,uint32_t stream,int large,uint64_t declared,uint64_t deadline);

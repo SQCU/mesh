@@ -310,8 +310,10 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   first gather carries each rank's free streams (`mesh_streams_free`), and both ends of each pair of members take the
   stream of the least `wire` free at both (`mesh_stream_take`), so the two ends of a communicator hold the two ends of
   one stream. An init is refused (EBUSY) only where no stream toward a member's node is free at both ends.
-- The holder declares how far it will supply each class (`declared`) and by when (`deadline`, uptime ns, at most
-  `MESH_PLATFORM_NS` on).
+- The holder declares how far it will supply each class (`declared`), with a `deadline` (uptime ns) that a live holder
+  leaves at UINT64_MAX: no unit of a producer still at work is ever sent as a dud (design/rubrics.md C5 and Quantities,
+  the operator 10-20). A holder that can supply no more, its group failed or revoked, sets the deadline to now, and
+  the bridge sends its unsupplied declared units as duds at once. A consumer's own wait stays bounded where it waits.
 
 **Duds, and a holding's end.**
 - The send thread posts unit u when its ready word reads `1 + u / units`. Where u is declared, not supplied, and the
