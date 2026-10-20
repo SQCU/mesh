@@ -35,8 +35,8 @@
    a step.  A caller's kernel stores its piece's element k with mesh_step_store and reads its peer's fourth k with
    mesh_step_read (float16), so it names no transport qualifier of its own (they are compiled here, under mesh.metal's
    pragma: a header after it, MetalPerformancePrimitives', may end that pragma).  The library's own kernels that write a
-   lane's out ring or ready words (a send, a release) do nothing once the stop word is set (STOP, GROUP_STOP: read by
-   thread 0 alone where the threadgroup meets a barrier), so none writes the lane after a revoke unbinds it. */
+   stream class's out ring or ready words (a send, a release) do nothing once the stop word is set (STOP, GROUP_STOP: read by
+   thread 0 alone where the threadgroup meets a barrier), so none writes them after a revoke. */
 static NSString *const STEPS =
   @"\nusing namespace metal;\n"
   XSTR(ARGS(mesh_args, ulong, uint)) ";\n"
@@ -394,7 +394,7 @@ static int dispatch4(struct metal_program *program, id<MTLComputePipelineState> 
    up to 1024 threads over a block's piece, any other over `units` threads */
 static int dispatch_as(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units,
                        int group);
-/* a GROUP kernel where `a` is given (a lane's ready or landed words) */
+/* a GROUP kernel where `a` is given (a stream class's ready or landed words) */
 static int dispatch(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units) {
   return dispatch_as(program, name, d, s, a, v, p, units, a != NULL);
 }

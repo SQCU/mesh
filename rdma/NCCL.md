@@ -164,8 +164,8 @@ chunks, by size class); the price is gone and the caller's configuration documen
 docs/principles.md section 6: a decision is structure, a measurement the calls make, or an algorithm restored from
 history). With no forms nothing changes: the structural table as above. Every rank passes the same forms, set before
 the communicator's first group that crosses a link; splits and shrinks keep them; a communicator over the caller's own
-programs refuses them. A form that cuts the operand (two-phase, chunked) is not fusable (`ncclMeshFusable` answers
-0). Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
+programs refuses them. A form that cuts the operand (two-phase, chunked) is not fusable (`ncclMeshFusableRooted`
+answers 0 for both steps). Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
 16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench
 output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 57.4 to 31.2-36.2 us
 (pair_programs.json): never measured on more than two nodes.
@@ -194,8 +194,7 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
     the caller's device, the library's buffers added to the caller's `residencySet`; nothing is committed or
-    signalled. `ncclMeshEncodeMetal4(comm, op, send, recv, count, type, encoder, table, residency, polls)` is the
-    all-reduce spelled so; every collective and group takes the stream. Its waits are bounded by the stream's `polls`
+    signalled. Every collective and group takes the stream. Its waits are bounded by the stream's `polls`
     as the classic form's are, 0, or more than `NCCL_MESH_POLLS`, being `NCCL_MESH_POLLS` ([Bounded
     waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such a group completes in its
     encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
