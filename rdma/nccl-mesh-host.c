@@ -37,7 +37,6 @@ void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t di
 static const size_t SIZE[12] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
 static int walked(int type) { return type >= 0 && type <= METAL_MERGE && type != 8; }
 
-static char error_[512];
 static pthread_mutex_t owned_lock = PTHREAD_MUTEX_INITIALIZER;
 struct held { void *object; int count; };
 static struct held *owned_;
@@ -72,7 +71,6 @@ static uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static unsigned char *at(void *buffer, size_t offset) { return (unsigned char *)buffer + offset; }
 
 void *metal_device(void) { return (void *)1; }
-const char *metal_error(void) { return error_; }
 void metal_records(uint64_t *issued, uint64_t *capacity) { *issued = 0; *capacity = 0; }
 void *metal_wrap(void *address, size_t bytes) { (void)bytes; return address; }
 void *metal_contents(void *buffer) { return buffer; }
@@ -118,17 +116,19 @@ void *metal_retain(void *object) { hold(object); return object; }
 /* nccl-mesh-metal.m bound_of: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls) {
+struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls, const char **message) {
   (void)command_buffer; (void)encoder;
   struct metal_program *program = calloc(1, sizeof *program);
-  if (program) { program->violation = violation; program->polls = bound_of(polls); }
+  if (!program) { *message = "out of memory"; return NULL; }
+  program->violation = violation;
+  program->polls = bound_of(polls);
   return program;
 }
 
 /* no Metal 4 on the host: the walk runs its classic steps here */
-struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls) {
+struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message) {
   (void)table; (void)residency;
-  return metal_begin(NULL, encoder, violation, polls);
+  return metal_begin(NULL, encoder, violation, polls, message);
 }
 int metal_metal4(const struct metal_program *program) { (void)program; return 0; }
 void metal_resident(struct metal_program *program, void *buffer) { (void)program; (void)buffer; }
@@ -313,124 +313,125 @@ static void *grown(void *items, size_t *room, size_t count, size_t size) {
 }
 
 /* a step made: its failure words and bound read now, then run, or appended to the item being recorded */
-static int step(struct metal_program *program, struct op *o, void *given) {
+static struct metal_result step(struct metal_program *program, struct op *o, void *given) {
   o->v = words_of(program, given, &o->polls);
   struct recording *r = recording_of(program);
-  if (!r || !r->on) { run_op(o); return 0; }
+  if (!r || !r->on) { run_op(o); return METAL_DONE; }
   struct cursor *c = r->track[r->at].cursor + r->cursor;
   struct item *it = c->item + c->count - 1;
   struct op *ops = grown(it->ops, &it->room, it->nops, sizeof *ops);
-  if (!ops) return ENOMEM;
+  if (!ops) return metal_failed(ENOMEM);
   it->ops = ops;
   it->ops[it->nops++] = *o;
   if (!it->v) { it->v = o->v; it->polls = o->polls; }
   if (r->cursor == METAL_CONSUME && !it->awaits && (o->kind == OP_SPIN || o->kind == OP_LAND)) {
     it->awaits = 1; it->wait = o->wait; it->v = o->v; it->polls = o->polls;
   }
-  return 0;
+  return METAL_DONE;
 }
 
-int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
+struct metal_result metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
   struct op o = {.kind = OP_COPY, .mode = mode, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = bytes};
   return step(program, &o, NULL);
 }
 
-int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
-  if (!walked(type)) return EINVAL;
+struct metal_result metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
+                                  size_t n) {
+  if (!walked(type)) return metal_failed(EINVAL);
   struct op o = {.kind = OP_COMBINE, .type = type, .op = op, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = n};
   return step(program, &o, NULL);
 }
 
-int metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, void *with,
-                   size_t with_offset, size_t n) {
-  if (!walked(type) || type == METAL_MERGE) return EINVAL;
+struct metal_result metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
+                                   void *with, size_t with_offset, size_t n) {
+  if (!walked(type) || type == METAL_MERGE) return metal_failed(EINVAL);
   struct op o = {.kind = OP_COMBINE3, .type = type, .op = op, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset,
                  .with = with, .with_offset = with_offset, .n = n};
   return step(program, &o, NULL);
 }
 
-int metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar) {
-  if (!walked(type)) return EINVAL;
+struct metal_result metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
+                                      uint64_t scalar) {
+  if (!walked(type) || type == METAL_MERGE) return metal_failed(EINVAL);
   struct op o = {.kind = OP_PREMUL, .type = type, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = n, .scalar = scalar};
   return step(program, &o, NULL);
 }
 
-int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor) {
-  if (type < 0 || type > 5) return EINVAL;
+struct metal_result metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
+                                   uint64_t divisor) {
+  if (type < 0 || type > 5) return metal_failed(EINVAL);
   struct op o = {.kind = OP_TRUNCDIV, .type = type, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = n, .scalar = divisor};
   return step(program, &o, NULL);
 }
 
-int metal_publish(struct metal_program *program, const struct metal_release *r) {
+struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
   struct op o = {.kind = OP_PUBLISH, .release = *r};
   return step(program, &o, NULL);
 }
 
-int metal_spin(struct metal_program *program, const struct metal_wait *w) {
+struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
   struct op o = {.kind = OP_SPIN, .wait = *w};
   return step(program, &o, w->violation);
 }
 
-int metal_send_small(struct metal_program *program, void *src, size_t src_offset, size_t bytes, const struct metal_release *r) {
+struct metal_result metal_send_small(struct metal_program *program, void *src, size_t src_offset, size_t bytes, const struct metal_release *r) {
   struct op o = {.kind = OP_SEND_SMALL, .src = src, .src_offset = src_offset, .n = bytes, .release = *r};
   return step(program, &o, NULL);
 }
 
-int metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
-  if (type >= 0 && !walked(type)) return EINVAL;
+struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
+  if (type >= 0 && !walked(type)) return metal_failed(EINVAL);
   struct op o = {.kind = OP_LAND, .type = type, .op = op, .dst = dst, .dst_offset = dst_offset, .n = n, .wait = *w};
   return step(program, &o, w->violation);
 }
 
-int metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
+struct metal_result metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
   (void)program; (void)bytes; (void)r; (void)bound;
-  snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's");
-  return EINVAL;
+  return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
 }
 
-int metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
-                        uint64_t bound[6]) {
+struct metal_result metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
+                                        uint64_t bound[6]) {
   (void)program; (void)op; (void)dst; (void)dst_offset; (void)n; (void)w; (void)bound;
-  snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's");
-  return EINVAL;
+  return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
 }
 
-int metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
-  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return EINVAL;
+struct metal_result metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
+  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return metal_failed(EINVAL);
   struct op o = {.kind = OP_COUNTED, .mode = kind, .counted = *k};
   return step(program, &o, kind == METAL_COUNTED_ARRIVED ? k->a : NULL);
 }
 
 static struct recording *recording_of(struct metal_program *program) { return program->recording; }
 
-int metal_record(struct metal_program *program, uint32_t track, int cursor, uint64_t position, uint64_t need) {
-  if (track == METAL_NONE) { if (program->recording) program->recording->on = 0; return 0; }
-  if (!program->recording && !(program->recording = calloc(1, sizeof *program->recording))) return ENOMEM;
+struct metal_result metal_record(struct metal_program *program, uint32_t track, int cursor, uint64_t position, uint64_t need) {
+  if (track == METAL_NONE) { if (program->recording) program->recording->on = 0; return METAL_DONE; }
+  if (!program->recording && !(program->recording = calloc(1, sizeof *program->recording))) return metal_failed(ENOMEM);
   struct recording *r = program->recording;
   if (track >= r->tracks) {
     struct track *bigger = realloc(r->track, ((size_t)track + 1) * sizeof *bigger);
-    if (!bigger) return ENOMEM;
+    if (!bigger) return metal_failed(ENOMEM);
     memset(bigger + r->tracks, 0, ((size_t)track + 1 - r->tracks) * sizeof *bigger);
     r->track = bigger; r->tracks = track + 1;
   }
   struct cursor *c = r->track[track].cursor + cursor;
   struct item *items = grown(c->item, &c->room, c->count, sizeof *items);
-  if (!items) return ENOMEM;
+  if (!items) return metal_failed(ENOMEM);
   c->item = items;
   c->item[c->count++] = (struct item){.position = position, .need = need};
   r->at = track; r->cursor = cursor; r->on = 1;
-  return 0;
+  return METAL_DONE;
 }
 
-int metal_depend(struct metal_program *program, uint32_t other, uint64_t count) {
+struct metal_result metal_depend(struct metal_program *program, uint32_t other, uint64_t count) {
   struct recording *r = program->recording;
-  if (!r || !r->on) return EINVAL;
+  if (!r || !r->on) return metal_failed(EINVAL);
   struct item *it = r->track[r->at].cursor[r->cursor].item + r->track[r->at].cursor[r->cursor].count - 1;
   struct dep *bigger = realloc(it->deps, ((size_t)it->ndeps + 1) * sizeof *bigger);
-  if (!bigger) return ENOMEM;
+  if (!bigger) return metal_failed(ENOMEM);
   it->deps = bigger;
   it->deps[it->ndeps++] = (struct dep){other, count};
-  return 0;
+  return METAL_DONE;
 }
 
 /* whether an item may run: its failure words hold a failure (it then does nothing), or its track has consumed its
@@ -470,12 +471,12 @@ static void tracks_free(struct recording *r) {
    track while its next item may run; a pass that advances none is one look, the looks bounded as a wait's are
    (step_wait: the program's polls, MESH_PLATFORM_NS since the last advance, with its backoff), after which each cursor
    that cannot run has its failure recorded, and every item gated on those words then runs as nothing */
-int metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
+struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
   struct recording *r = program->recording;
   if (r) r->on = 0;
-  if (!r || !r->tracks) return 0;
+  if (!r || !r->tracks) return METAL_DONE;
   uint64_t *count = malloc(((size_t)r->tracks + 1) * sizeof *count);
-  if (!count) { tracks_free(r); return ENOMEM; }
+  if (!count) { tracks_free(r); return metal_failed(ENOMEM); }
   for (uint32_t t = 0; t < r->tracks; t++) count[t] = t < tracks ? consumed[t] : 0;
   uint64_t looks = 0, since = now_ns();
   int expired = 0;
@@ -507,7 +508,7 @@ int metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t 
   }
   free(count);
   tracks_free(r);
-  return 0;
+  return METAL_DONE;
 }
 
 const char *metal_steps(void) { return ""; }

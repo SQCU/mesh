@@ -5,6 +5,7 @@
 #include "mesh_metal.h"
 #pragma GCC visibility pop
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -166,19 +167,53 @@ static NSString *const KERNELS =
   "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
   "HEAD(combine_merge) { ENTER(i == 0) MERGE } GROUP(land_merge) { ENTER_G AWAIT MERGE }\n";
 
-/* every kernel a track may record, by its index (struct op kind): the track kernel's switch calls each one's body */
-static const char *const KIND[] = {
-  "copy_plain_4", "copy_land_4", "copy_send_4", "copy_plain_1", "copy_land_1", "copy_send_1",
-  "combine_i8", "land_i8", "combine3_i8", "premul_i8", "truncdiv_i8", "combine_u8", "land_u8", "combine3_u8", "premul_u8", "truncdiv_u8",
-  "combine_i32", "land_i32", "combine3_i32", "premul_i32", "truncdiv_i32", "combine_u32", "land_u32", "combine3_u32", "premul_u32", "truncdiv_u32",
-  "combine_i64", "land_i64", "combine3_i64", "premul_i64", "truncdiv_i64", "combine_u64", "land_u64", "combine3_u64", "premul_u64", "truncdiv_u64",
-  "combine_f16", "land_f16", "combine3_f16", "premul_f16", "combine_f32", "land_f32", "combine3_f32", "premul_f32",
-  "combine_bf16", "land_bf16", "combine3_bf16", "premul_bf16", "combine_e4m3", "land_e4m3", "combine3_e4m3", "premul_e4m3",
-  "combine_e5m2", "land_e5m2", "combine3_e5m2", "premul_e5m2",
-  "publish", "send_small", "land_copy", "spin",
-  "counted_start", "counted_check", "counted_arrived", "counted_send_4", "counted_land_4", "counted_own_4", "counted_send_1", "counted_land_1",
-  "counted_own_1", "combine_merge", "land_merge"};
-enum { KINDS = sizeof KIND / sizeof *KIND };
+/* every kernel a track may record, by its kind: one list, the one numbering of the host's steps (struct host_op kind,
+   a device's pipelines' index: pipeline) and of the track kernel's switch (TRACKS' enum and TRACK_KERNEL's cases, made
+   from this list by the preprocessor, so neither names a kind the other lacks); each kernel's name, which the Metal
+   library's lookup takes (newFunctionWithName, an interface the library does not implement: design/rubrics.md,
+   Strings are messages) and whose body the switch calls, and the word a consumption's item awaits in it (record_step:
+   WORD_D a spin's, in its d; WORD_A a landing's, in its a; 0 none) */
+enum { WORD_D = 1, WORD_A };
+#define KINDS_OF(X) \
+  X(copy_plain_4, 0) X(copy_land_4, 0) X(copy_send_4, 0) X(copy_plain_1, 0) X(copy_land_1, 0) X(copy_send_1, 0) \
+  X(combine_i8, 0) X(land_i8, WORD_A) X(combine3_i8, 0) X(premul_i8, 0) X(truncdiv_i8, 0) \
+  X(combine_u8, 0) X(land_u8, WORD_A) X(combine3_u8, 0) X(premul_u8, 0) X(truncdiv_u8, 0) \
+  X(combine_i32, 0) X(land_i32, WORD_A) X(combine3_i32, 0) X(premul_i32, 0) X(truncdiv_i32, 0) \
+  X(combine_u32, 0) X(land_u32, WORD_A) X(combine3_u32, 0) X(premul_u32, 0) X(truncdiv_u32, 0) \
+  X(combine_i64, 0) X(land_i64, WORD_A) X(combine3_i64, 0) X(premul_i64, 0) X(truncdiv_i64, 0) \
+  X(combine_u64, 0) X(land_u64, WORD_A) X(combine3_u64, 0) X(premul_u64, 0) X(truncdiv_u64, 0) \
+  X(combine_f16, 0) X(land_f16, WORD_A) X(combine3_f16, 0) X(premul_f16, 0) X(combine_f32, 0) X(land_f32, WORD_A) X(combine3_f32, 0) X(premul_f32, 0) \
+  X(combine_bf16, 0) X(land_bf16, WORD_A) X(combine3_bf16, 0) X(premul_bf16, 0) X(combine_e4m3, 0) X(land_e4m3, WORD_A) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
+  X(combine_e5m2, 0) X(land_e5m2, WORD_A) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
+  X(publish, 0) X(send_small, 0) X(land_copy, WORD_A) X(spin, WORD_D) \
+  X(counted_start, 0) X(counted_check, 0) X(counted_arrived, 0) X(counted_send_4, 0) X(counted_land_4, 0) X(counted_own_4, 0) \
+  X(counted_send_1, 0) X(counted_land_1, 0) X(counted_own_1, 0) X(combine_merge, 0) X(land_merge, WORD_A)
+#define KIND_ENUM(name, word) KIND_##name,
+#define KIND_NAME(name, word) #name,
+#define KIND_WORD(name, word) word,
+#define KIND_CASE(name, word) case KIND_##name: body_##name(o.d, o.s, o.p, o.a, o.v, progress, i, g, tg); break;
+/* the kinds, then the track kernel's own pipeline (KIND_tracks: no track records it) */
+enum { KINDS_OF(KIND_ENUM) KINDS, KIND_tracks = KINDS, PIPELINES };
+static const char *const NAME[PIPELINES] = {KINDS_OF(KIND_NAME) "tracks"};
+static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
+
+/* a typed kernel's kind by its operation and its ncclDataType_t (int8 uint8 int32 uint32 int64 uint64 float16 float32
+   float64 bfloat16 e4m3 e5m2, then the partials merge's rows, METAL_MERGE), KINDS where none is compiled: float64's,
+   truncdiv's but the integers', combine3's and premul's of the merge */
+enum { OP_COMBINE, OP_LAND, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OPS };
+#define INTEGERS(op) KIND_##op##_i8, KIND_##op##_u8, KIND_##op##_i32, KIND_##op##_u32, KIND_##op##_i64, KIND_##op##_u64
+#define FLOATS(op) KIND_##op##_f16, KIND_##op##_f32, KINDS, KIND_##op##_bf16, KIND_##op##_e4m3, KIND_##op##_e5m2
+static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
+  {INTEGERS(combine), FLOATS(combine), KIND_combine_merge}, {INTEGERS(land), FLOATS(land), KIND_land_merge},
+  {INTEGERS(combine3), FLOATS(combine3), KINDS}, {INTEGERS(premul), FLOATS(premul), KINDS},
+  {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}};
+/* a copy's kind by its width (0 words of 4 bytes, 1 bytes) and its mode (METAL_PLAIN, METAL_LAND, METAL_SEND); a
+   counted step's by its width and its kind (nccl-mesh-metal.h METAL_COUNTED_*) */
+static const uint8_t COPY[2][METAL_SEND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4, KIND_copy_send_4},
+                                                {KIND_copy_plain_1, KIND_copy_land_1, KIND_copy_send_1}};
+static const uint8_t COUNTED[2][METAL_COUNTED_OWN + 1] = {
+  {KIND_counted_start, KIND_counted_check, KIND_counted_arrived, KIND_counted_send_4, KIND_counted_land_4, KIND_counted_own_4},
+  {KIND_counted_start, KIND_counted_check, KIND_counted_arrived, KIND_counted_send_1, KIND_counted_land_1, KIND_counted_own_1}};
 
 /* the track kernel (nccl-mesh-metal.h metal_tracks; rdma/NCCL.md "Per-channel progress"), after KERNELS: one thread
    group a track, its thread 0 choosing the next item of either cursor whose credit, dependencies and (a consumption)
@@ -186,9 +221,11 @@ enum { KINDS = sizeof KIND / sizeof *KIND };
    raising the track's count (system scope, release); an item whose failure words hold a failure runs as its bodies do
    (nothing); a group that chooses nothing for the program's polls of passes records its blocked items' failures
    (mesh_step_check for a landing, else the bound at its position) and ends once nothing more can run.  The records'
-   layouts are struct track_head, track, track_item, track_op and track_dep below, the host's alike */
+   layouts are struct track_head, track, track_item, track_op and track_dep below, the host's alike; struct track_op's
+   kind one of KINDS_OF's, the enum the host's */
 static NSString *const TRACKS =
   @"\n"
+  "enum { " XSTR(KINDS_OF(KIND_ENUM)) " };\n"
   "struct track_op { device uchar *d; device uchar *s; device uchar *a; device uchar *v; mesh_args p; uint kind; uint pad; };\n"
   "struct track_item { ulong position, need, target; device ulong *word; device uchar *v; uint first_op, ops, first_dep, deps, wait_op, cursor; };\n"
   "struct track_dep { ulong count; uint other, pad; };\n"
@@ -237,31 +274,29 @@ static NSString *const TRACK_KERNEL =
   "if (!pick[1]) return; "
   "if (chosen != ~0u) { constant track_item &it = items[chosen]; "
   "for (uint k = 0; k < it.ops; k++) { constant track_op &o = ops[it.first_op + k]; device ulong *progress = (device ulong *)o.d; "
-  "switch (o.kind) { %@ default: break; } "
+  "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } "
   "threadgroup_barrier(mem_flags::mem_device); } "
   "if (it.cursor == 1 && i == 0) mesh_publish(count + t, it.position + 1); } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); } }\n";
-
-/* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2, then the
-   partials merge's rows (METAL_MERGE) */
-static const char *const TYPE[METAL_MERGE + 1] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2", "merge"};
-static const char *const MODE[3] = {"plain", "land", "send"};
 
 ARGS(args, uint64_t, uint32_t);
 /* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
    keeps until the program's end; or the Metal 4 form's caller's encoder, argument table and residency set, the
    device's argument ring, and whether a buffer was made resident since the set's last commit; and either form's
    failure words, those of the communicator whose group it encodes (metal_gate; none: nothing recorded or halted), and
-   its waits' bound (`polls`, never 0) */
+   its waits' bound (`polls`, never 0); its device's kernels (`kernels`, found at its first step: program_kernels) */
 struct ring;
 struct recording;
+struct kernels;
 struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed;
                        id<MTL4ComputeCommandEncoder> encoder4; id<MTL4ArgumentTable> table; id<MTLResidencySet> residency;
-                       id<MTLBuffer> violation; struct ring *ring; int added; uint32_t polls; struct recording *recording; };
+                       id<MTLBuffer> violation; struct ring *ring; int added; uint32_t polls; struct recording *recording;
+                       struct kernels *kernels; };
 
-/* a device's kernels: its library and pipelines by name; and its argument ring (the Metal 4 form's arguments: RECORDS
-   records of RECORD bytes in `records`, the `next` one written, which the GPU's dispatch of sequence q reads from record
-   (q - 1) mod RECORDS, `progress` the sequence of the last dispatch the GPU began, every one before it finished) */
+/* a device's kernels: the device, its library and its pipelines by kind (each made at its first use: pipeline); and its
+   argument ring (the Metal 4 form's arguments: RECORDS records of RECORD bytes in `records`, the `next` one written,
+   which the GPU's dispatch of sequence q reads from record (q - 1) mod RECORDS, `progress` the sequence of the last
+   dispatch the GPU began, every one before it finished) */
 #define RECORDS 65536u
 #define RECORD 128u
 struct ring { id<MTLBuffer> records, progress; uint64_t next; };
@@ -271,13 +306,25 @@ struct ring { id<MTLBuffer> records, progress; uint64_t next; };
 #define TRACK_RING (64u << 20)
 struct span { uint64_t sequence, first, end; };
 struct track_ring { id<MTLBuffer> buffer; uint64_t sequence, head; struct span *held; size_t helds, room; };
-struct kernels { id<MTLLibrary> library; NSMutableDictionary *pipelines; struct ring ring; struct track_ring tracks; };
+struct kernels { id<MTLDevice> device; id<MTLLibrary> library; id<MTLComputePipelineState> pipelines[PIPELINES]; struct ring ring;
+                 struct track_ring tracks; };
 _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
 
 static id<MTLDevice> device_;
 static NSMutableDictionary *kernels_;
 static NSMutableArray *retiring_;
-static char error_[512];
+/* the text of this thread's last failure here that is composed (say): a result's message (struct metal_result), its
+   caller's to carry before the thread's next step */
+static _Thread_local char said_[512];
+
+static const char *say(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static const char *say(const char *format, ...) {
+  va_list arguments;
+  va_start(arguments, format);
+  vsnprintf(said_, sizeof said_, format, arguments);
+  va_end(arguments);
+  return said_;
+}
 
 void *metal_device(void) {
   static dispatch_once_t once;
@@ -285,10 +332,8 @@ void *metal_device(void) {
   return device_;
 }
 
-const char *metal_error(void) { return error_; }
-
-/* `device`'s kernels, compiled at its first use */
-static struct kernels *kernels_of(id<MTLDevice> device) {
+/* `device`'s kernels, compiled at its first use; NULL, *message what failed, where they cannot be */
+static struct kernels *kernels_of(id<MTLDevice> device, const char **message) {
   @autoreleasepool {
     if (!kernels_) { kernels_ = [NSMutableDictionary new]; retiring_ = [NSMutableArray new]; }
     NSValue *key = [NSValue valueWithPointer:(__bridge const void *)device];
@@ -298,48 +343,49 @@ static struct kernels *kernels_of(id<MTLDevice> device) {
     options.mathMode = MTLMathModeSafe;
     NSError *error = nil;
     NSString *primitives = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
-    NSMutableString *cases = [NSMutableString string];
-    for (int k = 0; k < KINDS; k++) [cases appendFormat:@"case %d: body_%s(o.d, o.s, o.p, o.a, o.v, progress, i, g, tg); break; ", k, KIND[k]];
     NSString *source = [[[[primitives stringByAppendingString:STEPS] stringByAppendingString:KERNELS] stringByAppendingString:TRACKS]
-                        stringByAppendingString:[NSString stringWithFormat:TRACK_KERNEL, cases]];
+                        stringByAppendingString:TRACK_KERNEL];
     id<MTLLibrary> library = [device newLibraryWithSource:source options:options error:&error];
-    if (!library) { snprintf(error_, sizeof error_, "the kernels: %s", error.localizedDescription.UTF8String); return NULL; }
+    if (!library) { *message = say("the kernels: %s", error.localizedDescription.UTF8String); return NULL; }
     struct kernels *made = calloc(1, sizeof *made);
-    if (!made) { [library release]; return NULL; }
+    if (!made) { [library release]; *message = "out of memory"; return NULL; }
     made->library = library;
-    made->pipelines = [NSMutableDictionary new];
-    [device retain];
+    made->device = [device retain];
     kernels_[key] = [NSValue valueWithPointer:made];
     return made;
   }
 }
 
-static id<MTLComputePipelineState> pipeline(id<MTLDevice> device, NSString *name) {
+/* the program's device's kernels (kernels_of), found at its first step and kept with it */
+static struct kernels *program_kernels(struct metal_program *program, const char **message) {
+  if (!program->kernels)
+    program->kernels = kernels_of(program->encoder4 ? program->residency.device : (id<MTLDevice>)metal_device(), message);
+  return program->kernels;
+}
+
+/* kernel `kind`'s pipeline, made at its first use from the library's function of its name (NAME: the one place a
+   kernel is named) and kept by kind; nil, *message what failed, where it cannot be */
+static id<MTLComputePipelineState> pipeline(struct kernels *k, uint32_t kind, const char **message) {
+  if (k->pipelines[kind]) return k->pipelines[kind];
   @autoreleasepool {
-    struct kernels *k = kernels_of(device);
-    if (!k) return nil;
-    id<MTLComputePipelineState> made = k->pipelines[name];
-    if (made) return made;
-    id<MTLFunction> function = [[k->library newFunctionWithName:name] autorelease];
+    id<MTLFunction> function = [[k->library newFunctionWithName:@(NAME[kind])] autorelease];
     NSError *error = nil;
-    made = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
-    if (!made) { snprintf(error_, sizeof error_, "kernel %s: %s", name.UTF8String, error ? error.localizedDescription.UTF8String : "absent"); return nil; }
-    k->pipelines[name] = made;
-    [made release];
-    return made;
+    id<MTLComputePipelineState> made = function ? [k->device newComputePipelineStateWithFunction:function error:&error] : nil;
+    if (!made) { *message = say("kernel %s: %s", NAME[kind], error ? error.localizedDescription.UTF8String : "absent"); return nil; }
+    return k->pipelines[kind] = made;
   }
 }
 
-/* `device`'s argument ring, made at its first Metal 4 program */
-static struct ring *ring_of(id<MTLDevice> device) {
-  struct kernels *k = kernels_of(device);
+/* `device`'s argument ring, made at its first Metal 4 program; NULL, *message what failed, where it cannot be */
+static struct ring *ring_of(id<MTLDevice> device, const char **message) {
+  struct kernels *k = kernels_of(device, message);
   if (!k) return NULL;
   if (!k->ring.records) {
     k->ring.records = [device newBufferWithLength:(NSUInteger)RECORDS * RECORD options:MTLResourceStorageModeShared];
     k->ring.progress = [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
     if (!k->ring.records || !k->ring.progress) {
       [k->ring.records release]; [k->ring.progress release]; k->ring.records = k->ring.progress = nil;
-      snprintf(error_, sizeof error_, "the argument ring of %u records", RECORDS);
+      *message = say("the argument ring of %u records", RECORDS);
       return NULL;
     }
     memset(k->ring.progress.contents, 0, 64);
@@ -348,7 +394,8 @@ static struct ring *ring_of(id<MTLDevice> device) {
 }
 
 void metal_records(uint64_t *issued, uint64_t *capacity) {
-  struct ring *ring = ring_of(metal_device());
+  const char *message = NULL;
+  struct ring *ring = ring_of(metal_device(), &message);
   *issued = ring ? ring->next : 0;
   *capacity = RECORDS - 1;
 }
@@ -377,9 +424,9 @@ void *metal_retain(void *object) { return [(id)object retain]; }
    (design/transport.md) */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls) {
+struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls, const char **message) {
   struct metal_program *program = calloc(1, sizeof *program);
-  if (!program) return NULL;
+  if (!program) { *message = "out of memory"; return NULL; }
   program->buffer = [(id<MTLCommandBuffer>)command_buffer retain];
   if (encoder) { program->encoder = [(id<MTLComputeCommandEncoder>)encoder retain]; program->borrowed = 1; }
   program->kept = [NSMutableArray new];
@@ -388,10 +435,11 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *vio
   return program;
 }
 
-struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls) {
-  struct ring *ring = ring_of(((id<MTLResidencySet>)residency).device);
-  struct metal_program *program = ring ? calloc(1, sizeof *program) : NULL;
-  if (!program) return NULL;
+struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message) {
+  struct ring *ring = ring_of(((id<MTLResidencySet>)residency).device, message);
+  if (!ring) return NULL;
+  struct metal_program *program = calloc(1, sizeof *program);
+  if (!program) { *message = "out of memory"; return NULL; }
   program->encoder4 = [(id<MTL4ComputeCommandEncoder>)encoder retain];
   program->table = [(id<MTL4ArgumentTable>)table retain];
   program->residency = [(id<MTLResidencySet>)residency retain];
@@ -434,15 +482,14 @@ static void close_encoder(struct metal_program *program) {
    buffers made resident and their addresses in binding order (0 d, 1 s, 2 the record, 3 a, 4 v: the failure words a
    wait names, else the program's (metal_gate), the waits bounded by the program's polls and failures recorded where
    there are such words; 5 progress) */
-static int record4(struct metal_program *program, id<MTLBuffer> d, id<MTLBuffer> s, id<MTLBuffer> a, id<MTLBuffer> words, struct args p,
-                   uint64_t bound[6]) {
+static struct metal_result record4(struct metal_program *program, id<MTLBuffer> d, id<MTLBuffer> s, id<MTLBuffer> a, id<MTLBuffer> words,
+                                   struct args p, uint64_t bound[6]) {
   struct ring *ring = program->ring;
   const uint64_t begun = *(volatile uint64_t *)ring->progress.contents;
-  if (ring->next - begun >= RECORDS - 1) {
-    snprintf(error_, sizeof error_, "the GPU began none of the library's last %u dispatches (dispatch %llu written, %llu begun): their command "
-             "buffers are not committed, or that far behind", RECORDS - 1, (unsigned long long)ring->next, (unsigned long long)begun);
-    return EOVERFLOW;
-  }
+  if (ring->next - begun >= RECORDS - 1)
+    return (struct metal_result){EOVERFLOW, say("the GPU began none of the library's last %u dispatches (dispatch %llu written, %llu begun): "
+                                                "their command buffers are not committed, or that far behind", RECORDS - 1,
+                                                (unsigned long long)ring->next, (unsigned long long)begun)};
   id<MTLBuffer> v = words ? words : program->violation ? program->violation : d;
   p.polls = v != d ? program->polls : 0;
   p.sequence = ++ring->next;
@@ -451,16 +498,16 @@ static int record4(struct metal_program *program, id<MTLBuffer> d, id<MTLBuffer>
   const uint64_t made[6] = {d.gpuAddress, (s ? s : d).gpuAddress, ring->records.gpuAddress + ((p.sequence - 1) % RECORDS) * RECORD,
                             (a ? a : d).gpuAddress, v.gpuAddress, ring->progress.gpuAddress};
   memcpy(bound, made, sizeof made);
-  return 0;
+  return METAL_DONE;
 }
 
 /* the Metal 4 form's dispatch: its record (record4), every buffer bound by address through the caller's table, then a
    barrier before the next */
-static int dispatch4(struct metal_program *program, id<MTLComputePipelineState> state, id<MTLBuffer> d, id<MTLBuffer> s, id<MTLBuffer> a,
-                     id<MTLBuffer> words, struct args p, uint64_t units, int group) {
+static struct metal_result dispatch4(struct metal_program *program, id<MTLComputePipelineState> state, id<MTLBuffer> d, id<MTLBuffer> s,
+                                     id<MTLBuffer> a, id<MTLBuffer> words, struct args p, uint64_t units, int group) {
   uint64_t bound[6];
-  const int recorded = record4(program, d, s, a, words, p, bound);
-  if (recorded) return recorded;
+  const struct metal_result recorded = record4(program, d, s, a, words, p, bound);
+  if (recorded.status) return recorded;
   for (NSUInteger k = 0; k < 6; k++) [program->table setAddress:bound[k] atIndex:k];
   id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
   [encoder setComputePipelineState:state];
@@ -469,27 +516,31 @@ static int dispatch4(struct metal_program *program, id<MTLComputePipelineState> 
   if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-  return 0;
+  return METAL_DONE;
 }
 
-/* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the program's
-   failure words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the progress
-   word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`) as one threadgroup of
-   up to 1024 threads over a block's piece, any other over `units` threads */
-static int dispatch_as(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units,
-                       int group);
+/* kernel `kind` (KINDS_OF) on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the
+   program's failure words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the
+   progress word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`) as one
+   threadgroup of up to 1024 threads over a block's piece, any other over `units` threads */
+static struct metal_result dispatch_as(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
+                                       uint64_t units, int group);
 /* a GROUP kernel where `a` is given (a stream class's ready or landed words) */
-static int dispatch(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units) {
-  return dispatch_as(program, name, d, s, a, v, p, units, a != NULL);
+static struct metal_result dispatch(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
+                                    uint64_t units) {
+  return dispatch_as(program, kind, d, s, a, v, p, units, a != NULL);
 }
-static int record_step(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p);
+static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p);
 static int recording_on(const struct metal_program *program);
-static int dispatch_as(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units,
-                       int group) {
-  if (!units) return 0;
-  if (recording_on(program)) return record_step(program, name, d, s, a, v, p);
-  id<MTLComputePipelineState> state = pipeline(program->encoder4 ? program->residency.device : (id<MTLDevice>)metal_device(), name);
-  if (!state) return EINVAL;
+static struct metal_result dispatch_as(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
+                                       uint64_t units, int group) {
+  if (kind >= KINDS) return (struct metal_result){EINVAL, "no kernel of this operation and data type (nccl-mesh-metal.m TYPED)"};
+  if (!units) return METAL_DONE;
+  if (recording_on(program)) return record_step(program, kind, d, s, a, v, p);
+  const char *message = NULL;
+  struct kernels *k = program_kernels(program, &message);
+  id<MTLComputePipelineState> state = k ? pipeline(k, kind, &message) : nil;
+  if (!state) return (struct metal_result){EINVAL, message};
   @autoreleasepool {
     if (program->encoder4) return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, group);
     if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
@@ -507,39 +558,41 @@ static int dispatch_as(struct metal_program *program, NSString *name, void *d, v
     if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   }
-  return 0;
+  return METAL_DONE;
 }
 
-int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
+struct metal_result metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
   const int words = !((dst_offset | src_offset | bytes) & 3);
-  NSString *name = [NSString stringWithFormat:@"copy_%s_%d", MODE[mode], words ? 4 : 1];
-  return dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = words ? bytes / 4 : bytes}, words ? bytes / 4 : bytes);
+  return dispatch(program, COPY[!words][mode], dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = words ? bytes / 4 : bytes},
+                  words ? bytes / 4 : bytes);
 }
 
-static NSString *typed(const char *what, int type) {
-  return (unsigned)type <= METAL_MERGE && TYPE[type] ? [NSString stringWithFormat:@"%s_%s", what, TYPE[type]] : nil;
+/* operation `op`'s kernel of `type` (TYPED), KINDS where none is compiled */
+static uint32_t typed(int op, int type) { return (unsigned)type <= METAL_MERGE ? TYPED[op][type] : KINDS; }
+
+struct metal_result metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
+                                  size_t n) {
+  const uint32_t kind = typed(OP_COMBINE, type);
+  return dispatch(program, kind, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op}, n);
 }
 
-int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
-  NSString *name = typed("combine", type);
-  return name ? dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op}, n) : EINVAL;
+struct metal_result metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
+                                   void *with, size_t with_offset, size_t n) {
+  const uint32_t kind = typed(OP_COMBINE3, type);
+  return dispatch_as(program, kind, dst, src, with, NULL,
+                     (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op, .aux = with_offset}, n, 0);
 }
 
-int metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, void *with,
-                   size_t with_offset, size_t n) {
-  NSString *name = typed("combine3", type);
-  return name ? dispatch_as(program, name, dst, src, with, NULL,
-                            (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op, .aux = with_offset}, n, 0) : EINVAL;
+struct metal_result metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
+                                      uint64_t scalar) {
+  const uint32_t kind = typed(OP_PREMUL, type);
+  return dispatch(program, kind, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar}, n);
 }
 
-int metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar) {
-  NSString *name = typed("premul", type);
-  return name ? dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar}, n) : EINVAL;
-}
-
-int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor) {
-  NSString *name = type <= 5 ? typed("truncdiv", type) : nil;
-  return name ? dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor}, n) : EINVAL;
+struct metal_result metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
+                                   uint64_t divisor) {
+  const uint32_t kind = typed(OP_TRUNCDIV, type);
+  return dispatch(program, kind, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor}, n);
 }
 
 /* a wait's arguments (nccl-mesh-metal.h struct metal_wait): its word at aux for 1 + scalar, its run's first unit at src
@@ -554,46 +607,44 @@ static struct args release_args(const struct metal_release *r, size_t src_offset
   return (struct args){.dst = r->slot, .src = src_offset, .n = bytes, .scalar = r->value, .aux = r->word, .count = r->count};
 }
 
-int metal_publish(struct metal_program *program, const struct metal_release *r) {
-  return dispatch(program, @"publish", r->buffer, NULL, NULL, NULL, release_args(r, 0, 1), 1);
+struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
+  return dispatch(program, KIND_publish, r->buffer, NULL, NULL, NULL, release_args(r, 0, 1), 1);
 }
 
-int metal_spin(struct metal_program *program, const struct metal_wait *w) {
-  return dispatch(program, @"spin", w->buffer, w->buffer, NULL, w->violation, wait_args(w, 0, 1, 0), 1);
+struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
+  return dispatch(program, KIND_spin, w->buffer, w->buffer, NULL, w->violation, wait_args(w, 0, 1, 0), 1);
 }
 
-int metal_send_small(struct metal_program *program, void *src, size_t src_offset, size_t bytes, const struct metal_release *r) {
-  return dispatch(program, @"send_small", r->buffer, src, r->buffer, NULL, release_args(r, src_offset, bytes), 1);
+struct metal_result metal_send_small(struct metal_program *program, void *src, size_t src_offset, size_t bytes, const struct metal_release *r) {
+  return dispatch(program, KIND_send_small, r->buffer, src, r->buffer, NULL, release_args(r, src_offset, bytes), 1);
 }
 
-int metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
-  NSString *name = type < 0 ? @"land_copy" : typed("land", type);
-  return name ? dispatch(program, name, dst, w->buffer, w->buffer, w->violation, wait_args(w, dst_offset, n, op), 1) : EINVAL;
+struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
+  const uint32_t kind = type < 0 ? (uint32_t)KIND_land_copy : typed(OP_LAND, type);
+  return dispatch(program, kind, dst, w->buffer, w->buffer, w->violation, wait_args(w, dst_offset, n, op), 1);
 }
 
-int metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
-  if (!program->encoder4) { snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's"); return EINVAL; }
+struct metal_result metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
+  if (!program->encoder4) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
   return record4(program, (id<MTLBuffer>)r->buffer, nil, (id<MTLBuffer>)r->buffer, nil, release_args(r, 0, bytes), bound);
 }
 
-int metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
-                        uint64_t bound[6]) {
-  if (!program->encoder4) { snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's"); return EINVAL; }
+struct metal_result metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
+                                        uint64_t bound[6]) {
+  if (!program->encoder4) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
   return record4(program, (id<MTLBuffer>)dst, (id<MTLBuffer>)w->buffer, (id<MTLBuffer>)w->buffer, (id<MTLBuffer>)w->violation,
                  wait_args(w, dst_offset, n, op), bound);
 }
 
-/* a counted all-to-all's dispatch (nccl-mesh-metal.h metal_counted): its kernel by kind, its copies' width the widest
-   word that divides every offset, row and piece it moves; each one's arguments as the kernel above reads them */
-int metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
-  static const char *const NAME[] = {"counted_start", "counted_check", "counted_arrived", "counted_send", "counted_land", "counted_own"};
-  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return EINVAL;
+/* a counted all-to-all's dispatch (nccl-mesh-metal.h metal_counted): its kernel by kind (COUNTED), its copies' width the
+   widest word that divides every offset, row and piece it moves; each one's arguments as the kernel above reads them */
+struct metal_result metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
+  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return metal_failed(EINVAL);
   const int words = !((k->dst | k->src | k->row | k->bytes | k->aux) & 3);
-  NSString *name = kind >= METAL_COUNTED_SEND ? [NSString stringWithFormat:@"%s_%d", NAME[kind], words ? 4 : 1] : @(NAME[kind]);
   const struct args p = {.dst = k->dst, .src = k->src, .n = k->bytes, .scalar = k->scalar, .aux = k->aux, .first = k->first, .slot = k->row,
                          .at = k->limit, .count = k->entries, .mask = kind == METAL_COUNTED_ARRIVED && k->a};
-  return dispatch(program, name, k->d, k->s, kind >= METAL_COUNTED_SEND ? k->a : NULL, kind == METAL_COUNTED_ARRIVED ? k->a : NULL, p,
-                  kind == METAL_COUNTED_START ? (k->bytes ? k->bytes : 1) : 1);
+  return dispatch(program, COUNTED[!words][kind], k->d, k->s, kind >= METAL_COUNTED_SEND ? k->a : NULL, kind == METAL_COUNTED_ARRIVED ? k->a : NULL,
+                  p, kind == METAL_COUNTED_START ? (k->bytes ? k->bytes : 1) : 1);
 }
 
 /* the tracks being recorded (nccl-mesh-metal.h metal_record): each step's kernel and bindings as its dispatch would bind
@@ -625,42 +676,40 @@ static void recording_free(struct recording *r) {
   free(r);
 }
 
-static int record_step(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p) {
+/* a step of kind `kind` recorded onto the item being recorded: a consumption's first step that awaits a word (WORD) its
+   item's wait */
+static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p) {
   struct recording *r = program->recording;
-  uint32_t kind = 0;
-  while (kind < KINDS && strcmp(KIND[kind], name.UTF8String)) kind++;
-  if (kind == KINDS) { snprintf(error_, sizeof error_, "kernel %s on a track", name.UTF8String); return EINVAL; }
   if (!v) v = (void *)program->violation;
   p.polls = v && v != d ? program->polls : 0;
   struct host_op *ops = more(r->op, &r->op_room, r->ops, sizeof *ops);
-  if (!ops) return ENOMEM;
+  if (!ops) return metal_failed(ENOMEM);
   r->op = ops;
   const struct host_op made = {d, s ? s : d, a ? a : d, v ? v : d, p, kind};
   r->op[r->ops++] = made;
   for (id b in @[(id)made.d, (id)made.s, (id)made.a, (id)made.v]) [r->named addObject:b];
   struct host_item *it = r->item + r->current;
   it->ops++;
-  const int spin = !strcmp(KIND[kind], "spin"), lands = !strncmp(KIND[kind], "land_", 5);
-  if (it->cursor == METAL_CONSUME && it->wait_op == UINT32_MAX && (spin || lands)) {
+  if (it->cursor == METAL_CONSUME && it->wait_op == UINT32_MAX && WORD[kind]) {
     it->wait_op = (uint32_t)(r->ops - 1);
-    it->word_buffer = spin ? made.d : made.a;
+    it->word_buffer = WORD[kind] == WORD_D ? made.d : made.a;
     it->word = p.aux;
     it->target = 1 + p.scalar;
   }
   if (!it->v && p.polls) it->v = made.v;
-  return 0;
+  return METAL_DONE;
 }
 
-int metal_record(struct metal_program *program, uint32_t track, int cursor, uint64_t position, uint64_t need) {
-  if (track == METAL_NONE) { if (program->recording) program->recording->on = 0; return 0; }
+struct metal_result metal_record(struct metal_program *program, uint32_t track, int cursor, uint64_t position, uint64_t need) {
+  if (track == METAL_NONE) { if (program->recording) program->recording->on = 0; return METAL_DONE; }
   if (!program->recording) {
-    if (!(program->recording = calloc(1, sizeof *program->recording))) return ENOMEM;
+    if (!(program->recording = calloc(1, sizeof *program->recording))) return metal_failed(ENOMEM);
     program->recording->named = [NSMutableSet new];
   }
   struct recording *r = program->recording;
   if (track >= r->tracks) {
     struct host_track *grown = realloc(r->track, ((size_t)track + 1) * sizeof *grown);
-    if (!grown) return ENOMEM;
+    if (!grown) return metal_failed(ENOMEM);
     memset(grown + r->tracks, 0, ((size_t)track + 1 - r->tracks) * sizeof *grown);
     r->track = grown; r->tracks = track + 1;
   }
@@ -668,25 +717,25 @@ int metal_record(struct metal_program *program, uint32_t track, int cursor, uint
   uint32_t *listed = more(t->item[cursor], &t->room[cursor], t->count[cursor], sizeof *listed);
   struct host_item *items = listed ? more(r->item, &r->item_room, r->items, sizeof *items) : NULL;
   if (listed) t->item[cursor] = listed;
-  if (!items) return ENOMEM;
+  if (!items) return metal_failed(ENOMEM);
   r->item = items;
   r->item[r->items] = (struct host_item){.position = position, .need = need, .first_op = (uint32_t)r->ops, .first_dep = (uint32_t)r->deps,
                                          .wait_op = UINT32_MAX, .cursor = (uint32_t)cursor};
   t->item[cursor][t->count[cursor]++] = (uint32_t)r->items;
   r->current = (uint32_t)r->items++;
   r->on = 1;
-  return 0;
+  return METAL_DONE;
 }
 
-int metal_depend(struct metal_program *program, uint32_t other, uint64_t count) {
+struct metal_result metal_depend(struct metal_program *program, uint32_t other, uint64_t count) {
   struct recording *r = program->recording;
-  if (!r || !r->on) return EINVAL;
+  if (!r || !r->on) return metal_failed(EINVAL);
   struct host_dep *deps = more(r->dep, &r->dep_room, r->deps, sizeof *deps);
-  if (!deps) return ENOMEM;
+  if (!deps) return metal_failed(ENOMEM);
   r->dep = deps;
   r->dep[r->deps++] = (struct host_dep){count, other};
   r->item[r->current].deps++;
-  return 0;
+  return METAL_DONE;
 }
 
 /* the records as the track kernel reads them (TRACKS: track_head, track, track_item, track_op, track_dep) */
@@ -721,19 +770,20 @@ static uint64_t ring_take(struct track_ring *t, uint64_t sequence, uint64_t byte
   return first;
 }
 
-int metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
+struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
   struct recording *r = program->recording;
   program->recording = NULL;
-  if (!r || !r->tracks) { recording_free(r); return 0; }
+  if (!r || !r->tracks) { recording_free(r); return METAL_DONE; }
   @autoreleasepool {
-    id<MTLDevice> device = program->encoder4 ? program->residency.device : (id<MTLDevice>)metal_device();
-    struct kernels *k = kernels_of(device);
-    id<MTLComputePipelineState> state = pipeline(device, @"tracks");
-    if (!k || !state) { recording_free(r); return EINVAL; }
+    const char *message = NULL;
+    struct kernels *k = program_kernels(program, &message);
+    id<MTLComputePipelineState> state = k ? pipeline(k, KIND_tracks, &message) : nil;
+    if (!state) { recording_free(r); return (struct metal_result){EINVAL, message}; }
+    id<MTLDevice> device = k->device;
     struct track_ring *ring = &k->tracks;
     if (!ring->buffer) {
       ring->buffer = [device newBufferWithLength:TRACK_RING options:MTLResourceStorageModeShared];
-      if (!ring->buffer) { recording_free(r); snprintf(error_, sizeof error_, "the track ring of %u bytes", TRACK_RING); return ENOMEM; }
+      if (!ring->buffer) { recording_free(r); return (struct metal_result){ENOMEM, say("the track ring of %u bytes", TRACK_RING)}; }
       memset(ring->buffer.contents, 0, 64);
       ring->head = 64;
     }
@@ -743,9 +793,8 @@ int metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t 
     const uint64_t sequence = ++ring->sequence, first = ring_take(ring, sequence, bytes);
     if (first == UINT64_MAX) {
       recording_free(r);
-      snprintf(error_, sizeof error_, "the track ring holds no %llu bytes free: the GPU has not begun the tracks that read it (their command buffers "
-               "not committed, or that far behind)", (unsigned long long)bytes);
-      return EOVERFLOW;
+      return (struct metal_result){EOVERFLOW, say("the track ring holds no %llu bytes free: the GPU has not begun the tracks that read it (their "
+                                                  "command buffers not committed, or that far behind)", (unsigned long long)bytes)};
     }
     unsigned char *base = (unsigned char *)ring->buffer.contents + first;
     const uint64_t address = ring->buffer.gpuAddress;
@@ -796,7 +845,7 @@ int metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t 
     }
   }
   recording_free(r);
-  return 0;
+  return METAL_DONE;
 }
 
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }

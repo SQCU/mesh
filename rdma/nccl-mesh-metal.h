@@ -10,11 +10,19 @@
 #define NCCL_MESH_METAL_H
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 /* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, What a client cannot reach) */
 #pragma GCC visibility push(hidden)
 
 enum { METAL_PLAIN, METAL_LAND, METAL_SEND };
 struct metal_program;
+/* A step's result and its message beside it (design/rubrics.md, Strings are messages): `status` 0, or an errno, and
+   with an errno `message`, what failed (a literal, or text the same thread's next failure here writes over), which its
+   caller carries (nccl-mesh.c gpu) and reads for no decision; with 0, NULL.  METAL_DONE the step done; metal_failed an
+   errno named by its own text. */
+struct metal_result { int status; const char *message; };
+#define METAL_DONE ((struct metal_result){0, NULL})
+static inline struct metal_result metal_failed(int status) { return (struct metal_result){status, strerror(status)}; }
 
 void *metal_device(void);
 /* the default device's argument records encoded and the ring's capacity (nccl.h ncclMeshMetal4Records) */
@@ -47,15 +55,17 @@ void *metal_retain(void *object);
 #define METAL_BOUND 1
 #define METAL_LOST 2
 #define METAL_REVOKED 4
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls);
+/* NULL where it cannot be made, *message then what failed (struct metal_result's message) */
+struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls, const char **message);
 /* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
    nothing signalled), on pipelines of the residency set's device, every binding through the caller's id<MTL4ArgumentTable>
    (each dispatch's arguments a record of the library's argument ring, never setBytes), each dispatch after the one
    before it (an intra-encoder barrier, and one before the first and after the last, so the caller's commands on either
    side are ordered with them), and every buffer of the library's the program touches made resident through the
    caller's id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits bounded by `polls` as
-   metal_begin's (0: NCCL_MESH_POLLS).  NULL where memory runs out. */
-struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls);
+   metal_begin's (0: NCCL_MESH_POLLS).  NULL where memory runs out or the device's kernels or argument ring cannot be
+   made, *message then what failed. */
+struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message);
 int metal_metal4(const struct metal_program *);
 /* A buffer of the program's made resident (the Metal 4 form; the classic form needs none). */
 void metal_resident(struct metal_program *, void *buffer);
@@ -63,19 +73,21 @@ void metal_resident(struct metal_program *, void *buffer);
    encoded next, which gate every dispatch naming none of its own (nccl-mesh.c complete, issue_group, retire), so
    one communicator's failure halts its dispatches and no other's. */
 void metal_gate(struct metal_program *, void *violation);
-int metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
+struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
 /* dst = dst op src, n elements of an ncclDataType_t (op as nccl-mesh.c combine_into: 0 sum, 1 product, 2 max, 3 min), or,
    `type` METAL_MERGE, the partials merge (nccl.h ncclMeshRedOpCreatePartials) of n rows of `op` float32 [m, l, O]: a
    row with l > 0 rescaled to the greater m and summed into dst's, one with none counting for none (two such the row
    [the least float, 0, 0]); metal_land's landed piece the same way */
 #define METAL_MERGE 12
-int metal_combine(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n);
+struct metal_result metal_combine(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n);
 /* dst = with op src, n elements of an ncclDataType_t: a landed slot (src, loaded system-coherent) combined with an operand
    read in place (`with`: a lease's send buffer, nccl.h ncclMeshMemBuffer), the first combine of a range no step wrote */
-int metal_combine3(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, void *with,
-                   size_t with_offset, size_t n);
-int metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar);
-int metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor);
+struct metal_result metal_combine3(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
+                                   void *with, size_t with_offset, size_t n);
+struct metal_result metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
+                                      uint64_t scalar);
+struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
+                                   uint64_t divisor);
 /* A wait on a run's landing (design/transport.md section 14): in `buffer` (a channel's stream class), the landed word of the
    run's last unit at `word`, landed once it holds at least 1 + `cycle`, and the run's first unit at `slot` (the landed
    piece); its failure recorded in `violation`'s words at position `at` of channel `channel`. */
@@ -84,18 +96,19 @@ struct metal_wait { void *buffer, *violation; size_t word, slot; uint64_t cycle,
    units' cycle) after every store before it; its first unit's slot of the out ring at `slot`. */
 struct metal_release { void *buffer; size_t word, slot; uint64_t value; uint32_t count; };
 /* a run's release, its slots as they are (an empty position's too) */
-int metal_publish(struct metal_program *, const struct metal_release *);
-int metal_spin(struct metal_program *, const struct metal_wait *);
+struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
+struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
 /* a piece in one kernel: copied into its run's slot and its words released (send), or awaited and combined (an ncclDataType_t, op as combine_into) or copied (type -1, n bytes)
    where it landed, the wait's slot (land) */
-int metal_send_small(struct metal_program *, void *src, size_t src_offset, size_t bytes, const struct metal_release *);
-int metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
+struct metal_result metal_send_small(struct metal_program *, void *src, size_t src_offset, size_t bytes, const struct metal_release *);
+struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
 /* the same two steps run by the caller's kernel (nccl.h ncclMeshFused, the Metal 4 form): each one's record written as
    its dispatch's would be and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
    5 progress), nothing dispatched; the kernel calls metal_steps' functions (the send: its piece stored into
    d + dst, n bytes, then mesh_step_release on a; the land: mesh_step_await on a with s, then the piece read from s + src) */
-int metal_send_deferred(struct metal_program *, size_t bytes, const struct metal_release *, uint64_t bound[6]);
-int metal_land_deferred(struct metal_program *, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *, uint64_t bound[6]);
+struct metal_result metal_send_deferred(struct metal_program *, size_t bytes, const struct metal_release *, uint64_t bound[6]);
+struct metal_result metal_land_deferred(struct metal_program *, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *,
+                                        uint64_t bound[6]);
 /* A counted all-to-all's steps (nccl.h ncclMeshAlltoAllCounted), every offset of its rows read on the GPU from int64
    counts (a row a count's unit, `row` bytes; a count below 0 none), so no host reads them:
      START   (d the landed counts, s the rank's counts) its own segment's counts, `bytes` of them from entry `first`,
@@ -119,7 +132,7 @@ int metal_land_deferred(struct metal_program *, int op, void *dst, size_t dst_of
    (NULL: none). */
 enum { METAL_COUNTED_START, METAL_COUNTED_CHECK, METAL_COUNTED_ARRIVED, METAL_COUNTED_SEND, METAL_COUNTED_LAND, METAL_COUNTED_OWN };
 struct metal_counted { void *d, *s, *a; size_t dst, src, aux; uint64_t bytes, scalar, first, row, limit; uint32_t entries; };
-int metal_counted(struct metal_program *, int kind, const struct metal_counted *);
+struct metal_result metal_counted(struct metal_program *, int kind, const struct metal_counted *);
 void *metal_contents(void *buffer);
 /* Tracks (rdma/NCCL.md "Per-channel progress"): a
    completion's work on each channel, recorded and then run with every channel progressing on its own, one thread group
@@ -130,18 +143,17 @@ void *metal_contents(void *buffer);
    positions, every metal_depend of it holds (track `other` has consumed `count`), and, a consumption, the landing its
    steps await came (or failed: the link's ~0, a revoke, its bound); a consumption's end raises its track's count to
    `position` + 1.  Each cursor runs its items in order, and neither waits on the other but by `need`.  metal_tracks:
-   the tracks recorded since the last, track t's count from consumed[t], encoded (one dispatch) or run; 0, or an
-   errno.  The deferred steps (metal_send_deferred, metal_land_deferred) are never recorded. */
+   the tracks recorded since the last, track t's count from consumed[t], encoded (one dispatch) or run; its result
+   (struct metal_result).  The deferred steps (metal_send_deferred, metal_land_deferred) are never recorded. */
 #define METAL_NONE UINT32_MAX
 enum { METAL_PUBLISH, METAL_CONSUME };
-int metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
-int metal_depend(struct metal_program *, uint32_t other, uint64_t count);
-int metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
+struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
+struct metal_result metal_depend(struct metal_program *, uint32_t other, uint64_t count);
+struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
 /* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
 const char *metal_steps(void);
 void metal_keep(struct metal_program *, void *object);
 void metal_end(struct metal_program *, void *event, uint64_t value);
 void metal_collect(void *event);
-const char *metal_error(void);
 #pragma GCC visibility pop
 #endif

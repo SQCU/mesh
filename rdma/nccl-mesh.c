@@ -35,15 +35,31 @@ enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
 #define OPS 64
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
-static _Thread_local char last[512];
+/* a failure's message: its text, and `id`, where the message is kept with its failure (a communicator's, comm_fail; a
+   non-blocking init's, init_run), the count of messages the process had kept when it was (`messages`), else 0 */
+struct said { uint64_t id; char text[512]; };
+static _Atomic uint64_t messages;
+/* this thread's last failure's message (ncclGetLastError): formatted by fail (id 0), or a copy of a kept one (told) */
+static _Thread_local struct said last;
 
 static ncclResult_t fail(ncclResult_t result, const char *format, ...) {
   va_list arguments;
   va_start(arguments, format);
-  vsnprintf(last, sizeof last, format, arguments);
+  vsnprintf(last.text, sizeof last.text, format, arguments);
   va_end(arguments);
+  last.id = 0;
   return result;
 }
+
+/* `result` beside the kept message `said` (design/rubrics.md, Strings are messages): `last` its copy, copied only where
+   `last` holds another (its id the match), so a failure polled again formats and copies nothing */
+static ncclResult_t told(ncclResult_t result, const struct said *said) {
+  if (last.id != said->id) last = *said;
+  return result;
+}
+
+/* a kept message's identity, a new one */
+static uint64_t keep(void) { return atomic_fetch_add_explicit(&messages, 1, memory_order_relaxed) + 1; }
 
 /* -- the element types: host arithmetic as numpy and ml_dtypes do it (the small floating types in float32,
    rounded to nearest even) -------------------------------------------------------------------------- */
@@ -259,14 +275,14 @@ struct channel {
    hold; `binding` while it counts among their users); its channels (`count`), two toward each member whose node its
    bridge reaches, toward[r] the first of rank r's (-1: none); its failure words (`words`, nccl-mesh-metal.h: its
    GPU work's failure records and the gate every later dispatch reads, and the stop a revoke sets; `violation` the Metal
-   buffer over them) and its failure once kept (`failed`, its text `failure`: comm_fail); `last`, the count of the last
+   buffer over them) and its failure once kept (`failed`, its message `failure`: comm_fail); `last`, the count of the last
    GPU program signalling `finished` that touched it (`touched`, `next_touched` while one is encoded: program_end), and
    `refreshed` its declarations' last refresh (ncclMeshComplete); `runs`, its host-path groups running; `revoked`, set by
    ncclCommRevoke and ncclCommDestroy, failing every group after it; `peers`, its bootstrap's sockets, kept for its life
    once its init succeeds (NCCL's bootstrapState), which a revoke shuts down and comm_free closes, under `guard`, and the
    end of its bootstrap's present phase (`until`, bootstrap_open, gather).  A
    non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy joins it), `async`
-   ncclInProgress until it ends and `why` its failure's text */
+   ncclInProgress until it ends and `why` its failure's message (its id 0 while none is kept) */
 struct attach;
 struct ncclComm {
   struct mesh_link_map map;
@@ -283,7 +299,7 @@ struct ncclComm {
   int revoked, *peers, initing, *toward;
   double until;
   pthread_t init;
-  char why[sizeof last], failure[sizeof last];
+  struct said why, failure;
   void **scratch, **spent;
   size_t *scratch_bytes;
   uint32_t scratches, scratch_used, spents;
@@ -790,7 +806,7 @@ const char *ncclGetErrorString(ncclResult_t result) {
   return (unsigned)result < ncclNumResults ? names[result] : "unknown result code";
 }
 
-const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
+const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last.text; }
 
 /* NCCL's bootstrap (NVIDIA/nccl src/bootstrap.cc): the unique id is the root's address, host:port (NCCL_COMM_ID where
    set, else a listener this process opens), and the root listens on that host alone where it is an IPv6 address (the
@@ -1205,12 +1221,12 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   return result;
 }
 
-/* a non-blocking init's thread (ncclMeshCommInitRank): comm_init, its failure's text kept in `why` before its result
-   is stored in `async` */
+/* a non-blocking init's thread (ncclMeshCommInitRank): comm_init, its failure's message kept in `why` (keep) before its
+   result is stored in `async` */
 static void *init_run(void *argument) {
   struct ncclComm *comm = argument;
   const ncclResult_t result = comm_init(comm);
-  if (result) memcpy(comm->why, last, sizeof comm->why);
+  if (result) { comm->why = last; comm->why.id = keep(); }
   __atomic_store_n(&comm->async, result, __ATOMIC_RELEASE);
   return NULL;
 }
@@ -1323,13 +1339,14 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
 
 ncclResult_t ncclCommAbort(ncclComm_t comm) { return ncclCommDestroy(comm); }
 
-/* a non-blocking init's state (ncclInProgress until it ends, then its failure, named again here) or a launch's failure,
-   else the communicator's failure (comm_failure: a revoke, a host-path group's, or one its GPU work recorded in its
-   failure words), which a group that had already returned, its work enqueued, could not report */
+/* a non-blocking init's state (ncclInProgress until it ends, then its failure, named again here: told, its kept message
+   `why`, which init_run keeps where the init fails) or a launch's failure, else the communicator's failure
+   (comm_failure: a revoke, a host-path group's, or one its GPU work recorded in its failure words), which a group that
+   had already returned, its work enqueued, could not report */
 ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
   if (!comm || !asyncError) return fail(ncclInvalidArgument, "comm or asyncError is NULL");
   const ncclResult_t async = __atomic_load_n(&comm->async, __ATOMIC_ACQUIRE);
-  if (async != ncclInProgress && *comm->why) fail(async, "%s", comm->why);
+  if (async != ncclInProgress && comm->why.id) told(async, &comm->why);
   if (async) { *asyncError = async; return ncclSuccess; }
   if (revoked(comm)) { *asyncError = ncclSuccess; return ncclSuccess; }
   pthread_mutex_lock(&group_lock);
@@ -1598,21 +1615,28 @@ static double now_s(void) {
   return now.tv_sec + now.tv_nsec * 1e-9;
 }
 
+/* a failed communicator's groups in flight lost (inflight_lose); its kept result, its kept message named
+   (ncclGetLastError: told, nothing formatted again).  Under group_lock */
+static ncclResult_t comm_told(struct ncclComm *comm) {
+  inflight_lose(comm);
+  return told(comm->failed, &comm->failure);
+}
+
 /* the communicator failed for good, made again by its caller (ncclCommDestroy, then an init): its first failure's
-   result and text kept (comm_failure reads them), its groups in flight lost (inflight_lose); that result, its failure
-   named (ncclGetLastError).  Under group_lock */
+   result and message kept, the message formatted here once (comm_failure reads them), then comm_told.  Under
+   group_lock */
 static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) __attribute__((format(printf, 3, 4)));
 static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) {
   if (!comm->failed) {
     va_list arguments;
     va_start(arguments, format);
-    vsnprintf(comm->failure, sizeof comm->failure, format, arguments);
+    vsnprintf(comm->failure.text, sizeof comm->failure.text, format, arguments);
     va_end(arguments);
+    comm->failure.id = keep();
     comm->failed = result;
     nil_send(comm);
   }
-  inflight_lose(comm);
-  return fail(comm->failed, "%s", comm->failure);
+  return comm_told(comm);
 }
 
 /* the communicator's failure: the one it kept; a revoke; one its GPU work recorded in its failure words (a wait's
@@ -1621,7 +1645,7 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
    mesh_stream_held), kept now (comm_fail), so ncclCommGetAsyncError reads it before any group runs on it; ncclSuccess
    where none.  Under group_lock */
 static ncclResult_t comm_failure(struct ncclComm *comm) {
-  if (comm->failed) return comm_fail(comm, comm->failed, "%s", comm->failure);
+  if (comm->failed) return comm_told(comm);
   if (revoked(comm))
     return comm_fail(comm, ncclInvalidUsage, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
   _Atomic uint64_t *v = comm->words;
@@ -2078,7 +2102,7 @@ static ncclResult_t schedule(struct ncclComm *comm, struct call *list, size_t n,
   *made = NULL;
   if (!plans) return fail(ncclSystemError, "out of memory");
   const ncclResult_t result = schedule_group(comm, list, n, plans);
-  if (result) { schedules_free(comm, plans); return comm_fail(comm, result, "%s", last); }
+  if (result) { schedules_free(comm, plans); return comm_fail(comm, result, "%s", last.text); }
   comm->crossed = 1;
   declare(comm, 0);
   *made = plans;
@@ -2343,7 +2367,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
   if (plans) {
     if ((result = run(comm, plans))) {
       pthread_mutex_lock(&group_lock);
-      comm_fail(comm, result, "%s", last);
+      comm_fail(comm, result, "%s", last.text);
       pthread_mutex_unlock(&group_lock);
     }
     schedules_free(comm, plans);
@@ -2368,8 +2392,9 @@ static ncclResult_t launch(struct call *list, size_t n) {
 
 /* -- the Metal path ------------------------------------------------------------------------------------ */
 
-static ncclResult_t gpu(int status, const char *what) {
-  return status ? fail(ncclSystemError, "%s on the GPU: %s", what, *metal_error() ? metal_error() : strerror(status)) : ncclSuccess;
+/* a step's result (nccl-mesh-metal.h struct metal_result): its errno a failure, named by `what` and the step's own message */
+static ncclResult_t gpu(struct metal_result step, const char *what) {
+  return step.status ? fail(ncclSystemError, "%s on the GPU: %s", what, step.message) : ncclSuccess;
 }
 
 /* a group issued and not complete: its communicator, its calls, its schedule and its positions [start, end) on each of
@@ -2429,7 +2454,7 @@ static void inflight_lose(struct ncclComm *comm) {
     if (grown) {
       losses = grown;
       losses[lost] = (struct loss){g->ticket, comm->failed ? comm->failed : ncclRemoteError, {0}};
-      snprintf(losses[lost++].reason, sizeof grown->reason, "%s", comm->failed ? comm->failure : "its communicator was destroyed");
+      snprintf(losses[lost++].reason, sizeof grown->reason, "%s", comm->failed ? comm->failure.text : "its communicator was destroyed");
     }
     *at = g->next_group;
     counted_failed(g->list, g->n);
@@ -3014,8 +3039,8 @@ static void program_end(struct metal_program *program, int borrowed, ncclResult_
 /* a walk's failure: comm (the walk's own group's; NULL: none) and every communicator with a group in flight through
    `ticket` failed with it (comm_fail: its channels stand mid-group), their groups lost */
 static void walk_failed(struct ncclComm *comm, uint64_t ticket, ncclResult_t result) {
-  char why[sizeof last];
-  snprintf(why, sizeof why, "%s", last);
+  char why[sizeof last.text];
+  snprintf(why, sizeof why, "%s", last.text);
   for (; comm || (inflight && inflight->ticket <= ticket); comm = NULL) comm_fail(comm ? comm : inflight->comm, result, "%s", why);
   fail(result, "%s", why);
 }
@@ -3080,11 +3105,12 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (result) { pthread_mutex_unlock(&group_lock); counted_failed(list, n); calls_free(list, n); return result; }
   if (finished) metal_collect(finished);
   void *const violation = remote ? comm->violation : NULL;
-  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, list[0].polls)
-                                         : metal_begin(list[0].command, list[0].encoder, violation, list[0].polls);
+  const char *message = NULL;
+  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, list[0].polls, &message)
+                                         : metal_begin(list[0].command, list[0].encoder, violation, list[0].polls, &message);
   if (!program) {
     pthread_mutex_unlock(&group_lock); counted_failed(list, n); calls_free(list, n);
-    return fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
+    return fail(ncclSystemError, "%s", message);
   }
   comm->scratch_used = 0;
   if (remote) touch(comm);
@@ -3190,10 +3216,11 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     struct inflight *through = inflight;
     while (through->next_group && through->next_group->ticket <= ticket) through = through->next_group;
     if (finished) metal_collect(finished);
+    const char *message = NULL;
     struct metal_program *program = stream->argumentTable
-      ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->comm->violation, stream->polls)
-      : metal_begin(stream->commandBuffer, stream->commandEncoder, inflight->comm->violation, stream->polls);
-    if (!program) result = fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
+      ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->comm->violation, stream->polls, &message)
+      : metal_begin(stream->commandBuffer, stream->commandEncoder, inflight->comm->violation, stream->polls, &message);
+    if (!program) result = fail(ncclSystemError, "%s", message);
     else {
       /* the units still to publish declared anew, their deadline from now (declare): they are supplied as this
          completion's work runs */
