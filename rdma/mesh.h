@@ -12,18 +12,9 @@
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* 124: the link lanes' words declared; 125: communicators' lane pairs leased at init through NCCL's bootstrap, the
-   channels, requests, exec, services, holds, stripe rings and ledger deleted (metal-microbench
-   output_data/structural-20261018/FINAL-BRIDGE.md); 126: a link lane's rings are the lane's (struct mesh_lane: the
-   bridge's arena, its receives posted continuously over the pairing), a lease is the lane's word alone, and a
-   position is a run of the lane's units both ends lay alike (design/transport.md); programs, flows,
-   transfer lists, deliveries, cancellation records, relays and a lease's DIRTY deleted; 127: a lane pair bound by the
-   bridge at a client's asking through the client's own slot (struct mesh_bind), the lease words deleted, the free pairs
-   published by the bridge (struct hdr `free`), a binding's declared units sent whole, the unsupplied ones as duds
-   (design/transport.md section 14); 128: a link's stream toward its peer node (struct mesh_stream), its units striped
-   by the bridge over the link's lane pairs, held by one client at a time by its owner word (as rows are), the client
-   naming the node alone; lanes, bindings, bells and free pairs the bridge's own; a link paired once a launch (section
-   14).  The wire is HELLO, FAREWELL, RECORD and LINK */
+/* 128: a link's stream toward its peer node (struct mesh_stream), held by one client at a time by its owner word (as
+   rows are), the client naming the node alone (design/transport.md section 14; the versions before it, this file's
+   history).  The wire is HELLO, FAREWELL, RECORD and LINK */
 #define MESH_VERSION 128u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the most nodes a bridge reaches (a stream toward each), and its client slots; and the

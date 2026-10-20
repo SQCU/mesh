@@ -25,8 +25,8 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
   its attention) is measured on each node and added as its own class (R3). A node has one rate per
   class and dtype, never one speed.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte. The bridges'
-  map holds the links, a cable each, and their bandwidths (mesh-plan.h `mesh_map`: β 8e9 over the slowest paired
-  port's bandwidth, mesh-dataflow.c `mesh_joined`).
+  map joins two nodes by one link where each one's bridge reaches the other, at the lesser of the two ends' stream
+  bandwidths (mesh-plan.h `mesh_map`: β 8e9 over that bandwidth, mesh-dataflow.c `mesh_joined`).
 - **Parts**: a mesh dimension's integers p_r ≥ 1, one per coordinate, of P = Σp units.
 - **Share**: rank r's part of an extent N, N·p_r/P.
 - **Grain**: N/P, the unit a share is counted in (a head, an expert, a tile). A program chooses the
@@ -41,7 +41,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | Fact | Written in | Read by | Decides |
 |---|---|---|---|
 | Node rates | the store's node records | the derivation (`allocate.equal_finish`; this repository's models: metal-microbench `programs.py derive`) | the parts: what each node computes |
-| Links | the bridges' map, a link a cable with its cost (a pair's cables striped, so at their count times the slowest's bandwidth), and the routing table (`mesh_map`; a communicator's members' map keeps the other nodes as relays, `mesh_map_members`) | the compiled collectives (`mesh_compile` along shortest-path trees balanced over the links, or a configured form's packed trees cut into pipelined chunks, `ncclMeshCommForms`, or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7), by the same functions | the collective's form, its trees and its chunks: how operands travel |
+| Links | the bridges' map, one link with its cost between two nodes whose bridges reach each other, and the routing table (`mesh_map`; a communicator's map holds its members alone, `nccl-mesh.c` `map_of`: the bridges forward nothing) | the compiled collectives (`mesh_compile` along shortest-path trees balanced over the links, or a configured form's packed trees cut into pipelined chunks, `ncclMeshCommForms`, or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7), by the same functions | the collective's form, its trees and its chunks: how operands travel |
 
 - Rates decide the parts. The map decides the algorithm.
 - A link's cost never becomes a node's rate, and a node's rate never selects an algorithm.
