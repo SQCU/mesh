@@ -967,6 +967,11 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
   free(order);
   return 0;
 }
+int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count,int32_t *before){
+  if(kind!=MESH_GROUP_HOSTED)return mesh_steps_before(steps,count,before);
+  for(uint32_t k=0;k<count;k++)before[k]=-1;
+  return 0;
+}
 
 /* design/transport.md: a group's calls laid together (libnccl-mesh lay), a counted all-to-all's
    steps (libnccl-mesh counted_steps), and the advisories.  The wire's rule, as libnccl-mesh runs it (nccl-mesh.c run):
@@ -1012,7 +1017,7 @@ uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,i
   *placed=0;
   for(uint32_t pass=0;pass<2;pass++)for(uint32_t i=0;i<g->calls;i++){
     const struct mesh_group_call *c=g->call+i;
-    if(c->kind==MESH_GROUP_POINT || (c->kind==MESH_GROUP_COUNTED)!=pass)continue;
+    if(c->kind==MESH_GROUP_POINT || (c->kind==MESH_GROUP_COUNTED || c->kind==MESH_GROUP_HOSTED)!=pass)continue;
     uint32_t laid=0;
     at=mesh_lay(c->steps[rank],c->count[rank],peer,large,wire,at,scratch,&laid);
     for(uint32_t k=0;k<laid;k++)made[(*placed)++]=(struct mesh_group_place){i,0,scratch[k]};
@@ -1123,7 +1128,7 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
       const uint32_t c=g->call[i].count[r];
       first[(size_t)i*n+r]=k;
       if(c)memcpy(steps[r]+k,g->call[i].steps[r],c*sizeof **steps);
-      if(mesh_steps_before(steps[r]+k,c,before[r]+k))goto done;
+      if(mesh_group_before(g->call[i].kind,steps[r]+k,c,before[r]+k))goto done;
       for(uint32_t j=k;j<k+c;j++){owner[r][j]=i;if(before[r][j]>=0)before[r][j]+=(int32_t)k;}
     }
     for(uint32_t k=0;k<count[r];k++)spot[r][k]=(struct mesh_spot){UINT32_MAX,0,0,0};

@@ -262,11 +262,16 @@ uint32_t mesh_program_advise(const struct mesh_program *,const struct mesh_wire 
    collectives and counted all-to-alls in one call order; `polls` its GPU waits' bound (nccl.h ncclMeshStream polls, one
    a group) and `bound` the most loads a wait may make (nccl.h NCCL_MESH_POLLS; 0: not read, a host group).
    mesh_group_lay: the positions rank `rank`'s calls take on its channel toward `peer` of class `large` from `at`, each
-   collective's in call order (mesh_lay), then each counted all-to-all's, then its point-to-point calls, its j-th SEND to
-   the peer beside its j-th receive from it (libnccl-mesh lay); each placement its call and mesh_lay's place (a
-   point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at the rank; the
-   end. */
-enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_POINT };
+   collective's in call order (mesh_lay), then each counted all-to-all's (COUNTED and HOSTED), then its point-to-point
+   calls, its j-th SEND to the peer beside its j-th receive from it (libnccl-mesh lay); each placement its call and
+   mesh_lay's place (a point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at
+   the rank; the end.  HOSTED: a counted all-to-all whose counts both ends hold (ncclAlltoAll, ncclGather, ncclScatter,
+   ncclMeshAlltoAllV), NCCL's sends and receives of it (classifyCollToP2pTasks), each receive into its own segment. */
+enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_POINT, MESH_GROUP_HOSTED };
+/* The receive before each step of a call of kind `kind` (mesh_steps_before; the walk's rule, a step's first position
+   waiting until that receive is consumed): none before a HOSTED call's, whose receives each progress alone, as NCCL's
+   per-peer sends and receives do, so no position of it waits on another channel's.  0, or ENOMEM. */
+int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count,int32_t *before);
 struct mesh_group_call { uint32_t kind,padding; const uint32_t *count; const struct mesh_step *const *steps; };
 struct mesh_group { uint32_t nodes,calls,polls,bound; const struct mesh_group_call *call; };
 struct mesh_group_place { uint32_t call,padding; struct mesh_place place; };

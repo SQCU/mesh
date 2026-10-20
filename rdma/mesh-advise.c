@@ -186,7 +186,7 @@ static int programs(const struct mesh_wire *wire) {
 }
 
 static void groups(const struct mesh_wire *wire) {
-  static const uint32_t kind[] = {MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_COUNTED,
+  static const uint32_t kind[] = {MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_HOSTED, MESH_GROUP_COUNTED,
                                   MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT};
   enum { CALLS = sizeof kind / sizeof *kind };
   uint64_t count = 0, total[CHECKS] = {0};
@@ -279,7 +279,7 @@ static int mutate(const struct mesh_wire *wire) {
   rows[1].count[1] = 0;
   for (int r = 0; r < 2; r++) rows[0].steps[r][0].op = r ? MESH_STEP_COPY : MESH_STEP_SEND;
   GROUP("G2 rank 0 sends rank 1 two messages, rank 1 receives one", 2, 2, NCCL_MESH_POLLS, 0);
-  kind[0] = MESH_GROUP_COUNTED;
+  kind[0] = MESH_GROUP_HOSTED;
   if (rows_counted(rows + 0, 3, 1, 1)) return 1;
   GROUP("G3 rank 1 counts one element more from rank 0 than rank 0 sends it", 1, 3, NCCL_MESH_POLLS, 0);
   kind[0] = MESH_GROUP_COLLECTIVE;
