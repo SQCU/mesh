@@ -241,6 +241,7 @@ static int loop_down(const char *directory) {
     if (left) usleep(100000);
   }
   shm_unlink(LOOP_FABRIC);
+  for (int i = 0; i < map.n; i++) shm_unlink(map.node[i].region);
   printf("{\"loop\":\"down\",\"nodes\":%d,\"stopped\":%s}\n", map.n, left ? "false" : "true");
   return left;
 }

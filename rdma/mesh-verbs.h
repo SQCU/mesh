@@ -91,7 +91,6 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
 }
 /* the region's name and the stop flag, defined once in mesh-link.c (design/transport.md) */
 extern const char *shm; extern _Atomic sig_atomic_t stop;
-static __attribute__((unused)) void down(void){ if(shm)shm_unlink(shm); }
 /* design/transport.md: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
 static __attribute__((unused)) void say(const char *format,...){

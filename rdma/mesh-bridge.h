@@ -270,6 +270,7 @@ void streams_cancel(const struct port *port);
 void streams_let_go(void);
 void record_changed(void);
 void record_retell(void);
+void map_adopt(void);
 struct mesh_record *record_held(uint32_t node);
 void health_turn(void);
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes);

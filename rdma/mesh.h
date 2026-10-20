@@ -17,6 +17,9 @@
    alone (design/transport.md section 14; the versions before it, this file's history).  The wire is HELLO, FAREWELL,
    RECORD and LINK */
 #define MESH_VERSION 131u
+/* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the window a bridge
+   before it left where its layout is this one (design/transport.md section 2, the window outlives its bridge) */
+#define MESH_LAYOUT 132u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads

@@ -692,7 +692,8 @@ static void stream_words_reset(struct port *port,uint32_t s){
   atomic_thread_fence(memory_order_release);
 }
 /* design/transport.md section 14: the port's streams' rings, leased from the arena by the parent as the port first pairs
-   and held for the bridge's life, every agent of the port's: of each stream and each class (a large unit the window's
+   (recorded in the region, so a bridge adopting the window takes the same pages: section 2) and held for the window's
+   life, every agent and bridge of the port's: of each stream and each class (a large unit the window's
    block, a small one a frame) its in and out rings of its units, then its ready and landed words, told in the region
    (mesh.h struct mesh_stream).  0, or ENOMEM where the window holds no room for them */
 static int stream_rings(struct port *port){
@@ -701,7 +702,10 @@ static int stream_rings(struct port *port){
   uint64_t bytes=0;
   for(uint32_t c=0;c<2;c++)bytes+=(2*units[c]*unit[c]+block-1)/block*block+(2*units[c]*8+block-1)/block*block;
   bytes*=MESH_LINK_STREAMS;
-  const uint32_t pages=(uint32_t)(bytes/pgsz),page=mesh_arena_alloc(&bridge,pages,M->block);
+  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
+  const uint32_t pages=(uint32_t)(bytes/pgsz);
+  if(own->rings[port->index]==MESH_ABSENT)own->rings[port->index]=mesh_arena_alloc(&bridge,pages,M->block);
+  const uint32_t page=own->rings[port->index];
   if(page==MESH_ABSENT)return ENOMEM;
   held_pages+=pages;record_changed();
   uint64_t at=M->data_off+(uint64_t)page*pgsz;
@@ -797,7 +801,8 @@ static void link_turn(struct port *port){
   }
   if(l->job || held)return;
   if(l->state==LINK_DOWN){
-    if((l->page==MESH_ABSENT && ((l->page=mesh_arena_alloc(&bridge,l->pages,M->block))==MESH_ABSENT || !(held_pages+=l->pages))) ||
+    if((l->page==MESH_ABSENT && ((l->page=mesh_bridge_pages(M)->link[port->index]=mesh_arena_alloc(&bridge,l->pages,M->block))==MESH_ABSENT ||
+                                 !(held_pages+=l->pages))) ||
        (l->rings==MESH_ABSENT && stream_rings(port))){
       say("link %u (%s): lanes not made: the window holds no room for their blocks and rings; paired again on hearing the peer\n",
           port->index,port->name);
@@ -1074,15 +1079,21 @@ static void control_heard(struct port *port){
 }
 /* design/transport.md: the link pages of every port the region has, leased at the bridge's start beside the
    map's, so a port found later (an interface attached once clients hold the window) has them; a port whose pages the
-   window could not give takes them as its link first pairs (link_turn) */
+   window could not give takes them as its link first pairs (link_turn).  Each is recorded in the region
+   (mesh-observe.h struct mesh_bridge_pages), so a bridge adopting the window takes the same pages (section 2) */
 static uint32_t link_page[MESH_PORTS];
 /* design/transport.md section 10: the all-ones block every dud is sent from (lane_send), taken and filled at the
    bridge's start, never written again */
 uint32_t ones=MESH_ABSENT;
 uint64_t held_pages;
 static void link_reserve(void){
-  for(uint32_t p=0;p<MESH_PORTS;p++)if((link_page[p]=mesh_arena_alloc(&bridge,link_pages(),M->block))!=MESH_ABSENT)held_pages+=link_pages();
-  if((ones=mesh_arena_alloc(&bridge,M->block,M->block))==MESH_ABSENT)die("the duds' block");
+  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
+  for(uint32_t p=0;p<MESH_PORTS;p++){
+    if(own->link[p]==MESH_ABSENT)own->link[p]=mesh_arena_alloc(&bridge,link_pages(),M->block);
+    if((link_page[p]=own->link[p])!=MESH_ABSENT)held_pages+=link_pages();
+  }
+  if(own->ones==MESH_ABSENT && (own->ones=mesh_arena_alloc(&bridge,M->block,M->block))==MESH_ABSENT)die("the duds' block");
+  ones=own->ones;
   held_pages+=M->block;
   memset(mesh_at(M,ones),0xff,(size_t)M->block*M->pgsz);
 }
@@ -1763,7 +1774,7 @@ static int agent_main(char **argv){
   struct stat shape;
   if(fd<0 || fstat(fd,&shape))die("agent: its bridge's region");
   M=mmap(NULL,(size_t)shape.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-  if(M==MAP_FAILED || M->magic!=MESH_MAGIC || M->version!=MESH_VERSION || atomic_load(&M->bridge_pid)!=(uint64_t)getppid())
+  if(M==MAP_FAILED || M->magic!=MESH_MAGIC || M->version!=MESH_LAYOUT || atomic_load(&M->bridge_pid)!=(uint64_t)getppid())
     die("agent: its bridge's region is not its parent's");
   if(wire_map(&wire,M,fd))die("agent: transport page aliases");
   close(fd);
@@ -1792,6 +1803,142 @@ static int agent_main(char **argv){
     now=clock_ns();
     for(int i=0;i<count;i++)if(ready[i].filter==EVFILT_READ && ready[i].ident==3)agent_read(port);
   }
+}
+
+/* design/transport.md section 2, the window outlives its bridge: the node's window opened at `region`.  The region a
+   bridge before this one left is adopted where its magic, layout version (MESH_LAYOUT) and layout (`geometry`, mesh_layout
+   of this configuration's window) are this bridge's: the same memory, its clients' slots, rows and leases standing and
+   the GPU buffers over them valid, its pages registered again by the port agents (the same pages: nothing is wired
+   twice, nothing reloaded).  A window a live bridge serves (its `bridge_pid` a live mesh-flow) is never touched: this
+   bridge ends.  A window of another layout is replaced only once every process holding it open has ended
+   (window_end), its layout version first made 0 so no client's mesh_open takes it again, and its name unlinked only
+   then: no second window is ever made beside a live client of the first (the 2026-10-20 watchdog panic,
+   design/rubrics.md "Failure across interfaces").  A window that cannot be
+   read is left as it is, and this bridge ends.  1 adopted, 0 made; *out its descriptor */
+static int window_same(const struct hdr *a,const struct hdr *b){
+  return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->streams==b->streams && a->clients==b->clients &&
+         a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
+         a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->client_off==b->client_off && a->data_off==b->data_off &&
+         a->length==b->length;
+}
+/* whether process `pid` holds the shared memory object `region` open, as a client does (mesh_attach keeps its
+   descriptor): its descriptors read (libproc PROC_PIDLISTFDS, PROC_PIDFDPSHMINFO) */
+static int window_client(pid_t pid,const char *region){
+  const int need=proc_pidinfo(pid,PROC_PIDLISTFDS,0,NULL,0);
+  struct proc_fdinfo *fds=need>0?malloc((size_t)need):NULL;
+  const int bytes=fds?proc_pidinfo(pid,PROC_PIDLISTFDS,0,fds,need):0;
+  int holds=0;
+  for(int i=0;i<bytes/(int)sizeof *fds && !holds;i++){
+    struct pshm_fdinfo info;
+    holds=fds[i].proc_fdtype==PROX_FDTYPE_PSHM &&
+          proc_pidfdinfo(pid,fds[i].proc_fd,PROC_PIDFDPSHMINFO,&info,(int)sizeof info)==(int)sizeof info &&
+          !strcmp(info.pshminfo.pshm_name,region);
+  }
+  free(fds);
+  return holds;
+}
+/* a replaced window's clients ended, every holder of its descriptor found again each round (one that attached between
+   two rounds is found at the next): SIGTERM, MESH_PLATFORM_NS for their exits, then SIGKILL and as long again (each
+   relaunches, as a data process may, on the new window); where any still lives this bridge ends with the window's name
+   kept, marked never to be adopted, so the next bridge ends its clients again rather than make a second window */
+static void window_end(struct hdr *old,size_t size,const char *region){
+  pid_t clients[MESH_CLIENTS];
+  for(int round=0;;round++){
+    uint32_t count=0;
+    for(uint32_t c=0;c<old->clients && c<MESH_CLIENTS && old->client_off+(uint64_t)(c+1)*sizeof(struct mesh_client)<=size;c++){
+      const pid_t pid=(pid_t)(uint32_t)atomic_load(&((struct mesh_client *)((char *)old+old->client_off))[c].owner);
+      if(pid && pid!=getpid() && !mesh_gone(pid) && window_client(pid,region))clients[count++]=pid;
+    }
+    if(!count)return;
+    if(round==2){
+      say("bridge: %u client%s of the replaced window %s still live: this bridge ends, the window kept, rather than make a second "
+          "window beside them\n",count,count==1?"":"s",region);
+      exit(1);
+    }
+    for(uint32_t k=0;k<count;k++){
+      say("bridge: process %d, a client of the replaced window %s, asked to end (%s); it relaunches on the new window\n",
+          (int)clients[k],region,round?"SIGKILL":"SIGTERM");
+      kill(clients[k],round?SIGKILL:SIGTERM);
+    }
+    for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;count && clock_ns()<until;){
+      uint32_t live=0;
+      for(uint32_t k=0;k<count;k++)if(!mesh_gone(clients[k]))clients[live++]=clients[k];
+      if((count=live))poll(NULL,0,50);
+    }
+  }
+}
+static int window_open(const char *region,const struct hdr *geometry,int *out){
+  int fd=shm_open(region,O_RDWR,0);
+  if(fd<0 && errno!=ENOENT){say("bridge: window %s not opened (%s): this bridge ends without touching it\n",region,strerror(errno));exit(1);}
+  if(fd>=0){
+    struct stat shape;
+    if(fstat(fd,&shape)){say("bridge: window %s not read (%s): this bridge ends without touching it\n",region,strerror(errno));exit(1);}
+    const size_t size=(size_t)shape.st_size;
+    struct hdr *old=size>=sizeof(struct hdr)?mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0):NULL;
+    if(old==MAP_FAILED){say("bridge: window %s not mapped (%s): this bridge ends without touching it\n",region,strerror(errno));exit(1);}
+    if(old && old->magic==MESH_MAGIC){
+      const pid_t was=(pid_t)atomic_load(&old->bridge_pid);
+      char path[PROC_PIDPATHINFO_MAXSIZE];
+      const char *base=was && was!=getpid() && !mesh_gone(was) && proc_pidpath(was,path,sizeof path)>0?strrchr(path,'/'):NULL;
+      if(base && !strncmp(base+1,"mesh-flow",9)){
+        say("bridge: process %d serves window %s: this bridge ends without touching it\n",(int)was,region);exit(1);}
+      if(old->version==MESH_LAYOUT && window_same(old,geometry)){M=old;*out=fd;return 1;}
+      old->version=0;
+      atomic_thread_fence(memory_order_seq_cst);
+      window_end(old,size,region);
+    }
+    if(old)munmap(old,size);
+    close(fd);
+    shm_unlink(region);
+  }
+  if((fd=shm_open(region,O_CREAT|O_RDWR,MESH_MODE))<0)die("shm");
+  if(ftruncate(fd,(off_t)geometry->length))die("ftruncate");
+  fchmod(fd,MESH_MODE);
+  M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+  if(M==MAP_FAILED)die("mmap");
+  *M=*geometry;M->version=MESH_LAYOUT;
+  for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
+  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
+  for(uint32_t p=0;p<MESH_PORTS;p++)own->link[p]=own->rings[p]=MESH_ABSENT;
+  own->ones=own->map=MESH_ABSENT;own->map_pages=0;
+  *out=fd;
+  return 0;
+}
+/* the adopted window's bridge state made this bridge's, before any client reads it as live (`bridge_pid` set last): every
+   stream not live, not free and held by none, its landed words ~0 (a lost pairing's holding ended with its bridge, and a
+   wait on it reads the loss; the next pairing opens each new, streams_open), the links' table cleared, a client slot
+   whose retirement a process that died left half done finished (mesh_retire's walk, which any party can repeat to the
+   same end), the closed rows released, a map or health serial a bridge that died mid-write left odd made even (its
+   readers wait while it is odd), and the map's records this bridge's to write again (map_adopt) */
+static void window_adopt(void){
+  for(uint32_t s=0;s<MESH_STREAMS;s++){
+    struct mesh_stream *x=mesh_stream_at(M,s);
+    atomic_store(&x->live,0);atomic_store(&x->free,0);atomic_store(&x->owner,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
+    for(uint32_t c=0;c<2;c++)
+      for(uint32_t u=0;u<x->units[c] && x->landed[c]+(uint64_t)x->units[c]*8<=M->length;u++)
+        atomic_store_explicit(stream_words(x->landed[c])+u,UINT64_MAX,memory_order_release);
+  }
+  struct mesh_link_info *links=mesh_links(M);
+  for(uint32_t p=0;p<MESH_PORTS;p++){
+    atomic_store(&links[p].peer,0);atomic_store(&links[p].phase,MESH_UNKNOWN);atomic_store(&links[p].code,0);atomic_store(&links[p].bandwidth,0);
+  }
+  for(uint32_t s=0;s<MESH_CLIENTS;s++){
+    struct mesh_client *slot=(struct mesh_client *)((char *)M+M->client_off)+s;
+    const uint64_t owner=atomic_load(&slot->owner);
+    if(!(owner&MESH_RETIRING))continue;
+    for(uint32_t row=0;row<mesh_rows(M);row++){
+      struct mesh_buffer *buffer=&mesh_buffers(M)[row];
+      if(atomic_load(&buffer->owner)!=(owner&~MESH_RETIRING))continue;
+      if(buffer->pages)atomic_store(&buffer->closed,1);
+      mesh_bits_clear(mesh_plane(M,MESH_ROW_OWN),row,1);
+    }
+    atomic_store(&slot->owner,0);
+  }
+  mesh_retired_release(M);
+  if(atomic_load(&M->map)&1)atomic_fetch_add(&M->map,1);
+  if(atomic_load(&M->health)&1)atomic_fetch_add(&M->health,1);
+  map_adopt();
+  atomic_store(&M->busy,0);atomic_store(&M->stopping,0);
 }
 
 /* design/transport.md: the node's resident bridge; its one operand the path of its configuration (no default); a port's
@@ -1844,15 +1991,14 @@ int main(int argc,char **argv){
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
   if(window<pg || window/pg>UINT32_MAX){say("bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
   struct hdr geometry={0};
-  uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
-  atexit(down);
-  shm_unlink(region);int fd=shm_open(region,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");
-  if(ftruncate(fd,(off_t)length))die("ftruncate");fchmod(fd,MESH_MODE);
-  M=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-  if(M==MAP_FAILED)die("mmap");shm=region;
+  mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
+  int fd=-1;
+  const int adopted=window_open(region,&geometry,&fd);
+  shm=region;
+  if(adopted)window_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
-  *M=geometry;M->node=node;M->version=MESH_VERSION;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
-  for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
+  M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
+  say("bridge node %u: window %s %s\n",node,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;

@@ -19,7 +19,7 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
   struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ,MAP_SHARED,file,0);
   close(file);
   if(m==MAP_FAILED)return -errno;
-  int count=m->magic!=MESH_MAGIC || m->version!=MESH_VERSION?-EINVAL:mesh_gone((pid_t)atomic_load(&m->bridge_pid))?-ESRCH:0;
+  int count=m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT?-EINVAL:mesh_gone((pid_t)atomic_load(&m->bridge_pid))?-ESRCH:0;
   if(!count)*node=m->node;
   for(uint32_t i=0;count>=0 && i<MESH_PORTS;i++){
     const struct mesh_link_info *link=mesh_links(m)+i;

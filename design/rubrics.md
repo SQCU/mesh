@@ -28,7 +28,8 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
   - It raises each landed word in order.
   - When the link is lost, it writes ~0 into the landed words.
 - It retires the slot of a client whose process ended: it releases the client's rows and lets go of its stream.
-- It ends when a signal arrives, and its exit releases everything.
+- It ends when a signal arrives, and its exit releases everything it holds of the devices. The window is the node's
+  memory and outlives it: the next bridge adopts it, its clients' leases standing (design/transport.md section 2).
 - It never reads or writes a payload byte.
 
 **What the bridge cannot do: no API exists for it.**
@@ -255,7 +256,12 @@ ranking.
 - Upper pole: the queues "spinqueried as FAST AS HARDWARE THREADS ALLOW on both sides of each bridge" (10-18).
 - Ranked:
   - a driver probing per call ≺ the bridge handling links at its own time scale (10-14);
-  - host groups that poll for 1 ms and then park ≺ no parking (10-19).
+  - host groups that poll for 1 ms and then park ≺ no parking (10-19);
+  - anything remade per call that would be faster kept ≺ kept: "everything which isn't persistent but would be more
+    performant if it was persistent is now required to be persistent. 1% overhead is not acceptable." (10-20); "if
+    there is 10ns of reducible overhead anywhere in our code we reduce it to 0ns. this too is something which was meant
+    to be communicated by the rubric and does not require the imposition of the user's subjectivity upon code or
+    results." (10-20).
 
 **M9. Addressing.**
 - Ranks higher: the form that uses what the bridge already knows about where each buffer goes, instead of
@@ -349,7 +355,20 @@ ranking.
 - Upper pole: the call returns an error, and the caller runs it again on the map as it is then.
 - The operator's pair: lower, "overwrought bullshit to pretend *within-call* state is recoverable, *synchronically*";
   upper, "recover from any error *across* calls, *diachronically*" (10-01, docs/principles.md section 4).
-- Ranked: within-call resumption ≺ "return an error (which a caller can presumably retry against immediately)" (10-14).
+- Ranked:
+  - within-call resumption ≺ "return an error (which a caller can presumably retry against immediately)" (10-14);
+  - a protocol of refusals, stuck states and errors that spread to other parties (a member's stale leases refusing the
+    head's group; a handler retiring a member's programs from outside a call) ≺ a call that fails and returns its error:
+    "you don't need a protocol, and you don't need ERRSTUCKs, and you don't need contagious errors. 1: you should not be
+    restarting bridges thousands of times per second or minute or hour or day 2: data processing code does not need to
+    be mutated mid-call based on state wrt a bridge or collective client. instead, data processing code fails and returns
+    an error through an error channel (e.g. a tuple index besides the value return of a function). 3: hold higher
+    standards for your code." (10-20);
+  - rejection filters ≺ none: "count every rejection filter everywhere in client and data processing code. then delete
+    absolutely all of them. there is no room for rejection fitlers in any collective or data processing code. you are
+    afaict lapsing into defensive programming and adding positive features which induce waits, stalls, guards, hangs,
+    and have no data flow or specification articulating why these states must exist or how they will with 100% certainty
+    exit a guarding or waiting state." (10-20).
 
 ### Fine-grained
 
@@ -575,6 +594,48 @@ In every layer, a form that adds a mechanism to survive another layer's failure 
 failure at its owner (M4). The operator, 10-18: "features which call for error correction or protocols are almost
 without exception superfluous and wrapping or preserving another errorful feature".
 
+## Failure across interfaces
+
+The operator, 10-20, verbatim:
+- "to me, the only possible reason for your weird statefulness reflects a sickly and perverted desire to 'prevent data
+  processing code from ever failing explicitly' by 'treating failure of collective ops and bridges as unexceptional,
+  typical, common, or desirable'. this is not correct. review the rubric and clarify positions on whether failures are
+  contagious or allowed to explode across interfaces, and whether there are any guarantees of lossless operation for
+  data processing functions (hint: no. there are no guarantees for lossless operation to data processing functions.
+  however, empirical loss must be very low from the nested requirements that collective operations almost never fail
+  and bridge operations almost never fail.)"
+- "it is not possible for the data processing code to succeed while all lower substrates have failed. therefore the
+  desired tradeoffs that seem to eb implied in past work are not tradeoffs but pure regressions or fault injections into
+  the source, which is why they user is authoritative on removal without replacement."
+
+The positions, in every kind:
+1. **Failure is exceptional.** Bridge operations almost never fail, and collective operations almost never fail
+   (Quantities: at least 1,000 normal frames per transport error; a collective client errs at most once in 10⁵
+   transmits). Data processing's empirical loss is very low because those two are nested beneath it, and for no other
+   reason.
+2. **No data processing function is guaranteed lossless.** A function cannot succeed while its substrate has failed.
+   It fails, and returns its error through its error channel, a value beside its result (a tuple's second index); its
+   caller may run it again on the map as it is then (C6). Code that tries to make it succeed anyway (waiting out a
+   peer, retrying, refusing, reconstructing, holding state across the failure, reloading what the failure took) is not
+   a tradeoff but a regression, a fault injected into the source, and is removed without replacement.
+3. **Failures are not contagious, and nothing explodes across an interface.** A failure belongs to the party that
+   failed and reaches only its own caller, as a value:
+   - the bridge never fails a client for another client's failure (M4);
+   - a collective's failure fails that call, through NCCL's error channel (C6);
+   - a data function's failure fails its call.
+
+   No interface carries a refusal, a stuck state, or a condition one party must clear for another (C6, 10-20).
+4. **Transactions fail; a healthy node never does.** "transactions can fail, nodes that are healthy can never fail. that
+   means that a bridge can fail then restart and reconnect, that a collective operation can fail and repeer, that a data
+   processing operation can fail and relaunch. inducing a system halt or kernel halt causes the entire node to fail.
+   that is not permittable for obvious reasons." (10-20). Nothing at any layer may halt the system or the kernel: the
+   Mini's watchdog panic of 10-20 (a rank running on a stopped bridge's window beside the new one, wiring all its
+   memory) is the case.
+5. **Rare failures get no machinery.** Nothing is built to make a failure ordinary: no protocol, refusal, stuck state,
+   or handler that changes data code from outside a call. Nothing is set up per call to survive a rare event; whatever
+   would be faster kept is kept (M8, 10-20). A bridge is not restarted thousands of times a second, minute, hour or
+   day.
+
 ## How the operator reviews
 
 - **Rankable, never pass/fail.** "rankable choices are broadly good; ... pass/fail tests are generally not good; ...
@@ -592,7 +653,8 @@ without exception superfluous and wrapping or preserving another errorful featur
 - **Fix what you find.** "fix problems when you find them instead of remarking on them" (10-19).
 - **Reviewed before built.** "the thing called a rubric is not metaphorical. all code needs to be reviewed in terms of
   the rubric before being built and compiled from this point onwards" (10-20): a change's ranked pairs, dimension by
-  dimension, are written before it is compiled.
+  dimension, are written before it is compiled; "use a subagent to review code which has been newly written within a
+  session wtih the rubric file" (10-20).
 
 ## Where HEAD sits (2026-10-20), as ranked pairs
 
@@ -606,7 +668,10 @@ without exception superfluous and wrapping or preserving another errorful featur
   metal-microbench's rank process makes beside its standing group) ≺ HEAD's four streams a link (version 129), each
   communicator holding its own toward each member's node, taken by the identity free at both ends, as v127's four lane
   pairs a link allowed without its binding.
-- **C6:** communicators kept across calls (metal-microbench mesh_rank.m `kept_sets`) ≺ calls that fail and are rerun.
+- **C6, M8 (10-20):** communicators made again every call (metal-microbench 906726c, 21–34 ms a call) ≺ communicators
+  kept for as long as they work, a failed one reporting its failure through `ncclCommGetAsyncError` and made again
+  between calls: "1% overhead is not acceptable" (10-20). C6's lower pole is state the next call must repair, not
+  persistence.
 - **D7:** goal_a.swift reading its bridge's records to find its node ≺ the host's own name (metal-microbench 5e95b12);
   mesh_rank.m asking libnccl-mesh for its node's fabric address ≺ the configured fabric address that binds here
   (configs/driver.json and bind(2)); rank.swift polling `ncclMeshMemLive` each second, and timing init waits by

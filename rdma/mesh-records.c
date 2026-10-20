@@ -50,10 +50,21 @@ static int map_grow(uint64_t records){
   if(page==MESH_ABSENT)return ENOMEM;
   memcpy(mesh_at(M,page),mesh_records(M),(size_t)atomic_load(&M->map_nodes)*sizeof(struct mesh_record));
   atomic_store(&M->map_off,(uint64_t)(mesh_at(M,page)-(unsigned char *)M));
+  mesh_bridge_pages(M)->map=page;mesh_bridge_pages(M)->map_pages=pages;
   if(map_pages)mesh_bits_clear(mesh_arena_bits(M),map_page,map_pages);
   held_pages+=pages;held_pages-=map_pages;
   map_page=page;map_pages=pages;map_room=(uint32_t)((uint64_t)pages*M->pgsz/sizeof(struct mesh_record));
   return 0;
+}
+/* design/transport.md section 2: an adopted window's map pages, recorded by the bridge before (mesh-observe.h struct
+   mesh_bridge_pages), taken again as this bridge's, its records none until this bridge writes its own */
+void map_adopt(void){
+  const struct mesh_bridge_pages *own=mesh_bridge_pages(M);
+  if(own->map==MESH_ABSENT)return;
+  map_page=own->map;map_pages=own->map_pages;map_room=(uint32_t)((uint64_t)map_pages*M->pgsz/sizeof(struct mesh_record));
+  held_pages+=map_pages;
+  atomic_store(&M->map_nodes,0);
+  atomic_store(&M->map_off,(uint64_t)(mesh_at(M,map_page)-(unsigned char *)M));
 }
 /* RFC 2328 s14: the map with `record` put in (its node's held record replaced, else added) and every record no paired
    path from this node reaches left out, written only where it differs from the map held (so a record that changes

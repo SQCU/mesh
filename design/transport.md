@@ -39,6 +39,23 @@ completion queue, every request it posts, which rows a receive or a SEND names, 
 carry which call's positions. Its port agents are the only processes that hold a device's objects or post on them; the
 parent reads the device list alone.
 
+**The window outlives its bridge** (layout version MESH_LAYOUT, apart from the wire's MESH_VERSION). A bridge that stops
+leaves its window: it never unlinks it. The next bridge adopts the window, the same memory, where its layout is that
+bridge's:
+- clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
+- the port agents register the same pages again, so nothing is wired twice and nothing is reloaded;
+- the bridge's own pages (each port's link page and rings, the duds' block, the map) are recorded in the window and
+  taken again;
+- every stream is set not live and held by none, its landed words ~0, so a communicator of the old pairing fails and is
+  made again, and the next pairing opens each stream new;
+- a retirement a dead process left half done is finished.
+
+A window a live bridge serves is never touched. A window of another layout is replaced only once every process holding
+it open has ended (SIGTERM, then SIGKILL, each bounded by MESH_PLATFORM_NS): its version is first made 0 so no client
+attaches it again, and its name is unlinked only then. A second window is never made beside a live client of the first,
+because on the Mini (24 GB, a 17 GB window) GPU work on one window beside another's registration wired all its memory
+and its watchdog halted the node (2026-10-20).
+
 **A client** (a rank, a tensor function, torch) owns its rows, and for each of its calls the positions it sends and
 receives. It reads and writes its own rows and its readiness words. It names nothing else.
 
