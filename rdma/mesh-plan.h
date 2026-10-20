@@ -22,7 +22,7 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
    the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
 int mesh_window(uint64_t *bytes,uint64_t *unleased);
 /* The flows and awaiting programs the node's bridge holds (0 between calls) and the wall clock in ns at which it last
-   came to hold none (0 while it holds any; mesh.h struct hdr `busy`, `idle_since`, design/bridge-and-ipc.md#region; a
+   came to hold none (0 while it holds any; mesh.h struct hdr `busy`, `idle_since`, design/transport.md; a
    read that meets the bridge as it becomes busy is told busy, 1); 0, or -errno where the bridge is unreachable. */
 int mesh_busy(uint64_t *busy,uint64_t *idle_since);
 
@@ -46,7 +46,7 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
    a table, two of the map's nodes are linked where the route between them crosses no other of them (relays alone),
    and that hop's bytes cross every link of it (a relay forwards each slot as it lands, mesh-program.c receive_input;
    mesh_trees_pack).  Without one, two nodes are linked where a link joins them.  Several links between one pair are
-   its cables, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is striped over
+   its cables, as the bridges carry them (design/transport.md): a program between the two is striped over
    them, position t on cable t mod n, so the pair carries n times its slowest cable's bandwidth.  `link`, `bandwidth`,
    `next` and `mark` are the caller's storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
@@ -92,12 +92,12 @@ uint32_t mesh_route_path(const struct mesh_link_map *,uint32_t a,uint32_t b,uint
    needed; EINVAL: a member twice, relays and map->next or map->mark NULL, or a whole map with relays; ENOMEM).  The
    one rule mesh_map reads the bridges' records by. */
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map);
-/* The map of the node's bridge (design/bridge-and-ipc.md#ports) as of one map serial, from its records of every
+/* The map of the node's bridge (design/transport.md) as of one map serial, from its records of every
    node's ports (mesh_observe's views), so the same records give every member the same map: the whole map, its nodes
    the records' ascending by bridge, two joined by a link a cable where each one's bridge holds ports paired with the
    other (the fewer of the two ends' counts), each at the bandwidth of the slowest of those ports at either end (the
    least any of them reports; 0 where none reports one; the bridge stripes a program between the two over every
-   cable, a routed one end to end, design/bridge-and-ipc.md#cables), each node marked by its bridge's number, its
+   cable, a routed one end to end, design/transport.md), each node marked by its bridge's number, its
    table mesh_routes';
    then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
    i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its
@@ -213,25 +213,21 @@ uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mes
    are cut by their weights as there.  0 where the sizes do not sum to the operand (mesh 430cf7b2^ mesh_cut, 3ab709aa:
    the planner's `segments`, cut alike by every program). */
 uint32_t mesh_program_steps_cut(const struct mesh_program *,uint32_t rank,struct mesh_operand,const uint64_t *segments,struct mesh_step *steps);
-/* The wire a session's programs run on (libnccl-mesh's rings, nccl-mesh.c session_open): toward each other member two
-   channels, a channel a ring of 2 lag slots each way, slot t % (2 lag) carrying position t; a step's piece on the
-   `large` channel where it is more than lag small slots or its element wider than one (else the small one) in pieces
-   of the whole elements its slot holds (`slot`, NCCL_BUFFSIZE over lag rounded up to a block, or `small`, the
-   communicator's operand, else one block; mesh_wire_pieces); `block` the
-   bridges' block, the page their window's rows take, the same on every paired bridge, and a ring's pitch: slot t of a
-   ring starts t whole blocks of its slot in.  Every position a whole slot on the wire (TN3205 pairs a SEND with a
-   receive of the same 4 KiB frames, so a slot's frames are the position's), one where the end has nothing to send a
-   filler's; an end publishing position t once it has consumed its peer's t - lag (NCCL's Simple protocol, its head
-   credit the reverse direction's positions).  MESH_LAG is NCCL_STEPS and MESH_BUFFSIZE NCCL_BUFFSIZE's default, in
-   bytes; mesh_wire_of the rule for a block, an NCCL_BUFFSIZE and a small slot (0: the block; at least MESH_SMALL_LEAST,
-   the members' agreement a session's first position carries, libnccl-mesh struct agreement). */
+/* The wire a communicator's channels run on (design/transport.md): toward each other member two channels,
+   each its leased pair's lane of a class (the small lane's unit a frame, the large lane's the bridges' block, `block`,
+   the same on every paired bridge), position t of a channel a run of the lane's units both ends lay alike from the
+   pieces before it (libnccl-mesh lay), the piece's bytes in whole units (one where the end sends nothing: a filler's),
+   a run that would pass the ring's end starting at its next turn; a step's piece on the large channel where it is more
+   than one small position's bytes or its element wider than that (else the small one), in pieces of the whole elements
+   a position of its class holds (`small` a small position's bytes, `slot` a large one's: each class's most units a run
+   such that the 2 lag positions a receiver holds unconsumed and a run's padding fit its ring, mesh_wire_pieces).  An
+   end publishes position t once it has consumed its peer's t - lag (NCCL's Simple protocol, its head credit the
+   reverse direction's positions); MESH_LAG is NCCL_STEPS.  mesh_wire_of the rule for a block; mesh_wire_units a
+   piece's units on its class's lane. */
 #define MESH_LAG 8
-#define MESH_SMALL_LEAST 32
-#define MESH_BUFFSIZE 4194304
 struct mesh_wire { uint64_t slot,small,block; uint32_t lag,padding; };
-void mesh_wire_of(uint64_t block,uint64_t buffsize,uint64_t small,struct mesh_wire *wire);
-/* the bytes from one slot of `bytes` to the next on a ring of the wire: whole blocks */
-uint64_t mesh_wire_pitch(const struct mesh_wire *,uint64_t bytes);
+void mesh_wire_of(uint64_t block,struct mesh_wire *wire);
+uint64_t mesh_wire_units(const struct mesh_wire *,int large,uint64_t bytes);
 /* Whether a piece of `bytes`, in elements of `element` bytes (its operand's, struct mesh_operand element_bytes), takes a
    wire's large channel (more than lag small slots, or an element wider than one), and its pieces there: a position
    carries whole elements, its slot's bytes less their remainder over the element (MPI's rule: no datatype's element is
@@ -252,7 +248,7 @@ uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int
 /* Each step's receive before it (by round, then the steps' order) of any bytes, -1 where none: a step's first piece
    waits until that receive is consumed, and so, by induction, every receive before it.  0, or ENOMEM. */
 int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before);
-/* A compiled program's advisories on a wire for an operand (design/collectives-dataflow.md#advisories): warnings only,
+/* A compiled program's advisories on a wire for an operand (design/transport.md): warnings only,
    each a line "check: ..." handed to warn(arg, line), the check one of projection (each pair's SENDs against its
    receives, and both ends' positions on each channel), priorities (each rank's steps by round, a round's SENDs first;
    a SEND and its receive in one round), depth (an element wider than its slot; a step that waits on its own channel at
@@ -261,7 +257,7 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
    reads, or a SEND not ordered after a receive of what it reads).  It refuses nothing and changes nothing; the count
    of warnings, UINT32_MAX where its room could not be had.  It is mesh_group_advise of a group of the one call. */
 uint32_t mesh_program_advise(const struct mesh_program *,const struct mesh_wire *,struct mesh_operand,void (*warn)(void *,const char *),void *arg);
-/* design/collectives-dataflow.md#advisories, a group's calls on one session's wire, as libnccl-mesh issues them between
+/* design/transport.md, a group's calls on one session's wire, as libnccl-mesh issues them between
    ncclGroupStart and ncclGroupEnd: call i of kind MESH_GROUP_*, its steps at rank r steps[r][0 .. count[r]) (a
    point-to-point call's at its own rank alone, one SEND or COPY; a row of none where count[r] is 0), every rank's
    collectives and counted all-to-alls in one call order; `polls` its GPU waits' bound (nccl.h ncclMeshStream polls, one
@@ -289,35 +285,18 @@ uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segment
 /* A group's advisories: mesh_program_advise's checks over its calls laid together (projection of both ends' positions on
    each channel and of each call's steps, the point-to-point calls' together; causality over every call's steps on the
    shared positions; each call's priorities, depth and hazards), and bound (GPU waits of polls 0 or past `bound`: a wait
-   whose landing never comes holding its queue past the platform's deadline, design/recovery.md#five-seconds).  Returns
+   whose landing never comes holding its queue past the platform's deadline, design/transport.md).  Returns
    as mesh_program_advise. */
 uint32_t mesh_group_advise(const struct mesh_group *,const struct mesh_wire *,void (*warn)(void *,const char *),void *arg);
-/* The invocation axis of a bridge-level program (mesh.h struct mesh_transfer `begin`, `end` and `depth`; the slot's
-   invocations and `cyclic`, design/prepared-machine.md#M30): transfer k a SEND (`send`) or a receive of rank `rank`
-   toward or from `peer` on `queue`, for the invocations [begin, end) at ring slot (t - begin) mod depth (0: the
-   program's `depth`), a rank's k-th SEND to a peer on a queue that peer's k-th receive from it there; wait w: its rank's
-   event of transfer `transfer` at invocation t (a SEND's publication, a receive's consumption) after its event of
-   transfer `on` at t - distance.  Its advisories: invocation (a cyclic program's ring that does not divide its
-   invocations, a range that does not cover it), projection (a transfer with no peer, two ends' ranges apart, a wait
-   across ranks), causality (a cycle of waits within one invocation: Lustre's instantaneous cycle, a recursion unguarded
-   by Nakano's later) and depth (a producer that may run further ahead of its consumer than the receive ring holds, or
-   of its landings than its SEND ring holds: each ring's waits depend only back to t - D).  Returns as
-   mesh_program_advise. */
-struct mesh_cyclic_transfer { uint32_t rank,peer,queue,send,begin,end,depth,padding; };
-struct mesh_cyclic_wait { uint32_t transfer,on,distance,padding; };
-struct mesh_cyclic { uint32_t ranks,invocations,depth,cyclic,transfers,waits; const struct mesh_cyclic_transfer *transfer;
-                     const struct mesh_cyclic_wait *wait; };
-uint32_t mesh_cyclic_advise(const struct mesh_cyclic *,void (*warn)(void *,const char *),void *arg);
 /* The planner's rules' version: the trees, routes, compiles and wire above, and libnccl-mesh's table of programs made
    of them (nccl-mesh.c comm_routes: the caller's, or the communicator's configured forms, nccl.h ncclMeshCommForms,
-   and then every collective along the caller's paths or the shortest-path trees, uncut); the library's session
-   handshake carries it with its digest of the members' map, trees, programs and wire, so members planning by different
-   rules fail the session rather than run it (a form enters the digest as the programs it compiles, so members
-   configured apart disagree there; a communicator configured with none plans as before the forms).  5: a position
-   carries whole elements (mesh_wire_pieces). */
-#define MESH_PLAN_VERSION 5u
+   and then every collective along the caller's paths or the shortest-path trees, uncut); a communicator's init gathers
+   it with its digest of the members' map, trees, programs and wire, so members planning by different rules fail the
+   init rather than run (a form enters the digest as the programs it compiles).  6: a position is a run of its lane's
+   units (mesh_wire_units). */
+#define MESH_PLAN_VERSION 6u
 
-/* design/bridge-and-ipc.md#records: what a node's record carries of its health to every bridge: `booted`, the wall
+/* design/transport.md: what a node's record carries of its health to every bridge: `booted`, the wall
    clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes
    the kernel can give without pressure, the measure jetsam keeps: kern.memorystatus_level percent of hw.memsize). */
 struct mesh_health { uint64_t booted,available; };

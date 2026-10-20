@@ -7,10 +7,10 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
-/* design/pages-and-functions.md#what-the-page-table-is */
+/* design/transport.md */
 static void mesh_reclaim(struct hdr *);
 #ifdef MESH_LOOP_FABRIC
-/* design/bridge-dataflow.md#the-loopback-fabric: a loop client's bridge, its region (the host build of libmesh alone:
+/* design/transport.md: a loop client's bridge, its region (the host build of libmesh alone:
    make host); MESH_NAME until bound */
 static char mesh_loop_region[32]=MESH_NAME;
 int mesh_loop_bind(const char *region){
@@ -23,7 +23,7 @@ int mesh_loop_bind(const char *region){
 #define MESH_REGION_NAME MESH_NAME
 #endif
 
-/* design/bridge-and-ipc.md#region: the node's region mapped, `writable` (a client's) or read-only (a reader's, which
+/* design/transport.md: the node's region mapped, `writable` (a client's) or read-only (a reader's, which
    attaches no client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for: 0, EINVAL
    where it is no region of this version, ESRCH where its bridge is gone, else the errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
@@ -45,7 +45,7 @@ static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
 }
 
 /* design/algorithm-sources.md#meshobserve */
-/* design/bridge-and-ipc.md#ports: each port of the node's bridge, by its index: its peer node while paired (0 else), its
+/* design/transport.md: each port of the node's bridge, by its index: its peer node while paired (0 else), its
    phase and bandwidth; a port is one the bridge found (its phase not MESH_UNKNOWN), and the bridge finds them in index
    order */
 int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
@@ -67,7 +67,7 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
   munmap(m,length);return result;
 }
 
-/* design/bridge-and-ipc.md#region: the flows and awaiting programs the bridge holds and the wall clock (ns) at which it
+/* design/transport.md: the flows and awaiting programs the bridge holds and the wall clock (ns) at which it
    last held none (0 while it holds any).  The bridge stores idle_since before busy (mesh-program.c busy_tell), and
    idle_since is never 0 while it holds none (the region's boot from its start), so a read that meets it as it becomes
    busy (busy 0 and idle_since 0: the old count, the new time) is a busy one and is told as one */
@@ -80,7 +80,7 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since){
   munmap(m,length);return 0;
 }
 
-/* design/bridge-and-ipc.md#region */
+/* design/transport.md */
 int mesh_window(uint64_t *bytes,uint64_t *unleased){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -89,7 +89,7 @@ int mesh_window(uint64_t *bytes,uint64_t *unleased){
   munmap(m,length);return 0;
 }
 
-/* design/bridge-and-ipc.md#region: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
+/* design/transport.md: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
    copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open) */
 static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){
   for(;;){
@@ -111,7 +111,7 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   }
 }
 
-/* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records: the cables between them, the ports each
+/* design/transport.md, #cables: the one join of two nodes' records: the cables between them, the ports each
    end's record holds paired with the other (the fewer of the two ends' counts), and *slowest the least bandwidth any
    of those ports at either end reports (0: none reports one): the bridge stripes a program between the two over every
    cable, a routed one too (mesh-program.c route_stripes), so they carry it at their count times the slowest */
@@ -205,7 +205,7 @@ int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH
   return result;
 }
 
-/* design/recovery.md#diagnosis */
+/* design/transport.md */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
@@ -232,7 +232,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   return count;
 }
 
-/* design/recovery.md#five-seconds C5 (8e716999's mesh.wait(serial), on this bound): the map's serial waited on until
+/* design/transport.md C5 (8e716999's mesh.wait(serial), on this bound): the map's serial waited on until
    it differs from *serial, the bridge's exit (ESRCH: its pid in the region 0 or another, or its process gone, read at
    every wake and every MESH_PAUSE_NS re-look, as mesh_records_read reads it) or bound_ns (UINT64_MAX: none) */
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
@@ -255,13 +255,11 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
 }
 
 /* design/algorithm-sources.md#programtensor */
-/* design/bridge-and-ipc.md#clients: a client's slot given up (by its detach, or by the bridge where its process is
-   gone): its program stopped, its rows closed for the bridge to release once its programs left the ports */
+/* design/transport.md: a client's slot given up (by its detach, or by the bridge where its process is
+   gone): its rows closed for the bridge to release (its lane leases are let go on their ports' turns) */
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_client *slot=mesh_client_at(m,client);
   if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
-  atomic_store_explicit(&slot->configured,0,memory_order_release);
-  for(uint32_t d=0;d<MESH_DESTINATIONS;d++)for(uint32_t q=0;q<MESH_QUEUES*2;q++)atomic_store_explicit(slot->tx[d].length+q,0,memory_order_release);
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
@@ -270,7 +268,7 @@ void mesh_retire(struct hdr *m,uint64_t client){
     }
   }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
-  /* design/prepared-machine.md#M26 */
+  /* design/transport.md */
   mesh_notify(&m->control);
 }
 
@@ -287,9 +285,6 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
     uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
     if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->key=key;
-    atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);atomic_store(&slot->configured,0);
-    slot->targets=0;slot->target_count=0;
-    memset(slot->tx,0,sizeof slot->tx);memset(slot->status,0,sizeof slot->status);
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     return 0;
   }
@@ -304,13 +299,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   *c=(struct mesh_ctx){.len=length,.fd=file};
   error=mesh_slot_take(c,m,mesh_key(name));
   if(error){munmap(m,length);close(file);*c=(struct mesh_ctx){0};}
-  return error;
-}
-
-int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,const char *name){
-  *program=(struct mesh_ctx){.fd=-1};
-  int error=mesh_gone((pid_t)atomic_load(&client->M->bridge_pid))?ESRCH:mesh_slot_take(program,client->M,mesh_key(name));
-  if(error)*program=(struct mesh_ctx){0};
   return error;
 }
 
@@ -381,14 +369,13 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
     buffer->pages=0;
-    *mesh_delivery_at(c->M,r)=(struct mesh_delivery){0};
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }
   return first;
 }
 
-/* design/prepared-machine.md#M01 */
-/* design/prepared-machine.md#M09 */
+/* design/transport.md */
+/* design/transport.md */
 /* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
    since that device came up (mesh-verbs.h device_up); a lease the window cannot meet is refused (ENOMEM).  The bits
    name no owner: a client's lease takes its pages with rows its slot owns (mesh-call.h mesh_section_create), which
@@ -399,7 +386,7 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
 }
 
-/* design/prepared-machine.md#M09 */
+/* design/transport.md */
 uint32_t mesh_arena_free(struct hdr *m){
   const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);
   uint32_t held=0;
@@ -458,7 +445,7 @@ void mesh_retired_release(struct hdr *m){
   mesh_reclaim(m);
 }
 
-/* design/prepared-machine.md#M09: the lease's rows other than its head disowned and every one of its rows released
+/* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
    while they stay hot, then the head reclaimed (mesh_buffer_reclaim: its pages' arena bits, then its rows' hot bits),
    so no client claims a row or page of it before it is whole again */
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
@@ -476,17 +463,4 @@ int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
 /* design/algorithm-sources.md#program */
 void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(mesh_plane(c->M,MESH_ROW_OWN),first,count);
-}
-
-/* design/prepared-machine.md#M13 */
-/* design/prepared-machine.md#M04 */
-/* design/algorithm-sources.md#programkernel_call */
-uint32_t mesh_publication_prepare(struct mesh_ctx *c,uint32_t row,struct prepared_publication *records){
-  uint32_t count;
-  const struct mesh_target *targets=mesh_row_targets(c->M,c->client,row,&count);
-  for(uint32_t i=0;records && i<count;i++){
-    struct mesh_send *cell=(void *)((char *)c->M+targets[i].cells);
-    records[i]=(struct prepared_publication){.destination=(uintptr_t)cell,.argument=cell->request.wr_id};
-  }
-  return count;
 }

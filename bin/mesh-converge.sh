@@ -2,8 +2,8 @@
 # A node's user layers follow their upstreams' branch heads, each built at its upstream in a stage and installed by rename
 # (README.md, Convergence; design/transport.md).  With no argument, one pass of the mesh's own layer: the mesh checkout
 # this script is in, built at its upstream in a stage, fast-forwarded, its images installed by rename (the libraries
-# first, the bridge's binary last, and the binary anew wherever libmesh changed) and bin/mesh-user.sh run on them; the
-# bridge restarts itself on its new binary between calls.  Its subcommands:
+# first, the bridge's binary last, and the binary anew wherever libmesh changed) and bin/mesh-user.sh run on them,
+# which stops the bridge by SIGTERM so launchd starts the new binary.  Its subcommands:
 #   follow           a pass every period_s, read again before each, for as long as the node has a convergence
 #                    configuration (the admin user's agent io.mesh.converge runs it, KeepAlive while it fails)
 #   held CHECKOUT    prints why and succeeds where CHECKOUT has work its upstream lacks (nothing is fetched); a

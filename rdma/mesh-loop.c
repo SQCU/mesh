@@ -1,19 +1,18 @@
 /* design/transport.md: N resident bridges on one host over loopverbs (mesh 800fe6bc^'s loop
    fabric, its driver metal-microbench b9dbc43^ tools/nccl_demo.py `loop`, on the resident bridge), each its own
    configuration (a canonical property list this tool writes: its node, region and cables), and the
-   readings that exercise what two nodes cannot show: relays and forwarding on 3 to 8 node maps.
+   readings that exercise what two nodes cannot show: collectives over 3 to 8 node maps.
 
      mesh-loop up FAMILY N WINDOW_MIB DIRECTORY
        FAMILY one of line, ring, star, complete, torus (two rows of N/2); N bridges (.build/loop/mesh-flow-loop) of a
        window of WINDOW_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
        returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
-     mesh-loop relay DIRECTORY BYTES
-       every ordered pair of nodes, one after another: a program of one transfer of BYTES from the one to the other, the
-       bridges routing it through the nodes between where the two are not cabled (relays, lanes); every word checked
      mesh-loop nccl DIRECTORY COUNT host|walk
        N ranks, one a node: all-reduce, all-gather, reduce-scatter, broadcast and reduce from each root, and a send and
        receive around the ring, of COUNT float32 each, every value exact; `host` the host path (a NULL stream), `walk`
-       the Metal path's walk with its kernels on the CPU (nccl-mesh-host.c), never a GPU
+       the Metal path's walk with its kernels on the CPU (nccl-mesh-host.c), never a GPU.  The bridges forward nothing:
+       the collectives run over the family's cables (its trees), and a send around the ring between two ranks no cable
+       joins (a line's ends, a star's leaves, a torus's) fails as a value
      mesh-loop down DIRECTORY
        every bridge stopped (SIGTERM, as launchd stops one), the fabric unlinked
 
@@ -40,7 +39,6 @@
 #define LOOP_NODES 8
 #define LOOP_CABLES 32
 #define LOOP_FABRIC "/meshloop-fabric"
-#define LOOP_MAGIC UINT64_C(0x6c6f6f702d6d6573)
 extern char **environ;
 
 struct loop_node { uint32_t node; char region[32]; pid_t pid; };
@@ -49,8 +47,7 @@ struct loop_map { char family[16]; int n, cables; uint64_t window; struct loop_n
 
 static uint64_t clock_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int usage(void) {
-  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | relay DIRECTORY BYTES | nccl DIRECTORY COUNT host|walk | "
-                  "down DIRECTORY\n");
+  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | nccl DIRECTORY COUNT host|walk | down DIRECTORY\n");
   return 2;
 }
 
@@ -164,21 +161,6 @@ static int degree(const struct loop_map *map, int i) {
   for (int c = 0; c < map->cables; c++) d += map->cable[c].a == i || map->cable[c].b == i;
   return d;
 }
-/* the hops between a and b on the map (breadth first), 0 where none */
-static int hops(const struct loop_map *map, int a, int b) {
-  int distance[LOOP_NODES], queue[LOOP_NODES], head = 0, tail = 0;
-  for (int i = 0; i < map->n; i++) distance[i] = -1;
-  distance[a] = 0; queue[tail++] = a;
-  while (head < tail) {
-    const int x = queue[head++];
-    for (int c = 0; c < map->cables; c++) {
-      const int y = map->cable[c].a == x ? map->cable[c].b : map->cable[c].b == x ? map->cable[c].a : -1;
-      if (y >= 0 && distance[y] < 0) { distance[y] = distance[x] + 1; queue[tail++] = y; }
-    }
-  }
-  return distance[b] > 0 ? distance[b] : 0;
-}
-
 /* every bridge's map holding the n nodes and its own cables paired, within `seconds` */
 static int converged(const struct loop_map *map, double seconds) {
   const uint64_t deadline = clock_ns() + (uint64_t)(seconds * 1e9);
@@ -253,56 +235,6 @@ static int loop_down(const char *directory) {
   return left;
 }
 
-/* the pattern word w of block p of a reading (mesh-stream.c's, the loop's magic) */
-static uint64_t pattern(uint64_t p, uint64_t w) { return (p << 32) ^ w ^ LOOP_MAGIC; }
-
-/* one end of a relayed program: one transfer of `bytes` toward or from node `peer`, the receiver following its landing
-   words and checking every word (mesh-stream.c's flow path); 0, or what failed */
-static int relay_end(const struct loop_map *map, int self, int peer, int receive, uint64_t bytes, int ready) {
-  struct mesh_ctx context = {0};
-  char name[64];
-  snprintf(name, sizeof name, "loop-relay-%d-%d", receive ? peer : self, receive ? self : peer);
-  int status = mesh_loop_bind(map->node[self].region);
-  if (!status) status = mesh_attach(&context, name);
-  if (status) { if (ready >= 0) close(ready); return status; }
-  struct hdr *m = context.M;
-  const uint64_t block = (uint64_t)m->block * m->pgsz, blocks = bytes / block, words = block / sizeof(uint64_t);
-  struct mesh_section section;
-  if (!blocks || bytes % block) status = EINVAL;
-  if (!status) status = mesh_section_create(&context, bytes, 1, &section);
-  if (!status) status = mesh_transfer_bind(&context, map->node[peer].node, 0, receive ? MESH_RECEIVE : MESH_SEND, 1, section, section.pages, 0, 1, 1);
-  if (!status) status = mesh_transfers_prepare(&context, 1, 1, 1);
-  if (!status && receive) status = mesh_host_inputs(&context);
-  unsigned char *data = status ? NULL : mesh_section_address(&context, section, 0);
-  for (uint64_t p = 0; data && p < blocks; p++)
-    for (uint64_t w = 0; w < words; w++) ((uint64_t *)(data + p * block))[w] = receive ? 0 : pattern(p, w);
-  if (ready >= 0) { if (write(ready, "r", 1) != 1) status = status ? status : EPIPE; close(ready); }
-  if (!status) status = mesh_transfers_start(&context);
-  struct mesh_client *client = mesh_client_at(m, context.client);
-  struct mesh_port_info *far = &client->status[mesh_destination(client, map->node[peer].node)];
-  const uint64_t deadline = clock_ns() + MESH_PLATFORM_NS;
-  if (!status && !receive) {
-    mesh_host_publish(&context, section, 0);
-    mesh_transfers_wake(&context);
-    while (atomic_load_explicit(&far->phase, memory_order_acquire) != MESH_STOPPED && clock_ns() < deadline) usleep(1000);
-  }
-  uint64_t completed = 0, mismatches = 0;
-  if (!status && receive) {
-    while (completed < blocks && clock_ns() < deadline) {
-      const struct mesh_delivery *delivery = mesh_delivery_at(m, section.first + (uint32_t)completed);
-      const uint64_t word = atomic_load_explicit((_Atomic uint64_t *)((char *)m + delivery->device_input), memory_order_acquire);
-      if (word == UINT64_MAX) { status = ECANCELED; break; }
-      if (word) completed++;
-      else usleep(10);
-    }
-    for (uint64_t p = 0; p < completed; p++)
-      for (uint64_t w = 0; w < words; w++) mismatches += ((const uint64_t *)(data + p * block))[w] != pattern(p, w);
-    if (!status && (completed != blocks || mismatches)) status = completed != blocks ? ETIMEDOUT : EIO;
-  }
-  mesh_detach(&context);
-  return status;
-}
-
 /* run `count` children, child i running `run(i)`, and wait for all; how many exited nonzero */
 static int children(int count, int (^run)(int)) {
   pid_t pid[2 * LOOP_NODES];
@@ -316,34 +248,6 @@ static int children(int count, int (^run)(int)) {
     if (pid[i] < 0 || waitpid(pid[i], &status, 0) != pid[i] || !WIFEXITED(status) || WEXITSTATUS(status)) failed++;
   }
   return failed;
-}
-
-static int loop_relay(const char *directory, uint64_t bytes) {
-  struct loop_map map;
-  if (map_read(directory, &map) || !bytes) return usage();
-  int failed = 0;
-  for (int a = 0; a < map.n; a++) for (int b = 0; b < map.n; b++) {
-    if (a == b) continue;
-    int ready[2];
-    if (pipe(ready)) return 1;
-    const int heard = ready[0], told = ready[1];
-    const uint64_t begin = clock_ns();
-    const int bad = children(2, ^(int i) {
-      if (i == 0) { close(heard); return relay_end(&map, b, a, 1, bytes, told); }
-      close(told);
-      char r;
-      if (read(heard, &r, 1) != 1) return EPIPE;
-      close(heard);
-      return relay_end(&map, a, b, 0, bytes, -1);
-    });
-    close(heard); close(told);
-    failed += bad != 0;
-    printf("{\"loop\":\"relay\",\"family\":\"%s\",\"nodes\":%d,\"from\":%d,\"to\":%d,\"hops\":%d,\"bytes\":%llu,\"seconds\":%.6f,"
-           "\"status\":\"%s\"}\n", map.family, map.n, a, b, hops(&map, a, b), (unsigned long long)bytes, (double)(clock_ns() - begin) / 1e9,
-           bad ? "failed" : "ok");
-    fflush(stdout);
-  }
-  return failed != 0;
 }
 
 /* a rank's NCCL calls, each checked exactly (every value an integer a float32 holds): rank r's element k is r + k mod 97 */
@@ -414,7 +318,6 @@ int main(int argc, char **argv) {
   if (argc < 3) return usage();
   if (!strcmp(argv[1], "up") && argc == 6) return loop_up(argv[2], atoi(argv[3]), strtoull(argv[4], NULL, 0), argv[5]);
   if (!strcmp(argv[1], "down") && argc == 3) return loop_down(argv[2]);
-  if (!strcmp(argv[1], "relay") && argc == 4) return loop_relay(argv[2], strtoull(argv[3], NULL, 0));
   if (!strcmp(argv[1], "nccl") && argc == 5 && (!strcmp(argv[4], "host") || !strcmp(argv[4], "walk")))
     return loop_nccl(argv[2], strtoull(argv[3], NULL, 0), !strcmp(argv[4], "walk"));
   return usage();

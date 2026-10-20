@@ -23,7 +23,7 @@ static int mesh_joins(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   return 0;
 }
 
-/* The links joining u and x (either way), a pair's cables (design/bridge-and-ipc.md#cables): their count, and *slowest
+/* The links joining u and x (either way), a pair's cables (design/transport.md): their count, and *slowest
    the least bandwidth the map gives any of them (0: none given) */
 static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t x,uint64_t *slowest){
   uint32_t count=0;
@@ -36,7 +36,7 @@ static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t 
     }
   return count;
 }
-/* A pair's hop striped over its n cables (design/bridge-and-ipc.md#cables: a direct program's position t on cable t mod
+/* A pair's hop striped over its n cables (design/transport.md: a direct program's position t on cable t mod
    n), its inverse bandwidth in whole fs a byte: 8e15 over n times its slowest cable's bits a second; 0 where the map
    gives none of them a bandwidth */
 static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
@@ -896,13 +896,16 @@ done:
 
 /* -- the wire: libnccl-mesh's rings and the positions a program takes on them ------------------------------------- */
 
-void mesh_wire_of(uint64_t block,uint64_t buffsize,uint64_t small,struct mesh_wire *wire){
-  const uint64_t b=block?block:1,slot=(buffsize/MESH_LAG+b-1)/b*b;
-  *wire=(struct mesh_wire){slot>b?slot:b,!small?b:small<MESH_SMALL_LEAST?MESH_SMALL_LEAST:small,b,MESH_LAG,0};
+void mesh_wire_of(uint64_t block,struct mesh_wire *wire){
+  const uint64_t b=block?block:MESH_FRAME,runs=2*MESH_LAG+1;
+  *wire=(struct mesh_wire){(MESH_LANE_LARGE_UNITS-1)/runs*b,(MESH_LANE_SMALL_UNITS-1)/runs*MESH_FRAME,b,MESH_LAG,0};
 }
-uint64_t mesh_wire_pitch(const struct mesh_wire *wire,uint64_t bytes){ return (bytes+wire->block-1)/wire->block*wire->block; }
+uint64_t mesh_wire_units(const struct mesh_wire *wire,int large,uint64_t bytes){
+  const uint64_t unit=large?wire->block:MESH_FRAME;
+  return bytes>unit?(bytes+unit-1)/unit:1;
+}
 int mesh_wire_large(const struct mesh_wire *wire,uint64_t bytes,uint64_t element){
-  return bytes>(uint64_t)wire->lag*wire->small || element>wire->small;
+  return bytes>wire->small || element>wire->small;
 }
 uint64_t mesh_wire_pieces(const struct mesh_wire *wire,uint64_t bytes,uint64_t element){
   const uint64_t slot=mesh_wire_large(wire,bytes,element)?wire->slot:wire->small,carried=element && element<=slot?slot-slot%element:slot;
@@ -965,7 +968,7 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
   return 0;
 }
 
-/* design/collectives-dataflow.md#advisories: a group's calls laid together (libnccl-mesh lay), a counted all-to-all's
+/* design/transport.md: a group's calls laid together (libnccl-mesh lay), a counted all-to-all's
    steps (libnccl-mesh counted_steps), and the advisories.  The wire's rule, as libnccl-mesh runs it (nccl-mesh.c run):
    on a channel each end publishes its positions in order, position t once it has consumed the peer's t - lag, and
    consumes the peer's in order, each once it has landed; a step's first position, published or consumed, waits until
@@ -1051,14 +1054,14 @@ static void mesh_advise_say(struct mesh_advice *a,uint32_t check,const char *for
 static const char *mesh_step_name(uint32_t op){ return op==MESH_STEP_SEND?"SEND":op==MESH_STEP_REDUCE?"REDUCE":"COPY"; }
 /* a step's place: its channel (UINT32_MAX: none, no bytes), its rank's end of it, its first position and its pieces */
 struct mesh_spot { uint32_t lane,end; uint64_t first,pieces; };
-struct mesh_lane { uint32_t a,b,large; uint64_t positions,base; };
-static uint64_t mesh_event(const struct mesh_lane *lane,uint32_t end,uint32_t consume,uint64_t t){
+struct mesh_track { uint32_t a,b,large; uint64_t positions,base; };
+static uint64_t mesh_event(const struct mesh_track *lane,uint32_t end,uint32_t consume,uint64_t t){
   return lane->base+(uint64_t)(2*end+consume)*lane->positions+t;
 }
-static void mesh_event_text(const struct mesh_lane *lanes,uint32_t count,uint64_t e,char *text,size_t room){
+static void mesh_event_text(const struct mesh_track *lanes,uint32_t count,uint64_t e,char *text,size_t room){
   uint32_t h=0;
   while(h+1<count && lanes[h+1].base<=e)h++;
-  const struct mesh_lane *l=lanes+h;
+  const struct mesh_track *l=lanes+h;
   const uint64_t x=e-l->base,t=x%l->positions;
   const uint32_t which=(uint32_t)(x/l->positions),end=which/2,me=end?l->b:l->a,peer=end?l->a:l->b;
   if(which%2)snprintf(text,room,"rank %u consumes rank %u's position %llu (%s)",me,peer,(unsigned long long)t,l->large?"large":"small");
@@ -1088,7 +1091,7 @@ static const char *mesh_move(const struct mesh_grouped *x,uint32_t r,uint32_t k,
 uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wire,void (*warn)(void *,const char *),void *arg){
   struct mesh_advice advice={warn,arg,0};
   const uint32_t n=g->nodes,lag=wire->lag,calls=g->calls;
-  /* bound: a GPU wait's loads past the platform's deadline (design/recovery.md#five-seconds) */
+  /* bound: a GPU wait's loads past the platform's deadline (design/transport.md) */
   if(g->bound && !g->polls)
     mesh_advise_say(&advice,MESH_ADVISE_BOUND,"the group's GPU waits are unbounded (polls 0): a wait whose landing never comes holds its "
                     "queue past the %u loads that conclude within the platform's deadline",g->bound);
@@ -1100,7 +1103,7 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
   struct mesh_spot **spot=calloc((size_t)n+1,sizeof *spot);
   uint32_t **owner=calloc((size_t)n+1,sizeof *owner),*first=calloc((size_t)calls*n+1,sizeof *first);
   uint32_t *count=calloc((size_t)n+1,sizeof *count),most=1,widest=1,result=UINT32_MAX;
-  struct mesh_lane *lanes=malloc(((size_t)n*n+1)*sizeof *lanes);
+  struct mesh_track *lanes=malloc(((size_t)n*n+1)*sizeof *lanes);
   struct mesh_place *scratch=NULL;
   struct mesh_group_place *ma=NULL,*mb=NULL;
   uint64_t *from=NULL,*to=NULL,*start=NULL,*list=NULL,*back=NULL,*rlist=NULL,*queue=NULL,*remaining=NULL;
@@ -1226,7 +1229,7 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
       }
     }
     const uint32_t h=lane_count++;
-    lanes[h]=(struct mesh_lane){a,b,(uint32_t)large,ea>eb?ea:eb,events};
+    lanes[h]=(struct mesh_track){a,b,(uint32_t)large,ea>eb?ea:eb,events};
     events+=4*lanes[h].positions;
     for(uint32_t k=0;k<na;k++)spot[a][MESH_AT(a,ma[k])]=(struct mesh_spot){h,0,ma[k].place.first,ma[k].place.pieces};
     for(uint32_t k=0;k<nb;k++)spot[b][MESH_AT(b,mb[k])]=(struct mesh_spot){h,1,mb[k].place.first,mb[k].place.pieces};
@@ -1259,7 +1262,7 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
   uint64_t E=0;
 #define MESH_EDGE(x,y) do { from[E]=(x);to[E]=(y);E++; } while(0)
   for(uint32_t h=0;h<lane_count;h++){
-    const struct mesh_lane *l=lanes+h;
+    const struct mesh_track *l=lanes+h;
     for(uint32_t end=0;end<2;end++)for(uint64_t t=0;t<l->positions;t++){
       if(t){MESH_EDGE(mesh_event(l,end,0,t-1),mesh_event(l,end,0,t));MESH_EDGE(mesh_event(l,end,1,t-1),mesh_event(l,end,1,t));}
       if(t>=lag)MESH_EDGE(mesh_event(l,end,1,t-lag),mesh_event(l,end,0,t));
@@ -1380,235 +1383,4 @@ done:
   for(uint32_t r=0;steps && r<n;r++)free(steps[r]);
   free(steps);free(count);
   return result;
-}
-
-/* design/collectives-dataflow.md#advisories: a bridge-level program's invocation axis, a marked graph whose arcs carry
-   invocation distances, its tokens [Commoner, Holt, Even & Pnueli 1971]: for each SEND transfer and its receive, the
-   publication P, the landing L and the consumption C; P(t) before L(t), L(t-1) before L(t) (receive completions in
-   order, design/prepared-machine.md#M08), P(t-1) before P(t) (the send stream's order, #M30), L(t) before C(t), and
-   each wait's event of t - distance before its own of t.  A cycle of distance 0 never occurs (Lustre's instantaneous
-   cycle [Halbwachs et al. 1991]; a recursion unguarded by Nakano's later [2000]); every other event occurs.  The most
-   invocations P runs ahead of C is the least distance of a path from C back to L (an arc's bound is its cycles' least
-   tokens), which a receive ring of depth D must hold at D: depending only back to t - D; from L back to P, a SEND
-   ring's. */
-static uint32_t mesh_cyclic_depth(const struct mesh_cyclic *x,uint32_t k){ return x->transfer[k].depth?x->transfer[k].depth:x->depth; }
-static uint32_t mesh_cyclic_end(const struct mesh_cyclic *x,uint32_t k){ return x->transfer[k].end<x->invocations?x->transfer[k].end:x->invocations; }
-static void mesh_cyclic_text(const struct mesh_cyclic *x,const uint32_t *pair,const uint32_t *sends,uint32_t v,char *text,size_t room){
-  static const char *const what[3]={"publishes","lands","consumes"};
-  const uint32_t s=sends[v/3],k=v%3==0?s:pair[s];
-  const struct mesh_cyclic_transfer *t=x->transfer+k;
-  snprintf(text,room,"rank %u %s transfer %u (%s rank %u)",t->rank,what[v%3],k,t->send?"to":"from",t->peer);
-}
-uint32_t mesh_cyclic_advise(const struct mesh_cyclic *x,void (*warn)(void *,const char *),void *arg){
-  struct mesh_advice advice={warn,arg,0};
-  const uint32_t K=x->transfers,N=x->invocations;
-  uint32_t *pair=malloc(((size_t)K+1)*sizeof *pair),*node=malloc(((size_t)K+1)*sizeof *node),*sends=calloc((size_t)K+1,sizeof *sends),pairs=0;
-  uint32_t *from=malloc(((size_t)4*K+x->waits+1)*sizeof *from),*to=malloc(((size_t)4*K+x->waits+1)*sizeof *to),*cut=NULL,*trail=NULL;
-  uint64_t *weight=malloc(((size_t)4*K+x->waits+1)*sizeof *weight),*distance=NULL;
-  unsigned char *active=NULL,*done=NULL;
-  uint32_t result=UINT32_MAX,E=0;
-  if(!pair || !node || !sends || !from || !to || !weight)goto out;
-  /* invocation: a cyclic program's every ring divides its invocations and every range covers it (#M30) */
-  for(uint32_t k=0;k<K;k++){
-    const struct mesh_cyclic_transfer *t=x->transfer+k;
-    const uint32_t D=mesh_cyclic_depth(x,k);
-    if(!D || (x->cyclic && N%D))
-      mesh_advise_say(&advice,MESH_ADVISE_INVOCATION,"rank %u's %s transfer %u (%s rank %u, queue %u): a ring of %u slots does not divide the "
-                      "program's %u invocations",t->rank,t->send?"SEND":"receive",k,t->send?"to":"from",t->peer,t->queue,D,N);
-    if(x->cyclic && (t->begin || t->end<N))
-      mesh_advise_say(&advice,MESH_ADVISE_INVOCATION,"rank %u's %s transfer %u (%s rank %u, queue %u) carries invocations [%u, %u) of a cyclic "
-                      "program's %u: every range covers the program",t->rank,t->send?"SEND":"receive",k,t->send?"to":"from",t->peer,t->queue,
-                      t->begin,mesh_cyclic_end(x,k),N);
-  }
-  /* projection: a rank's k-th SEND transfer to a peer on a queue against the peer's k-th receive from it there, their
-     invocations alike */
-  for(uint32_t k=0;k<K;k++)pair[k]=node[k]=UINT32_MAX;
-  for(uint32_t k=0;k<K;k++){
-    const struct mesh_cyclic_transfer *t=x->transfer+k;
-    uint32_t m=0,j=0;
-    if(t->rank>=x->ranks || t->peer>=x->ranks || t->rank==t->peer)
-      mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"rank %u's transfer %u names rank %u, not another of the program's %u",t->rank,k,t->peer,
-                      x->ranks);
-    for(uint32_t i=0;i<k;i++)m+=x->transfer[i].send==t->send && x->transfer[i].rank==t->rank && x->transfer[i].peer==t->peer &&
-                                 x->transfer[i].queue==t->queue;
-    for(j=0;j<K;j++){
-      const struct mesh_cyclic_transfer *u=x->transfer+j;
-      if(u->send!=t->send && u->rank==t->peer && u->peer==t->rank && u->queue==t->queue && !m--)break;
-    }
-    if(j<K)pair[k]=j;
-    else mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"rank %u's %s transfer %u %s rank %u (queue %u) has no %s there",t->rank,
-                         t->send?"SEND":"receive",k,t->send?"to":"from",t->peer,t->queue,t->send?"receive":"SEND");
-    if(j<K && t->send && (t->begin!=x->transfer[j].begin || mesh_cyclic_end(x,k)!=mesh_cyclic_end(x,j)))
-      mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"rank %u's SEND transfer %u to rank %u (queue %u) carries invocations [%u, %u), its "
-                      "receive %u there [%u, %u)",t->rank,k,t->peer,t->queue,t->begin,mesh_cyclic_end(x,k),j,x->transfer[j].begin,
-                      mesh_cyclic_end(x,j));
-    if(j<K && t->send){
-      /* the pair's events 3 p + 0, 1, 2: P, L, C; its arcs P-L, L-L (1), P-P (1), L-C */
-      static const uint32_t arc[4][3]={{0,1,0},{1,1,1},{0,0,1},{1,2,0}};
-      sends[pairs]=k;node[k]=3*pairs;node[j]=3*pairs+2;
-      for(int a=0;a<4;a++){from[E]=3*pairs+arc[a][0];to[E]=3*pairs+arc[a][1];weight[E++]=arc[a][2];}
-      pairs++;
-    }
-  }
-  for(uint32_t w=0;w<x->waits;w++){
-    const struct mesh_cyclic_wait *v=x->wait+w;
-    if(v->transfer>=K || v->on>=K || x->transfer[v->transfer].rank!=x->transfer[v->on].rank)
-      mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"wait %u names transfers of two ranks or none: a rank waits on its own events",w);
-    else if(node[v->transfer]!=UINT32_MAX && node[v->on]!=UINT32_MAX && (x->cyclic || v->distance<N)){
-      from[E]=node[v->on];to[E]=node[v->transfer];weight[E++]=v->distance;
-    }
-  }
-  const uint32_t V=3*pairs;
-  cut=malloc(((size_t)2*K+3)*sizeof *cut);distance=malloc(((size_t)V+1)*sizeof *distance);trail=malloc(((size_t)V+1)*sizeof *trail);
-  active=calloc((size_t)V+1,1);done=calloc((size_t)V+1,1);
-  if(!cut || !distance || !trail || !active || !done)goto out;
-  /* causality: the distance-0 arcs among the transfers live at once, each interval of invocations a range's ends cut
-     (a cyclic program's one: every range covers it), sorted with no timing (Kahn) */
-  uint32_t cuts=0;
-  cut[cuts++]=0;cut[cuts++]=x->cyclic?1:N;
-  for(uint32_t k=0;!x->cyclic && k<K;k++){cut[cuts++]=x->transfer[k].begin<N?x->transfer[k].begin:N;cut[cuts++]=mesh_cyclic_end(x,k);}
-  for(uint32_t c=0;c<cuts;c++)for(uint32_t d=c+1;d<cuts;d++)if(cut[d]<cut[c]){const uint32_t s=cut[c];cut[c]=cut[d];cut[d]=s;}
-  for(uint32_t c=0;c+1<cuts;c++){
-    if(cut[c]==cut[c+1])continue;
-    const uint32_t t=cut[c];
-    for(uint32_t p=0;p<pairs;p++){
-      const uint32_t s=sends[p],v=pair[s];
-      const int live=x->cyclic || (x->transfer[s].begin<=t && t<mesh_cyclic_end(x,s) && x->transfer[v].begin<=t && t<mesh_cyclic_end(x,v));
-      active[3*p]=active[3*p+1]=active[3*p+2]=(unsigned char)live;
-    }
-    /* Kahn over the live distance-0 arcs: distance[] counts each event's unmet arcs, done[] those that occur */
-    for(uint32_t v=0;v<V;v++){distance[v]=0;done[v]=0;}
-    for(uint32_t e=0;e<E;e++)if(!weight[e] && active[from[e]] && active[to[e]])distance[to[e]]++;
-    for(int moved=1;moved;){
-      moved=0;
-      for(uint32_t v=0;v<V;v++)if(active[v] && !done[v] && !distance[v]){
-        done[v]=1;moved=1;
-        for(uint32_t e=0;e<E;e++)if(from[e]==v && !weight[e] && active[to[e]])distance[to[e]]--;
-      }
-    }
-    uint32_t v=0,length=0;
-    while(v<V && !(active[v] && !done[v]))v++;
-    if(v==V)continue;
-    /* a witness: back along events that never occur until one repeats, a cycle */
-    for(uint32_t u=0;u<V;u++)distance[u]=0;
-    while(!distance[v]){
-      distance[v]=++length;trail[length-1]=v;
-      for(uint32_t e=0;e<E;e++)if(to[e]==v && !weight[e] && active[from[e]] && !done[from[e]]){v=from[e];break;}
-    }
-    char cycle[512]="",event[128];
-    size_t used=0;
-    const uint32_t on=(uint32_t)distance[v]-1;
-    for(uint32_t i=on;i<length && i<on+6 && used<sizeof cycle;i++){
-      mesh_cyclic_text(x,pair,sends,trail[i],event,sizeof event);
-      used+=(size_t)snprintf(cycle+used,sizeof cycle-used,"%s%s",i>on?" <- ":"",event);
-    }
-    mesh_advise_say(&advice,MESH_ADVISE_CAUSALITY,"invocation %u: a cycle of %u events of distance 0, each waiting on the next within one "
-                    "invocation, so none occurs (an unguarded recursion): %s%s",t,length-on,cycle,length-on>6?" <- ...":"");
-    break;
-  }
-  /* depth: each ring's least distance from its consumption back to its landing, from its landing back to its
-     publication (Dijkstra over the arcs' distances), against its depth where the ring is reused */
-  for(uint32_t p=0;p<pairs;p++)for(int side=0;side<2;side++){
-    const uint32_t s=sends[p],k=side?s:pair[s],D=mesh_cyclic_depth(x,k),source=side?3*p+1:3*p+2,target=side?3*p:3*p+1;
-    if(!D || (!x->cyclic && mesh_cyclic_end(x,k)<=x->transfer[k].begin+D))continue;
-    for(uint32_t v=0;v<V;v++){distance[v]=UINT64_MAX;done[v]=0;}
-    distance[source]=0;
-    for(;;){
-      uint32_t u=UINT32_MAX;
-      for(uint32_t v=0;v<V;v++)if(!done[v] && distance[v]!=UINT64_MAX && (u==UINT32_MAX || distance[v]<distance[u]))u=v;
-      if(u==UINT32_MAX || u==target)break;
-      done[u]=1;
-      for(uint32_t e=0;e<E;e++)if(from[e]==u && distance[u]+weight[e]<distance[to[e]])distance[to[e]]=distance[u]+weight[e];
-    }
-    if(distance[target]<=D)continue;
-    const struct mesh_cyclic_transfer *t=x->transfer+k;
-    char ahead[96];
-    if(distance[target]==UINT64_MAX)snprintf(ahead,sizeof ahead,"without bound: nothing orders it after the %s",side?"landing":"consumption");
-    else snprintf(ahead,sizeof ahead,"%llu invocations",(unsigned long long)distance[target]);
-    mesh_advise_say(&advice,MESH_ADVISE_DEPTH,"rank %u's %s transfer %u %s rank %u (queue %u), a ring of %u slots: its producer runs ahead of "
-                    "its %s %s, so a slot may be %s before it is %s",t->rank,side?"SEND":"receive",k,side?"to":"from",t->peer,t->queue,D,
-                    side?"landing":"consumer",ahead,side?"refilled":"landed on",side?"sent":"consumed");
-  }
-  result=advice.count;
-out:
-  free(pair);free(node);free(sends);free(from);free(to);free(weight);free(cut);free(distance);free(trail);free(active);free(done);
-  return result;
-}
-
-/* design/prepared-machine.md#M07 */
-/* design/prepared-machine.md#M12 */
-/* Each destination's completion words and the cancellation ranges over them: destination d's words follow d-1's
-   (16-word aligned), one per received chunk an invocation of each receive transfer's range, in the frame order
-   mesh_transfers_prepare assigned (a chunk's word for the transfer's invocation u is first + (u*count + slot)*chunks
-   + chunk, its stride count*chunks words; a row's delivery names its slot's chunk word of invocation 0, slot 0's
-   where every slot lands on the same rows, the bridge adding slot*chunks words, mesh-program.c receive_input); the
-   words in context->inputs_off, inputs_bytes. */
-int mesh_host_inputs(struct mesh_ctx *context){
-  struct hdr *m=context->M;
-  struct mesh_client *client=mesh_client_at(m,context->client);
-  uint64_t frames[MESH_DESTINATIONS],words=0;
-  const uint32_t destinations=mesh_destination(client,0);
-  for(uint32_t d=0;d<destinations;d++){
-    words=(words+15)&~UINT64_C(15);
-    frames[d]=0;
-    for(uint32_t q=d*MESH_QUEUES;q<(d+1)*MESH_QUEUES;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)frames[d]+=mesh_transfer_frames(m,in+i,client->tx[d].invocations);
-    }
-    words+=frames[d];
-  }
-  struct mesh_section input,stop;
-  int status=mesh_section_create(context,sizeof(uint64_t)*(words?words:1),1,&input);
-  if(!status)status=mesh_section_create(context,sizeof(struct mesh_cancellation)+(destinations?destinations:1)*sizeof(struct mesh_cancel_range),1,&stop);
-  if(status)return status;
-  uint64_t *word=mesh_section_address(context,input,0);
-  struct mesh_cancellation *cancel=mesh_section_address(context,stop,0);
-  memset(word,0,input.bytes);memset(cancel,0,stop.bytes);
-  cancel->cyclic=atomic_load(&client->cyclic);
-  context->inputs_off=(uint64_t)((char *)word-(char *)m);context->inputs_bytes=(uint64_t)input.pages*m->pgsz;
-  uint64_t first=0;
-  for(uint32_t d=0;d<destinations;d++){
-    first=(first+15)&~UINT64_C(15);
-    client->tx[d].cancel=(uint64_t)((char *)cancel-(char *)m);
-    cancel->ranges[d]=(struct mesh_cancel_range){.offset=(uint64_t)((char *)(word+first)-(char *)m),.count=frames[d]};
-    for(uint32_t q=d*MESH_QUEUES;q<(d+1)*MESH_QUEUES;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
-        uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
-        for(uint32_t s=0;s<(in[i].stride?in[i].count:1);s++)for(uint32_t k=0;k<chunks;k++){
-          struct mesh_delivery *delivery=mesh_delivery_at(m,in[i].local_row+s*in[i].stride+k);
-          delivery->device_input=(uint64_t)((char *)(word+first+in[i].first+(uint64_t)s*chunks+k)-(char *)m);
-          delivery->device_stride=sizeof(uint64_t)*(uint64_t)in[i].count*chunks;
-        }
-      }
-    }
-    first+=frames[d];
-  }
-  return 0;
-}
-
-/* What the GPU publication kernel stores (M04/M10): each prepared cell's continuation, into the
-   cell of invocation t, released after the caller's writes to the section. */
-/* design/prepared-machine.md#M30: running invocation T is the program's invocation T mod N in cycle T / N */
-static uint32_t program_invocations(struct mesh_ctx *context){
-  return mesh_client_at(context->M,context->client)->tx[0].invocations;
-}
-
-void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint64_t invocation){
-  uint32_t count=mesh_publication_prepare(context,section.first,NULL),n=program_invocations(context);
-  struct prepared_publication records[count?count:1];
-  mesh_publication_prepare(context,section.first,records);
-  const uint64_t t=n?invocation%n:invocation,cycle=n?invocation/n:0;
-  for(uint32_t i=0;i<count;i++)
-    atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)(records[i].destination+t*sizeof(struct mesh_send)),
-      records[i].argument+cycle,memory_order_release);
-}
-
-/* The last chunk's word, as mesh_metal_receive_prepare reads it: chunks of one receive land in order. */
-uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){
-  struct hdr *m=context->M;
-  struct mesh_delivery *delivery=mesh_delivery_at(m,section.first+mesh_row_chunks(m,section.first,section.bytes)-1);
-  const uint32_t n=program_invocations(context),t=n?invocation%n:invocation;
-  return atomic_load_explicit((_Atomic uint64_t *)((char *)m+delivery->device_input+(uint64_t)t*delivery->device_stride),
-    memory_order_acquire);
 }

@@ -1,13 +1,12 @@
-/* design/collectives-dataflow.md#advisories: mesh_program_advise over every collective mesh_compile makes on the loopback
+/* design/transport.md: mesh_program_advise over every collective mesh_compile makes on the loopback
    fabric's maps (mesh-loop.c family_cables: the pair, line 4, ring 5, star 8, torus 6 and 8), along each map's
    shortest-path trees and its packed trees (as libnccl-mesh makes them, nccl-mesh.c comm_routes, compile_form), at
    chunks 1 to 4, every root of a rooted collective, the all-reduce whole and two-phase, every node or the even nodes
    contributing, over operands of 1, 4,096 and 1,000,003 float32 and 2^20 half, on mesh_wire_of's wire at a 16 KiB
    block; mesh_group_advise over a group on each map and tree set (collectives, both counted all-to-alls, point-to-point
-   calls each way at two sizes); mesh_cyclic_advise over libnccl-mesh's wire as a cyclic program at every map's size,
-   and a ring pipeline of rings of 1 to 3.  It prints each one's advisories and a summary line, then the totals; it
-   refuses nothing, exits 0.  `mesh-advise mutate`: programs, groups and cyclic programs broken on purpose, each named
-   with the check it must fire and whether it did. */
+   calls each way at two sizes).  It prints each one's advisories and a summary line, then the totals; it refuses
+   nothing, exits 0.  `mesh-advise mutate`: programs and groups broken on purpose, each named with the check it must
+   fire and whether it did. */
 #include "mesh-plan.h"
 #include "nccl.h"
 #include <stdio.h>
@@ -121,41 +120,6 @@ static uint32_t group_advise(const char *label, struct rows *rows, const uint32_
   return warnings;
 }
 
-/* libnccl-mesh's wire as a cyclic program (nccl-mesh.c run; mesh-plan.h mesh_wire): toward each other member a ring
-   of `ring` slots each way, every position a whole slot either way, an end publishing position t once it consumed its
-   peer's t - `distance`; and a ring pipeline, rank r's SEND to r + 1 published once it consumed r - 1's of the same
-   invocation, rank 0's of `head` invocations before (UINT32_MAX: never) */
-struct cyclic { struct mesh_cyclic_transfer transfer[2 * MOST * MOST]; struct mesh_cyclic_wait wait[MOST * MOST]; struct mesh_cyclic program; };
-static void cyclic_wire(struct cyclic *c, uint32_t n, uint32_t ring, uint32_t distance, uint32_t invocations) {
-  uint32_t k = 0, w = 0, send[MOST][MOST], receive[MOST][MOST];
-  for (uint32_t a = 0; a < n; a++)
-    for (uint32_t b = 0; b < n; b++)
-      if (a != b) {
-        send[a][b] = k; c->transfer[k++] = (struct mesh_cyclic_transfer){a, b, 0, 1, 0, invocations, ring, 0};
-        receive[a][b] = k; c->transfer[k++] = (struct mesh_cyclic_transfer){b, a, 0, 0, 0, invocations, ring, 0};
-      }
-  for (uint32_t a = 0; a < n; a++)
-    for (uint32_t b = 0; b < n; b++)
-      if (a != b) c->wait[w++] = (struct mesh_cyclic_wait){send[a][b], receive[b][a], distance, 0};
-  c->program = (struct mesh_cyclic){n, invocations, ring, 1, k, w, c->transfer, c->wait};
-}
-static void cyclic_pipeline(struct cyclic *c, uint32_t n, uint32_t ring, uint32_t head, uint32_t invocations) {
-  uint32_t w = 0;
-  for (uint32_t r = 0; r < n; r++) {
-    c->transfer[2 * r] = (struct mesh_cyclic_transfer){r, (r + 1) % n, 0, 1, 0, invocations, ring, 0};
-    c->transfer[2 * r + 1] = (struct mesh_cyclic_transfer){(r + 1) % n, r, 0, 0, 0, invocations, ring, 0};
-  }
-  for (uint32_t r = 0; r < n; r++)
-    if (r || head != UINT32_MAX) c->wait[w++] = (struct mesh_cyclic_wait){2 * r, 2 * ((r + n - 1) % n) + 1, r ? 0 : head, 0};
-  c->program = (struct mesh_cyclic){n, invocations, ring, 1, 2 * n, w, c->transfer, c->wait};
-}
-static uint32_t cyclic_advise(const char *label, const struct cyclic *c, uint64_t *total) {
-  struct tally t = {label, {0}};
-  const uint32_t warnings = mesh_cyclic_advise(&c->program, warned, &t);
-  summary(&t, warnings, total, "");
-  return warnings;
-}
-
 static int programs(const struct mesh_wire *wire) {
   static const struct mesh_operand operands[] = {{0, 4, 1}, {0, 4, 4096}, {0, 4, 1000003}, {1, 2, 1u << 20}};
   uint64_t count = 0, failed = 0, unchecked = 0, priorities_free = 0, admissible = 0, total[CHECKS] = {0}, by_kind[KINDS][CHECKS] = {{0}};
@@ -258,35 +222,6 @@ static void groups(const struct mesh_wire *wire) {
   printf("\n");
 }
 
-static void cyclics(const struct mesh_wire *wire) {
-  static const uint32_t sizes[] = {2, 4, 5, 6, 8};
-  uint64_t count = 0, total[CHECKS] = {0};
-  struct cyclic *c = malloc(sizeof *c);
-  for (size_t s = 0; c && s < sizeof sizes / sizeof *sizes; s++) {
-    char label[160];
-    snprintf(label, sizeof label, "cyclic wire n=%u (rings of 2 lag = %u, publication after the peer's t - lag)", sizes[s], 2 * wire->lag);
-    cyclic_wire(c, sizes[s], 2 * wire->lag, wire->lag, 2 * wire->lag);
-    cyclic_advise(label, c, total); count++;
-    for (uint32_t ring = 1; ring <= 3; ring++) {
-      snprintf(label, sizeof label, "cyclic pipeline n=%u (rings of %u, 6 invocations, the head one invocation behind)", sizes[s], ring);
-      cyclic_pipeline(c, sizes[s], ring, 1, 6);
-      cyclic_advise(label, c, total); count++;
-    }
-    snprintf(label, sizeof label, "one-pass pipeline n=%u (rings of 2, 6 invocations, the head one behind)", sizes[s]);
-    cyclic_pipeline(c, sizes[s], 2, 1, 6);
-    c->program.cyclic = 0;
-    cyclic_advise(label, c, total); count++;
-    snprintf(label, sizeof label, "one-pass pipeline n=%u (rings of 6 holding every invocation, the head waiting on nothing)", sizes[s]);
-    cyclic_pipeline(c, sizes[s], 6, UINT32_MAX, 6);
-    c->program.cyclic = 0;
-    cyclic_advise(label, c, total); count++;
-  }
-  free(c);
-  printf("\ncyclic programs %llu, warnings:", (unsigned long long)count);
-  for (int k = 0; k < CHECKS; k++) printf(" %s %llu", checks[k], (unsigned long long)total[k]);
-  printf("\n");
-}
-
 /* each mutation's tally and whether its expected check fired */
 static uint32_t tried, fired;
 static void expect(const struct tally *t, int check) {
@@ -354,38 +289,18 @@ static int mutate(const struct mesh_wire *wire) {
   GROUP("G5 a GPU group of polls past NCCL_MESH_POLLS", 1, 2, NCCL_MESH_POLLS + 1, 6);
 #undef GROUP
   rows_free(&reduce); rows_free(&gather);
-  struct cyclic *c = malloc(sizeof *c);
-  if (!c) return 1;
-#define CYCLIC(name, check) do { t = (struct tally){name, {0}}; mesh_cyclic_advise(&c->program, warned, &t); expect(&t, check); } while (0)
-  cyclic_pipeline(c, 4, 2, 0, 6);
-  CYCLIC("C1 a pipeline whose head publishes once it consumed the same invocation", 3);
-  cyclic_wire(c, 2, 2 * wire->lag, wire->lag + 1, 2 * wire->lag);
-  CYCLIC("C2 libnccl-mesh's wire publishing after the peer's t - lag - 1, rings of 2 lag", 2);
-  cyclic_pipeline(c, 3, 2, UINT32_MAX, 6);
-  CYCLIC("C3 a pipeline whose head never waits on the ring's return", 2);
-  cyclic_pipeline(c, 3, 4, 1, 6);
-  CYCLIC("C4 rings of 4 in a cyclic program of 6 invocations", 5);
-  cyclic_wire(c, 2, 2 * wire->lag, wire->lag, 2 * wire->lag);
-  c->transfer[1].end = 2 * wire->lag - 1;
-  CYCLIC("C5 rank 1 receives one invocation fewer than rank 0 sends", 0);
-  cyclic_pipeline(c, 3, 2, 0, 6);
-  c->program.cyclic = 0;
-  c->transfer[4].begin = c->transfer[5].begin = 3;
-  CYCLIC("C6 a one-pass pipeline closed by its return from invocation 3, its head publishing once it consumed the same one", 3);
-#undef CYCLIC
-  free(c); free(root); free(parent); free(weight);
+  free(root); free(parent); free(weight);
   printf("mutations %u, each firing its check: %u\n", tried, fired);
   return 0;
 }
 
 int main(int argc, char **argv) {
   struct mesh_wire wire;
-  mesh_wire_of(16384, MESH_BUFFSIZE, 0, &wire);
+  mesh_wire_of(16384, &wire);
   printf("wire: slot %llu, small %llu, block %llu, lag %u\n", (unsigned long long)wire.slot, (unsigned long long)wire.small,
          (unsigned long long)wire.block, wire.lag);
   if (argc > 1 && !strcmp(argv[1], "mutate")) return mutate(&wire);
   programs(&wire);
   groups(&wire);
-  cyclics(&wire);
   return 0;
 }

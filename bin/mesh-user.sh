@@ -10,8 +10,8 @@
 # stage, installs its images by rename and runs this script again on them (MESH_USER_BUILT) (README.md, Convergence).
 # A definition this script writes never changes with what it runs: a loaded agent is left running (bin/mesh-agent.sh).  Each document's path is recorded
 # beside its canonical form, so the convergence and the keeper keep the node's own.  The bridge's definition names its
-# program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename and the
-# bridge restarts itself on it between calls (README.md, Convergence).  The install records what it installed
+# program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename, the
+# bridge stopped by SIGTERM, and launchd starts it on them (design/transport.md section 9).  The install records what it installed
 # (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes) and the inputs it converged to.
 # Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]  (~/mesh)
 set -u
@@ -72,7 +72,7 @@ before=$(sed -n 's/^images=//p' "$state/facts/io.mesh.bridge" 2>/dev/null)
 [ -z "$renew" ] || { cp "$source/rdma/mesh-flow" "$source/rdma/mesh-flow.renew" && mv -f "$source/rdma/mesh-flow.renew" "$source/rdma/mesh-flow"; } || exit 1
 cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- the node's bridge (bin/mesh-user.sh): a new binary or configuration is installed by rename, and the bridge restarts itself on it between calls (README.md, Convergence) -->
+<!-- the node's bridge (bin/mesh-user.sh): a new binary or configuration is installed by rename, the bridge stopped by SIGTERM, and launchd starts it on them (design/transport.md section 9) -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
 <key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string>
@@ -82,7 +82,8 @@ PL
 out=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
-  || echo "io.mesh.bridge: its new binary or configuration is installed; the bridge restarts itself on them between calls"
+  || { launchctl kill SIGTERM "gui/$(id -u)/io.mesh.bridge" 2>/dev/null; \
+       echo "io.mesh.bridge: its new binary or configuration is installed; the bridge stopped by SIGTERM, launchd starts it on them"; }
 printf 'revision=%s\nimages=%s\n' "$(git -C "$source" rev-parse HEAD 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
 if [ -f "$support/io.mesh.converge/configuration.plist" ]; then
   cat > "$agents/io.mesh.converge.plist.new" <<PL

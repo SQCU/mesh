@@ -233,22 +233,19 @@ static __attribute__((unused)) uint32_t pairs_error(struct mesh_verbs *provider,
   }
   return moved;
 }
-/* design/transport.md: a link's queue pairs moved to the error state, whatever the move returns (none is
-   destroyed ready with receives posted: 0fb8eb54's down_pair, design/transport.md), then destroyed at its
-   next pairing (d6dceac's down_pair, its completion queues kept, the context's own), then what those queues hold of
-   them taken and dropped: a poll returns what is there and 0 once none is (no queue pair is left to add any).  0, or
-   the destruction's error, every queue pair not destroyed kept with its count in the device's for the next pairing to
-   destroy (4df30806 down_pair: "a failed destruction keeps its handle for the next retirement turn"; a live context is
-   never forgotten, design/transport.md B16) */
-static __attribute__((unused)) int pairs_down(struct mesh_verbs *provider){
-  pairs_error(provider,UINT32_MAX);
-  while(provider->qp_count){
-    struct ibv_qp *q=provider->queues[provider->qp_count-1].pair;
-    if(q && ibv_destroy_qp(q))return errno?errno:EIO;
-    provider->queues[--provider->qp_count].pair=NULL;
-    if(q)provider->device->pairs--;
+/* design/transport.md section 14: a link's queue pairs, kept across its pairings, made ready for the next: each moved
+   to RESET (which drops what it held) and to INIT again (pair_make's attributes), a fresh first sequence number drawn,
+   and what its completion queues hold of the last pairing taken and dropped (a poll returns at once, 0 once none is).
+   No queue pair is destroyed (design/transport.md section 5).  0, or the move's error */
+static __attribute__((unused)) int pairs_reset(struct mesh_verbs *provider){
+  for(int q=0;q<provider->qp_count;q++){
+    struct ibv_qp *pair=provider->queues[q].pair;
+    if(!pair)continue;
+    struct ibv_qp_attr reset={.qp_state=IBV_QPS_RESET},init={.qp_state=IBV_QPS_INIT,.port_num=1};
+    if(ibv_modify_qp(pair,&reset,IBV_QP_STATE) ||
+       ibv_modify_qp(pair,&init,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   }
-  free(provider->queues);provider->queues=NULL;provider->count=0;
+  provider->psn=arc4random()&0xffffff;
   struct ibv_wc stale[32];
   struct ibv_cq *queues[2]={provider->completion,provider->sent};
   for(int c=0;c<2;c++)while(queues[c] && ibv_poll_cq(queues[c],32,stale)>0){}

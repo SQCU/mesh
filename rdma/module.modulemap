@@ -1,7 +1,0 @@
-module CMesh {
-  header "mesh-call.h"
-  header "mesh-collective.h"
-  header "mesh-plan.h"
-  link "mesh"
-  export *
-}

@@ -2,10 +2,9 @@
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
 node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
 the header's own: link maps, the trees every collective and message take, operands, collectives (compile: a program,
-the operand libnccl-mesh's ncclMeshCommInitRank takes), steps, the wire libnccl-mesh's sessions run (wire()), and the
-window a session takes on each member and on each relay its routes cross (session_bytes, relay_bytes).  Collectives
-run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the memory they move
-taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
+the operand libnccl-mesh's ncclMeshCommInitRank takes), steps and the wire libnccl-mesh's channels run (wire()).
+Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the
+memory they move taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
 import errno
 import os
 import re
@@ -211,38 +210,12 @@ def footprint(pid=0):
     return info[2 + 7]
 
 
-def wire(block=None, buffsize=None, small=0):
-    """mesh_wire_of: the rings a session of libnccl-mesh runs on (mesh-plan.h struct mesh_wire: `slot`, `small`,
-    `block`, `lag`), as this process's sessions make them: `block` (None: this machine's page, the block every bridge's
-    region takes), `buffsize` (None: NCCL_BUFFSIZE as the library reads it, a positive integer, else NCCL's default
-    MESH_BUFFSIZE) and `small` (the communicator's small slot, ncclMeshCommInitRank's; 0: the block)."""
-    if buffsize is None:
-        given = re.match(r'\s*([-+]?\d+)', os.environ.get('NCCL_BUFFSIZE', ''))
-        buffsize = int(given.group(1)) if given and int(given.group(1)) > 0 else lib.MESH_BUFFSIZE
+def wire(block=None):
+    """mesh_wire_of: the layout of libnccl-mesh's positions on a bound lane pair's rings (mesh-plan.h struct mesh_wire:
+    `slot`, `small`, `block`, `lag`) for `block` (None: this machine's page, the block every bridge's region takes)."""
     made = ffi.new('struct mesh_wire *')
-    lib.mesh_wire_of(block if block is not None else os.sysconf('SC_PAGE_SIZE'), buffsize, small, made)
+    lib.mesh_wire_of(block if block is not None else os.sysconf('SC_PAGE_SIZE'), made)
     return made
-
-
-def session_bytes(peers, wire_=None):
-    """ncclMeshSessionBytes: the bytes of its node's window one communicator's session takes toward `peers` other members
-    on `wire_` (wire(): None, this process's): its rings, transfer lists, SEND cells, completion words and violation
-    page.  A session binds every other member of its communicator; a split's is its own."""
-    made = ffi.new('uint64_t *')
-    if lib.ncclMeshSessionBytes(peers, wire_ if wire_ is not None else wire(), made):
-        raise ValueError(f'ncclMeshSessionBytes of {peers} peers')
-    return made[0]
-
-
-def relay_bytes(wire_=None):
-    """ncclMeshRelayBytes: the bytes of its node's window a relay's bridge leases for one direction of a session on
-    `wire_` (wire(): None, this process's) that its route crosses (mesh-program.c mirror): one such lease, and one
-    client slot of its bridge (mesh.h MESH_CLIENTS), a direction of two members of a session whose route crosses the
-    node, whatever its stripes; session_bytes (above) is what each member's own bridge leases."""
-    made = ffi.new('uint64_t *')
-    if lib.ncclMeshRelayBytes(wire_ if wire_ is not None else wire(), made):
-        raise ValueError('ncclMeshRelayBytes')
-    return made[0]
 
 
 def lease(nbytes):
