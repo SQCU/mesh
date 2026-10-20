@@ -347,7 +347,9 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 - An agent that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
   passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
   most an hour (section 9's rule, a port's: "restarted, not crashing again of course"). An agent whose parent is gone halts its
-  lanes and exits MESH_PLATFORM_NS later, its own windows held. At the bridge's stop every agent is halted before the
+  lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's agent is spawned only while no other agent of
+  its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one agent's at
+  a time and no make meets the device's ceiling. At the bridge's stop every agent is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
 - Streams across agents. A port's rings and words are the parent's, leased once. A new agent opens each stream as its
   link connects: one nobody holds is made new and free; one a holder of the previous pairing still holds keeps its

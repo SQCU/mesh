@@ -2,6 +2,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <crt_externs.h>
+#include <libproc.h>
 
 /* mesh-verbs.h: the region's name, unlinked at exit (down), and the stop flag every loop reads */
 const char *shm;
@@ -1330,10 +1331,47 @@ static void agent_send(struct port *port,struct agent_message said){
   }
 }
 static void agent_reaped(struct port *port);
+/* a process of this image, not this bridge nor one of its agents, that is an agent of the port's device (its argv
+   `--agent REGION FABRIC DEVICE ...`): an agent of a launch whose parent ended unbidden, which holds the device's queue
+   pairs until its exit (agent_leave, at most 2 MESH_PLATFORM_NS); its pid, or 0.  A device's queue pairs are one
+   agent's at a time: the device holds ten usable and a link takes all ten */
+static pid_t agent_elsewhere(const struct port *port){
+  static pid_t pids[16384];
+  static char *arguments;
+  static size_t room;
+  int most=0,argmax[2]={CTL_KERN,KERN_ARGMAX};
+  size_t length=sizeof most;
+  if(!arguments && (sysctl(argmax,2,&most,&length,NULL,0) || most<=0 || !(arguments=malloc(room=(size_t)most))))return 0;
+  const int count=proc_listallpids(pids,(int)sizeof pids);
+  for(int i=0;i<count && i<(int)(sizeof pids/sizeof *pids);i++){
+    const pid_t pid=pids[i];
+    int own=pid==getpid();
+    for(uint32_t p=0;p<port_count;p++)own|=pid==ports[p].agent;
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    if(own || proc_pidpath(pid,path,sizeof path)<=0 || strcmp(path,self_path))continue;
+    int mib[3]={CTL_KERN,KERN_PROCARGS2,pid},argc=0;
+    size_t size=room;
+    if(sysctl(mib,3,arguments,&size,NULL,0) || size<sizeof argc)continue;
+    memcpy(&argc,arguments,sizeof argc);
+    const char *at=arguments+sizeof argc,*end=arguments+size,*argv[5]={0};
+    at+=strnlen(at,(size_t)(end-at));
+    while(at<end && !*at)at++;
+    for(int a=0;a<argc && a<5 && at<end;a++){argv[a]=at;at+=strnlen(at,(size_t)(end-at))+1;}
+    if(argc==9 && argv[1] && argv[4] && !strcmp(argv[1],"--agent") && !strcmp(argv[4],port->device.name))return pid;
+  }
+  return 0;
+}
 /* the port's agent spawned (its socket's messages and its exit watched, tagged by the port); 0, or the error, the
    port's next spawn held MESH_PAUSE_NS */
 static int agent_spawn(struct port *port){
   int pair[2],on=1;
+  const pid_t elsewhere=agent_elsewhere(port);
+  if(elsewhere){
+    if(elsewhere!=port->elsewhere)say("link %u (%s): process %d, an agent of its device from an earlier launch, holds its queue "
+                                      "pairs until its exit; its own agent spawned after it\n",port->index,port->name,(int)elsewhere);
+    port->elsewhere=elsewhere;
+    return EBUSY;
+  }
   if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)){
     const int error=errno?errno:EIO;
     say("link %u (%s): its agent not spawned: %s\n",port->index,port->name,strerror(error));

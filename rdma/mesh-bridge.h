@@ -212,9 +212,10 @@ struct port {
   /* the parent's: the port's agent (design/transport.md section 14, "A process a port"): its process (0 none) and
      socket, when it was spawned, the agents in a row that ended unbidden within MESH_AGENT_SETTLE_NS of their spawn and
      the hold they set before the next (`hold_to`), whether the port's link, lost once its lanes were asked for, waits
-     to end its agent (`recycle`) and whether that end was asked (`ending`), and the part of its agent's next message
-     read (`agent_in`, `agent_held` bytes of it) */
-  pid_t agent;
+     to end its agent (`recycle`) and whether that end was asked (`ending`), the part of its agent's next message
+     read (`agent_in`, `agent_held` bytes of it), and an agent of its device from an earlier launch last found alive
+     (`elsewhere`: mesh-link.c agent_elsewhere) */
+  pid_t agent,elsewhere;
   int agent_fd,recycle,ending;
   uint32_t aborts,agent_held;
   uint64_t agent_at,hold_to;
