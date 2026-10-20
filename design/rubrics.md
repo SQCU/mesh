@@ -690,6 +690,29 @@ tensor table, a model's config.json, GGUF keys) is read at its load, once, into 
 the declared structure); that ranks above text read again on a recurring path, and above structure inferred from names
 where a declaration exists.
 
+The operator, 10-20, verbatim, on logging and on names an operating system's interface takes: "the rubric is about
+pairwise relationships, not absolutes. add to the rubric that logging is side effectful and takes strings as operands
+yet nevertheless cannot be reduced away without compromising on other values, while removing many otehr string typed
+functions is possible without compromising on our values. integrity is important here, and is emphasized by the rubric
+based approach rather htan 'rule' based approaches." On how the export finds which operator belongs to which layer and
+role: "either of these in a module is acceptable [a declaration we write ourselves, or the partition derived from
+config.json], as is using the stock litert engine without modification as it is not code we are implementing a priori;
+this is similar to the claims about rankability wrt the rubric for the other otpic".
+
+So each string site is ranked against what removing it would cost, not struck by a rule:
+- **Logging** takes strings and has a side effect, and still ranks above its absence: a log is how a person sees what a
+  node did, and removing it gives up another value (servicing a node, rubrics 6) for nothing. What ranks lower is a
+  log's text read back as a value (the driver parsing a rank's lines), or a log written on a recurring path where a
+  counter would do.
+- **A name an interface we do not implement takes** (the operating system's `shm_open`, a spawned image's path, a
+  device by name, the stock LiteRT engine used without modification) is that interface's form: the code we write
+  around it is ranked, not the interface.
+- **Most other string-typed functions remove without compromising any value** (a record kept as a string-keyed
+  dictionary, an op chosen by comparing its text, a kernel looked up by name on every dispatch, a structure inferred
+  from names that a declaration states), and rank below their typed forms.
+- **The export's partition** (which operator belongs to which layer and role) comes from a module: a declaration we
+  write, or one derived from config.json; or the stock LiteRT engine runs unmodified.
+
 The positions, in M, C and D:
 1. **A string is a message.** It is carried, composed (string to string), and returned beside a value. No function
    takes a string and returns anything but a string, and none has a side effect. So nothing measures, compares,
