@@ -345,7 +345,8 @@ ranking.
 - Ranks higher: the form that declares its precision and order, and checks payload less.
 - Lower pole: bit-identity demanded across members, and checksums or digests as gates.
 - Upper pole: fp32 accumulation rounded once, last-bit differences accepted.
-- Also: "bit identicality of floats is not real" (10-04).
+- Also: "bit identicality of floats is not real" (10-04). Summation orders that differ between members decorrelate
+  their rounding, which ranks higher than one order shared (D12).
 
 **C9. One primitive, offered as a header.**
 - Ranks higher: the form with fewer copies of each primitive, offered for others to call rather than spliced into their
@@ -496,6 +497,42 @@ ranking.
   - exact-identity autotune ≺ "parametric fit" over tile units (10-07);
   - a tile-sparse kernel slower than torch at full density ≺ "strictly faster or no slower" (10-07).
 
+**D12. Correlation of error.**
+- Ranks higher: the form whose errors are decorrelated with one another, across positions, layers, chunks of a sum,
+  members' shares, forms of the same computation, and runs.
+- Lower pole: errors that share a direction: one rounding direction in every chunk, a quantizer whose error aligns with
+  its weights or its inputs, a model trained or measured only on data whose errors its own errors steer, and two forms
+  that share a defect. They add coherently, and no average or comparison exposes them.
+- Upper pole: errors with no correlation. They add in quadrature, average toward zero, and show as disagreement
+  wherever two forms are compared.
+- Why, in each of the operator's cases:
+  - **Accumulation.** n errors of variance σ² with pairwise correlation ρ sum to variance nσ²(1 + (n − 1)ρ): about √n·σ
+    in amplitude where ρ = 0, n·σ where ρ = 1. Rounding errors that behave as independent give a backward error of order
+    √n·u, not n·u [Higham & Mary 2019, SIAM J. Sci. Comput. 41(5)].
+  - **Quantization.** Dither and stochastic rounding make the error unbiased and independent of the signal, so it
+    averages out where deterministic rounding's bias does not [Widrow & Kollár 2008, *Quantization Noise*; Gupta et al.
+    2015, ICML].
+  - **Floating-point non-associativity.** Summation orders that differ between members or calls decorrelate their
+    rounding: last-bit differences accepted (C8). One order forced everywhere gives every member the same bias.
+  - **On-policy and off-policy, training and inference.** A learner's errors on its own trajectory are correlated with
+    the states those errors lead it into, and compound over a horizon T (behavior cloning's O(T²)). Data drawn from
+    its own policy breaks that correlation (O(T)) [Ross, Gordon & Bagnell 2011, AISTATS, DAgger]. A measurement
+    teacher-forced on a reference's tokens and one free-running on the program's own draws differ for the same reason,
+    and are reported apart.
+  - **Measurement.** Two forms are compared by the divergence between their own records (`tools/retained.py` on the
+    two), never by the difference of their divergences from a reference. KL is asymmetric and obeys no triangle
+    inequality: two forms equally far from bf16 can be identical or far apart. Decorrelated errors are what make that
+    comparison see each form's error. Correlated ones hide it.
+- Ranked:
+  - correlated errors ≺ decorrelated errors: "decorrelatd errors are better than correlated errors for various
+    reasons ... this is the case whether measuring on policy vs off policy training / inference, whether measuring
+    quantization approaches, whether measuring floating point nonassociativity, etc" (10-20).
+- Also, the case that prompted it (10-20, e2bheld teacher-forced over the M5 and Mini pair):
+  - The 10-17 program and the 10-20 program read KL 0.616 and 0.826 from bf16, but 0.43 and 0.64 from each other.
+    Their errors are decorrelated.
+  - The serial walk and per-channel tracks read 6.2 × 10⁻⁷ from each other, against 3.4 × 10⁻⁵ between two runs of
+    one program: the same function.
+
 ## Inversions
 
 The same comparison ranks one way in one layer and the other way in another.
@@ -552,3 +589,8 @@ without exception superfluous and wrapping or preserving another errorful featur
   `ncclMeshInitWaits` ≺ a failed call that finds its leases stale through NCCL's `ncclMemAlloc` (the operator's choice,
   10-20).
 - **D2, D3:** attention plans and instances derived in builders (before 2b75b6a and d3d0f4b) ≺ synthesized at load.
+- **C4, C7:** a group's completion as one serial order of dispatches that every rank had to build alike (order_group:
+  a wait cycle among three or more ranks) ≺ each channel progressing on its own (264ce849, the operator's choice of
+  10-20), the two computing one function on the pair (KL between their records 6.2 × 10⁻⁷).
+- **M4:** a dud's all-ones bytes read by its consumer as a failure of its own group ≺ a dud landed as bytes (fcb79df2,
+  the operator 10-20: "'duds' are not sentinel values").
