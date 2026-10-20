@@ -173,7 +173,6 @@ mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
 for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
-  launchctl enable system/$L >/dev/null 2>&1
   port=
   case "$L" in io.mesh.telemetry) port=8788 ;; io.mesh.observer) port=8787 ;; esac
   upid=$(launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')

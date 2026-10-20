@@ -19,9 +19,6 @@ done
 now=$(date +%s)
 rids=$(ioreg -l -w0 -r -c AppleThunderboltRDMAInterface 2>/dev/null | awk '/\+-o rdma_/{n=substr($2,6)} /"RID" =/{print n, $NF}')
 peers=" $(ioreg -l -w0 -r -c AppleThunderboltRDMAPeerInterface 2>/dev/null | awk '/"RID" =/{printf "%s ", $NF}')"
-lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
-lanok=0; [ -n "$lan" ] && [ -n "$(ipconfig getifaddr "$lan" 2>/dev/null)" ] && lanok=1
-active=$(for p in $ports; do [ "$(ifconfig "$p" 2>/dev/null | awk '/status:/{print $2}')" = active ] && echo "$p"; done)
 : > /var/run/mesh-fabric.$$
 for p in $ports; do
   f=/var/run/mesh-link.$p
@@ -29,24 +26,18 @@ for p in $ports; do
   rid=$(echo "$rids" | awk -v p="$p" '$1==p{print $2}')
   case "$peers" in *" ${rid:-none} "*) peer=present ;; *) peer=absent ;; esac
   echo "port=$p link=${link:-unknown} rdma_peer=$peer" >> /var/run/mesh-fabric.$$
-  t0= n=
-  [ -f "$f" ] && read -r t0 n _ < "$f"
+  t0=
+  [ -f "$f" ] && read -r t0 _ < "$f"
   if [ "$link" != active ] || [ "$peer" = present ]; then
-    [ -f "$f" ] && [ "$peer" = present ] && { echo "[$(ts)] RECOVERED $p rdma_peer=present after $((now - ${t0:-$now})) s, ${n:-0} bounces"
-      logger -p user.warning -t io.mesh.fabric "$p RDMA peer present again after $((now - ${t0:-$now})) s, ${n:-0} interface bounces"; }
+    [ -f "$f" ] && [ "$peer" = present ] && { echo "[$(ts)] RECOVERED $p rdma_peer=present after $((now - ${t0:-$now})) s"
+      logger -p user.warning -t io.mesh.fabric "$p RDMA peer present again after $((now - ${t0:-$now})) s"; }
     rm -f "$f"; continue
   fi
-  t0=${t0:-$now} n=${n:-0}; other=$lanok
-  for q in $active; do [ "$q" = "$p" ] || other=1; done
-  if [ "$other" = 0 ]; then
-    echo "$t0 $n" > "$f"; drift=1
-    echo "[$(ts)] HELD $p link=active rdma_peer=absent for $((now - t0)) s: its link is the node's only one, so it is not bounced"
-    continue
-  fi
-  n=$((n + 1)); echo "$t0 $n" > "$f"
-  echo "[$(ts)] BOUNCE $p ($n) link=active rdma_peer=absent for $((now - t0)) s"
-  logger -p user.warning -t io.mesh.fabric "$p cable link up but no RDMA peer for $((now - t0)) s: interface bounced ($n)"
-  ifconfig "$p" down; ifconfig "$p" up; drift=1
+  # design/rubrics.md M3 (10-20): a port is never brought down here; one taken down under the bridge's open device
+  # terminates the device beneath its objects
+  t0=${t0:-$now}; echo "$t0" > "$f"; drift=1
+  echo "[$(ts)] HELD $p link=active rdma_peer=absent for $((now - t0)) s"
+  logger -p user.warning -t io.mesh.fabric "$p cable link up but no RDMA peer for $((now - t0)) s"
 done
 for p in $ports; do
   mac=$(ifconfig "$p" 2>/dev/null | awk '/ether/{print $2}')

@@ -193,6 +193,18 @@ The one exposure left is the kernel's own release of the device at the process's
 which is what upgrades avoid by their timing: one node at a time, with no program running and the peer's bridge
 steady.
 
+Nothing of the node's brings a fabric port down: a port whose cable link is up with no RDMA peer is logged and held
+(`bin/mesh-fabric-init.sh`), since a port taken down under the bridge's open device terminates the device beneath its
+objects. A job an operator disables (`launchctl disable`) stays off: the keeper and the installers load no disabled job
+(`bin/mesh-agent.sh`).
+
+A fault the bridge's start or its pairing meets would recur at every boot, since launchd and the keeper start the
+bridge at boot. The bridge therefore keeps a boot ledger beside its configuration (`boots`): the boot it started in,
+and how many boots in a row ended while a bridge was in its first 10 minutes with the ledger set, a panic, a power loss
+or a reset. At n of them, it opens no device for 60·2ⁿ⁻¹ s, at most an hour, and a stop signal ends it meanwhile. Its
+stop clears the ledger, and so do 10 minutes of running. Such a fault then recurs at most once an hour, its report is
+written at each boot, and the node stays reachable by ssh in between.
+
 ## 10. Duds
 
 If a client has not supplied a position it scheduled by the position's deadline (the call's own, at most the

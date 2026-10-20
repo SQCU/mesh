@@ -43,6 +43,54 @@ static uint32_t device_count;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 
 static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+/* design/transport.md section 9: the bridge's boot ledger beside its configuration (`boots`): the boot it started in
+   (kern.bootsessionuuid) and how many boots in a row ended while a bridge was within BOOTS_SETTLE_NS of its start, no
+   stop of its having cleared the ledger (a panic, a power loss, a reset); n of them hold every device unopened 60 2^(n-1)
+   s, at most an hour, so a fault the bridge's start or pairing meets recurs at most that often and the node stays
+   reachable meanwhile; the bridge's stop clears it, and so does BOOTS_SETTLE_NS of running */
+#define BOOTS_SETTLE_NS (UINT64_C(600)*1000000000u)
+static char boots_path[PATH_MAX];
+static int boots_set;
+static uint64_t boots_since;
+static void boots_clear(void){ if(boots_set && !unlink(boots_path))boots_set=0; }
+static __attribute__((unused)) void boots_hold(const char *configuration){
+  const char *slash=strrchr(configuration,'/');
+  snprintf(boots_path,sizeof boots_path,"%.*s/boots",slash?(int)(slash-configuration):1,slash?configuration:".");
+  char boot[64]={0},prior[64]={0};
+  size_t size=sizeof boot-1;
+  if(sysctlbyname("kern.bootsessionuuid",boot,&size,NULL,0)){
+    say("bridge boots: this boot's identity (kern.bootsessionuuid): %s; no boot is counted\n",strerror(errno));return;}
+  unsigned abrupt=0;
+  FILE *in=fopen(boots_path,"r");
+  if(in){
+    if(fscanf(in,"%63s %u",prior,&abrupt)!=2){prior[0]=0;abrupt=0;}
+    fclose(in);
+    if(strcmp(prior,boot))abrupt++;
+  }
+  char next[PATH_MAX+8];
+  snprintf(next,sizeof next,"%s.new",boots_path);
+  FILE *out=fopen(next,"w");
+  if(out){
+    fprintf(out,"%s %u\n",boot,abrupt);
+    const int kept=!fflush(out) && !fsync(fileno(out));
+    if(!fclose(out) && kept && !rename(next,boots_path))boots_set=1;
+  }
+  if(!boots_set)say("bridge boots: %s not written (%s); no boot is counted\n",boots_path,strerror(errno));
+  if(abrupt){
+    const uint64_t hold=MIN(UINT64_C(60)<<MIN(abrupt-1,6u),UINT64_C(3600));
+    say("bridge boots: %u boot%s in a row ended within %llu s of a bridge's start with %s set (a panic, a power loss or a "
+        "reset); no device is opened for %llu s, and a stop signal ends the bridge meanwhile\n",abrupt,abrupt==1?"":"s",
+        (unsigned long long)(BOOTS_SETTLE_NS/1000000000u),boots_path,(unsigned long long)hold);
+    struct timespec rest={(time_t)hold,0};
+    struct kevent64_s got;
+    if(kevent64(events,NULL,0,&got,1,0,&rest)>0 && got.filter==EVFILT_SIGNAL){
+      boots_clear();
+      say("bridge boots: stopped while holding (signal %llu)\n",(unsigned long long)got.ident);
+      exit(0);
+    }
+  }
+  boots_since=clock_ns();
+}
 uint64_t memory;
 static int64_t stop_reason;
 static void farewell_text(int64_t code,char *out,size_t room){
@@ -1340,6 +1388,9 @@ int main(int argc,char **argv){
     signal(stopping[i],SIG_IGN);
   }
   signal(SIGPIPE,SIG_IGN);
+#ifndef MESH_LOOP_FABRIC
+  boots_hold(argv[1]);
+#endif
   /* design/transport.md (fault_heard): the provider's text read and the faults' handler installed before
      any device is opened */
   for(uint32_t i=0;i<_dyld_image_count();i++){
@@ -1474,6 +1525,7 @@ int main(int argc,char **argv){
     struct timespec tick={0,250000000};
     int count=kevent64(events,NULL,0,ready,16,0,&tick);
     now=clock_ns();
+    if(boots_set && now-boots_since>=BOOTS_SETTLE_NS)boots_clear();
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
       if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
@@ -1524,6 +1576,7 @@ int main(int argc,char **argv){
   }
   char why[96];farewell_text(stop_reason,why,sizeof why);
   say("bridge node %u: stopping (%s)\n",node,why);
+  boots_clear();
   /* design/transport.md: FAREWELL on every control socket (queued as the socket takes it; the kernel sends
      what it holds after the close), every program's words ~0 and its status the stop, stored from this thread, then the
      bridge gone; no queue, thread or verbs call waited on, and every object the kernel's to release at the exit

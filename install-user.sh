@@ -10,7 +10,6 @@ bad(){ failures=$((failures+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 try(){ d="$1"; shift; "$@" >/dev/null 2>&1 && ok "$d" || bad "$d"; }
 load(){
   label=$1
-  launchctl enable "gui/$UID/$label" >/dev/null 2>&1
   if out=$("$R/bin/mesh-agent.sh" "$A/$label.plist.new" "gui/$UID"); then
     if [ -n "$out" ]; then replaced=$((replaced+1)); ok "$out"; else retained=$((retained+1)); ok "$label current"; fi
   else bad "$label: $out"; fi

@@ -34,8 +34,8 @@ else rm -f "$DU"; fi
   [ "$STATE" = under_floor ] && echo "warn=disk: $FREE GiB free, under the $FLOOR GiB floor (mesh-disk.h): logs, records and compiled shares are being skipped; $USED GiB used, ${READABLE:-?} GiB readable by du; largest: ${TOP:-unmeasured}"
   [ "$STATE" != ok ] && [ -n "$HOLDERS" ] && echo "warn=idle: $HOLDERS; while a process declares the user active or keeps the display on, dasd runs no idle maintenance and aned's SIP-protected model cache is never collected (README.md, power)"
   for f in /var/run/mesh-link.*; do
-    [ -f "$f" ] || continue; read -r t0 n _ < "$f"
-    echo "warn=link: ${f#/var/run/mesh-link.} cable link up but no RDMA peer in the IORegistry, for $((NOW - ${t0:-$NOW})) s; the fabric init has bounced the interface ${n:-0} times, once a keeper pass while the node keeps another link (fabric.log)"
+    [ -f "$f" ] || continue; read -r t0 _ < "$f"
+    echo "warn=link: ${f#/var/run/mesh-link.} cable link up but no RDMA peer in the IORegistry, for $((NOW - ${t0:-$NOW})) s; the fabric init holds it and never brings it down (fabric.log)"
   done
 } > "$OUT.tmp"
 mv -f "$OUT.tmp" "$OUT"
