@@ -1,5 +1,34 @@
 # Three rubrics: mesh, collective, data
 
+## Three kinds of source
+
+The mesh's code is three kinds of source: mesh (M), collective (C) and data (D). The rubrics below rank some of the same
+comparisons in opposite directions in different kinds (Inversions). For example:
+- Surviving another party's failure ranks higher in M and lower in C and D.
+- Specializing to one model ranks higher in D and lower in C and M.
+- Members knowing each other's parts ranks higher in C and lower in M and D.
+
+So no piece of code can rank high in two kinds at once. That is why the three are kept as separate bodies of source,
+with separate namespaces and separate interfaces:
+
+| Interface | What crosses it |
+|---|---|
+| M and C | rows a client owns, positions in them, supplied and landed words |
+| C and D | the NCCL API, the device-function header, memory through `ncclMemAlloc` |
+| M and D | nothing |
+
+Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mixture would.
+
+**For agents, subagents and reviewers:**
+1. Name the kind of every file a change touches, from the table under Quantities.
+2. Rank the change against the form it replaces, using that kind's dimensions only, each dimension separately. Give the
+   ranking as a pair, `old ≺ new` or `new ≺ old`, with the code that decides it.
+3. Read a change that ranks higher in one kind only by taking in another kind's concern as misplaced. It is split along
+   the interfaces above.
+4. When two requirements conflict, decide by the rubric of the kind the code belongs to. In a conflict between kinds,
+   decide by the interface: what crosses it, and nothing else.
+5. Never write a rule, a memory note or a pass/fail check in place of a ranking.
+
 ## How to read them
 
 Each dimension is a ranking. Given two forms of the same code (two commits, two designs, or two call paths that do the
