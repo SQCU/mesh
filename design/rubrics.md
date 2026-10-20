@@ -604,3 +604,7 @@ without exception superfluous and wrapping or preserving another errorful featur
   10-20), the two computing one function on the pair (KL between their records 6.2 × 10⁻⁷).
 - **M4:** a dud's all-ones bytes read by its consumer as a failure of its own group ≺ a dud landed as bytes (fcb79df2,
   the operator 10-20: "'duds' are not sentinel values").
+- **M4, M6:** a link lost after it connected staying down until a person relaunched the bridge (version 129) ≺ a
+  process a port (version 130, 1f9be1d5): the lost link's agent ends once its quiet window has passed, the next agent
+  pairs it again with nobody acting, and calls in flight fail as values; on the loop fabric so far, the pair's run on
+  the operator's word.
