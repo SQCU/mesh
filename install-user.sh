@@ -22,9 +22,10 @@ system_owns(){
 provide_http(){
   label=$1; port=$2
   if system_owns "$label" "$port"; then
-    mv -f "$A/$label.plist.new" "$A/$label.plist"
+    rm -f "$A/$label.plist.new" "$A/$label.plist"
+    launchctl bootout "gui/$UID/$label" >/dev/null 2>&1
     retained=$((retained+1))
-    ok "$label provided by system domain on :$port"
+    ok "$label provided by system domain on :$port (no user copy, which launchd would load at login and which could never bind)"
   else
     load "$label"
   fi
