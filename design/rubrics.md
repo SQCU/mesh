@@ -1,199 +1,266 @@
 # Three rubrics: mesh, collective, data
 
-Code is reviewed by the rubric of the layer it belongs to. Each axis is scored on its own, and failing one fails the
-change. The three rubrics contradict one another on purpose: code that would satisfy two of them belongs to neither, and
-is split along a boundary (Boundaries, below). The reasons R1-R8 are at the end.
+Each rubric says what its code is like at its best and at its worst, and scores the code on several qualities. A
+quality is not met or missed. The code sits somewhere between a virtuous pole and a derelict one, and every change moves
+it one way or the other. Neither pole is neutral: a virtue is like a particular good thing done well, and a dereliction
+is like a particular way of failing the people who depended on it. The signs under each quality say which way a change
+moves the code.
 
-## The layers
+The three rubrics invert one another. What is virtue in one layer is, in another, a dereliction (Inversions, below).
+Code that reads as virtuous under two rubrics is in the wrong layer.
 
 | | Mesh | Collective | Data |
 |---|---|---|---|
-| Code | `rdma/mesh-flow` and what it publishes (mesh-link.c, mesh-verbs.h, mesh-records.c, mesh.h's region layout); the node services (keeper, installers, map, records, mesh-stat) | libnccl-mesh (nccl.h, nccl-mesh*.c/.m), the schedule compiler (mesh-collective.c, mesh-plan.h), the device functions kernels call (mesh.metal), the bindings (torch-mesh backend.py, mesh_mpi.py) | everything that computes values: metal-microbench's engine (bootstrap.swift, dense_execution.swift, drafter.swift, metal/), LiteRT's program (litert_program.m, prepare_e2b.py), a rank's operands and crossings (mesh_rank.m, rank.swift), goal_a.swift, torch programs, examples/, torch-mesh's kernels; and the configuration they load (instance tables, attention plans, tpconfig, partition.py, allocate.py's parts) |
+| Code | `rdma/mesh-flow` and what it publishes (mesh-link.c, mesh-verbs.h, mesh-records.c, mesh.h's region layout); the node services | libnccl-mesh (nccl.h, nccl-mesh*.c/.m), the schedule compiler (mesh-collective.c, mesh-plan.h), the device functions kernels call (mesh.metal), the bindings (torch-mesh backend.py, mesh_mpi.py) | everything that computes values: metal-microbench's engine, LiteRT's program, a rank's operands and crossings (mesh_rank.m, rank.swift), goal_a.swift, torch programs, examples/, torch-mesh's kernels; and the configuration they load |
 | Lives | as long as the node | as long as a communicator, in its client's process | one call; its configuration, one model load |
-| Owns | the device, the window, the page table, every queue pair and request | its schedule and its own rows | its buffers and its numbers |
 | Hides | Apple's driver and the cables' hardware | the cabling and the membership, which change daily | the model, its formats and kernels, which change weekly |
-| Measured by | frames: at least 1,000 normal per transport error; time a hop | latency and bandwidth per link (αβ) | tok/s at the KL bar |
 
-## Rubric M: mesh code
+## M. Mesh code: the common carrier, or the customs house
 
-- **M1. Resident, never self-ending, always killable.** Nothing a client, call, peer, link, time or fault does stops
-  it, and any signal from anyone ends it, SIGKILL included. Its stop on SIGTERM is a flag, FAREWELL, exit. Nothing
-  makes it, or any other process, harder to end.
-- **M2. Only kernel calls that return.** After its start: post, poll and query. No destroy, deallocate, deregister,
-  close, drain, or move to the error state. What it no longer uses it forgets; the kernel releases it at exit.
-- **M3. Waits on no one.** Every loop polls memory or a call that returns at once, and reads its stop flag each pass.
-  It never waits for a client, a peer or a reply. No channel is used 5 s without something happening on it.
-- **M4. Content-blind.** It moves bytes between rows. It reads no dtype, shape, value, checksum, model, layer or
-  collective. The only bytes it writes are landed words and all-ones duds.
-- **M5. Algorithm-blind.** It knows no reduction, gather, tree, root or rank. It is handed positions (peer node,
-  length, rows of the client's own) and chooses the queue pairs, the order across clients and the rows a dud names.
-  It never derives a position.
-- **M6. Sole owner; complete mediation.** It is the only process that makes a verbs call or names a queue pair,
-  request, SGE, key, completion or doorbell. A client can express only its own rows (indices into its own row table):
-  anything else is unrepresentable, not checked and refused.
-- **M7. Everything at start.** The window is registered once and every table sized at start from the node's
-  configuration document. Nothing is allocated, registered or resized for a call or a client.
-- **M8. No protocol.** HELLO, LINK, FAREWELL and RECORD on the control socket. Data is a SEND into a posted RECV, frames
-  matched. No request, acknowledgement, handshake, agreement, session, stamp or retry.
-- **M9. A client's error stays the client's.** Its rows are released and its unsent positions go out as duds. No
-  client's failure, revocation or exit concludes a link, restarts a queue pair or delays another client. The bridge's
-  own errors never reach state other services use.
-- **M10. Three nines.** Per port: frames posted, frames landed, duds, transport errors by cause. At least 1,000 normal
-  frames per transport error; a link is lost only by a physical event.
-- **M11. Hardware latency.** No hop, copy or wake past the hardware's (about 2-3 µs a hop; three times that fails).
+At its best the bridge is a common carrier. It takes anyone's sealed goods and carries them without opening them. It is
+there every day, whatever happens to any one shipper, and it keeps an honest ledger of what it lost. At its worst it is
+a customs house. It opens parcels, demands forms, and holds goods until someone answers. It closes the road when one
+cart breaks down, and it will not leave when its shift is over.
 
-Forbidden in mesh code, required elsewhere:
-- Failing as a value; ending anything because a call failed (C5, D8). R1, R4.
-- Knowing a dtype, a combine, a schedule's meaning or a model; checking payload (C8, D1). R2, R7.
-- Specializing for a workload: caches, prediction, policies, features (D3). R3: every feature is shared state with the
-  node's lifetime, and changing it means restarting the bridge, the one operation that has panicked the Mini.
-- GPU work (D). R1, R6.
-- Agreeing with its peer about anything but a pairing (C4). R5.
-- Compensating for a client: watchdogs on clients, liveness detectors, state kept for a client "in case", guards
-  against being killed. R8.
+**M1. Discretion: what it knows of what it carries.**
+- Virtue, the sealed-letter postman: it moves bytes between rows and never learns what they mean; a new model or a new
+  collective changes nothing in it.
+- Dereliction, the customs inspector: it opens the parcels (dtypes, checksums, digests, a collective's name), and must
+  be retrained, which here means restarted on every node, for every new kind of parcel.
+- Signs: toward the postman, deleting anything the bridge reads of payload or of a position's purpose; toward the
+  inspector, any check of content or branch on what a position is for.
 
-## Rubric C: collective code
+**M2. Steadfastness: what other parties' failures do to it.**
+- Virtue, the lighthouse: ships founder and the light stays on; a client's failure costs that client its rows, its
+  unsent positions go out as duds, and nothing else changes.
+- Dereliction, the drawbridge that goes up whenever a cart breaks down: a client's end concludes a link, restarts its
+  queue pairs and delays every other client on the cable, so one failure becomes everyone's.
+- Signs: toward the lighthouse, duds and released rows; toward the drawbridge, any path from a client's end to a link's
+  conclusion.
 
-- **C1. Reference parity.** The API and its semantics are NCCL's, call for call, and MPI's for the V variants; each
-  algorithm is transcribed from its source (Rabenseifner 2004; Patarasuk & Yuan 2009; Thakur, Rabenseifner & Gropp
-  2005; Trivance 2026). A deviation cites the hardware interface that forces it.
-- **C2. General.** One implementation per collective, for every dtype and op the API names, any member count of at
-  least 2, any counts (ragged included), any connected map. Nothing names a model, a layer, a tensor's role or a
-  member's hardware.
-- **C3. The schedule is a pure function of its operands.** (map, members, counts, dtype, op, the communicator's
-  configured form), compiled before the call, the same at every member. No route, form or chunk is inferred, measured
-  or priced at run time.
-- **C4. Symmetric and silent.** Every length, order and position is known at both ends from the schedule. Nothing is
-  learned from a peer at run time; readiness is the landed word alone. No member decides anything alone.
-- **C5. Fails the call, within its deadline, holding nothing.** A call completes, or returns an error naming what was
-  lost within its deadline (5 s at most). Nothing resumes within a call, nothing needs cleaning, and the next call runs
-  on the next map with nothing to repair.
-- **C6. Own rows only.** It writes positions into its rows and supplied words, and reads landed words. It names no
-  device object and posts nothing.
-- **C7. Allocated once.** Scratch and staging come from its rows at communicator init; nothing is allocated per call.
-- **C8. Numerics declared, never checked.** Accumulation precision and reduction order are part of the schedule (fp32
-  accumulation, rounded once); bit identity across members is not required; no checksum or payload validation.
-- **C9. A library, not a splice.** What a kernel needs (publish, await, read) is a function in a header that data
-  kernels call. It never edits, generates or patches another program's kernels.
-- **C10. Bound by αβ.** Measured per link as latency plus bytes over bandwidth [Hockney 1994], within the hardware's,
-  overlapped with compute where the schedule allows.
+**M3. Tenure: how it begins and ends.**
+- Virtue, the night watchman: on duty all night, gone at once when relieved. Any signal from anyone ends it, and it
+  leaves nothing locked behind it.
+- Dereliction has two faces. The deserter walks off mid-shift on its own: it stops itself when its binary changes, on
+  a peer's silence, on a timer. The squatter barricades the door: guards that make it unkillable, teardown it insists
+  on finishing before it will go.
+- Signs: toward the watchman, exits reduced to a startup failure and an outside signal, release calls deleted; toward
+  the deserter, any stop it starts itself; toward the squatter, anything that delays or refuses a signal.
 
-Forbidden in collective code, required elsewhere:
-- Surviving a failure: retries, resumption, waiting out a peer, keeping a failed communicator for the next call (M1).
-  R4: recovery inside a call is a protocol, and calls fail and are rerun by their callers.
-- Device objects, posting, registering, claiming queue pairs, repairing links (M2, M6). R1, R6.
-- Specialization: variants per model or layer, model math beyond the declared combine, forms chosen by price (D3).
-  R2, R3: the cabling changes daily, and a collective shaped to one model or map is wrong on the next.
-- Adapting on one member at run time (D4). R5: with no protocol, a decision one member makes alone desynchronizes the
-  schedule.
-- Knowing what an axis means (D4). R2.
-- Compensating for the mesh: timers that declare a peer dead, keepalives, communicators kept to avoid a cost in M. R8.
+**M4. Austerity: how much state it keeps.**
+- Virtue, the monk's cell: rows, requests, words; nothing it does not need, all of it allocated at start.
+- Dereliction, the hoarder's house: sessions, caches, predictions, policies, per-client bookkeeping, each living as long
+  as the node and rotting there.
+- Signs: toward the cell, deleting a table, a phase or a timer; toward the hoarder, any feature, however useful it
+  sounds to some client.
 
-## Rubric D: data code
+**M5. Silence: how it coordinates.**
+- Virtue, the pneumatic tube: things arrive where they were sent without a word exchanged; the only conversation is the
+  pairing a new cable needs.
+- Dereliction, the bureaucracy: requests, receipts, acknowledgements, appointments, sessions, meetings, stamps. Each is
+  a second message about the first, and it can be late, lost or false.
+- Signs: toward the tube, deleting a frame kind; toward the bureaucracy, any message whose content is the state of
+  another message.
 
-- **D1. Accuracy is measured, never gated.** The whole model's KL at the unembedding against the bar (LiteRT's pair
-  KL), computed after the call. Draws at temperature 1.
-- **D2. Throughput.** tok/s end to end; slower than the last measured form is a regression; under 3% is equal. Kernels
-  against the hardware's roofline and LiteRT's per-matrix times.
-- **D3. Specialized at load.** Every choice (forms, parts, splits, row classes, kernel instances, attention plans) is
-  synthesized once when the configuration loads. Nothing is derived, defaulted or guessed in a function that takes
-  tensors; a missing choice throws; as few branches at run time as physically attainable.
-- **D4. Shares are data; members differ.** Every partitioned axis is a ragged share from the configuration (tpconfig,
-  the Balancer's parts from the calls' evidence). Every member hosts, the second computer is always used, and members
-  run different work on different engines.
-- **D5. One form.** One implementation of each computation (one layer program for target and drafter; one RMSNorm). A
-  deleted form is restored, not redesigned.
-- **D6. Collectives through the API.** Crossings are NCCL calls, or the library's device functions called from its own
-  kernels. It names no link, peer, route, queue pair, bridge row or bridge object; topology is unknown to it.
-- **D7. It knows what it needs.** Weights, KV and crossing buffers are sized by the program from its configuration and
-  held in its own rows from load; nothing is allocated per call; no other layer computes a ceiling for it.
-- **D8. The call fails; the process does not.** A failed call returns its error to its caller, who may run it again.
-  Nothing outlives the call but caches keyed by content (weights, compiled programs, KV pages). No cleanup, no recovery
-  inside a call.
-- **D9. Waits on its inputs only.** A kernel waits only on its inputs' landed words, through the library's bounded
-  await; never on a word another queue of its own writes, never on another member's control flow.
-- **D10. Foreign code unmodified.** LiteRT, torch and others are called through their APIs or extended by modules and
-  headers; no text edits, monkeypatches or interposition.
+**M6. Custody: who touches the device.**
+- Virtue, the vault teller: clients hand over slips naming their own accounts, and only the teller enters the vault. A
+  slip naming someone else's account cannot even be written.
+- Dereliction, keys under the mat: clients holding work requests, queue-pair pointers and the addresses of words the
+  bridge writes, and grabbing queue pairs for themselves.
+- Signs: toward the teller, client-visible types reduced to row indices and readiness words; toward the mat, any device
+  object in a client's memory.
 
-Forbidden in data code, required elsewhere:
-- Generality across maps, dtypes and ops (C2). R3: generic code leaves the roofline.
-- Knowing topology, routes, links, peers' liveness or the bridge (C3, M). R2: a recabling never touches model code,
-  and a model never touches the transport.
-- Holding device or link state; never failing; cleanup protocols (M1, M2). R1, R4.
-- Agreeing with other members at run time (C4). R5: members differ by configuration they all load, never by
-  negotiation.
-- Payload checks, stamps or digests inside the program (C8, M4). R7.
-- Compensating: fallback forms, defaults, clamps, retries, ceilings. R8.
+**M7. Composure: whether it ever waits.**
+- Virtue, the air-traffic controller: eyes on every plane, never stepping away; every loop polls and can stop.
+- Dereliction, the clerk who goes to lunch with the only key: a kernel call that waits on a device's termination, a
+  drain that waits for markers never promised, a wait on a peer.
+- Signs: toward the controller, only calls that return and a stop flag read every pass; toward the clerk, any call that
+  can wait on another party.
 
-## Boundaries
+**M8. Honest accounts: its reliability, counted.**
+- Virtue, the auditor's ledger: every frame counted and every loss attributed to its cause, a thousand clean frames for
+  each loss, and links lost only to physical events.
+- Dereliction, the embezzler's books: its own conclusions of links booked as flaky hardware, client errors booked as
+  transport errors, losses not counted at all.
+- Signs: toward the ledger, counters per port by cause; toward the embezzler, any loss it caused and did not count as
+  its own.
 
-- **Mesh and collective:** rows the client owns, positions in them, supplied and landed words. Nothing else.
-- **Collective and data:** the NCCL API (communicators, buffers, a call's result), the device-function header, and
-  memory through `ncclMemAlloc`. Nothing else.
-- **Mesh and data:** nothing. Data code never reads the bridge's region, watches its process or sizes itself by its
-  window.
+**M9. Directness: what it costs a frame.**
+- Virtue, the relay runner's clean handoff: no hop, copy or wake beyond the hardware's 2-3 µs.
+- Dereliction, the middleman taking a cut: an extra hop, a staging copy, a thread woken to pass something on.
 
-## The contradictions
+## C. Collective code: the ensemble reading one score, or the committee
 
-| | Mesh | Collective | Data |
-|---|---|---|---|
-| On failure | never fails; forgets the client | fails the call within 5 s | returns the error; the caller reruns |
-| Ending | resident; any signal ends it | with its process | with its call |
-| Content | bytes | dtype and op | meaning |
-| Topology | its own cables | the whole map, as an operand | none |
-| Specialization | forbidden | forbidden | required |
-| Agreement with peers | a pairing only | total, by construction | none: members differ by configuration |
-| Device | sole owner | own rows | own buffers, through the API |
-| Features | none | NCCL's | any that measures faster at the bar |
-| Waits | on no one | on landed words, within 5 s | on its inputs, through the library |
-| Allocation | everything at start | at communicator init | at model load |
+At its best a collective is an ensemble playing from one score. Every entry is written down before the performance and
+each player knows every other's part. Nobody speaks while playing. If a player collapses, the music stops, and the next
+piece starts clean. At its worst it is a committee. Its members confer before each step, and each decides alone when it
+feels like it. A missing member is waited for indefinitely, and the minutes carry over to haunt the next meeting.
 
-## Why they contradict
+**C1. Fidelity: how close it stays to its sources.**
+- Virtue, the faithful translator, the musician playing as written: NCCL's calls and semantics, the papers' algorithms
+  near verbatim (Rabenseifner; Patarasuk & Yuan; Thakur, Rabenseifner & Gropp; Trivance).
+- Dereliction, the cover band rewriting the song: invented semantics, home-grown algorithms, features NCCL never had.
 
-- **R1. Lifetime.** The node outlives a communicator, which outlives a call. Longer-lived state may not depend on
-  shorter-lived code, and shorter-lived code may not hold longer-lived state. The operator, 2026-10-14: "functions can
-  fail from any one operand becoming invalidatd, servers should not fail when any operand is invalidated (ideally)".
-- **R2. What changes.** Each layer hides the one thing that changes on its own schedule: Apple's driver (M), the cabling
-  and membership (C), the model (D) [Parnas 1972]. A layer that knows another's secret changes when that changes, and a
-  change to M is a restart of every node's bridge.
-- **R3. Objectives pull apart.** Reliability grows by removing features (M), generality by removing specialization
-  (C), throughput at the bar by adding specialization (D). Code that serves two objectives loses both.
-- **R4. Failure.** M never fails and can always be killed; C fails the call within its deadline; D's call fails and is
-  rerun. Crash-only: the way to stop is to end, and the way to recover is the next start [Candea & Fox 2003]. Recovery
-  inside a call is forbidden at every layer (the operator, 2026-10-14: "within call failures cannot be resume and
-  instead must return an error").
-- **R5. Coordination without protocol.** M agrees with its peer only on a pairing. C agrees by construction (both ends
-  compile the same schedule), so no member decides alone. D's members differ, by configuration all of them load before
-  the call.
-- **R6. Privilege.** Complete mediation [Anderson 1972; Saltzer & Schroeder 1975]; the four reasons of
-  design/transport.md section 2.
-- **R7. End to end.** Correctness is checked at the ends (D1's KL, after the call), never in the transport or the
-  collective [Saltzer, Reed & Clark 1984]. A check below the ends becomes a gate (the September `K_DIGEST`).
-- **R8. An error is removed by its owner, never compensated by another layer.** A mechanism added in one layer to
-  survive another layer's error is a second error: it presumes the first will happen, does not remove it, fails in its
-  own way, and hides the first from its owner, so the two spread together. Examples from this repository: a guard that
-  made processes unkillable, against a deadlock any exit could enter; links concluded to clear receives a communicator
-  had left posted; communicators kept across calls to avoid that conclusion; meets and stamps against a missing peer;
-  per-rank ceilings against a window the program could size itself. The removals are at the owners: no release calls
-  (M2), no receives in client rows (M6), duds (M9), each program's own sizes (D7).
+**C2. Universality: what it can serve.**
+- Virtue, standard-gauge track: any train on any line; every dtype and op, any member count from two, ragged counts,
+  any connected map.
+- Dereliction, the bespoke part machined for one engine: a variant per model or layer, a form chosen for one shape.
 
-## HEAD against the rubrics (first reading, 2026-10-19)
+**C3. Unison: how members know each other's parts.**
+- Virtue, one score: every length, order and position known to every member from a schedule each compiles identically.
+- Dereliction, the committee and the soloist: conferring at run time (meets, agreements, stamps), or one member
+  improvising alone and leaving the rest out of time.
+- Signs: toward the score, deleting a message between members; toward the committee, any wait for another member's
+  word that is not its data.
 
-- metal-microbench mesh_rank.m reads the bridge's region header and watches the bridge's process (`MeshRankBridge`):
-  D6, Boundaries.
-- metal-microbench weights.swift `withinPlan` and tools/mesh/programs.py `plans` ceilings: D7, R8.
-- libnccl-mesh's sessions, meets, digests and stamps: C4, C5, R8.
-- Clients claim queue pairs by compare-and-swap on `hdr->lanes` and hold `struct mesh_send`: C6, M6.
-- The bridge concludes a link when a communicator ends: M9, M10.
-- The bridge stops itself when its binary changes: M1.
-- Communicators kept from call to call: C5, R8.
-- The kill guard (`bin/mesh-kill-guard.sh`, its shims and hooks; deleted 2026-10-19): M1, R8.
+**C4. Foresight: when the schedule is decided.**
+- Virtue, the printed timetable: routes, forms and chunks fixed from the map and the communicator's configuration
+  before the call.
+- Dereliction, the dispatcher deciding each train's route as it pulls in: routes inferred, forms priced, chunks
+  measured during the call.
+
+**C5. Clean endings: what a loss does to it.**
+- Virtue, the referee's whistle: on a loss the call stops within its deadline with an error naming what was lost.
+  Everyone leaves the field holding nothing, and the next call starts on the next map.
+- Dereliction, the hostage negotiation and the ghost: waiting out a missing peer, retrying, resuming, or keeping a
+  communicator alive so that its state haunts the next call.
+
+**C6. Tenancy: what it touches.**
+- Virtue, the good tenant: its own rows, its supplied and landed words, and device functions offered as a header for
+  others to call.
+- Dereliction, the burglar, and the surgeon who sews his instruments into the patient: reaching for device objects,
+  posting, claiming queue pairs; splicing its code into other programs' kernels.
+
+**C7. Candor about numbers.**
+- Virtue, the recipe that states its measures: accumulation precision and reduction order declared, last-bit
+  differences between members accepted.
+- Dereliction, the nervous inspector stamping every crate: checksums and digests, which become gates.
+
+**C8. Economy.**
+- Virtue, water finding the shortest path: latency plus bytes over bandwidth per link, overlapped with compute.
+- Dereliction, the tour bus stopping at every gift shop: extra rounds, staging copies, host round trips between steps.
+
+## D. Data code: the tailor with mise en place, or the improvising cook
+
+At its best a program is bespoke work prepared before service. It is fitted to this model and these machines at load,
+and every station is prepped. Each cook does the work that suits them, and the kitchen is judged by the plate that
+leaves it. At its worst it is an improvising cook in someone else's kitchen. It rummages for ingredients mid-order and
+serves the same generic dish to everyone. It inspects each step instead of tasting the result. It grabs the delivery
+driver's wheel, and it blames the weather when it is slow.
+
+**D1. Fit.**
+- Virtue, the bespoke tailor, the racing car set up for this track: kernels, row classes, splits and attention plans
+  made for this model on these machines.
+- Dereliction, off the rack: generic kernels, branches at run time choosing among shapes, "works for any model" as a
+  goal.
+
+**D2. Mise en place: when its choices are made.**
+- Virtue, the chef's station before service: every choice synthesized when the configuration loads, and a missing one
+  stops the kitchen before the first order.
+- Dereliction, the cook rummaging mid-order: parameters derived inside functions that take tensors, defaults, guesses,
+  fallback forms.
+- Signs: toward the station, a choice moved into configuration synthesis; toward the rummaging, any branch or
+  computation of a parameter where a tensor is in scope.
+
+**D3. Judged by the plate.**
+- Virtue, the dish judged by the diner: the whole model's KL at the unembedding, over temperature-1 draws, measured
+  after the call.
+- Dereliction, the hypochondriac taking his pulse every minute, and the cheat tasting only the garnish: gates inside
+  the program, demands for bit identity, greedy outputs taken as evidence.
+
+**D4. Honest pace.**
+- Virtue, the athlete against their best time: tok/s end to end against the last best form, differences under 3%
+  treated as equal.
+- Dereliction, the excuse-maker: slowness blamed on other load or on noise, a different distance run (a component timed
+  in place of the call), a regression kept because it reads cleaner.
+
+**D5. The brigade: how members share the work.**
+- Virtue, a kitchen brigade: each member does the work that suits it. Shares are ragged, from the calls' evidence;
+  every member hosts; nodes run different engines; the second computer is always working.
+- Dereliction, the chain gang or the bench: identical shares forced on unequal members, or the weaker member benched at
+  0%.
+
+**D6. The passenger: what it knows of the road.**
+- Virtue, the passenger who buys a ticket: crossings through the API, and the route unknown and unneeded.
+- Dereliction, the backseat driver: reading the bridge's region, watching its process, naming links, peers or routes,
+  so that a recabling means a rewrite.
+
+**D7. Provisions: how it gets its memory.**
+- Virtue, the provisioned expedition: buffers sized from its own configuration and held from load.
+- Dereliction, the lodger on rations or the looter: ceilings imposed by someone else's estimate, or memory taken per
+  call.
+
+**D8. Sending the dish back: what a failure does.**
+- Virtue, the dish remade: the call fails, returns its error, and the caller runs it again; only caches keyed by content
+  outlive it.
+- Dereliction, the cook who serves it half-done with an excuse (fallback forms, partial results), or who sets the
+  kitchen on fire (shared state held across the failure, cleanup protocols, recovery inside the call).
+
+**D9. One master recipe.**
+- Virtue, one recipe for each dish (one layer program for target and drafter, one RMSNorm), and others' recipe books
+  respected (LiteRT and torch called through their APIs).
+- Dereliction, twenty-three variants of the same sauce, and the vandal scribbling in someone else's recipe book
+  (monkeypatching, text splices).
+
+## Inversions
+
+| What the code does | Virtue in | The same act, in another layer |
+|---|---|---|
+| Ignores what it carries | M: the sealed-letter postman | D: the cook indifferent to the ingredients |
+| Never ends on its own | M: the lighthouse, the watchman | C and D: the hostage negotiation, the guest who will not leave |
+| Ends at the first loss | C: the referee's whistle | M: the drawbridge that rises for every broken cart |
+| Knows every other party's part | C: the ensemble's score | M: the bureaucrat who must be consulted; D: the backseat driver |
+| Fits one case exactly | D: the bespoke tailor | C: the part that fits one engine; M: the carrier that favours one shipper |
+| Fits every case | C: standard-gauge track | D: off the rack |
+| Members do different work | D: the brigade | C: the soloist out of time |
+| Adds a feature that measures faster | D: the athlete's new technique | M: the hoarder's new shelf |
+
+They invert for these reasons:
+- **Lifetime.** The node outlives a communicator, which outlives a call. Steadfastness in the longest-lived is
+  stubbornness in the shorter-lived. A clean ending in a call is desertion in the carrier. The operator, 2026-10-14:
+  "functions can fail from any one operand becoming invalidatd, servers should not fail when any operand is invalidated
+  (ideally)".
+- **What each hides.** The driver and the cables (M), the cabling and the membership (C), the model (D) [Parnas 1972].
+  Knowing another layer's secret is meddling, and it makes the meddler change whenever the secret does.
+- **Opposite objectives.** Reliability comes by subtraction (M), generality by refusing to specialize (C), throughput
+  by specializing (D). Code that serves two objectives serves neither.
+- **No protocol.** Agreement exists only by construction (C). A carrier that agrees is a bureaucrat. Members that
+  differ do so by configuration they all load, never by negotiation.
+- **Privilege** [Anderson 1972; Saltzer & Schroeder 1975]: design/transport.md section 2.
+- **End to end.** Correctness is judged at the plate, never at the post office [Saltzer, Reed & Clark 1984].
+- **Crash-only.** The way to stop is to end, and the way to recover is the next start [Candea & Fox 2003].
+- **Contagion.** A mechanism one layer adds to survive another layer's failure is a second failure. It presumes the
+  first will happen, does not remove it, fails in its own way, and hides the first from its owner, and then the two
+  spread together. Examples:
+  - The squatter: a guard that made processes unkillable against a deadlock any exit could enter.
+  - The drawbridge: links concluded to clear receives that a communicator had left posted.
+  - The ghost: communicators kept across calls to avoid that conclusion.
+  - The committee: meets and stamps against a missing peer.
+  - The lodger on rations: ceilings against a window the program could size itself.
+
+  Each failure is removed by its owner and nowhere else.
+
+## Where HEAD sits (2026-10-19)
+
+- **The bridge.**
+  - M2, near the drawbridge: links are concluded when a communicator ends.
+  - M3, near the deserter: it stops itself when its binary changes.
+  - M6, near keys under the mat: clients hold `struct mesh_send` and claim queue pairs on `hdr->lanes`.
+  - M8, near the embezzler's books: 100 of the M5 bridge's 176 link losses from 2026-10-16 to 10-19 were its own
+    conclusions, and nothing counted them as its own.
+  - M3's squatter is gone: the kill guard was deleted on 2026-10-19.
+- **libnccl-mesh.** Near the committee on C3 (sessions, meets, stamps) and near the ghost on C5 (communicators kept
+  across calls).
+- **metal-microbench.**
+  - D6, near the backseat driver: mesh_rank.m reads the bridge's region and watches its process.
+  - D7, near the lodger on rations: `withinPlan` and `plans` ceilings.
+  - D1 and D2, close to the tailor's mise en place since attention plans and instances are synthesized at load
+    (2b75b6a, d3d0f4b).
 
 ## References
 
 - Anderson, J. P. (1972). Computer security technology planning study. ESD-TR-73-51.
 - Candea, G. & Fox, A. (2003). Crash-only software. HotOS IX.
-- Hockney, R. (1994). The communication challenge for MPP: Intel Paragon and Meiko CS-2. Parallel Computing.
 - Parnas, D. L. (1972). On the criteria to be used in decomposing systems into modules. CACM 15(12).
 - Saltzer, J. H. & Schroeder, M. D. (1975). The protection of information in computer systems. Proc. IEEE 63(9).
 - Saltzer, J. H., Reed, D. P. & Clark, D. D. (1984). End-to-end arguments in system design. ACM TOCS 2(4).
