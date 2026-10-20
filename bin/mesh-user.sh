@@ -82,7 +82,7 @@ PL
 out=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
-  || { launchctl kill SIGTERM "gui/$(id -u)/io.mesh.bridge" 2>/dev/null; \
+  || { launchctl kill SIGTERM "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
        echo "io.mesh.bridge: its new binary or configuration is installed; the bridge stopped by SIGTERM, launchd starts it on them"; }
 printf 'revision=%s\nimages=%s\n' "$(git -C "$source" rev-parse HEAD 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
 if [ -f "$support/io.mesh.converge/configuration.plist" ]; then
