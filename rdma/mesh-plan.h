@@ -241,7 +241,7 @@ struct mesh_place { uint32_t step,send; uint64_t first,pieces; };
    from position `at`: each round's (in the steps' round order, a round's steps in their order) SENDs and receives side
    by side from where the round before ended, a piece's pieces consecutive; the end, and each step it places (one with
    no bytes none) in made[*placed ..], *placed counting them.  The one layout both ends of a channel make of their two
-   ranks' steps (libnccl-mesh lay, order_group). */
+   ranks' steps (libnccl-mesh lay, schedule_group). */
 uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int large,const struct mesh_wire *wire,uint64_t at,
                   struct mesh_place *made,uint32_t *placed);
 /* Each step's receive before it (by round, then the steps' order) of any bytes, -1 where none: a step's first piece

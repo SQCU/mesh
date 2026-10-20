@@ -2363,12 +2363,9 @@ static ncclResult_t gpu(int status, const char *what) {
   return status ? fail(ncclSystemError, "%s on the GPU: %s", what, *metal_error() ? metal_error() : strerror(status)) : ncclSuccess;
 }
 
-/* one of this rank's publications in its group's order (order_group): its level, channel and position */
-struct event { uint64_t level; uint32_t h; uint64_t at; };
-
 /* a group issued and not complete: its communicator, its calls, its schedule and its positions [start, end) on each of
-   its communicator's channels, its publications in order (`next` the first the walk has not completed); the groups in
-   flight are in issue order, a communicator's holding consecutive positions on every channel of it */
+   its communicator's channels; the groups in flight are in issue order, a communicator's holding consecutive positions
+   on every channel of it */
 struct inflight {
   uint64_t ticket;
   struct ncclComm *comm;
@@ -2376,8 +2373,6 @@ struct inflight {
   size_t n;
   struct schedule *plans;
   uint64_t *start, *end;
-  struct event *order;
-  size_t events, next;
   struct inflight *next_group;
 };
 static struct inflight *inflight, *inflight_last;
@@ -2403,7 +2398,6 @@ static void calls_free(struct call *list, size_t n) {
 static void inflight_free(struct inflight *g) {
   schedules_free(g->comm, g->plans);
   free(g->start);
-  free(g->order);
   calls_free(g->list, g->n);
   free(g);
 }
@@ -2485,170 +2479,6 @@ static ncclResult_t arrive(struct metal_program *program, struct ncclComm *comm,
   return result;
 }
 
-static int event_order(const void *x, const void *y) {
-  const struct event *a = x, *b = y;
-  if (a->level != b->level) return a->level < b->level ? -1 : 1;
-  if (a->h != b->h) return a->h < b->h ? -1 : 1;
-  return (a->at > b->at) - (a->at < b->at);
-}
-
-/* the group's publications in the one order every rank's walk keeps (MSCCLang's: a topological order of the dependency
-   graph over every rank, so no rank's wait is on what another encodes after a wait of its own).  Every rank's plan of
-   each collective laid out on every channel (mesh_group_lay), each end's publication of each position and its
-   consumption are the nodes: a publication after its channel's previous one, the peer's publication LAG positions back
-   (whose landing frees the units it fills) and its own consumption of that position, a SEND's first piece after the
-   consumption of the receive before it; a consumption after its channel's previous one, the peer's publication where a
-   piece lands, a receive's first piece after the receive before it.  A publication's level is one more than its
-   predecessors' largest, a consumption's that largest.  This rank's publications go to g->order by level; the walk
-   encodes a consumption only where a publication (or the group's end) needs it, so a wait is on a publication of a level
-   below the next one encoded, and the lowest level not yet published always can be.  Every rank plans every rank's steps
-   of a collective; of a point-to-point call and a hosted all-to-all only its own, which already lay both directions of
-   each of its channels (mesh_lay: a pair's sizes agree at both ends), and none of whose steps waits on another channel
-   (mesh_group_before), so their positions on two other ranks' channels, laid after every collective's, feed no node of
-   another channel and every level is the same on every rank.  A counted all-to-all whose counts are the device's waits
-   its rows on every counts receive, on channels of two other ranks that are unknown here: among three or more ranks its
-   levels may differ between ranks */
-static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
-  const int N = comm->nranks, me = comm->rank;
-  struct call *list = g->list;
-  size_t S = 2;
-  for (size_t i = 0; i < g->n; i++) {
-    if (list[i].bound && list[i].bound->program && list[i].bound->program->first[N] + 1 > S) S = list[i].bound->program->first[N] + 1;
-    if (list[i].bound && list[i].bound->count + 1 > S) S = list[i].bound->count + 1;
-  }
-  const size_t n = g->n, E = (size_t)N * (N - 1);
-  const struct mesh_step **steps = calloc((size_t)N * n + 1, sizeof *steps);
-  struct mesh_step *planned = calloc((size_t)N * n * S + 1, sizeof *planned);
-  uint32_t *counts = calloc((size_t)N * n + 1, sizeof *counts), *lane = calloc((size_t)N * n * S + 1, sizeof *lane);
-  uint64_t *first = calloc((size_t)N * n * S + 1, sizeof *first), *pieces = calloc((size_t)N * n * S + 1, sizeof *pieces);
-  uint64_t *length = calloc(2 * E + 1, sizeof *length), *offset = calloc(E + 1, sizeof *offset);
-  struct mesh_group_call *calls = calloc(n + 1, sizeof *calls);
-  struct mesh_group_place *made = calloc(n * S + 1, sizeof *made);
-  struct mesh_place *scratch = calloc(S + 1, sizeof *scratch);
-  int32_t *before = calloc((size_t)N * n * S + 1, sizeof *before);
-  struct mesh_group group;
-  ncclResult_t result = steps && planned && counts && lane && first && pieces && length && offset && calls && made && scratch && before
-                          ? ncclSuccess : fail(ncclSystemError, "out of memory");
-  /* a channel: the pair a < b (its index among the pairs) and the class; an end's side 0 for a, 1 for b; rank r's steps
-     of call i at steps[i * N + r] */
-#define CHANNEL(a, b, large) ((((size_t)(a) * (2 * N - (a) - 1) / 2 + ((b) - (a) - 1))) * 2 + (size_t)(large))
-#define AT(r, i, k) (((size_t)(r) * n + (i)) * S + (k))
-#define STEPS(r, i) ((size_t)(i) * N + (size_t)(r))
-  for (int r = 0; r < N && !result; r++)
-    for (size_t i = 0; i < n && !result; i++) {
-      const struct steps *own = list[i].bound;
-      if (!own) continue;
-      if (r == me) { steps[STEPS(r, i)] = own->steps; counts[STEPS(r, i)] = own->count; }
-      else if (!p2p(list + i) && !counted(list + i)) {
-        steps[STEPS(r, i)] = planned + AT(r, i, 0);
-        counts[STEPS(r, i)] = mesh_program_steps_cut(own->program, (uint32_t)r, own->operand, own->segments, planned + AT(r, i, 0));
-      }
-    }
-  if (!result) group_of(list, n, (uint32_t)N, steps, counts, calls, &group);
-  for (int r = 0; r < N && !result; r++)
-    for (int q = 0; q < N; q++)
-      for (int large = 0; q != r && large < 2; large++) {
-        uint32_t placed = 0;
-        const size_t e = r < q ? CHANNEL(r, q, large) : CHANNEL(q, r, large);
-        length[2 * e + (r > q)] = mesh_group_lay(&group, (uint32_t)r, (uint32_t)q, large, &comm->wire, 0, scratch, made, &placed);
-        for (uint32_t m = 0; m < placed; m++) {
-          const size_t x = AT(r, made[m].call, made[m].place.step);
-          lane[x] = (uint32_t)e; first[x] = made[m].place.first; pieces[x] = made[m].place.pieces;
-        }
-      }
-  for (int r = 0; r < N && !result; r++)
-    for (size_t i = 0; i < n && !result; i++)
-      if (counts[STEPS(r, i)] && mesh_group_before(group_kind(list + i), steps[STEPS(r, i)], counts[STEPS(r, i)], before + AT(r, i, 0)))
-        result = fail(ncclSystemError, "out of memory");
-  size_t T = 0;
-  for (size_t e = 0; e < E && !result; e++) {
-    offset[e] = T;
-    T += length[2 * e] > length[2 * e + 1] ? length[2 * e] : length[2 * e + 1];
-  }
-  /* per end and position: the consumption a publication's first piece and a receive's first piece wait on (node + 1, 0
-     none), whether a piece leaves (sends) and arrives (lands) there */
-  uint64_t *after_send = calloc(2 * T + 1, sizeof *after_send), *after_receive = calloc(2 * T + 1, sizeof *after_receive);
-  unsigned char *sends = calloc(2 * T + 1, 1), *lands = calloc(2 * T + 1, 1);
-  if (!result && (!after_send || !after_receive || !sends || !lands)) result = fail(ncclSystemError, "out of memory");
-#define NODE(e, t, kind) (4 * (offset[e] + (t)) + (kind))
-  for (int r = 0; r < N && !result; r++)
-    for (size_t i = 0; i < n; i++)
-      for (uint32_t k = 0; k < counts[STEPS(r, i)]; k++) {
-        if (!pieces[AT(r, i, k)]) continue;
-        const struct mesh_step *own = steps[STEPS(r, i)];
-        const size_t e = lane[AT(r, i, k)], side = (size_t)(r > (int)own[k].peer), at = offset[e] + first[AT(r, i, k)];
-        const int send = own[k].op == MESH_STEP_SEND;
-        const int32_t j = before[AT(r, i, k)];
-        uint64_t wait = 0;
-        if (j >= 0) {
-          const size_t ej = lane[AT(r, i, j)], sj = (size_t)(r > (int)own[j].peer);
-          wait = 1 + 4 * (offset[ej] + first[AT(r, i, j)] + pieces[AT(r, i, j)] - 1) + 2 + sj;
-        }
-        (send ? after_send : after_receive)[2 * at + side] = wait;
-        for (uint64_t t = 0; t < pieces[AT(r, i, k)]; t++) (send ? sends : lands)[2 * (at + t) + side] = 1;
-      }
-  /* the nodes, their predecessors (at most four), Kahn's order */
-  uint64_t *pred = calloc(16 * T + 1, sizeof *pred), *level = calloc(4 * T + 1, sizeof *level), *queue = calloc(4 * T + 1, sizeof *queue);
-  uint32_t *degree = calloc(4 * T + 1, sizeof *degree), *successors = calloc(4 * T + 2, sizeof *successors);
-  uint64_t *edge = calloc(16 * T + 1, sizeof *edge);
-  if (!result && (!pred || !level || !queue || !degree || !successors || !edge)) result = fail(ncclSystemError, "out of memory");
-  for (size_t e = 0; e < E && !result; e++) {
-    const uint64_t positions = (e + 1 < E ? offset[e + 1] : T) - offset[e];
-    for (uint64_t t = 0; t < positions; t++)
-      for (size_t side = 0; side < 2; side++) {
-        const size_t o = offset[e] + t;
-        uint64_t *pp = pred + 4 * NODE(e, t, side), *pc = pred + 4 * NODE(e, t, 2 + side);
-        if (t) { pp[0] = 1 + NODE(e, t - 1, side); pc[0] = 1 + NODE(e, t - 1, 2 + side); }
-        if (t >= LAG) { pp[1] = 1 + NODE(e, t - LAG, 1 - side); pp[2] = 1 + NODE(e, t - LAG, 2 + side); }
-        pp[3] = after_send[2 * o + side];
-        if (lands[2 * o + side] || sends[2 * o + 1 - side]) pc[1] = 1 + NODE(e, t, 1 - side);
-        pc[2] = after_receive[2 * o + side];
-      }
-  }
-  for (uint64_t v = 0; v < 4 * T && !result; v++)
-    for (int k = 0; k < 4; k++)
-      if (pred[4 * v + k]) { degree[v]++; successors[pred[4 * v + k] - 1 + 1]++; }
-  for (uint64_t v = 0; v < 4 * T && !result; v++) successors[v + 1] += successors[v];
-  for (uint64_t v = 0; v < 4 * T && !result; v++)
-    for (int k = 0; k < 4; k++)
-      if (pred[4 * v + k]) edge[successors[pred[4 * v + k] - 1]++] = v;
-  for (uint64_t v = 4 * T; v > 0 && !result; v--) successors[v] = successors[v - 1];
-  if (!result) successors[0] = 0;
-  size_t head = 0, tail = 0;
-  for (uint64_t v = 0; v < 4 * T && !result; v++)
-    if (!degree[v]) queue[tail++] = v;
-  while (head < tail && !result) {
-    const uint64_t v = queue[head++];
-    uint64_t most = 0;
-    for (int k = 0; k < 4; k++)
-      if (pred[4 * v + k] && level[pred[4 * v + k] - 1] > most) most = level[pred[4 * v + k] - 1];
-    level[v] = most + ((v & 3) < 2);
-    for (uint32_t x = successors[v]; x < successors[v + 1]; x++)
-      if (!--degree[edge[x]]) queue[tail++] = edge[x];
-  }
-  if (!result && tail != 4 * T) result = fail(ncclInternalError, "the group's positions admit no order (%zu of %llu nodes)", tail, (unsigned long long)(4 * T));
-  size_t events = 0;
-  for (uint32_t h = 0; h < comm->count; h++) events += g->end[h] - g->start[h];
-  if (!result && !(g->order = calloc(events + 1, sizeof *g->order))) result = fail(ncclSystemError, "out of memory");
-  for (uint32_t h = 0; h < comm->count && !result; h++) {
-    const struct channel *ch = comm->channels + h;
-    const int q = ch->peer;
-    if (g->end[h] == g->start[h]) continue;
-    const size_t e = me < q ? CHANNEL(me, q, ch->large) : CHANNEL(q, me, ch->large), side = (size_t)(me > q);
-    if (length[2 * e + side] != g->end[h] - g->start[h]) { result = fail(ncclInternalError, "the group's positions on channel %u disagree", h); break; }
-    for (uint64_t t = 0; t < g->end[h] - g->start[h]; t++) g->order[g->events++] = (struct event){level[NODE(e, t, side)], h, g->start[h] + t};
-  }
-#undef NODE
-#undef STEPS
-#undef AT
-#undef CHANNEL
-  if (!result) qsort(g->order, g->events, sizeof *g->order, event_order);
-  free(steps); free(planned); free(counts); free(lane); free(first); free(pieces); free(length); free(offset); free(calls); free(made); free(scratch);
-  free(before); free(after_send); free(after_receive); free(sends); free(lands); free(pred); free(level); free(queue); free(degree); free(successors);
-  free(edge);
-  return result;
-}
-
 /* a counted all-to-all's end on the GPU, once every count landed (its counts receives consumed; at once where it has
    none): its own rows into place, the landed counts into `received` (stored system-coherent: the host reads them as they
    are, mesh 3981ca80^'s `received`) and `landed`, then its word released (1, or 2 where the counts pass its layout,
@@ -2701,15 +2531,20 @@ static ncclResult_t counted_stage(struct metal_program *program, struct call *c,
   return result || (st && c->counting) ? result : counted_end(program, c, violation);
 }
 
-/* a counted all-to-all's counts from rank q consumed: their rows checked against the pair's bound (METAL_COUNTED_CHECK),
-   and its end once every count landed */
-static ncclResult_t counted_landed(struct metal_program *program, struct call *c, int q, void *violation) {
+/* a counted all-to-all's counts from rank q consumed (its step k): their rows checked against the pair's bound
+   (METAL_COUNTED_CHECK), and its end after its last counts receive in step order, which every other counts receive
+   precedes (mesh_group_before: each after the one before it) */
+static ncclResult_t counted_landed(struct metal_program *program, struct call *c, int q, uint32_t k, void *violation) {
   const int n = c->comm->nranks;
   const uint64_t *rseg = c->segments + n, R = seg_first(rseg, n);
+  const struct steps *st = c->bound;
   ncclResult_t result = gpu(metal_counted(program, METAL_COUNTED_CHECK, &(struct metal_counted){
     .d = c->got_at.buffer, .dst = c->got_at.offset + R * sizeof(int64_t), .first = seg_first(rseg, q), .entries = (uint32_t)rseg[q],
     .scalar = counted_bound(c)}), "a counted all-to-all's bound");
-  if (!result && c->counting && !--c->counting) result = counted_end(program, c, violation);
+  uint32_t last = k;
+  for (uint32_t j = k + 1; j < st->count; j++)
+    if (st->steps[j].op != MESH_STEP_SEND && st->steps[j].buffer == 2) last = j;
+  if (!result && last == k) result = counted_end(program, c, violation);
   return result;
 }
 
@@ -2722,91 +2557,88 @@ static int fused_piece(const struct message *m, size_t offset, size_t length) {
   return fusing.out && m->c == fusing.call && !m->offset && !offset && length == m->bytes && m->bytes == elements(m->c) * SIZE[m->c->type];
 }
 
-/* channel h's positions consumed up to `end`, in order: a piece's landing awaited (its run's last unit's, a dud
-   checked) and combined or copied where it belongs (an empty position needs nothing), a receive's first piece after the
-   receive before it; the fused call's landing of its whole operand recorded for its caller's kernel
-   (metal_land_deferred) */
-static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t end) {
+/* channel h's next position consumed, as its track's item (metal_record; rdma/NCCL.md "Per-channel progress"): a
+   piece's landing awaited (its run's last unit's, a dud checked) and combined or copied where it belongs, an empty
+   position's landing awaited alone, a receive's first piece after the receive before it (metal_depend: that receive's
+   channel, track `base` + its index, consumed to its last); the fused call's landing of its whole operand recorded for
+   its caller's kernel (metal_land_deferred) */
+static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base) {
   struct channel *ch = comm->channels + h;
+  const uint64_t at = ch->consumed;
+  struct inflight *g = inflight_at(comm, h, at);
+  if (!g) return outside_groups(comm, h, at);
+  struct schedule *p = g->plans + h;
+  struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
   ncclResult_t result = ncclSuccess;
-  while (ch->consumed < end && !result) {
-    const uint64_t at = ch->consumed;
-    struct inflight *g = inflight_at(comm, h, at);
-    if (!g) return outside_groups(comm, h, at);
-    struct schedule *p = g->plans + h;
-    struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
-    if (m && at == m->first && m->c->bound->before[m->step] >= 0) {
-      const struct steps *prior = m->c->bound;
-      const int32_t j = prior->before[m->step];
-      result = consume(program, comm, prior->channel[j], prior->first[j] + prior->pieces[j]);
-      if (result) break;
-    }
-    if (m) {
-      struct steps *st = m->c->bound;
-      size_t length, offset = piece_at(m, at, &length);
-      const struct metal_wait wait = wait_of(comm, h, p->runs + 2 * (at - p->start) + 1, at);
-      const size_t from = wait.slot;
-      const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
-      const struct where to = st->gpu[st->steps[m->step].buffer];
-      const int q = (int)st->steps[m->step].peer, n = m->c->comm->nranks;
-      if (counted(m->c) && st->steps[m->step].buffer == 3) {
-        const uint64_t *rseg = m->c->segments + n;
-        result = arrive(program, comm, ch, at + 1);
-        if (!result)
-          result = gpu(metal_counted(program, METAL_COUNTED_LAND, &(struct metal_counted){
-            .d = to.buffer, .dst = to.offset, .s = ch->buffer, .src = from, .bytes = length, .scalar = offset, .a = m->c->got_at.buffer,
-            .aux = m->c->got_at.offset, .first = seg_first(rseg, q), .entries = (uint32_t)rseg[q], .row = row_bytes(m->c),
-            .limit = m->c->capacity * row_bytes(m->c)}), "a counted landing");
-      } else if (st->fresh && st->fresh[m->step]) {
-        const struct where with = st->read[m->step];
-        result = arrive(program, comm, ch, at + 1);
-        if (!result)
-          result = gpu(metal_combine3(program, m->c->type, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->buffer, from, with.buffer,
-                                      with.offset + m->offset + offset, length / SIZE[m->c->type]), "a first combine");
-      } else if (!ch->large) {
-        if (fusing.lands && !fusing.landed && fused_piece(m, offset, length)) {
-          result = gpu(metal_land_deferred(program, m->c->combine, to.buffer, to.offset, reduce ? length / SIZE[m->c->type] : length, &wait,
-                                           fusing.out->land), "a fused landing's record");
-          fusing.landed = !result;
-        } else
-          result = gpu(metal_land(program, reduce ? ktype(m->c) : -1, kop(m->c), to.buffer, to.offset + m->offset + offset,
-                                  reduce ? kcount(m->c, length) : length, &wait), "a landing");
-        if (at + 1 > ch->waited) ch->waited = at + 1;
-      } else {
-        result = arrive(program, comm, ch, at + 1);
-        if (!result && reduce)
-          result = gpu(metal_combine(program, ktype(m->c), kop(m->c), to.buffer, to.offset + m->offset + offset, ch->buffer, from,
-                                     kcount(m->c, length)), "a combine");
-        else if (!result)
-          result = gpu(metal_copy(program, METAL_LAND, to.buffer, to.offset + m->offset + offset, ch->buffer, from, length), "a landing");
-      }
-      if (result) break;
-      if (at + 1 == m->first + m->pieces) {
-        st->done[m->step] = 1; p->in_at++;
-        if (counted(m->c) && st->steps[m->step].buffer == 2) result = counted_landed(program, m->c, q, comm->violation);
-      }
-    }
-    if (!m && ch->waited <= at && (result = arrive(program, comm, ch, at + 1))) break;
-    ch->consumed++;
+  if (m && at == m->first && m->c->bound->before[m->step] >= 0) {
+    const struct steps *prior = m->c->bound;
+    const int32_t j = prior->before[m->step];
+    result = gpu(metal_depend(program, base + prior->channel[j], prior->first[j] + prior->pieces[j]), "a receive's dependency");
   }
+  if (m && !result) {
+    struct steps *st = m->c->bound;
+    size_t length, offset = piece_at(m, at, &length);
+    const struct metal_wait wait = wait_of(comm, h, p->runs + 2 * (at - p->start) + 1, at);
+    const size_t from = wait.slot;
+    const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
+    const struct where to = st->gpu[st->steps[m->step].buffer];
+    const int q = (int)st->steps[m->step].peer, n = m->c->comm->nranks;
+    if (counted(m->c) && st->steps[m->step].buffer == 3) {
+      const uint64_t *rseg = m->c->segments + n;
+      result = arrive(program, comm, ch, at + 1);
+      if (!result)
+        result = gpu(metal_counted(program, METAL_COUNTED_LAND, &(struct metal_counted){
+          .d = to.buffer, .dst = to.offset, .s = ch->buffer, .src = from, .bytes = length, .scalar = offset, .a = m->c->got_at.buffer,
+          .aux = m->c->got_at.offset, .first = seg_first(rseg, q), .entries = (uint32_t)rseg[q], .row = row_bytes(m->c),
+          .limit = m->c->capacity * row_bytes(m->c)}), "a counted landing");
+    } else if (st->fresh && st->fresh[m->step]) {
+      const struct where with = st->read[m->step];
+      result = arrive(program, comm, ch, at + 1);
+      if (!result)
+        result = gpu(metal_combine3(program, m->c->type, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->buffer, from, with.buffer,
+                                    with.offset + m->offset + offset, length / SIZE[m->c->type]), "a first combine");
+    } else if (!ch->large) {
+      if (fusing.lands && !fusing.landed && fused_piece(m, offset, length)) {
+        result = gpu(metal_land_deferred(program, m->c->combine, to.buffer, to.offset, reduce ? length / SIZE[m->c->type] : length, &wait,
+                                         fusing.out->land), "a fused landing's record");
+        fusing.landed = !result;
+      } else
+        result = gpu(metal_land(program, reduce ? ktype(m->c) : -1, kop(m->c), to.buffer, to.offset + m->offset + offset,
+                                reduce ? kcount(m->c, length) : length, &wait), "a landing");
+      if (at + 1 > ch->waited) ch->waited = at + 1;
+    } else {
+      result = arrive(program, comm, ch, at + 1);
+      if (!result && reduce)
+        result = gpu(metal_combine(program, ktype(m->c), kop(m->c), to.buffer, to.offset + m->offset + offset, ch->buffer, from,
+                                   kcount(m->c, length)), "a combine");
+      else if (!result)
+        result = gpu(metal_copy(program, METAL_LAND, to.buffer, to.offset + m->offset + offset, ch->buffer, from, length), "a landing");
+    }
+    if (!result && at + 1 == m->first + m->pieces) {
+      st->done[m->step] = 1; p->in_at++;
+      if (counted(m->c) && st->steps[m->step].buffer == 2) result = counted_landed(program, m->c, q, m->step, comm->violation);
+    }
+  }
+  if (!result && !m && ch->waited <= at) result = arrive(program, comm, ch, at + 1);
+  if (!result) ch->consumed++;
   return result;
 }
 
-/* channel h's next position published, after the landing of the peer's position LAG back, which frees the units its run
-   takes: the units its run skips released as fillers, then its piece copied into its run's slots and its units
-   released, or a filler's (an empty position); the fused call's whole operand recorded for its caller's kernel, which
-   stores it and releases its units (metal_send_deferred) */
+/* channel h's next position published, once the consumption of the peer's position LAG back has freed the units its
+   run takes (its track item's credit, or, issued, already done): the units its run skips released as fillers, then its
+   piece copied into its run's slots and its units released, or a filler's (an empty position); the fused call's whole
+   operand recorded for its caller's kernel, which stores it and releases its units (metal_send_deferred) */
 static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm, uint32_t h, int *published) {
   struct channel *ch = comm->channels + h;
-  const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
+  const uint64_t at = ch->sent;
   struct inflight *g = inflight_at(comm, h, at);
   if (!g) return outside_groups(comm, h, at);
   struct schedule *p = g->plans + h;
   struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
   const struct run *r = p->runs + 2 * (at - p->start);
   const struct metal_release out = release_of(ch, r, 0), skipped = release_of(ch, r, 1);
-  ncclResult_t result = arrive(program, comm, ch, need);
-  if (!result && r->skip) result = gpu(metal_publish(program, &skipped), "a lap's skipped units");
+  ncclResult_t result = ncclSuccess;
+  if (r->skip) result = gpu(metal_publish(program, &skipped), "a lap's skipped units");
   int released = 0;
   if (m && !result) {
     const struct steps *st = m->c->bound;
@@ -2853,70 +2685,103 @@ static void touch(struct ncclComm *comm) {
   touching = comm;
 }
 
-/* a group completed: its publications in its order, each after the consumptions it needs (the positions LAG back on
-   its channel; a SEND's first piece, the receive before it), then every position of it consumed */
-static ncclResult_t complete_group(struct metal_program *program, struct inflight *g, int *published) {
-  struct ncclComm *comm = g->comm;
+/* every group in flight through `through` completed, each channel progressing on its own (nccl-mesh-metal.h
+   metal_record; rdma/NCCL.md "Per-channel progress"): channel h of the k-th communicator met is track base[k] + h, its
+   publications to its communicator's last group through `through` each an item of its own (its credit the consumption
+   LAG back; a SEND's first piece after the consumption of the receive before it), then its consumptions; the tracks
+   run as one (metal_tracks).  No rank orders anything another rank must share */
+static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
+  size_t comms = 0, room = 0;
+  struct ncclComm **comm = NULL;
+  uint32_t *base = NULL, tracks = 0;
   ncclResult_t result = ncclSuccess;
-  touch(comm);
-  metal_gate(program, comm->violation);
-  for (; g->next < g->events && !result; g->next++) {
-    const struct event v = g->order[g->next];
-    const struct channel *ch = comm->channels + v.h;
-    if (v.at < ch->sent) continue;
-    if (v.at != ch->sent) return fail(ncclInternalError, "the group's positions admit no order");
-    result = consume(program, comm, v.h, v.at >= LAG ? v.at - LAG + 1 : 0);
-    const struct message *m = result ? NULL : sending(g, v.h, v.at);
-    if (m && v.at == m->first && m->c->bound->before[m->step] >= 0) {
-      const struct steps *prior = m->c->bound;
-      const int32_t j = prior->before[m->step];
-      result = consume(program, comm, prior->channel[j], prior->first[j] + prior->pieces[j]);
+  for (struct inflight *g = inflight; g && !result; g = g == through ? NULL : g->next_group) {
+    size_t k = 0;
+    while (k < comms && comm[k] != g->comm) k++;
+    if (k < comms) continue;
+    if (comms == room) {
+      room = room ? 2 * room : 4;
+      struct ncclComm **c = realloc(comm, room * sizeof *c);
+      uint32_t *b = c ? realloc(base, room * sizeof *b) : NULL;
+      if (c) comm = c;
+      if (!b) { result = fail(ncclSystemError, "out of memory"); break; }
+      base = b;
     }
-    if (!result) result = publish(program, comm, v.h, published);
+    comm[comms] = g->comm; base[comms++] = tracks; tracks += g->comm->count;
   }
-  for (uint32_t h = 0; h < comm->count && !result; h++) result = consume(program, comm, h, g->end[h]);
+  uint64_t *consumed = result ? NULL : calloc((size_t)tracks + 1, sizeof *consumed), *end = NULL;
+  if (!result && !consumed) result = fail(ncclSystemError, "out of memory");
+  for (size_t k = 0; k < comms && !result; k++) {
+    struct ncclComm *const c = comm[k];
+    touch(c);
+    metal_gate(program, c->violation);
+    free(end);
+    if (!(end = calloc((size_t)c->count + 1, sizeof *end))) { result = fail(ncclSystemError, "out of memory"); break; }
+    for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group)
+      if (g->comm == c) memcpy(end, g->end, c->count * sizeof *end);
+    for (uint32_t h = 0; h < c->count && !result; h++) {
+      struct channel *ch = c->channels + h;
+      const uint32_t track = base[k] + h;
+      consumed[track] = ch->consumed;
+      while (!result && ch->sent < end[h]) {
+        const uint64_t at = ch->sent;
+        struct inflight *g = inflight_at(c, h, at);
+        const struct message *m = g ? sending(g, h, at) : NULL;
+        result = gpu(metal_record(program, track, METAL_PUBLISH, at, at >= LAG ? at - LAG + 1 : 0), "a publication's record");
+        if (!result && m && at == m->first && m->c->bound->before[m->step] >= 0) {
+          const struct steps *prior = m->c->bound;
+          const int32_t j = prior->before[m->step];
+          result = gpu(metal_depend(program, base[k] + prior->channel[j], prior->first[j] + prior->pieces[j]), "a SEND's dependency");
+        }
+        if (!result) result = publish(program, c, h, published);
+      }
+      while (!result && ch->consumed < end[h]) {
+        result = gpu(metal_record(program, track, METAL_CONSUME, ch->consumed, 0), "a consumption's record");
+        if (!result) result = consume(program, c, h, base[k]);
+      }
+    }
+  }
+  if (!result) result = gpu(metal_record(program, METAL_NONE, 0, 0, 0), "the tracks' end");
+  if (!result) result = gpu(metal_tracks(program, tracks, consumed), "the tracks");
+  else metal_record(program, METAL_NONE, 0, 0, 0);
+  free(end); free(consumed); free(comm); free(base);
   return result;
 }
 
-/* a group's publications that need no wait, in its order: its channel's earlier positions published, the positions LAG
-   back consumed (empty ones freely) and the peer's landing there awaited before, a SEND's receives before it consumed */
+/* a group's publications that need no wait, each channel's in order: its earlier positions published, the positions
+   LAG back consumed (empty ones freely) and the peer's landing there awaited before, a SEND's receives before it
+   consumed */
 static ncclResult_t issue_group(struct metal_program *program, struct inflight *g, int *published) {
   struct ncclComm *comm = g->comm;
   ncclResult_t result = ncclSuccess;
   touch(comm);
   metal_gate(program, comm->violation);
-  for (size_t e = g->next; e < g->events && !result; e++) {
-    const struct event v = g->order[e];
-    struct channel *ch = comm->channels + v.h;
-    const uint64_t need = v.at >= LAG ? v.at - LAG + 1 : 0;
-    if (v.at != ch->sent || need > ch->waited) continue;
-    while (ch->consumed < need) {
-      struct inflight *at = inflight_at(comm, v.h, ch->consumed);
-      struct schedule *p = at ? at->plans + v.h : NULL;
-      if (!p || (p->in_at < p->ins && ch->consumed >= p->in[p->in_at].first)) break;
-      ch->consumed++;
+  for (uint32_t h = 0; h < comm->count && !result; h++) {
+    struct channel *ch = comm->channels + h;
+    while (!result && ch->sent >= g->start[h] && ch->sent < g->end[h]) {
+      const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
+      if (need > ch->waited) break;
+      while (ch->consumed < need) {
+        struct inflight *x = inflight_at(comm, h, ch->consumed);
+        struct schedule *p = x ? x->plans + h : NULL;
+        if (!p || (p->in_at < p->ins && ch->consumed >= p->in[p->in_at].first)) break;
+        ch->consumed++;
+      }
+      const struct message *m = sending(g, h, at);
+      if (ch->consumed < need || (m && at == m->first && !ready(m->c->bound, m->step))) break;
+      result = publish(program, comm, h, published);
     }
-    const struct message *m = sending(g, v.h, v.at);
-    if (ch->consumed < need || (m && v.at == m->first && !ready(m->c->bound, m->step))) continue;
-    result = publish(program, comm, v.h, published);
   }
   return result;
 }
 
-/* the groups in flight, in the order every rank's walk keeps (order_group): completing through a group, each group up
-   to it completed, then any later group's publications that need no wait; issuing a group, its publications that need
-   no wait, so a group issued encodes no wait at all; each group's dispatches gated on its own communicator's failure
-   words (metal_gate) */
+/* the groups in flight: completing through a group, every group up to it completed (complete), then any later group's
+   publications that need no wait; issuing a group, its publications that need no wait, so a group issued encodes no
+   wait at all; each group's dispatches gated on its own communicator's failure words (metal_gate) */
 static ncclResult_t walk(struct metal_program *program, struct inflight *issuing, struct inflight *through, int *published) {
   ncclResult_t result = ncclSuccess;
   struct inflight *g = issuing;
-  if (through) {
-    for (g = inflight; g && !result; g = g->next_group) {
-      result = complete_group(program, g, published);
-      if (g == through) break;
-    }
-    g = g ? g->next_group : NULL;
-  }
+  if (through) { result = complete(program, through, published); g = through->next_group; }
   for (; g && !result; g = g->next_group) result = issue_group(program, g, published);
   return result;
 }
@@ -3278,7 +3143,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
         if (inflight_last) inflight_last->next_group = g; else inflight = g;
         inflight_last = g;
         scheduled = 1;
-        result = order_group(comm, g);
         if (list[0].fused) {
           const int what = list[0].what, rooted = comm->rank == list[0].root;
           fusing = (typeof(fusing)){list[0].fused, list, 0, 0, what == MESH_ALLREDUCE || (what == MESH_BROADCAST) == rooted,

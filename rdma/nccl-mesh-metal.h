@@ -61,7 +61,7 @@ int metal_metal4(const struct metal_program *);
 /* A buffer of the program's made resident (the Metal 4 form; the classic form needs none). */
 void metal_resident(struct metal_program *, void *buffer);
 /* The program's failure words from here on, `violation` (made resident): those of the communicator whose group is
-   encoded next, which gate every dispatch naming none of its own (nccl-mesh.c complete_group, issue_group, retire), so
+   encoded next, which gate every dispatch naming none of its own (nccl-mesh.c complete, issue_group, retire), so
    one communicator's failure halts its dispatches and no other's. */
 void metal_gate(struct metal_program *, void *violation);
 int metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
@@ -125,6 +125,22 @@ enum { METAL_COUNTED_START, METAL_COUNTED_CHECK, METAL_COUNTED_ARRIVED, METAL_CO
 struct metal_counted { void *d, *s, *a; size_t dst, src, aux; uint64_t bytes, scalar, first, row, limit; uint32_t entries; };
 int metal_counted(struct metal_program *, int kind, const struct metal_counted *);
 void *metal_contents(void *buffer);
+/* Tracks (rdma/NCCL.md "Per-channel progress"): a
+   completion's work on each channel, recorded and then run with every channel progressing on its own, one thread group
+   a track on the GPU and one cooperative loop on the host.  metal_record(program, track, cursor, position, need): the
+   steps encoded after it (metal_copy .. metal_counted) become item `position` of cursor `cursor` (METAL_PUBLISH or
+   METAL_CONSUME) of track `track`, in place of their dispatches, until the next metal_record; track METAL_NONE ends the
+   recording, and the steps after it are dispatched as ever.  An item runs once its track has consumed `need`
+   positions, every metal_depend of it holds (track `other` has consumed `count`), and, a consumption, the landing its
+   steps await came (or failed: the link's ~0, a revoke, its bound); a consumption's end raises its track's count to
+   `position` + 1.  Each cursor runs its items in order, and neither waits on the other but by `need`.  metal_tracks:
+   the tracks recorded since the last, track t's count from consumed[t], encoded (one dispatch) or run; 0, or an
+   errno.  The deferred steps (metal_send_deferred, metal_land_deferred) are never recorded. */
+#define METAL_NONE UINT32_MAX
+enum { METAL_PUBLISH, METAL_CONSUME };
+int metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
+int metal_depend(struct metal_program *, uint32_t other, uint64_t count);
+int metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
 /* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
 const char *metal_steps(void);
 void metal_keep(struct metal_program *, void *object);

@@ -42,7 +42,8 @@ static pthread_mutex_t owned_lock = PTHREAD_MUTEX_INITIALIZER;
 struct held { void *object; int count; };
 static struct held *owned_;
 static size_t owned_count_, owned_capacity_;
-struct metal_program { void **kept; size_t count, capacity; _Atomic uint64_t *violation; uint32_t polls; };
+struct recording;
+struct metal_program { void **kept; size_t count, capacity; _Atomic uint64_t *violation; uint32_t polls; struct recording *recording; };
 struct host_event { _Atomic uint64_t value; };
 
 /* what metal_scratch and metal_event made, counted: the caller's reference and each program's or retainer's, freed
@@ -190,111 +191,20 @@ static void step_release(const struct metal_release *r) {
     atomic_store_explicit((_Atomic uint64_t *)at(r->buffer, r->word) + u, r->value, memory_order_release);
 }
 
-int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
+/* a step as the walk encodes it: its kind and arguments, and the failure words and bound it names (words_of, read
+   where it is made, as a dispatch binds them where it is encoded) */
+enum { OP_COPY, OP_COMBINE, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OP_PUBLISH, OP_FILLER, OP_SPIN, OP_SEND_SMALL, OP_LAND, OP_COUNTED };
+struct op {
+  int kind, mode, type, op;
+  void *dst, *src, *with;
+  size_t dst_offset, src_offset, with_offset, n;
+  uint64_t scalar;
+  struct metal_release release;
+  struct metal_wait wait;
+  struct metal_counted counted;
+  _Atomic uint64_t *v;
   uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if ((mode == METAL_SEND ? stopped(v, polls) : halted(v, polls)) || !bytes) return 0;
-  if (mode == METAL_LAND) atomic_thread_fence(memory_order_acquire);
-  memmove(at(dst, dst_offset), at(src, src_offset), bytes);
-  if (mode == METAL_SEND) atomic_thread_fence(memory_order_release);
-  return 0;
-}
-
-int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (!walked(type)) return EINVAL;
-  if (halted(v, polls) || !n) return 0;
-  atomic_thread_fence(memory_order_acquire);
-  nccl_mesh_combine(type, op, at(dst, dst_offset), at(src, src_offset), n);
-  return 0;
-}
-
-int metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, void *with,
-                   size_t with_offset, size_t n) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (!walked(type) || type == METAL_MERGE) return EINVAL;
-  if (halted(v, polls) || !n) return 0;
-  atomic_thread_fence(memory_order_acquire);
-  memmove(at(dst, dst_offset), at(with, with_offset), n * SIZE[type]);
-  nccl_mesh_combine(type, op, at(dst, dst_offset), at(src, src_offset), n);
-  return 0;
-}
-
-int metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (!walked(type)) return EINVAL;
-  if (halted(v, polls) || !n) return 0;
-  nccl_mesh_premultiply(type, at(dst, dst_offset), at(src, src_offset), scalar, n);
-  return 0;
-}
-
-int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (type < 0 || type > 5) return EINVAL;
-  if (halted(v, polls) || !n) return 0;
-  nccl_mesh_truncdiv(type, at(dst, dst_offset), at(src, src_offset), n, divisor);
-  return 0;
-}
-
-int metal_publish(struct metal_program *program, const struct metal_release *r) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (!stopped(v, polls)) step_release(r);
-  return 0;
-}
-
-int metal_publish_filler(struct metal_program *program, const struct metal_release *r) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (stopped(v, polls)) return 0;
-  memset(at(r->buffer, r->slot), 0, sizeof(uint64_t));
-  step_release(r);
-  return 0;
-}
-
-int metal_spin(struct metal_program *program, const struct metal_wait *w) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, w->violation, &polls);
-  if (!halted(v, polls)) step_await(w, v, polls);
-  return 0;
-}
-
-int metal_send_small(struct metal_program *program, void *src, size_t src_offset, size_t bytes, const struct metal_release *r) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, NULL, &polls);
-  if (stopped(v, polls)) return 0;
-  if (bytes < sizeof(uint64_t)) memset(at(r->buffer, r->slot), 0, sizeof(uint64_t));
-  memmove(at(r->buffer, r->slot), at(src, src_offset), bytes);
-  step_release(r);
-  return 0;
-}
-
-int metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, w->violation, &polls);
-  if (type >= 0 && !walked(type)) return EINVAL;
-  if (halted(v, polls) || !step_await(w, v, polls) || !n) return 0;
-  if (type < 0) memmove(at(dst, dst_offset), at(w->buffer, w->slot), n);
-  else nccl_mesh_combine(type, op, at(dst, dst_offset), at(w->buffer, w->slot), n);
-  return 0;
-}
-
-int metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
-  (void)program; (void)bytes; (void)r; (void)bound;
-  snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's");
-  return EINVAL;
-}
-
-int metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
-                        uint64_t bound[6]) {
-  (void)program; (void)op; (void)dst; (void)dst_offset; (void)n; (void)w; (void)bound;
-  snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's");
-  return EINVAL;
-}
+};
 
 /* nccl-mesh-metal.m's counted kernels (counted_start .. counted_own), one step each */
 static uint64_t counted_rows(const int64_t *c, uint64_t first, uint64_t count) {
@@ -303,11 +213,7 @@ static uint64_t counted_rows(const int64_t *c, uint64_t first, uint64_t count) {
   return rows;
 }
 static uint64_t least(uint64_t a, uint64_t b) { return a < b ? a : b; }
-int metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
-  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return EINVAL;
-  uint32_t polls;
-  _Atomic uint64_t *v = words_of(program, kind == METAL_COUNTED_ARRIVED ? k->a : NULL, &polls);
-  if (kind == METAL_COUNTED_SEND ? stopped(v, polls) : halted(v, polls)) return 0;
+static void run_counted(int kind, const struct metal_counted *k) {
   unsigned char *d = k->d, *s = k->s, *a = k->a;
   atomic_thread_fence(memory_order_acquire);
   if (kind == METAL_COUNTED_START) {
@@ -343,6 +249,278 @@ int metal_counted(struct metal_program *program, int kind, const struct metal_co
     }
     else memmove(d + k->dst + place, s + k->src, length);
   }
+}
+
+/* a step's body, nccl-mesh-metal.m's kernel of its kind: a step gated on failure words that hold a failure does
+   nothing, nor does one writing a lane once the stop word is set */
+static void run_op(const struct op *o) {
+  _Atomic uint64_t *v = o->v;
+  const uint32_t polls = o->polls;
+  const int writes = o->kind == OP_PUBLISH || o->kind == OP_FILLER || o->kind == OP_SEND_SMALL || (o->kind == OP_COPY && o->mode == METAL_SEND) ||
+                     (o->kind == OP_COUNTED && o->mode == METAL_COUNTED_SEND);
+  if (writes ? stopped(v, polls) : halted(v, polls)) return;
+  switch (o->kind) {
+  case OP_COPY:
+    if (!o->n) return;
+    if (o->mode == METAL_LAND) atomic_thread_fence(memory_order_acquire);
+    memmove(at(o->dst, o->dst_offset), at(o->src, o->src_offset), o->n);
+    if (o->mode == METAL_SEND) atomic_thread_fence(memory_order_release);
+    return;
+  case OP_COMBINE:
+    if (!o->n) return;
+    atomic_thread_fence(memory_order_acquire);
+    nccl_mesh_combine(o->type, o->op, at(o->dst, o->dst_offset), at(o->src, o->src_offset), o->n);
+    return;
+  case OP_COMBINE3:
+    if (!o->n) return;
+    atomic_thread_fence(memory_order_acquire);
+    memmove(at(o->dst, o->dst_offset), at(o->with, o->with_offset), o->n * SIZE[o->type]);
+    nccl_mesh_combine(o->type, o->op, at(o->dst, o->dst_offset), at(o->src, o->src_offset), o->n);
+    return;
+  case OP_PREMUL:
+    if (o->n) nccl_mesh_premultiply(o->type, at(o->dst, o->dst_offset), at(o->src, o->src_offset), o->scalar, o->n);
+    return;
+  case OP_TRUNCDIV:
+    if (o->n) nccl_mesh_truncdiv(o->type, at(o->dst, o->dst_offset), at(o->src, o->src_offset), o->n, o->scalar);
+    return;
+  case OP_PUBLISH: step_release(&o->release); return;
+  case OP_FILLER:
+    memset(at(o->release.buffer, o->release.slot), 0, sizeof(uint64_t));
+    step_release(&o->release);
+    return;
+  case OP_SPIN: step_await(&o->wait, v, polls); return;
+  case OP_SEND_SMALL:
+    if (o->n < sizeof(uint64_t)) memset(at(o->release.buffer, o->release.slot), 0, sizeof(uint64_t));
+    memmove(at(o->release.buffer, o->release.slot), at(o->src, o->src_offset), o->n);
+    step_release(&o->release);
+    return;
+  case OP_LAND:
+    if (!step_await(&o->wait, v, polls) || !o->n) return;
+    if (o->type < 0) memmove(at(o->dst, o->dst_offset), at(o->wait.buffer, o->wait.slot), o->n);
+    else nccl_mesh_combine(o->type, o->op, at(o->dst, o->dst_offset), at(o->wait.buffer, o->wait.slot), o->n);
+    return;
+  case OP_COUNTED: run_counted(o->mode, &o->counted); return;
+  }
+}
+
+/* the tracks being recorded (nccl-mesh-metal.h metal_record): each item's position, credit (`need`), dependencies,
+   steps, and the landing a consumption awaits (its first wait) */
+struct dep { uint32_t other; uint64_t count; };
+struct item { uint64_t position, need; struct dep *deps; uint32_t ndeps; struct op *ops; size_t nops, room; int awaits; struct metal_wait wait;
+              _Atomic uint64_t *v; uint32_t polls; };
+struct cursor { struct item *item; size_t count, room, next; };
+struct track { struct cursor cursor[2]; };
+struct recording { struct track *track; uint32_t tracks, at; int cursor, on; };
+static struct recording *recording_of(struct metal_program *program);
+
+static void *grown(void *items, size_t *room, size_t count, size_t size) {
+  if (count < *room) return items;
+  const size_t more = *room ? 2 * *room : 8;
+  void *bigger = realloc(items, more * size);
+  if (bigger) *room = more;
+  return bigger;
+}
+
+/* a step made: its failure words and bound read now, then run, or appended to the item being recorded */
+static int step(struct metal_program *program, struct op *o, void *given) {
+  o->v = words_of(program, given, &o->polls);
+  struct recording *r = recording_of(program);
+  if (!r || !r->on) { run_op(o); return 0; }
+  struct cursor *c = r->track[r->at].cursor + r->cursor;
+  struct item *it = c->item + c->count - 1;
+  struct op *ops = grown(it->ops, &it->room, it->nops, sizeof *ops);
+  if (!ops) return ENOMEM;
+  it->ops = ops;
+  it->ops[it->nops++] = *o;
+  if (!it->v) { it->v = o->v; it->polls = o->polls; }
+  if (r->cursor == METAL_CONSUME && !it->awaits && (o->kind == OP_SPIN || o->kind == OP_LAND)) {
+    it->awaits = 1; it->wait = o->wait; it->v = o->v; it->polls = o->polls;
+  }
+  return 0;
+}
+
+int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
+  struct op o = {.kind = OP_COPY, .mode = mode, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = bytes};
+  return step(program, &o, NULL);
+}
+
+int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
+  if (!walked(type)) return EINVAL;
+  struct op o = {.kind = OP_COMBINE, .type = type, .op = op, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = n};
+  return step(program, &o, NULL);
+}
+
+int metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, void *with,
+                   size_t with_offset, size_t n) {
+  if (!walked(type) || type == METAL_MERGE) return EINVAL;
+  struct op o = {.kind = OP_COMBINE3, .type = type, .op = op, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset,
+                 .with = with, .with_offset = with_offset, .n = n};
+  return step(program, &o, NULL);
+}
+
+int metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar) {
+  if (!walked(type)) return EINVAL;
+  struct op o = {.kind = OP_PREMUL, .type = type, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = n, .scalar = scalar};
+  return step(program, &o, NULL);
+}
+
+int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor) {
+  if (type < 0 || type > 5) return EINVAL;
+  struct op o = {.kind = OP_TRUNCDIV, .type = type, .dst = dst, .dst_offset = dst_offset, .src = src, .src_offset = src_offset, .n = n, .scalar = divisor};
+  return step(program, &o, NULL);
+}
+
+int metal_publish(struct metal_program *program, const struct metal_release *r) {
+  struct op o = {.kind = OP_PUBLISH, .release = *r};
+  return step(program, &o, NULL);
+}
+
+int metal_publish_filler(struct metal_program *program, const struct metal_release *r) {
+  struct op o = {.kind = OP_FILLER, .release = *r};
+  return step(program, &o, NULL);
+}
+
+int metal_spin(struct metal_program *program, const struct metal_wait *w) {
+  struct op o = {.kind = OP_SPIN, .wait = *w};
+  return step(program, &o, w->violation);
+}
+
+int metal_send_small(struct metal_program *program, void *src, size_t src_offset, size_t bytes, const struct metal_release *r) {
+  struct op o = {.kind = OP_SEND_SMALL, .src = src, .src_offset = src_offset, .n = bytes, .release = *r};
+  return step(program, &o, NULL);
+}
+
+int metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
+  if (type >= 0 && !walked(type)) return EINVAL;
+  struct op o = {.kind = OP_LAND, .type = type, .op = op, .dst = dst, .dst_offset = dst_offset, .n = n, .wait = *w};
+  return step(program, &o, w->violation);
+}
+
+int metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
+  (void)program; (void)bytes; (void)r; (void)bound;
+  snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's");
+  return EINVAL;
+}
+
+int metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
+                        uint64_t bound[6]) {
+  (void)program; (void)op; (void)dst; (void)dst_offset; (void)n; (void)w; (void)bound;
+  snprintf(error_, sizeof error_, "a step run by its caller's kernel is the Metal 4 form's");
+  return EINVAL;
+}
+
+int metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
+  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return EINVAL;
+  struct op o = {.kind = OP_COUNTED, .mode = kind, .counted = *k};
+  return step(program, &o, kind == METAL_COUNTED_ARRIVED ? k->a : NULL);
+}
+
+static struct recording *recording_of(struct metal_program *program) { return program->recording; }
+
+int metal_record(struct metal_program *program, uint32_t track, int cursor, uint64_t position, uint64_t need) {
+  if (track == METAL_NONE) { if (program->recording) program->recording->on = 0; return 0; }
+  if (!program->recording && !(program->recording = calloc(1, sizeof *program->recording))) return ENOMEM;
+  struct recording *r = program->recording;
+  if (track >= r->tracks) {
+    struct track *bigger = realloc(r->track, ((size_t)track + 1) * sizeof *bigger);
+    if (!bigger) return ENOMEM;
+    memset(bigger + r->tracks, 0, ((size_t)track + 1 - r->tracks) * sizeof *bigger);
+    r->track = bigger; r->tracks = track + 1;
+  }
+  struct cursor *c = r->track[track].cursor + cursor;
+  struct item *items = grown(c->item, &c->room, c->count, sizeof *items);
+  if (!items) return ENOMEM;
+  c->item = items;
+  c->item[c->count++] = (struct item){.position = position, .need = need};
+  r->at = track; r->cursor = cursor; r->on = 1;
+  return 0;
+}
+
+int metal_depend(struct metal_program *program, uint32_t other, uint64_t count) {
+  struct recording *r = program->recording;
+  if (!r || !r->on) return EINVAL;
+  struct item *it = r->track[r->at].cursor[r->cursor].item + r->track[r->at].cursor[r->cursor].count - 1;
+  struct dep *bigger = realloc(it->deps, ((size_t)it->ndeps + 1) * sizeof *bigger);
+  if (!bigger) return ENOMEM;
+  it->deps = bigger;
+  it->deps[it->ndeps++] = (struct dep){other, count};
+  return 0;
+}
+
+/* whether an item may run: its failure words hold a failure (it then does nothing), or its track has consumed its
+   credit, every dependency holds and, a consumption, its landing came (its word at 1 + the cycle, ~0, or the stop
+   word set) */
+static int item_ready(const struct item *it, int cursor, const uint64_t *count, uint32_t self) {
+  if (halted(it->v, it->polls)) return 1;
+  if (count[self] < it->need) return 0;
+  for (uint32_t d = 0; d < it->ndeps; d++)
+    if (count[it->deps[d].other] < it->deps[d].count) return 0;
+  if (cursor != METAL_CONSUME || !it->awaits) return 1;
+  if (it->v && atomic_load_explicit(it->v + 6, memory_order_acquire)) return 1;
+  return atomic_load_explicit((_Atomic uint64_t *)at(it->wait.buffer, it->wait.word), memory_order_acquire) >= 1 + it->wait.cycle;
+}
+
+/* a track's item that cannot run, its bound reached: its wait's failure recorded (mesh_step_check: the bound, the
+   link's ~0, a revoke), or, an item waiting on its credit or a dependency alone, the bound at its position */
+static void item_expired(const struct item *it) {
+  if (!it->v || !it->polls || atomic_load_explicit(it->v + 2, memory_order_acquire)) return;
+  if (it->awaits) { step_check(&it->wait, it->v, it->polls, atomic_load_explicit((_Atomic uint64_t *)at(it->wait.buffer, it->wait.word), memory_order_acquire)); return; }
+  atomic_store_explicit(it->v, METAL_BOUND, memory_order_relaxed);
+  atomic_store_explicit(it->v + 4, it->polls, memory_order_relaxed);
+  atomic_store_explicit(it->v + 2, it->position + 1, memory_order_release);
+}
+
+static void tracks_free(struct recording *r) {
+  for (uint32_t t = 0; t < r->tracks; t++)
+    for (int c = 0; c < 2; c++) {
+      for (size_t i = 0; i < r->track[t].cursor[c].count; i++) { free(r->track[t].cursor[c].item[i].ops); free(r->track[t].cursor[c].item[i].deps); }
+      free(r->track[t].cursor[c].item);
+    }
+  free(r->track);
+  *r = (struct recording){0};
+}
+
+/* the tracks run (nccl-mesh-metal.h metal_tracks) as one cooperative loop: each pass advances every cursor of every
+   track while its next item may run; a pass that advances none is one look, the looks bounded as a wait's are
+   (step_wait: the program's polls, MESH_PLATFORM_NS since the last advance, with its backoff), after which each cursor
+   that cannot run has its failure recorded, and every item gated on those words then runs as nothing */
+int metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
+  struct recording *r = program->recording;
+  if (r) r->on = 0;
+  if (!r || !r->tracks) return 0;
+  uint64_t *count = malloc(((size_t)r->tracks + 1) * sizeof *count);
+  if (!count) { tracks_free(r); return ENOMEM; }
+  for (uint32_t t = 0; t < r->tracks; t++) count[t] = t < tracks ? consumed[t] : 0;
+  uint64_t looks = 0, since = now_ns();
+  int expired = 0;
+  for (;;) {
+    int left = 0, moved = 0;
+    for (uint32_t t = 0; t < r->tracks; t++)
+      for (int c = 0; c < 2; c++) {
+        struct cursor *k = r->track[t].cursor + c;
+        while (k->next < k->count) {
+          const struct item *it = k->item + k->next;
+          if (!item_ready(it, c, count, t)) { left = 1; break; }
+          for (size_t s = 0; s < it->nops; s++) run_op(it->ops + s);
+          if (c == METAL_CONSUME) count[t] = it->position + 1;
+          k->next++; moved = 1;
+        }
+      }
+    if (!left) break;
+    if (moved) { looks = 0; since = now_ns(); expired = 0; continue; }
+    if (expired) break;
+    if (++looks >= program->polls || now_ns() - since > MESH_PLATFORM_NS) {
+      for (uint32_t t = 0; t < r->tracks; t++)
+        for (int c = 0; c < 2; c++)
+          if (r->track[t].cursor[c].next < r->track[t].cursor[c].count) item_expired(r->track[t].cursor[c].item + r->track[t].cursor[c].next);
+      expired = 1;
+      continue;
+    }
+    if (looks > 4096) usleep(20);
+    else if (looks > 256) sched_yield();
+  }
+  free(count);
+  tracks_free(r);
   return 0;
 }
 
@@ -362,6 +540,7 @@ void metal_keep(struct metal_program *program, void *object) {
 
 /* the program's end: its event signalled (its steps have run), what it kept released */
 void metal_end(struct metal_program *program, void *event, uint64_t value) {
+  if (program->recording) { tracks_free(program->recording); free(program->recording); }
   if (event) atomic_store_explicit(&((struct host_event *)event)->value, value, memory_order_release);
   for (size_t i = 0; i < program->count; i++) metal_release(program->kept[i]);
   free(program->kept);

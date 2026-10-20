@@ -199,9 +199,33 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such a group completes in its
     encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
-  - A wait is a kernel polling the landed word of its run's last unit, which the bridge sets `~0` where the link is
-    lost, and its communicator's stop word, which a revoke sets ([Failures](#failures)); the stream's `polls` bounds
-    it ([Bounded waits](#bounded-waits)).
+  - A wait polls the landed word of its run's last unit, which the bridge sets `~0` where the link is lost, and its
+    communicator's stop word, which a revoke sets ([Failures](#failures)); the stream's `polls` bounds it ([Bounded
+    waits](#bounded-waits)).
+
+### Per-channel progress
+
+A group's completion runs every channel on its own (`nccl-mesh-metal.h` `metal_record`, `metal_tracks`). This is
+NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place of one serial order of the whole group.
+
+- **Tracks.** Each channel's remaining positions are a track with two cursors: its publications and its consumptions,
+  each in position order.
+  - A publication runs once its track has consumed the position LAG back (the ring's credit).
+  - A consumption runs once its landing came. Its dud is checked, and it is combined or copied where it belongs.
+  - A step's first piece that has a receive before it (`mesh_group_before`) waits on that receive's channel having
+    consumed it.
+  - Neither cursor waits on the other beyond the credit.
+- **On the GPU.** The tracks are one dispatch, one thread group per track. Thread 0 picks the next item whose
+  conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a consumption
+  raises its track's count. A group that can pick nothing for `polls` passes records its blocked items' failures, as
+  a wait does.
+- **On the host executor.** The same tracks run in one cooperative loop.
+- **What ranks share.** No rank orders anything another rank must share. Each channel's two ends agree on its
+  positions (`mesh_group_lay`) and nothing else, so groups of any calls, including counted all-to-alls of per-rank
+  shapes, among any number of ranks, complete wherever their steps' dependencies do.
+- **Not completion.** Issuing a group (`issue`) encodes no wait and is unchanged.
+- **Residency.** Thread groups of one dispatch wait on each other only through a step's receive before it. Metal does
+  not promise they are all resident; a wait on one that is not reaches its bound and fails as a value.
 
 ### Bounded waits
 
