@@ -620,5 +620,11 @@ without exception superfluous and wrapping or preserving another errorful featur
   the operator 10-20: "'duds' are not sentinel values").
 - **M4, M6:** a link lost after it connected staying down until a person relaunched the bridge (version 129) ≺ a
   process a port (version 130, 1f9be1d5): the lost link's agent ends once its quiet window has passed, the next agent
-  pairs it again with nobody acting, and calls in flight fail as values; on the loop fabric so far, the pair's run on
-  the operator's word.
+  pairs it again with nobody acting, and calls in flight fail as values: on the pair, 10-20, the M5 paired again 7.4 s
+  after the Mini's bridge stopped.
+- **M3, M4:** a stream kept for a lost pairing's holder, bootstrap waits with no bound, and a member's stale leases
+  refusing its group until a call the refusal blocks (version 130) ≺ version 131 (9add4cbe, ab2e5192, metal-microbench
+  7b04f33): every stream new at a pairing, every bootstrap wait a slice within the platform deadline, and the refused
+  member retiring its residents at the refusal. A process still never holds leases of two regions: removing that rule
+  (9add4cbe's P3) wired all of the Mini's memory and its watchdog panicked it (10-20 18:27 UTC). On the pair after
+  ab2e5192, the Mini's bridge restart failed one call and the next two committed, its wired memory steady.
