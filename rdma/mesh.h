@@ -12,15 +12,16 @@
 /* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-/* 128: a link's stream toward its peer node (struct mesh_stream), held by one client at a time by its owner word (as
-   rows are), the client naming the node alone (design/transport.md section 14; the versions before it, this file's
-   history).  The wire is HELLO, FAREWELL, RECORD and LINK */
-#define MESH_VERSION 128u
+/* 129: a link's streams toward its peer node (struct mesh_stream), each held by one client at a time by its owner word
+   (as rows are), so as many communicators as a link has streams use a node pair at once, the client naming the node
+   alone (design/transport.md section 14; the versions before it, this file's history).  The wire is HELLO, FAREWELL,
+   RECORD and LINK */
+#define MESH_VERSION 129u
 #define MESH_ABSENT UINT32_MAX
-/* design/transport.md section 14: the most nodes a bridge reaches (a stream toward each), and its client slots; and the
-   bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
+/* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
+   slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
    (`bridge_off`, mesh-observe.h) */
-#define MESH_STREAMS 8
+#define MESH_STREAMS 32
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
@@ -57,19 +58,21 @@ _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_e
    write; per class c (0 large, 1 small) its rings, the in ring the bridge's receives land in and the out ring its holder
    supplies (`in`, `out`, region offsets), of `units[c]` units of `unit[c]` bytes, a word a unit its holder stores to
    supply it (`ready`: 1 plus the unit's cycle, its sequence over the ring) and a word a unit the bridge stores as it
-   lands (`landed`: 1 plus its cycle; ~0 once the link is lost: a landing only raises a word, so ~0 stands); the link's
-   bandwidth; `free` while no client holds it and every unit its last holder declared has gone, the first unit a holder
-   then supplies of each class (`next`); and its holder's: its owner word (`owner`, taken 0 to its own while `free`, as
-   rows are, and let go to 0), and the units of each class it will supply, up to `declared` (an absolute sequence), by the
-   uptime `deadline` (ns): a declared unit not supplied by then, or by the holding's end, goes as a dud */
+   lands (`landed`: 1 plus its cycle; ~0 once the link is lost: a landing only raises a word, so ~0 stands); its share of
+   the link's bandwidth; `wire`, the stream's identity, the same at both its ends and no other stream's between the two
+   nodes, by which the two ends of a communicator hold the two ends of one stream (0 until it is live); `free` while no
+   client holds it and every unit its last holder declared has gone, the first unit a holder then supplies of each class
+   (`next`); and its holder's: its owner word (`owner`, taken 0 to its own while `free`, as rows are, and let go to 0),
+   and the units of each class it will supply, up to `declared` (an absolute sequence), by the uptime `deadline` (ns): a
+   declared unit not supplied by then, or by the holding's end, goes as a dud */
 struct mesh_stream {
   _Atomic uint32_t peer,live;
   uint32_t unit[2],units[2];
   uint64_t in[2],out[2],ready[2],landed[2];
-  _Atomic uint64_t bandwidth,free,next[2];
+  _Atomic uint64_t bandwidth,wire,free,next[2];
   _Atomic uint64_t owner,declared[2],deadline;
 };
-_Static_assert(sizeof(struct mesh_stream)==152,"mesh_stream");
+_Static_assert(sizeof(struct mesh_stream)==160,"mesh_stream");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
    the record's sequence in that boot, the bytes of its bridge's window its clients may hold (the window less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware

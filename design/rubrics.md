@@ -22,7 +22,7 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 **What the bridge does (M), one process per node.**
 - At its launch, it maps the node's window and registers it once on every RDMA device.
 - When it first hears a peer on a cable, it makes that link's queue pairs and exchanges their numbers once. It connects them once in its life. That exchange, and the map records it floods, are its only messages.
-- On each link it keeps one stream toward the peer node:
+- On each link it keeps four streams toward the peer node, each on a lane pair of its own and named by an identity both bridges compute alike:
   - It posts receives into the stream's in ring for the link's life.
   - For each unit the holder declared, it posts a SEND when the unit's ready word is set. If the deadline passes or the holding ends first, it posts the same SEND from its all-ones block instead.
   - It raises each landed word in order.
@@ -44,7 +44,7 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 - Reads which nodes its bridge reaches.
 - Meets its peers through NCCL's bootstrap, on its own sockets.
 - Compiles the same schedule as every member.
-- Holds the stream toward each member's node by taking its owner word while the stream is free, and tells its peers where its units start.
+- Holds a stream toward each member's node, the one whose identity is free at both ends, by taking its owner word while the stream is free, and tells its peers where its units start.
 - Lays positions as runs of stream units and declares them.
 - Writes units and their ready words, and reads landed words and the in ring.
 - Combines on the host or the GPU, and paces itself by NCCL's head credit.
@@ -528,9 +528,10 @@ without exception superfluous and wrapping or preserving another errorful featur
 - **M3:** the deleted kill guard ≺ HEAD after its deletion.
 - **C1:** libnccl-mesh exporting its own Metal functions and including the planner in nccl.h ≺ HEAD's ABI of NCCL's
   functions, their twins and its extensions (5312f9b2).
-- **C2, C7:** HEAD's one communicator a node pair (287795f5: a second toward a node refused, EBUSY, as metal-microbench's
-  rank process makes beside its standing group) ≺ communicators that share a node pair, as v127's four lane pairs a
-  link allowed.
+- **C2, C7:** one communicator a node pair (version 128 with 287795f5: a second toward a node refused, EBUSY, as
+  metal-microbench's rank process makes beside its standing group) ≺ HEAD's four streams a link (version 129), each
+  communicator holding its own toward each member's node, taken by the identity free at both ends, as v127's four lane
+  pairs a link allowed without its binding.
 - **C6:** communicators kept across calls (metal-microbench mesh_rank.m `kept_sets`) ≺ calls that fail and are rerun.
 - **D7:** goal_a.swift reading its bridge's records to find its node ≺ the host's own name (metal-microbench 5e95b12);
   mesh_rank.m asking libnccl-mesh for its node's fabric address ≺ the configured fabric address that binds here

@@ -274,24 +274,30 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | The binary changing | the bridge stops itself ≺ it stops on the installer's SIGTERM alone | M3 |
 
 **The stream.**
-- Each link carries one stream toward its peer node, in two classes: large units (the window's block) and small units
-  (one frame). Each class is a ring of units in the bridge's arena, with a ready word and a landed word per unit
-  (`struct mesh_stream`).
-- The bridge stripes each class over the link's lane pairs: unit u rides lane pair u mod 4 as that lane's
-  (u div 4)-th unit, alike at both ends.
+- Each link carries `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own, since a
+  queue pair carries one ring (a SEND fills the oldest receive posted on it). Each stream has two classes: large units
+  (the window's block) and small units (one frame). Each class is a ring of units in the bridge's arena, with a ready
+  word and a landed word per unit (`struct mesh_stream`).
+- A stream's units of a class ride its lane of that class in order, alike at both ends (`MESH_STREAM_PAIRS`, the pairs
+  a stream stripes over, is one).
+- Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
+  GID and queue pair number) and which no other stream between the two nodes has.
 - The receive thread posts receives into the in ring for the link's life, and raises a unit's landed word only once it
   and every unit before it have landed. A run has landed once its last unit's word says so, whichever lanes it rode.
-- Clients see the stream's rings and words, its `peer` node, `live`, `free` and `next`. They never see a port, lane,
-  queue pair, request or completion.
+- Clients see the stream's rings and words, its `peer` node, `wire`, `live`, `free` and `next`. They never see a port,
+  lane, queue pair, request or completion.
 
 **Holding it.**
 - A process holds a stream as it holds rows: it takes the owner word from 0 to its own while `free` reads 1
   (`mesh_stream_take`), and gives it back to 0 when its last communicator on it ends (`mesh_stream_give`). The bridge
   answers nothing; it lets go the word of a client whose process is gone (`streams_let_go`).
 - The holder's first units are the stream's `next`, which its communicator's init tells its peers through NCCL's
-  bootstrap. One communicator holds a stream at a time; a second is refused (EBUSY). Each channel's head credit (a
-  position published once the peer's position LAG back is consumed) sizes the ring for that channel alone, so two
-  communicators on one ring could write a slot before it is read.
+  bootstrap. One communicator holds a stream at a time. Each channel's head credit (a position published once the
+  peer's position LAG back is consumed) sizes the ring for that channel alone, so two communicators on one ring could
+  write a slot before it is read. Communicators that share a node pair hold different streams of its link: an init's
+  first gather carries each rank's free streams (`mesh_streams_free`), and both ends of each pair of members take the
+  stream of the least `wire` free at both (`mesh_stream_take`), so the two ends of a communicator hold the two ends of
+  one stream. An init is refused (EBUSY) only where no stream toward a member's node is free at both ends.
 - The holder declares how far it will supply each class (`declared`) and by when (`deadline`, uptime ns, at most
   `MESH_PLATFORM_NS` on).
 

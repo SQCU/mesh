@@ -34,17 +34,22 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
 
 /* design/transport.md section 14: a link's queue pairs, made once at its one pairing, are its MESH_LINK_LANES lanes:
    lane MESH_LANE_KEEPALIVE the keepalive's, lane 1 reserved and unused, and from MESH_LANE_FIRST pairs, a pair's large
-   lane (MESH_LANE_FIRST + 2 p) and its small lane (+ 2 p + 1).  The link's stream (mesh.h struct mesh_stream) is striped
-   over them: its unit u of a class rides the lane of that class of pair u mod MESH_LANE_PAIRS, as that lane's
-   (u / MESH_LANE_PAIRS)-th unit, alike at both ends (a lane's units land in order) */
+   lane (MESH_LANE_FIRST + 2 p) and its small lane (+ 2 p + 1).  The link's MESH_LINK_STREAMS streams (mesh.h struct
+   mesh_stream) take MESH_STREAM_PAIRS pairs each, stream s pairs s MESH_STREAM_PAIRS on, a queue pair carrying one ring
+   (a SEND fills the oldest receive posted on its queue pair); a stream's unit u of a class rides the lane of that class
+   of its pair u mod MESH_STREAM_PAIRS, as that lane's (u / MESH_STREAM_PAIRS)-th unit, alike at both ends (a lane's
+   units land in order) */
 #define MESH_LINK_LANES 10u
 #define MESH_LANE_KEEPALIVE 0u
 #define MESH_LANE_FIRST 2u
 #define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
+#define MESH_STREAM_PAIRS (MESH_LANE_PAIRS/MESH_LINK_STREAMS)
 _Static_assert(MESH_LANE_FIRST+2*MESH_LANE_PAIRS==MESH_LINK_LANES,"the lanes' pairs");
-_Static_assert(!(MESH_STREAM_LARGE_UNITS%MESH_LANE_PAIRS) && !(MESH_STREAM_SMALL_UNITS%MESH_LANE_PAIRS),"a stream's ring striped whole");
+_Static_assert(MESH_STREAM_PAIRS && MESH_STREAM_PAIRS*MESH_LINK_STREAMS==MESH_LANE_PAIRS,"a link's pairs, its streams' whole");
+_Static_assert(!(MESH_STREAM_LARGE_UNITS%MESH_STREAM_PAIRS) && !(MESH_STREAM_SMALL_UNITS%MESH_STREAM_PAIRS),"a stream's ring striped whole");
 static inline uint32_t lane_class(uint32_t k){ return (k-MESH_LANE_FIRST)&1; }
-static inline uint32_t lane_stripe(uint32_t k){ return (k-MESH_LANE_FIRST)/2; }
+static inline uint32_t lane_stream(uint32_t k){ return (k-MESH_LANE_FIRST)/2/MESH_STREAM_PAIRS; }
+static inline uint32_t lane_stripe(uint32_t k){ return (k-MESH_LANE_FIRST)/2%MESH_STREAM_PAIRS; }
 
 _Static_assert(sizeof(struct ibv_send_wr)==128,"M06");
 _Static_assert(sizeof(struct ibv_sge)==16,"M07 M09");
@@ -82,7 +87,7 @@ struct send_gate {
   uint32_t capacity;
 };
 /* design/transport.md section 14: a data lane's progress, the bridge's alone, counted in the lane's own units (its i-th
-   the stream's MESH_LANE_PAIRS i + its stripe): the units it has posted SENDs for (`sent`, the send thread's), and
+   its stream's MESH_STREAM_PAIRS i + its stripe): the units it has posted SENDs for (`sent`, the send thread's), and
    received (`posted` receives posted, `got` landed, the receive thread's, posted at most `window` units ahead: the
    lane's share of the completion queue in its frames), whether its receives were posted (`armed`, the receive
    thread's), and its requests, one a slot of its stripe each way (`sends`, `receives`, made as the link connects;
@@ -140,7 +145,8 @@ struct link {
   uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t alive_at,job_at,held,seen[2],final[2],released[2];
+  uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2],released[MESH_LINK_STREAMS][2];
+  uint64_t wire[MESH_LINK_STREAMS];
   _Atomic int alive_flight;
 };
 /* design/transport.md: a port, its link, its control socket's queues each way, its verbs work's queue (its

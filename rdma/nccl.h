@@ -22,9 +22,11 @@
    MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets them), every rank's node (mesh_observe) meets there,
    the root listening on that host alone where it is an IPv6 address; the id is its name.  ncclCommInitRankConfig with
    config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Its first gather carries each rank's
-   node and the nodes its bridge reaches (mesh-call.h mesh_nodes_reached); each rank then holds its bridge's stream toward each
-   other member's node it is joined to, as it holds rows (mesh_stream_take: design/transport.md section 14), one
-   communicator a stream (a second refused, EBUSY: each channel's head credit sizes its ring alone); the second gather,
+   node, the nodes its bridge reaches and the streams free to take (mesh-call.h mesh_nodes_reached, mesh_streams_free);
+   each rank then holds, toward each other member's node it is joined to, the stream of the least identity free at both
+   ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (each channel's
+   head credit sizes its ring alone; a link has several, so communicators sharing a node pair hold their own; EBUSY where
+   none toward a member's node is free at both ends); the second gather,
    bounded by mesh.h MESH_PLATFORM_NS a send or receive, carries each rank's holding's status and its streams' first
    units, the peer's first unit out being this end's first in.  A communicator names nodes, never a link, port, lane
    or queue pair.  An init fails as a value where two ranks are on one node, a stream is held by another process or

@@ -41,8 +41,9 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
   nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
   it holds rows (the stream's owner word taken while the stream is free). The second, bounded by `MESH_PLATFORM_NS` a
   send or receive, carries each rank's holding's status and where its streams' units start. A communicator names
-  nodes alone. An init fails as a value where two ranks are on one node (`ncclInvalidUsage`), where a stream it needs
-  is held by another communicator or still sending its last holder's units (EBUSY) or is gone (ENOLINK)
+  nodes alone. An init fails as a value where two ranks are on one node (`ncclInvalidUsage`), where no stream
+  toward a member's node is free at both ends (EBUSY: a link has four, each held by one communicator) or the link is
+  gone (ENOLINK)
   (`ncclSystemError`), or where a peer is silent past that bound; what it held is let go, and the next init reads the
   streams as they then stand.
 - A non-blocking init sets `comm` at once, runs on a thread of its own and returns `ncclInProgress`;
@@ -56,8 +57,7 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
 - A rank's connect to its root gives up `MESH_PLATFORM_NS` after its first try: an init toward a root that does not
   listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
 - `ncclCommSplit` takes the ranks of a color and holds the child's streams over comm (NCCL's bootstrapSplit, with the
-  init's two gathers); a stream comm or another communicator of the process still holds refuses it (EBUSY: one
-  communicator a stream). `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
+  init's two gathers), streams of its own, as every init takes. `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
   exchange among the rest, so it holds no stream: a shrink to one rank is made, and one to two ranks or more is refused
   (`ncclInvalidUsage`, ENOLCK).
 - Making a communicator, a lone rank's too, attaches the process's client of its node's bridge ([Memory](#memory)),
@@ -326,8 +326,8 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
   Separate send then receive calls in the same order on both sides do not pair: a channel has one position axis for
   both directions. The library does not detect it, nor unequal counts or different collectives on two ranks: a landed
   position's one check is a dud's (its first eight bytes all ones), so these are the caller's error.
-- Communicators in one process know nothing of one another, and no two hold one stream: a communicator that needs a
-  stream another communicator of the process holds is refused (EBUSY) until that one is destroyed.
+- Communicators know nothing of one another, and no two hold one stream: a link has four, so four communicators use
+  a node pair at once, and a fifth is refused (EBUSY) until one of them is destroyed.
 
 ## Failures
 
@@ -350,8 +350,7 @@ returning if the link topo changed mid function execution"). A communicator keep
 that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator
 (metal-microbench makes each call's communicators at the call's start). A rank that departed is left out with
 `ncclCommShrink` (to one rank: [Communicators](#communicators)), and a joining one taken in with `ncclCommGetUniqueId`
-and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding its streams as every init does (a stream
-comm still holds refuses it, EBUSY). `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
+and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding streams of its own as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and the units its groups
 declared and supplied nothing for go as duds at their deadline, so its peers' groups fail rather than wait); an init
 still running (a non-blocking one's) ends as a value, its host-path groups return at their next look and its GPU waits
@@ -360,9 +359,9 @@ end at their next look at its stop word, and every later group on it is refused 
 
 A communicator takes no bytes of its node's window: its rings are its streams', the bridge's (`mesh.h`
 `struct mesh_stream`). The process holds one of its bridge's client slots (`mesh.h` `MESH_CLIENTS`) whatever its
-communicators; each communicator of two ranks or more holds the stream toward each member's node it is joined to from
+communicators; each communicator of two ranks or more holds a stream toward each member's node it is joined to from
 its init to its destruction, one communicator a stream (each channel's head credit sizes the stream's ring for that
-channel alone, so a second is refused, EBUSY).
+channel alone), of the four a link has.
 
 ## Environment
 

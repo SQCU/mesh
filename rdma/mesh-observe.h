@@ -6,7 +6,11 @@
 #ifndef MESH_OBSERVE_H
 #define MESH_OBSERVE_H
 #include "mesh.h"
-#define MESH_PORTS MESH_STREAMS
+/* a link's streams, and so the most ports: link p's streams are the region's p MESH_LINK_STREAMS to p MESH_LINK_STREAMS
+   + MESH_LINK_STREAMS - 1 */
+#define MESH_LINK_STREAMS 4u
+#define MESH_PORTS (MESH_STREAMS/MESH_LINK_STREAMS)
+_Static_assert(MESH_PORTS*MESH_LINK_STREAMS==MESH_STREAMS,"a port's streams");
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; };
 _Static_assert(sizeof(struct mesh_link_info)==32 && MESH_PORTS*sizeof(struct mesh_link_info)<=MESH_BRIDGE_BYTES,"mesh_link_info");

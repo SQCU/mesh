@@ -8,13 +8,9 @@
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
 
 /* ---- The streams toward nodes (mesh-call.h; design/transport.md section 14) ------------------------- */
-/* the live stream toward `node`, NULL where none goes there */
-static struct mesh_stream *stream_toward(struct hdr *m,uint32_t node){
-  for(uint32_t p=0;node && p<m->streams && p<MESH_STREAMS;p++){
-    struct mesh_stream *x=mesh_stream_at(m,p);
-    if(atomic_load_explicit(&x->live,memory_order_acquire) && atomic_load_explicit(&x->peer,memory_order_relaxed)==node)return x;
-  }
-  return NULL;
+/* stream `stream` of the region, NULL where it has none such */
+static struct mesh_stream *stream_held(struct hdr *m,uint32_t stream){
+  return stream<m->streams && stream<MESH_STREAMS?mesh_stream_at(m,stream):NULL;
 }
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
@@ -28,40 +24,53 @@ uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room
   }
   return count;
 }
-int mesh_stream_take(struct mesh_ctx *context,uint32_t node,uint64_t next[2]){
-  if(!context || !context->client || !next)return EINVAL;
-  struct mesh_stream *x=stream_toward(context->M,node);
-  if(!x)return ENOLINK;
-  uint64_t vacant=0;
-  if(!atomic_load_explicit(&x->free,memory_order_acquire) ||
-     !atomic_compare_exchange_strong_explicit(&x->owner,&vacant,context->client,memory_order_acq_rel,memory_order_acquire))return EBUSY;
-  next[0]=atomic_load_explicit(&x->next[0],memory_order_relaxed);next[1]=atomic_load_explicit(&x->next[1],memory_order_relaxed);
-  atomic_store_explicit(&x->declared[0],next[0],memory_order_relaxed);atomic_store_explicit(&x->declared[1],next[1],memory_order_release);
-  return 0;
-}
-void mesh_stream_give(struct mesh_ctx *context,uint32_t node){
-  if(!context || !context->client)return;
-  for(uint32_t p=0;p<context->M->streams && p<MESH_STREAMS;p++){
-    struct mesh_stream *x=mesh_stream_at(context->M,p);
-    uint64_t mine=context->client;
-    if(atomic_load_explicit(&x->peer,memory_order_relaxed)==node)atomic_compare_exchange_strong(&x->owner,&mine,0);
+uint32_t mesh_streams_free(struct hdr *m,uint32_t *node,uint64_t *wire,uint32_t room){
+  uint32_t count=0;
+  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
+    const struct mesh_stream *x=mesh_stream_at(m,p);
+    if(!atomic_load_explicit(&x->live,memory_order_acquire) || !atomic_load_explicit(&x->free,memory_order_acquire) ||
+       atomic_load_explicit(&x->owner,memory_order_relaxed))continue;
+    node[count]=atomic_load_explicit(&x->peer,memory_order_relaxed);wire[count++]=atomic_load_explicit(&x->wire,memory_order_relaxed);
   }
+  return count;
 }
-int mesh_stream_view(struct mesh_ctx *context,uint32_t node,int large,struct mesh_stream_view *view){
+int mesh_stream_take(struct mesh_ctx *context,uint64_t wire,uint32_t *stream,uint64_t next[2]){
+  if(!context || !context->client || !next || !stream || !wire)return EINVAL;
+  struct hdr *m=context->M;
+  for(uint32_t p=0;p<m->streams && p<MESH_STREAMS;p++){
+    struct mesh_stream *x=mesh_stream_at(m,p);
+    if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->wire,memory_order_relaxed)!=wire)continue;
+    uint64_t vacant=0;
+    if(!atomic_load_explicit(&x->free,memory_order_acquire) ||
+       !atomic_compare_exchange_strong_explicit(&x->owner,&vacant,context->client,memory_order_acq_rel,memory_order_acquire))return EBUSY;
+    next[0]=atomic_load_explicit(&x->next[0],memory_order_relaxed);next[1]=atomic_load_explicit(&x->next[1],memory_order_relaxed);
+    atomic_store_explicit(&x->declared[0],next[0],memory_order_relaxed);atomic_store_explicit(&x->declared[1],next[1],memory_order_release);
+    *stream=p;
+    return 0;
+  }
+  return ENOLINK;
+}
+void mesh_stream_give(struct mesh_ctx *context,uint32_t stream){
+  if(!context || !context->client)return;
+  struct mesh_stream *x=stream_held(context->M,stream);
+  uint64_t mine=context->client;
+  if(x)atomic_compare_exchange_strong(&x->owner,&mine,0);
+}
+int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,int large,struct mesh_stream_view *view){
   if(!context || !context->client || !view)return EINVAL;
   struct hdr *m=context->M;
-  const struct mesh_stream *x=stream_toward(m,node);
-  if(!x)return ENOLINK;
+  const struct mesh_stream *x=stream_held(m,stream);
+  if(!x || !atomic_load_explicit(&x->live,memory_order_acquire))return ENOLINK;
   if(atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client)return EPERM;
   const uint32_t c=!large;
   *view=(struct mesh_stream_view){.in=(unsigned char *)m+x->in[c],.out=(unsigned char *)m+x->out[c],.ready=(_Atomic uint64_t *)((char *)m+x->ready[c]),
     .landed=(_Atomic uint64_t *)((char *)m+x->landed[c]),.unit=x->unit[c],.units=x->units[c]};
   return 0;
 }
-int mesh_stream_declare(struct mesh_ctx *context,uint32_t node,int large,uint64_t declared,uint64_t deadline){
+int mesh_stream_declare(struct mesh_ctx *context,uint32_t stream,int large,uint64_t declared,uint64_t deadline){
   if(!context || !context->client)return EINVAL;
-  struct mesh_stream *x=stream_toward(context->M,node);
-  if(!x)return ENOLINK;
+  struct mesh_stream *x=stream_held(context->M,stream);
+  if(!x || !atomic_load_explicit(&x->live,memory_order_acquire))return ENOLINK;
   atomic_store_explicit(&x->deadline,deadline,memory_order_relaxed);
   atomic_store_explicit(&x->declared[!large],declared,memory_order_release);
   return 0;

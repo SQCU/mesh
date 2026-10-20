@@ -4,7 +4,7 @@
    last came to be (`idle_since`, 0 while any is) */
 static void busy_tell(void){
   uint64_t busy=0;
-  for(uint32_t p=0;p<port_count;p++)busy+=atomic_load_explicit(&mesh_stream_at(M,p)->owner,memory_order_relaxed)!=0;
+  for(uint32_t p=0;p<port_count*MESH_LINK_STREAMS;p++)busy+=atomic_load_explicit(&mesh_stream_at(M,p)->owner,memory_order_relaxed)!=0;
   if(busy)atomic_store_explicit(&M->idle_since,0,memory_order_relaxed);
   else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
   atomic_store_explicit(&M->busy,busy,memory_order_release);

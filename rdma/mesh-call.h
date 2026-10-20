@@ -9,13 +9,17 @@ void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index)
 /* design/transport.md section 14: the nodes this node's bridge has a live stream toward, each with its stream's
    bandwidth (mesh-plan.h struct mesh_reach), at most `room`; their count */
 uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
-/* design/transport.md section 14: the stream toward node `node`, held by this client as its rows are: taken while it is
-   free (its owner word 0 to the client's own), each class's first unit then the stream's `next` (next[0] large,
-   next[1] small): 0, EINVAL, ENOLINK where no live stream goes to the node, or EBUSY where another client holds it or
-   its last holder's units are still going; let go (its owner word back to 0), after which its bridge sends every unit
-   it declared, the unsupplied ones as duds */
-int mesh_stream_take(struct mesh_ctx *,uint32_t node,uint64_t next[2]);
-void mesh_stream_give(struct mesh_ctx *,uint32_t node);
+/* design/transport.md section 14: the streams free to take, each one's node and its `wire` (struct mesh_stream: its
+   identity, alike at both its ends), at most `room`; their count.  The two ends of a communicator take the stream of one
+   wire between their nodes, one free at both: its init exchanges these */
+uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t room);
+/* design/transport.md section 14: the live stream of identity `wire`, held by this client as its rows are: taken while
+   it is free (its owner word 0 to the client's own), `*stream` its index, each class's first unit then the stream's
+   `next` (next[0] large, next[1] small): 0, EINVAL, ENOLINK where no live stream has the identity, or EBUSY where
+   another client holds it or its last holder's units are still going; let go by its index (its owner word back to 0),
+   after which its bridge sends every unit it declared, the unsupplied ones as duds */
+int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream,uint64_t next[2]);
+void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
 /* design/transport.md section 14: a held stream's class (`large` 1: its large units, 0: its small), as the client maps
    it: its in and out rings, a ready word and a landed word a unit, its unit's bytes and its units; 0, EINVAL, EPERM
    where the client does not hold it, or ENOLINK.  The holder supplies unit u (its sequence in the class, from the
@@ -26,6 +30,6 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t node);
    (absolute) by `deadline` (uptime ns, at most MESH_PLATFORM_NS away): mesh_stream_declare; a declared unit not
    supplied by then, or by the holding's end, goes as a dud (all ones) */
 struct mesh_stream_view { unsigned char *in,*out; _Atomic uint64_t *ready,*landed; uint32_t unit,units; };
-int mesh_stream_view(struct mesh_ctx *,uint32_t node,int large,struct mesh_stream_view *);
-int mesh_stream_declare(struct mesh_ctx *,uint32_t node,int large,uint64_t declared,uint64_t deadline);
+int mesh_stream_view(struct mesh_ctx *,uint32_t stream,int large,struct mesh_stream_view *);
+int mesh_stream_declare(struct mesh_ctx *,uint32_t stream,int large,uint64_t declared,uint64_t deadline);
 #endif

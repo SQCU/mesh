@@ -60,7 +60,7 @@ int main(void){
   if(!carrying)printf("\"idle\":%s,\"idle_since\":%llu,",busy?"false":"true",(unsigned long long)(idle_since/1000000000u));
   printf("\"peers\":[");
   static const char *const phase_name[]={[MESH_UNKNOWN]="UNKNOWN",[MESH_PAIRING]="PAIRING",[MESH_PAIRED]="PAIRED",[MESH_STOPPED]="STOPPED"};
-  for(int i=0;i<ports && i<MESH_PORTS;i++)
+  for(int i=0;i<ports && i<(int)MESH_PORTS;i++)
     printf("%s{\"port\":%d,\"node\":%u,\"phase\":\"%s\",\"bandwidth\":%llu}",i?",":"",i,port[i].peer,
       port[i].phase<=MESH_STOPPED?phase_name[port[i].phase]:"?",(unsigned long long)port[i].bandwidth);
   if(count<0)printf("],\"map\":{\"errno\":%d}",-count);
