@@ -535,7 +535,7 @@ without exception superfluous and wrapping or preserving another errorful featur
 - **C6:** communicators kept across calls (metal-microbench mesh_rank.m `kept_sets`) ≺ calls that fail and are rerun.
 - **D7:** goal_a.swift reading its bridge's records to find its node ≺ the host's own name (metal-microbench 5e95b12);
   mesh_rank.m asking libnccl-mesh for its node's fabric address ≺ the configured fabric address that binds here
-  (configs/driver.json and bind(2)). rank.swift's `ncclMeshMemLive`, whether its leases' window is still registered, is
-  an extension the hardware needs: a registered window ends with its bridge's process, and NCCL's memory has no such
-  end (C1, the operator's words on extensions, 10-20).
+  (configs/driver.json and bind(2)); rank.swift polling `ncclMeshMemLive` each second, and timing init waits by
+  `ncclMeshInitWaits` ≺ a failed call that finds its leases stale through NCCL's `ncclMemAlloc` (the operator's choice,
+  10-20).
 - **D2, D3:** attention plans and instances derived in builders (before 2b75b6a and d3d0f4b) ≺ synthesized at load.

@@ -569,7 +569,7 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    leases' pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A
    lease is an operand of the window it was taken from, and a bridge that stops takes its region with it: while the
    process holds a lease of a bridge that stopped (no longer registered on any device), its next lease, communicator and
-   ncclCommRegister fail naming it (ESTALE, attach_fail), and ncclMeshMemLive says so, until the process has freed every
+   ncclCommRegister fail naming it (ESTALE, attach_fail), until the process has freed every
    such lease; the next attaches to the bridge that runs then, so a process never holds leases of two regions (a group of
    a communicator made on the bridge that stopped fails: comm_ready).
    The attach of a bridge gone stays mapped while a lease of it is held or a communicator holds it (until
@@ -1032,8 +1032,6 @@ static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, con
   return 0;
 }
 
-/* nccl.h ncclMeshInitWaits */
-static _Atomic uint64_t init_waits;
 
 /* the attach's hold of the stream toward `node`, NULL where it holds none; under attach_lock */
 /* comm's hold of its stream toward node `node`, NULL where it holds none */
@@ -1054,7 +1052,6 @@ static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node) {
    stream toward a member's node free at both ends), ENOSPC (no hold vacant), or mesh_stream_take's refusal; what it
    took is let go with comm (comm_leave) */
 static int comm_hold(struct ncclComm *comm, const struct report *reports, struct report *mine) {
-  const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
   struct attach *a = comm->attach;
   const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   uint64_t bandwidth;
@@ -1083,7 +1080,6 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     mine->fresh |= UINT32_C(1) << k;
   }
   pthread_mutex_unlock(&attach_lock);
-  atomic_fetch_add(&init_waits, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began);
   return status;
 }
 
@@ -1519,14 +1515,6 @@ static int lease_wait(const void *ptr, int write, uint64_t until) {
   }
 }
 
-/* every lease the process holds of a bridge that runs: ncclSuccess, or ncclRemoteError where one is of a bridge that
-   stopped (attach_fail's ESTALE) */
-ncclResult_t ncclMeshMemLive(void) {
-  pthread_mutex_lock(&attach_lock);
-  const int stale = attaches_stale();
-  pthread_mutex_unlock(&attach_lock);
-  return stale ? attach_fail(stale, "ncclMeshMemLive") : ncclSuccess;
-}
 
 /* an operator made into the communicator's table, its handle past ncclNumOps */
 static ncclResult_t op_make(ncclComm_t comm, struct redop made, ncclRedOp_t *op) {
@@ -3316,7 +3304,6 @@ uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
 void ncclMeshMetal4Records(uint64_t *issued, uint64_t *capacity) { metal_records(issued, capacity); }
 
-void ncclMeshInitWaits(uint64_t *ns) { *ns = atomic_load(&init_waits); }
 
 /* whether a rank's moves of a program are at most one SEND and one receive, each of every part: the whole operand in one
    piece each way */

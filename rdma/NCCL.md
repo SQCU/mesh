@@ -265,8 +265,8 @@ system call".
 - A lease is an operand of the window it came from, and a bridge that stops takes its region with it: the lease's
   pages stay readable but are no longer registered memory. While the process holds such a lease, its next
   `ncclMemAlloc`, communicator and `ncclCommRegister` fail with `ncclRemoteError` naming it (and a communicator's next
-  group that crosses a link fails), and `ncclMeshMemLive()` says so for a process that makes no other call (a server
-  between calls). Once the process has freed every such lease (`ncclMemFree`), its next call attaches to the bridge
+  group that crosses a link fails); a server between calls finds it when a call fails, by a lease of one page
+  `ncclMemAlloc` refuses with `ncclRemoteError`. Once the process has freed every such lease (`ncclMemFree`), its next call attaches to the bridge
   that runs then and leases from its window, so a process never holds leases of two regions. This is the recovery
   doctrine (design/transport.md, mandates 12 and 13, the operator, 2026-10-14): "functions can fail from any one operand
   becoming invalidatd, servers should not fail when any operand is invalidated (ideally)"; "within call failures

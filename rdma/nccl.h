@@ -120,7 +120,7 @@
    ncclCommDeregister releases nothing.  A lease is an operand of the window it came from: once its bridge stops its
    pages are no longer registered, and while the process holds such a lease its next ncclMemAlloc, communicator and
    ncclCommRegister fail with ncclRemoteError naming it (and a communicator's next group that crosses a link fails),
-   as ncclMeshMemLive (below) does, until the process has freed every one (ncclMemFree); it then leases from the bridge
+   until the process has freed every one (ncclMemFree); it then leases from the bridge
    that runs, so a process never holds leases of two regions (design/transport.md).  Weights, KV and
    every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being outside of
    it means that they cannot be zero copy passed to peers."  A lease's Metal buffer is ncclMeshMemBuffer's (below), the
@@ -976,14 +976,6 @@ const char* ncclMeshMetalSteps(void);
    EOVERFLOW mid-group (a failed group), so a caller that encodes several windows ahead bounds each window's records by it (the
    records a step encodes, read across one step's encode). */
 void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
-/* The nanoseconds this process's communicators' inits and splits have spent holding their streams (counting from its
-   first: mesh-call.h mesh_stream_take, which waits on nothing).  A caller that times its work
-   across an init takes this out of it (metal-microbench tools/mesh/rates.py measured). */
-void ncclMeshInitWaits(uint64_t* ns);
-/* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
-   where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
-   and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */
-ncclResult_t ncclMeshMemLive(void);
 /* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
    in it: the library's, made at the lease's first such call and released by ncclMemFree, the buffer a tensor allocator
    or the caller's kernels bind over the lease (mesh 3981ca80^'s).  A Metal-path collective whose ncclMeshBuffer names
