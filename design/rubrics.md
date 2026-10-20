@@ -56,10 +56,12 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 - A request to the bridge, or a way to wake its threads.
 - Another client's rows or slot.
 - The words only the bridge writes: landed, `live`, `free`, `next`.
+- Its library's internals: libnccl-mesh exports NCCL's functions, their pnccl twins and its `ncclMesh` extensions, and
+  nothing else.
 
 **What data code (D) reaches:** the NCCL API, the device-function header and `ncclMemAlloc`. It reaches nothing of the bridge's or the region's.
 
-The region is mapped whole into every client, so nothing in the hardware enforces the lists above. Only the headers enforce them, which is why the headers expose nothing else (design/transport.md section 2).
+The region is mapped whole into every client, so nothing in the hardware enforces the lists above. Only the headers enforce them, which is why the headers expose nothing else (design/transport.md section 2). The operator, 10-20: "memory safety isn ot a requirement or even allowed for our code. we don't expose dangerous source level headers, functions, ontological objects, whatever. that's the limit and the only limit we are working with here."
 
 **For agents, subagents and reviewers:**
 1. Name the kind of every file a change touches, from the table under Quantities.
@@ -152,7 +154,12 @@ ranking.
 - Ranked:
   - "a singlethreaded application which chooses to 'spin forever' with no semaphore and no secondary thread" ≺ loops
     that poll and read a stop flag (10-18);
-  - a kill guard keeping processes alive ≺ processes any signal ends (10-20).
+  - a kill guard keeping processes alive ≺ processes any signal ends (10-20);
+  - a queue pair moved to RESET or ERR, or destroyed, inside the running process ≺ queue pairs made and connected once
+    and released only by the process's exit (10-20): "why do you think you're 'allowed' to do 'teardowns' in the
+    operation of any code we are discussing?"; "every single time a claudemade code artifact has tried to introduce
+    'revocation' or 'destruction' it has resulted in a null pointer access and an unscheduled reboot, or an infinite
+    loop and a watchdog OS restart" (10-20).
 
 **M4. Containment.**
 - Ranks higher: the form in which a failure's effects stay with the party that failed, and in which no mechanism is added
@@ -182,7 +189,9 @@ ranking.
 - Ranked:
   - a dud copied into a pre-posted address ≺ a dud sent from the bridge's own all-ones rows by address translation
     (10-19);
-  - one namespace for clients and bridge ≺ separate namespaces, the bridge's private (10-19).
+  - one namespace for clients and bridge ≺ separate namespaces, the bridge's private (10-19);
+  - a bridge with requests its clients make of it ≺ "the bridge does not have any 'verbs' at all. the rdma protocol we
+    are transducing *is* a complete protocol. it's done. we're not writing a protocol." (10-20).
 
 **M6. Recovery without people.**
 - Ranks higher: the form that gets back to serving after a loss with fewer parties involved and less downtime.
@@ -246,7 +255,12 @@ ranking.
 - Ranked:
   - "sessions", "meets" and "destructions" ≺ "buffers and basically async 'awaities' and 'maybes' wrt to buffers" (10-19);
   - "complicated logic hidden inside of classmodules" ≺ "something from the established literature" for routing
-    (10-04).
+    (10-04);
+  - a revoke that gives back what NCCL's keeps ≺ NCCL's revoke: "why do you want anything outside of nccl" (10-20).
+- Also: "if they're really features of nccl, whatever, we can use them, that's an if and only if"; and of extensions
+  the hardware needs, "it is not impossible that there are non-nccl extension functions we need for this codebase to
+  perform many operations which behave slightly differently from the specific firmware on the specific rdma backend on
+  this specific hardware; that is not ultimately what we are here to redact" (10-20).
 
 **C2. Invariance.**
 - Ranks higher: the form whose one implementation serves more cablings, member counts, uneven counts and dtypes without
@@ -481,6 +495,10 @@ The same comparison ranks one way in one layer and the other way in another.
 | has members doing different work | D (D5) | C (C7): a member deciding alone desynchronizes the schedule |
 | adds a feature that measures faster | D (D10) | M (M1): every feature is state with the node's lifetime |
 | lives longer | M: resident, killable | D: what outlives a call, other than caches keyed by content, ranks lower (D8) |
+| has data kernels write the stream's ring slots and ready words themselves | D (D10): no copy between them and the wire | M (M5): clients hold the addresses of the bridge's words |
+
+Of the last row, the operator, 10-20: "if this is the fastest possible operation that the hardware allows, we might need
+to allow it; memory safety is not a requirement but zero reducible overhead is a requirement".
 
 In every layer, a form that adds a mechanism to survive another layer's failure ranks below the form that removes the
 failure at its owner (M4). The operator, 10-18: "features which call for error correction or protocols are almost
@@ -502,13 +520,19 @@ without exception superfluous and wrapping or preserving another errorful featur
   wrapped, or scheduled by other code. therefore we have to abstract, wrap, and schedule it" (10-16).
 - **Fix what you find.** "fix problems when you find them instead of remarking on them" (10-19).
 
-## Where HEAD sits (2026-10-19), as ranked pairs
+## Where HEAD sits (2026-10-20), as ranked pairs
 
-- **M2, M4, M5:** HEAD's bridge ≺ the bridge of design/transport.md. HEAD has a keyword protocol for sessions, concludes
-  links when a communicator ends, and lets clients hold work requests and claim queue pairs.
+- **M2, M3, M4, M5:** v127's bridge (a binding protocol in client slots, links re-paired inside the process by RESET and
+  ERR, clients claiming lane pairs) ≺ HEAD's (version 128, 0e34c13e; the M5's bridge since 10-20 05:53 UTC): a stream a
+  link held by an owner word, queue pairs made and connected once, nothing a client asks of it.
 - **M3:** the deleted kill guard ≺ HEAD after its deletion.
-- **C1, C6, C7:** libnccl-mesh's sessions, meets, stamps and kept communicators ≺ buffers and readiness words with calls
-  that fail and are rerun.
-- **D7:** mesh_rank.m reading the bridge's region ≺ the collectives API alone.
-- **D8:** `withinPlan` ceilings ≺ sizes from the program's own configuration.
+- **C1:** libnccl-mesh exporting its own Metal functions and including the planner in nccl.h ≺ HEAD's ABI of NCCL's
+  functions, their twins and its extensions (5312f9b2).
+- **C2, C7:** HEAD's one communicator a node pair (287795f5: a second toward a node refused, EBUSY, as metal-microbench's
+  rank process makes beside its standing group) ≺ communicators that share a node pair, as v127's four lane pairs a
+  link allowed.
+- **C6:** communicators kept across calls (metal-microbench mesh_rank.m `kept_sets`) ≺ calls that fail and are rerun.
+- **D7:** goal_a.swift reading its bridge's records to find its node ≺ the host's own name (metal-microbench 5e95b12);
+  mesh_rank.m learning its node's fabric address (`ncclMeshFabricAddress`) and rank.swift its bridge's liveness
+  (`ncclMeshMemLive`) ≺ the collectives API alone.
 - **D2, D3:** attention plans and instances derived in builders (before 2b75b6a and d3d0f4b) ≺ synthesized at load.
