@@ -32,7 +32,7 @@
 
 _Static_assert(sizeof(pthread_t)==8,"M17");
 
-/* design/transport.md section 14: a link's queue pairs, made once at its one pairing, are its MESH_LINK_LANES lanes:
+/* design/transport.md section 14: a link's queue pairs, made once at its agent's one pairing, are its MESH_LINK_LANES lanes:
    lane MESH_LANE_KEEPALIVE the keepalive's, lane 1 reserved and unused, and from MESH_LANE_FIRST pairs, a pair's large
    lane (MESH_LANE_FIRST + 2 p) and its small lane (+ 2 p + 1).  The link's MESH_LINK_STREAMS streams (mesh.h struct
    mesh_stream) take MESH_STREAM_PAIRS pairs each, stream s pairs s MESH_STREAM_PAIRS on, a queue pair carrying one ring
@@ -112,8 +112,8 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
 /* design/transport.md: the most bytes a port holds unsent toward a peer that takes none */
 #define MESH_UNSENT (UINT64_C(64)<<20)
 /* design/transport.md section 14: a port's link lanes (MESH_LINK_LANES), its queue pairs made once and connected once
-   in the bridge's life (its one pairing: `connected` once its connect began; a link lost after it stays down until the
-   bridge's next launch), on the two completion queues its device's context holds, each lane's share of them (`share`
+   in its agent's life ("A process a port": `lanes` once the agent was asked for them, the parent's; a link lost after it
+   pairs again with the port's next agent), on the two completion queues its device's context holds, each lane's share of them (`share`
    frames, a request one frame at least: no lane overruns its queues), and each lane's queue pair number (`qpn`, by which
    a completion names its lane).  Its state (LINK_DOWN; made and told, LINK_MADE; connecting; up), its job on the port's
    queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled) and a registration its make refused (`refused`), the
@@ -139,16 +139,43 @@ enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 #define LINK_ALIVE_RECEIVES 256u
 struct link {
   struct mesh_verbs provider;
-  int state,job,result,heard,refused,connected;
+  int state,job,result,heard,refused,lanes;
   _Atomic int done;
   _Atomic uint32_t served,broken,pairing;
-  uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing;
+  uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing,psn;
+  /* a stream a holder of a previous pairing still held at this pairing's connect: its words left ~0 for that holder, and
+     made new and freed once it lets go (the agent's send thread, mesh-link.c stream_turn_one) */
+  int stale[MESH_LINK_STREAMS];
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2],released[MESH_LINK_STREAMS][2];
   uint64_t wire[MESH_LINK_STREAMS];
   _Atomic int alive_flight;
 };
+/* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's agent on
+   their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct agent_message).  The
+   parent's: open the device (AGENT_OPEN), make the link's lanes (AGENT_MAKE, naming the link's keepalive page, which the
+   parent may lease after the agent's spawn), connect them to the peer's (AGENT_CONNECT: the peer's lanes, address, node
+   and the link's bandwidth), serve no lane again (AGENT_HALT), end (AGENT_END).  The agent's, each naming the pairing it
+   was asked for: the device opened or not (AGENT_OPENED: its address and bandwidth), the lanes made or not (AGENT_MADE:
+   each lane's queue pair number, the first sequence number and each lane's share), connected or not (AGENT_CONNECTED),
+   and the lanes a progress thread found failed (AGENT_BROKEN, naming its connect's pairing), a fault absorbed on the
+   provider's doorbell (AGENT_FAULTED), a guard not held within MESH_PLATFORM_NS (AGENT_UNGUARDED), its port's peer
+   interface terminating (AGENT_TERMINATED, as the agent heard it: B9b) */
+enum { AGENT_OPEN=1, AGENT_MAKE, AGENT_CONNECT, AGENT_HALT, AGENT_END,
+       AGENT_OPENED, AGENT_MADE, AGENT_CONNECTED, AGENT_BROKEN, AGENT_FAULTED, AGENT_UNGUARDED, AGENT_TERMINATED };
+struct agent_message {
+  uint32_t kind,pairing;
+  int32_t result,refused;
+  uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,broken,node,page;
+  uint16_t lid,padding;
+  uint8_t gid[16];
+  uint64_t bandwidth;
+};
+/* an agent that ends unbidden within this of its spawn counts toward its port's hold, from the second in a row (the boot
+   ledger's rule, a port's: mesh-link.c agent_reaped) */
+#define MESH_AGENT_SETTLE_NS (UINT64_C(60)*1000000000)
+#define TAG_AGENT (UINT64_C(1)<<58)
 /* design/transport.md: a port, its link, its control socket's queues each way, its verbs work's queue (its
    open's job `job`, dispatched at `job_at`; `stuck` once a job of the port outlived MESH_PLATFORM_NS, or a progress
    thread did not hold within it, and the port was concluded around it, until the call returns and each progress thread
@@ -182,6 +209,16 @@ struct port {
   _Atomic uint64_t epoch,seen[2];
   _Atomic(pthread_t) thread[3];
   _Atomic uint64_t guard,guarded[2];
+  /* the parent's: the port's agent (design/transport.md section 14, "A process a port"): its process (0 none) and
+     socket, when it was spawned, the agents in a row that ended unbidden within MESH_AGENT_SETTLE_NS of their spawn and
+     the hold they set before the next (`hold_to`), whether the port's link, lost once its lanes were asked for, waits
+     to end its agent (`recycle`) and whether that end was asked (`ending`), and the part of its agent's next message
+     read (`agent_in`, `agent_held` bytes of it) */
+  pid_t agent;
+  int agent_fd,recycle,ending;
+  uint32_t aborts,agent_held;
+  uint64_t agent_at,hold_to;
+  unsigned char agent_in[sizeof(struct agent_message)];
 };
 
 /* design/transport.md section 9: why this bridge stops, the code its FAREWELL carries (a signal's number) */

@@ -214,7 +214,17 @@ ranking.
   (10-18).
 - Ranked:
   - keyboard and monitor on the Mini ≺ "100% remote administrable" (10-15);
-  - asking for administrative actions ≺ "services always respect shutdown isgnals no matter what state" (10-18).
+  - asking for administrative actions ≺ "services always respect shutdown isgnals no matter what state" (10-18);
+  - a link lost after it connected staying down until a person relaunches the bridge (version 129) ≺ the port's agent
+    ending once its quiet window has passed and the next agent pairing the link again (version 130, transport.md
+    section 14): "this violates some of the first mandates ever written into this codebase's documentation, which
+    cover reconnection of existing bridges or mesh applications as the first basic requirement for mesh networking
+    code. bridges might die, collective clients might die, data procesing clients might die, but all of these and any
+    of these are not contagious to other sections in the same data flow. e.g. a bridge crashing on a computer two hops
+    down should result in the bridge being restarted, not crashing again of course, and becoming available again as a
+    resource for collectives with nothing but an error channel indicating that calls-in-flight failed and ought to be
+    retried" (10-20); "when the machine is back it is back, and the fact that it is gone is not very meaningful"
+    (10-20), "making the code work is some implicit zeroeth law that stands above all other laws" (10-20).
 
 ### Fine-grained
 

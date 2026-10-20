@@ -10,7 +10,8 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
 ## 1. The objects
 
 - **The registered window.** One POSIX shared-memory object per node, `/mesh0`, mapped by the bridge and registered
-  with every Thunderbolt RDMA device of the node once, at the bridge's start, as memory regions of 1 GiB extents
+  with every Thunderbolt RDMA device of the node by that port's agent as it opens the device (section 14), as memory
+  regions of 1 GiB extents
   aligned to 1 GiB (`tbt_post_recv` keeps only the low 32 bits of an SGE address with the region's key, so a region
   crossing a 4 GiB boundary aliased receives 4 GiB low: September 5). Every address a request names is inside it.
 - **The page table.** The window's rows (one row is one block, 16 KiB on the pair) and, per row, an owner word and the
@@ -32,10 +33,11 @@ Nothing else is needed to move data: rows, requests naming rows, completions, an
 
 ## 2. Who owns what
 
-**The bridge** (`rdma/mesh-flow`, one process per node, started by launchd and resident) owns the device contexts,
-the protection domains, the registration, every queue pair and completion queue, every request it posts, which rows a
-receive or a SEND names, and in what order a link's queue pairs carry which call's positions. It is the only process
-that makes a verbs call.
+**The bridge** (`rdma/mesh-flow`: a resident parent per node, started by launchd, and an agent per port that the
+parent spawns, section 14) owns the device contexts, the protection domains, the registration, every queue pair and
+completion queue, every request it posts, which rows a receive or a SEND names, and in what order a link's queue pairs
+carry which call's positions. Its port agents are the only processes that hold a device's objects or post on them; the
+parent reads the device list alone.
 
 **A client** (a rank, a tensor function, torch) owns its rows, and for each of its calls the positions it sends and
 receives. It reads and writes its own rows and its readiness words. It names nothing else.
@@ -172,9 +174,10 @@ No warning at all: the hardware is gone before any event says so. This is tenabl
 - **No teardown.** The surviving bridge makes no call that waits on the termination (section 5), so the termination
   completes and the node stays responsive. On 2026-10-19 the Mini lost power with the M5 running a bridge that makes
   no teardown call, and the M5 stayed up; the 2026-10-18 hang had a teardown call in it.
-- **The port left, the others kept.** Each Thunderbolt port is a separate device context. The bridge stops serving
-  the crushed port and keeps its handles unused; the link pairs again at the bridge's next launch (section 14). The
-  map drops the link, and the next calls plan over the remaining cables (two thirds, five sixths).
+- **The port left, the others kept.** Each Thunderbolt port is a separate device context in a process of its own. The
+  bridge stops serving the crushed port and makes no call on its handles; once the port's quiet window has passed its
+  agent ends, and the next agent pairs the link again when the cable is back (section 14). The map drops the link, and
+  the next calls plan over the remaining cables (two thirds, five sixths).
 - **A post racing the loss.** A post issued in the instant the hardware went may touch a doorbell mapping that no
   longer exists. Recorded only with a queue pair being destroyed by our own call at the same time (October 16-17);
   with no destroy calls it has not been seen. Where it happens, the post's thread faults, and the port is lost, as
@@ -281,7 +284,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life | M4, M9 |
 | How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more | M4, M10 |
 | Where the next holding starts | the bridge's answer in the client's slot (127) ≺ the stream's `next`, published once free, exchanged at init through NCCL's bootstrap | M2, C7 |
-| A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life | M3, M4 |
+| A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life, a lost link down until a person relaunched it (129) ≺ none in a process: made and connected once in a port agent's life, released by its exit, the link paired again by the port's next agent (130) | M3, M4, M6 |
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on the installer's SIGTERM alone | M3 |
 
@@ -322,8 +325,39 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   the unsupplied ones as duds, and one unit more. Once every lane has sent them, the stream is free again, its `next`
   the first unit after them.
 
-**Pairing once.**
-- A link's ten queue pairs are made once and connected once in the bridge's life. None is moved to another state,
-  destroyed or forgotten; the kernel releases them at the process's exit.
-- A link lost after it connected stays lost until the bridge's next launch. A LINK heard from a peer whose bridge
-  launched since is taken by no lane.
+**A process a port** (version 130; the operator's choice of 10-20).
+- The bridge is a parent and an agent a port. The parent, launchd's job, holds the region, the map and records, the
+  clients' slots, device discovery, hellos and the control sockets. A port's agent is `mesh-flow` spawned again by the
+  parent: the same image (its LC_UUID checked, so a binary replaced on disk is no agent of a running parent), in a
+  process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the window,
+  makes and connects the link's ten queue pairs and runs the port's progress threads. The parent asks it to open,
+  make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes, absorbed
+  faults, guards not held and terminations it heard. Queue pairs exist only in an agent, and an agent is the bridge
+  ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
+- A link's ten queue pairs are made once and connected once in an agent's life. None is moved to another state,
+  destroyed or forgotten; the kernel releases them at the agent's exit. A device holds ten usable queue pairs and a
+  link takes all ten, so a returning peer's lanes cannot exist beside the old ones, and the old agent's exit is their
+  one release (RESET panicked the M5 on 10-19; destroy is ruled out by its history, M3).
+- A link lost once its agent was asked for lanes (a farewell, the control socket's end, a failed completion, the link
+  going off, a termination, an absorbed fault, a protocol error, the agent's own end): its streams cancelled (landed
+  words ~0), its lanes served no more (the agent halted, before the control socket closes), the port closed. Once the
+  port's quiet window and any termination's have ended and no call is stuck (B9, B9b, B12), the parent asks the agent
+  to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
+  Other ports' agents and links, the clients and their leases are untouched.
+- An agent that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
+  passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
+  most an hour (section 9's rule, a port's: "restarted, not crashing again of course"). An agent whose parent is gone halts its
+  lanes and exits MESH_PLATFORM_NS later, its own windows held. At the bridge's stop every agent is halted before the
+  farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
+- Streams across agents. A port's rings and words are the parent's, leased once. A new agent opens each stream as its
+  link connects: one nobody holds is made new and free; one a holder of the previous pairing still holds keeps its
+  landed words ~0 for that holder and is not free until it lets go, when the send thread makes it new and frees it. A
+  holder takes a stream only while it is free, and the two ends of a communicator take only an identity free at both
+  (`wire`, a digest of this pairing's queue pair numbers and addresses), so no byte of one pairing is sent in the next.
+- A LINK names the address its lanes were made on (a make reads the port's address again, as a peer's restart can move
+  its GID table); the connect and each stream's identity take the peer's address from its LINK.
+- Calls in flight on a lost link fail as values (ncclRemoteError) and the next call takes a stream of the new pairing:
+  "a bridge crashing on a computer two hops down should result in the bridge being restarted, not crashing again of
+  course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
+  calls-in-flight failed and ought to be retried" (the operator, 10-20).
+- XMAGIC carries MESH_VERSION, so bridges of 129 and 130 never pair: both ends of a link run the rule.

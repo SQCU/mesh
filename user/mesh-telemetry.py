@@ -199,7 +199,7 @@ def fabric_bridges(now):
     stat = executable([os.environ.get("MESH_STAT", ""), os.path.join(HERE, "mesh-stat"), os.path.join(ROOT, "bin", "mesh-stat"), "/usr/local/mesh/bin/mesh-stat"])
     for pid, process in table.items():
         argv = process["argv"]
-        if os.path.basename(argv[0]) != "mesh-flow": continue
+        if os.path.basename(argv[0]) != "mesh-flow" or argv[1:2] == ["--agent"]: continue
         entry = BRIDGES.get(pid)
         if entry is None:
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)

@@ -178,8 +178,8 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
   return 0;
 }
 /* `count` UC queue pairs in INIT, against the device's usable queue pairs, on the provider's two completion queues: a
-   link's, made once in the bridge's life (design/transport.md section 14: no queue pair is moved to another state,
-   destroyed or forgotten; the kernel releases them at the process's exit).  0, or the error (ENOSPC: the device holds
+   link's, made once in its port agent's life (design/transport.md section 14: no queue pair is moved to another state,
+   destroyed or forgotten; the kernel releases them at the agent's exit).  0, or the error (ENOSPC: the device holds
    no more queue pairs). */
 static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,int count){
   struct mesh_device *device=provider->device;
