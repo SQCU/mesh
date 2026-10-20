@@ -25,7 +25,8 @@
    NCCL_MESH_POLLS: metal_begin), ended sooner by the landing, the link's loss (~0) or a revoke.  mesh_step_check: the
    wait's failure recorded in failure words [0] (its cause, nccl-mesh-metal.h METAL_*), [3] and [4] and then the gate
    [2], where the gate is still clear: a revoke, the link lost, the bound reached, or a dud, its run's first eight bytes
-   (at p.src) all ones (the peer supplied nothing there: design/transport.md section 10).  mesh_step_await: a landing
+   (at p.src) all ones (the peer supplied nothing there: design/transport.md section 10); a landing reads its first
+   eight bytes alone, as HEAD's stamp check read them, and the failure words and the fence only where it failed.  mesh_step_await: a landing
    awaited by thread 0 and checked, then the threadgroup past a device barrier and a system-scope fence (its payload
    then read with mesh_payload).  mesh_step_release: a piece the threadgroup stored into its run's slots, then its
    units' ready words (p.count from p.aux, each p.scalar) released by thread 0 after a device barrier.  One threadgroup
@@ -45,12 +46,15 @@ static NSString *const STEPS =
   "for (uint k = " XSTR(STEP_LOOK) "; seen < 1 + p.scalar && k < p.polls && !v[6]; k += " XSTR(STEP_LOOK) ") "
   "seen = mesh_wait_bounded(w, 1 + p.scalar, min(p.polls - k, " XSTR(STEP_LOOK) ")); return seen; }\n"
   "static inline void mesh_step_check(constant mesh_args &p, ulong status, device uchar *ring, device uchar *vb) { "
+  "if (!p.polls) return; "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
-  "if (!p.polls || v[2]) return; "
+  "ulong cause; "
+  "if (status != ~0UL && status >= 1 + p.scalar) { "
+  "if (mesh_payload((volatile coherent(system) device const ulong *)(ring + p.src)) != ~0UL) return; cause = " XSTR(METAL_DUD) "UL; } "
+  "else cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
+  "if (v[2]) return; "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "ulong cause = v[6] ? " XSTR(METAL_REVOKED) "UL : status == ~0UL ? " XSTR(METAL_LOST) "UL : status < 1 + p.scalar ? " XSTR(METAL_BOUND) "UL : "
-  "mesh_payload((volatile coherent(system) device const ulong *)(ring + p.src)) == ~0UL ? " XSTR(METAL_DUD) "UL : 0UL; "
-  "if (cause) { v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); } }\n"
+  "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
   "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *ring, device uchar *vb, uint i) { "
   "if (i == 0) mesh_step_check(p, mesh_step_wait(p, words + p.aux, vb), ring, vb); "
   "threadgroup_barrier(mem_flags::mem_device); "
