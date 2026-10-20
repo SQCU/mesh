@@ -177,6 +177,10 @@ ranking.
   - concluding the link to clear receives a communicator left posted ≺ receiving into the failed call's pages and
     releasing them (10-19);
   - a timer that declares a quiet peer lost and fails the program ≺ no such detector (10-18);
+  - a dud read as a sentinel, its all-ones bytes failing the consumer's group ≺ a dud landed as bytes like any other:
+    "duds aren't a protocol and are there to prevent the limit case of 'send must happen, remote client doesn't exist
+    anymore, omething has to be placed there'. type inferences are not required and you do'nt need to do anything
+    here. 'duds' are not sentinel values." (10-20);
   - a node shutting down for an unknown reason during DMA ≺ a node that stays up (10-15).
 - Also: "attempts to add statefulness to functions that don't need it, and in so doing create contagious brittleness"
   (10-18).
@@ -194,7 +198,10 @@ ranking.
     (10-19);
   - one namespace for clients and bridge ≺ separate namespaces, the bridge's private (10-19);
   - a bridge with requests its clients make of it ≺ "the bridge does not have any 'verbs' at all. the rdma protocol we
-    are transducing *is* a complete protocol. it's done. we're not writing a protocol." (10-20).
+    are transducing *is* a complete protocol. it's done. we're not writing a protocol." (10-20), the verbs being RDMA's
+    own: "the verbs are SEND and RECV. there isn't a 'send to send' or 'send to maybe receive to maybe send to send'.
+    the verbs are SEND or RECV. if you have successfully 'asked permission' to send data, you could have sent the data
+    instead. this is why i keep asking why protocols are being introduced." (10-19).
 
 **M6. Recovery without people.**
 - Ranks higher: the form that gets back to serving after a loss with fewer parties involved and less downtime.
