@@ -72,7 +72,7 @@ def main():
     for first in range(0, steps, chunk):
         count = min(chunk, steps - first)
         if rank == 0:
-            e[:count].copy_(torch.from_numpy(np.ascontiguousarray(inputs[first:first + count])))
+            e[:count].copy_(torch.from_numpy(np.array(inputs[first:first + count])))
         dist.broadcast(e[:count], src=0)
         for i in range(count):
             previous = step(e[i] if previous is None else e[i] + previous, a, b, z)
