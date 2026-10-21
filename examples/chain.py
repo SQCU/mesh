@@ -20,16 +20,19 @@ def _ksplit(items, ktiles, simdgroups):
 
 
 # docs/writing-a-service.md#the-step-kernel
+def _nearest(n, least):
+    return sorted({max(least, n // TILE * TILE), max(least, -(-n // TILE) * TILE)})
+
+
+# docs/writing-a-service.md#the-step-kernel
 def workers(K, S):
-    cores = node()[1]
-    G = 1 << (cores.bit_length() - 1)
-    unit = TILE * G
-    wrong = [(name, n) for name, n in (('width', K), ('share', S)) if n % unit]
+    G = node()[1]
+    least = TILE * G
+    wrong = [(name, n) for name, n in (('width', K), ('share', S)) if n % TILE or n < least]
     if wrong:
-        nearest = '; '.join(f'{name} {n}: {" or ".join(str(m) for m in (n // unit * unit, (n // unit + 1) * unit) if m)}'
-                            for name, n in wrong)
-        raise ValueError(f'chain step: {cores} GPU cores run {G} workers, which take a width and a share that are multiples '
-                         f'of {unit}; the nearest that are, {nearest}')
+        nearest = '; '.join(f'{name} {n}: {" or ".join(map(str, _nearest(n, least)))}' for name, n in wrong)
+        raise ValueError(f'chain step: each of the {G} GPU cores runs a worker of at least one tile of {TILE} columns, so a '
+                         f'width and a share are multiples of {TILE} and at least {least}; the nearest that run, {nearest}')
     return G
 
 
@@ -48,8 +51,8 @@ def words(args, rows, capacity):
         raise ValueError(f'chain step: instance RG {args["RG"]} takes rows that are multiples of {TILE * args["RG"]} up '
                          f'to the capacity {capacity}, not {rows}')
     groups, G, SG = rows // (TILE * args['RG']), args['G'], args['THREADS'] // 32
-    K, S = args['K'], args['S']
-    return [rows, _ksplit((S // G // TILE) * groups, K // TILE, SG), _ksplit((K // G // TILE) * groups, S // TILE, SG)]
+    kt, st = args['K'] // TILE, args['S'] // TILE
+    return [rows, _ksplit(-(-st // G) * groups, kt, SG), _ksplit(-(-kt // G) * groups, st, SG)]
 
 
 # docs/writing-a-service.md#the-step-kernel

@@ -99,24 +99,26 @@ class Pace:
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
+def fill(E, rank, inputs, first, steps, block):
+    held, slots = span(first, steps, block, len(E))
+    if rank == 0:
+        E[slots].copy_(torch.from_numpy(inputs[held]), non_blocking=True)
+    return dist.broadcast(E[slots], src=0, async_op=True)
+
+
+# docs/writing-a-service.md#how-the-example-moves-its-data
 def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
     e, p, pace = E.unbind(0), P.unbind(0), Pace()
     deep, sums = len(e), len(p)
-    if rank == 0:
-        held, slots = span(0, steps, block, deep)
-        E[slots].copy_(torch.from_numpy(inputs[held]), non_blocking=True)
-    landing = dist.broadcast(e[0], src=0, async_op=True)
+    landing = fill(E, rank, inputs, 0, steps, block)
     for t in range(steps):
         if t % block == 0:
             pace.wait()
-            if rank == 0 and t + block < steps:
-                held, slots = span(t + block, steps, block, deep)
-                E[slots].copy_(torch.from_numpy(inputs[held]), non_blocking=True)
-        ahead = dist.broadcast(e[(t + 1) % deep], src=0, async_op=True) if t + 1 < steps else None
-        landing.wait()
+            ahead = fill(E, rank, inputs, t + block, steps, block) if t + block < steps else None
+            landing.wait()
+            landing = ahead
         step(e[t % deep], p[(t - 1) % sums], p[t % sums], t == 0)
         dist.all_reduce(p[t % sums])
-        landing = ahead
         if (t + 1) % block == 0 or t + 1 == steps:
             if rank == 0:
                 held, slots = span(t - t % block, steps, block, sums)

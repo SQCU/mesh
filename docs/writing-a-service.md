@@ -71,15 +71,17 @@ Rank 0 holds the files. At the start it reads the input's shape and broadcasts t
 every rank knows them. Then it sends each rank that rank's rows of A and B.
 
 The inputs are one operand: a block of rows for each step. They move through a ring of slots in the region, one slot a
-step. Each rank has two rings, one for the inputs and one for the sums. Rank 0 copies inputs from its file into its
-ring a block at a time. The copy goes on the GPU's own queue, a block ahead of the steps that read it, and the host does
-not wait for it.
+step. Each rank has two rings, one for the inputs and one for the sums.
 
-Each input crosses one step early. Before step t's kernel, the host issues the broadcast of e_{t+1}, and rank 0's GPU
-sends it right there. So the input crosses while step t computes. The library lands it at step t's all-reduce, since a
-call finishes every call issued before it. The wait just before step t+1's kernel, the first thing that reads the
-input, then finds it done and adds nothing. It stays there, since that is where the input is read. Each step makes one
-all-reduce of its part of z, and nothing else crosses.
+The inputs cross a block at a time, a block early. They depend on nothing in the chain, so nothing makes them wait.
+Before the first step of each block, rank 0 copies the next block's inputs from its file into its ring, and broadcasts
+them into every rank's ring. Both go on the GPU's own queue, and the host does not wait for them. The host waits for
+that broadcast just before the next block's first step, the first thing that reads it. A step then has two host calls:
+its kernel and one all-reduce of its part of z. Nothing else crosses during a block.
+
+The library lands each block's broadcast sooner than that wait, though. A call finishes every call issued before it, so
+the block's first all-reduce lands the next block's inputs too. That all-reduce waits for the whole block's bytes to
+arrive, once a block.
 
 At the end of each block, rank 0 puts tanh of that block's sums, and a copy of them, on the GPU's queue as well. The
 copy writes straight into the output file's memory. No step waits for the host, and the next section says when the
@@ -90,8 +92,9 @@ place, with no copy. They also use memory the bridge already holds, so no second
 
 ## The rings
 
-The input ring is two blocks deep. While the GPU works through one block, rank 0's copies fill the other. The sum ring
-is one block deep: a block's sums are copied out at the block's end, before the next block writes over them.
+The input ring is two blocks deep. While the GPU works through one block, the next block's inputs arrive in the
+other. The sum ring is one block deep: a block's sums are copied out at the block's end, before the next block writes
+over them.
 
 How long is a block? The configuration gives `ring_bytes`, the bytes of the region the two rings may hold on each node.
 If each ring can hold the whole stream, a block is the whole stream, and no slot is used twice. If not, a block is a third
@@ -119,9 +122,11 @@ Second, the workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker 
 rank's part of z from y and its rows of B. The all-reduce then adds the parts on the same stream, and the next step's
 kernel starts once that sum has landed.
 
-G is the largest power of two that fits the GPU's cores. The width and the rank's share must both be multiples of 8
-times G. If one is not, the service stops with an error that names the nearest values that are. It never drops to a
-smaller G, since that would run slow without saying so.
+G is the number of the GPU's cores, so the whole GPU works: one worker a core. The columns come in tiles of 8, and
+each worker takes a fair share of them. If there are n tiles, each worker takes n/G of them, rounded down, and the first
+few workers take one more, so the shares differ by one tile at most. y's columns over the share are split this way, and
+so are z's columns over the width. The width and the rank's share must be multiples of 8, with at least one tile for
+every core. If one is not, the service stops with an error that names the nearest values that would run.
 
 The rows are not built into the kernel. The row count is a word the host passes with each step. The kernel's work
 items are pairs: a group of rows and a tile of columns. Only the size of a row group, RG, is built in, since it sets

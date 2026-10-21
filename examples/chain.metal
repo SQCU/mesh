@@ -33,6 +33,13 @@ inline bool await_stamps(device atomic_uint* stamps, uint target, uint sgid, uin
 }
 
 // docs/writing-a-service.md#the-step-kernel
+template <uint N, uint G>
+inline uint2 share(uint w) {
+    constexpr uint q = N / G, r = N % G;
+    return uint2(w * q + min(w, r), q + (w < r ? 1u : 0u));
+}
+
+// docs/writing-a-service.md#the-step-kernel
 template <uint RG>
 inline void partial(device const half* src, uint ld, device const half* wp, uint k0, uint k1, thread simdgroup_float8x8* acc) {
     for (uint kt = k0; kt < k1; kt++) {
@@ -47,18 +54,18 @@ inline void partial(device const half* src, uint ld, device const half* wp, uint
 }
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint RG, uint KIN, uint TILES, uint SG, typename Epi>
-inline void stage(device const half* src, uint ld, device const half* Wt, uint tile0, uint groups, uint ks, uint sgid,
+template <uint RG, uint KIN, uint SG, typename Epi>
+inline void stage(device const half* src, uint ld, device const half* Wt, uint2 tiles, uint groups, uint ks, uint sgid,
                   threadgroup float* red, thread Epi& epi) {
     constexpr uint KT = KIN / 8;
-    const uint items = TILES * groups, per = SG / ks;
+    const uint items = tiles.y * groups, per = SG / ks;
     for (uint pass = 0; pass < items; pass += per) {
         uint item = pass + sgid / ks, seg = sgid % ks;
         bool active = item < items && sgid < per * ks;
         uint ct = item / groups, g = item % groups;
         simdgroup_float8x8 acc[RG];
         for (uint r = 0; r < RG; r++) acc[r] = simdgroup_float8x8(0.0f);
-        if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tile0 + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
+        if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tiles.x + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
         for (uint r = 0; r < RG; r++) {
             if (ks > 1) {
                 simdgroup_store(acc[r], red + sgid * 64, 8);
@@ -105,7 +112,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
                        uint tid [[thread_index_in_threadgroup]], uint sgid [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]], uint w [[threadgroup_position_in_grid]]) {
     static_assert(TILE == 8, "simdgroup matrices are 8 x 8");
-    constexpr uint SG = THREADS / 32, Sx = K / G, Sy = S / G;
+    constexpr uint SG = THREADS / 32;
     threadgroup float red[SG * 64];
     threadgroup atomic_uint stop;
     if (tid == 0) atomic_store_explicit(&stop, 0u, memory_order_relaxed);
@@ -113,16 +120,18 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     const bool first = words[0] != 0;
     uint phase = words[1];
     const uint R = words[2], groups = R / (TILE * RG), ks0 = words[3], ks1 = words[4];
-    for (uint q = tid; q < R * Sx; q += THREADS) {
-        uint i = (q / Sx) * K + w * Sx + q % Sx;
+    const uint2 xs = share<K / TILE, G>(w), ys = share<S / TILE, G>(w);
+    const uint x0 = xs.x * TILE, xw = xs.y * TILE;
+    for (uint q = tid; q < R * xw; q += THREADS) {
+        uint i = (q / xw) * K + x0 + q % xw;
         X[i] = half(float(E[i]) + (first ? 0.0f : tanh(float(Z[i]))));
     }
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 1u)) return;
-    Activated activated{Y, w * Sy, S};
-    stage<RG, K, Sy / 8, SG>(X, K, At, w * (Sy / 8), groups, ks0, sgid, red, activated);
+    Activated activated{Y, ys.x * TILE, S};
+    stage<RG, K, SG>(X, K, At, ys, groups, ks0, sgid, red, activated);
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 2u)) return;
-    Summand summand{P, w * Sx, K};
-    stage<RG, S, Sx / 8, SG>(Y, S, Bt, w * (Sx / 8), groups, ks1, sgid, red, summand);
+    Summand summand{P, x0, K};
+    stage<RG, S, SG>(Y, S, Bt, xs, groups, ks1, sgid, red, summand);
 }
