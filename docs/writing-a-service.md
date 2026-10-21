@@ -184,6 +184,12 @@ the all-reduce alone. It gives the bytes a step's two collectives move, and thos
 two windows of steps against a plain float64 run of the same rule: the first steps, and the first steps of the last
 block, which start from rank 0's own output. The second window reads slots the ring has used before.
 
+The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling
+its kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the
+first block's time. It then gives the time a step of the later blocks takes, from timestamps the GPU's stream records
+at each block's end, and the rows a second those blocks reach. The whole-run times include the first block; these do
+not.
+
 ## What to read next
 
 - [design/transport.md](../design/transport.md): the bridge, its region, its links and how they fail.
