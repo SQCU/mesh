@@ -38,7 +38,6 @@ own(){
       r=$(git -C "$(dirname "$(plutil -extract ProgramArguments.0 raw "$p" 2>/dev/null)")" rev-parse --short=12 HEAD 2>/dev/null) && printf '%s:%s\n' "$l" "$r"
     done; } | paste -sd, -)"
   fact images "$(for f in "$S"/facts/*; do [ -f "$f" ] && sed -n "s|^images=\(.\{1,12\}\).*|${f##*/}:\1|p" "$f"; done | paste -sd, -)"
-  fact converge "$(for f in "$S"/converge/*.state; do [ -f "$f" ] && l=${f##*/} && printf '%s:%s\n' "${l%.state}" "$(awk 'NR==1{sub(/:$/,"",$1); print $1}' "$f")"; done | paste -sd, -)"
   fact models "$(cd "$H/models" 2>/dev/null && stat -L -f '%Sp %z %N' -- */* 2>/dev/null | awk '$1 ~ /^-/ && NF == 3 && $3 !~ /[,:]/{printf "%s%s:%s", n++ ? "," : "", $3, $2}')"
   grep -E '^(disk_free_gib|idle_blockers)=' /var/run/mesh-health 2>/dev/null
   fact health_warnings "$([ -f /var/run/mesh-health ] && awk '/^warn=/{n++} END{print n+0}' /var/run/mesh-health || echo unmeasured)"

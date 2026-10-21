@@ -1,5 +1,5 @@
 # design/transport.md: the node's images, built in .build by `all`, which installs nothing; `install` renames
-# each that changed into rdma/, in this order: the libraries first, the bridge's binary last (bin/mesh-converge.sh swap's)
+# each that changed into rdma/, in this order: the libraries first, the bridge's binary last
 IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib mesh-stat mesh-heartbeat mesh-flow
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
@@ -23,7 +23,7 @@ LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdm
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
 .build/mesh-stat: mesh-stat.c mesh.h mesh-plan.h .build/libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stat.c $(LIBMESH)
-# design/transport.md (README.md, Convergence; bin/mesh-converge.sh swap's form): each built image whose bytes
+# design/transport.md: each built image whose bytes
 # differ from the installed one's copied beside it and renamed into place, in IMAGES' order, and the bridge's binary
 # anew wherever libmesh changed; a running process keeps the files it mapped, and the bridge runs a new binary once
 # stopped by SIGTERM (bin/mesh-user.sh; design/transport.md section 9)
