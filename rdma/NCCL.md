@@ -209,6 +209,13 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such a group completes in its
     encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
+  - **Fused crossings.** A two-rank call that is one publication of the rank's whole operand and one landing of its
+    peer's (`ncclMeshFusableRooted`) runs its two steps in the caller's own kernels: on a stream whose `fused` is set
+    the call writes the steps' argument records and returns their bindings (`ncclMeshFused`), and the caller's kernels
+    call the library's steps (`ncclMeshMetalSteps`) on them; the call dispatches neither step. Either
+    form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one `mesh_step_binding`
+    record, and its stream names a `residencySet`, which the library fills with the buffers the bindings name and the
+    caller makes resident for its queue (torch-mesh's `torch_mesh/fused.py` on torch's stream).
   - A wait polls the landed word of its run's last unit, which the bridge sets `~0` where the link is lost, and its
     communicator's stop word, which a revoke sets ([Failures](#failures)); the stream's `polls` bounds it ([Bounded
     waits](#bounded-waits)).
