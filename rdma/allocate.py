@@ -6,21 +6,27 @@ same parts back (plain floats in a fixed order: identical inputs give identical 
 call's configuration is one more value in the dataflow: no root, no lock.
 
 `min_max` divides units among ranks whose times are given nondecreasing functions of their units, each grain to the
-rank finishing earliest with it [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  `time` and `Points` are a
-rank's measured points (units, seconds) as DFPA reads them [Lastovetsky & Reddy 2010, partial estimation of functional
-performance models]: nondecreasing, interpolated between the points, each point a filter of its calls.  `least`
-minimises a call's value over the lattice of parts (`min_max` for one stretch, a pairwise descent and a
-branch and bound for more), and `_path` is a call's time from its stretches as a longest path.
+rank finishing earliest with it [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  `time` and `Quantiles` are
+a rank's measured points as DFPA reads them [Lastovetsky & Reddy 2010, partial estimation of functional performance
+models], each point the distribution of its seconds an invocation at the units it ran and never one number:
+nondecreasing at every level, interpolated between the points, each point its latest calls pooled.  `least` minimises a
+call's value over the lattice of parts (`min_max` for one stretch, a pairwise descent and a branch and bound for
+more), and `_path` is a call's time from its stretches as a longest path at every invocation it ran.
 
 `Balancer` is DFPA over a program's measured stretches (design/heterogeneity.md R3, R5, R10, R11); `pareto` keeps
 the calls' frontier over their two throughputs (aggregate and per-stream tok/s) per workload coordinate.  `Coupled` divides
 one decision among members that run at once and slow each other (a node's engines) by a search over allocations, each
 measured before any is chosen, members that occupy one physical unit never holding units together (`Coupled.forbid`).
 """
+import bisect
+import functools
 import heapq
 import math
 
+import numpy
+
 RESOLUTION = 0.01  # the least relative accuracy a decision resolves (R11): a gain below it is no gain [DFPA 2011]
+GRID = numpy.linspace(0.0, 1.0, 17)  # the levels a holder's distribution of seconds an invocation is held at (Quantiles)
 
 
 def min_max(total, grain, low, high, times):
@@ -84,80 +90,81 @@ def min_max(total, grain, low, high, times):
 
 
 def time(points):
-    """A rank's time for d units from its measured points [(units, seconds)], made nondecreasing in units (pool
-    adjacent violators [Ayer et al. 1955]: more units never take less time), the time interpolated linearly between
-    them and extended along the line through the two nearest past either end (between none and the first's time below
-    it); with one point, in proportion below it and its own time above (the least a nondecreasing time can be there:
-    optimism where nothing is known [Auer et al. 2002], which the trust region bounds); with none, 0 (a Points holds
-    none only where every time it was given was 0: its decision does no work there).  Its `knots` are the units where
-    it bends (the nondecreasing points'; at 0 it steps, and below the first point it is the max of 0 and an affine
+    """A rank's time for d units from its measured points [(units, its seconds an invocation there as their quantiles
+    at GRID's levels)], made nondecreasing in units at every level (pool adjacent violators [Ayer et al. 1955]: more
+    units never take less time at any level; the projection keeps every point's levels in order, since it preserves
+    order), interpolated linearly between them and extended along the line through the two nearest past either end
+    (between none and the first's time below it), an extended point's levels put in order [Chernozhukov, Fernandez-Val
+    & Galichon 2010]; with one point, in proportion below it and its own time above (the least a nondecreasing time can
+    be there: optimism where nothing is known [Auer et al. 2002], which the trust region bounds); with none, 0 (a
+    Quantiles holds none only where every time it was given was 0: its decision does no work there).  Its `knots` are
+    the units where it bends (the points'; at 0 it steps, and below the first point it is the max of 0 and an affine
     piece, convex), which `_split` reads off it."""
-    blocks = []
-    for d, t in sorted((d, t) for d, t in points if d > 0 and t > 0):
-        blocks.append([[d], t])
-        while len(blocks) > 1 and blocks[-2][1] > blocks[-1][1]:
-            ds1, t1 = blocks.pop()
-            ds0, t0 = blocks.pop()
-            blocks.append([ds0 + ds1, (t0 * len(ds0) + t1 * len(ds1)) / (len(ds0) + len(ds1))])
-    known = [(d, t) for ds, t in blocks for d in ds]
+    points = sorted(((d, numpy.asarray(t, dtype=float)) for d, t in points if d > 0 and numpy.max(t) > 0), key=lambda p: p[0])
+    grid = [d for d, _ in points]
+    table = numpy.array([t for _, t in points]) if points else numpy.zeros((0, len(GRID)))
+    for level in range(table.shape[1]):
+        blocks = []
+        for t in table[:, level]:
+            blocks.append([1, t])
+            while len(blocks) > 1 and blocks[-2][1] > blocks[-1][1]:
+                n1, t1 = blocks.pop()
+                n0, t0 = blocks.pop()
+                blocks.append([n0 + n1, (t0 * n0 + t1 * n1) / (n0 + n1)])
+        table[:, level] = [t for n, t in blocks for _ in range(n)]
 
     def at(d):
-        if d <= 0:
-            return 0.0
-        if not known:
-            return 0.0
-        if len(known) == 1:
-            return known[0][1] * min(d / known[0][0], 1.0)
-        if d <= known[0][0]:
-            (d0, t0), (d1, t1) = known[0], known[1]
-            return min(t0, max(0.0, t0 - (t1 - t0) / (d1 - d0) * (d0 - d)))
-        if d >= known[-1][0]:
-            (d0, t0), (d1, t1) = known[-2], known[-1]
-            return t1 + (t1 - t0) / (d1 - d0) * (d - d1)
-        for (d0, t0), (d1, t1) in zip(known, known[1:]):
-            if d0 <= d <= d1:
-                return t0 + (t1 - t0) * (d - d0) / (d1 - d0)
-    at.knots = [d for d, _ in known]
+        if d <= 0 or not grid:
+            return numpy.zeros(len(GRID))
+        if len(grid) == 1:
+            return table[0] * min(d / grid[0], 1.0)
+        if d <= grid[0]:
+            (d0, d1), (t0, t1) = grid[:2], table[:2]
+            return numpy.sort(numpy.minimum(t0, numpy.maximum(0.0, t0 - (t1 - t0) / (d1 - d0) * (d0 - d))))
+        if d >= grid[-1]:
+            (d0, d1), (t0, t1) = grid[-2:], table[-2:]
+            return numpy.sort(t1 + (t1 - t0) / (d1 - d0) * (d - d1))
+        j = bisect.bisect_right(grid, d) - 1
+        if grid[j] == d:
+            return table[j]
+        return table[j] + (table[j + 1] - table[j]) * (d - grid[j]) / (grid[j + 1] - grid[j])
+    at.knots = list(grid)
     return at
 
 
-class Points:
-    """A holder's time on a stretch at each part it ran: DFPA's partial functional performance model [Lastovetsky &
-    Reddy 2010] whose points are latent, each part's time a Kalman filter of a random walk observed in noise [Kalman
-    1960], so the model has a posterior and not only a value.  A call at u units observes its time t with its own
-    standard error `se` (the call's invocations') and the variance between calls `r` (the innovations' excess over
-    the filters' and the calls' own, estimated as they come [Mehra 1970]); every point's variance grows by 1 / `forget`
-    a call (the drift the forgetting factor states [Haykin 2014]), so a holder whose performance changed moves its
-    points by its calls' own evidence, every call kept.  The `keep` latest parts are held.  The model is `time` over the
-    points' means (more units never take less time, interpolated between them)."""
+class Quantiles:
+    """A holder's time on a stretch at each part it ran, as its invocations ran it: at each part the distribution of
+    its seconds an invocation, held as its quantiles at GRID's levels (its least and its most among them), the calls
+    at that part pooled, each new call weighed 1 / the calls pooled before it and at least 1 / `window` (a mixture's
+    quantiles: the memory of `window` calls the forgetting factor states [Haykin 2014]), the `keep` latest parts held.
+    A holder's time at a part is a distribution and never one number, because a collective that blocks at every
+    crossing pays each invocation's slowest holder (metal-microbench docs/serialized_collective_cost.md).  The model is
+    `time` over the parts' quantiles (more units never take less time at any level, interpolated between them)."""
 
-    def __init__(self, forget, keep=8):
-        self.forget, self.keep, self.r, self.seen, self.at = float(forget), int(keep), 0.0, 0, {}
-        self._made = None
+    def __init__(self, window, keep=8):
+        self.window, self.keep, self.at, self._made = int(window), int(keep), {}, None
 
-    def update(self, u, t, se=0.0):
-        """One call: `t` seconds at `u` units, its standard error `se`."""
-        u, t = int(u), float(t)
-        if u <= 0 or t <= 0:
+    def update(self, u, samples):
+        """One call: `samples` seconds an invocation at `u` units."""
+        u, samples = int(u), numpy.asarray(samples, dtype=float)
+        if u <= 0 or not samples.size or samples.max() <= 0:
             return
-        self.seen, self._made = self.seen + 1, None
-        for point in self.at.values():
-            point[1] /= self.forget
-        own = max(se * se, (RESOLUTION * t) ** 2)
+        self._made = None
+        new = numpy.quantile(samples, GRID)
         if u in self.at:
-            m, v = self.at.pop(u)
-            e, spread = t - m, v + own + self.r
-            self.r += (1 - self.forget) * (max(0.0, e * e - v - own) - self.r)
-            k = v / spread
-            self.at[u] = [m + k * e, (1 - k) * v]
+            calls, old = self.at.pop(u)
+            w = 1.0 / min(calls + 1, self.window)
+            at = numpy.sort(numpy.concatenate([old, new]))
+            new = numpy.interp(GRID, (1 - w) * numpy.interp(at, old, GRID) + w * numpy.interp(at, new, GRID), at)
+            self.at[u] = (calls + 1, new)
         else:
-            self.at[u] = [t, own + self.r]
+            self.at[u] = (1, new)
         while len(self.at) > self.keep:
             self.at.pop(next(iter(self.at)))
 
     def _model(self):
         if self._made is None:
-            self._made = time([(u, m) for u, (m, v) in self.at.items()])
+            self._made = time([(u, q) for u, (_, q) in self.at.items()])
         return self._made
 
     def __call__(self, u):
@@ -168,23 +175,15 @@ class Points:
         return self._model().knots
 
     def state(self):
-        return {'forget': self.forget, 'keep': self.keep, 'r': self.r, 'seen': self.seen,
-                'at': [[u, m, v] for u, (m, v) in self.at.items()]}
+        # six significant digits: a part's seconds to a millionth of themselves, far inside RESOLUTION
+        return {'window': self.window, 'keep': self.keep,
+                'at': [[u, calls, [float(f'{v:.6g}') for v in q]] for u, (calls, q) in self.at.items()]}
 
     @classmethod
     def of(cls, state):
-        model = cls(state['forget'], state['keep'])
-        model.r, model.seen, model.at = state['r'], state['seen'], {int(u): [m, v] for u, m, v in state['at']}
+        model = cls(state['window'], state['keep'])
+        model.at = {int(u): (int(calls), numpy.asarray(q, dtype=float)) for u, calls, q in state['at']}
         return model
-
-
-def _robust(samples):
-    """(median, its standard error) of seconds an invocation: 1.2533 x 1.4826 MAD / sqrt(n), which a tail of slow
-    invocations does not inflate."""
-    import statistics
-    med = statistics.median(samples)
-    mad = statistics.median(abs(t - med) for t in samples)
-    return med, 1.2533 * 1.4826 * mad / math.sqrt(len(samples))
 
 
 def least(total, grain, low, high, stretches, value, knots, stop=None, budget=None):
@@ -375,40 +374,59 @@ def _split(total, grain, low, high, value, knots):
     return [best[1], total - best[1]], best[0]
 
 
+def _aligned(latency, k):
+    """A crossing's latency at the `k` invocations of its program: seconds, or a vector of them an invocation (its own
+    invocations, the program's last), placed at the program's last ones, 0 at the invocations before them."""
+    if latency is None:
+        return 0.0
+    if numpy.ndim(latency) == 0:
+        return float(latency)
+    latency = numpy.asarray(latency, dtype=float)[-k:]
+    return numpy.concatenate([numpy.zeros(k - latency.size), latency])
+
+
 def _path(rows):
-    """A call's time from its stretches `rows` [(c, order, latency, [a rank's seconds, None where it publishes none])]:
-    each program's stretches (order: (program, place)) in place order as a longest path [the dependency graph's
-    critical path; Baccelli, Cohen, Olsder & Quadrat 1992, max-plus], a stretch starting on a rank once its own
-    previous one has ended and every other rank that published there has ended and crossed (the previous stretch's
-    latency, seconds, or, where it is a function, its value at whether each rank publishes there, a tuple of booleans: a
-    crossing's time over the ranks it then joins, so a rank that holds none of the parts publishing there leaves it),
-    the program's count times its end and its last crossing; a stretch without an order its count times its slowest
-    rank.  With every latency 0 it is the sum of each stretch's slowest rank."""
-    total, programs = 0.0, {}
-    for c, order, latency, times in rows:
+    """A call's time from its stretches `rows` [(c, order, latency, [a rank's seconds at each invocation of its program,
+    NaN where it did not run there, None where it publishes none])], as its invocations ran it: at every invocation each
+    program's stretches (order: (program, place)) in place order as a longest path [the dependency graph's critical
+    path; Baccelli, Cohen, Olsder & Quadrat 1992, max-plus], a stretch starting on a rank once its own previous one has
+    ended and every other rank that published there has ended and crossed (the previous stretch's latency: seconds, a
+    vector of them an invocation, or, where it is a function, its value at whether each rank publishes there, a tuple of
+    booleans: a crossing's time over the ranks it then joins, so a rank that holds none of the parts publishing there
+    leaves it), a stretch no rank ran at an invocation passed over there; the program's count times the mean over its
+    invocations of its end and its last crossing; a stretch without an order its count times the mean of its slowest
+    rank's.  The mean of each invocation's maximum, never the maximum of means: a collective that blocks on every
+    crossing pays each invocation's slowest rank (metal-microbench docs/serialized_collective_cost.md).  {program (a
+    stretch without an order its own): its count times each invocation's time, a vector}, the call's time the sum of
+    their means."""
+    out, programs = {}, {}
+    for s, (c, order, latency, times) in enumerate(rows):
         if order is None:
-            total += c * max((t for t in times if t is not None), default=0.0)
+            present = [t for t in times if t is not None]
+            if present:
+                out[('alone', s)] = c * numpy.nan_to_num(numpy.fmax.reduce(present))
         else:
             programs.setdefault(order[0], []).append((order[1], c, latency, times))
-    for seq in programs.values():
+    for key, seq in programs.items():
         seq.sort(key=lambda r: r[0])
         n = max(len(r[3]) for r in seq)
-        end, crossed, sent = [0.0] * n, 0.0, [False] * n
+        k = next(len(t) for r in seq for t in r[3] if t is not None)
+        ranks = numpy.arange(n)[:, None]
+        end, crossed, sent = numpy.zeros((n, k)), numpy.zeros(k), numpy.zeros((n, k), dtype=bool)
         for _, _, latency, times in seq:
+            stretch = numpy.stack([numpy.full(k, numpy.nan) if t is None else t for t in times])
+            ran = ~numpy.isnan(stretch)
+            runs = ran.any(axis=0)
             # the latest crossed end of the ranks that sent, and the next latest (a rank waits on the others' alone)
-            first, at, second = -math.inf, -1, -math.inf
-            for j in range(n):
-                if sent[j]:
-                    t = end[j] + crossed
-                    if t > first:
-                        first, at, second = t, j, first
-                    elif t > second:
-                        second = t
-            end = [max(end[i], second if i == at else first) + (times[i] or 0.0) for i in range(n)]
-            sent = [t is not None for t in times]
-            crossed = latency(tuple(sent)) if callable(latency) else latency or 0.0
-        total += max(c for _, c, _, _ in seq) * (max(end) + crossed)
-    return total
+            reached = numpy.where(sent, end + crossed, -numpy.inf)
+            latest = reached.argmax(axis=0)
+            waits = numpy.where(ranks == latest, numpy.where(ranks == latest, -numpy.inf, reached).max(axis=0), reached.max(axis=0))
+            got = latency(tuple(t is not None for t in times)) if callable(latency) else latency
+            end = numpy.where(runs, numpy.maximum(end, waits) + numpy.nan_to_num(stretch), end)
+            sent = numpy.where(runs, ran, sent)
+            crossed = numpy.where(runs, got, crossed)
+        out[key] = max(c for _, c, _, _ in seq) * (end.max(axis=0) + crossed)
+    return out
 
 
 class Balancer:
@@ -418,9 +436,15 @@ class Balancer:
     A call runs stretches: a rank's own work between two consecutive collectives (never inside one: R2), named by
     the program (its sequence of collectives and the place in it), each run some count of invocations a call.  A
     stretch's time on a rank scales with the units the rank holds of the decisions the program names for it.  The
-    call's time is the sum over its stretches of their count times the slowest rank's time, or, where the stretches
-    carry their place in their program (`order`: program, place) and their crossing's latency (`latency`, seconds),
-    each program's longest path (`_path`): a stretch starts on a rank once its own previous stretch has ended and
+    call's time is taken as its invocations ran it, every one replayed: at other parts each rank's time at an
+    invocation is the time at the same level of its distribution there as its measured time holds of its distribution at
+    its own parts (its slow invocations stay slow, its stalls stay where they fell, the ranks' joint invocations kept),
+    the call's time at each invocation computed from those and the mean over the invocations taken, because a
+    collective that blocks on every crossing pays each invocation's slowest rank, so the expectation of the maximum and
+    never the maximum of medians (metal-microbench docs/serialized_collective_cost.md; at the measured parts the replay
+    is the call itself).  At an invocation the call's time is the sum over its stretches of their count times the
+    slowest rank's time, or, where the stretches carry their place in their program (`order`: program, place) and their
+    crossing's latency (`latency`, seconds, at each invocation), each program's longest path (`_path`): a stretch starts on a rank once its own previous stretch has ended and
     every other rank's has ended and crossed, so where the slower rank alternates between consecutive stretches the
     call is the cross cycle (one rank's stretch, a crossing, the other's, a crossing) that the sum misses.  Each
     decision's parts minimise its stretches' part of that time (its programs' whole paths where ordered, every
@@ -436,14 +460,16 @@ class Balancer:
     last had, so a move back is evaluated on what it measured.
 
     The models are DFPA's [Lastovetsky & Reddy 2010, partial estimation of functional performance models]: each
-    (decision, stretch, rank)'s measured points (units, seconds an invocation), up to `window` at a part, their median
-    [LB-BSP 2020, §3.2.1]; the time interpolated between them, nondecreasing (`time`), within a doubling trust region
+    (decision, stretch, group)'s measured points, at each part the distribution of its seconds an invocation from the
+    `window` latest calls there (`Quantiles`); the time interpolated between them, nondecreasing at every level (`time`),
+    a part's invocation read at its level of the distribution at its own part (a part that ran none of a stretch
+    here at the slowest part's level), within a doubling trust region
     past the largest part the holder was measured at in the stretches the call ran, else in any the decision has seen
     (a part that moves the work into other stretches, a whole layer's onto one member, does not widen the region of the
     stretches it left), else past its part (a holder never measured: a grain past it), never less than a grain past it
     (a region that has halved to the measured parts cannot move them, and a decision whose models promise a gain then
     stood without a step) [Conn, Gould & Toint 2000]; a rank with none at a stretch read at the measured ranks' median
-    time a unit.  Every stretch a decision observes is remembered (its count, each holder's remainder and the outside
+    time a unit at each invocation.  Every stretch a decision observes is remembered (its count, each holder's remainder and the outside
     ranks' time), the call a move is rejected at too, so a move measured worse is evaluated by what it measured once its
     stretches are no longer run.  A move is judged by the models, every member's measured within the same call, never
     by comparing one call's measured time with another's: two calls run under
@@ -457,11 +483,12 @@ class Balancer:
     that waits is weighed again at the next call, not read as standing.  A move left pending (below) changes no stretch
     the call reads, so it holds no other decision back: a ragged decision moves while a prepared one waits for its
     preparation.  A decision's parts stand at a call where the
-    models' unbounded optimum promises less than its resolution under the measured sum [DFPA; Meta-Balancer 2012], and
-    are weighed again at every call on every call's evidence; once a part moves back the way it came, every part of the
-    decision moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the measured sum's relative standard
-    error (each stretch's slowest rank's median's, from its invocations, in quadrature), at least 1 %.  Every rank
-    given the same evidence gets the same parts (R4).
+    models' unbounded optimum promises less than 1 % of the call's time [DFPA; Meta-Balancer 2012], or where the move's
+    gain is within twice its standard error over the invocations, each invocation's time at the parts less its time at
+    the move (paired: the invocations' own spread, a position's growing attention or a chunk's vocabulary, is no noise
+    and cancels) [Student 1908], and are weighed again at every call on every call's evidence; once a part moves back
+    the way it came, every part of the decision moves half as far [LB-BSP 2020, §3.3.2].  Every rank given the same
+    evidence gets the same parts (R4).
 
     A move takes, in the call that takes it, its members' preparation of the placement it makes (metal-microbench
     docs/placement.md#moves: S), unless they prepared it before or the decision is `ragged` (its parts the calls' data,
@@ -530,115 +557,143 @@ class Balancer:
         return low if sum(low) <= sum(d['parts']) else list(d['low'])
 
     def observe(self, stretches, prepare=False):
-        seen = {}
+        seen, programs = {}, {}
         for s, obs in stretches.items():
             scales = {d: w for d, w in (obs.get('scales') or {}).items() if d in self.decisions}
-            ranks = {i: _robust([float(t) for t in ts]) for i, ts in enumerate(obs['times']) if ts}
-            if scales and ranks:
+            lists = {i: list(ts) for i, ts in enumerate(obs['times']) if ts and any(t is not None for t in ts)}
+            if scales and lists:
                 order = tuple(obs['order']) if obs.get('order') is not None else None
-                latency = obs.get('latency')
                 standing, joined = list(obs.get('fixed') or []), list(obs.get('joined') or [])
                 fixed = [(standing[i] if i < len(standing) else 0.0) + (joined[i] if i < len(joined) else 0.0)
                          for i in range(max(len(standing), len(joined)))]
-                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, fixed, order,
-                           latency if callable(latency) else float(latency or 0.0), len(obs['times']), standing)
+                seen[s] = [max(len(ts) for ts in lists.values()), lists, scales, fixed, order, obs.get('latency'),
+                           len(obs['times']), standing, None]
+                programs.setdefault(order[0] if order is not None else ('alone', s), []).append(s)
+        # a program's invocations: its stretches' lists end at its last, a shorter list's stretch not run at the ones
+        # before it (NaN), an invocation a rank ran untimed (no crossing before it) read at its mean there
+        for members in programs.values():
+            k = max(len(ts) for s in members for ts in seen[s][1].values())
+            for s in members:
+                timed = {}
+                for i, ts in seen[s][1].items():
+                    known = [float(t) for t in ts if t is not None]
+                    mean = sum(known) / len(known)
+                    seen[s][1][i] = numpy.array([numpy.nan] * (k - len(ts)) + [mean if t is None else float(t) for t in ts])
+                    timed[i] = numpy.array([False] * (k - len(ts)) + [t is not None for t in ts])
+                latency = seen[s][5]
+                seen[s][5] = (lambda sent, f=latency, k=k: _aligned(f(sent), k)) if callable(latency) else _aligned(latency, k)
+                seen[s][8] = timed
         ordered = any(v[4] is not None for v in seen.values())
 
-        def rows(times, keep=None):
-            return [(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n, _) in seen.items()
-                    if keep is None or s in keep]
+        def realized(times, keep):
+            return _path([(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n, _, _) in seen.items()
+                          if s in keep])
 
-        medians = lambda s, ranks, n: [ranks[i][0] if i in ranks else None for i in range(n)]
+        measured = lambda s, ranks, n: [ranks[i] if i in ranks else None for i in range(n)]
         proposals, runs = [], {}
         for name, d in self.decisions.items():
             groups = self._groups(d)
+            n = len(d['parts'])
             mine = {}
-            for s, (c, ranks, scales, fixed, *_) in seen.items():
+            for s, (c, ranks, scales, fixed, _, _, _, _, timed) in seen.items():
                 if name not in scales:
                     continue
                 view = {}
                 for g, members in enumerate(groups):
                     present = [i for i in members if i in ranks]
                     if present:
-                        i = max(present, key=lambda i: ranks[i][0])
-                        view[g] = (ranks[i], i)
-                outside = [ranks[i][0] for i in ranks if not any(i in g for g in groups)]
+                        # a part its ranks hold together: each invocation its slowest's, weighed as its slowest on the whole
+                        i = max(present, key=lambda i: numpy.nanmean(ranks[i]))
+                        view[g] = (numpy.fmax.reduce([ranks[j] for j in present]), i, numpy.logical_and.reduce([timed[j] for j in present]))
+                outside = [ranks[i] for i in ranks if not any(i in g for g in groups)]
                 if view:
-                    mine[s] = (c, ranks, scales, fixed, view, max(outside, default=0.0))
+                    mine[s] = (c, ranks, scales, fixed, view, numpy.fmax.reduce(outside) if outside else None)
             if not mine:
                 continue
             path = {s for s, v in seen.items() if ordered and v[4] is not None and any(seen[t][4] and seen[t][4][0] == v[4][0] for t in mine)}
             counted = runs[name] = set(mine) | path
-            summed = sum(c * max(med for med, _ in r.values()) for c, r, *_ in mine.values())
-            slowest = [(c, max(r.values())) for c, r, *_ in mine.values()]
-            within = max(RESOLUTION, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / summed if summed else 0.0)
-            base = _path(rows(medians, counted)) if path else summed
+            keep = counted if path else set(mine)
             last, d['last'] = d.get('last'), [list(d['parts'])]
+            shares = {}
             for s, (c, ranks, scales, fixed, view, _) in mine.items():
-                for g, ((med, se), i) in view.items():
+                for g, (slowest, i, timed) in view.items():
                     units = d['parts'][g]
-                    if not units:
-                        continue
                     weights = {e: max(0.0, float(w[i] or 0.0)) * bool(self._holds(e, i)) for e, w in scales.items()}
                     total = sum(weights.values()) + max(0.0, float(fixed[i] if i < len(fixed) else 0.0))
-                    share = med * (weights[name] / total if total else 1.0 / len(weights))
-                    line = self.lines.setdefault((name, s, g), Points(self.forget, self.memory or 8))
-                    line.update(units, share, se * share / med if med > 0 else 0.0)
+                    share = slowest * (weights[name] / total if total else 1.0 / len(weights)) * bool(units)
+                    shares[s, g] = (share, slowest - share)
+                    if units:
+                        self.lines.setdefault((name, s, g), Quantiles(self.window, self.memory or 8)).update(units, share[timed])
             remembered = d.setdefault('seen', {})
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
-                remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
+                remembered[s] = [c, [[g, float(numpy.nanmean(shares[s, g][1]))] for g in view if d['parts'][g]],
+                                 float(numpy.nanmean(other)) if other is not None else 0.0]
             if last and last[0] != d['parts']:
                 d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
-            n = len(d['parts'])
-            kept, ranked = [], {}
+            kept = []
             for s, (c, rests, other) in remembered.items():
                 if s in mine:
                     continue
                 rests = dict((int(g), r) for g, r in rests)
                 kept.append((c, [(lambda u, o=other: o) if d['parts'][g] or g not in rests else
-                                 (lambda u, m=self._model(name, s, g), r=rests[g], o=other: max(o, m(u) + r) if u else o)
+                                 (lambda u, m=self._model(name, s, g), r=rests[g], o=other: numpy.maximum(o, m(u) + r) if u else o)
                                  for g in range(n)]))
-            built, alone = list(kept), {}
+            alone, ranked = {}, {}
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
                 standing = seen[s][7]
                 alone[s] = {i for i in ranks if not max(0.0, float(standing[i] if i < len(standing) else 0.0))
                             and not any(max(0.0, float(w[i] or 0.0)) and self._holds(e, i) for e, w in scales.items() if e != name)}
-                fs, gs = [], {}
-                per_unit = [self._model(name, s, g)(d['parts'][g]) / d['parts'][g] for g in view if d['parts'][g]]
-                per_unit = sorted(per_unit)[len(per_unit) // 2] if per_unit else 0.0
+                held = [g for g in view if d['parts'][g]]
+                slow = max(view, key=lambda g: numpy.nanmean(view[g][0]))
+                none = numpy.where(numpy.isnan(view[slow][0]), numpy.nan, 0.0)
+                per_unit = (numpy.sort(numpy.stack([shares[s, g][0] / d['parts'][g] for g in held]), axis=0)[len(held) // 2]
+                            if held else none)
+                # an invocation's level among its call's invocations: a part without one of its own (it ran none of this
+                # stretch here) takes the slowest part's, its least E[max] where no joint evidence is [Auer et al. 2002]
+                order_ = numpy.argsort(numpy.argsort(numpy.nan_to_num(view[slow][0], nan=numpy.inf)))
+                slow_level = numpy.where(numpy.isnan(view[slow][0]), numpy.nan, order_ / max(1, numpy.count_nonzero(~numpy.isnan(view[slow][0])) - 1))
+                gs = {}
                 for g in range(n):
-                    if g not in view and d['parts'][g]:
-                        fs.append(lambda u, o=other: o)
+                    here = d['parts'][g]
+                    if g not in view and here:
                         continue
-                    med = view[g][0][0] if g in view else 0.0
-                    rest = (med - self._model(name, s, g)(d['parts'][g]) if d['parts'][g] else med) if g in view else 0.0
-                    if (name, s, g) in self.lines:
-                        gs[g] = lambda u, m=self._model(name, s, g), r=rest: m(u) + r if u else r
+                    share, rest = shares[s, g] if g in view else (none, none)
+                    line = self.lines.get((name, s, g))
+                    if line is not None and line.at:
+                        # each invocation at its own level of its part's distribution here, read at the same level there
+                        level = numpy.interp(share, line(here), GRID) if here else slow_level
+                        moved = lambda u, m=line, q=level: numpy.interp(q, GRID, m(u))
+                    elif here:
+                        moved = lambda u, share=share, here=here: share * (u / here)
                     else:
-                        gs[g] = lambda u, r=rest, k=per_unit: k * u + r
-                    fs.append(lambda u, f=gs[g], o=other: max(o, f(u)))
-                built.append((c, fs))
+                        moved = lambda u, k=per_unit: k * u
+                    gs[g] = lambda u, moved=moved, share=share, rest=rest, here=here: rest + (share if u == here else moved(u)) if u else rest
                 ranked[s] = gs
-            value = None
-            if path:
-                member = {i: g for g, members in enumerate(groups) for i in members}
+            member = {i: g for g, members in enumerate(groups) for i in members}
 
-                def value(u, ranked=ranked, member=member, kept=kept, counted=counted, alone=alone):
-                    def at(s, ranks, n):
-                        if s not in ranked:
-                            return medians(s, ranks, n)
-                        return [(ranked[s][member[i]](u[member[i]]) if (i in ranks or u[member[i]])
-                                 and (u[member[i]] or i not in alone.get(s, ())) else None)
-                                if member.get(i) in ranked[s] else (ranks[i][0] if i in ranks and i not in member else None)
-                                for i in range(n)]
-                    return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
-                value = _remembered(value)
+            def steps(u, ranked=ranked, member=member, keep=keep, alone=alone):
+                def at(s, ranks, n):
+                    if s not in ranked:
+                        return measured(s, ranks, n)
+                    return [(ranked[s][member[i]](u[member[i]]) if (i in ranks or u[member[i]])
+                             and (u[member[i]] or i not in alone.get(s, ())) else None)
+                            if member.get(i) in ranked[s] else (ranks[i] if i in ranks and i not in member else None)
+                            for i in range(n)]
+                return realized(at, keep)
+            steps = _remembered(steps)
+
+            def value(u, steps=steps, kept=kept):
+                return sum(float(v.mean()) for v in steps(u).values()) + sum(
+                    c * float(numpy.mean(functools.reduce(numpy.maximum, [f(u[g]) for g, f in enumerate(fs)]))) for c, fs in kept)
+            value = _remembered(value)
+            now = list(d['parts'])
+            base = value(now)
             total, low = sum(d['parts']), self._floor(d)
             knots = [sorted({int(k) for (e, s, h), line in self.lines.items() if e == name and h == g for k in line.knots})
                      for g in range(n)]
-            target = base - within * summed
+            target = base - RESOLUTION * base
             if all(p >= lo for p, lo in zip(d['parts'], low)) and least(
-                    total, d['grain'], low, d['high'], [] if value else built, value, knots, stop=target,
+                    total, d['grain'], low, d['high'], [], value, knots, stop=target,
                     budget=self.budget)[1] >= target:
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
@@ -653,18 +708,23 @@ class Balancer:
             reach = [min(d['high'][g], max(d['parts'][g], d['grain'] * math.ceil(grow * u / d['grain']), u + d['grain']))
                      for g, u in enumerate(measured_)]
             reach = [r if f is None else max(min(r, f - d['grain']), d['parts'][g]) for g, (r, f) in enumerate(zip(reach, failed))]
-            nxt, promise, _ = least(total, d['grain'], low, reach, [] if value else built, value, knots, budget=self.budget)
+            nxt, promise, _ = least(total, d['grain'], low, reach, [], value, knots, budget=self.budget)
             if sum(nxt) < total:
                 reach = [d['high'][g] if f is None else max(f - d['grain'], d['parts'][g]) for g, f in enumerate(failed)]
-                nxt, promise, _ = least(total, d['grain'], low, reach, [] if value else built, value, knots, budget=self.budget)
-            nxt, promise = self._fewest(d, low, nxt, promise, value or (
-                lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in built)), reach, knots)
+                nxt, promise, _ = least(total, d['grain'], low, reach, [], value, knots, budget=self.budget)
+            nxt, promise = self._fewest(d, low, nxt, promise, value, reach, knots)
             if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
                 nxt, promise, _ = least(total, d['grain'], [max(lo, math.floor(h / d['grain']) * d['grain']) for lo, h in zip(low, half)],
                                         [max(lo, math.ceil(h / d['grain']) * d['grain']) for lo, h in zip(low, half)],
-                                        [] if value else built, value, knots, budget=self.budget)
-            proposals.append(((base - promise) / summed if summed else 0.0, name, nxt))
+                                        [], value, knots, budget=self.budget)
+            # the move's gain on the invocations as they ran, paired (each invocation at the parts less at the move): a
+            # gain within twice its standard error over the invocations is no gain [Student 1908]
+            paired = sum(float((a - steps(nxt)[p]).var()) / a.size for p, a in steps(now).items())
+            if base - promise <= 2 * math.sqrt(paired):
+                d['before'], d['stands'] = list(d['parts']), True
+                continue
+            proposals.append(((base - promise) / base if base else 0.0, name, nxt))
         taken = set()
         for _, name, value in sorted(proposals, key=lambda p: -p[0]):
             d = self.decisions[name]
@@ -681,11 +741,6 @@ class Balancer:
             elif not d.get('pending'):
                 d['pending'], d['stands'] = list(value), False
         return self.parts
-
-    @property
-    def forget(self):
-        """The models' forgetting factor: a memory of `window` calls at each of `memory` parts (8 where unset)."""
-        return 1.0 - 1.0 / (self.window * (self.memory or 8))
 
     @property
     def pending(self):
@@ -760,7 +815,7 @@ class Balancer:
                               'high': [sum(d['parts'])] * len(d['parts']), 'before': None, 'stands': False, **d,
                               'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
                        for name, d in state['decisions'].items()}
-        b.lines = {(d, s, int(i)): Points.of(line) for d, s, i, line in state.get('lines', [])}
+        b.lines = {(d, s, int(i)): Quantiles.of(line) for d, s, i, line in state.get('lines', [])}
         return b
 
 
