@@ -35,18 +35,15 @@
 // 13-19 us whatever it holds (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication (work
 // a peer waits on) is a floor of its own.  Each buffer the library commits signals its count on `progress` as the GPU
 // reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us later, at the
-// 99th percentile 20-60).  A publication is committed at once while at most the node's lead of those buffers are
-// still in flight, read from the event's value then; otherwise it joins torch's open command buffer.  The next
+// 99th percentile 20-60).  A publication is committed at once while at most one of those buffers is still in flight,
+// read from the event's value then: double buffering, one committed buffer queued behind the one the GPU runs, so a
+// commit overlaps the GPU's work (the 10-02 rule, mesh 3c00d37: 12.7 us a crossing compiled); otherwise it joins
+// torch's open command buffer.  The next
 // publication applies the rule again, and a host wait commits the open buffer, since nothing else would: the
 // library's (commit, host_wait) and torch's own (torch.mps.synchronize, torch.accelerator.synchronize, .item() and
 // .cpu() commit torch's open buffer and wait: MPSStream::synchronize COMMIT_AND_WAIT).  A host that blocks outside
 // torch while a publication waits stalls its peer, which is the program's to avoid; the peer's bounded wait ends the
 // call as a value.  In flight counts the buffers this library committed, not torch's own.
-
-// The node's lead: how many of a stream's committed buffers may still be in flight when a publication commits at once,
-// a measured quantity of the node (configure: backend.py reads it once from the node's record).  A stream made before
-// it is configured throws.
-static std::atomic<int64_t> lead_{-1};
 
 // One torch MPS stream's commits and group workspace, held by the stream (made at its first group and never freed:
 // torch's streams live as long as the process, and the library's workspace allocator holds it as its context).  Its
@@ -56,7 +53,6 @@ static std::atomic<int64_t> lead_{-1};
 // that queue: torch's MPSAllocator adds completed handlers through it).
 struct MeshStream {
   at::mps::MPSStream *const mps;
-  const uint64_t lead;
   id<MTLSharedEvent> const progress;
   // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
@@ -71,8 +67,7 @@ struct MeshStream {
   std::vector<at::Tensor> scratch;
   std::map<uint64_t, std::vector<at::Tensor>> holders;
 
-  MeshStream(at::mps::MPSStream *stream, uint64_t depth)
-      : mps(stream), lead(depth), progress([stream->device() newSharedEvent]) {}
+  explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
 
   // On torch's queue: whether a publication still waits in torch's open buffer, the root it joined not yet committed
   // (one torch committed needs no buffer of ours, which would cost the GPU a start of its own).
@@ -93,10 +88,11 @@ struct MeshStream {
   }
 
   // On torch's queue, as a group's encoding ends, the rule: a publication encoded in torch's open buffer, committed
-  // with every publication waiting there while at most `lead` buffers are in flight, else left to join it.
+  // with every publication waiting there while at most one buffer is in flight (double buffering), else left to join
+  // it.
   void published() {
     if (!waiting()) open = [mps->commandBuffer().rootCommandBuffer retain];
-    if (committed - progress.signaledValue <= lead) signalled(false);
+    if (committed - progress.signaledValue <= 1) signalled(false);
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
@@ -111,18 +107,13 @@ struct MeshStream {
 static std::mutex *streams_lock_ = new std::mutex;
 static auto *streams_ = new std::unordered_map<at::mps::MPSStream *, MeshStream *>;
 
-// torch's stream's MeshStream, made at its first use with the node's lead.
+// torch's stream's MeshStream, made at its first use.
 static MeshStream &stream_of(at::mps::MPSStream *mps) {
   thread_local std::pair<at::mps::MPSStream *, MeshStream *> last{nullptr, nullptr};
   if (last.first == mps) return *last.second;
   std::lock_guard<std::mutex> guard(*streams_lock_);
   auto found = streams_->find(mps);
-  if (found == streams_->end()) {
-    const int64_t lead = lead_.load();
-    TORCH_CHECK(lead >= 0, "torch-mesh: this node's commit lead is not configured (backend.py reads it from the node's "
-                "record: torch-mesh README, Performance)");
-    found = streams_->emplace(mps, new MeshStream(mps, (uint64_t)lead)).first;
-  }
+  if (found == streams_->end()) found = streams_->emplace(mps, new MeshStream(mps)).first;
   last = {mps, found->second};
   return *found->second;
 }
@@ -152,12 +143,6 @@ static void host_wait(MeshStream &s, bool wait) {
 // publication committed.
 static void commit() {
   for (MeshStream *s : streams_made()) host_wait(*s, false);
-}
-
-// The node's lead (backend.py, from the node's record), taken by every stream made after it.
-static void configure(int64_t lead) {
-  TORCH_CHECK(lead >= 0, "torch-mesh: a commit lead counts buffers in flight, and ", lead, " counts none");
-  lead_ = lead;
 }
 
 // The library's workspace allocator: an MPS tensor of torch's caching allocator, kept in the MeshStream's scratch
@@ -833,7 +818,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     return work_of(issue(calls, comm, split, true), std::move(outputs), comm);
   });
   module.def("attach", &attach);
-  module.def("configure", &configure);
   module.def("commit", &commit);
   module.def("region_empty", &region_empty);
   module.def("address", &address);

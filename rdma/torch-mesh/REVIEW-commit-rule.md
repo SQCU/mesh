@@ -22,7 +22,7 @@ only second thread that touched torch's stream, and with that the race against t
 |---|---|
 | `torch_mesh/_stream.mm` (commit machinery, `on_stream`, `complete`, `issue`, exports) | C: the bindings |
 | `torch_mesh/__init__.py` (`compiler`, `Recording`, `record`, `replay`) | C: the bindings |
-| `torch_mesh/backend.py` (`node_lead`, group creation, `counted`) | C: the bindings |
+| `torch_mesh/backend.py` (group creation, `counted`) | C: the bindings |
 | `stream.example.json` | D: configuration, a didactic record |
 | `README.md`, `docs/writing-a-service.md` | documents |
 
@@ -31,15 +31,15 @@ No file of `nccl.h`, `nccl-mesh.c` or `nccl-mesh-metal.m` is touched, and none o
 ## The rule in brief
 
 1. Each buffer the library commits signals its count on a shared event as the GPU reaches its end.
-2. A publication is committed at once, with every publication waiting in torch's open buffer, while at most `lead` of
-   those buffers are in flight, read from the event's value at that moment.
+2. A publication is committed at once, with every publication waiting in torch's open buffer, while at most one of
+   those buffers is in flight, read from the event's value at that moment: double buffering.
 3. Otherwise it joins torch's open command buffer.
 4. The next publication applies the rule again. A host wait commits the open buffer: the library's (`_stream.commit`,
    `host_wait`) and torch's own (`synchronize`, `.item()`, `.cpu()`).
 5. Nothing else commits it. A host that blocks outside torch with a publication waiting stalls its peer until the
    peer's bounded wait ends the call.
 
-`lead` is the node's record, read once when a group is made. A missing record fails there.
+The depth is the rule's structure, not a setting (see "The depth is not a parameter" below).
 
 ## Ranked pairs, change by change
 
@@ -48,14 +48,14 @@ No file of `nccl.h`, `nccl-mesh.c` or `nccl-mesh-metal.m` is touched, and none o
 - **C4 Asynchrony: old ≺ new.** Old: `publishing` committed at every publication unless `batching_` was set. Only
   `compiler` set it, so eager calls, the library's own callers and user programs paid one command buffer a
   collective (40 us eager against 26 us in the region, same bytes). New: `MeshStream::published` serves every caller.
-  A publication joins the open buffer while more than `lead` buffers are in flight.
+  A publication joins the open buffer while more than one buffer is in flight.
 - **D3 Control flow: old ≺ new.** Old: `if (!batching_ || ...)`, a mode the caller enters. New: one path. Its only
-  branch is the depth against `lead`, which is configuration.
-- **D2 When choices are made: old ≺ new.** Old: `committed_ - progress_.signaledValue < 2`, a literal in the
-  function. New: `lead` comes from the node's record (`backend.node_lead`), read once at group creation. A stream made
-  without it throws (`stream_of`'s `TORCH_CHECK`).
+  branch is the structural depth (one buffer queued behind the one running).
+- **D2 When choices are made: old ≈ new.** Both compare the in-flight count with the same structural depth. An
+  intermediate draft of this branch made the depth a per-node `commit_lead` read from `~/.cache/mesh/stream.json` or
+  `MESH_STREAM` at group creation; it was removed (below).
 - **C5 When time may decide: old ≈ new.** Both decide at the publication from the event's value, a count of buffers
-  (known depth), not a timing estimate. It decides only grouping, never correctness. New: the depth is the node's data.
+  (known depth), not a timing estimate. It decides only grouping, never correctness.
 - **C2 Invariance: old ≺ new.** One implementation for eager, compiled, library and user callers, on any torch stream.
 - **C1 Provenance: old ≺ new.** NCCL's calls enqueue on a stream and return; the caller never chooses when the stream
   is flushed. Old: whether work was flushed per call depended on a region the caller entered. New: one rule for all.
@@ -83,8 +83,6 @@ What an exception does at each point (C6):
 
 | where | what is left |
 |---|---|
-| `backend.node_lead` (no record) | raised in `ProcessGroupMesh.__init__` before the bootstrap: no communicator, no stream state |
-| `stream_of` (lead not configured) | thrown before anything is encoded; no `MeshStream` is made |
 | `workspace` (torch's allocator throws) | caught; returns NULL; the library fails the group as a value ("out of GPU memory") |
 | inside `on_stream`'s or `complete`'s block | nothing throws: the library returns values, and torch's `synchronize(COMMIT)` is `commitAndContinue` (installed binary) |
 | `checked(result)` after the block | the rule already ran; workspace is held only for a ticket that succeeded |
@@ -145,9 +143,8 @@ It reviewed the revision with the listener.
 5. `replay`'s time is a step's interval in the stream (MPS timing events take host times in listener callbacks of
    torch's own, equally late at both ends), and with steps back to back it is the slower of the GPU's time and the
    host's issue. Restated in the docstring and README.
-6. The lead record had no producer, accepted `true`, and named no path for bad JSON. The loader now names the path for
-   any read or parse failure and takes only an int. No probe writes the record yet (README); provisioning is to write
-   it.
+6. (Superseded.) The lead record had no producer. The record, its loader and the environment variable were then
+   removed: the depth is not a parameter (below).
 7. The host path waited only on the current stream. It now waits on the current one and every stream a group was
    issued on. Completion is still encoded on the current stream (`ncclMeshComplete` completes every issued group on
    the stream it is given), so Metal-path groups from two torch streams remain unsupported, as before.
@@ -181,8 +178,7 @@ Not confirmed, for the first build:
 
 ## What the first build and the first crossing.py run must show
 
-- It builds, links `dispatch_sync_with_rethrow`, and imports. Every node has `~/.cache/mesh/stream.json`
-  (`{"commit_lead": 1}` reproduces the 10-02 depth), or `init_process_group` fails naming it.
+- It builds, links `dispatch_sync_with_rethrow`, and imports. No node needs any file for it.
 - metal-microbench `crossing.py`, both ranks, eager and `COMPILE=1 COMPILER=mesh`, with the TP ratio, aggregate and
   per-stream rates logged as the rubric's Quantities ask:
   - Compiled at or under 12.7 us a crossing; eager at or under 17.4. Under one rule the two should now be close,
@@ -190,3 +186,20 @@ Not confirmed, for the first build:
   - Command buffers per step (Metal System Trace, or a count of `committed`) well under 141 in both.
   - The first check passes (each rank contributes rank + 1).
 - If either reading misses its target, finding 8's regression history decides what is restored.
+
+## The depth is not a parameter (the operator, 2026-10-21)
+
+An intermediate draft carried a per-node `commit_lead`, read from `~/.cache/mesh/stream.json` or the file `MESH_STREAM`
+named, failing every group without it. The coordinator had asked for it ("a measured quantity of the node, carried as
+data") without first asking whether the depth is a parameter at all. The operator: "if it's parametric it's chosen by an
+optimization process, and if it's nonparametric it's not a choice"; and a configurable feature "belongs in a configfile
+regardless", never an untracked cache file.
+
+It is nonparametric. The GPU starts a command buffer at most every 13-19 µs whatever it holds (metal-microbench
+docs/measurement.md, 2026-10-02). When buffers are shorter than that, the start rate binds and no depth helps. When they
+are longer, one committed buffer queued behind the running one is always ready when it ends. Joining publications into
+the open buffer makes buffers longer. So the throughput-optimal depth is the structural one: one queued behind one
+running. The 7-9 µs listener latency that made a deeper lead look useful mattered only to the listener, which was
+removed. If a measurement ever shows a depth effect, the depth becomes a parameter chosen by an optimization process
+from the calls' evidence, with its result in a tracked configuration file. It is never a hand-written value and never an
+untracked file.

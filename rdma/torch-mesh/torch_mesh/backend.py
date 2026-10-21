@@ -19,8 +19,6 @@ partials operator.
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
 store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; it takes no pg_options.
 The silent-link bound is the library's (nccl.h)."""
-import functools
-import json
 import math
 import os
 
@@ -51,24 +49,6 @@ def op(reduce_op):
         if reduce_op == known:
             return code
     raise NotImplementedError(f'the mesh backend reduces by sum, product, max, min and avg, not {reduce_op}')
-
-
-@functools.cache
-def node_lead():
-    """This node's commit lead (_stream.mm configure; torch-mesh README, Performance): how many of a stream's committed
-    buffers may still be in flight when its open buffer is committed, a measured quantity of the node, read once from
-    the node's record, the `commit_lead` of the JSON document MESH_STREAM names, else ~/.cache/mesh/stream.json.  A
-    node without it fails here, naming the record."""
-    path = os.environ.get('MESH_STREAM') or os.path.expanduser('~/.cache/mesh/stream.json')
-    try:
-        with open(path) as f:
-            record = json.load(f)
-    except (OSError, ValueError) as e:
-        raise RuntimeError(f'mesh: this node has no commit lead: {path}: {e} (torch-mesh README, Performance)') from None
-    lead = record.get('commit_lead') if isinstance(record, dict) else None
-    if type(lead) is not int or lead < 0:
-        raise RuntimeError(f'mesh: {path} gives no commit_lead, a count of buffers (torch-mesh README, Performance): {lead!r}')
-    return lead
 
 
 def blank(shape, dtype, device):
@@ -134,7 +114,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def __init__(self, rank, size, store):
         super().__init__(rank, size)
-        _stream.configure(node_lead())
         made, unique = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
         if rank == 0:
             check(LIB.ncclGetUniqueId(unique))
@@ -153,7 +132,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
     @classmethod
     def _of(cls, comm):
         """A group over a communicator libnccl-mesh made (a shrink's or a grow's), with no bootstrap of its own."""
-        _stream.configure(node_lead())
         count, rank = ffi.new('int *'), ffi.new('int *')
         check(LIB.ncclCommCount(comm, count))
         check(LIB.ncclCommUserRank(comm, rank))
