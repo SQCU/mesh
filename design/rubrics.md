@@ -74,7 +74,7 @@ The region is mapped whole into every client, so nothing in the hardware enforce
    the interfaces above.
 4. When two requirements conflict, decide by the rubric of the kind the code belongs to. In a conflict between kinds,
    decide by the interface: what crosses it, and nothing else.
-5. Never write a rule, a memory note or a pass/fail check in place of a ranking.
+5. Rank a rule, a memory note or a pass/fail check written in place of a ranking below the ranking.
 
 ## How to read them
 
@@ -93,8 +93,7 @@ Each rubric has the two kinds of dimension the operator scores separately: abstr
 and a few fine-grained ones about particular mechanisms. Some comparisons rank in opposite directions in different
 layers; see Inversions.
 
-**Quantities.** These are read alongside the rankings. They are indexed absolutely, so they are not part of any
-ranking.
+**Quantities.** The values the rankings compare, each entering them pairwise like any other dimension.
 - Throughput in tok/s, per stream and aggregate. A measurement is ranked like any form, pairwise, by what it
   contains. The operator, 10-20, verbatim: "the rubric contains pairwise comparable qualitative judgemetns that can
   compare any two things. therefore we cannot use that notion [a rule that every change be measured]; instead, we say
@@ -115,17 +114,20 @@ ranking.
   - a measurement of KL alone ≺ one of aggregate throughput Paretos alone that lacks the KL it should have had;
   - a regression patched ≺ a regression unwritten (metal-microbench d673284, 10-19: "d673 will not be accepted adn
     does not need to be reviewed").
-- KL at the unembedding against LiteRT's pair KL. Up to 2.0 is allowed while shapes work is unfinished.
-- A difference under 3% counts as equal.
-- Latency more than 3 times the hardware's per hop is forbidden.
-- No DMA or network channel goes 5 s without something happening on it.
-- At least 1,000 normal frames per transport error.
-- A collective client errs at most once in 10⁵ transmits, and no dud is ever read where the producer lives. The
-  operator, 10-20: "collective clients can only have an error one in 10000 (yes, 1e5) transmits'; duds *should not
-  happen*." A dud read is a read of memory its producer was not yet allowed to write, caught by the bridge.
-- Testing takes about 12 s an hour; an investigation runs at most 10 s of intensive work.
-- No collective has fewer than 2 members.
-- After a backend's first build, switching to it costs under 1 s.
+- KL at the unembedding, against LiteRT's pair KL. While shapes work is unfinished: an export of more bytes at a lower
+  KL ≺ the export of fewest bytes within a KL of 2.0.
+- Two forms whose times differ by under 3% rank equal on time.
+- Latency per hop: more than three times the hardware's ≺ within it (M8).
+- A DMA or network channel's silence: a channel 5 s without anything happening on it ≺ one that is never so long
+  quiet.
+- Errors: a transport erring more than once in 1,000 normal frames ≺ one erring less; a collective client erring more
+  than once in 10⁵ transmits ≺ one erring less; a dud read where its producer lives ≺ none. The operator, 10-20:
+  "collective clients can only have an error one in 10000 (yes, 1e5) transmits'; duds *should not happen*." A dud read
+  is a read of memory its producer was not yet allowed to write, caught by the bridge.
+- Testing and investigation: more than about 12 s of testing an hour ≺ less; an investigation of more than 10 s of
+  intensive work ≺ one of less.
+- A collective of one member ≺ one of two or more (D9).
+- Switching to a backend after its first build: more than 1 s ≺ less (D6).
 
 | | Mesh | Collective | Data |
 |---|---|---|---|
@@ -629,33 +631,29 @@ The operator, 10-20, verbatim:
   desired tradeoffs that seem to eb implied in past work are not tradeoffs but pure regressions or fault injections into
   the source, which is why they user is authoritative on removal without replacement."
 
-The positions, in every kind:
-1. **Failure is exceptional.** Bridge operations almost never fail, and collective operations almost never fail
-   (Quantities: at least 1,000 normal frames per transport error; a collective client errs at most once in 10⁵
-   transmits). Data processing's empirical loss is very low because those two are nested beneath it, and for no other
-   reason.
-2. **No data processing function is guaranteed lossless.** A function cannot succeed while its substrate has failed.
-   It fails, and returns its error through its error channel, a value beside its result (a tuple's second index); its
-   caller may run it again on the map as it is then (C6). Code that tries to make it succeed anyway (waiting out a
-   peer, retrying, refusing, reconstructing, holding state across the failure, reloading what the failure took) is not
-   a tradeoff but a regression, a fault injected into the source, and is removed without replacement.
-3. **Failures are not contagious, and nothing explodes across an interface.** A failure belongs to the party that
-   failed and reaches only its own caller, as a value:
-   - the bridge never fails a client for another client's failure (M4);
-   - a collective's failure fails that call, through NCCL's error channel (C6);
-   - a data function's failure fails its call.
-
-   No interface carries a refusal, a stuck state, or a condition one party must clear for another (C6, 10-20).
+The positions, in every kind, as ranked pairs:
+1. **Failure is exceptional.** Code that treats a bridge's or a collective's failure as ordinary ≺ code that treats it
+   as exceptional: bridge and collective operations almost never fail (Quantities: errors), and data processing's
+   empirical loss is very low because those two are nested beneath it, and for no other reason.
+2. **No data processing function is guaranteed lossless.** A data function made to succeed while its substrate has
+   failed (waiting out a peer, retrying, refusing, reconstructing, holding state across the failure, reloading what the
+   failure took) ≺ one that fails and returns its error through its error channel, a value beside its result (a tuple's
+   second index), for its caller to run again on the map as it is then (C6); the former is a regression, a fault
+   injected into the source, and ranks below its removal without replacement.
+3. **Failures are not contagious.** A failure that reaches past its own caller (the bridge failing a client for another
+   client's failure, a collective's failure failing more than that call, a data function's more than its call; an
+   interface carrying a refusal, a stuck state, or a condition one party must clear for another) ≺ a failure that
+   belongs to the party that failed and reaches only its own caller, as a value (M4, C6, 10-20).
 4. **Transactions fail; a healthy node never does.** "transactions can fail, nodes that are healthy can never fail. that
    means that a bridge can fail then restart and reconnect, that a collective operation can fail and repeer, that a data
    processing operation can fail and relaunch. inducing a system halt or kernel halt causes the entire node to fail.
-   that is not permittable for obvious reasons." (10-20). Nothing at any layer may halt the system or the kernel: the
-   Mini's watchdog panic of 10-20 (a rank running on a stopped bridge's window beside the new one, wiring all its
-   memory) is the case.
-5. **Rare failures get no machinery.** Nothing is built to make a failure ordinary: no protocol, refusal, stuck state,
-   or handler that changes data code from outside a call. Nothing is set up per call to survive a rare event; whatever
-   would be faster kept is kept (M8, 10-20). A bridge is not restarted thousands of times a second, minute, hour or
-   day.
+   that is not permittable for obvious reasons." (10-20). A halt of the system or the kernel, at any layer ≺ a failed
+   transaction: the Mini's watchdog panic of 10-20 (a rank running on a stopped bridge's window beside the new one,
+   wiring all its memory) is the case.
+5. **Rare failures get no machinery.** A protocol, refusal, stuck state, or handler that changes data code from outside
+   a call, built to make a rare failure ordinary ≺ none; something set up per call to survive a rare event ≺ whatever
+   would be faster kept, kept (M8, 10-20); a bridge restarted thousands of times a second, minute, hour or day ≺ one
+   that is not.
 6. **Every program can be shut down whole, and a client transduces its lower layer's end as a value.** The operator,
    10-20, verbatim:
    - "we need to be able to service and maintain these machines, incl. to deliberately free memory because a bridge is
@@ -729,22 +727,22 @@ So each string site is ranked against what removing it would cost, not struck by
 - **Most other string-typed functions remove without compromising any value** (a record kept as a string-keyed
   dictionary, an op chosen by comparing its text, a kernel looked up by name on every dispatch, a structure inferred
   from names that a declaration states), and rank below their typed forms.
-- **The export's partition** (which operator belongs to which layer and role) comes from a module: a declaration we
-  write, or one derived from config.json; or the stock LiteRT engine runs unmodified.
+- **The export's partition** (which operator belongs to which layer and role): read from tensor names ≺ a module's
+  declaration we write, or one derived from config.json; or the stock LiteRT engine run unmodified.
 
-The positions, in M, C and D:
-1. **A string is a message.** It is carried, composed (string to string), and returned beside a value. No function
-   takes a string and returns anything but a string, and none has a side effect. So nothing measures, compares,
-   searches, parses, hashes, looks up by, or converts a string into a value, and no branch reads a message's content.
-2. **Every function's result is a value and a message**, the message empty or not. A fault is an exception or a
-   kernel fault in the calling context; anything else is a message on the rail, and no code changes what it does
-   because of what a message says.
-3. **What crosses into these programs as a value arrives as a typed value**: configuration, requests, identities and
-   outcomes are never text that the program parses.
-4. **Programs outside the three kinds** (tabulation, visualization, renderers of the wire's crossings) read and write
-   text as they like.
-
-5. **Types and structure are declared, never inferred at run time.** The operator, 10-20, verbatim: "how is a
+The positions, in M, C and D, as ranked pairs:
+1. **A string is a message.** A function that takes a string and returns other than a string, or has a side effect
+   (measuring, comparing, searching, parsing, hashing, looking up by, or converting a string into a value; a branch on a
+   message's content) ≺ a string carried, composed (string to string), and returned beside a value; with the weighing
+   above (logging, an interface's names).
+2. **Every function's result is a value and a message**, the message empty or not. Code that changes what it does
+   because of what a message says ≺ code that carries it: a fault is an exception or a kernel fault in the calling
+   context, and anything else is a message on the rail.
+3. **What crosses into these programs as a value**: configuration, requests, identities or outcomes as text the
+   program parses ≺ as typed values.
+4. **Programs outside the three kinds** (tabulation, visualization, renderers of the wire's crossings) are not ranked
+   here: they read and write text as they like.
+5. **Types and structure are declared, not inferred at run time.** The operator, 10-20, verbatim: "how is a
    model.config.file written in the huggingface et al dialect? i do not think it is by type inferenec at runtime.
    figure out why the user is being picky about type inferences and then act on it". A model's configuration declares
    its structure as typed fields (gemma-4-E2B's `num_hidden_layers` 35, `layer_types`, `num_attention_heads`,
@@ -753,12 +751,12 @@ The positions, in M, C and D:
    program runs (a layer's index from a regex over a tensor's name, MoE from whether a tensor of some name exists, a
    value's type from a cast that may fail, a format from a file's suffix) is a guess: it costs work at every load or
    call where a declared value costs one read, and when the names or the shapes change it yields a different program
-   rather than an error (the operator, 10-19: no parameter derived or guessed inside a function). A declaration is
-   read once, at the boundary, into a typed value; every consumer takes that value.
-6. **What a call returns is a value a consumer matches exactly**: a word or bit vector compared against the expected
-   one, never text formatted by one program and parsed by another. The operator, 10-20: "i do not understand why
-   serializing or deserializing or checking strings is the exact same expected overhead as a bitvector exact match in
-   a kernel which takes a return and does something in response...?"
+   rather than an error (the operator, 10-19: no parameter derived or guessed inside a function). Ranked: inferred ≺
+   declared and read once, at the boundary, into a typed value every consumer takes.
+6. **What a call returns**: text formatted by one program and parsed by another ≺ a value a consumer matches exactly,
+   a word or bit vector compared against the expected one. The operator, 10-20: "i do not understand why serializing or
+   deserializing or checking strings is the exact same expected overhead as a bitvector exact match in a kernel which
+   takes a return and does something in response...?"
 
 Ranked by where the text is read, lowest first: text read or compared on a recurring path (per frame, dispatch,
 window, step or call) ≺ text read once per load or start into typed values (a safetensors header, a declaration) ≺ no
@@ -796,11 +794,11 @@ a numeric constant or a typed operand; logging on a change found by comparing st
   review code with independent subagents to mitigate and prevent complicated, labrythine, slow interventions and their
   removal" (10-20). Everything else here ranks.
 - **The rubric answers the choice.** "why are you asking me to make a choice when the rubricfile exists to totally
-  answer questions of this kind?" (10-20): between forms of the same code, the ranking chooses; the operator is not
-  asked.
+  answer questions of this kind?" (10-20). Ranked: asking the operator to choose between forms the rubric ranks ≺
+  choosing by the ranking.
 - **Write the module, not the history.** "identify hwat the code did and write that module then, rahter htan playing
-  pretend wrt git version trees etc" (10-20): where a rejected change is entangled with later work, what the earlier
-  code did is read from its source and written as a module now.
+  pretend wrt git version trees etc" (10-20). Ranked, where a rejected change is entangled with later work: recovering
+  the earlier code from version history ≺ reading what it did from its source and writing that module now.
 - **Megatron TP is its semantics.** "megatron-tp meant something very semantically sepecific and it can be recovered
   from source alone" (10-20): every rank runs the same program from the same inputs (metal-microbench
   tools/torch_parallel/tp.py, 10-02: wq, wk, wv, w1, w3 column-parallel, wo, w2 row-parallel, an all-reduce after
@@ -808,8 +806,9 @@ a numeric constant or a typed operand; logging on a change found by comparing st
   inference server has rank 0 broadcast a fixed-size typed value and the token tensor, the others looping on that
   broadcast. Ranked: members as servers interpreting a head's request (d673284, 10-19) ≺ every rank running the same
   program from the same inputs (10-20).
-- **No part ends another.** "i do not want to hear anything about 'when x died, y co-died ...' ever again" (10-20): a
-  coupling through which one part's end ends another is a defect to remove, never an account of a failure.
+- **No part ends another.** "i do not want to hear anything about 'when x died, y co-died ...' ever again" (10-20).
+  Ranked: a coupling through which one part's end ends another ≺ none; such a coupling told as the account of a
+  failure ≺ the coupling found in the code and removed.
 
 ## Where HEAD sits (2026-10-20), as ranked pairs
 
@@ -845,8 +844,8 @@ a numeric constant or a typed operand; logging on a change found by comparing st
 - **M3, M4:** a stream kept for a lost pairing's holder, bootstrap waits with no bound, and a member's stale leases
   refusing its group until a call the refusal blocks (version 130) ≺ version 131 (9add4cbe, ab2e5192, metal-microbench
   7b04f33): every stream new at a pairing, every bootstrap wait a slice within the platform deadline, and the refused
-  member retiring its residents at the refusal. A process still never holds leases of two regions: removing that rule
-  (9add4cbe's P3) wired all of the Mini's memory and its watchdog panicked it (10-20 18:27 UTC). On the pair after
+  member retiring its residents at the refusal. A process holding leases of two regions (9add4cbe's P3) ≺ one region a
+  process: the former wired all of the Mini's memory and its watchdog panicked it (10-20 18:27 UTC). On the pair after
   ab2e5192, the Mini's bridge restart failed one call and the next two committed, its wired memory steady.
 - **M3, M4, rubrics 6 (10-20):** a window unlinked and made again at every bridge start, its clients' leases left in a
   dead window beside the new one (through version 131) ≺ a window adopted across a restart (923d73fd, layout 132: on
