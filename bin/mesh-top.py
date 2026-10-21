@@ -77,7 +77,7 @@ class Top:
 
     def refresh(self, wait=False):
         """The map of this node's bridge (mesh.current: mesh_map), naming each bridge node, and its records (mesh.nodes:
-        each node's model, memory, window, boot and available memory); then this node's own telemetry asked for where no
+        each node's model, memory, region, boot and available memory); then this node's own telemetry asked for where no
         ask of it is under way (`wait`: until it answers)."""
         own, records = None, {}
         try:
@@ -160,7 +160,7 @@ class Top:
             elif f.get("bridges"):
                 b = max(f["bridges"], key=lambda x: x["exited_at"])
                 bridge = (f"none (last exited {duration(now - b['exited_at'])} ago)", "bad")
-            elif not node.me and r: bridge = (f"in the map, window {gib(r.get('window'))}", "ok")
+            elif not node.me and r: bridge = (f"in the map, region {gib(r.get('region'))}", "ok")
             else: bridge = ("none", "bad")
             transport = (f"loopback {node.rtt * 1000:.0f}ms", "dim") if node.rtt is not None else ("no telemetry", "bad") if node.error else ("asking", "dim") if node.me else ("on its node", "dim")
             add("  ", (f"{node.name:<17} ", "bold"), f"{chip:<14} {gib((s.get('host') or {}).get('memory_bytes') or r.get('memory')):<6} {gib(r.get('available')):<6} {up:<9} ",
@@ -270,7 +270,7 @@ def interactive(screen, top):
         if key == ord("k"): offset, due = max(0, offset - 1), 0
 
 def main():
-    parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth from this node: the nodes this node's bridge's map names, with the facts their records carry (model, memory, window, available memory, boot), and this node's io.mesh.telemetry (:8788): its services, its cables, its bridge's ports and the bytes landed through each; sends no RDMA traffic of its own.")
+    parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth from this node: the nodes this node's bridge's map names, with the facts their records carry (model, memory, region, available memory, boot), and this node's io.mesh.telemetry (:8788): its services, its cables, its bridge's ports and the bytes landed through each; sends no RDMA traffic of its own.")
     parser.add_argument("-n", "--interval", type=float, default=1.0)
     parser.add_argument("--window", type=float, default=5.0)
     parser.add_argument("--nodes", type=lambda text: [x for x in text.split(",") if x], default=None)

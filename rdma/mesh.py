@@ -4,7 +4,7 @@ node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's s
 the header's own: link maps, the trees every collective and message take, operands, collectives (compile: a program,
 the operand libnccl-mesh's ncclMeshCommInitRank takes), steps and the wire libnccl-mesh's channels run (wire()).
 Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the
-memory they move taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
+memory they move taken from the node's bridge's region (rdma/NCCL.md "Memory")."""
 import errno
 import os
 import re
@@ -185,7 +185,7 @@ def current(members=None):
 
 def nodes():
     """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node and
-    name, its bridge's window and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
+    name, its bridge's region and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
     `available` memory as its bridge last sampled it (what the kernel can give without pressure, its reclaimable cache
     counted).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
     bridges, never probed over another network.  OSError naming the bridge where it is unreachable."""
@@ -195,7 +195,7 @@ def nodes():
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
     lib.mesh_reached(ffi.NULL, 0, own)
     text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
-    return [{'node': r.node, 'name': text(r.name), 'window': r.window, 'memory': r.memory, 'model': text(r.model),
+    return [{'node': r.node, 'name': text(r.name), 'region': r.region, 'memory': r.memory, 'model': text(r.model),
              'booted': r.health.booted, 'available': r.health.available, 'own': r.node == own[0]} for r in held[0:count]]
 
 
@@ -219,10 +219,10 @@ def wire(block=None):
 
 
 def lease(nbytes):
-    """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's window, whole pages already registered on its
+    """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's region, whole pages already registered on its
     devices (design/transport.md), as a writable buffer (numpy.frombuffer and torch.frombuffer take it),
-    returned to the window (ncclMemFree) once it and every object over it are gone.  RuntimeError with the library's
-    reason where the window cannot meet it (the bytes asked and the pages free), the node runs no bridge, or this
+    returned to the region (ncclMemFree) once it and every object over it are gone.  RuntimeError with the library's
+    reason where the region cannot meet it (the bytes asked and the pages free), the node runs no bridge, or this
     process still holds a lease of a bridge that stopped (rdma/NCCL.md "Memory")."""
     held, size = ffi.new('void **'), max(1, nbytes)
     result = lib.ncclMemAlloc(held, size)

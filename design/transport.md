@@ -9,20 +9,20 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
 
 ## 1. The objects
 
-- **The registered window.** One POSIX shared-memory object per node, `/mesh0`, mapped by the bridge and registered
-  with every Thunderbolt RDMA device of the node by that port's agent as it opens the device (section 14), as memory
-  regions of 1 GiB extents
-  aligned to 1 GiB (`tbt_post_recv` keeps only the low 32 bits of an SGE address with the region's key, so a region
+- **The registered region.** One POSIX shared-memory object per node, `/mesh0`, mapped by the bridge and registered
+  with every Thunderbolt RDMA device of the node by that port's agent as it opens the device (section 14), one ibv_mr
+  per 1 GiB extent,
+  aligned to 1 GiB (`tbt_post_recv` keeps only the low 32 bits of an SGE address with the extent's key, so an extent
   crossing a 4 GiB boundary aliased receives 4 GiB low: September 5). Every address a request names is inside it.
-- **The page table.** The window's rows (one row is one block, 16 KiB on the pair) and, per row, an owner word and the
+- **The page table.** The region's rows (one row is one block, 16 KiB on the pair) and, per row, an owner word and the
   arena page it maps (`mesh_buffer`, `mesh_page_entry`), claimed by compare-and-swap on bitmaps. A client's memory is
   rows whose owner word is its own. "Lease" in the code means only this: rows owned. It has no term, renewal or expiry.
 - **A link.** The two ports at the ends of one cable and the queue pairs the bridges make on them at each pairing:
   ten unreliable-connected queue pairs (index 0 carries the keepalive frame), created, moved through INIT, RTR and RTS,
   on two completion queues of the port's device context.
-- **A posted receive.** An `ibv_recv_wr` with one SGE: an address in the window, a length, a key. The queue pair's
+- **A posted receive.** An `ibv_recv_wr` with one SGE: an address in the region, a length, a key. The queue pair's
   next arriving SEND fills the oldest posted receive. Its completion is an entry in the receive completion queue.
-- **A SEND.** An `ibv_send_wr` with one SGE naming a range of the window. TN3205: only SEND and RECV exist on this
+- **A SEND.** An `ibv_send_wr` with one SGE naming a range of the region. TN3205: only SEND and RECV exist on this
   transport (no RDMA WRITE or READ), a SEND and the receive it fills must cover the same number of 4 KiB frames, and a
   SEND is held by the hardware's credit until the peer has a receive posted.
 - **A readiness word.** A 64-bit word in shared memory with exactly one writer and one or more readers: a client's
@@ -39,59 +39,59 @@ completion queue, every request it posts, which rows a receive or a SEND names, 
 carry which call's positions. Its port agents are the only processes that hold a device's objects or post on them; the
 parent reads the device list alone.
 
-**The window outlives a restart of its bridge** (layout version MESH_LAYOUT, apart from the wire's MESH_VERSION). A
-bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash leaves its window as it is. The next
-bridge adopts the window, the same memory, where its layout is that bridge's:
+**The region outlives a restart of its bridge** (layout version MESH_LAYOUT, apart from the wire's MESH_VERSION). A
+bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash leaves its region as it is. The next
+bridge adopts the region, the same memory, where its layout is that bridge's:
 - clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
 - the port agents register the same pages again, so nothing is wired twice and nothing is reloaded;
-- the bridge's own pages (each port's link page and rings, the duds' block, the map) are recorded in the window and
+- the bridge's own pages (each port's link page and rings, the duds' block, the map) are recorded in the region and
   taken again;
 - every stream is set not live and held by none, its landed words ~0, so a communicator of the old pairing fails and is
   made again, and the next pairing opens each stream new;
 - a retirement a dead process left half done is finished.
 
-A window a live bridge serves is never touched: a second bridge of the node ends at its port's bind, before it reads
-the window.
+A region a live bridge serves is never touched: a second bridge of the node ends at its port's bind, before it reads
+the region.
 
-**A release frees it** (design/rubrics.md "Failure across interfaces" 6). Every stop of the bridge keeps its window; a
+**A release frees it** (design/rubrics.md "Failure across interfaces" 6). Every stop of the bridge keeps its region; a
 release is the heartbeat's: it stops the bridge by SIGTERM (its agents end, so the kernel frees every object of their
-devices), and once the bridge has ended it makes the window *expire*, its layout version made 0. A bridge that finds a window of another layout expires it the same way and ends
-(EX_TEMPFAIL). No party signals a client. An expired window is:
+devices), and once the bridge has ended it makes the region *expire*, its layout version made 0. A bridge that finds a region of another layout expires it the same way and ends
+(EX_TEMPFAIL). No party signals a client. An expired region is:
 - attached by no new client (mesh_open refuses its version);
 - returned to each client that holds a lease or communicator of it as a value, at its next lease or communicator
-  (ncclRemoteError, and ncclMeshWindowExpired: nccl.h Memory); a client the library made no Metal buffer for frees what
+  (ncclRemoteError, and ncclMeshRegionExpired: nccl.h Memory); a client the library made no Metal buffer for frees what
   it holds of it, or ends, and the library then unmaps it and closes its descriptor; a client with Metal buffers over
   it (its GPU work and residency set may hold those pages after they are released) ends; what a client still holds
   stays mapped and valid until it frees it or ends;
 - unlinked by the heartbeat once none of its holders lives, and its memory is then the system's. Its holders are
-  recorded in the window, each by its pid and its process's start (so a pid the system gives again is no holder): the
-  bridge (`bridge_pid` and `bridge_start`), each agent a bridge spawned (the agents register the window and hold it
+  recorded in the region, each by its pid and its process's start (so a pid the system gives again is no holder): the
+  bridge (`bridge_pid` and `bridge_start`), each agent a bridge spawned (the agents register the region and hold it
   until their exit, which can outlast their bridge's), and each client slot's process (its owner's pid and `start`).
   Fields of the header, the slots and the bridge's area are only ever appended, so the heartbeat reads the holders of
-  a window of any layout.
+  a region of any layout.
 
-A second window is never made beside a holder of the first, because on the Mini (24 GB, a 17 GB window) GPU work on
-one window beside another's registration wired all its memory and its watchdog halted the node (2026-10-20): the
-heartbeat opens a bridge only once no expired window is named. A process that maps the window without a slot (a reader,
+A second region is never made beside a holder of the first, because on the Mini (24 GB, a 17 GB region) GPU work on
+one region beside another's registration wired all its memory and its watchdog halted the node (2026-10-20): the
+heartbeat opens a bridge only once no expired region is named. A process that maps the region without a slot (a reader,
 or a child forked by a client without exec) is not recorded; none registers it or makes it resident.
 
 **The heartbeat** (rdma/mesh-heartbeat, the job launchd keeps alive, `io.mesh.bridge`) supervises the bridge. It holds no
-device, window or socket of the mesh. It opens the bridge (a child in a process group of its own, so the bridge serves
+device, region or socket of the mesh. It opens the bridge (a child in a process group of its own, so the bridge serves
 on if the heartbeat ends), closes it on the operator's signal and hears its end as a kernel event (EVFILT_PROC
-NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an expired window. Its signals, sent with
+NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an expired region. Its signals, sent with
 `launchctl kill SIG user/$(id -u)/io.mesh.bridge`:
-- SIGHUP opens the bridge, or restarts it: the bridge closes by SIGHUP (its window kept), the heartbeat runs its own
-  image again (a deploy's new binaries both, bin/mesh-user.sh), and the bridge opens and adopts the window;
-- SIGUSR1 releases: the bridge closes by SIGTERM, the window is unlinked once none of its holders lives, and no bridge
+- SIGHUP opens the bridge, or restarts it: the bridge closes by SIGHUP (its region kept), the heartbeat runs its own
+  image again (a deploy's new binaries both, bin/mesh-user.sh), and the bridge opens and adopts the region;
+- SIGUSR1 releases: the bridge closes by SIGTERM, the region is unlinked once none of its holders lives, and no bridge
   opens until SIGHUP;
 - SIGTERM and SIGINT (launchd's stop of the job, a shutdown) release and end the heartbeat, which exits 0, and launchd's
   KeepAlive {SuccessfulExit: false} does not start it again.
 
 A bridge that ends unasked opens again 60 s later, so the mesh is never restarted more than once a minute (rubrics 6: "do
 not stop meshes hundreds of times per second, minute, or hour"); nothing else is built for a crash (rubrics position
-5). A bridge that ended finding its window expired opens again once the heartbeat has unlinked that window. A job whose
+5). A bridge that ended finding its region expired opens again once the heartbeat has unlinked that region. A job whose
 definition predates the heartbeat runs the bridge directly until the job's next load (launchd keeps a loaded
-definition): its stops keep the window as ever, and it has no release.
+definition): its stops keep the region as ever, and it has no release.
 
 **A client** (a rank, a tensor function, torch) owns its rows, and for each of its calls the positions it sends and
 receives. It reads and writes its own rows and its readiness words. It names nothing else.
@@ -106,8 +106,8 @@ independently, have invariants no access can check in time, and fail irreversibl
 enforcement (complete mediation: Anderson's reference monitor, 1972; Saltzer and Schroeder, 1975; capabilities, Dennis
 and Van Horn, 1966):
 
-1. *Memory the device writes.* A DMA write cannot be undone and the NIC checks nothing beyond the region's key. A
-   client that can form an address in the window can write where another client's receive lands, or keep using rows
+1. *Memory the device writes.* A DMA write cannot be undone and the NIC checks nothing beyond the extent's key. A
+   client that can form an address in the region can write where another client's receive lands, or keep using rows
    after they are given away. Clients hold their own rows only.
 2. *Device registers and state machines.* Queue-pair handles, requests, SGEs, doorbells and the RESET-INIT-RTR-RTS
    sequence have preconditions the hardware does not check, or checks by faulting: a post while another queue pair of
@@ -305,7 +305,7 @@ summary of the four is part of each node's record.
 
 What HEAD did against the sections above, by section:
 
-- 2: every client mapped the whole window read-write; client rows held `struct mesh_send` (a prepared `ibv_send_wr`
+- 2: every client mapped the whole region read-write; client rows held `struct mesh_send` (a prepared `ibv_send_wr`
   and the queue-pair pointer), which the bridge posted as it found it; clients named the addresses of the words the
   bridge writes (`mesh_delivery`); clients claimed queue pairs by compare-and-swap on `hdr->lanes`.
 - 3: a per-communicator "session" (opened at the first crossing group, its rings in the communicator's rows, a digest
@@ -318,7 +318,7 @@ What HEAD did against the sections above, by section:
 - 9: the bridge stopped itself when its binary changed.
 - 10: no duds; a member that supplied nothing made its peers wait to the bound of their GPU waits.
 - 2 and 11, in metal-microbench: per-rank byte ceilings computed by the planner (`programs.py plans`, the engine's
-  `withinPlan`) refused allocations the window could hold.
+  `withinPlan`) refused allocations the region could hold.
 
 ## 13. Reviewing transport code
 
@@ -346,7 +346,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 **The stream.**
 - Each link carries `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own, since a
   queue pair carries one ring (a SEND fills the oldest receive posted on it). Each stream has two classes: large units
-  (the window's block) and small units (one frame). Each class is a ring of units in the bridge's arena, with a ready
+  (the region's block) and small units (one frame). Each class is a ring of units in the bridge's arena, with a ready
   word and a landed word per unit (`struct mesh_stream`).
 - A stream's units of a class ride its lane of that class in order, alike at both ends (`MESH_STREAM_PAIRS`, the pairs
   a stream stripes over, is one).
@@ -390,7 +390,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 - The bridge is a parent and an agent a port. The parent, its heartbeat's child, holds the region, the map and records, the
   clients' slots, device discovery, hellos and the control sockets. A port's agent is `mesh-flow` spawned again by the
   parent: the same image (its LC_UUID checked, so a binary replaced on disk is no agent of a running parent), in a
-  process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the window,
+  process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the region,
   makes and connects the link's ten queue pairs and runs the port's progress threads. The parent asks it to open,
   make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes, absorbed
   faults, guards not held and terminations it heard. Queue pairs exist only in an agent, and an agent is the bridge

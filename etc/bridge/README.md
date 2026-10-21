@@ -2,7 +2,7 @@
 
 A node's bridge (`rdma/mesh-flow`) starts from one operand, its configuration: a document its consumer writes and
 passes, in JSON, TOML or YAML. `bin/mesh-user.sh CONFIGURATION [CHECKOUT]` reads it with the mesh library's one
-loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and window
+loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and region
 in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's agent
 definition, so the keeper's load at boot keeps it, and records the document's path beside it, so the node's
 convergence (`bin/mesh-converge.sh`, etc/converge/README.md) installs each upstream revision with the node's own. A
@@ -13,31 +13,31 @@ they need.
 
 Servicing a node (design/transport.md section 2, the heartbeat): the bridge's job runs its heartbeat, which opens and
 closes the bridge.
-- `launchctl kill SIGUSR1 user/$(id -u)/io.mesh.bridge` releases the bridge and its window: every device object
-  freed at once, and the window's memory once none of its holders lives (each client's next lease or communicator returns the
+- `launchctl kill SIGUSR1 user/$(id -u)/io.mesh.bridge` releases the bridge and its region: every device object
+  freed at once, and the region's memory once none of its holders lives (each client's next lease or communicator returns the
   expiry; the heartbeat's log names the processes that still hold it);
-- `launchctl kill SIGHUP user/$(id -u)/io.mesh.bridge` opens it again (once a released window is unlinked), or
-  restarts it keeping the window (a changed window size replaces it, as a release does);
+- `launchctl kill SIGHUP user/$(id -u)/io.mesh.bridge` opens it again (once a released region is unlinked), or
+  restarts it keeping the region (a changed region size replaces it, as a release does);
 - `launchctl kill SIGTERM user/$(id -u)/io.mesh.bridge` releases it and ends the heartbeat, which launchd then leaves
   stopped until `launchctl kickstart user/$(id -u)/io.mesh.bridge`.
 
 A document has these keys:
 
 - `purpose`: one line stating what the configuration is for (required).
-- the window, exactly one of `window_gib` (GiB) or `window_percent` (of the node's physical memory).
+- the region, exactly one of `region_gib` (GiB) or `region_percent` (of the node's physical memory).
 - `keepalive_us` (optional): the most microseconds an exclusive flow goes without a frame while it runs
   (design/transport.md): each such flow takes one queue pair more, and its send side posts a one-frame
   SEND on it that often, so a link's controller that slows after a quiet stretch (the Mac mini's, 6-10 us after 40 us of
   nothing) stays ready. Both ends of a flow state it for its frames to flow; a document that states none makes no such
   queue pair.
 
-The window is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
+The region is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
 when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
-checks the window against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a window of more
+checks the region against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a region of more
 extents than that device registers is refused for that port, logged with the extent, its bytes, the errno and the
 extents the device holds, and the port turns again 60 s later, doubling to 30 min, keeping its extents
-(design/transport.md). The bridge starts and serves the node either way; the window is never clamped. Clients lease
-from it; a lease that does not fit fails at its start with an error naming the execution, and the window never grows.
+(design/transport.md). The bridge starts and serves the node either way; the region is never clamped. Clients lease
+from it; a lease that does not fit fails at its start with an error naming the execution, and the region never grows.
 How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
 
 ## The loopback fabric's configurations
@@ -58,9 +58,9 @@ didactic programming exercises.
 - `example-1pct.json`: one percent of the node's memory (245 MiB on a 24 GiB Mac mini, 1.3 GiB on a 128 GiB M5). It
   allows small streaming transfers: a libnccl-mesh session toward one peer leases 24 MiB (its rings, its SEND cells
   and after them in the same lease its publication targets, its completion words and its transfer lists). It does not allow programs that stage large operands in
-  the window.
+  the region.
 - `example-10pct.yaml`: ten percent of the node's memory. It holds many sessions' crossing rings, and it is too small
-  for many applications: a model's weights and KV pool in the window, or a long reduction's staging.
+  for many applications: a model's weights and KV pool in the region, or a long reduction's staging.
 
 The proper configuration for an application is the client writer's to derive and write explicitly for each node of
 their mesh.
@@ -68,12 +68,12 @@ their mesh.
 ## The E2B pair under test
 
 These two are written for the source as it stands (metal-microbench d27fcd9): the rank leases its weights, its KV
-pool and every buffer a crossing takes from the window (metal-microbench docs/placement.md#memory; the operator,
+pool and every buffer a crossing takes from the region (metal-microbench docs/placement.md#memory; the operator,
 2026-10-15: "why would weights or kv be outside of the memory pinned pool? being outside of it means that they cannot
-be zero copy passed to peers"). Until metal-microbench 773cead the rank kept them outside it, and a window beside them
-overcommitted the Mini (M09: at a 9 GiB window its userspace starved and its watchdog reset it). What a member leases
+be zero copy passed to peers"). Until metal-microbench 773cead the rank kept them outside it, and a region beside them
+overcommitted the Mini (M09: at a 9 GiB region its userspace starved and its watchdog reset it). What a member leases
 is one computation, metal-microbench tools/mesh/programs.py `plans` of the call's record: the planner derives no call
-whose members' leases their windows do not hold (node-info `window`) and the driver places no finished record that does
+whose members' leases their regions do not hold (node-info `region`) and the driver places no finished record that does
 not fit, each call's record carries each member's, and the rank holds its part's load to the record's to the byte and
 its calls within the record's total. A count of its rule from the model file's header (2026-10-15, before programs.py
 plans was first run) gives the leases lease5's ranks took before their Neural Engine shares to the byte.
@@ -89,13 +89,13 @@ header (2026-10-15, before programs.py plans was first run): its weights (a Neur
 norm are its layer's own buffers, the down read at the layer's row pitch), the KV pool at the engine's whole page geometry
 (16000 pages and the strip, with their chunk tables; a call leases its own pages, 36 MiB for each 2048 positions of a
 row), the crossed capacity set, the conversion staging, a call's per-layer inputs, its communicator's session (the
-library's, beside the computation), and the whole model alone. Beside the window: the region's tables (64.5 bytes a
-window page, a row's page-table entry, buffer record and delivery word and its plane bits, and 0.5 MiB of header,
+library's, beside the computation), and the whole model alone. Beside the arena: the region's tables (64.5 bytes an
+arena page, a row's page-table entry, buffer record and delivery word and its plane bits, and 0.5 MiB of header,
 ports and client slots, rdma/mesh.h `mesh_layout`, from MESH_VERSION 111: 0.06 GiB at 16 GiB, 0.056 at 14; at 110 every row
-also carried a publication's targets, 1,136.5 bytes a window page and 0.5 MiB, 1.11 GiB at 16 GiB, touched as rows were leased; a
+also carried a publication's targets, 1,136.5 bytes an arena page and 0.5 MiB, 1.11 GiB at 16 GiB, touched as rows were leased; a
 program's targets now follow its SEND cells in their lease, design/transport.md), the node's base wired and macOS
 memory, the rank's process, the Neural Engine's own copy of its columns, and a 2 GiB margin. A served engine (metal-microbench server/bridge.py) leases its model and pool
-from its node's window too; neither file holds one.
+from its node's region too; neither file holds one.
 
 ## The Studios
 
@@ -106,28 +106,28 @@ pair's rules; which a Studio runs is the operator's decision.
 essentially all of the memory on the entire device"): the most whole GiB that leaves a 2 GiB margin, 86 GiB. Beside it
 the node keeps 2.71 GiB: the region's tables (0.339 GiB, 347.2 MiB), base wired (1.6), macOS's anonymous memory (1.5), the
 rank's process (0.9) and the Neural Engine's own copy (2.95); 87 GiB would leave 1.71. It holds 26B-A4B whole at the
-engine's whole page geometry (81.11 GiB) on one Studio and 12B's (97.18 GiB) on any two members, and the six windows
+engine's whole page geometry (81.11 GiB) on one Studio and 12B's (97.18 GiB) on any two members, and the six regions
 (four Studios at 86, the M5 at 14, the Mini at 16) hold 374 GiB.
 
 `m5ultra-low.toml`, by the M5's rule:
-a node of more flops and bandwidth than the Mini has less to gain from memoization, so its window is the least whole GiB
+a node of more flops and bandwidth than the Mini has less to gain from memoization, so its region is the least whole GiB
 that holds the whole E2B model alone at the engine's whole page geometry, 14 GiB (13.27 GiB counted by programs.py `plans`
 of a membership of one from the model file's header; 10.56 on the streamed codes export), and any part of E2B on any
 membership holds in it. Beside it the node keeps 74.99 GiB: the region's tables (0.056 GiB), base wired (1.6, the Mini's
 figure until a Studio's is read), macOS's anonymous memory (1.5), the rank's process (0.9) and the Neural Engine's own copy
 (at most every FFN column at fp16, 2.95). The Mini's rule, the most that leaves a 2 GiB margin, gives 86 GiB. The larger
 models alone at a call's own pages take more than 14 GiB (12B 16.46 GiB at 4,096 positions, 26B-A4B 28.25 GiB): a Studio
-holds its part of them on memberships whose windows together hold the whole, and the planner fits each member's part to
-its window; at the engine's whole page geometry they take 97.18 GiB (12B) and 81.11 GiB (26B-A4B), more than the six
-windows at these documents hold together (four Studios at 14, the M5 at 14, the Mini at 16: 86 GiB). Counted with
+holds its part of them on memberships whose regions together hold the whole, and the planner fits each member's part to
+its region; at the engine's whole page geometry they take 97.18 GiB (12B) and 81.11 GiB (26B-A4B), more than the six
+regions at these documents hold together (four Studios at 14, the M5 at 14, the Mini at 16: 86 GiB). Counted with
 metal-microbench tools/mesh/programs.py under `MESH_MODEL=e2b-engine` (12b, 26b-a4b):
 `plans({'bs': 1, 'ctx_max': 256000}, structure(), pages=16000)[0]['total']`, and at a call's pages
 `pages=pool_request(1, 4096)` with `ctx_max` 4096 (metal-microbench output_data/lifecycle-20261015/studio_window.py).
 
-The window is the operator's decision; each document states the arithmetic it follows from. A Studio's base wired
+The region is the operator's decision; each document states the arithmetic it follows from. A Studio's base wired
 memory and its devices' `max_mr` are read when it arrives: the pair's devices register 100 one-GiB extents, and a device
-that registers fewer than its window's extents pairs no port until the window is lowered (its refusal logged with the
-extent, above), never a clamped window. Each of a node's devices registers the whole window, so a Studio cabled on
+that registers fewer than its region's extents pairs no port until the region is lowered (its refusal logged with the
+extent, above), never a clamped region. Each of a node's devices registers the whole region, so a Studio cabled on
 several ports registers it once a device.
 
 ## The operator's words

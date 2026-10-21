@@ -3,9 +3,9 @@
    configuration (a canonical property list this tool writes: its node, region and cables), and the
    readings that exercise what two nodes cannot show: collectives over 3 to 8 node maps.
 
-     mesh-loop up FAMILY N WINDOW_MIB DIRECTORY
+     mesh-loop up FAMILY N REGION_MIB DIRECTORY
        FAMILY one of line, ring, star, complete, torus (two rows of N/2); N bridges (.build/loop/mesh-flow-loop) of a
-       window of WINDOW_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
+       region of REGION_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
        returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
      mesh-loop nccl DIRECTORY COUNT host|walk
        N ranks, one a node: all-reduce, all-gather, reduce-scatter, broadcast and reduce from each root, and a send and
@@ -44,11 +44,11 @@ extern char **environ;
 
 struct loop_node { uint32_t node; char region[32]; pid_t pid; };
 struct loop_cable { int a, b; uint16_t listen[2]; };
-struct loop_map { char family[16]; int n, cables; uint64_t window; struct loop_node node[LOOP_NODES]; struct loop_cable cable[LOOP_CABLES]; };
+struct loop_map { char family[16]; int n, cables; uint64_t region_bytes; struct loop_node node[LOOP_NODES]; struct loop_cable cable[LOOP_CABLES]; };
 
 static uint64_t clock_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int usage(void) {
-  fprintf(stderr, "usage: mesh-loop up FAMILY N WINDOW_MIB DIRECTORY | nccl DIRECTORY COUNT host|walk | down DIRECTORY\n");
+  fprintf(stderr, "usage: mesh-loop up FAMILY N REGION_MIB DIRECTORY | nccl DIRECTORY COUNT host|walk | down DIRECTORY\n");
   return 2;
 }
 
@@ -92,7 +92,7 @@ static int map_write(const char *directory, const struct loop_map *map) {
   if (map_path(directory, path, sizeof path)) return ENAMETOOLONG;
   FILE *f = fopen(path, "w");
   if (!f) return errno;
-  fprintf(f, "%s %d %d %llu\n", map->family, map->n, map->cables, (unsigned long long)map->window);
+  fprintf(f, "%s %d %d %llu\n", map->family, map->n, map->cables, (unsigned long long)map->region_bytes);
   for (int i = 0; i < map->n; i++)
     fprintf(f, "%u %s %d\n", map->node[i].node, map->node[i].region, (int)map->node[i].pid);
   for (int c = 0; c < map->cables; c++)
@@ -104,10 +104,10 @@ static int map_read(const char *directory, struct loop_map *map) {
   if (map_path(directory, path, sizeof path)) return ENAMETOOLONG;
   FILE *f = fopen(path, "r");
   if (!f) return errno;
-  unsigned long long window = 0;
-  int ok = fscanf(f, "%15s %d %d %llu", map->family, &map->n, &map->cables, &window) == 4 && map->n > 0 && map->n <= LOOP_NODES &&
+  unsigned long long region_bytes = 0;
+  int ok = fscanf(f, "%15s %d %d %llu", map->family, &map->n, &map->cables, &region_bytes) == 4 && map->n > 0 && map->n <= LOOP_NODES &&
            map->cables >= 0 && map->cables <= LOOP_CABLES;
-  map->window = window;
+  map->region_bytes = region_bytes;
   for (int i = 0; ok && i < map->n; i++) {
     unsigned node; int pid;
     ok = fscanf(f, "%u %31s %d", &node, map->node[i].region, &pid) == 3;
@@ -131,10 +131,10 @@ static int plist_write(const char *directory, const struct loop_map *map, int i)
   fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
              "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n"
              "<key>name</key><string>loop%d</string>\n<key>purpose</key><string>node %d of a %s of %d on the loopback fabric "
-             "(mesh-loop)</string>\n<key>window</key><integer>%llu</integer>\n"
+             "(mesh-loop)</string>\n<key>region_bytes</key><integer>%llu</integer>\n"
              "<key>loop</key><dict>\n<key>region</key><string>%s</string>\n<key>fabric</key><string>%s</string>\n"
              "<key>node</key><integer>%u</integer>\n<key>ports</key><array>\n",
-          i, i, map->family, map->n, (unsigned long long)map->window, map->node[i].region, LOOP_FABRIC, map->node[i].node);
+          i, i, map->family, map->n, (unsigned long long)map->region_bytes, map->node[i].region, LOOP_FABRIC, map->node[i].node);
   for (int c = 0; c < map->cables; c++) {
     const struct loop_cable *k = map->cable + c;
     if (k->a != i && k->b != i) continue;
@@ -193,10 +193,10 @@ static int converged(const struct loop_map *map, double seconds) {
   return done ? 0 : ETIMEDOUT;
 }
 
-static int loop_up(const char *family, int n, uint64_t window_mib, const char *directory) {
-  struct loop_map map = {.n = n, .window = window_mib << 20};
+static int loop_up(const char *family, int n, uint64_t region_mib, const char *directory) {
+  struct loop_map map = {.n = n, .region_bytes = region_mib << 20};
   snprintf(map.family, sizeof map.family, "%s", family);
-  if (n < 2 || n > LOOP_NODES || !window_mib || family_cables(family, n, &map)) return usage();
+  if (n < 2 || n > LOOP_NODES || !region_mib || family_cables(family, n, &map)) return usage();
   char binary[PATH_MAX];
   if (bridge_path(binary, sizeof binary)) return 1;
   mkdir(directory, 0755);

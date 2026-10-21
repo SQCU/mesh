@@ -24,9 +24,9 @@ int mesh_loop_bind(const char *region){
 #define MESH_REGION_NAME MESH_NAME
 #endif
 
-/* design/transport.md: the node's window mapped, `writable` (a client's) or read-only (a reader's, which attaches no
+/* design/transport.md: the node's region mapped, `writable` (a client's) or read-only (a reader's, which attaches no
    client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge
-   runs on it now (it outlives a restart of its bridge, design/transport.md section 2): 0, EINVAL where it is no window
+   runs on it now (it outlives a restart of its bridge, design/transport.md section 2): 0, EINVAL where it is no region
    of this layout, or one expired,
    else the errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
@@ -72,7 +72,7 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since){
 }
 
 /* design/transport.md */
-int mesh_window(uint64_t *bytes,uint64_t *unleased){
+int mesh_region(uint64_t *bytes,uint64_t *unleased){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
@@ -212,7 +212,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   if(count<0)return count;
   for(int i=0;i<count && (uint32_t)i<capacity;i++){
     out[i].node=r[i].node;memcpy(out[i].name,r[i].name,MESH_NAME_BYTES);out[i].name[MESH_NAME_BYTES-1]=0;
-    out[i].window=r[i].window;out[i].memory=r[i].memory;
+    out[i].region=r[i].region;out[i].memory=r[i].memory;
     memcpy(out[i].model,r[i].model,MESH_MODEL_BYTES);out[i].model[MESH_MODEL_BYTES-1]=0;
     out[i].health=r[i].health;
   }
@@ -363,7 +363,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 /* design/transport.md */
 /* design/transport.md */
 /* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
-   since that device came up (mesh-verbs.h device_up); a lease the window cannot meet is refused (ENOMEM).  The bits
+   since that device came up (mesh-verbs.h device_up); a lease the region cannot meet is refused (ENOMEM).  The bits
    name no owner: a client's lease takes its pages with rows its slot owns (mesh-call.h mesh_section_create), which
    carry them back at its retirement (mesh_buffer_reclaim) or its return (mesh_lease_return). */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){

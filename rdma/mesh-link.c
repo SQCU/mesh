@@ -557,7 +557,7 @@ void port_say(struct port *port,struct message said,const void *payload,uint32_t
 }
 /* each client slot's owner as clients_turn last read it */
 uint64_t owners[MESH_CLIENTS];
-/* design/transport.md: this node's record, its window, memory and model with its ports and health */
+/* design/transport.md: this node's record, its region, memory and model with its ports and health */
 char model[MESH_MODEL_BYTES];
 /* a port's link as the port table tells it; a change is a new record */
 static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code){
@@ -738,10 +738,10 @@ static void stream_words_reset(struct port *port,uint32_t s){
   atomic_thread_fence(memory_order_release);
 }
 /* design/transport.md section 14: the port's streams' rings, leased from the arena by the parent as the port first pairs
-   (recorded in the region, so a bridge adopting the window takes the same pages: section 2) and held for the window's
-   life, every agent and bridge of the port's: of each stream and each class (a large unit the window's
+   (recorded in the region, so a bridge adopting the region takes the same pages: section 2) and held for the region's
+   life, every agent and bridge of the port's: of each stream and each class (a large unit the region's
    block, a small one a frame) its in and out rings of its units, then its ready and landed words, then its two time
-   rings, told in the region (mesh.h struct mesh_stream).  0, or ENOMEM where the window holds no room for them */
+   rings, told in the region (mesh.h struct mesh_stream).  0, or ENOMEM where the region holds no room for them */
 static int stream_rings(struct port *port){
   struct link *l=&port->link;
   const uint64_t pgsz=M->pgsz,block=(uint64_t)M->block*pgsz,unit[2]={block,MESH_FRAME},units[2]={MESH_STREAM_LARGE_UNITS,MESH_STREAM_SMALL_UNITS};
@@ -852,7 +852,7 @@ static void link_turn(struct port *port){
     if((l->page==MESH_ABSENT && ((l->page=mesh_bridge_pages(M)->link[port->index]=mesh_arena_alloc(&bridge,l->pages,M->block))==MESH_ABSENT ||
                                  !(held_pages+=l->pages))) ||
        (l->rings==MESH_ABSENT && stream_rings(port))){
-      say("link %u (%s): lanes not made: the window holds no room for their blocks and rings; paired again on hearing the peer\n",
+      say("link %u (%s): lanes not made: the region holds no room for their blocks and rings; paired again on hearing the peer\n",
           port->index,port->name);
       port_lost(port,ENOMEM);
       return;
@@ -1032,7 +1032,7 @@ static void device_open(struct port *port){
   });
 }
 /* design/transport.md: a port's opening taken (its address and bandwidth as its agent told them, AGENT_OPENED): a
-   device whose registration of the window it refused keeps
+   device whose registration of the region it refused keeps
    the extents it took and opens again at its link's next coming on (device_up logged the extent and why); a device
    that failed otherwise, likewise, or at the next hello heard on it (hello_heard, design/transport.md B16);
    one opened says hello at once (port_hello) */
@@ -1040,7 +1040,7 @@ static void port_opened(struct port *port){
   const int result=port->result;
   port->job=0;
   if(result){
-    if(port->refused)say("link %u (%s): the window's registration refused (%s): the port is down until its link next comes on\n",
+    if(port->refused)say("link %u (%s): the region's registration refused (%s): the port is down until its link next comes on\n",
                          port->index,port->name,strerror(port->refused));
     port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);
     return;
@@ -1126,9 +1126,9 @@ static void control_heard(struct port *port){
   }
 }
 /* design/transport.md: the link pages of every port the region has, leased at the bridge's start beside the
-   map's, so a port found later (an interface attached once clients hold the window) has them; a port whose pages the
-   window could not give takes them as its link first pairs (link_turn).  Each is recorded in the region
-   (mesh-observe.h struct mesh_bridge_pages), so a bridge adopting the window takes the same pages (section 2) */
+   map's, so a port found later (an interface attached once clients hold the region) has them; a port whose pages the
+   region could not give takes them as its link first pairs (link_turn).  Each is recorded in the region
+   (mesh-observe.h struct mesh_bridge_pages), so a bridge adopting the region takes the same pages (section 2) */
 static uint32_t link_page[MESH_PORTS];
 /* design/transport.md section 10: the all-ones block every dud is sent from (lane_send), taken and filled at the
    bridge's start, never written again */
@@ -1431,8 +1431,8 @@ static int agent_spawn(struct port *port){
     port->elsewhere=elsewhere;
     return EBUSY;
   }
-  /* design/transport.md section 2: the agent's entry among the window's holders, one no live agent holds; where every
-     one is held, the agent waits as for an earlier launch's (a holder of the window is never left unrecorded) */
+  /* design/transport.md section 2: the agent's entry among the region's holders, one no live agent holds; where every
+     one is held, the agent waits as for an earlier launch's (a holder of the region is never left unrecorded) */
   struct mesh_holder *holders=mesh_bridge_pages(M)->agent;
   uint32_t entry=0;
   while(entry<2*MESH_PORTS && mesh_holds((pid_t)holders[entry].pid,holders[entry].start))entry++;
@@ -1590,7 +1590,7 @@ static void *control_watch(void *unused){
 }
 
 /* design/transport.md: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
-   the consumer's document (rdma/bridge_configuration.py): its name and its window in bytes, and its `keepalive` in
+   the consumer's document (rdma/bridge_configuration.py): its name and its region in bytes (`region_bytes`), and its `keepalive` in
    nanoseconds where it states one (#keepalive); NULL, or why it is refused */
 #ifdef MESH_LOOP_FABRIC
 /* design/transport.md: a loop bridge's `loop` (a dictionary: `region`, `fabric`, `node` and
@@ -1625,7 +1625,7 @@ static const char *loop_read(CFPropertyListRef list){
   return NULL;
 }
 #endif
-static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *window){
+static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *region_bytes){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
   unsigned char bytes[65536];
@@ -1638,14 +1638,14 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   if(data)CFRelease(data);
   const char *refused=NULL;
   CFTypeRef named=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("name")):NULL;
-  CFTypeRef sized=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("window")):NULL;
+  CFTypeRef sized=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("region_bytes")):NULL;
   /* design/transport.md */
   CFTypeRef alive=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("keepalive")):NULL;
   int64_t value=0,interval=0;
   if(!list || CFGetTypeID(list)!=CFDictionaryGetTypeID())refused="not a property list of a configuration (rdma/bridge_configuration.py writes it)";
   else if(!named || CFGetTypeID(named)!=CFStringGetTypeID() || !CFStringGetCString(named,name,(CFIndex)room,kCFStringEncodingUTF8))refused="its name is missing";
   else if(!sized || CFGetTypeID(sized)!=CFNumberGetTypeID() || !CFNumberGetValue(sized,kCFNumberSInt64Type,&value) || value<=0)
-    refused="its window, a positive number of bytes, is missing";
+    refused="its region_bytes, a positive number of bytes, is missing";
   else if(alive && (CFGetTypeID(alive)!=CFNumberGetTypeID() || !CFNumberGetValue(alive,kCFNumberSInt64Type,&interval) || interval<=0))
     refused="its keepalive, where stated, is not a positive number of nanoseconds";
 #ifdef MESH_LOOP_FABRIC
@@ -1653,7 +1653,7 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
 #endif
   keepalive_ns=refused?0:(uint64_t)interval;
   if(list)CFRelease(list);
-  *window=(uint64_t)value;
+  *region_bytes=(uint64_t)value;
   return refused;
 }
 
@@ -1863,47 +1863,47 @@ static int agent_main(char **argv){
   }
 }
 
-/* design/transport.md section 2, the window and the heartbeat: the node's window opened at `region`.  The region a
+/* design/transport.md section 2, the region and the heartbeat: the node's region opened by its name `name`.  The region a
    bridge before this one kept (a restart, SIGHUP; a crash) is adopted where its magic, layout version (MESH_LAYOUT) and
-   layout (`geometry`, mesh_layout of this configuration's window) are this bridge's: the same memory, its clients'
+   layout (`geometry`, mesh_layout of this configuration's region) are this bridge's: the same memory, its clients'
    slots, rows and leases standing and the GPU buffers over them valid, its pages registered again by the port agents
-   (the same pages: nothing is wired twice, nothing reloaded).  A window a live bridge serves is never read: a second
-   bridge of the node ends at its port's bind, before window_open (the loop build binds any port and has no such
-   bound: its harness, mesh-loop, runs one bridge a region).  A window of another layout, or one a stop released (layout version
+   (the same pages: nothing is wired twice, nothing reloaded).  A region a live bridge serves is never read: a second
+   bridge of the node ends at its port's bind, before region_open (the loop build binds any port and has no such
+   bound: its harness, mesh-loop, runs one bridge a region).  A region of another layout, or one a stop released (layout version
    0), is made expired (its layout version 0: no client's mesh_open takes it, and each client's next lease or
    communicator returns the expiry, nccl-mesh.c attach_expired) and left named, and this bridge ends with EX_TEMPFAIL:
-   its heartbeat unlinks it once no process holds it and opens a bridge again, so no second window is ever made beside
+   its heartbeat unlinks it once no process holds it and opens a bridge again, so no second region is ever made beside
    a live client of the first (the 2026-10-20 watchdog panic, design/rubrics.md "Failure across interfaces"); a bridge
-   unlinks only a region that never became a window (no magic: a bridge ended while making it).  A window that cannot
+   unlinks only a shared memory object that never became a region (no magic: a bridge ended while making it).  A region that cannot
    be read is left as it is, and this bridge ends.  1 adopted, 0 made; *out its descriptor */
-static int window_same(const struct hdr *a,const struct hdr *b){
+static int region_same(const struct hdr *a,const struct hdr *b){
   return a->pgsz==b->pgsz && a->block==b->block && a->rows==b->rows && a->streams==b->streams && a->clients==b->clients &&
          a->planes_off==b->planes_off && a->arena_off==b->arena_off && a->page_off==b->page_off && a->buffer_off==b->buffer_off &&
          a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->client_off==b->client_off && a->data_off==b->data_off &&
          a->length==b->length;
 }
-static int window_open(const char *region,const struct hdr *geometry,int *out){
-  int fd=shm_open(region,O_RDWR,0);
-  if(fd<0 && errno!=ENOENT){say("bridge: window %s not opened (%s): this bridge ends without touching it\n",region,strerror(errno));exit(1);}
+static int region_open(const char *name,const struct hdr *geometry,int *out){
+  int fd=shm_open(name,O_RDWR,0);
+  if(fd<0 && errno!=ENOENT){say("bridge: region %s not opened (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
   if(fd>=0){
     struct stat shape;
-    if(fstat(fd,&shape)){say("bridge: window %s not read (%s): this bridge ends without touching it\n",region,strerror(errno));exit(1);}
+    if(fstat(fd,&shape)){say("bridge: region %s not read (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
     const size_t size=(size_t)shape.st_size;
     struct hdr *old=size>=sizeof(struct hdr)?mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0):NULL;
-    if(old==MAP_FAILED){say("bridge: window %s not mapped (%s): this bridge ends without touching it\n",region,strerror(errno));exit(1);}
+    if(old==MAP_FAILED){say("bridge: region %s not mapped (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
     if(old && old->magic==MESH_MAGIC){
-      if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && window_same(old,geometry)){M=old;*out=fd;return 1;}
+      if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && region_same(old,geometry)){M=old;*out=fd;return 1;}
       __atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);
-      say("bridge: window %s is expired (another layout, or released): this bridge ends, and its heartbeat unlinks it once no "
-          "holder of it lives and opens a bridge again\n",region);
+      say("bridge: region %s is expired (another layout, or released): this bridge ends, and its heartbeat unlinks it once no "
+          "holder of it lives and opens a bridge again\n",name);
       boots_clear();
       exit(EX_TEMPFAIL);
     }
     if(old)munmap(old,size);
     close(fd);
-    shm_unlink(region);
+    shm_unlink(name);
   }
-  if((fd=shm_open(region,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
+  if((fd=shm_open(name,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
   if(ftruncate(fd,(off_t)geometry->length))die("ftruncate");
   fchmod(fd,MESH_MODE);
   M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
@@ -1917,13 +1917,13 @@ static int window_open(const char *region,const struct hdr *geometry,int *out){
   return 0;
 }
 
-/* the adopted window's bridge state made this bridge's, before any client reads it as live (`bridge_pid` set last): every
+/* the adopted region's bridge state made this bridge's, before any client reads it as live (`bridge_pid` set last): every
    stream not live, not free and held by none, its landed words ~0 (a lost pairing's holding ended with its bridge, and a
    wait on it reads the loss; the next pairing opens each new, streams_open), the links' table cleared, a client slot
    whose retirement a process that died left half done finished (mesh_retire's walk, which any party can repeat to the
    same end), the closed rows released, a map or health serial a bridge that died mid-write left odd made even (its
    readers wait while it is odd), and the map's records this bridge's to write again (map_adopt) */
-static void window_adopt(void){
+static void region_adopt(void){
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_stream *x=mesh_stream_at(M,s);
     atomic_store(&x->live,0);atomic_store(&x->free,0);atomic_store(&x->owner,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
@@ -1959,8 +1959,8 @@ static void window_adopt(void){
 int main(int argc,char **argv){
   if(argc==9 && !strcmp(argv[1],"--agent"))return agent_main(argv);
   if(argc!=2)die("usage: mesh-flow CONFIGURATION: the canonical property list bin/mesh-user.sh writes from the node's bridge configuration document (etc/bridge/README.md); the bridge has no default and does not start without one");
-  char name[256];uint64_t window;
-  const char *refused=configuration_read(argv[1],name,sizeof name,&window);
+  char name[256];uint64_t region_bytes;
+  const char *refused=configuration_read(argv[1],name,sizeof name,&region_bytes);
   if(refused){say("bridge configuration %s refused: %s\n",argv[1],refused);exit(1);}
   uint32_t room=sizeof self_path;
   char resolved[PATH_MAX];
@@ -2002,11 +2002,11 @@ int main(int argc,char **argv){
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/transport.md */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
-  if(window<pg || window/pg>UINT32_MAX){say("bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
+  if(region_bytes<pg || region_bytes/pg>UINT32_MAX){say("bridge configuration %s refused: its region of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)region_bytes);exit(1);}
   struct hdr geometry={0};
-  mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
-  /* design/transport.md section 2: the bridge's port bound before its window is read, so a second bridge of the node
-     (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the window; a loop
+  mesh_layout(&geometry,pg,1,(uint32_t)(region_bytes/pg));
+  /* design/transport.md section 2: the bridge's port bound before its region is read, so a second bridge of the node
+     (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the region; a loop
      bridge binds any port, so its harness alone keeps one bridge a region */
   int on=1;
   struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
@@ -2022,12 +2022,12 @@ int main(int argc,char **argv){
      fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
     die("bridge sockets");
   int fd=-1;
-  const int adopted=window_open(region,&geometry,&fd);
+  const int adopted=region_open(region,&geometry,&fd);
   shm=region;
-  if(adopted)window_adopt();
+  if(adopted)region_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
   M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
-  say("bridge node %u: window %s %s\n",node,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
+  say("bridge node %u: region %s %s\n",node,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;
@@ -2036,7 +2036,7 @@ int main(int argc,char **argv){
   snprintf(host,sizeof host,"%s",name);
 #endif
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
-  /* design/transport.md: the node's memory and hardware model, which its record carries with its window */
+  /* design/transport.md: the node's memory and hardware model, which its record carries with its region */
   size_t size=sizeof memory;
   if(sysctlbyname("hw.memsize",&memory,&size,NULL,0))memory=0;
   sysctl_text("hw.model",model,sizeof model);
@@ -2079,8 +2079,8 @@ int main(int argc,char **argv){
   char alive[192]="";
   if(keepalive_ns)snprintf(alive,sizeof alive,", a keepalive frame every %llu ns on each link's keepalive lane while its port's stream is held "
                            "(design/transport.md)",(unsigned long long)keepalive_ns);
-  say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u%s\n",node,host,name,
-    (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows,alive);
+  say("bridge node %u (%s): configuration %s, region %llu bytes, arena %llu pages, rows %u%s\n",node,host,name,
+    (unsigned long long)region_bytes,(unsigned long long)mesh_arena_pages(M),M->rows,alive);
   uint64_t liveness=0;
   while(!stop){
     now=clock_ns();
@@ -2182,8 +2182,8 @@ int main(int argc,char **argv){
     if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
   }
   streams_cancel(NULL);
-  /* design/transport.md section 2: every stop keeps the window for the next bridge to adopt; a release is the
-     heartbeat's, which expires the window once this bridge has ended (mesh-heartbeat.c window_expire) */
+  /* design/transport.md section 2: every stop keeps the region for the next bridge to adopt; a release is the
+     heartbeat's, which expires the region once this bridge has ended (mesh-heartbeat.c region_expire) */
   atomic_store(&M->bridge_pid,0);
   mesh_notify(&M->control);
   const uint64_t held_to=clock_ns()+MESH_PLATFORM_NS;

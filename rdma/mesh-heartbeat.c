@@ -1,23 +1,23 @@
 /* design/transport.md section 2, "The heartbeat": the node's bridge supervised by one small process, the job launchd
-   keeps alive (bin/mesh-user.sh).  It holds no device, no window and no socket of the mesh: it opens the bridge (spawned
+   keeps alive (bin/mesh-user.sh).  It holds no device, no region and no socket of the mesh: it opens the bridge (spawned
    in a process group of its own, so a heartbeat that ends leaves it serving), closes it when asked (a signal, its exit
    then heard as a kernel event, never inferred from time passing), and is the one process that unlinks an expired
-   window, once none of the window's holders lives (the bridge, its agents and its clients, each recorded in the window
+   region, once none of the region's holders lives (the bridge, its agents and its clients, each recorded in the region
    by its pid and start: mesh_holds), before it opens a bridge again: a bridge is never opened while another is ending,
-   and no second window is ever made beside a holder of the first.
+   and no second region is ever made beside a holder of the first.
 
    Its operator's signals (`launchctl kill SIG user/$(id -u)/io.mesh.bridge`):
-   - SIGHUP: open, or restart: the bridge closed by SIGHUP (its window kept for the next to adopt), this heartbeat's own
-     image run again (a deploy's new binaries both), and the bridge opened again (once an expired window is unlinked);
+   - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region kept for the next to adopt), this heartbeat's own
+     image run again (a deploy's new binaries both), and the bridge opened again (once an expired region is unlinked);
    - SIGUSR1: release: the bridge closed by SIGTERM (its agents end, so the kernel frees their devices' objects; its
-     window expired, so every client's next lease or communicator returns the expiry), the window unlinked once no
+     region expired, so every client's next lease or communicator returns the expiry), the region unlinked once no
      holder lives (its memory then the system's), and no bridge opened until SIGHUP;
    - SIGTERM, SIGINT (launchd's stop of the job, the system's shutdown): release, then this heartbeat ends (0, which
      launchd's KeepAlive {SuccessfulExit: false} does not restart).
-   The bridge keeps its window at every stop of its own; a release is the heartbeat's: once the bridge it closed has
-   ended, it expires the window (window_expire).  A bridge that ends unasked is opened again REOPEN_S later (a mesh is never restarted more than once a minute); one
-   that ended finding its window expired (EX_TEMPFAIL, mesh-link.c window_open) is opened again once the heartbeat has
-   unlinked that window. */
+   The bridge keeps its region at every stop of its own; a release is the heartbeat's: once the bridge it closed has
+   ended, it expires the region (region_expire).  A bridge that ends unasked is opened again REOPEN_S later (a mesh is never restarted more than once a minute); one
+   that ended finding its region expired (EX_TEMPFAIL, mesh-link.c region_open) is opened again once the heartbeat has
+   unlinked that region. */
 #include "mesh.h"
 #include "mesh-dataflow.h"
 #include "mesh-observe.h"
@@ -67,15 +67,15 @@ static pid_t bridge;
 static int child;
 static enum { ASKED_NONE, ASKED_RESTART, ASKED_RELEASE, ASKED_END } asked;
 static uint64_t opened_at;
-/* whether a bridge is wanted (SIGHUP; a release none), whether an expired window waits to be unlinked (its holders
+/* whether a bridge is wanted (SIGHUP; a release none), whether an expired region waits to be unlinked (its holders
    watched), whether a reopen waits REOPEN_S, and the holders last told */
 static int wanted=1,replacing,timer_open;
 static pid_t told[3*MESH_PORTS+MESH_CLIENTS];
 static uint32_t told_count;
 
-/* the node's window by name, mapped (read-only, or read-write where `writable`) and its descriptor closed at once:
+/* the node's region by name, mapped (read-only, or read-write where `writable`) and its descriptor closed at once:
    NULL where none is named */
-static struct hdr *window_map(size_t *size,int writable){
+static struct hdr *region_map(size_t *size,int writable){
   const int fd=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
   if(fd<0)return NULL;
   struct stat shape;
@@ -85,31 +85,31 @@ static struct hdr *window_map(size_t *size,int writable){
   close(fd);
   return m==MAP_FAILED?NULL:m;
 }
-/* window `m`'s bridge area, where it lies within its `size` bytes, else NULL */
-static struct mesh_bridge_pages *window_own(struct hdr *m,size_t size){
+/* region `m`'s bridge area, where it lies within its `size` bytes, else NULL */
+static struct mesh_bridge_pages *region_own(struct hdr *m,size_t size){
   const uint64_t at=m->bridge_off+MESH_PORTS*sizeof(struct mesh_link_info);
   return m->magic==MESH_MAGIC && at+sizeof(struct mesh_bridge_pages)<=size?(struct mesh_bridge_pages *)((char *)m+at):NULL;
 }
-/* the live bridge serving window `m` (its `bridge_pid` of the start it recorded), or 0 */
+/* the live bridge serving region `m` (its `bridge_pid` of the start it recorded), or 0 */
 static pid_t bridge_of(struct hdr *m,size_t size,uint64_t *start){
-  const struct mesh_bridge_pages *own=window_own(m,size);
+  const struct mesh_bridge_pages *own=region_own(m,size);
   const pid_t was=own?(pid_t)atomic_load(&m->bridge_pid):0;
   *start=own?own->bridge_start:0;
   return was && mesh_holds(was,*start)?was:0;
 }
-static pid_t window_bridge(uint64_t *start){
+static pid_t region_bridge(uint64_t *start){
   size_t size=0;
-  struct hdr *m=window_map(&size,0);
+  struct hdr *m=region_map(&size,0);
   const pid_t was=m?bridge_of(m,size,start):0;
   if(m)munmap(m,size);
   return was;
 }
-/* the end of a release: the named window, where no bridge serves it, made expired (layout version 0), as its bridge's
+/* the end of a release: the named region, where no bridge serves it, made expired (layout version 0), as its bridge's
    release stop makes it (mesh-link.c), for a bridge that ended keeping it (a restart's close the release overtook, a
    bridge launchd ran itself, or an end before its stop) */
-static void window_expire(void){
+static void region_expire(void){
   size_t size=0;
-  struct hdr *m=window_map(&size,1);
+  struct hdr *m=region_map(&size,1);
   uint64_t start;
   if(m && m->magic==MESH_MAGIC && !bridge_of(m,size,&start))__atomic_store_n(&m->version,0,__ATOMIC_SEQ_CST);
   if(m)munmap(m,size);
@@ -122,15 +122,15 @@ static void reopen_later(void){
   kevent64(events,&t,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
 }
 
-/* design/transport.md section 2: an expired window (magic, layout version 0) unlinked once none of its holders lives:
+/* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its holders lives:
    its bridge (`bridge_pid`, `bridge_start`), each agent its bridges recorded, and each client slot's process (its
    owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder).  Until then
    they are watched (their exits as events, the slots read every REPLACE_TICK_MS for a client that lets go and lives on)
-   and named as they change.  A window that is live, or none, ends the replacement */
+   and named as they change.  A region that is live, or none, ends the replacement */
 static void replace_turn(void){
   size_t size=0;
-  struct hdr *m=window_map(&size,0);
-  struct mesh_bridge_pages *own=m?window_own(m,size):NULL;
+  struct hdr *m=region_map(&size,0);
+  struct mesh_bridge_pages *own=m?region_own(m,size):NULL;
   if(!own || __atomic_load_n(&m->version,__ATOMIC_ACQUIRE)!=0){
     if(m)munmap(m,size);
     replacing=0;told_count=0;
@@ -151,9 +151,9 @@ static void replace_turn(void){
   munmap(m,size);
   if(!count){
     replacing=0;told_count=0;
-    if(!shm_unlink(MESH_NAME) || errno==ENOENT)say("window %s unlinked: none of its holders lives, and its memory is the system's\n",MESH_NAME);
+    if(!shm_unlink(MESH_NAME) || errno==ENOENT)say("region %s unlinked: none of its holders lives, and its memory is the system's\n",MESH_NAME);
     else {
-      say("window %s not unlinked: %s\n",MESH_NAME,strerror(errno));
+      say("region %s not unlinked: %s\n",MESH_NAME,strerror(errno));
       if(!timer_open)reopen_later();
     }
     return;
@@ -162,7 +162,7 @@ static void replace_turn(void){
   int same=count==told_count;
   for(uint32_t k=0;k<count && same;k++)same=holders[k]==told[k];
   if(!same){
-    say("window %s is expired; it is unlinked, and a bridge opened, once each of its %u holders ends or lets it go:",MESH_NAME,count);
+    say("region %s is expired; it is unlinked, and a bridge opened, once each of its %u holders ends or lets it go:",MESH_NAME,count);
     for(uint32_t k=0;k<count;k++)fprintf(stderr," %d",(int)holders[k]);
     fputc('\n',stderr);
     memcpy(told,holders,count*sizeof *holders);told_count=count;
@@ -208,7 +208,7 @@ static void run_again(void){
 }
 
 static void bridge_ended(void);
-/* the bridge opened where one is wanted, none runs, no window waits for its holders and no reopen waits: spawned in a
+/* the bridge opened where one is wanted, none runs, no region waits for its holders and no reopen waits: spawned in a
    process group of its own, its signals' dispositions the defaults and none blocked, its input /dev/null, its log
    this heartbeat's */
 static void open_bridge(void){
@@ -243,7 +243,7 @@ static void open_bridge(void){
   if(bridge_watch(pid,1))bridge_ended();
 }
 
-/* the heartbeat's state carried forward after any event: a bridge opened where one is wanted, else an expired window's
+/* the heartbeat's state carried forward after any event: a bridge opened where one is wanted, else an expired region's
    holders read again */
 static void turn(void){
   if(wanted && !bridge && !timer_open)open_bridge();
@@ -262,7 +262,7 @@ static void bridge_ended(void){
   else say("bridge %d ended by signal %d\n",(int)was,WIFSIGNALED(status)?WTERMSIG(status):0);
   switch(asked){
   case ASKED_END:
-    window_expire();
+    region_expire();
     replace_turn();
     say("the heartbeat ends\n");
     exit(0);
@@ -271,10 +271,10 @@ static void bridge_ended(void){
     run_again();
     break;
   case ASKED_RELEASE:
-    window_expire();
+    region_expire();
     break;
   case ASKED_NONE:
-    if(expired)say("its window is expired: a bridge is opened once the window is unlinked\n");
+    if(expired)say("its region is expired: a bridge is opened once the region is unlinked\n");
     else {
       say("it ended unasked after %.0f s\n",(double)(wall_us()-opened_at)/1e6);
       reopen_later();
@@ -289,7 +289,7 @@ static void close_bridge(int how,int signal_number){
   if(!bridge)return;
   if(asked==ASKED_END || (asked==ASKED_RELEASE && how!=ASKED_END))return;
   asked=how;
-  say("bridge %d asked to close (%s)\n",(int)bridge,signal_number==SIGHUP?"SIGHUP: restarted, its window kept":"SIGTERM: released");
+  say("bridge %d asked to close (%s)\n",(int)bridge,signal_number==SIGHUP?"SIGHUP: restarted, its region kept":"SIGTERM: released");
   kill(bridge,signal_number);
 }
 
@@ -326,10 +326,10 @@ int main(int argc,char **argv){
   sigprocmask(SIG_UNBLOCK,&held,NULL);
   for(size_t i=0;i<sizeof heard/sizeof *heard;i++)if(sigismember(&pending,heard[i]))kill(getpid(),heard[i]);
   uint64_t start=0;
-  const pid_t serving=window_bridge(&start);
+  const pid_t serving=region_bridge(&start);
   if(serving && !bridge_watch(serving,0)){
     bridge=serving;child=0;asked=ASKED_NONE;opened_at=start?start:wall_us();
-    say("bridge %d found serving window %s; watched\n",(int)serving,MESH_NAME);
+    say("bridge %d found serving region %s; watched\n",(int)serving,MESH_NAME);
   }
   else open_bridge();
   int ending=0;
@@ -354,11 +354,11 @@ int main(int argc,char **argv){
         wanted=0;
         if(timer_open){timer_open=0;timer_off(TIMER_OPEN);}
         if(bridge)close_bridge(ASKED_RELEASE,SIGTERM);
-        else {window_expire();replace_turn();}
+        else {region_expire();replace_turn();}
       }
       else if(e->filter==EVFILT_SIGNAL){
         wanted=0;
-        if(!bridge){window_expire();replace_turn();say("signal %d: the heartbeat ends\n",(int)e->ident);return 0;}
+        if(!bridge){region_expire();replace_turn();say("signal %d: the heartbeat ends\n",(int)e->ident);return 0;}
         close_bridge(ASKED_END,SIGTERM);
         if(!ending){
           ending=1;
@@ -371,7 +371,7 @@ int main(int argc,char **argv){
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
         say("bridge %d has not ended %.0f s after it was asked; the heartbeat ends without it\n",(int)bridge,
             (double)(3*MESH_PLATFORM_NS)/1e9);
-        window_expire();
+        region_expire();
         return 0;
       }
       else if(e->filter==EVFILT_PROC && e->udata==TAG_BRIDGE && (pid_t)e->ident==bridge)bridge_ended();

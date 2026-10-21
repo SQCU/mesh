@@ -264,8 +264,8 @@ extern struct known known[MESH_KNOWN];
 extern uint64_t keepalive_ns;
 extern uint64_t owners[MESH_CLIENTS];
 extern uint32_t ones;
-/* the window's pages the bridge holds itself (the map, the links' pages and rings, the duds' block): its record's
-   `window` is the rest, what its clients may hold */
+/* the region's pages the bridge holds itself (the map, the links' pages and rings, the duds' block): its record's
+   `region` is the rest, what its clients may hold */
 extern uint64_t held_pages;
 extern char model[MESH_MODEL_BYTES];
 

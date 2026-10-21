@@ -113,7 +113,7 @@ tool. Build it beside the bridges as they run (a client of libmesh):
 make -C rdma mesh-stream
 ```
 
-Each bridge's window must hold the stream's GiB beside what its clients lease. With the Mini's node number N
+Each bridge's region must hold the stream's GiB beside what its clients lease. With the Mini's node number N
 (mesh-stat's `nodes`) and the M5's M, the receiver first (it prints a ready line, then its result once every block
 landed and every word was checked), then the sender, both naming the same lane pair P (0 to 3, free at both ends):
 

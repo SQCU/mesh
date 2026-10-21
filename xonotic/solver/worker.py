@@ -190,7 +190,7 @@ def dominance(X):
 
 
 class TorchWorld:
-    """The world as torch.distributed's "mesh" backend (rdma/torch-mesh): one rank a node, its operands window
+    """The world as torch.distributed's "mesh" backend (rdma/torch-mesh): one rank a node, its operands region
     tensors (torch_mesh.empty) so the collectives read and write them where they lie."""
 
     def __init__(self, device):
@@ -223,7 +223,7 @@ class TorchWorld:
 
 
 class MPIWorld:
-    """The world as mesh_mpi's Comm (rdma/NCCL.md "NumPy"), its operands mesh_mpi.empty arrays in the window."""
+    """The world as mesh_mpi's Comm (rdma/NCCL.md "NumPy"), its operands mesh_mpi.empty arrays in the region."""
 
     def __init__(self):
         import mesh_mpi
@@ -244,7 +244,7 @@ class MPIWorld:
 
     def allgatherv(self, value, counts):
         out = self.mpi.empty(sum(counts), np.float32)
-        self.comm.Allgatherv(self.mpi.window(np.ascontiguousarray(value).reshape(-1)), [out, counts])
+        self.comm.Allgatherv(self.mpi.to_region(np.ascontiguousarray(value).reshape(-1)), [out, counts])
         return np.split(out, np.cumsum(counts)[:-1])
 
     def free(self):

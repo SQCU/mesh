@@ -35,8 +35,8 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
 /* design/transport.md: the node's bridge as it publishes itself, one JSON line: whether it answers
    (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase and bandwidth) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
-   numbers with its bandwidth in bits a second, null where none is reported), its window in bytes with the bytes no lease holds (mesh_window), and every node's
-   record as the bridge holds it: its name, its bridge's window, its memory and hardware model, its boot and its
+   numbers with its bandwidth in bits a second, null where none is reported), its region in bytes with the bytes no lease holds (mesh_region), and every node's
+   record as the bridge holds it: its name, its bridge's region, its memory and hardware model, its boot and its
    available memory (mesh_nodes_health, design/transport.md) */
 int main(void){
   struct port_view port[MESH_PORTS];
@@ -53,10 +53,10 @@ int main(void){
     count=mesh_map(NULL,0,nodes,NULL,&map);
     room=map.nodes;links=map.links;
   }
-  uint64_t window=0,unleased=0,busy=0,idle_since=0;
-  if(mesh_window(&window,&unleased))window=unleased=0;
+  uint64_t region=0,unleased=0,busy=0,idle_since=0;
+  if(mesh_region(&region,&unleased))region=unleased=0;
   const int carrying=mesh_busy(&busy,&idle_since);
-  printf("{\"up\":true,\"node\":%u,\"window\":%llu,\"unleased\":%llu,",node,(unsigned long long)window,(unsigned long long)unleased);
+  printf("{\"up\":true,\"node\":%u,\"region\":%llu,\"unleased\":%llu,",node,(unsigned long long)region,(unsigned long long)unleased);
   if(!carrying)printf("\"idle\":%s,\"idle_since\":%llu,",busy?"false":"true",(unsigned long long)(idle_since/1000000000u));
   printf("\"peers\":[");
   static const char *const phase_name[]={[MESH_UNKNOWN]="UNKNOWN",[MESH_PAIRING]="PAIRING",[MESH_PAIRED]="PAIRED",[MESH_STOPPED]="STOPPED"};
@@ -82,7 +82,7 @@ int main(void){
     const struct mesh_health *h=&health[i].health;
     printf("%s{\"node\":%u,\"name\":\"",i?",":"",health[i].node);
     for(const char *c=health[i].name;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
-    printf("\",\"window\":%llu,\"memory\":%llu,\"model\":\"",(unsigned long long)health[i].window,(unsigned long long)health[i].memory);
+    printf("\",\"region\":%llu,\"memory\":%llu,\"model\":\"",(unsigned long long)health[i].region,(unsigned long long)health[i].memory);
     for(const char *c=health[i].model;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
     printf("\",\"booted\":%llu,\"available\":%llu}",(unsigned long long)h->booted,(unsigned long long)h->available);
   }

@@ -107,26 +107,26 @@
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
-   communicator takes no bytes of the window (its rings are its streams', the bridge's).  ncclMemAlloc is the lease,
+   communicator takes no bytes of the region (its rings are its streams', the bridge's).  ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
-   call"): whole pages of the window covering size, which the bridge registered on every device when the device came up,
+   call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
-   responsibility of client programs to know how much allocation they need"): a lease the window cannot meet is
+   responsibility of client programs to know how much allocation they need"): a lease the region cannot meet is
    ncclSystemError naming the bytes asked and the pages free, one while every client slot is held ncclSystemError naming
    mesh.h MESH_CLIENTS, and one where the process attaches no region of a bridge that runs names the requirement, a
-   bridge whose configuration's window holds the client's footprint (etc/bridge/README.md; ncclRemoteError where the
+   bridge whose configuration's region holds the client's footprint (etc/bridge/README.md; ncclRemoteError where the
    bridge stopped, else ncclSystemError); nothing falls back to other memory.  ncclMemFree returns the pages; the leases
    of a process gone are returned by its bridge, as every retired client's rows are.  ncclCommRegister takes a buffer in
-   the window, its handle the buffer itself, and refuses any other (ncclInvalidArgument: lease it with ncclMemAlloc);
-   ncclCommDeregister releases nothing.  A lease is an operand of the window it came from, which outlives a bridge's
-   restart (its next bridge adopts it: the lease stands, nothing is reloaded).  A window a stop released, or a bridge
+   the region, its handle the buffer itself, and refuses any other (ncclInvalidArgument: lease it with ncclMemAlloc);
+   ncclCommDeregister releases nothing.  A lease is an operand of the region it came from, which outlives a bridge's
+   restart (its next bridge adopts it: the lease stands, nothing is reloaded).  A region a stop released, or a bridge
    of another layout replaced, is expired: while the process holds a lease or communicator of it, its next ncclMemAlloc
    and communicator fail with ncclRemoteError naming the expiry (and a communicator's next group that crosses a link
    fails), until the process has freed every one (ncclMemFree, ncclCommDestroy) or ended; the library then lets the
-   expired window go and leases from the bridge's next one, so a process never holds two windows (design/transport.md
+   expired region go and leases from the bridge's next one, so a process never holds two regions (design/transport.md
    section 2).  A process that held a communicator, or a lease's Metal buffer (ncclMeshMemBuffer), ends to leave it:
-   the library made Metal buffers over the window for them, which its GPU work and residency set may hold after they
-   are released, so the library never lets that window go.  A caller that makes its own Metal buffers over a lease
+   the library made Metal buffers over the region for them, which its GPU work and residency set may hold after they
+   are released, so the library never lets that region go.  A caller that makes its own Metal buffers over a lease
    releases them, and their residency, before ncclMemFree, or ends.  Weights, KV and
    every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being outside of
    it means that they cannot be zero copy passed to peers."  A lease's Metal buffer is ncclMeshMemBuffer's (below), the
@@ -136,7 +136,7 @@
    publications, and no staging copy or scratch copy of the operand is made: its scratch buffers that no step writes
    are never made), every read in the group's own command buffer (an issued group stages its operand as ever), and a
    wire's bytes still cross through its streams' rings.  The host path copies every operand through them, a lease or not.
-   ncclCommRegister refuses a buffer outside the window.  Design: design/transport.md.
+   ncclCommRegister refuses a buffer outside the region.  Design: design/transport.md.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
    communicator whose group failed fails its later groups, made again on the map current then (ncclCommDestroy, then an
@@ -987,7 +987,7 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
 const char* ncclMeshMetalSteps(void);
 /* The Metal 4 form's argument records this process has encoded on the default device (`issued`, counting from its first
    program) and how many its ring holds unread by the GPU at most (`capacity`): an encode past that refuses with
-   EOVERFLOW mid-group (a failed group), so a caller that encodes several windows ahead bounds each window's records by it (the
+   EOVERFLOW mid-group (a failed group), so a caller that encodes several submissions ahead bounds each submission's records by it (the
    records a step encodes, read across one step's encode). */
 void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
 /* The number comm's next group takes (*group): every group the communicator issues takes the next number, from 0 in
@@ -1016,10 +1016,10 @@ ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint
    rings, never a caller's lease, so once that command buffer completes nothing reads the lease and ncclMemFree may
    return its pages.  ncclInvalidArgument where ptr is in no lease of this process. */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
-/* Whether this process holds leases or communicators of an expired window (*expired 1; Memory, above): the value a
-   client reads in its own error path, after a lease or communicator failed, to free what it holds of that window, or
+/* Whether this process holds leases or communicators of an expired region (*expired 1; Memory, above): the value a
+   client reads in its own error path, after a lease or communicator failed, to free what it holds of that region, or
    end, before it leases again.  ncclInvalidArgument where expired is NULL. */
-ncclResult_t ncclMeshWindowExpired(int* expired);
+ncclResult_t ncclMeshRegionExpired(int* expired);
 /* The caller's GPU work on the lease holding `ptr` (writing it where `write`, else reading it) is done once `event` (an
    id<MTLSharedEvent>, retained until then) reaches `value` (mesh 3981ca80^'s, for leases): a host-path group that reads
    the lease waits for its writers' points, one that writes it for every point, on the host, each until the caller's

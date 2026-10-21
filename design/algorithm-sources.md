@@ -29,7 +29,7 @@ edge is empty (a region is reused only once its readers finished: storage of cap
 bounded channels), a host write a token on the edges of the block it fills, a call whose inputs are all constants
 firing once. Kernels run on one compute thread, the ready call earliest by row, then record. Operands are torch
 tensors (`Ref.tensor`; `Ref.array` and `write` give NumPy views of CPU ones), each backing allocated where a member's
-call touches it, in the node's bridge's window where a crossing of that member reads or writes it
+call touches it, in the node's bridge's region where a crossing of that member reads or writes it
 (`torch_mesh.backend.blank`, over `mesh.lease`). Every wait ends at an event (a call completing, a failure, `close`), never at a time;
 a failure is a value (`Program.report`, `MeshError`) and the caller makes the program again. The package's import
 name is `mesh`, the name `rdma/mesh.py` also takes: importing it loads that module from the same checkout and carries
@@ -215,8 +215,8 @@ results themselves. This does not establish N1's cross-participant ownership
 bound. A passive rank's explicit `submit` now reads the program fault before
 returning success for its lack of local roots; reception still needs no submit.
 
-The existing Core ML chain now submits a bounded window and observes each
-invocation's result before reusing its window position, including on ranks whose
+The existing Core ML chain now keeps a bounded number of predictions in flight and observes each
+invocation's result before reusing its slot among them, including on ranks whose
 work arrives solely from peers. It reports native failure through the same
 public `Result` path. This adds no library scheduling path or numerical kernel;
 it exercises the status API in the existing arbitrary-stage producer/consumer
@@ -1259,7 +1259,7 @@ crosses once its own blocks are ready): `all_gather(program, value, *, peers, ow
 every block) and `broadcast(..., root, peers)` the same with every block `root`'s; `all_to_all(..., owners,
 destinations)` is MPI_Alltoallv (`torch.distributed.all_to_all_single` on the "mesh" backend), and `scatter` and
 `gather` the same with every block's sender or receiver `root`. Each defines the block on its receivers in place, its
-blocks packed into one window tensor and back.
+blocks packed into one region tensor and back.
 
 Swift's `broadcast` and `allGather` are mesh-collective.c's `MESH_ALLGATHER` among the parts' ranks and the
 destinations (a part an element, a contributor's segment its parts; the walk at

@@ -17,9 +17,9 @@ extern "C" {
    (design/rubrics.md, Three kinds of source). */
 struct mesh_reach { uint32_t node,padding; uint64_t bandwidth; };
 int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node);
-/* The node's bridge's window as its region holds it: its bytes (the arena its configuration registered at device up) and
-   the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
-int mesh_window(uint64_t *bytes,uint64_t *unleased);
+/* The node's bridge's region: its arena's bytes (what its configuration registered at device up, the bridge's own pages
+   included) and the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
+int mesh_region(uint64_t *bytes,uint64_t *unleased);
 /* The streams held at the node's bridge (0 between calls) and the wall clock in ns at which none last came to be held
    (0 while any is; mesh.h struct hdr `busy`, `idle_since`, design/transport.md; a read that meets the bridge as it
    becomes busy is told busy, 1); 0, or -errno where the bridge is unreachable. */
@@ -302,11 +302,11 @@ uint32_t mesh_group_advise(const struct mesh_group *,const struct mesh_wire *,vo
    clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes
    the kernel can give without pressure, the measure jetsam keeps: kern.memorystatus_level percent of hw.memsize). */
 struct mesh_health { uint64_t booted,available; };
-/* A node's record as its bridge last sent it: its bridge's node and host name, its bridge's window (bytes), the node's
+/* A node's record as its bridge last sent it: its bridge's node and host name, its bridge's region (bytes its clients may hold), the node's
    memory (hw.memsize) and model (hw.model, NUL-terminated, MESH_MODEL_BYTES with its NUL; mesh.h struct mesh_record),
    and its health. */
 #define MESH_MODEL_BYTES 32
-struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; uint64_t window,memory; char model[MESH_MODEL_BYTES];
+struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; uint64_t region,memory; char model[MESH_MODEL_BYTES];
                           struct mesh_health health; };
 /* Every node's record the bridge holds (mesh_map's nodes, this node's own among them): their count (at most `capacity`
    written), or -errno where the bridge is unreachable. */

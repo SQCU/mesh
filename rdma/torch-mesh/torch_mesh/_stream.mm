@@ -197,7 +197,7 @@ static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::T
 
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
 
-static at::Tensor window_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
 
 // One call of a group: its kind, its send and receive tensors (an all-to-all's none where it moves none that way; the
 // counted all-to-all's {input, counts} and {output, landed, host words}; an all-reduce's, reduce's or broadcast's sends
@@ -219,7 +219,7 @@ struct Operand {
 };
 
 // A group's operands: one device's tensors (MPS: the Metal path; CPU: the host path), a non-contiguous one through a
-// contiguous copy (a CPU one in the window) written back after the group where a call writes it.
+// contiguous copy (a CPU one in the region) written back after the group where a call writes it.
 struct Group {
   bool metal = false;
   std::deque<ncclMeshBuffer> buffers;
@@ -238,7 +238,7 @@ struct Group {
         writes |= written;
         return copy;
       }
-    at::Tensor copy = metal ? t.contiguous() : window_empty(t.sizes().vec(), t, false).copy_(t);
+    at::Tensor copy = metal ? t.contiguous() : region_empty(t.sizes().vec(), t, false).copy_(t);
     staged.emplace_back(t, copy, written);
     return copy;
   }
@@ -626,7 +626,7 @@ static double sequence(int64_t handle, const std::vector<std::vector<std::option
   return (buffer.GPUEndTime - buffer.GPUStartTime) / (double)count;
 }
 
-// Window tensors (torch_mesh.empty, records, address): a tensor whose bytes are a lease of this node's bridge's window
+// Region tensors (torch_mesh.empty, records, address): a tensor whose bytes are a lease of this node's bridge's region
 // (ncclMemAlloc: pages registered on every device when it came up), so the library reaches it with no staging copy
 // where it reads or writes its operands in place.  An MPS one is made through torch's documented interop, DLPack
 // (at::fromDLPack of a kDLMetal tensor: its data an id<MTLBuffer>, its byte_offset the offset in it, as torch's own
@@ -635,27 +635,27 @@ static double sequence(int64_t handle, const std::vector<std::vector<std::option
 // release has completed, so every command bound to it before then has run.  A CPU one is torch::from_blob over the
 // lease, returned at its release (a host-path call is complete when it returns).  No allocator of torch's is replaced:
 // tensors the program makes otherwise stay its MPS allocator's.
-static std::mutex windows_lock_;
-static std::map<uintptr_t, size_t> windows_;
+static std::mutex region_tensors_lock_;
+static std::map<uintptr_t, size_t> region_tensors_;
 
 static void returned(void *memory) {
   ncclMemFree(memory);
-  std::lock_guard<std::mutex> guard(windows_lock_);
-  windows_.erase((uintptr_t)memory);
+  std::lock_guard<std::mutex> guard(region_tensors_lock_);
+  region_tensors_.erase((uintptr_t)memory);
 }
 
-struct WindowShape {
+struct RegionShape {
   std::vector<int64_t> sizes, strides;
 };
 
-static at::Tensor window_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps) {
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps) {
   const at::ScalarType dtype = like.scalar_type();
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
   void *memory = nullptr;
   checked(ncclMemAlloc(&memory, bytes));
   {
-    std::lock_guard<std::mutex> guard(windows_lock_);
-    windows_[(uintptr_t)memory] = bytes;
+    std::lock_guard<std::mutex> guard(region_tensors_lock_);
+    region_tensors_[(uintptr_t)memory] = bytes;
   }
   const auto options = at::TensorOptions().dtype(dtype);
   if (!mps) return at::from_blob(memory, sizes, [memory](void *) { returned(memory); }, options.device(at::kCPU));
@@ -665,7 +665,7 @@ static at::Tensor window_empty(std::vector<int64_t> sizes, const at::Tensor &lik
     returned(memory);
     checked(result);
   }
-  auto *shape = new WindowShape{sizes, std::vector<int64_t>(std::max<size_t>(sizes.size(), 1), 1)};
+  auto *shape = new RegionShape{sizes, std::vector<int64_t>(std::max<size_t>(sizes.size(), 1), 1)};
   for (int64_t d = (int64_t)sizes.size() - 2; d >= 0; d--) shape->strides[d] = shape->strides[d + 1] * std::max<int64_t>(sizes[d + 1], 1);
   auto *managed = new DLManagedTensor{};
   managed->dl_tensor.data = buffer;
@@ -677,7 +677,7 @@ static at::Tensor window_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   managed->dl_tensor.byte_offset = offset;
   managed->manager_ctx = shape;
   managed->deleter = [](DLManagedTensor *self) {
-    delete (WindowShape *)self->manager_ctx;
+    delete (RegionShape *)self->manager_ctx;
     delete self;
   };
   return at::fromDLPack(managed, [managed, memory](void *) {
@@ -686,7 +686,7 @@ static at::Tensor window_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   });
 }
 
-// Where a tensor's bytes lie in the window (0: outside it): an MPS tensor's where its MTLBuffer is the Metal buffer of the
+// Where a tensor's bytes lie in the region (0: outside it): an MPS tensor's where its MTLBuffer is the Metal buffer of the
 // lease its contents lie in, a CPU tensor's where its pointer lies in a lease.
 static uint64_t address(const at::Tensor &t) {
   void *theirs = nullptr;
@@ -700,11 +700,11 @@ static uint64_t address(const at::Tensor &t) {
   return (uint64_t)(uintptr_t)at;
 }
 
-// The window tensors' leases live now: each its address and bytes.
+// The region tensors' leases live now: each its address and bytes.
 static std::vector<std::pair<uint64_t, uint64_t>> records() {
-  std::lock_guard<std::mutex> guard(windows_lock_);
+  std::lock_guard<std::mutex> guard(region_tensors_lock_);
   std::vector<std::pair<uint64_t, uint64_t>> out;
-  for (auto &w : windows_) out.emplace_back(w.first, w.second);
+  for (auto &w : region_tensors_) out.emplace_back(w.first, w.second);
   return out;
 }
 
@@ -730,7 +730,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   });
   module.def("attach", &attach);
   module.def("batch", &batch);
-  module.def("window_empty", &window_empty);
+  module.def("region_empty", &region_empty);
   module.def("address", &address);
   module.def("records", &records);
 }

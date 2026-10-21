@@ -46,22 +46,22 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
-  bridge's window (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the window is
+  bridge's region (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the region is
   `torch.frombuffer(mesh.lease(nbytes), dtype=...)`, or `torch_mesh.empty(shape, dtype=..., device="cpu")`.
-- Window MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
+- Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
   Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
   data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release returns the lease
   once the stream's command buffer open at the release has completed (torch's MPS allocator's own rule for a buffer in
   flight). Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
-  it reads or writes window operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the window
-  tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the window (0: outside it).
-  Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on window
+  it reads or writes region operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the region
+  tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the region (0: outside it).
+  Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on region
   tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
-  allocator's, copied into the window's rings: torch's MPS factories take their allocator from a fixed instance
+  allocator's, copied into the region's rings: torch's MPS factories take their allocator from a fixed instance
   (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a tensor in the
-  window by making it with `empty`, never by default. metal-microbench's callers: `tools/torch_parallel/ep.py`
-  `COUNTED=1` gathers its dispatched rows into one window tensor and writes its experts' outputs into another (its two
-  send buffers, made once at their fixed shapes), and `crossing.py` `WINDOW=1` all-reduces one in place.
+  region by making it with `empty`, never by default. metal-microbench's callers: `tools/torch_parallel/ep.py`
+  `COUNTED=1` gathers its dispatched rows into one region tensor and writes its experts' outputs into another (its two
+  send buffers, made once at their fixed shapes), and `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
 ## What works
 
@@ -92,7 +92,7 @@ MPI_Alltoallv whose counts the GPU wrote (the operator `torch_mesh::all_to_all_c
 q of `counts` (int64 on the input's device, `send_segments[q]` entries) sums to; each rank's segment for this rank moves
 with its rows in one exchange, received packed in rank order into `capacity` rows. It returns `(rows, landed, handle,
 work)`: `landed` the received counts on the GPU once `work.wait()` has ordered the call on torch's stream, and
-`torch_mesh.counted(handle)` the same counts on the host as they land (a window CPU tensor the library writes), its wait
+`torch_mesh.counted(handle)` the same counts on the host as they land (a region CPU tensor the library writes), its wait
 ending at their arrival or the call's failure, never at a time. Its caller is metal-microbench
 `tools/torch_parallel/ep.py` with `COUNTED=1` (the 09-30 dispatch and combine: the experts' slots on `partition`'s "ep"
 dimension, the counts made on the GPU and unpacked to each rank's slots, no `.tolist()` of the splits). Reproduction
@@ -102,7 +102,7 @@ target (metal-microbench docs/measurement.md 2026-09-30, part B, mesh ab98765 an
 `partition.routed(mesh, "ep", x, experts, slots)` is that dispatch and combine as a routed range partition: the
 partitioned mesh dimension's units are experts (rank r's capacity[r] slots, the first parts[r] of them its experts and
 the rest receiving no rows), each (token, k) row crosses to its expert's rank and back by the counted all-to-all, its
-send buffers window tensors made once, and it returns each row's expert output for the caller to weight and sum. Equal
+send buffers region tensors made once, and it returns each row's expert output for the caller to weight and sum. Equal
 parts are the even split, so one form serves both of `ep.py`'s.
 
 ### Partials merge

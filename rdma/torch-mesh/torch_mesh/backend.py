@@ -52,8 +52,8 @@ def op(reduce_op):
 
 
 def blank(shape, dtype, device):
-    """An uninitialized contiguous tensor the backend hands a collective: a CPU one in this node's bridge's window (a
-    lease, mesh.lease: rdma/NCCL.md "Memory"); an MPS one is torch's (the Metal path copies it into the window's
+    """An uninitialized contiguous tensor the backend hands a collective: a CPU one in this node's bridge's region (a
+    lease, mesh.lease: rdma/NCCL.md "Memory"); an MPS one is torch's (the Metal path copies it into the region's
     rings)."""
     if torch.device(device).type != 'cpu':
         return torch.empty(shape, dtype=dtype, device=device)

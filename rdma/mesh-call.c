@@ -82,7 +82,7 @@ int mesh_stream_declare(struct mesh_ctx *context,uint32_t stream,int large,uint6
   return 0;
 }
 
-/* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the window has them */
+/* design/algorithm-sources.md#programtensor: a lease's rows and arena pages, the pages anywhere the region has them */
 int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;

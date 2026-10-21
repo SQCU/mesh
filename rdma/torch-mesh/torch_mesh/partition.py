@@ -57,10 +57,10 @@ each block's attention over this rank's own keys and values its partials (the ro
 partials reduce-scattered by the library's partials operator (ncclMeshRedOpCreatePartials in ncclMeshReduceScatterV),
 each block's merged at its owner by their log-sum-exp, so the crossing follows from the role of the split axis, a
 softmax over it, as a contraction's is a reduction.  On a group
-of the mesh backend the MPS buffers these collectives send from and land in are window tensors (torch_mesh.empty, mesh
+of the mesh backend the MPS buffers these collectives send from and land in are region tensors (torch_mesh.empty, mesh
 5ff5d699 and f9898875): the all-gather's output, this rank's block copied into its place there and the call run in
-place; the reduce-scatter's input (where it does not lie in the window already, its copy) and its output; the ring's
-gathered queries and its partials; so the library reads what they send where it lies.  Elsewhere, and where the window
+place; the reduce-scatter's input (where it does not lie in the region already, its copy) and its output; the ring's
+gathered queries and its partials; so the library reads what they send where it lies.  Elsewhere, and where the region
 refuses a lease, torch's own memory.
 
 A routed partition (routed): a mixture of experts' experts as a partition's units, each token's rows sent to the ranks
@@ -261,17 +261,17 @@ unpack.register_autograd(lambda ctx, g: (pack(g, ctx.saved['dim'], ctx.saved['ke
 _IDENTITY = {'sum': 0.0, 'avg': 0.0, 'max': -math.inf, 'min': math.inf}
 
 
-def _windowed(like, group):
-    """Whether the collectives' buffers like `like` on `group` are window tensors: an MPS tensor on a group of the mesh
-    backend (its communicator's handle: rebalance's test), whose node's bridge leases the window (mesh 5ff5d699)."""
+def _region_backed(like, group):
+    """Whether the collectives' buffers like `like` on `group` are region tensors: an MPS tensor on a group of the mesh
+    backend (its communicator's handle: rebalance's test), whose node's bridge leases the region (mesh 5ff5d699)."""
     return group is not None and like.device.type == 'mps' and bool(getattr(group, 'handle', 0))
 
 
 def _lease(shape, like):
-    """An MPS window tensor like `like` (torch_mesh.empty: a lease of the node's bridge's window, which the library reads
+    """An MPS region tensor like `like` (torch_mesh.empty: a lease of the node's bridge's region, which the library reads
     and writes where it lies: rdma/NCCL.md "Memory"), made by name as 5ff5d699 made it (DTensor's dispatch runs no
-    factory mode, and torch documents no MPS allocator to place it: mesh 7e6f0335); None where the window refuses the
-    lease (full, or its bridge stopped: the library's error, the collective's own to raise), where aee2829b's window
+    factory mode, and torch documents no MPS allocator to place it: mesh 7e6f0335); None where the region refuses the
+    lease (full, or its bridge stopped: the library's error, the collective's own to raise), where aee2829b's region
     allocator took the device's own buffer."""
     from . import empty
     try:
@@ -281,15 +281,15 @@ def _lease(shape, like):
 
 
 def _empty(shape, like, group=None, dtype=None):
-    """A window tensor (_lease) where the buffer is _windowed and the window holds it, else torch.empty; like `like`,
+    """A region tensor (_lease) where the buffer is _region_backed and the region holds it, else torch.empty; like `like`,
     of `dtype` where given."""
     like = like if dtype is None else like.new_empty(0, dtype=dtype)
-    made = _lease(shape, like) if _windowed(like, group) else None
+    made = _lease(shape, like) if _region_backed(like, group) else None
     return made if made is not None else torch.empty(shape, dtype=like.dtype, device=like.device)
 
 
-def _in_window(y):
-    """Whether contiguous `y` lies in the window already (torch_mesh.address), so a collective reads it where it lies."""
+def _in_region(y):
+    """Whether contiguous `y` lies in the region already (torch_mesh.address), so a collective reads it where it lies."""
     from . import address
     return y.is_contiguous() and address(y) != 0
 
@@ -298,11 +298,11 @@ def _in_window(y):
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> torch.Tensor:
     """The blocks gathered from x's block (contiguous along dim), an opaque op, so a compiled graph calls it as torch's
     functional collectives are called.  On the mesh backend the list is a split of `out`, so it is one MPI_Allgatherv
-    into `out` in place (ncclMeshAllGatherV: backend.py allgather).  Where the output is a window tensor (_windowed),
+    into `out` in place (ncclMeshAllGatherV: backend.py allgather).  Where the output is a region tensor (_region_backed),
     this rank's block is copied into its place in it first and gathered from there, the call in place (nccl.h: sendbuff
-    rank's segment of recvbuff; mesh f9898875), so what it sends lies in the window; else out of place from x's block."""
+    rank's segment of recvbuff; mesh f9898875), so what it sends lies in the region; else out of place from x's block."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
-    if not _windowed(x, group):
+    if not _region_backed(x, group):
         y = x.movedim(dim, 0).contiguous()
         out = _empty((sum(sizes),) + y.shape[1:], y)
         dist.all_gather(list(out.split(sizes)), y, group=group)
@@ -319,12 +319,12 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> 
 def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: str, group_name: str) -> torch.Tensor:
     """The blocks reduce-scattered out of place from x (contiguous along dim), this rank's block, an opaque op.  On
     the mesh backend the list is a split of `y`, so it is one MPI_Reduce_scatter reading `y` in place
-    (ncclMeshReduceScatterV: backend.py reduce_scatter).  Where the buffers are window tensors (_windowed), `y` is x's
-    block where it lies in the window already, else its contiguous copy into a window tensor (mesh f9898875), and the
-    output a window tensor of its own, so what it sends lies in the window and the output holds no lease of the input."""
+    (ncclMeshReduceScatterV: backend.py reduce_scatter).  Where the buffers are region tensors (_region_backed), `y` is x's
+    block where it lies in the region already, else its contiguous copy into a region tensor (mesh f9898875), and the
+    output a region tensor of its own, so what it sends lies in the region and the output holds no lease of the input."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     y = x.movedim(dim, 0)
-    held = _lease(y.shape, y) if _windowed(x, group) and not _in_window(y) else None
+    held = _lease(y.shape, y) if _region_backed(x, group) and not _in_region(y) else None
     y = held.copy_(y) if held is not None else y.contiguous()
     out = _empty((sizes[rank],) + y.shape[1:], y, group)
     dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
@@ -1203,7 +1203,7 @@ def _block(query, key, value, scale=None, queries=None, keys=None, valid=None):
 
 def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1):
     """Ring attention over capacity blocks as split-KV partials: every rank's query block gathered (one Allgatherv,
-    static counts, into a window tensor on the mesh backend: _empty, this rank's copied into its place there and the
+    static counts, into a region tensor on the mesh backend: _empty, this rank's copied into its place there and the
     call run in place, mesh f9898875); each block's attention over this rank's own keys and values written as its
     owner's rows of the partials (backend.partial; keys past their valid extents masked, a causal one by the logical
     positions of its queries and keys, a half of the block attending only to the halves of this rank's keys it can see,
@@ -1260,7 +1260,7 @@ def routed(mesh, name, x, experts, slots):
     this rank's capacity[r] callables, slot j's rows to it.  Each (row, k) crosses to its expert's rank and back by the
     counted all-to-all (torch_mesh.all_to_all_counted: the counts the GPU wrote move with the rows, the received counts
     read on the host as they land, no host read of the splits), every rank passing the same T K.  Returns each (row,
-    k)'s expert output (T x K x D), to be weighted and summed by the caller.  The rows it sends lie in window tensors
+    k)'s expert output (T x K x D), to be weighted and summed by the caller.  The rows it sends lie in region tensors
     (torch_mesh.empty), made at their first use and kept (their shapes the capacities' and T K's)."""
     from . import all_to_all_counted, counted
     o, group = operand(mesh, name), mesh.get_group(name)
@@ -1288,7 +1288,7 @@ _ROUTING = {}
 
 
 def _routing(key, what, rows, like):
-    """A routed partition's window tensor of `rows` rows like `like`, made at its first use (torch_mesh.empty)."""
+    """A routed partition's region tensor of `rows` rows like `like`, made at its first use (torch_mesh.empty)."""
     from . import empty
     at = (key, what, rows, like.shape[1:], like.dtype, like.device.type)
     if at not in _ROUTING:

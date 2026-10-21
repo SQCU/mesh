@@ -112,7 +112,7 @@ was actually asked for. Each of these is open to revisiting:
 ```
 node <name> self|peer               each node this node's bridge holds a record of (its map), at once; then each node
                                     that announces _meshnode._tcp (Bonjour) on the shared LAN, as it announces
-info <name> via=bridge node=... model=... memory=... window=...   its bridge's record of the node
+info <name> via=bridge node=... model=... memory=... region=...   its bridge's record of the node
 info <name> via=mdns model=... rdma=...                           the node's announcement, as it is resolved
 path <name> kind=<kind> addr=<a>    each address the node advertises: lan, lan-v6, fabric-adjacent (a link-local
                                     on one of this node's RDMA ports), fabric-routed (its fd6d:6573:68:: identity),
@@ -436,7 +436,7 @@ cables directly, point to point.
 ```
 node <self> self
 node <peer> peer
-info <peer> via=bridge node=<n> model=Mac16,11 memory=... window=...
+info <peer> via=bridge node=<n> model=Mac16,11 memory=... region=...
 path <peer> kind=lan addr=<a>
 path <peer> kind=fabric-adjacent addr=fe80::<b>%<port>
 path <self> kind=fabric-routed addr=fd6d:6573:68:<c>
@@ -448,8 +448,8 @@ docs/elastic.md#call-delivery), as the rank's user, so no root process runs the 
 that splits a line on whitespace reads it whole; `rdma/peers.py` `fields` reads a value to the next `key=` of its line
 and takes either form.
 Each node reports its name, hardware (its chip and GPU core count among it), macOS, RDMA enablement and SDK state, its
-bridge's window (`window`, mesh-stat's own top-level figure: since mesh-stat prints every node's record, the last
-`"window"` of its line was another node's, and from 67d50f2 each of the pair published the other's), its admin account,
+bridge's region (`region`, mesh-stat's own top-level figure: since mesh-stat prints every node's record, the last
+`"window"` (now `"region"`) of its line was another node's, and from 67d50f2 each of the pair published the other's), its admin account,
 the maker of its instance evidence (`instances`, `<chip>/<cores>`, written `incomplete:<chip>/<cores>` where the file
 lacks its fit (coefficients and bandwidth), its served and attention readings (a fit before torch-mesh 771ae16) or an
 attention line of either plan: torch-mesh refuses the first two and cannot price a layer's plan without the third), what each of its
@@ -521,7 +521,7 @@ Nothing stops a bridge but the bridge. Its agent's definition names its program 
 it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the
 installation above, or `make all install` by hand, which installs the binary anew whenever libmesh changed) or a new
 configuration (`mesh-user.sh` renames it into place and then gives the binary a new file), and `mesh-user.sh` sends the
-bridge's heartbeat SIGHUP, which restarts the bridge keeping its window and runs its own new image (design/transport.md
+bridge's heartbeat SIGHUP, which restarts the bridge keeping its region and runs its own new image (design/transport.md
 section 2); a process already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
 
 Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what

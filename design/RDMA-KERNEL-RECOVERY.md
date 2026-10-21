@@ -326,7 +326,7 @@ outlives a teardown of another.
 ## The stripe writes of October 1
 
 mesh 8fc27cbe (2026-10-01 15:07, MESH_VERSION 120 of that line) added stripe writes: any thread of any process
-writing into a peer's window with no program at the peer. 753676bc (15:26) took rdma/ back to 3981ca80 with eight
+writing into a peer's region with no program at the peer. 753676bc (15:26) took rdma/ back to 3981ca80 with eight
 other commits, because the bridge then running "deregistered each of its two memory regions twice at shutdown on both
 nodes (lkeys 525 and 269, 2026-10-01 15:20:19); both kernels then panicked in IOThunderboltFamily/AppleThunderboltRDMA
 (the Mini 15:21:47, a data abort; the M5 a tag check fault)". The defect was attributed to the stack and never located.
@@ -343,14 +343,14 @@ uncommitted edits, which are lost) and nothing else: nothing below was run.
    advertised `max_mr_size`. The fallback runs only during a registration, never at a stop, and `device_up` holds the
    device's `setup` mutex. Each extent therefore had one user-space deregistration at the 15:20:19 stop. (The geometry
    run_pair.py started both bridges with, metal-microbench 408461a `BRIDGE_GEOMETRY` `-W 262144` at 16 KiB pages, is a
-   4 GiB window, four 1 GiB extents a device; the message names two lkeys, each twice. Whether the bridges of that stop
+   4 GiB region, four 1 GiB extents a device; the message names two lkeys, each twice. Whether the bridges of that stop
    ran that geometry is not recorded.)
 2. **Queue pairs lived for the bridge's life, with receives posted.** Each link's stripe service (`peer_run`,
    `peer_serve`, thread `mesh.stripes`) paired a control and a data queue pair once and kept them until the bridge
    stopped; `peer_configure` posted 256 descriptor receives on the control pair before RTS, and `peer_serve` posted
    again each slot as its descriptor landed, so from pairing to stop the device held a queue pair in RTS with receives
    posted. At the stop, `peer_run` destroyed both (`down_pair`: no move to the error state, the receives still posted)
-   and `main` then deregistered the window, freed the protection domain and closed the context at once
+   and `main` then deregistered the region, freed the protection domain and closed the context at once
    (`down_device`). At 3981ca80 (d6dceac's transport), a bridge stopped between programs held no queue pair at all.
 3. **Posts on those queue pairs crossed other queue pairs' teardowns.** The `mesh.stripes` thread posted on its two
    queue pairs (descriptor receives, data receives, descriptor and data SENDs) whenever a stripe moved, with no

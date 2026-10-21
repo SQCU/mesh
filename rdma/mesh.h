@@ -17,8 +17,8 @@
    alone (design/transport.md section 14; the versions before it, this file's history).  The wire is HELLO, FAREWELL,
    RECORD and LINK */
 #define MESH_VERSION 131u
-/* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the window a bridge
-   before it left where its layout is this one (design/transport.md section 2, the window outlives its bridge) */
+/* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
+   before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
 #define MESH_LAYOUT 133u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
@@ -28,7 +28,7 @@
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
-/* design/transport.md section 14: a stream's two classes, its large units (the window's block) and its small units
+/* design/transport.md section 14: a stream's two classes, its large units (the region's block) and its small units
    (one frame), each a ring of MESH_STREAM_LARGE_UNITS or MESH_STREAM_SMALL_UNITS units; an owner word leaves bit 63 clear
    (its generation is 25 bits, mesh-dataflow.c mesh_slot_take) */
 #define MESH_FRAME 4096u
@@ -86,15 +86,15 @@ struct mesh_stream {
 };
 _Static_assert(sizeof(struct mesh_stream)==192,"mesh_stream");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
-   the record's sequence in that boot, the bytes of its bridge's window its clients may hold (the window less what the
+   the record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
    model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), and the `reached` nodes its bridge reaches (mesh-plan.h
    struct mesh_reach) */
-struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t window,memory;
+struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
    that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The
-   slot's fields, as the header's, are only ever appended to, so any later bridge or heartbeat reads a window's holders
+   slot's fields, as the header's, are only ever appended to, so any later bridge or heartbeat reads a region's holders
    at these offsets (design/transport.md section 2) */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
@@ -167,7 +167,7 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
 
 /* design/algorithm-sources.md#programkernel_call; design/transport.md */
 /* design/transport.md; design/transport.md: the node's region: `pages` arena pages of `block`
-   pages a block (the bridge's window, its node's configured share of its memory), a page-table row a block (its page
+   pages a block (the bridge's registered memory, its node's configured share of its memory), a page-table row a block (its page
    entry and buffer, and a bit in each plane), the bridge's own pages, the streams and the client slots; the map's
    records and the streams' rings are leases the bridge takes from the arena (mesh_records, mesh_stream_at), which the
    bridge registers whole once */

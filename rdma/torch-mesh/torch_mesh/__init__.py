@@ -5,9 +5,9 @@ compiler is the torch.compile backend "mesh" (setup.py's torch_dynamo_backends e
 for a package to register): torch.compile(f, backend="mesh") compiles f with Inductor and batches the collectives of
 each compiled graph's run into torch's command buffers (_stream.mm batch).
 
-empty() makes a window tensor, whose bytes are a lease of this node's bridge's window (an MPS one through torch's
-DLPack interop over the lease's Metal buffer: _stream.mm window_empty), which a collective reads and writes where it
-lies; records() is the window tensors' leases live now and address(t) where a tensor's bytes lie in the window (0:
+empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
+DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
+lies; records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the region (0:
 outside it).
 
 all_to_all_counted() is MPI_Alltoallv whose counts the GPU wrote (the torch operator torch_mesh::all_to_all_counted over
@@ -53,7 +53,7 @@ def compiler(gm, example_inputs):
 
 
 def empty(*size, dtype=None, device='mps'):
-    """A tensor of window memory (rdma/NCCL.md "Memory"), uninitialized: collectives read and write it in place where
+    """A tensor of region memory (rdma/NCCL.md "Memory"), uninitialized: collectives read and write it in place where
     the library reads its operands in place.  An 'mps' one is an MPS tensor whose storage is the lease's Metal buffer
     (ncclMeshMemBuffer), made through DLPack; it returns its lease once the GPU's work before its release is done."""
     import torch
@@ -63,17 +63,17 @@ def empty(*size, dtype=None, device='mps'):
     kind = torch.device(device).type
     if kind not in ('cpu', 'mps'):
         raise ValueError(f'mesh: empty() makes cpu or mps tensors, not {device}')
-    return _stream.window_empty(sizes, torch.empty(0, dtype=dtype or torch.get_default_dtype()), kind == 'mps')
+    return _stream.region_empty(sizes, torch.empty(0, dtype=dtype or torch.get_default_dtype()), kind == 'mps')
 
 
 def records():
-    """The window tensors empty() made that are live now: each {address, bytes} of its lease."""
+    """The region tensors empty() made that are live now: each {address, bytes} of its lease."""
     from . import _stream
     return [{'address': a, 'bytes': b} for a, b in _stream.records()]
 
 
 def address(tensor):
-    """Where a tensor's bytes lie in the window (its first byte's address), 0 where they lie outside it."""
+    """Where a tensor's bytes lie in the region (its first byte's address), 0 where they lie outside it."""
     from . import _stream
     return _stream.address(tensor)
 

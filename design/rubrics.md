@@ -20,7 +20,7 @@ with separate namespaces and separate interfaces:
 Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mixture would.
 
 **What the bridge does (M), one process per node.**
-- At its launch, it maps the node's window and registers it once on every RDMA device.
+- At its launch, it maps the node's region and registers it once on every RDMA device.
 - When it first hears a peer on a cable, it makes that link's queue pairs and exchanges their numbers once. It connects them once in its life. That exchange, and the map records it floods, are its only messages.
 - On each link it keeps four streams toward the peer node, each on a lane pair of its own and named by an identity both bridges compute alike:
   - It posts receives into the stream's in ring for the link's life.
@@ -28,9 +28,9 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
   - It raises each landed word in order.
   - When the link is lost, it writes ~0 into the landed words.
 - It retires the slot of a client whose process ended: it releases the client's rows and lets go of its stream.
-- It ends when a signal arrives, and its exit releases everything it holds of the devices. Its window outlives it, and
+- It ends when a signal arrives, and its exit releases everything it holds of the devices. Its region outlives it, and
   the next bridge adopts it, its clients' leases standing; a release is its heartbeat's: once the bridge has ended, the
-  window expires and is unlinked once none of its holders lives, so its memory returns to the system
+  region expires and is unlinked once none of its holders lives, so its memory returns to the system
   (design/transport.md section 2, the heartbeat).
 - It never reads or writes a payload byte.
 
@@ -43,7 +43,7 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 
 **What a client does (C), libnccl-mesh in its process.**
 - Attaches one slot of its node's region.
-- Takes rows of the window by compare-and-swap on the shared bitmaps (`ncclMemAlloc`).
+- Takes rows of the region by compare-and-swap on the shared bitmaps (`ncclMemAlloc`).
 - Reads which nodes its bridge reaches.
 - Meets its peers through NCCL's bootstrap, on its own sockets.
 - Compiles the same schedule as every member.
@@ -166,7 +166,7 @@ layers; see Inversions.
   moving bytes between it on paired links.
 - Lower pole: a general service. It delivers calls, takes remote commands, carries events and sessions, is started per
   call, and holds any feature a client found convenient.
-- Upper pole: a transport that behaves like a system call. It has a window, links, SEND and RECV, and does nothing a
+- Upper pole: a transport that behaves like a system call. It has a region, links, SEND and RECV, and does nothing a
   client could do for itself.
 - The operator's pair: lower, "the 'bridge' is not a grab bag of arbitrary ontologies anyone wants to put anywhere"
   (10-19); upper, "the bridge is there to behave like a system call all operating systems should have always been
@@ -291,7 +291,7 @@ layers; see Inversions.
 - Lower pole: lazy registration at a program's first page, which rewrites the device's address translation in the
   middle of other clients' transfers.
 - Upper pole: most of the node's memory registered once, at the bridge's start. Each client sizes its own use, and
-  weights and KV sit inside the window.
+  weights and KV sit inside the region.
 - Ranked:
   - lazy registration ≺ eager registration (10-15);
   - weights and KV outside the pinned pool ≺ inside it (10-15).
@@ -373,7 +373,7 @@ layers; see Inversions.
 - Ranks higher: the form that issues earlier and waits later, and adds fewer waits between them.
 - Lower pole: barriers, pauses, syncs, guards and host round trips inserted between steps.
 - Upper pole: the send at the call and the wait at the consumer, the wait only on landed data, and nothing waited on
-  between a window's crossings.
+  between a submission's crossings.
 - The operator's pair: lower, "innocent sounding barriers" (10-17); upper, "earlier waitless implementatinos which did
   not need to be made waitful" (10-16).
 - Ranked:
@@ -543,7 +543,7 @@ layers; see Inversions.
 - Ranks higher: the form whose buffers are sized by the program itself from its configuration, held from load and
   reused, caches included.
 - Lower pole: ceilings computed by someone else's estimate, memory taken per call, and caches skipped "to save memory".
-- Upper pole: the client knows its allocation. Everything it shares sits in the window, zero-copy, and persistent
+- Upper pole: the client knows its allocation. Everything it shares sits in the region, zero-copy, and persistent
   caches and memos are kept.
 - Ranked: recomputing what a cache would hold ≺ "caching and memoization are required" (10-16).
 
@@ -716,7 +716,7 @@ The positions, in every kind, as ranked pairs:
    means that a bridge can fail then restart and reconnect, that a collective operation can fail and repeer, that a data
    processing operation can fail and relaunch. inducing a system halt or kernel halt causes the entire node to fail.
    that is not permittable for obvious reasons." (10-20). A halt of the system or the kernel, at any layer ≺ a failed
-   transaction: the Mini's watchdog panic of 10-20 (a rank running on a stopped bridge's window beside the new one,
+   transaction: the Mini's watchdog panic of 10-20 (a rank running on a stopped bridge's region beside the new one,
    wiring all its memory) is the case.
 5. **Rare failures get no machinery.** A protocol, refusal, stuck state, or handler that changes data code from outside
    a call, built to make a rare failure ordinary ≺ none; something set up per call to survive a rare event ≺ whatever
@@ -740,13 +740,13 @@ The positions, in every kind, as ranked pairs:
      which is on a different thread than mesh. mesh_heartbeat uses polite opens and polite closes on the actual mesh
      service."
 
-   So: a release stops the bridge (its agents' exits free every device object) and expires its window; no party signals
+   So: a release stops the bridge (its agents' exits free every device object) and expires its region; no party signals
    a client for it; each client's next lease or communicator returns the expiry as a value (ncclRemoteError, and
-   ncclMeshWindowExpired), and the client frees what it holds of that window or ends; the window is unlinked, and its
+   ncclMeshRegionExpired), and the client frees what it holds of that region or ends; the region is unlinked, and its
    memory the system's, once none of its holders lives. One supervisor (the heartbeat) opens and closes the bridge on kernel
-   events (a delay only bounds how soon a bridge that ended unasked opens again), and no second window is made beside a holder of the first. Ranked: a deliberate stop
+   events (a delay only bounds how soon a bridge that ended unasked opens again), and no second region is made beside a holder of the first. Ranked: a deliberate stop
    that leaves memory held until reboot ≺ a release that frees it; launchd relaunching a stopped bridge ≺ a heartbeat
-   that closes it and keeps it closed; a bridge ending its clients for a window change ≺ clients that receive the expiry
+   that closes it and keeps it closed; a bridge ending its clients for a region change ≺ clients that receive the expiry
    as a value and let go; a restart policy of one second ≺ one bridge start a minute at most (REOPEN_S).
 
 ## Strings are messages
@@ -827,7 +827,7 @@ The positions, in M, C and D, as ranked pairs:
    takes a return and does something in response...?"
 
 Ranked by where the text is read, lowest first: text read or compared on a recurring path (per frame, dispatch,
-window, step or call) ≺ text read once per load or start into typed values (a safetensors header, a declaration) ≺ no
+submission, step or call) ≺ text read once per load or start into typed values (a safetensors header, a declaration) ≺ no
 text.
 
 Ranked, in every kind: `lenstring(*)->int` ≺ `lenstring(*)->string`, its number spelled in words (`fourtythree`), which
@@ -915,10 +915,10 @@ a numeric constant or a typed operand; logging on a change found by comparing st
   member retiring its residents at the refusal. A process holding leases of two regions (9add4cbe's P3) ≺ one region a
   process: the former wired all of the Mini's memory and its watchdog panicked it (10-20 18:27 UTC). On the pair after
   ab2e5192, the Mini's bridge restart failed one call and the next two committed, its wired memory steady.
-- **M3, M4, rubrics 6 (10-20):** a window unlinked and made again at every bridge start, its clients' leases left in a
-  dead window beside the new one (through version 131) ≺ a window adopted across a restart (923d73fd, layout 132: on
+- **M3, M4, rubrics 6 (10-20):** a region unlinked and made again at every bridge start, its clients' leases left in a
+  dead region beside the new one (through version 131) ≺ a region adopted across a restart (923d73fd, layout 132: on
   the pair the Mini's bridge restarted and the next call committed, wired memory 20.0 GB throughout) ≺ that, with a
-  release that frees it: a heartbeat opens and closes the bridge on kernel events, a release expires the window, each
-  client receives the expiry as a value and lets go or ends, and the heartbeat unlinks the window once none of its
+  release that frees it: a heartbeat opens and closes the bridge on kernel events, a release expires the region, each
+  client receives the expiry as a value and lets go or ends, and the heartbeat unlinks the region once none of its
   holders (bridge, agents, clients, recorded by pid and start) lives, before any bridge makes another; a bridge that
   ended unasked opens again a minute later.

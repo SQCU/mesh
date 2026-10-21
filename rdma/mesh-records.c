@@ -56,7 +56,7 @@ static int map_grow(uint64_t records){
   map_page=page;map_pages=pages;map_room=(uint32_t)((uint64_t)pages*M->pgsz/sizeof(struct mesh_record));
   return 0;
 }
-/* design/transport.md section 2: an adopted window's map pages, recorded by the bridge before (mesh-observe.h struct
+/* design/transport.md section 2: an adopted region's map pages, recorded by the bridge before (mesh-observe.h struct
    mesh_bridge_pages), taken again as this bridge's, its records none until this bridge writes its own */
 void map_adopt(void){
   const struct mesh_bridge_pages *own=mesh_bridge_pages(M);
@@ -109,7 +109,7 @@ static void map_put(const struct mesh_record *record){
    map serial moves only where the mesh changes, and a health sample is no change of the mesh */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
   int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
-    a->window==b->window && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
+    a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
   for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
     same=a->reach[k].node==b->reach[k].node && a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
@@ -124,7 +124,7 @@ struct mesh_record *record_held(uint32_t node){
   return NULL;
 }
 void record_changed(void){
-  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.window=wire.length-held_pages*M->pgsz,.memory=memory};
+  struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=wire.length-held_pages*M->pgsz,.memory=memory};
   memcpy(own.name,host,sizeof own.name);
   memcpy(own.model,model,sizeof own.model);
   own.reached=mesh_nodes_reached(M,own.reach,MESH_STREAMS);

@@ -16,10 +16,10 @@ while name=$(printf '%s' "$stat" | plutil -extract "nodes.$i.name" raw -o - - 2>
   r=nodes.$i; i=$((i+1)); n=$(printf '%s' "$stat" | plutil -extract "$r.node" raw -o - - 2>/dev/null)
   [ "$n" = "$own" ] && me=$name
   named "$name"
-  printf 'info %s via=bridge node=%s model=%s memory=%s window=%s\n' "$name" "$n" \
+  printf 'info %s via=bridge node=%s model=%s memory=%s region=%s\n' "$name" "$n" \
     "$(printf '%s' "$stat" | plutil -extract "$r.model" raw -o - - 2>/dev/null)" \
     "$(printf '%s' "$stat" | plutil -extract "$r.memory" raw -o - - 2>/dev/null)" \
-    "$(printf '%s' "$stat" | plutil -extract "$r.window" raw -o - - 2>/dev/null)"
+    "$(printf '%s' "$stat" | plutil -extract "$r.region" raw -o - - 2>/dev/null)"
 done
 addresses(){
   mkfifo "$T/$2.g"; dns-sd -G v4v6 "$1.local" > "$T/$2.g" 2>/dev/null & echo $! >> "$T/pids"; echo $! >> "$T/$2.pids"

@@ -53,8 +53,8 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
   by its caller; nothing waits on a peer that never comes.
 - While the process holds a lease of a bridge that stopped, its next lease (`ncclRemoteError`), communicator
   (`ncclInvalidUsage`: the process's own leases, which only it can free) and `ncclCommRegister` are refused naming it,
-  until it has freed every such lease: a process never holds leases of two regions. A node's window is most of its
-  memory, and GPU work on a stopped region's leases beside the new window's registration wired the Mini's whole memory
+  until it has freed every such lease: a process never holds leases of two regions. A node's region is most of its
+  memory, and GPU work on a stopped region's leases beside the new region's registration wired the Mini's whole memory
   (10-20, metal-microbench output_data/bridge-20261019/REVIEW-131.md).
 - A non-blocking init sets `comm` at once, runs on a thread of its own and returns `ncclInProgress`;
   `ncclCommGetAsyncError` gives `ncclInProgress` until it ends, then its result. `ncclCommRevoke`, `ncclCommAbort` and
@@ -125,7 +125,7 @@ in leases, which the GPU writes. The positions are laid without the counts: each
 that layout fail as a value with `*arrived` 2. Reproduction target (metal-microbench docs/measurement.md 2026-09-30,
 part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
 473-480 us, the host idle 7.4-7.9 ms. A crossing counted call had failed since its restoration (mesh 598cb6cf: a NULL
-program read where the uneven collectives check their segments) and, on a reused window, could read a pair's position
+program read where the uneven collectives check their segments) and, on a reused region, could read a pair's position
 with no rows as a filler; with both fixed, on the loopback fabric (a line of 4) every rank's counts and rows land,
 host path and walk.
 
@@ -273,7 +273,7 @@ Ops: sum, prod, max, min, avg; premul-sum takes a host immediate.
 
 ## Memory
 
-The node's bridge registers its window, its configuration's share of the node's memory (etc/bridge/README.md), on
+The node's bridge registers its region, its configuration's share of the node's memory (etc/bridge/README.md), on
 every device when the device comes up, and never again while the device is up
 (design/transport.md). The operator, 2026-10-15: "the bridge's job is to allocate essentially all of the
 memory on the entire device so that there are large already 'pinned' buffers which are ready to receive surprise
@@ -283,29 +283,29 @@ system call".
 
 - The process is one client of its node's bridge: one attach of the node's region, made at its first `ncclMemAlloc` or
   communicator. Its slot owns the process's leases and holds the streams its communicators use; a communicator takes
-  no bytes of the window (its rings are its streams', the bridge's).
-- `ncclMemAlloc(ptr, size)` is the lease, the system call: whole pages of the window covering `size` (one page for 0),
+  no bytes of the region (its rings are its streams', the bridge's).
+- `ncclMemAlloc(ptr, size)` is the lease, the system call: whole pages of the region covering `size` (one page for 0),
   already registered; a lease registers nothing. Its bookkeeping is the region's (the lease's rows are owned by the
   client's slot), so when the process exits or dies its bridge returns the pages as it returns every retired client's
   rows.
-- A lease the window cannot meet is `ncclSystemError` naming the bytes asked and the pages free. While every client
+- A lease the region cannot meet is `ncclSystemError` naming the bytes asked and the pages free. While every client
   slot of the bridge is held it is `ncclSystemError` naming `mesh.h` `MESH_CLIENTS`. Where the process attaches no
-  region of a bridge that runs, it names the requirement: the node's bridge runs with a configuration whose window
+  region of a bridge that runs, it names the requirement: the node's bridge runs with a configuration whose region
   holds the client's footprint (`ncclRemoteError` where the bridge stopped, else `ncclSystemError`). Nothing falls back
   to other memory.
 - `ncclMemFree(ptr)` returns the lease's pages at once.
-- `ncclCommRegister` takes a buffer in the window (its handle is the buffer itself) and refuses any other with
+- `ncclCommRegister` takes a buffer in the region (its handle is the buffer itself) and refuses any other with
   `ncclInvalidArgument` (lease it with `ncclMemAlloc`). `ncclCommDeregister` releases nothing.
-- A lease is an operand of the node's window, which outlives a restart of its bridge: the next bridge adopts it
+- A lease is an operand of the node's region, which outlives a restart of its bridge: the next bridge adopts it
   (design/transport.md section 2), so a lease, its pages and every buffer over them stand across a bridge's restart,
-  and nothing is reloaded. A window a release (or a bridge of another layout) expired is returned as a value: while the
+  and nothing is reloaded. A region a release (or a bridge of another layout) expired is returned as a value: while the
   process holds a lease or communicator of it, its next `ncclMemAlloc` and communicator fail with `ncclRemoteError`
-  naming the expiry, and `ncclMeshWindowExpired` reads 1; once the process has freed every one (`ncclMemFree`,
-  `ncclCommDestroy`), or ended, the library lets that window go and its next lease attaches the bridge's next window;
+  naming the expiry, and `ncclMeshRegionExpired` reads 1; once the process has freed every one (`ncclMemFree`,
+  `ncclCommDestroy`), or ended, the library lets that region go and its next lease attaches the bridge's next region;
   a process that held a communicator or a lease's `ncclMeshMemBuffer` ends instead, since the library made Metal
-  buffers over the window for them, which its GPU work and residency set may hold; a caller's own Metal buffers over a
+  buffers over the region for them, which its GPU work and residency set may hold; a caller's own Metal buffers over a
   lease are released, with their residency, before `ncclMemFree`, or the caller ends. A process never
-  holds two windows. A communicator whose
+  holds two regions. A communicator whose
   streams a restart or a new pairing opened again reports its failure through `ncclCommGetAsyncError` before any group
   runs on it, and is made again. This is the recovery
   doctrine (design/transport.md, mandates 12 and 13, the operator, 2026-10-14): "functions can fail from any one operand
@@ -313,7 +313,7 @@ system call".
   cannot be resume and instead must return an error (which a caller can presumably retry against immediately if that's
   what they want)".
 
-The client sizes the window on each node it runs on, and on the nodes it peers or streams with: weights, KV and every
+The client sizes the region on each node it runs on, and on the nodes it peers or streams with: weights, KV and every
 buffer a peer reads are leases. The operator, 2026-10-15: "why would weights or kv be outside of the memory pinned
 pool? being outside of it means that they cannot be zero copy passed to peers. ... pipeline parallelism, context
 parallelism, and megatron column parallelism are all required. ... you can't defend against this; it's *your code*
@@ -322,15 +322,15 @@ you're pretending you need to defend against; you can write it right all along."
 Porting:
 
 - An NCCL program takes its collectives' buffers from `ncclMemAlloc` (NCCL's allocator for the buffers it registers), and
-  its node's bridge configuration's window holds them.
+  its node's bridge configuration's region holds them.
 - A NumPy program takes them from `mesh_mpi.empty(shape, dtype)`, the role mpi4py's `MPI.Alloc_mem` plays; `mesh_mpi`'s
   own temporaries are such arrays.
 - Python's lease is `mesh.lease(nbytes)`: a writable buffer for `numpy.frombuffer` or `torch.frombuffer`, returned to
-  the window when it and everything over it are gone.
+  the region when it and everything over it are gone.
 - torch-mesh's own CPU staging and temporaries are leases ([torch-mesh](torch-mesh/README.md)).
 - `ncclMeshMemBuffer(ptr, &buffer, &offset)` is the Metal buffer over the whole lease holding `ptr` (any byte of it)
   and ptr's offset in it, made once and released by `ncclMemFree`: the buffer a tensor allocator makes MPS tensors over
-  (torch-mesh's window tensors).
+  (torch-mesh's region tensors).
 - A Metal-path collective whose send buffer is a lease's Metal buffer reads it in place where its program allows: a
   SEND of a range no step of the rank wrote reads the send buffer, the first combine of such a range writes send op
   piece (`combine3_*`), the result's ranges no step writes are copied from it after the publications, and no staging
@@ -348,7 +348,7 @@ Porting:
 - The host path copies every operand through its streams' rings, a lease or not; `ncclMeshMemUse(ptr, bytes, event,
   value, write)` declares the caller's GPU work on a lease (an `MTLSharedEvent` and the value it reaches), which a
   host-path group reading or writing that lease waits for (until the GPU's work reaches the value). `ncclCommRegister`
-  refuses a buffer outside the window.
+  refuses a buffer outside the region.
 
 ## Routes between unlinked ranks
 
@@ -400,7 +400,7 @@ still running (a non-blocking one's) ends as a value, its host-path groups retur
 end at their next look at its stop word, and every later group on it is refused (`ncclInvalidUsage`, "revoked") until
 `ncclCommDestroy` gives its streams back.
 
-A communicator takes no bytes of its node's window: its rings are its streams', the bridge's (`mesh.h`
+A communicator takes no bytes of its node's region: its rings are its streams', the bridge's (`mesh.h`
 `struct mesh_stream`). The process holds one of its bridge's client slots (`mesh.h` `MESH_CLIENTS`) whatever its
 communicators; each communicator of two ranks or more holds a stream toward each member's node it is joined to from
 its init to its destruction, one communicator a stream (each channel's head credit sizes the stream's ring for that

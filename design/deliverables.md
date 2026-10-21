@@ -331,7 +331,7 @@ record's, its last sentence the restored surfaces' names.
 
 **L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. A *partial tensor* (Definition) has combine `+` and the exactness of I23; another associative combine is movement plus a supplied function and carries no claim beyond associativity. Ref: `MPI_Op`; Blelloch. Check: no special case for `+` in the movement. Restored surfaces: Swift `reduce(using:)` (the combine's calls placed by the compiled reduce's REDUCE steps); Python `op=` (`SUM`, `MAX`, `MIN` and `PARTIALS` go to libnccl-mesh; any supplied kernel declaring `combine` otherwise).
 
-**L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5. Restored surfaces: Swift's sections and leases; Python storage freed with its last view (a window lease returned with it, `mesh.lease`).
+**L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5. Restored surfaces: Swift's sections and leases; Python storage freed with its last view (a region lease returned with it, `mesh.lease`).
 
 **L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Swift `Mesh.syncOnRemoteFill`, `examples/sync-on-remote-fill.swift`; Python `collective.sync_on_remote_fill` (bounded by the program's timeout), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
 

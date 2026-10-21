@@ -11,7 +11,7 @@
 # A definition this script writes never changes with what it runs: a loaded agent is left running (bin/mesh-agent.sh).  Each document's path is recorded
 # beside its canonical form, so the convergence and the keeper keep the node's own.  The bridge's definition names its
 # program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename, and the
-# bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its window kept (design/transport.md section 2).  The install records what it installed
+# bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its region kept (design/transport.md section 2).  The install records what it installed
 # (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes) and the inputs it converged to.
 # Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]  (~/mesh)
 set -u
@@ -72,7 +72,7 @@ before=$(sed -n 's/^images=//p' "$state/facts/io.mesh.bridge" 2>/dev/null)
 [ -z "$renew" ] || { cp "$source/rdma/mesh-flow" "$source/rdma/mesh-flow.renew" && mv -f "$source/rdma/mesh-flow.renew" "$source/rdma/mesh-flow"; } || exit 1
 cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- the node's bridge (bin/mesh-user.sh): its heartbeat (rdma/mesh-heartbeat), which opens and closes the bridge; a new binary or configuration is installed by rename and the heartbeat's SIGHUP restarts both on them, the window kept; SIGUSR1 releases the bridge and its window, SIGTERM releases them and ends the heartbeat (design/transport.md section 2) -->
+<!-- the node's bridge (bin/mesh-user.sh): its heartbeat (rdma/mesh-heartbeat), which opens and closes the bridge; a new binary or configuration is installed by rename and the heartbeat's SIGHUP restarts both on them, the region kept; SIGUSR1 releases the bridge and its region, SIGTERM releases them and ends the heartbeat (design/transport.md section 2) -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
 <key>ProgramArguments</key><array><string>$source/rdma/mesh-heartbeat</string><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string><key>AbandonProcessGroup</key><true/>
@@ -83,7 +83,7 @@ out=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { print
 [ -z "$out" ] || printf '%s\n' "$out"
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
   || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
-       echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the window kept"; }
+       echo "io.mesh.bridge: its new binaries or configuration are installed; its heartbeat restarts the bridge on them (SIGHUP), the region kept"; }
 printf 'revision=%s\nimages=%s\n' "$(git -C "$source" rev-parse HEAD 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
 if [ -f "$support/io.mesh.converge/configuration.plist" ]; then
   cat > "$agents/io.mesh.converge.plist.new" <<PL

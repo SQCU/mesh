@@ -17,18 +17,18 @@
 #define QD 4095
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
-   virtual-address boundary.  The window is mapped at a bank-aligned base and registered in extents of
-   MESH_REGION bytes, which divides the bank: every extent lies inside one bank, however many banks the
-   window spans.  1 GiB is the registration the provider takes. */
+   virtual-address boundary.  The region is mapped at a bank-aligned base and registered in extents of
+   MESH_EXTENT bytes, which divides the bank: every extent lies inside one bank, however many banks the
+   region spans.  1 GiB is the registration the provider takes. */
 #define MESH_BANK ((size_t)1<<32)
-#define MESH_REGION ((size_t)1<<30)
+#define MESH_EXTENT ((size_t)1<<30)
 struct wire_mapping { char *data; size_t length; };
-/* design/transport.md: a port's device: its context, protection domain and the whole window's `extents`
+/* design/transport.md: a port's device: its context, protection domain and the whole region's `extents`
    registered on it (design/transport.md), the queue pairs it holds against those it can use (`max_pairs`:
    its max_qp less one, design/transport.md's "max_qp: 11 (10 usable)") */
 struct mesh_device {
   char name[32];
-  struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
+  struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **extent_mrs;
   uint32_t extents,frame_capacity,pairs,max_pairs;
   char *wire;
   struct ibv_port_attr port;
@@ -48,14 +48,13 @@ static __attribute__((unused)) int device_gid(struct mesh_device *device){
 }
 /* design/transport.md */
 /* design/transport.md */
-/* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, which is a
-   byte offset into the registered window because the window begins at data_off; a span never crosses
-   a block, so it never crosses an extent. */
+/* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, the region's registered
+   part, which begins at data_off; a span never crosses a block, so it never crosses an extent. */
 static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t payload,uint64_t offset,uint64_t remaining){
   uint64_t capacity=payload-offset%payload;
   return (struct ibv_sge){.addr=(uintptr_t)device->wire+offset,
     .length=(uint32_t)(remaining<capacity?remaining:capacity),
-    .lkey=device->regions[offset/MESH_REGION]->lkey};
+    .lkey=device->extent_mrs[offset/MESH_EXTENT]->lkey};
 }
 /* design/algorithm-sources.md#programcopy */
 /* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
@@ -107,10 +106,10 @@ static __attribute__((unused)) void die(const char*m){ say("%s\n",m); exit(1); }
 /* design/algorithm-sources.md#programcopy */
 /* design/transport.md */
 /* design/transport.md: the port's device opened (by its name, the device list read again) and its port
-   active, its protection domain, the whole window registered on it and its capacities read once a context, before any
+   active, its protection domain, the whole region registered on it and its capacities read once a context, before any
    queue pair exists (design/transport.md), on the port's own queue (design/transport.md).  0, or the
    errno (ENETDOWN: the port is not active; ENODEV: no such device now).  A registration the device refuses sets
-   *refused to its code (EFBIG: the window's extents past the device's max_mr; else ibv_reg_mr's errno), logged with
+   *refused to its code (EFBIG: the region's extents past the device's max_mr; else ibv_reg_mr's errno), logged with
    the extent, and keeps the device and the extents it registered, so its next turn registers the rest
    (design/transport.md). */
 static __attribute__((unused)) int device_up(struct mesh_device *device,struct wire_mapping *wire,int *refused){
@@ -127,27 +126,27 @@ static __attribute__((unused)) int device_up(struct mesh_device *device,struct w
   struct ibv_device_attr capabilities;
   if(ibv_query_device(device->context,&capabilities))return errno?errno:EIO;
   if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return errno?errno:EIO;
-  const uint32_t extents=(uint32_t)((wire->length+MESH_REGION-1)/MESH_REGION);
+  const uint32_t extents=(uint32_t)((wire->length+MESH_EXTENT-1)/MESH_EXTENT);
   if((uint64_t)extents>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:0)){
-    say("%s: the window of %zu bytes is %u extents of %zu bytes, past the device's max_mr %d: refused\n",device->name,
-      wire->length,extents,MESH_REGION,capabilities.max_mr);
+    say("%s: the region of %zu bytes is %u extents of %zu bytes, past the device's max_mr %d: refused\n",device->name,
+      wire->length,extents,MESH_EXTENT,capabilities.max_mr);
     *refused=EFBIG;return EFBIG;
   }
-  if(!device->regions && !(device->regions=calloc(extents,sizeof *device->regions)))return ENOMEM;
+  if(!device->extent_mrs && !(device->extent_mrs=calloc(extents,sizeof *device->extent_mrs)))return ENOMEM;
   device->extents=extents;
   const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-  for(size_t e=0,first=0;e<extents;e++,first+=MESH_REGION){
-    const size_t bytes=wire->length-first<MESH_REGION?wire->length-first:MESH_REGION;
-    if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
+  for(size_t e=0,first=0;e<extents;e++,first+=MESH_EXTENT){
+    const size_t bytes=wire->length-first<MESH_EXTENT?wire->length-first:MESH_EXTENT;
+    if(!device->extent_mrs[e] && !(device->extent_mrs[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
       const int error=errno?errno:EIO;
       uint32_t held=0;
-      for(uint32_t k=0;k<extents;k++)held+=device->regions[k]!=NULL;
-      say("%s: extent %zu of %u (%zu bytes at %zu) refused: %s; %u of the window's extents registered, max_mr %d\n",
+      for(uint32_t k=0;k<extents;k++)held+=device->extent_mrs[k]!=NULL;
+      say("%s: extent %zu of %u (%zu bytes at %zu) refused: %s; %u of the region's extents registered, max_mr %d\n",
         device->name,e,extents,bytes,first,strerror(error),held,capabilities.max_mr);
       *refused=error;return error;
     }
   }
-  say("%s: window of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
+  say("%s: region of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
     (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
   device->wire=wire->data;device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
