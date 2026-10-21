@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch_mesh
+from torch_mesh import _stream
 
 import chain
 
@@ -69,9 +70,11 @@ def main():
         if rank == 0:
             e[:count].copy_(torch.from_numpy(np.array(inputs[first:first + count])))
         dist.broadcast(e[:count], src=0)
+        _stream.batch(1)
         for i in range(count):
             step(e[i], p[(i - 1) % chunk], p[i], first + i == 0)
             dist.all_reduce(p[i])
+        _stream.batch(-1)
         if rank == 0:
             outputs[first:first + count] = torch.tanh(p[:count]).cpu().numpy()
     torch.mps.synchronize()
@@ -80,8 +83,10 @@ def main():
     dist.barrier()
     torch.mps.synchronize()
     began = time.perf_counter()
+    _stream.batch(1)
     for t in range(steps):
         dist.all_reduce(p[t % chunk])
+    _stream.batch(-1)
     torch.mps.synchronize()
     crossing = time.perf_counter() - began
     summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, seconds=seconds,

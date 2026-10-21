@@ -85,7 +85,9 @@ has a limit, the patience, so a stuck kernel ends instead of hanging the GPU.
 The kernel does three things. First, each worker writes its slice of x = e_t + tanh(z), where z is the last step's sum.
 Second, the workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the
 rank's part of z from y and its rows of B. The all-reduce then adds the parts on the same stream, and the next step's
-kernel starts once that sum has landed.
+kernel starts once that sum has landed. A chunk's steps run inside `_stream.batch`, the region torch-mesh's compiler
+puts around a compiled graph. There, a step's all-reduce joins the open command buffer instead of paying for a commit
+of its own. The host waits for nothing until the chunk ends, which is that region's one rule.
 
 The number of workers is the largest power of two that fits the GPU's cores and divides the widths. A product is split
 along K where a worker has fewer items than simdgroups. How many rows a simdgroup takes at once is chosen by timing each
