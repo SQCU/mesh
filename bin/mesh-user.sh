@@ -34,6 +34,7 @@ sum=$(cat "$source"/rdma/libnccl-mesh.dylib "$source"/rdma/torch-mesh/setup.py "
 if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   build=$(mktemp -d) || exit 1
   cp -R "$source/rdma/torch-mesh/." "$build/"
+  rm -rf "$build/build" "$build"/torch_mesh/*.so
   MESH_RDMA="$source/rdma" "$uv" pip install -q --python "$venv/bin/python" --no-build-isolation --reinstall-package torch-mesh "$build"
   status=$?; rm -rf "$build"
   [ "$status" = 0 ] || exit "$status"
