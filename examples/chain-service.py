@@ -7,12 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_mesh
 
-
-# docs/writing-a-service.md#the-function
-def step(x, a, b, z):
-    torch.matmul(torch.tanh(x @ a.T), b, out=z)
-    dist.all_reduce(z)
-    return torch.tanh(z)
+import chain
 
 
 # docs/writing-a-service.md#the-function
@@ -57,34 +52,42 @@ def main():
         raise ValueError('The configuration gives one part a rank')
     rows, width, steps, chunk = (config[key] for key in ('rows', 'width', 'steps', 'chunk'))
     a, b, full = shares(config, rank, size)
+    step = chain.Step(a, b, rows, config['threads'], config['patience'], config['trials'])
+    del a, b
     e = torch_mesh.empty(chunk, rows, width, dtype=torch.half)
-    z = torch_mesh.empty(rows, width, dtype=torch.half)
+    p = torch_mesh.empty(chunk, rows, width, dtype=torch.half)
     if rank == 0:
         inputs = np.load(config['input'], mmap_mode='r')
         if inputs.shape != (steps, rows, width):
             raise ValueError('The input is [steps, rows, width]')
         outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width))
-        held = torch.empty(chunk, rows, width, dtype=torch.half, device='mps')
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    previous = None
     for first in range(0, steps, chunk):
         count = min(chunk, steps - first)
         if rank == 0:
             e[:count].copy_(torch.from_numpy(np.array(inputs[first:first + count])))
         dist.broadcast(e[:count], src=0)
         for i in range(count):
-            previous = step(e[i] if previous is None else e[i] + previous, a, b, z)
-            if rank == 0:
-                held[i].copy_(previous)
+            step(e[i], p[(i - 1) % chunk], p[i], first + i == 0)
+            dist.all_reduce(p[i])
         if rank == 0:
-            outputs[first:first + count] = held[:count].cpu().numpy()
+            outputs[first:first + count] = torch.tanh(p[:count]).cpu().numpy()
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
+    step.check()
+    dist.barrier()
+    torch.mps.synchronize()
+    began = time.perf_counter()
+    for t in range(steps):
+        dist.all_reduce(p[t % chunk])
+    torch.mps.synchronize()
+    crossing = time.perf_counter() - began
     summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, seconds=seconds,
                    aggregate_rows_per_second=steps * rows / seconds, per_stream_steps_per_second=steps / seconds,
-                   step_microseconds=seconds / steps * 1e6)
+                   step_microseconds=seconds / steps * 1e6, crossing_microseconds=crossing / steps * 1e6,
+                   kernel={key: step.args[key] for key in chain.ARGS})
     if rank == 0 and config['check']:
         count = config['check']
         expected = reference(np.asarray(inputs[:count], np.float64), *(w.astype(np.float64) for w in full), count)

@@ -1,6 +1,8 @@
 # Writing a service on the mesh
 
-The mesh is not a language model server. Its bridge moves bytes between Macs, and it does not care what the bytes mean.
+The mesh is not a language model server. Its library is for any linear algebra, or any SIMD-style function you give
+it. Transformers are one user, and they must be fast on it because all code must be fast on it. Its bridge moves
+bytes between Macs, and it does not care what the bytes mean.
 This page shows a program that uses the mesh and has nothing to do with language. The program is
 [examples/chain-service.py](../examples/chain-service.py). It names three kinds of program. For each one, it says what
 the program does and what it never does.
@@ -72,10 +74,29 @@ copies one chunk of outputs to the host at the end of the chunk, not once a step
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
 place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
 
+## The step kernel
+
+Each step on a rank is one kernel, run through torch-mesh's own calls. `streamed.instance` names an instance of the
+template in [examples/chain.metal](../examples/chain.metal), `_stream.pipeline` compiles it, and `_stream.encode` puts
+it on torch's stream, so no host waits for it ([examples/chain.py](../examples/chain.py)). The rank's GPU cores run it
+as G workers that are all on the GPU at once. They hand work to each other through stamp words in memory. Every wait
+has a limit, the patience, so a stuck kernel ends instead of hanging the GPU.
+
+The kernel does three things. First, each worker writes its slice of x = e_t + tanh(z), where z is the last step's sum.
+Second, the workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the
+rank's part of z from y and its rows of B. The all-reduce then adds the parts on the same stream, and the next step's
+kernel starts once that sum has landed.
+
+The number of workers is the largest power of two that fits the GPU's cores and divides the widths. A product is split
+along K where a worker has fewer items than simdgroups. How many rows a simdgroup takes at once is chosen by timing each
+choice on the rank itself, at the start. Each run prints two times a step: the whole step, and the all-reduce alone. The
+gap between them is what the kernel and its hand-offs cost.
+
 ## The configuration
 
 The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the rows,
-the width, the steps, the chunk and the parts. It also says how many first steps to check. A part is how many rows of A and B a rank holds, in rank order. The service never
+the width, the steps, the chunk and the parts. It also says how many first steps to check, and gives the kernel's
+threads, its patience and how many steps each timing takes. A part is how many rows of A and B a rank holds, in rank order. The service never
 guesses a part. A balancer that measures the calls writes the parts. Both Macs are always loaded fully.
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
 sample.
