@@ -16,5 +16,8 @@ A document has two keys, each required:
   node, so a pass asks the upstream every period.
 
 `five-minutes.toml` is written for the headless nodes of the E2B pair and the Studios; its `purpose` states the
-reasoning. A development machine whose checkouts carry work in progress needs none: its checkouts are held anyway
-(`mesh-converge.sh held`: changes to tracked files, commits its upstream lacks, or no upstream).
+reasoning. `development-node.toml` is for a node that is also where its checkouts are edited: a checkout carrying work
+in progress is held (`mesh-converge.sh held`: changes to tracked files, commits its upstream lacks, or no upstream), and
+once it is clean and level with its upstream a push is built and installed there as on any node. Without a document, a
+node's images change only when someone runs `mesh-user.sh` or `make install`, which is how a node's installed
+libraries came to lag its checkout by days.
