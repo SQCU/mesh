@@ -179,9 +179,12 @@ __attribute__((always_inline)) static inline void mesh_gathered_places(uint out,
     }
 }
 
-__attribute__((always_inline)) static inline void mesh_gathered_store(device half *O, uint4 dst, float4 scale, uint columns, float4 value) {
-    if (columns == 0) { *(device half4 *)(O + dst.x) = half4(value); return; }
-    for (uint i = 0; i < 4; ++i) O[dst[i]] = half(scale[i] * value[i]);
+// O4: O's four-wide pointer, its address space and coherence O's (a resident run's, metal-microbench docs/kernels.md Any
+// program).
+template <typename O4 = device half4 *, typename O>
+__attribute__((always_inline)) static inline void mesh_gathered_store(O out, uint4 dst, float4 scale, uint columns, float4 value) {
+    if (columns == 0) { *(O4)(out + dst.x) = half4(value); return; }
+    for (uint i = 0; i < 4; ++i) out[dst[i]] = half(scale[i] * value[i]);
 }
 
 // Single, a threadgroup of D / 4 threads a row (thread d its float4 d): a row's J parts (P, mesh_split_parts) merged into

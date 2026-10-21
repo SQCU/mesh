@@ -983,7 +983,12 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
    them with its kernels and keeps no copy.  mesh_step_enter's and mesh_step_await's results are the calling thread's
    (the gate a failed wait closes may close while a threadgroup runs): every thread of the threadgroup calls them, skips
    only stores by them, and decides a release (mesh_step_release holds a barrier) by one thread's reading shared through
-   threadgroup memory. */
+   threadgroup memory, which mesh_step_enter_group (with `stop`, the stop word too: mesh_step_stopped) and
+   mesh_step_await_group give: thread 0's reading in tg[0], every thread past one barrier with it.  Every read of the gate
+   is at system coherence, so a kernel whose threadgroups run on (a caller's resident run) reads another threadgroup's
+   failure.  mesh_step_fail is a failed wait of the caller's own (its bound `polls` reached: cause mesh_step_caller,
+   nccl-mesh-metal.h METAL_CALLER) recorded on a crossing's failure words and its gate closed, as mesh_step_check records
+   the library's; mesh_step_look the loads such a wait makes between its reads of the stop word and the gate. */
 const char* ncclMeshMetalSteps(void);
 /* The Metal 4 form's argument records this process has encoded on the default device (`issued`, counting from its first
    program) and how many its ring holds unread by the GPU at most (`capacity`): an encode past that refuses with
