@@ -735,7 +735,7 @@ static std::string fused_steps() { return ncclMeshMetalSteps(); }
 // and its landing's (ncclMeshFused, six GPU addresses each), the rest of its group encoded on torch's stream as ever.  The
 // operand is a lease's (torch_mesh.empty): the landing's binding names its buffer, which the residency set then holds,
 // and a lease's buffer is the library's for the process's life.  Nothing is committed here: the publication is the
-// caller's kernel, encoded after this returns (fused_published).
+// caller's kernel, encoded after this returns, and the stream's commit rule and host waits commit it.
 static std::pair<std::vector<uint64_t>, std::vector<uint64_t>> fused_all_reduce(const at::Tensor &operand, int64_t comm, int64_t polls) {
   TORCH_CHECK(operand.is_mps() && operand.is_contiguous() && operand.scalar_type() == at::kHalf && address(operand),
               "fused all_reduce: the operand is a contiguous float16 MPS region tensor (torch_mesh.empty), the call's send and receive buffer");
@@ -755,13 +755,6 @@ static std::pair<std::vector<uint64_t>, std::vector<uint64_t>> fused_all_reduce(
   });
   checked(result);
   return {std::vector<uint64_t>(steps.publish, steps.publish + 6), std::vector<uint64_t>(steps.land, steps.land + 6)};
-}
-
-// A fused crossing's publishing kernel just encoded on torch's stream (fused.encode): work its peer waits on, under the
-// stream's one rule for a publication (publishing), as a group that published is.
-static void fused_published() {
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  dispatch_sync(stream->queue(), ^{ publishing(stream); });
 }
 
 
@@ -790,5 +783,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("records", &records);
   module.def("fused_steps", &fused_steps);
   module.def("fused_all_reduce", &fused_all_reduce);
-  module.def("fused_published", &fused_published);
 }

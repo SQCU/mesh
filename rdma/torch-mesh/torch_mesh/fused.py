@@ -12,8 +12,7 @@ mesh_step_read to land) on the bindings all_reduce returns, which encode passes 
                                              is not fusable raises, and nothing runs a slower form in its place
   encode(handle, buffers, constants, at, gx, gy, threads, land=None, publish=None)
                                              _stream.encode's dispatch with `land`'s landing bindings and `publish`'s
-                                             publication bindings after the constants; a dispatch that publishes is
-                                             work the peer waits on, committed by the stream's rule for a publication
+                                             publication bindings after the constants
 
 The kernel's constant block at `at` is its own words padded to an even count, then the landing's mesh_step_binding,
 then the publication's (all zero where encode is given none), each address two words, its low word first:
@@ -22,7 +21,13 @@ publishing kernel: a step kernel that lands crossing t - 1 and publishes crossin
 call, with crossing t - 1's Crossing as `land` and crossing t's as `publish`.  The operand never holds the sum: the
 landing kernel reads its own part (the landing's d + dst) and the peer's (mesh_step_read at its s) and keeps the sum
 where it needs it.  polls bounds each landing's wait in loads (0: NCCL_MESH_POLLS), the caller's from its plan
-(rdma/NCCL.md "Bounded waits")."""
+(rdma/NCCL.md "Bounded waits").
+
+Nothing here commits torch's command buffer: the stream's commit rule (keeping the GPU fed with the fewest command
+buffers) and the host waits commit it, as they commit every kernel.  A host that blocks while its publication sits in
+an open buffer stalls its peer; the program's order is its own to keep, and the peer's bounded wait ends such a stall
+as a value.  The operator, 2026-10-21: "we are here to REMOVE fences, REMOVE guards, REMOVE waits. it is the
+responsibility of DATA PROCESSING FUNCTIONS to not overwrite each other's buffers"."""
 from collections import namedtuple
 from pathlib import Path
 
@@ -55,9 +60,7 @@ def _words(addresses):
 
 def encode(handle, buffers, constants, at, gx, gy, threads, land=None, publish=None):
     """_stream.encode of kernel `handle`, its constants followed by `land`'s landing bindings and `publish`'s
-    publication bindings (module docstring); where it publishes, the publication is committed by the stream's rule."""
+    publication bindings (module docstring)."""
     words = list(constants) + [0] * (len(constants) % 2)
     words += _words(land.land if land else _NONE) + _words(publish.publish if publish else _NONE)
     _stream.encode(handle, buffers, words, at, gx, gy, threads)
-    if publish:
-        _stream.fused_published()
