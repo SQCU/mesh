@@ -64,17 +64,19 @@ def main():
         outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width))
     torch.mps.synchronize()
     dist.barrier()
-    began = time.perf_counter()
+    began, issuing = time.perf_counter(), 0.0
     for first in range(0, steps, chunk):
         count = min(chunk, steps - first)
         if rank == 0:
             e[:count].copy_(torch.from_numpy(np.array(inputs[first:first + count])))
         dist.broadcast(e[:count], src=0)
+        issued = time.perf_counter()
         _stream.batch(1)
         for i in range(count):
             step(e[i], p[(i - 1) % chunk], p[i], first + i == 0)
             dist.all_reduce(p[i])
         _stream.batch(-1)
+        issuing += time.perf_counter() - issued
         if rank == 0:
             outputs[first:first + count] = torch.tanh(p[:count]).cpu().numpy()
     torch.mps.synchronize()
@@ -91,7 +93,8 @@ def main():
     crossing = time.perf_counter() - began
     summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, seconds=seconds,
                    aggregate_rows_per_second=steps * rows / seconds, per_stream_steps_per_second=steps / seconds,
-                   step_microseconds=seconds / steps * 1e6, crossing_microseconds=crossing / steps * 1e6,
+                   step_microseconds=seconds / steps * 1e6, issue_microseconds=issuing / steps * 1e6,
+                   crossing_microseconds=crossing / steps * 1e6,
                    kernel={key: step.args[key] for key in chain.ARGS})
     if rank == 0 and config['check']:
         count = config['check']
