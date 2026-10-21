@@ -37,8 +37,8 @@
    never a value a consumer reads as a signal, design/rubrics.md M4), and it reads the failure words, claims and fences
    only where it failed.  The host reads the record after the command buffer and fails the group as a value
    (nccl-mesh.c comm_failure); no kernel halts on it (METAL_COUNTED_ARRIVED reads it to report its call's outcome).  mesh_step_await: a landing awaited by thread 0 and checked, then the
-   threadgroup past a device barrier, its payload then read with mesh_payload (volatile coherent(system): the waiting
-   thread's loop exit depends on the landed word, and every other thread reads after the barrier); every threadgroup of
+   threadgroup past a device barrier and one system-scope fence, its payload then read with mesh_payload (a running
+   kernel sees the NIC's stores late without a fence: mesh.metal mesh_wait_bounded); every threadgroup of
    a dispatch may await one landing, each its own bounded wait, calling it from every thread alike; its result is true,
    kept as mesh_step_enter's.  mesh_step_release: a piece the threadgroup stored into its run's slots, then, after a
    device barrier, thread 0's one system-scope fence (mesh.metal mesh_publish: every thread's stores of the piece
@@ -67,7 +67,8 @@ static NSString *const STEPS =
   "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
   "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *ring, device uchar *vb, uint i) { "
   "if (i == 0) mesh_step_check(p, mesh_step_wait(p, words + p.aux, vb), ring, vb); "
-  "threadgroup_barrier(mem_flags::mem_device); return true; }\n"
+  "threadgroup_barrier(mem_flags::mem_device); "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); return true; }\n"
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0 && p.count) { volatile coherent(system) device ulong *w = (volatile coherent(system) device ulong *)(words + p.aux); "

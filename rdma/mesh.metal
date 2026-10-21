@@ -29,20 +29,22 @@ __attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coh
     return mesh_wait(completion, 1 + cycle);
 }
 
-// The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load): each wait at
-// most nccl.h NCCL_MESH_POLLS loads, which hold the GPU at most MESH_PLATFORM_NS a wait (design/transport.md; a load's
-// period the node GPU's, rdma/NCCL.md "Bounded waits"). The bound is a count of polls and nothing else: it exists
+// The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load), each after a
+// system-scope fence: without it a running kernel sees a store of the NIC's or the host's late, on the M4 Pro about
+// 3.2 ms in nearly every wait and on the M5 Max 2.3 ms at the 99th percentile, while the fence costs at most 0.13 us a
+// wait (metal-microbench tools/poll_probe.m, both nodes, 2026-10-21: one kernel spinning across rounds, unfenced 3198 us
+// median on the Mini and 0.50 us with a 2308 us p99 on the M5, fenced 0.58 us on both; a poll 0.23-0.26 us either way).
+// Each wait makes at most nccl.h NCCL_MESH_POLLS loads, about 1.1 s at that period on both nodes: the bound exists
 // because a GPU spin with no end halts the node (the Mini's watchdog reset, 2026-10-21), and the caller tells a word
-// short of `target` (the bound reached) from a landing. Each poll is one volatile coherent(system) load, which reads
-// the word where the NIC and the host store it, so no fence stands between two polls. The landed payload is read
-// through mesh_payload (volatile coherent(system)) after the loop that saw the word: in the waiting thread the loop's
-// exit depends on the word's value, and the other threads of its group read after the barrier that follows the wait
-// (nccl-mesh-metal.m mesh_step_await).
+// short of `target` (the bound reached) from a landing. A reader orders its later loads after the observation with a
+// system-scope fence of its own, after the barrier that gives the observation to its threads (nccl-mesh-metal.m
+// mesh_step_await).
 template <typename W>
 __attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
     W seen;
     uint k = 0u;
     do {
+        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
         seen = *word;
     } while (seen < target && ++k < polls);
     return seen;
