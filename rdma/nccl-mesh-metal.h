@@ -154,8 +154,9 @@ void *metal_contents(void *buffer);
    positions, every metal_depend of it holds (track `other` has consumed `count`), and, a consumption, the landing its
    steps await came (or failed: the link's ~0, a revoke, its bound); a consumption's end raises its track's count to
    `position` + 1.  Each cursor runs its items in order, and neither waits on the other but by `need`.  metal_tracks:
-   the tracks recorded since the last, track t's count from consumed[t], encoded (one dispatch) or run; its result
-   (struct metal_result).  The deferred steps (metal_send_deferred, metal_land_deferred) are never recorded. */
+   the tracks recorded since the last, track t's count from consumed[t], encoded (one dispatch) or run, and nothing
+   where no item has a step; its result (struct metal_result).  The deferred steps (metal_send_deferred,
+   metal_land_deferred) are never recorded, so a fused crossing's tracks encode nothing. */
 #define METAL_NONE UINT32_MAX
 enum { METAL_PUBLISH, METAL_CONSUME };
 struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
