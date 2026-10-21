@@ -11,8 +11,8 @@
    revoke) recorded in the failure words [0], [3], [4] and the gate [2], and every later step gated on them doing
    nothing; a step naming no words is gated on the program's (metal_gate), as nccl-mesh-metal.m dispatch_as binds them.
    A buffer is a host address (metal_wrap returns its address; metal_contents it); what metal_scratch, metal_shared and
-   metal_event made is counted and freed with its last release.  The Metal 4 form's own steps (a caller's kernel running
-   a step: metal_send_deferred, metal_land_deferred) are refused as the classic form refuses them.  Built as
+   metal_event made is counted and freed with its last release.  A step run by a caller's kernel (metal_send_deferred,
+   metal_land_deferred: a fused crossing's, on either form) is refused, since no kernel of a caller's runs here.  Built as
    .build/host/libnccl-mesh.dylib (make host), the GPU library's install name, beside .build/host/libmesh.dylib (the
    loop client's libmesh). */
 #include "mesh-collective.h"
@@ -116,8 +116,8 @@ void *metal_retain(void *object) { hold(object); return object; }
 /* nccl-mesh-metal.m bound_of: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls, const char **message) {
-  (void)command_buffer; (void)encoder;
+struct metal_program *metal_begin(void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message) {
+  (void)command_buffer; (void)encoder; (void)residency;
   struct metal_program *program = calloc(1, sizeof *program);
   if (!program) { *message = "out of memory"; return NULL; }
   program->violation = violation;
@@ -128,7 +128,7 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *vio
 /* no Metal 4 on the host: the walk runs its classic steps here */
 struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message) {
   (void)table; (void)residency;
-  return metal_begin(NULL, encoder, violation, polls, message);
+  return metal_begin(NULL, encoder, NULL, violation, polls, message);
 }
 int metal_metal4(const struct metal_program *program) { (void)program; return 0; }
 void metal_resident(struct metal_program *program, void *buffer) { (void)program; (void)buffer; }
@@ -387,13 +387,13 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
 
 struct metal_result metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
   (void)program; (void)bytes; (void)r; (void)bound;
-  return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
+  return (struct metal_result){EINVAL, "a step run by its caller's kernel: no kernel of a caller's runs on the host executor"};
 }
 
 struct metal_result metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
                                         uint64_t bound[6]) {
   (void)program; (void)op; (void)dst; (void)dst_offset; (void)n; (void)w; (void)bound;
-  return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
+  return (struct metal_result){EINVAL, "a step run by its caller's kernel: no kernel of a caller's runs on the host executor"};
 }
 
 struct metal_result metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {

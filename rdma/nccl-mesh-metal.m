@@ -20,11 +20,13 @@
 /* a step of a compiled program, the library's one implementation of it (metal-microbench docs/acceptance-20261014.md
    A39), after rdma/mesh.metal: libnccl-mesh's kernels call these, and so does a caller's kernel that runs a step its
    group handed it (ncclMeshFused: a product's finish that publishes its piece, the kernel after the call that lands its
-   peer's).  mesh_step_enter: in the Metal 4 form a kernel first stores its record's sequence in `progress` (`first` in
-   one thread of the dispatch; every dispatch before it has finished: a barrier stands between each two), whether or not
-   its program has failure words
-   (the classic form's sequence is 0, and it stores none), and, where it has them (p.polls, set wherever they are), goes
-   on only while failure word [2], the gate, holds none.  The gate is the calling thread's reading: a wait's failure
+   peer's), its six bindings one mesh_step_binding where its encoder is classic (setBytes) and its argument table's
+   six where it is Metal 4.  mesh_step_enter: a kernel whose record is the argument ring's (every Metal 4 dispatch's,
+   and a deferred step's on either form) first stores the record's sequence in `progress` (`first` in one thread of the
+   dispatch; every dispatch before it has finished: a barrier stands between each two, or a classic encoder's serial
+   order), whether or not its program has failure words (a classic dispatch's record is its setBytes, its sequence 0,
+   and it stores none), and, where it has them (p.polls, set wherever they are), goes on only while failure word [2],
+   the gate, holds none.  The gate is the calling thread's reading: a wait's failure
    closes it once, and may close it while the thread's threadgroup runs (another threadgroup's wait, in its dispatch or
    another), so a threadgroup that decides alike has one thread read it and share it (ENTER_G, GROUP_STOP).
    mesh_step_wait: a wait on its run's last unit's landed word at p.aux for 1 + p.scalar, at most p.polls loads
@@ -52,6 +54,7 @@
 static NSString *const STEPS =
   @"\nusing namespace metal;\n"
   XSTR(ARGS(mesh_args, ulong, uint)) ";\n"
+  "struct mesh_step_binding { device uchar *d; device uchar *s; constant mesh_args *p; device uchar *a; device uchar *v; device ulong *progress; };\n"
   "static inline bool mesh_step_enter(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first) { "
   "if (p.sequence && first) *progress = p.sequence; return !(p.polls && ((volatile device const ulong *)vb)[2]); }\n"
   "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, device uchar *vb) { "
@@ -296,8 +299,9 @@ static NSString *const TRACK_KERNEL =
 
 ARGS(args, uint64_t, uint32_t);
 /* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
-   keeps until the program's end; or the Metal 4 form's caller's encoder, argument table and residency set, the
-   device's argument ring, and whether a buffer was made resident since the set's last commit; and either form's
+   keeps until the program's end; or the Metal 4 form's caller's encoder and argument table; the caller's residency set
+   and the device's argument ring (the Metal 4 form's, and a fused classic program's: metal_begin's residency), and
+   whether a buffer was made resident since the set's last commit; and either form's
    failure words, those of the communicator whose group it encodes (metal_gate; none: nothing recorded or halted), and
    its waits' bound (`polls`, never 0); its device's kernels (`kernels`, found at its first step: program_kernels) */
 struct ring;
@@ -439,7 +443,9 @@ void *metal_retain(void *object) { return [(id)object retain]; }
    (design/transport.md) */
 static uint32_t bound_of(uint32_t polls) { return polls && polls < NCCL_MESH_POLLS ? polls : NCCL_MESH_POLLS; }
 
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls, const char **message) {
+struct metal_program *metal_begin(void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message) {
+  struct ring *ring = residency ? ring_of(((id<MTLResidencySet>)residency).device, message) : NULL;
+  if (residency && !ring) return NULL;
   struct metal_program *program = calloc(1, sizeof *program);
   if (!program) { *message = "out of memory"; return NULL; }
   program->buffer = [(id<MTLCommandBuffer>)command_buffer retain];
@@ -447,6 +453,15 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *vio
   program->kept = [NSMutableArray new];
   program->violation = [(id<MTLBuffer>)violation retain];
   program->polls = bound_of(polls);
+  /* a fused group's: the ring its deferred steps' records are written to, its progress word and the failure words,
+     which the caller's kernels reach by address, made resident (record4 adds each record's own buffers) */
+  if (residency) {
+    program->residency = [(id<MTLResidencySet>)residency retain];
+    program->ring = ring;
+    metal_resident(program, ring->records);
+    metal_resident(program, ring->progress);
+    metal_resident(program, violation);
+  }
   return program;
 }
 
@@ -492,7 +507,8 @@ static void close_encoder(struct metal_program *program) {
   program->encoder = nil;
 }
 
-/* the Metal 4 form's record of a step: its arguments the ring's next record (refused where the GPU has not begun the
+/* a step's record in the device's argument ring (every Metal 4 dispatch's, and a deferred step's on either form): its
+   arguments the ring's next record (refused where the GPU has not begun the
    dispatch that read that record RECORDS dispatches ago: its command buffers not committed, or that far behind), its
    buffers made resident and their addresses in binding order (0 d, 1 s, 2 the record, 3 a, 4 v: the failure words a
    wait names, else the program's (metal_gate), the waits bounded by the program's polls and failures recorded where
@@ -639,14 +655,16 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
   return dispatch(program, kind, dst, w->buffer, w->buffer, w->violation, wait_args(w, dst_offset, n, op), 1);
 }
 
+/* a deferred step's program is one whose records the argument ring holds (metal_begin4, or metal_begin with a residency
+   set) */
 struct metal_result metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
-  if (!program->encoder4) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
+  if (!program->ring) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's, or a classic stream's with its residency set"};
   return record4(program, (id<MTLBuffer>)r->buffer, nil, (id<MTLBuffer>)r->buffer, nil, release_args(r, 0, bytes), bound);
 }
 
 struct metal_result metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
                                         uint64_t bound[6]) {
-  if (!program->encoder4) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's"};
+  if (!program->ring) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's, or a classic stream's with its residency set"};
   return record4(program, (id<MTLBuffer>)dst, (id<MTLBuffer>)w->buffer, (id<MTLBuffer>)w->buffer, (id<MTLBuffer>)w->violation,
                  wait_args(w, dst_offset, n, op), bound);
 }

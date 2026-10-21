@@ -57,8 +57,14 @@ void *metal_retain(void *object);
 #define METAL_BOUND 1
 #define METAL_LOST 2
 #define METAL_REVOKED 4
-/* NULL where it cannot be made, *message then what failed (struct metal_result's message) */
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls, const char **message);
+/* The classic form: the kernels encoded into the caller's id<MTLCommandBuffer>, in its compute encoder (`encoder`, left
+   open) or one made here, each dispatch's arguments its setBytes.  With `residency` (an id<MTLResidencySet>; NULL: none),
+   a fused group's: its deferred steps' records are the device's argument ring's, as the Metal 4 form's are, and the
+   ring and every buffer their bindings name are made resident through it (added, and the set committed, where they
+   were not: nccl.h ncclMeshStream residencySet), since the caller's kernels reach them by address.  NULL where it cannot
+   be made (memory, or that device's kernels or argument ring), *message then what failed (struct metal_result's
+   message) */
+struct metal_program *metal_begin(void *command_buffer, void *encoder, void *residency, void *violation, uint32_t polls, const char **message);
 /* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
    nothing signalled), on pipelines of the residency set's device, every binding through the caller's id<MTL4ArgumentTable>
    (each dispatch's arguments a record of the library's argument ring, never setBytes), each dispatch after the one
@@ -69,7 +75,8 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *vio
    made, *message then what failed. */
 struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls, const char **message);
 int metal_metal4(const struct metal_program *);
-/* A buffer of the program's made resident (the Metal 4 form; the classic form needs none). */
+/* A buffer of the program's made resident through its residency set (the Metal 4 form's, or a classic program's begun with
+   one; a classic program without one needs none, its dispatches binding their buffers). */
 void metal_resident(struct metal_program *, void *buffer);
 /* The program's failure words from here on, `violation` (made resident): those of the communicator whose group is
    encoded next, which gate every dispatch naming none of its own (nccl-mesh.c complete, issue_group, retire), so
@@ -104,10 +111,12 @@ struct metal_result metal_spin(struct metal_program *, const struct metal_wait *
    where it landed, the wait's slot (land) */
 struct metal_result metal_send_small(struct metal_program *, void *src, size_t src_offset, size_t bytes, const struct metal_release *);
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
-/* the same two steps run by the caller's kernel (nccl.h ncclMeshFused, the Metal 4 form): each one's record written as
-   its dispatch's would be and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
-   5 progress), nothing dispatched; the kernel calls metal_steps' functions (the send: its piece stored into
-   d + dst, n bytes, then mesh_step_release on a; the land: mesh_step_await on a with s, then the piece read from s + src) */
+/* the same two steps run by the caller's kernel (nccl.h ncclMeshFused: the Metal 4 form, or a classic program begun with
+   a residency set): each one's record written to the device's argument ring as a Metal 4 dispatch's would be, the
+   buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
+   5 progress), nothing dispatched; EINVAL on a program with no ring; the kernel calls metal_steps' functions (the
+   send: its piece stored into d + dst, n bytes, then mesh_step_release on a; the land: mesh_step_await on a with s,
+   then the piece read from s + src) */
 struct metal_result metal_send_deferred(struct metal_program *, size_t bytes, const struct metal_release *, uint64_t bound[6]);
 struct metal_result metal_land_deferred(struct metal_program *, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *,
                                         uint64_t bound[6]);
@@ -152,7 +161,8 @@ enum { METAL_PUBLISH, METAL_CONSUME };
 struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
 struct metal_result metal_depend(struct metal_program *, uint32_t other, uint64_t count);
 struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
-/* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
+/* the steps' Metal text (after rdma/mesh.metal): the argument record, a deferred step's bindings as one record
+   (mesh_step_binding) and mesh_step_* */
 const char *metal_steps(void);
 void metal_keep(struct metal_program *, void *object);
 void metal_end(struct metal_program *, void *event, uint64_t value);

@@ -103,7 +103,12 @@
    through the caller's argument table (at least 6 buffer bindings; no setBytes, each dispatch's arguments a record of
    the library's ring), on pipelines of the residency set's device, every buffer of the library's it touches added to
    the caller's residency set (committed where one was added); nothing is committed or signalled, and with no workspace
-   its scratch is the communicator's, reused in the encoder's order.
+   its scratch is the communicator's, reused in the encoder's order.  The classic form reads residencySet only for a
+   fused crossing (ncclMeshFusableRooted, below), whose steps the caller's kernels run by their bindings' GPU addresses:
+   an id<MTLResidencySet> of the command buffer's device, to which the library adds every buffer those bindings name
+   (committed where one was added), and which the caller makes resident for the command buffers its kernels are encoded
+   into (its queue's addResidencySet:, or each command buffer's useResidencySet:), since a classic encoder makes resident
+   only the buffers bound to it.
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
@@ -184,7 +189,9 @@ typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
 typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
 /* A fused crossing's two steps, run by the caller's kernels (ncclMeshFusableRooted, below): each one's six bindings' GPU
-   addresses, in the library's binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress). */
+   addresses, in the library's binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel
+   takes them through its argument table, a classic one as one record of its bytes (ncclMeshMetalSteps'
+   mesh_step_binding, the six in this order). */
 typedef struct { uint64_t publish[6], land[6]; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
@@ -946,9 +953,10 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int
 /* The highest ticket through which every issued group is complete (or lost with a failed communicator): its
    workspace may be reused in the stream's order. */
 uint64_t ncclMeshRetired(void);
-/* A crossing whose steps the caller's own kernels run (the Metal 4 form; metal-microbench docs/kernels.md#collectives,
-   Q5P's in-stream form and its one-sided fused crossings, the steps still this library's: docs/acceptance-20261014.md
-   A39, A40).  The Metal 4 form is a stream whose argumentTable is set (Metal path, above).  A fused all-reduce is the
+/* A crossing whose steps the caller's own kernels run (either Metal form: the Metal 4 form, or the classic form with its
+   residencySet, Metal path above; metal-microbench docs/kernels.md#collectives, Q5P's in-stream form and its one-sided
+   fused crossings, and torch-mesh's torch_mesh/fused.py on torch's stream, the steps still this library's:
+   docs/acceptance-20261014.md A39, A40).  A fused all-reduce is the
    in-place call this rank publishes its whole operand in as one small piece and lands its peer's whole operand in as
    one, combined, and nothing else (two ranks, the direct exchange, a sum of float16 within one small slot; its copy of
    the operand, which the fused steps never read, the only scratch).  A fused all-gather is the in-place call (sendbuff
@@ -961,7 +969,10 @@ uint64_t ncclMeshRetired(void);
    a), encoded after the call returns; the kernel after it lands the peer's (mesh_step_enter, mesh_step_await on a with
    s, then the peer's operand read from s + record.src with mesh_step_read and combined with its own; an all-gather's
    peer piece is the one whose place in recvbuff, in rank order, is d + record.dst), and nothing reads the operand's
-   buffer as the sum.  A call that is not fusable on such a stream fails as a value (ncclInvalidUsage).  A publication
+   buffer as the sum.  The call encodes no dispatch of either fused step, so the caller's kernels are ordered by its
+   stream alone: on the classic form, its queue's order (a serial compute encoder's dispatches, its command buffers in
+   commit order).  A call that is not fusable on such a stream fails as a value (ncclInvalidUsage), and one on a classic
+   stream without its residencySet (ncclInvalidArgument).  A publication
    is one threadgroup's release; a landing may be awaited by every threadgroup of the kernel after the call, each its
    own wait bounded as the library's, one failure recorded of them all and every later wait ending at it.
    *publishes and *lands are this rank's steps where an in-place call of `kind` rooted at `root` (an all-reduce's and an
@@ -977,7 +988,8 @@ typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFus
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int* publishes, int* lands);
 /* The Metal text of the steps the library's kernels and a fused crossing's kernels run, after rdma/mesh.metal's: the
-   argument record (struct mesh_args) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_check, mesh_step_await,
+   argument record (struct mesh_args), a fused step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's
+   order, a classic kernel's form of them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_check, mesh_step_await,
    mesh_step_release, mesh_step_store and mesh_step_read (any element type), addressed on a channel's stream class (a run's slots and ready words to
    release, its last unit's landed word to await and its first unit to read); the library's own, so the caller compiles
    them with its kernels and keeps no copy.  mesh_step_enter's and mesh_step_await's results are the calling thread's
@@ -985,8 +997,9 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
    only stores by them, and decides a release (mesh_step_release holds a barrier) by one thread's reading shared through
    threadgroup memory. */
 const char* ncclMeshMetalSteps(void);
-/* The Metal 4 form's argument records this process has encoded on the default device (`issued`, counting from its first
-   program) and how many its ring holds unread by the GPU at most (`capacity`): an encode past that refuses with
+/* The argument records this process has encoded on the default device (the Metal 4 form's dispatches' and either form's
+   fused steps'; `issued`, counting from its first program) and how many its ring holds unread by the GPU at most
+   (`capacity`): an encode past that refuses with
    EOVERFLOW mid-group (a failed group), so a caller that encodes several submissions ahead bounds each submission's records by it (the
    records a step encodes, read across one step's encode). */
 void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);

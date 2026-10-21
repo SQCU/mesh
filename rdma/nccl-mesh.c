@@ -3101,7 +3101,8 @@ static ncclResult_t losses_through(uint64_t ticket) {
    issued (with issue) or completed with every group before it; its results into recvbuff as it completes; the
    program's end signals `finished` where the library made its encoder.  The Metal 4 form makes its channels' stream buffers
    resident through the stream's residency set; without a workspace its scratch is the communicator's (workspace), so it
-   is not issued. */
+   is not issued.  A fused group on the classic form takes the stream's residency set too (metal_begin), through which
+   the buffers its deferred steps' bindings name are made resident for the caller's kernels. */
 static ncclResult_t launch_metal(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclMeshIssue *const issue = list[0].issue;
@@ -3125,11 +3126,14 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   else if (!result && !metal4 && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
   else if (!result && !metal4 && list[0].encoder && !list[0].workspace)
     result = fail(ncclInvalidArgument, "an ncclMeshStream with an encoder and no workspace");
-  else if (!result && list[0].fused && (!metal4 || issue || n != 1 || !sent_in_place(list) ||
+  else if (!result && !metal4 && list[0].fused && !list[0].residency)
+    result = fail(ncclInvalidArgument, "a fused crossing on a classic ncclMeshStream without its residency set (the caller's kernels reach "
+                                       "the library's buffers by address)");
+  else if (!result && list[0].fused && (issue || n != 1 || !sent_in_place(list) ||
                                         (list[0].what != MESH_ALLREDUCE && list[0].what != MESH_BROADCAST && list[0].what != MESH_REDUCE &&
                                          list[0].what != MESH_ALLGATHER)))
-    result = fail(ncclInvalidUsage, "a fused crossing is one in-place ncclAllReduce, ncclBroadcast, ncclReduce or ncclAllGather on a Metal 4 "
-                                    "stream, not issued (ncclMeshFusableRooted)");
+    result = fail(ncclInvalidUsage, "a fused crossing is one in-place ncclAllReduce, ncclBroadcast, ncclReduce or ncclAllGather, not issued "
+                                    "(ncclMeshFusableRooted)");
   if (!result && revoked(comm)) result = revoked_fail(comm);
   pthread_mutex_lock(&group_lock);
   if (!result) group_numbered(comm);
@@ -3143,7 +3147,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   void *const violation = remote ? comm->violation : NULL;
   const char *message = NULL;
   struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, list[0].polls, &message)
-                                         : metal_begin(list[0].command, list[0].encoder, violation, list[0].polls, &message);
+                                         : metal_begin(list[0].command, list[0].encoder, list[0].fused ? list[0].residency : NULL, violation,
+                                                       list[0].polls, &message);
   if (!program) {
     pthread_mutex_unlock(&group_lock); counted_failed(list, n); calls_free(list, n);
     return fail(ncclSystemError, "%s", message);
@@ -3254,7 +3259,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     const char *message = NULL;
     struct metal_program *program = stream->argumentTable
       ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->comm->violation, stream->polls, &message)
-      : metal_begin(stream->commandBuffer, stream->commandEncoder, inflight->comm->violation, stream->polls, &message);
+      : metal_begin(stream->commandBuffer, stream->commandEncoder, NULL, inflight->comm->violation, stream->polls, &message);
     if (!program) result = fail(ncclSystemError, "%s", message);
     else {
       /* the units still to publish declared anew, their deadline from now (declare): they are supplied as this
