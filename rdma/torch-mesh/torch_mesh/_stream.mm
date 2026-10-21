@@ -3,9 +3,10 @@
 // broadcast, the V all-gather, reduce-scatter and all-to-all, a send, a receive, the counted all-to-all; a reduction by
 // any of the library's operators, the partials merge among them).  On MPS tensors the group is encoded in torch's stream's command buffer and open compute encoder (its kernels
 // join torch's own) with a workspace allocator (MPS tensors from torch's caching allocator, held until the group is
-// complete, then reused in the stream's order), committed without waiting; on CPU tensors it is the host path, complete
-// where it returns.  A group issued and not completed (an async op, a functional collective) is a MeshWork: its wait
-// encodes the rest (its landings, later rounds and results) on the stream where it is waited.
+// complete, then reused in the stream's order), committed by the one commit rule (below) without waiting; on CPU
+// tensors it is the host path, complete where it returns.  A group issued and not completed (an async op, a functional
+// collective) is a MeshWork: its wait encodes the rest (its landings, later rounds and results) on the stream where it
+// is waited.
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <ATen/DLConvertor.h>
@@ -16,72 +17,186 @@
 #include <ATen/native/mps/OperationUtils.h>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#include <atomic>
 #include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include "nccl.h"
 
 
-static ncclMeshStream stream_;
-// Within compiled-graph regions (batch): the command buffers committed, each signalling its count on progress_ as the
-// GPU reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us
-// later, at the 99th percentile 20-60), and whether a collective was left in torch's open buffer.
-static id<MTLSharedEvent> progress_;
-static uint64_t committed_ = 0;
-static int batching_ = 0;
-static bool deferred_ = false;
-static std::vector<at::Tensor> held_;
-// each issued group's workspace, by ticket, until the library has retired it
-static std::map<uint64_t, std::vector<at::Tensor>> holders_;
-// whether a group was issued on torch's stream since the host path last waited for it
-static bool streamed_ = false;
+// The commit rule (README, Performance), one for every caller: eager calls and compiled graphs, the library's own
+// callers and a user's program alike, with no region, mode or counter a caller enters.  Its work is throughput: the GPU
+// fed with the fewest command buffers.  The GPU starts a command buffer at most every 13-19 us whatever it holds
+// (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication (work a peer waits on) is a
+// floor of its own.  A publication is committed at once while at most the node's lead of the buffers its stream
+// committed are still in flight; otherwise it joins torch's open command buffer.  That buffer is committed before the
+// GPU drains: each buffer the stream commits signals its count on `progress` as the GPU reaches its end (a shared
+// event's value is the GPU's progress at once; a completion handler runs 7-9 us later, at the 99th percentile 20-60),
+// and a listener on torch's queue applies the rule again once the count reaches the committed count less the lead, so
+// the open buffer is committed while the GPU still holds `lead` buffers and never idles for the host's next call.  A
+// host wait commits, since nothing else would: the library's (commit, host_wait) and torch's own
+// (torch.mps.synchronize, torch.accelerator.synchronize, .item() and .cpu() commit torch's open buffer and wait:
+// MPSStream::synchronize COMMIT_AND_WAIT).
 
-static void release() {
-  const uint64_t retired = ncclMeshRetired();
-  holders_.erase(holders_.begin(), holders_.upper_bound(retired));
-}
+// The node's lead: how many of a stream's committed buffers may still be in flight when its open buffer is committed,
+// a measured quantity of the node (configure: backend.py reads it once from the node's record).  A stream made before
+// it is configured throws.
+static std::atomic<int64_t> lead_{-1};
 
-static void *workspace(size_t bytes, void *) {
-  held_.push_back(at::empty({(int64_t)bytes}, at::TensorOptions().dtype(at::kByte).device(at::kMPS)));
-  return (__bridge void *)at::native::mps::getMTLBufferStorage(held_.back());
-}
+// One torch MPS stream's commits and group workspace, held by the stream (made at its first group and never freed:
+// torch's streams live as long as the process, and a notification may arrive at any time).  Its commit state
+// (committed, open, armed) is read and written on torch's queue alone, where the host's groups are encoded
+// (dispatch_sync) and where the listener delivers its notifications, so it takes no lock and no caller enters it.  Its
+// workspace is the host's, freed outside torch's queue (a free may enter that queue: torch's MPSAllocator adds
+// completed handlers through it).
+struct MeshStream {
+  at::mps::MPSStream *const mps;
+  const uint64_t lead;
+  id<MTLSharedEvent> const progress;
+  MTLSharedEventListener *const listener;
+  // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
+  uint64_t committed = 0;
+  // the root command buffer a publication joined (MPSCommandBuffer rootCommandBuffer, which commitAndContinue
+  // commits), retained until it is committed by this stream or by torch's own commits, which carry the publication
+  // with them; nil while none waits
+  id<MTLCommandBuffer> open = nil;
+  // a notification asked at a count not yet reached when it was asked, which Metal delivers as the count arrives
+  bool armed = false;
+  // whether a group was issued on this stream since the host path last waited for it
+  bool streamed = false;
+  // the workspace of the group being encoded (the library's workspace allocator's context is the MeshStream, which
+  // outlives every call), then each issued group's, by ticket, until the library has retired it (ncclMeshRetired)
+  std::vector<at::Tensor> scratch;
+  std::map<uint64_t, std::vector<at::Tensor>> holders;
 
-// On torch's queue: its open buffer committed (within a compiled graph, counted on progress_).
-static void committing(at::mps::MPSStream *stream) {
-  if (batching_) {
-    if (!progress_) progress_ = [stream->device() newSharedEvent];
-    stream->endKernelCoalescing();
-    [stream->commandBuffer() encodeSignalEvent:progress_ value:++committed_];
+  MeshStream(at::mps::MPSStream *stream, uint64_t depth)
+      : mps(stream), lead(depth), progress([stream->device() newSharedEvent]),
+        listener([[MTLSharedEventListener alloc] initWithDispatchQueue:stream->queue()]) {}
+
+  // On torch's queue: whether a publication still waits in torch's open buffer, the root it joined not yet committed
+  // (one torch committed needs no buffer of ours, which would cost the GPU a start of its own).
+  bool waiting() {
+    if (open && open.status < MTLCommandBufferStatusCommitted) return true;
+    [open release];
+    open = nil;
+    return false;
   }
-  stream->synchronize(at::mps::SyncType::COMMIT);
-  deferred_ = false;
+
+  // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
+  void signalled(bool wait) {
+    mps->endKernelCoalescing();
+    [mps->commandBuffer() encodeSignalEvent:progress value:++committed];
+    mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
+    [open release];
+    open = nil;
+  }
+
+  // On torch's queue, the rule: a publication waiting in the open buffer is committed while at most `lead` buffers
+  // are in flight; else the listener is asked to apply the rule again at the count committed - lead (at least 1, as
+  // more than `lead` are in flight).  A count reached by the time it was asked is applied here at once, so nothing
+  // rests on Metal delivering a notification asked for a count already reached; one delivered late finds nothing
+  // waiting, or applies the rule to what waits then.
+  void rule() {
+    if (!waiting()) return;
+    if (committed - progress.signaledValue <= lead) return signalled(false);
+    if (armed) return;
+    const uint64_t at = committed - lead;
+    MeshStream *self = this;
+    [progress notifyListener:listener atValue:at block:^(id<MTLSharedEvent>, uint64_t) {
+      @autoreleasepool {
+        self->armed = false;
+        self->rule();
+      }
+    }];
+    armed = progress.signaledValue < at;
+    if (!armed) rule();
+  }
+
+  // On torch's queue, as a group's encoding ends: a publication encoded in torch's open buffer.
+  void published() {
+    if (!waiting()) open = [mps->commandBuffer().rootCommandBuffer retain];
+    rule();
+  }
+
+  // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
+  // complete in the stream's order once encoded, whose workspace returns to torch's allocator here, where later work
+  // reuses it after the group's), and the workspace of every group retired by now released.
+  void retire(uint64_t ticket, std::vector<at::Tensor> held) {
+    if (ticket) holders[ticket] = std::move(held);
+    holders.erase(holders.begin(), holders.upper_bound(ncclMeshRetired()));
+  }
+};
+
+static std::mutex *streams_lock_ = new std::mutex;
+static auto *streams_ = new std::unordered_map<at::mps::MPSStream *, MeshStream *>;
+
+// torch's stream's MeshStream, made at its first use with the node's lead.
+static MeshStream &stream_of(at::mps::MPSStream *mps) {
+  thread_local std::pair<at::mps::MPSStream *, MeshStream *> last{nullptr, nullptr};
+  if (last.first == mps) return *last.second;
+  std::lock_guard<std::mutex> guard(*streams_lock_);
+  auto found = streams_->find(mps);
+  if (found == streams_->end()) {
+    const int64_t lead = lead_.load();
+    TORCH_CHECK(lead >= 0, "torch-mesh: this node's commit lead is not configured (backend.py reads it from the node's "
+                "record: torch-mesh README, Performance)");
+    found = streams_->emplace(mps, new MeshStream(mps, (uint64_t)lead)).first;
+  }
+  last = {mps, found->second};
+  return *found->second;
 }
 
-// Work the peers wait on (a publication): committed at once outside a compiled graph (the host may next block
-// outside torch while a peer waits on it); within one, while two buffers are in flight it joins the open one.
-static void publishing(at::mps::MPSStream *stream) {
-  if (!batching_ || committed_ - progress_.signaledValue < 2)
-    committing(stream);
-  else
-    deferred_ = true;
+// The current torch stream's MeshStream where a group was issued on MPS tensors (nullptr before any was, so the host
+// path makes no MPS stream).
+static MeshStream *stream_made() {
+  {
+    std::lock_guard<std::mutex> guard(*streams_lock_);
+    if (streams_->empty()) return nullptr;
+  }
+  return &stream_of(at::mps::getCurrentMPSStream());
 }
 
+// A host wait of the library's on stream s, on torch's queue: a publication still waiting committed, and with `wait`
+// the stream committed and waited for (torch's COMMIT_AND_WAIT, taken here on its queue).
+static void host_wait(MeshStream &s, bool wait) {
+  MeshStream *self = &s;
+  at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{
+    @autoreleasepool {
+      if (self->waiting()) self->signalled(wait);
+      else if (wait) self->mps->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);
+    }
+  });
+}
+
+// Before a host wait outside torch's stream (backend.counted, a recording's compile meeting): the current stream's
+// waiting publication committed (none where no group was issued on MPS tensors).
 static void commit() {
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  dispatch_sync(stream->queue(), ^{ committing(stream); });
-  held_.clear();
-  release();
+  if (MeshStream *s = stream_made()) host_wait(*s, false);
 }
 
-// A compiled graph's run (torch_mesh.compiler, the torch.compile backend "mesh"): +1 as it starts, -1 as it ends, when
-// a collective left open is committed.
-static void batch(int64_t delta) {
-  batching_ += (int)delta;
-  if (!batching_ && deferred_) commit();
+// The node's lead (backend.py, from the node's record), taken by every stream made after it.
+static void configure(int64_t lead) {
+  TORCH_CHECK(lead >= 0, "torch-mesh: a commit lead counts buffers in flight, and ", lead, " counts none");
+  lead_ = lead;
+}
+
+// The library's workspace allocator: an MPS tensor of torch's caching allocator, kept in the MeshStream's scratch
+// (`context`) until the group is complete in the stream's order (MeshStream::retire); NULL where torch cannot allocate
+// it, which fails the group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through the
+// library.
+static void *workspace(size_t bytes, void *context) {
+  auto *s = static_cast<MeshStream *>(context);
+  try {
+    s->scratch.push_back(at::empty({(int64_t)bytes}, at::TensorOptions().dtype(at::kByte).device(at::kMPS)));
+  } catch (...) {
+    return nullptr;
+  }
+  return (__bridge void *)at::native::mps::getMTLBufferStorage(s->scratch.back());
 }
 
 
@@ -124,22 +239,23 @@ static void mark(int64_t comm, int64_t kind) {
 }
 
 // A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
-// and committed where it published.  Split, it is issued and not completed: its ticket (0: complete at once), its
-// workspace held until the library retires it.
-static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm) {
+// and the commit rule applied where it published.  Its staged copies (`held`) and its workspace are held together:
+// split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
+static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
   const auto *encode = &call;
   mark(comm, 0);
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  MeshStream *s = &stream_of(stream);
+  s->scratch = std::move(held);
   __block ncclResult_t result = ncclSuccess;
   __block ncclMeshIssue issue = {0, 0};
   dispatch_sync(stream->queue(), ^{
-    stream_ = ncclMeshStream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, split ? &issue : nullptr};
-    result = (*encode)(&stream_);
-    if (!split || issue.published) publishing(stream);
+    ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
+    result = (*encode)(&on);
+    if (!split || issue.published) s->published();
   });
-  if (issue.ticket && !result) holders_[issue.ticket] = std::move(held_);
-  held_.clear();
-  release();
+  s->streamed = true;
+  s->retire(issue.ticket && !result ? issue.ticket : 0, std::exchange(s->scratch, {}));
   checked(result);
   if (!issue.ticket) mark(comm, 1);
   return issue.ticket;
@@ -147,16 +263,17 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
 
 // every issued group through `ticket` completed on torch's stream where it is waited
 static void complete(uint64_t ticket) {
-  if (ncclMeshRetired() >= ticket) return release();
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  MeshStream *s = &stream_of(stream);
+  if (ncclMeshRetired() >= ticket) return s->retire(0, {});
   __block ncclResult_t result = ncclSuccess;
   dispatch_sync(stream->queue(), ^{
-    stream_ = ncclMeshStream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, nullptr};
+    ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
     int published = 0;
-    result = ncclMeshComplete(ticket, &stream_, &published);
-    if (published) publishing(stream);
+    result = ncclMeshComplete(ticket, &on, &published);
+    if (published) s->published();
   });
-  release();
+  s->retire(0, std::exchange(s->scratch, {}));
   checked(result);
 }
 
@@ -381,17 +498,18 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
   for (const Call &c : calls) issues.push_back(prepare(c, g));
   uint64_t ticket = 0;
   if (g.metal) {
+    std::vector<at::Tensor> held;
     for (auto &[original, copy, written] : g.staged) {
       split &= !written;
-      held_.push_back(copy);
+      held.push_back(copy);
     }
-    streamed_ = true;
-    ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm);
+    ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm, std::move(held));
   } else {
-    if (streamed_) {
+    MeshStream *s = stream_made();
+    if (s && s->streamed) {
       complete(UINT64_MAX);
-      at::detail::getMPSHooks().deviceSynchronize();
-      streamed_ = false;
+      host_wait(*s, true);
+      s->streamed = false;
     }
     std::optional<pybind11::gil_scoped_release> unlocked;
     if (unlock) unlocked.emplace();
@@ -728,7 +846,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     return work_of(issue(calls, comm, split, true), std::move(outputs), comm);
   });
   module.def("attach", &attach);
-  module.def("batch", &batch);
+  module.def("configure", &configure);
+  module.def("commit", &commit);
   module.def("region_empty", &region_empty);
   module.def("address", &address);
   module.def("records", &records);

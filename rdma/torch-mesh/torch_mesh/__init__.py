@@ -2,8 +2,9 @@
 entry point loads it when torch is imported, so a program only names it: init_process_group(backend="mesh").
 
 compiler is the torch.compile backend "mesh" (setup.py's torch_dynamo_backends entry point, a backend torch documents
-for a package to register): torch.compile(f, backend="mesh") compiles f with Inductor and batches the collectives of
-each compiled graph's run into torch's command buffers (_stream.mm batch).
+for a package to register): torch.compile(f, backend="mesh") compiles f with Inductor, its collectives the library's,
+with nothing wrapped around a compiled graph's run.  Every collective, compiled or eager, is committed by _stream.mm's
+one commit rule (README, Performance).
 
 empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
 DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
@@ -20,7 +21,7 @@ its own keys merged by the rows' logsumexp into the attention over all of them; 
 (a reduce-scatter by the operator).
 
 record() and replay() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
-compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its collectives batched."""
+compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its replays issued back to back."""
 
 
 def _autoload():
@@ -29,27 +30,13 @@ def _autoload():
 
 def compiler(gm, example_inputs):
     """Inductor's compilation of a graph (torch._dynamo.lookup_backend("inductor"), as torch's composable backends
-    compose it), each run of it a batch (_stream.mm batch): while it runs, a collective's publication joins torch's
-    open command buffer while two of its buffers are in flight, and its end commits what it left open, so a compiled
-    collective pays no command buffer of its own (mesh 3c00d37: 12.7 us a crossing compiled against 17.4 eager).
-    Inductor's wrapper is straight-line code, so no host wait inside it waits on a buffer left open.  The graph the
-    backend is handed is a forward (a training graph's backward runs from autograd, unbatched)."""
-    import functools
-
+    compose it), its collectives the library's (_stream.mm's kernels for torch's functional collectives on MPS), with
+    nothing wrapped around its run.  A compiled collective's publication is committed by the same rule as an eager
+    one's (_stream.mm, the commit rule; README, Performance), so how a program is written does not decide how fast its
+    collectives are.  The graph the backend is handed is a forward (a training graph's backward runs from autograd,
+    under the same rule)."""
     from torch._dynamo import lookup_backend
-
-    from . import _stream
-    compiled = lookup_backend('inductor')(gm, example_inputs)
-    batch = _stream.batch
-
-    @functools.wraps(compiled)
-    def run(*args):
-        batch(1)
-        try:
-            return compiled(*args)
-        finally:
-            batch(-1)
-    return run
+    return lookup_backend('inductor')(gm, example_inputs)
 
 
 def empty(*size, dtype=None, device='mps'):
@@ -145,10 +132,13 @@ class Recording:
     def _backend(self, gm, example_inputs):
         """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
         outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
-        timeout."""
+        timeout.  The meeting is a host wait, so a publication waiting in torch's open buffer is committed first."""
         import torch.distributed as dist
+
+        from . import _stream
         made = compiler(gm, example_inputs)
         if dist.is_initialized():
+            _stream.commit()
             store, key = dist.distributed_c10d._get_default_store(), f'mesh/recording/{self.name}/{self.graphs}'
             store.set(f'{key}/{dist.get_rank()}', b'1')
             store.wait([f'{key}/{r}' for r in range(dist.get_world_size())])
@@ -163,8 +153,8 @@ def record(step):
     """`step` (a function of no arguments that runs one step on MPS tensors, its collectives torch's) recorded, the
     CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of the step
     (torch.compile with fullgraph, its collectives functional ones), compiled at its first replay by the "mesh"
-    backend (compiler: Inductor's kernels, the graph's collectives batched into torch's command buffers, each issued on
-    torch's stream and completed where it is waited) after every rank has compiled it.  Nothing runs while it records:
+    backend (compiler: Inductor's kernels, the graph's collectives each issued on torch's stream under the one commit
+    rule and completed where it is waited) after every rank has compiled it.  Nothing runs while it records:
     its tensors keep what they held, and each replay writes them.  Every rank records the same steps in the same
     order.  What the 10-01 form (mesh 4cbe704, metal-microbench 35c30a9 metal_recording.m) did beyond this needs an
     interposed recorder of torch's Metal commands, which has no documented extension point (README, Record and
@@ -175,21 +165,20 @@ def record(step):
 
 
 def replay(recording, steps=1):
-    """`steps` replays of a record()ed step, each waited for; every rank replays alike.  The last one's seconds on the
-    GPU (MPS timing events around it on torch's stream)."""
+    """`steps` replays of a record()ed step issued back to back on torch's stream, with no wait between them: the steps
+    are an operand's leading dimension, each reading what the last wrote in the stream's order; every rank replays
+    alike.  The one wait is where a consumer reads, the time this returns: the last step's seconds on the GPU, the span
+    between two MPS timing events recorded on torch's stream before and after it (steps issued back to back, the span
+    from the end of the step before it to its own end), read once the end event has passed.  The steps' outputs are
+    read where the caller reads them (torch commits and waits at .item(), .cpu() and torch.mps.synchronize())."""
     import torch
-    torch.mps.synchronize()
-    seconds = 0.0
-    for i in range(steps):
-        last = i == steps - 1
-        if last:
-            begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
-            begin.record()
+    if steps < 1:
+        return 0.0
+    for _ in range(steps - 1):
         recording.compiled()
-        if last:
-            end.record()
-        torch.mps.synchronize()
-        if last:
-            seconds = begin.elapsed_time(end) / 1e3
-        recording.replays += 1
-    return seconds
+    begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
+    begin.record()
+    recording.compiled()
+    end.record()
+    recording.replays += steps
+    return begin.elapsed_time(end) / 1e3
