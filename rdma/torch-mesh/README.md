@@ -76,7 +76,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
-| functional collectives under torch.compile | one graph; `backend="mesh"` batches its collectives (Performance) |
+| functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, under the one commit rule (Performance) |
 | DDP | |
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
@@ -124,11 +124,15 @@ rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 `torch_mesh.record(step)` and `torch_mesh.replay(recording, steps)` are a step recorded once and replayed (the CUDA
 graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
 (`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
-each issued on torch's stream and batched into torch's command buffers: Performance), every rank's compilation met at
-the default group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise
-fail its peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). Each replay is waited for; `replay` returns the last one's seconds
-on the GPU (MPS timing events). Its caller is metal-microbench `tools/torch_parallel/tp.py` with `CAPTURE=K`: a
-training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
+each issued on torch's stream under the one commit rule: Performance), every rank's compilation met at the default
+group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise fail its
+peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `replay` issues its steps back to back on torch's stream,
+with no wait between them: the steps are an operand's leading dimension, each reading what the last wrote in the
+stream's order. It waits once, where its time is read: it returns the last step's seconds on the GPU, the span between
+MPS timing events recorded before and after it, which with the steps back to back runs from the end of the step before
+it to its own end. The steps' outputs are read where the caller reads them (`.item()`, `.cpu()`,
+`torch.mps.synchronize()` commit and wait). Its caller is metal-microbench `tools/torch_parallel/tp.py` with
+`CAPTURE=K`: a training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
 traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target
 (metal-microbench docs/measurement.md 2026-09-30, parts C and D, the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
 call past the wire against 186-216 eager.
@@ -143,7 +147,7 @@ ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the 
 Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a stream's
 receives into its in ring ahead of the data: [design/transport.md](../../design/transport.md) section 14), and
 the planning once is the communicator's compiled programs'. A training step's backward, run by autograd, is compiled
-but not batched.
+and committed by the same rule.
 
 ## What does not
 
@@ -371,10 +375,32 @@ w = s["lm_head"].to("cpu")                        # decoded
 
 - The MPS path is the measured path; async ops hide the crossing behind compute.
 - On two ranks every all-reduce is the direct exchange: one crossing.
+- One commit rule for every caller (`_stream.mm`, "The commit rule"): eager calls and compiled graphs, the library's
+  own callers and user programs alike. Nothing is entered, wrapped or opted into, and how a program is written does
+  not decide how fast its collectives are. The rule's work is throughput, the GPU fed with the fewest command buffers:
+  the GPU starts a command buffer at most every 13-19 us whatever it holds (metal-microbench docs/measurement.md,
+  2026-10-02), so a buffer for each publication is a floor of its own.
+  - A publication (work a peer waits on) is committed at once while at most the node's commit lead of the buffers
+    its stream committed are in flight. Otherwise it joins torch's open command buffer.
+  - Each buffer the library commits signals its count on a shared event as the GPU reaches its end. A shared event's
+    value is the GPU's progress at once, while a completion handler runs 7-9 us later (20-60 at the 99th percentile).
+  - A listener (`MTLSharedEventListener`, on torch's stream queue) applies the rule again once that count reaches the
+    committed count less the lead. So the open buffer is committed while the GPU still holds `lead` buffers, and the
+    GPU never idles for the host's next call.
+  - A host wait commits, since nothing else would. The library's: the host path, `counted`, a recording's compile
+    meeting. torch's own: `torch.mps.synchronize()`, `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit
+    torch's open buffer and wait (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
+  - The stream's state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written on torch's queue,
+    so no caller's exception leaves it deferring. A group's workspace is held until the library retires the group
+    (`ncclMeshRetired`), never by the commit.
+- The node's commit lead is a measured quantity of the node, carried as data: `commit_lead` in the JSON document
+  `MESH_STREAM` names, else `~/.cache/mesh/stream.json`, read once when a group is made. A node without it fails there,
+  naming the record. Every lead keeps the GPU fed eventually; the lead sets how many buffers the GPU still holds when
+  the commit is posted, which should cover the listener's delay (7-9 us, 20-60 at the 99th percentile) plus a buffer's
+  start (13-19 us). `stream.example.json` holds 1, the depth of the 10-02 rule (mesh 3c00d37: a publication joined the
+  open buffer while two buffers were in flight).
 - `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
-  point) is Inductor's compilation with each run of a compiled graph a batch (`_stream.mm` `batch`): a collective's
-  publication joins torch's open command buffer while two of the graph's buffers are in flight (a shared event counts
-  them), and the graph's end commits what it left open, so a compiled collective does not pay the command-buffer floor
-  of its own commit. Reproduction target: metal-microbench `crossing.py` with `COMPILE=1 COMPILER=mesh`, 12.7 us
-  a crossing (mesh 3c00d37; 17.4 us eager). A graph's backward, run from autograd, is not batched.
+  point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
+  targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`
+  (mesh 3c00d37). No reading of this rule has been taken yet.
 - Readings and their records: metal-microbench `docs/measurement.md`.
