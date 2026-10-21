@@ -1176,7 +1176,7 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
 // not clipped).
 template <uint M, uint TILES, uint WIDTHS, uint LOADS>
 kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
-                           device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
+                           device const uint *bands [[buffer(2)]], device const half *xs [[buffer(4)]],
                            device float *partials [[buffer(5)]], device half *ys [[buffer(11)]],
                            device const int *order [[buffer(12)]], device const float *rowScale [[buffer(13)]],
                            constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
@@ -1189,7 +1189,8 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
     threadgroup half panel[256 * 40];
     const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks, bw = bands[group.x];
     xs += streamed_slab(bw, d.inputs, TILES * 32);
-    auto X = tensor(xs, dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
+    // matmul2d takes no const element type: the view is the read-only binding's (xs is never written)
+    auto X = tensor(const_cast<device half *>(xs), dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
     auto W = tensor(panel, dextents<int, 2>{32, 256}, array<int, 2>{1, int(KN)});
     constexpr auto descriptor = matmul2d_descriptor(M, 32, 256, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
     matmul2d<descriptor, execution_simdgroups<8>> op;

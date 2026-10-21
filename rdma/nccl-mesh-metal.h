@@ -43,9 +43,11 @@ void *metal_retain(void *object);
    past which the dispatch records a failure, and every later dispatch gated on those words reads it and does nothing,
    so the host finds the failure there after the command buffer (nccl-mesh.c comm_failure) and the call fails as a
    value.  The failure words: [0] the cause (METAL_BOUND the bound reached, METAL_LOST the link's ~0, METAL_REVOKED a
-   revoke; a landing is none, whatever its bytes), [2] 1 + the position (the gate, stored last, by the GPU alone, so
-   every thread of a dispatch reads it alike), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow, and
-   [6] the host's stop (a revoke's), which every wait reads and records.  The bound is the caller's, carried per crossing (nccl.h
+   revoke; a landing is none, whatever its bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that
+   fails, the one that found 0 recording [0], [3], [4] and [2]: nccl-mesh-metal.m mesh_step_claim), [2] 1 + the position
+   (the gate, stored last by the claimant, by the GPU alone; a loser re-stores the value it read; it may close while a
+   threadgroup runs, so each thread's reading is its own), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow, and [6] the host's stop (a revoke's), which
+   every wait reads and records.  The bound is the caller's, carried per crossing (nccl.h
    ncclMeshStream polls); 0, or more than nccl.h NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md;
    nccl-mesh-metal.m bound_of).  A load's period, the time a bound stands for, is the node's GPU's: on the M4 Pro (the
    Mini) 251 to 265 ns once the GPU's clock has risen, about 1.0 to 1.1 us while it rises (an idle GPU's first ~4 ms of

@@ -951,30 +951,39 @@ uint64_t ncclMeshRetired(void);
    A39, A40).  The Metal 4 form is a stream whose argumentTable is set (Metal path, above).  A fused all-reduce is the
    in-place call this rank publishes its whole operand in as one small piece and lands its peer's whole operand in as
    one, combined, and nothing else (two ranks, the direct exchange, a sum of float16 within one small slot; its copy of
-   the operand, which the fused steps never read, the only scratch).  On a stream whose `fused` is set, the call encodes
-   every other step of the group as ever and the fused steps in no dispatch: their records are written and their
-   bindings returned in *fused.  The caller's kernel that makes the operand publishes it (it calls ncclMeshMetalSteps'
-   mesh_step_enter, stores the operand into d + record.dst, record.n bytes in the operand's layout, then
-   mesh_step_release on a), encoded after the call returns; the kernel after it lands the peer's (mesh_step_enter,
-   mesh_step_await on a with s, then the peer's operand read from s + record.src with mesh_payload and combined with its
-   own), and nothing reads the operand's buffer as the sum.  A call that is not fusable on such a stream fails as a
-   value (ncclInvalidUsage).  One threadgroup a step: a kernel of several releases or awaits in one of them.
-   *publishes and *lands are this rank's steps where an in-place call of `kind` rooted at `root` (an all-reduce's root 0)
-   of `count` elements of `type` by `op` on comm is, on its program, at most this rank's publication of its whole
-   operand as one small piece and its landing of its peer's whole operand as one (two ranks, the direct exchange, no
-   scratch copy, within one small slot; a reduce and an all-reduce a sum of float16): a broadcast's root publishes and
-   its peer lands, a copy; a reduce's peer publishes and its root lands, combined; an all-reduce both; both 0 where it
-   is not fusable.  Such a call on a stream whose `fused` is set writes those steps' records and returns their bindings
-   in *fused, and encodes the rest of the group as ever; the caller runs each as an all-reduce's: its publishing kernel
-   before the call, its landing kernel after it. */
-typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2 } ncclMeshFuseKind;
+   the operand, which the fused steps never read, the only scratch).  A fused all-gather is the in-place call (sendbuff
+   recvbuff + rank x sendcount, NCCL's) this rank publishes its piece in as one small piece and lands its peer's piece
+   in as one, and nothing else (two ranks, the direct exchange, each piece within one small slot, any type, no
+   scratch).  On a stream whose `fused` is set, the call encodes every other step of the group as ever and the fused
+   steps in no dispatch: their records are written and their bindings returned in *fused.  The caller's kernel that
+   makes the operand publishes it (it calls ncclMeshMetalSteps' mesh_step_enter, stores the operand, an all-gather's
+   piece, into d + record.dst with mesh_step_store, record.n bytes in the operand's layout, then mesh_step_release on
+   a), encoded after the call returns; the kernel after it lands the peer's (mesh_step_enter, mesh_step_await on a with
+   s, then the peer's operand read from s + record.src with mesh_step_read and combined with its own; an all-gather's
+   peer piece is the one whose place in recvbuff, in rank order, is d + record.dst), and nothing reads the operand's
+   buffer as the sum.  A call that is not fusable on such a stream fails as a value (ncclInvalidUsage).  A publication
+   is one threadgroup's release; a landing may be awaited by every threadgroup of the kernel after the call, each its
+   own wait bounded as the library's, one failure recorded of them all and every later wait ending at it.
+   *publishes and *lands are this rank's steps where an in-place call of `kind` rooted at `root` (an all-reduce's and an
+   all-gather's root 0) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount) by `op` on comm
+   is, on its program, at most this rank's publication of its whole operand (an all-gather's piece) as one small piece
+   and its landing of its peer's as one (two ranks, the direct exchange, no scratch copy, within one small slot; a
+   reduce and an all-reduce a sum of float16, an all-gather any type): a broadcast's root publishes and its peer lands,
+   a copy; a reduce's peer publishes and its root lands, combined; an all-reduce and an all-gather both; both 0 where
+   it is not fusable.  Such a call on a stream whose `fused` is set writes those steps' records and returns their
+   bindings in *fused, and encodes the rest of the group as ever; the caller runs each as an all-reduce's: its
+   publishing kernel before the call, its landing kernel after it. */
+typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2, ncclMeshFuseAllGather = 3 } ncclMeshFuseKind;
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int* publishes, int* lands);
 /* The Metal text of the steps the library's kernels and a fused crossing's kernels run, after rdma/mesh.metal's: the
-   argument record (struct mesh_args) and mesh_step_enter, mesh_step_wait, mesh_step_check, mesh_step_await,
-   mesh_step_release, mesh_step_store and mesh_step_read, addressed on a channel's stream class (a run's slots and ready words to
+   argument record (struct mesh_args) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_check, mesh_step_await,
+   mesh_step_release, mesh_step_store and mesh_step_read (any element type), addressed on a channel's stream class (a run's slots and ready words to
    release, its last unit's landed word to await and its first unit to read); the library's own, so the caller compiles
-   them with its kernels and keeps no copy. */
+   them with its kernels and keeps no copy.  mesh_step_enter's and mesh_step_await's results are the calling thread's
+   (the gate a failed wait closes may close while a threadgroup runs): every thread of the threadgroup calls them, skips
+   only stores by them, and decides a release (mesh_step_release holds a barrier) by one thread's reading shared through
+   threadgroup memory. */
 const char* ncclMeshMetalSteps(void);
 /* The Metal 4 form's argument records this process has encoded on the default device (`issued`, counting from its first
    program) and how many its ring holds unread by the GPU at most (`capacity`): an encode past that refuses with
