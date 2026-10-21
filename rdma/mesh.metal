@@ -10,8 +10,7 @@
 #pragma METAL internals : enable
 #include <metal_stdlib>
 
-// The word at `word` once it holds at least `target`, with mesh_wait_bounded's fence before each load and no bound: no
-// wait takes it, and it and mesh_remote_wait are kept only for a libnccl-mesh.dylib built before 4efbec2f, whose STEPS
+// The word at `word` once it holds at least `target`, with a fence before each load and no bound: no wait takes it, and it and mesh_remote_wait are kept only for a libnccl-mesh.dylib built before 4efbec2f, whose STEPS
 // call mesh_remote_wait (metal-microbench metal_runtime.swift joins a dylib's STEPS to this file); both go once no
 // node's dylib is older (design/transport.md).
 template <typename W>
@@ -30,19 +29,20 @@ __attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coh
     return mesh_wait(completion, 1 + cycle);
 }
 
-// The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load), each after a
-// system-scope fence (without it the M4 did not observe the NIC's or the host's store: metal-microbench d8566be): every
-// wait, at most nccl.h NCCL_MESH_POLLS loads, which hold the GPU at most MESH_PLATFORM_NS
-// (design/transport.md; a load's period the node GPU's, rdma/NCCL.md "Bounded waits"). The word is still a
-// canceller's (design/transport.md), and the caller tells a word short of `target` (the bound reached) from a
-// landing. A reader orders its later loads after the observation with a system-scope fence of its own, after the
-// barrier that gives the observation to its threads.
+// The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load): each wait at
+// most nccl.h NCCL_MESH_POLLS loads, which hold the GPU at most MESH_PLATFORM_NS a wait (design/transport.md; a load's
+// period the node GPU's, rdma/NCCL.md "Bounded waits"). The bound is a count of polls and nothing else: it exists
+// because a GPU spin with no end halts the node (the Mini's watchdog reset, 2026-10-21), and the caller tells a word
+// short of `target` (the bound reached) from a landing. Each poll is one volatile coherent(system) load, which reads
+// the word where the NIC and the host store it, so no fence stands between two polls. The landed payload is read
+// through mesh_payload (volatile coherent(system)) after the loop that saw the word: in the waiting thread the loop's
+// exit depends on the word's value, and the other threads of its group read after the barrier that follows the wait
+// (nccl-mesh-metal.m mesh_step_await).
 template <typename W>
 __attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
     W seen;
     uint k = 0u;
     do {
-        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
         seen = *word;
     } while (seen < target && ++k < polls);
     return seen;

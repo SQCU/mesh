@@ -571,17 +571,25 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int 
   for(size_t k=0;k<(size_t)T*c;k++)part_of[k]=UINT32_MAX;
   if(what==MESH_ALLREDUCE && whole){
     /* the whole operand toward every node v up v's heaviest tree: u's partial for v from scratch of its own where it
-       has children there, else its own operand from its copy (scratch 1), which nothing changes; chunk j its part j */
+       has children there, else its own operand, from buffer[u * n + u]: the operand itself (buffer 0) where u sends it
+       to one node only and forwards nothing (a connected map's two nodes: the direct exchange, in which u's one SEND and
+       its one REDUCE, of its peer's operand, are chunk j's at round j each and lie at the same positions of one
+       channel, each position published before it is combined into: libnccl-mesh complete_track, sends_what_lands),
+       else its copy (scratch 1), which nothing changes; chunk j its part j */
     parts=c;
     for(uint32_t j=0;j<c;j++){segment[j]=0;log_weight[j]=0;}
     for(uint32_t u=0;u<n;u++){
-      uint32_t next=2;
+      uint32_t next=2,own=0;
       for(uint32_t v=0;v<n;v++){
         const uint32_t t=mesh_trees_heaviest(trees,v);
         if(t==T)goto done;
-        if(u!=v && shape[(size_t)t*n+u].inner)buffer[(size_t)u*n+v]=next++;
+        if(u==v || !shape[(size_t)t*n+u].live)continue;
+        if(shape[(size_t)t*n+u].inner)buffer[(size_t)u*n+v]=next++;
+        else own++;
       }
-      if(next-1>scratch)scratch=next-1;
+      buffer[(size_t)u*n+u]=own==1 && next==2?0:1;
+      const uint32_t used=next>2?next-1:own && buffer[(size_t)u*n+u]?1:0;
+      if(used>scratch)scratch=used;
     }
     for(uint32_t v=0;v<n;v++){
       const uint32_t t=mesh_trees_heaviest(trees,v),*parent=trees->parent+(size_t)t*n;
@@ -590,7 +598,7 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int 
         if(u==v || !s[u].live)continue;
         const uint32_t w=parent[u],op=!mesh_member(mine,w) && mesh_first_child(trees,t,s,w,u)?MESH_STEP_COPY:MESH_STEP_REDUCE;
         for(uint32_t j=0;j<c;j++)
-          message[messages++]=(struct mesh_message){u,w,s[u].height+j,j,1,s[u].inner?buffer[(size_t)u*n+v]:1,w==v?0:buffer[(size_t)w*n+v],op,v};
+          message[messages++]=(struct mesh_message){u,w,s[u].height+j,j,1,s[u].inner?buffer[(size_t)u*n+v]:buffer[(size_t)u*n+u],w==v?0:buffer[(size_t)w*n+v],op,v};
       }
     }
   }else{
@@ -1075,6 +1083,23 @@ static void mesh_event_text(const struct mesh_track *lanes,uint32_t count,uint64
 static int mesh_overlap(const struct mesh_step *x,const struct mesh_step *y){
   return x->buffer==y->buffer && x->first<y->first+y->piece.elements && y->first<x->first+x->piece.elements;
 }
+/* a step's piece at position t of its place x on a channel of class `large`: its elements [*lo, *hi), the wire's cut of
+   a step into the whole elements a position carries (mesh_wire_pieces) */
+static void mesh_piece(const struct mesh_wire *wire,int large,const struct mesh_step *s,const struct mesh_spot *x,uint64_t t,uint64_t *lo,
+                       uint64_t *hi){
+  const uint64_t slot=large?wire->slot:wire->small,e=s->piece.element_bytes?s->piece.element_bytes:1,per=(e<=slot?slot-slot%e:slot)/e;
+  const uint64_t end=s->first+s->piece.elements,at=s->first+(t-x->first)*per;
+  *lo=at<end?at:end;
+  *hi=*lo+per<end?*lo+per:end;
+}
+/* whether step s's piece at position t of its place x and step v's at position u of its place y meet in one buffer */
+static int mesh_pieces_meet(const struct mesh_wire *wire,const struct mesh_track *lanes,const struct mesh_step *s,const struct mesh_spot *x,
+                            uint64_t t,const struct mesh_step *v,const struct mesh_spot *y,uint64_t u){
+  uint64_t a,b,c,d;
+  mesh_piece(wire,(int)lanes[x->lane].large,s,x,t,&a,&b);
+  mesh_piece(wire,(int)lanes[y->lane].large,v,y,u,&c,&d);
+  return s->buffer==v->buffer && a<d && c<b;
+}
 /* the events reachable from `from` along `start`/`list` (forward or reverse), marked `generation` */
 static void mesh_reach(uint64_t from,const uint64_t *start,const uint64_t *list,uint32_t *mark,uint32_t generation,uint64_t *queue){
   uint64_t head=0,tail=0;
@@ -1259,7 +1284,7 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
   if(!balanced || !events){result=advice.count;goto done;}
   /* causality: the events under the rule, a marked graph, whose every event occurs (in some order, no timing) where
      it has no cycle (Lee & Messerschmitt's admissible schedule; Lustre's instantaneous dependency check) */
-  edges+=2*events;
+  edges+=2*events+events/2;
   from=malloc(edges*sizeof *from);to=malloc(edges*sizeof *to);
   start=calloc(events+1,sizeof *start);back=calloc(events+1,sizeof *back);remaining=calloc(events+1,sizeof *remaining);
   queue=malloc((events+1)*sizeof *queue);mark=calloc(events+1,sizeof *mark);
@@ -1280,6 +1305,23 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
     const struct mesh_spot *w=spot[r]+before[r][k];
     if(w->lane==UINT32_MAX)continue;
     MESH_EDGE(mesh_event(lanes+w->lane,w->end,1,w->first+w->pieces-1),mesh_event(lanes+s->lane,s->end,steps[r][k].op!=MESH_STEP_SEND,s->first));
+  }
+  /* a position whose publication reads in place what its own consumption writes (one call's SEND and receive at one end
+     of one channel, their pieces there meeting in one buffer: mesh_compile's two-node direct exchange) is consumed after
+     it is published, the executors' order (libnccl-mesh complete_track by the stream's order, the tracks and the host
+     path by sends_what_lands): at most one such edge an end's position */
+  for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
+    const struct mesh_step *s=steps[r]+k;
+    const struct mesh_spot *x=spot[r]+k;
+    if(s->op!=MESH_STEP_SEND || x->lane==UINT32_MAX)continue;
+    for(uint32_t w=0;w<count[r];w++){
+      const struct mesh_step *v=steps[r]+w;
+      const struct mesh_spot *y=spot[r]+w;
+      if(v->op==MESH_STEP_SEND || owner[r][w]!=owner[r][k] || y->lane!=x->lane || y->end!=x->end || !mesh_overlap(s,v))continue;
+      const uint64_t lo=x->first>y->first?x->first:y->first,hi=x->first+x->pieces<y->first+y->pieces?x->first+x->pieces:y->first+y->pieces;
+      for(uint64_t t=lo;t<hi;t++)
+        if(mesh_pieces_meet(wire,lanes,s,x,t,v,y,t))MESH_EDGE(mesh_event(lanes+x->lane,x->end,0,t),mesh_event(lanes+x->lane,x->end,1,t));
+    }
   }
 #undef MESH_EDGE
   list=malloc((E+1)*sizeof *list);rlist=malloc((E+1)*sizeof *rlist);
@@ -1327,24 +1369,38 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
     goto done;
   }
   /* hazard: within a call, a receive after a SEND of the same rank into elements the SEND reads, with no order from the
-     SEND's last position to the receive's first (write after read); a receive before a SEND of what it writes, with
-     none from the receive's last to the SEND's first (read after write) */
+     position of a SEND piece to that of a receive piece meeting it (write after read: a piece is read at its
+     publication and written at its consumption); a receive before a SEND of what it writes, with none from the
+     receive's last position to the SEND's first (read after write) */
   uint32_t generation=0;
   for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
     const struct mesh_step *s=steps[r]+k;
     const struct mesh_spot *x=spot[r]+k;
     if(s->op!=MESH_STEP_SEND || x->lane==UINT32_MAX)continue;
-    mesh_reach(mesh_event(lanes+x->lane,x->end,0,x->first+x->pieces-1),start,list,mark,++generation,queue);
+    int meets=0;
+    for(uint32_t w=k+1;w<count[r] && !meets;w++)
+      meets=owner[r][w]==owner[r][k] && steps[r][w].op!=MESH_STEP_SEND && spot[r][w].lane!=UINT32_MAX && mesh_overlap(s,steps[r]+w);
+    unsigned char *unordered=calloc((size_t)count[r]+1,1);
+    if(!unordered)goto done;
+    for(uint64_t t=x->first;meets && t<x->first+x->pieces;t++){
+      mesh_reach(mesh_event(lanes+x->lane,x->end,0,t),start,list,mark,++generation,queue);
+      for(uint32_t w=k+1;w<count[r];w++){
+        const struct mesh_step *v=steps[r]+w;
+        const struct mesh_spot *y=spot[r]+w;
+        if(unordered[w] || owner[r][w]!=owner[r][k] || v->op==MESH_STEP_SEND || y->lane==UINT32_MAX || !mesh_overlap(s,v))continue;
+        for(uint64_t u=y->first;u<y->first+y->pieces && !unordered[w];u++)
+          unordered[w]=mesh_pieces_meet(wire,lanes,s,x,t,v,y,u) && mark[mesh_event(lanes+y->lane,y->end,1,u)]!=generation;
+      }
+    }
     for(uint32_t w=k+1;w<count[r];w++){
       const struct mesh_step *v=steps[r]+w;
-      const struct mesh_spot *y=spot[r]+w;
-      if(owner[r][w]!=owner[r][k] || v->op==MESH_STEP_SEND || y->lane==UINT32_MAX || !mesh_overlap(s,v))continue;
-      if(mark[mesh_event(lanes+y->lane,y->end,1,y->first)]!=generation)
+      if(unordered[w])
         mesh_advise_say(&advice,MESH_ADVISE_HAZARD,"rank %u's %s %s (round %u, from rank %u) writes buffer %u's elements [%llu, +%llu) that its "
-                        "SEND %s (round %u, to rank %u) reads, with no order from the SEND's last position to the receive's first",r,
+                        "SEND %s (round %u, to rank %u) reads, a piece of it with no order from the SEND piece's position it meets",r,
                         mesh_step_name(v->op),mesh_move(&grouped,r,w,text[0],sizeof *text),v->round,v->peer,v->buffer,(unsigned long long)v->first,
                         (unsigned long long)v->piece.elements,mesh_move(&grouped,r,k,text[1],sizeof *text),s->round,s->peer);
     }
+    free(unordered);
     mesh_reach(mesh_event(lanes+x->lane,x->end,0,x->first),back,rlist,mark,++generation,queue);
     for(uint32_t w=0;w<k;w++){
       const struct mesh_step *v=steps[r]+w;
