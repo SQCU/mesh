@@ -1,9 +1,17 @@
 # Pages and functions
 
+The [complete replacement requirements](completion-requirements.md) track the
+whole implementation and its acceptance evidence. On the actual Thunderbolt
+substrate, literal pages use SEND/RECV, as documented by Apple TN3205; software
+publication of a received page does not require hardware remote-write support.
+Statements below about instant execution and topology-independent utilization
+express the desired absence of added control dependencies, not a zero-latency
+theorem or a measured performance guarantee.
+
 Plain statements of the algorithm. Only the words used in the operator's own
 turns: mesh, peers, pages, page table, rows, stamps, use count, buffers as
 function returns, functions, release, reduce, accumulator page, index page,
-NFE, status word, digest. Every other word that has appeared in code
+NFE, status word, metadata. Every other word that has appeared in code
 ("stage", "chunk", "version", "gate", "token", "group", "consumer",
 "scheduler") named a control-flow object standing in for something the page
 table already holds, and is not part of the algorithm.
@@ -20,6 +28,49 @@ the only state.
 Every function has a known number of output pages. Every function input is
 the output pages of some function, on this node or on a peer. All of this is
 known before the NFE starts.
+
+All page-table allocations needed by the complete compute graph are determined
+before launch, including parameters, intermediates, accumulators, indices and
+outputs. Numerical execution does not discover allocations or introduce
+data-dependent control flow to repair missing storage.
+
+The calling process may invalidate the page table whenever it chooses, including
+when a kernel is hung. The mesh API must expose that operation directly. Pages
+may be consumed, freed and invalidated; these operations do not start recovery,
+retry, parity, or waiting protocols inside computation, transport or reduction.
+The caller decides whether to rerun the complete feed-forward NFE.
+
+Every node has NVMe storage or is transitively RDMA-connected to a node that
+does. This is a deployment invariant, not a capability to infer during an NFE.
+Deleted or invalidated DNN parameter pages can be loaded again from local NVMe
+or retransmitted from such a peer. Parameter residency is not a reason to retain
+an invalidated graph or add a recovery protocol to its numerical functions.
+
+### Asynchronous error metadata
+
+The calling interface is `out, meta = meshfunction(x)`. `out` contains numerical
+values; `meta` contains literal error codes and their callgraph location and
+occurrence (where and when). Error status returns are permitted only through
+this asynchronous metadata channel. Returning the pair does not synchronously
+wait for execution or for a final error verdict.
+
+Composition carries metadata monadically alongside values. A function in the
+callgraph does not consume error metadata to branch, short-circuit, suppress
+arithmetic, synchronize, wait, retry or recover. Only the calling context
+interprets and handles it, including deciding whether to repeat the complete
+feed-forward NFE. Here monadic propagation does not mean exception-style
+short-circuiting on an error.
+
+Metadata storage is also configured before launch and occupies literal
+page-table pages. It is a distinct return channel, not a private allocation,
+completion token or readiness gate. Error codes never replace numerical output
+values. A terminal device completion publishes the actual configured output
+pages independently of any error metadata. Their stamp certifies availability,
+not correctness: the calling context may reject their contents using `meta`.
+Without a terminal completion the output remains unavailable. Publishing
+metadata alone neither invents a numerical value nor certifies that outstanding
+work has completed. An error-dependent publication gate would consume metadata
+inside the callgraph and is excluded by the operator's instruction.
 
 ### The NFE, number k
 
@@ -52,18 +103,12 @@ known before the NFE starts.
    because rows for NFE k+1 point at other pages until the rows for NFE k are
    released.
 
-### Checking
-
-8. After a reduce has read its inputs, the node hashes the pages it sent and
-   the pages it received. It writes the numbers into a page. That page goes to
-   the peer. When both digest pages are present, the node compares them.
-9. If they differ, the NFE concludes with a failure value. The caller repeats
-   the NFE.
-
 ### Link error
 
-10. The runtime's status word goes negative. Every NFE in flight concludes
-    with a failure value. The caller recovers the program and repeats the NFE.
+8. A negative link status is reported with its location and occurrence in
+    asynchronous metadata for the affected invocation. The callgraph does not
+    consume that status. The calling context may reject the result and rerun
+    the complete feed-forward NFE; mesh does not perform recovery or replay.
 
 ## The same NFE on infinitely many Mac Minis
 
@@ -127,19 +172,12 @@ input is some function's output rows, on this Mini or on an adjacent Mini.
    because the rows for NFE k+1 point at other pages until the rows for NFE k
    are released.
 
-### Checking
-
-9. After a reduce has read its inputs, the Mini hashes the pages it sent over
-   the link and the pages it received over it. It writes both numbers into a
-   page. That page goes one hop. When the adjacent Mini's digest page has
-   arrived and mine is written, the Mini compares them.
-10. If they differ, the NFE concludes with a failure value. The caller repeats
-    the NFE.
-
 ### Link error
 
-11. The runtime's status word goes negative. Every NFE in flight concludes
-    with a failure value. The caller recovers the program and repeats the NFE.
+9. A negative link status is reported with its location and occurrence in
+    asynchronous metadata for the affected invocation. The callgraph does not
+    consume that status. The calling context may reject the result and rerun
+    the complete feed-forward NFE; mesh does not perform recovery or replay.
 
 ### Why two Minis are the same as infinitely many
 
@@ -171,8 +209,8 @@ stands in for the pages. Then it acts on the message. This is what goes wrong.
    lost, or land out of order, or be corrupt. Acting on the message is acting
    on a claim. To make the claim safe, the sender and receiver need
    acknowledgements, retries, and ordering. That is a protocol on top of page
-   delivery. The digest, computed after the pages were used, already finds a
-   wrong page without any of it.
+   delivery. The calling context determines whether the numerical results are
+   acceptable; mesh adds no correctness exchange.
 3. **The message can be false and the data present.** The pages landed and
    the rows are stamped, but the message is late, or the sender concluded
    early, or the link that carried the message broke while the link that
@@ -198,8 +236,8 @@ stands in for the pages. Then it acts on the message. This is what goes wrong.
 7. **A speculative message lets a function run before its data.** "The pages
    will arrive" is not "the pages have arrived". A function that runs on the
    promise reads stale pages and writes a wrong output with a good stamp. The
-   digest will disagree later, and the NFE will be repeated, but the work was
-   wasted and the wrong output already travelled a hop.
+   calling context may reject the result, but the work was wasted and the
+   wrong output already travelled a hop.
 8. **Fan-in multiplies all of the above.** A function whose inputs come from
    many Minis would need a message from each, each a hop, each a race with its
    pages. The rows give one check for all of them: are they all stamped k.
@@ -207,6 +245,24 @@ stands in for the pages. Then it acts on the message. This is what goes wrong.
 The rule that follows is the one already in the spec. A Mini acts on data,
 and only on data, and acts the moment the data is present. The row's stamp is
 the only signal. The GPU is handed only functions whose rows are stamped. The
-NFE concludes on a status word, never on a message inside the data. With that
+calling context receives errors through asynchronous metadata, never through
+numerical values or a status gate inside the callgraph. With that
 rule a Mini's latency and utilization are the same whether it has one
 neighbour or an infinite mesh behind it. Without it they are not.
+
+## What this is called elsewhere
+
+On September 9, 2026, the operator removed the CRC/digest feature as superfluous.
+Mesh does not hash payloads, exchange digests, compare them, or retain pages for
+those operations. Earlier checking clauses are superseded. Literal device and
+transport errors still travel through asynchronous metadata; the calling context
+owns numerical acceptance and whole-NFE repetition.
+
+The firing principle is tagged-token dataflow; operand slots and presence
+bits have hardware prior art in Monsoon. In-data flags, dependency-driven
+execution and pipelined reductions also have published implementations.
+The [citation audit](dataflow-implementation-audit.md) distinguishes those
+mechanisms from the exact caller required here, which remains an implementation
+obligation. It also records the divergent code and corrects the unmeasured
+claim of strict performance superiority. The binding reduce description and
+historical incident record are in [distributed-reduce.md](distributed-reduce.md).
