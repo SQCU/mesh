@@ -128,9 +128,9 @@ each issued on torch's stream under the one commit rule: Performance), every ran
 group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise fail its
 peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `replay` issues its steps back to back on torch's stream,
 with no wait between them: the steps are an operand's leading dimension, each reading what the last wrote in the
-stream's order. It waits once, where its time is read: it returns the last step's seconds on the GPU, the span between
-MPS timing events recorded before and after it, which with the steps back to back runs from the end of the step before
-it to its own end. The steps' outputs are read where the caller reads them (`.item()`, `.cpu()`,
+stream's order. It waits once, where its time is read: it returns the last step's interval in the stream, the span
+between MPS timing events recorded before and after it. With the steps back to back that span runs from the end of the
+step before it to its own end: the GPU's time or the host's issue, whichever is slower. The steps' outputs are read where the caller reads them (`.item()`, `.cpu()`,
 `torch.mps.synchronize()` commit and wait). Its caller is metal-microbench `tools/torch_parallel/tp.py` with
 `CAPTURE=K`: a training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
 traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target
@@ -387,15 +387,20 @@ w = s["lm_head"].to("cpu")                        # decoded
   - A listener (`MTLSharedEventListener`, on torch's stream queue) applies the rule again once that count reaches the
     committed count less the lead. So the open buffer is committed while the GPU still holds `lead` buffers, and the
     GPU never idles for the host's next call.
-  - A host wait commits, since nothing else would. The library's: the host path, `counted`, a recording's compile
-    meeting. torch's own: `torch.mps.synchronize()`, `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit
-    torch's open buffer and wait (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
-  - The stream's state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written on torch's queue,
-    so no caller's exception leaves it deferring. A group's workspace is held until the library retires the group
-    (`ncclMeshRetired`), never by the commit.
+  - In flight counts the buffers the library committed, not torch's own.
+  - A host wait commits at once rather than at the count, since the host encodes nothing more meanwhile. The
+    library's: the host path, `counted`, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
+    `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
+    (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
+  - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written on
+    torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. A group's workspace
+    is held until the library retires the group (`ncclMeshRetired`), never by the commit.
+  - Open: torch 2.14's `synchronize` calls run off the stream's queue, so a listener commit can meet one
+    (`REVIEW-commit-rule.md`). The first build looks for it.
 - The node's commit lead is a measured quantity of the node, carried as data: `commit_lead` in the JSON document
   `MESH_STREAM` names, else `~/.cache/mesh/stream.json`, read once when a group is made. A node without it fails there,
-  naming the record. Every lead keeps the GPU fed eventually; the lead sets how many buffers the GPU still holds when
+  naming the record. No probe writes it yet: until one does, it is written by hand from the node's measured listener
+  delay and buffer start. Every lead keeps the GPU fed eventually; the lead sets how many buffers the GPU still holds when
   the commit is posted, which should cover the listener's delay (7-9 us, 20-60 at the 99th percentile) plus a buffer's
   start (13-19 us). `stream.example.json` holds 1, the depth of the 10-02 rule (mesh 3c00d37: a publication joined the
   open buffer while two buffers were in flight).

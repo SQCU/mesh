@@ -117,8 +117,13 @@ peer's bounded wait ends it as a value.
 ### 5. Commits at the library's host waits
 
 - **C4: old ≈ new, with a commit added before existing waits.** `backend.counted` and `Recording._backend`'s store
-  meeting now call `_stream.commit()` first. They are host waits, and without a commit nothing else would. No wait
+  meeting now call `_stream.commit()` first, for every stream. The listener would commit the open buffer anyway once
+  the count arrives; committing at the wait saves that delay, since the host encodes nothing more meanwhile. No wait
   is added.
+- **Host path: old ≺ new.** Old: `streamed_` was one flag, and the wait was torch's default stream off its queue
+  (`deviceSynchronize`). New: completion is encoded on the current stream as before, then the current stream and each
+  stream a group was issued on are committed and waited for on their queues (`host_wait`), and their retired
+  workspace released.
 
 ### 6. Documents
 
@@ -152,6 +157,35 @@ Not confirmed, for the first build:
 - `MPSCommandBuffer`'s root stays below `Committed` until torch or the library commits it, including when MPSGraph
   calls `commitAndContinue` itself (handled: then `waiting()` is false).
 - The race in section 2: a listener commit overlapping a host `torch.mps.synchronize()`.
+
+## The independent review (a subagent with the rubric file, 2026-10-21) and what was done
+
+1. `examples/chain-service.py:74,78,88,91` still call the deleted `_stream.batch` and fail with AttributeError.
+   `examples/` belongs to another agent; finding 9 deletes the calls there. Not changed here.
+2. The listener can race torch's off-queue `synchronize` (section 2). Routing torch's `synchronize` through the queue
+   would wrap a torch function, which A53 and D4 rank lowest. Documented in the README as open; the first build looks
+   for it.
+3. `workspace` allocates on torch's queue; under memory pressure torch's allocator enters that queue again
+   (`MPSAllocator.mm` `release_cached_buffers`), a deadlock, not an exception. This predates the branch and lies outside
+   findings 1-7. The comment no longer claims a value in that case. A fix needs the library to report a group's
+   scratch bytes before encoding, or a pool grown off the queue: an `nccl.h` change, left for its owner.
+4. "A host wait commits, since nothing else would" was wrong: the listener commits regardless. Corrected in the
+   README and `_stream.mm`; the README no longer says the workspace is touched on the queue.
+5. `replay`'s time is a step's interval in the stream (MPS timing events take host times in listener callbacks,
+   equally late at both ends), and with steps back to back it is the slower of the GPU's time and the host's issue.
+   Restated in the docstring and README.
+6. The lead record had no producer, accepted `true`, and named no path for bad JSON. The loader now names the path for
+   any read or parse failure and takes only an int. No probe writes the record yet (README).
+7. The host path waited only on the current stream. It now waits on the current one and every stream a group was
+   issued on. Completion is still encoded on the current stream (`ncclMeshComplete` completes every issued group on
+   the stream it is given), so Metal-path groups from two torch streams remain unsupported, as before.
+8. `on_stream`'s and `complete`'s blocks now drain an autorelease pool, as `host_wait`'s does. "In flight" counts the
+   library's buffers, not torch's: stated.
+
+Checked and found sound by the review: manual retain and release of `open`; `std::exchange`; the export of
+`dispatch_sync_with_rethrow`; the `ncclMeshStream` field order; no `dispatch_sync` from torch's queue and no tensor
+freed on it; the `armed` logic (every waiting publication has a notification at or below its count, stale ones find
+nothing); a throw in `host_wait` or `stream_of` leaves nothing deferring.
 
 ## What the first build and the first crossing.py run must show
 

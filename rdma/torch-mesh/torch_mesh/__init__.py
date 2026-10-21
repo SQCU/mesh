@@ -167,10 +167,12 @@ def record(step):
 def replay(recording, steps=1):
     """`steps` replays of a record()ed step issued back to back on torch's stream, with no wait between them: the steps
     are an operand's leading dimension, each reading what the last wrote in the stream's order; every rank replays
-    alike.  The one wait is where a consumer reads, the time this returns: the last step's seconds on the GPU, the span
-    between two MPS timing events recorded on torch's stream before and after it (steps issued back to back, the span
-    from the end of the step before it to its own end), read once the end event has passed.  The steps' outputs are
-    read where the caller reads them (torch commits and waits at .item(), .cpu() and torch.mps.synchronize())."""
+    alike.  The one wait is where a consumer reads, the time this returns: the last step's interval in the stream, the
+    span between two MPS timing events torch records before and after it (each event's time taken as its listener
+    runs, equally late for both), read once the end event has passed.  With the steps back to back the span runs from
+    the end of the step before it to its own end, the GPU's time or the host's issue, whichever is slower; as before,
+    a first replay's compile falls inside it.  The steps' outputs are read where the caller reads them (torch commits
+    and waits at .item(), .cpu() and torch.mps.synchronize())."""
     import torch
     if steps < 1:
         return 0.0

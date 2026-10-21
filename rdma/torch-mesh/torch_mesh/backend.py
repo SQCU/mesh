@@ -62,10 +62,11 @@ def node_lead():
     path = os.environ.get('MESH_STREAM') or os.path.expanduser('~/.cache/mesh/stream.json')
     try:
         with open(path) as f:
-            lead = json.load(f).get('commit_lead')
-    except FileNotFoundError:
-        raise RuntimeError(f'mesh: this node has no commit lead: {path} is missing (torch-mesh README, Performance)') from None
-    if not isinstance(lead, int) or lead < 0:
+            record = json.load(f)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f'mesh: this node has no commit lead: {path}: {e} (torch-mesh README, Performance)') from None
+    lead = record.get('commit_lead') if isinstance(record, dict) else None
+    if type(lead) is not int or lead < 0:
         raise RuntimeError(f'mesh: {path} gives no commit_lead, a count of buffers (torch-mesh README, Performance): {lead!r}')
     return lead
 

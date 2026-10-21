@@ -38,10 +38,12 @@
 // GPU drains: each buffer the stream commits signals its count on `progress` as the GPU reaches its end (a shared
 // event's value is the GPU's progress at once; a completion handler runs 7-9 us later, at the 99th percentile 20-60),
 // and a listener on torch's queue applies the rule again once the count reaches the committed count less the lead, so
-// the open buffer is committed while the GPU still holds `lead` buffers and never idles for the host's next call.  A
-// host wait commits, since nothing else would: the library's (commit, host_wait) and torch's own
+// the open buffer is committed while the GPU still holds `lead` buffers and never idles for the host's next call.  In
+// flight counts the buffers this library committed, not torch's own.  A host wait commits at once rather than at the
+// count, as the host encodes nothing more meanwhile: the library's (commit, host_wait) and torch's own
 // (torch.mps.synchronize, torch.accelerator.synchronize, .item() and .cpu() commit torch's open buffer and wait:
-// MPSStream::synchronize COMMIT_AND_WAIT).
+// MPSStream::synchronize COMMIT_AND_WAIT).  torch 2.14's synchronize calls run off its queue, so a listener commit can
+// meet one (REVIEW-commit-rule.md).
 
 // The node's lead: how many of a stream's committed buffers may still be in flight when its open buffer is committed,
 // a measured quantity of the node (configure: backend.py reads it once from the node's record).  A stream made before
@@ -51,9 +53,9 @@ static std::atomic<int64_t> lead_{-1};
 // One torch MPS stream's commits and group workspace, held by the stream (made at its first group and never freed:
 // torch's streams live as long as the process, and a notification may arrive at any time).  Its commit state
 // (committed, open, armed) is read and written on torch's queue alone, where the host's groups are encoded
-// (dispatch_sync) and where the listener delivers its notifications, so it takes no lock and no caller enters it.  Its
-// workspace is the host's, freed outside torch's queue (a free may enter that queue: torch's MPSAllocator adds
-// completed handlers through it).
+// (dispatch_sync) and where the listener delivers its notifications, so it takes no lock and no caller enters it.  The
+// rest (streamed, scratch, holders) is the host's, and workspace is freed outside torch's queue (a free may enter that
+// queue: torch's MPSAllocator adds completed handlers through it).
 struct MeshStream {
   at::mps::MPSStream *const mps;
   const uint64_t lead;
@@ -151,14 +153,13 @@ static MeshStream &stream_of(at::mps::MPSStream *mps) {
   return *found->second;
 }
 
-// The current torch stream's MeshStream where a group was issued on MPS tensors (nullptr before any was, so the host
-// path makes no MPS stream).
-static MeshStream *stream_made() {
-  {
-    std::lock_guard<std::mutex> guard(*streams_lock_);
-    if (streams_->empty()) return nullptr;
-  }
-  return &stream_of(at::mps::getCurrentMPSStream());
+// Every MeshStream made so far: those of the torch streams a group was issued on (none before any was, so the host path
+// makes no MPS stream).
+static std::vector<MeshStream *> streams_made() {
+  std::lock_guard<std::mutex> guard(*streams_lock_);
+  std::vector<MeshStream *> made;
+  for (auto &[mps, s] : *streams_) made.push_back(s);
+  return made;
 }
 
 // A host wait of the library's on stream s, on torch's queue: a publication still waiting committed, and with `wait`
@@ -173,10 +174,10 @@ static void host_wait(MeshStream &s, bool wait) {
   });
 }
 
-// Before a host wait outside torch's stream (backend.counted, a recording's compile meeting): the current stream's
-// waiting publication committed (none where no group was issued on MPS tensors).
+// Before a host wait outside torch's streams (backend.counted, a recording's compile meeting): every stream's waiting
+// publication committed.
 static void commit() {
-  if (MeshStream *s = stream_made()) host_wait(*s, false);
+  for (MeshStream *s : streams_made()) host_wait(*s, false);
 }
 
 // The node's lead (backend.py, from the node's record), taken by every stream made after it.
@@ -186,9 +187,10 @@ static void configure(int64_t lead) {
 }
 
 // The library's workspace allocator: an MPS tensor of torch's caching allocator, kept in the MeshStream's scratch
-// (`context`) until the group is complete in the stream's order (MeshStream::retire); NULL where torch cannot allocate
-// it, which fails the group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through the
-// library.
+// (`context`) until the group is complete in the stream's order (MeshStream::retire); NULL where torch's allocator
+// throws, which fails the group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through
+// the library.  It runs on torch's queue, where an allocator that frees cached buffers would enter that queue again
+// (MPSAllocator release_cached_buffers): REVIEW-commit-rule.md.
 static void *workspace(size_t bytes, void *context) {
   auto *s = static_cast<MeshStream *>(context);
   try {
@@ -250,9 +252,11 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   __block ncclResult_t result = ncclSuccess;
   __block ncclMeshIssue issue = {0, 0};
   dispatch_sync(stream->queue(), ^{
-    ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
-    result = (*encode)(&on);
-    if (!split || issue.published) s->published();
+    @autoreleasepool {
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
+      result = (*encode)(&on);
+      if (!split || issue.published) s->published();
+    }
   });
   s->streamed = true;
   s->retire(issue.ticket && !result ? issue.ticket : 0, std::exchange(s->scratch, {}));
@@ -268,10 +272,12 @@ static void complete(uint64_t ticket) {
   if (ncclMeshRetired() >= ticket) return s->retire(0, {});
   __block ncclResult_t result = ncclSuccess;
   dispatch_sync(stream->queue(), ^{
-    ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
-    int published = 0;
-    result = ncclMeshComplete(ticket, &on, &published);
-    if (published) s->published();
+    @autoreleasepool {
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
+      int published = 0;
+      result = ncclMeshComplete(ticket, &on, &published);
+      if (published) s->published();
+    }
   });
   s->retire(0, std::exchange(s->scratch, {}));
   checked(result);
@@ -486,8 +492,9 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
 
 // One group of `calls` on comm: on MPS tensors encoded on torch's stream, issued and not completed where `split` (its
 // ticket; 0 complete) unless a call writes a staged copy; on CPU tensors the host path, first completing every group
-// issued on torch's stream and waiting for it (the session's positions run in its order), the GIL released while it
-// runs where `unlock`.  Every staged copy a call writes is written back after it.
+// issued on torch's streams (ncclMeshComplete encodes every issued group's completion on the current one) and waiting
+// for each stream a group was issued on (the session's positions run in its order), the GIL released while it runs
+// where `unlock`.  Every staged copy a call writes is written back after it.
 static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, bool unlock) {
   Group g;
   for (const Call &c : calls)
@@ -505,11 +512,17 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
     }
     ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm, std::move(held));
   } else {
-    MeshStream *s = stream_made();
-    if (s && s->streamed) {
+    bool streamed = false;
+    for (MeshStream *s : streams_made()) streamed |= s->streamed;
+    if (streamed) {
       complete(UINT64_MAX);
-      host_wait(*s, true);
-      s->streamed = false;
+      const MeshStream *current = &stream_of(at::mps::getCurrentMPSStream());
+      for (MeshStream *s : streams_made())
+        if (s->streamed || s == current) {
+          host_wait(*s, true);
+          s->retire(0, {});
+          s->streamed = false;
+        }
     }
     std::optional<pybind11::gil_scoped_release> unlocked;
     if (unlock) unlocked.emplace();
