@@ -95,7 +95,19 @@ layers; see Inversions.
 
 **Quantities.** These are read alongside the rankings. They are indexed absolutely, so they are not part of any
 ranking.
-- Throughput in tok/s, per stream and aggregate.
+- Throughput in tok/s, per stream and aggregate, with step latency, overhead, and bandwidth per stream against aggregate
+  bandwidth: the form every measurement takes, for every change that touches a call's path, against the form before
+  it. Throughput per stream and aggregate trade against each other along a Pareto curve, and each backend (the engine,
+  LiteRT, a hybrid) has its own where they differ in any sense; a KL is never reported without them. The operator,
+  10-20, verbatim: "avoid reporting on kl div when we are not also reporting on aggregate throughput and throughput
+  per stream (which forms a tradeoff w/ a clear pareto curve if we have measured anything at all, with different
+  backends serving different pareto curves where they differ in any sense)"; "if you were logging the throughput,
+  latency, overhead, and per-stream bandwidth vs aggregate bandwdith in tokens/s this would have been reported and
+  unwritten as an obvious regression, brittleness, and deviation from acceptable and satisfactory preexisting code
+  immediately"; "this is yet another point to be written in the rubric if it is not already; that is to say the
+  perfomrance measurementsa nd what form they take." A change whose measurement ranks below the form before it is
+  unwritten, not patched (metal-microbench d673284, 10-19: "d673 will not be accepted adn does not need to be
+  reviewed").
 - KL at the unembedding against LiteRT's pair KL. Up to 2.0 is allowed while shapes work is unfinished.
 - A difference under 3% counts as equal.
 - Latency more than 3 times the hardware's per hop is forbidden.
@@ -773,6 +785,24 @@ a numeric constant or a typed operand; logging on a change found by comparing st
   the rubric before being built and compiled from this point onwards" (10-20): a change's ranked pairs, dimension by
   dimension, are written before it is compiled; "use a subagent to review code which has been newly written within a
   session wtih the rubric file" (10-20).
+- **The one rule is the review.** "this is not a 'rule'; if there are 'rules' they are about the use of the rubric to
+  review code with independent subagents to mitigate and prevent complicated, labrythine, slow interventions and their
+  removal" (10-20). Everything else here ranks.
+- **The rubric answers the choice.** "why are you asking me to make a choice when the rubricfile exists to totally
+  answer questions of this kind?" (10-20): between forms of the same code, the ranking chooses; the operator is not
+  asked.
+- **Write the module, not the history.** "identify hwat the code did and write that module then, rahter htan playing
+  pretend wrt git version trees etc" (10-20): where a rejected change is entangled with later work, what the earlier
+  code did is read from its source and written as a module now.
+- **Megatron TP is its semantics.** "megatron-tp meant something very semantically sepecific and it can be recovered
+  from source alone" (10-20): every rank runs the same program from the same inputs (metal-microbench
+  tools/torch_parallel/tp.py, 10-02: wq, wk, wv, w1, w3 column-parallel, wo, w2 row-parallel, an all-reduce after
+  each), started as torchrun starts it; only tensors cross between ranks, in the program's collectives; Megatron-LM's
+  inference server has rank 0 broadcast a fixed-size typed value and the token tensor, the others looping on that
+  broadcast. Ranked: members as servers interpreting a head's request (d673284, 10-19) ≺ every rank running the same
+  program from the same inputs (10-20).
+- **No part ends another.** "i do not want to hear anything about 'when x died, y co-died ...' ever again" (10-20): a
+  coupling through which one part's end ends another is a defect to remove, never an account of a failure.
 
 ## Where HEAD sits (2026-10-20), as ranked pairs
 
