@@ -24,9 +24,7 @@
    one thread of the dispatch; every dispatch before it has finished: a barrier stands between each two), whether or not
    its program has failure words
    (the classic form's sequence is 0, and it stores none), and, where it has them (p.polls, set wherever they are), goes
-   on only while failure word [2], the gate, holds none, read at system coherence (as every read of the gate here: a
-   threadgroup of a kernel that runs on, a caller's resident run, reads the store another threadgroup's failure made,
-   never a line its core cached at an earlier read).  The gate is the calling thread's reading: a wait's failure
+   on only while failure word [2], the gate, holds none.  The gate is the calling thread's reading: a wait's failure
    closes it once, and may close it while the thread's threadgroup runs (another threadgroup's wait, in its dispatch or
    another), so a threadgroup that decides alike has one thread read it and share it (ENTER_G, GROUP_STOP).
    mesh_step_wait: a wait on its run's last unit's landed word at p.aux for 1 + p.scalar, at most p.polls loads
@@ -48,13 +46,6 @@
    A caller's kernel stores its piece's element k of type T with mesh_step_store and reads its peer's with
    mesh_step_read<T> (half4 where it names none: float16 fourths), so it names no transport qualifier of its own (they
    are compiled here, under mesh.metal's pragma: a header after it, MetalPerformancePrimitives', may end that pragma).
-   mesh_step_fail: a failed wait recorded by its claimant (a loser as mesh_step_check's) with the wait's bound `polls`
-   in [4], the body mesh_step_check calls with the library's cause and p.polls and a caller calls for a wait of its own
-   with mesh_step_caller and its own bound (nccl-mesh-metal.h METAL_CALLER: metal-microbench's resident run's level
-   sync, on the record of the crossing the failure stops).  mesh_step_look: STEP_LOOK, the loads between two reads of
-   the stop word and the gate, for a caller's own wait.  mesh_step_enter_group and mesh_step_await_group:
-   mesh_step_enter's and mesh_step_await's reading by thread 0 alone, shared through tg[0] past one barrier (with
-   `stop`, mesh_step_stopped's stop word too), so a threadgroup decides alike (ENTER_G).
    The library's own kernels that write a stream class's out ring or ready words (a send, a release) do nothing once the
    stop word is set (STOP, GROUP_STOP: read by thread 0 alone where the threadgroup meets a barrier), so none writes them
    after a revoke. */
@@ -62,7 +53,7 @@ static NSString *const STEPS =
   @"\nusing namespace metal;\n"
   XSTR(ARGS(mesh_args, ulong, uint)) ";\n"
   "static inline bool mesh_step_enter(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first) { "
-  "if (p.sequence && first) *progress = p.sequence; return !(p.polls && ((volatile coherent(system) device const ulong *)vb)[2]); }\n"
+  "if (p.sequence && first) *progress = p.sequence; return !(p.polls && ((volatile device const ulong *)vb)[2]); }\n"
   "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, device uchar *vb) { "
   "volatile coherent(system) device const ulong *w = (volatile coherent(system) device const ulong *)word, *v = (volatile coherent(system) device const ulong *)vb; "
   "ulong seen = mesh_wait_bounded(w, 1 + p.scalar, min(p.polls, " XSTR(STEP_LOOK) ")); "
@@ -70,37 +61,21 @@ static NSString *const STEPS =
   "seen = mesh_wait_bounded(w, 1 + p.scalar, min(p.polls - k, " XSTR(STEP_LOOK) ")); return seen; }\n"
   "static inline bool mesh_step_claim(device uchar *vb) { "
   "return atomic_exchange_explicit((device atomic_uint *)(vb + 8), 1u, memory_order_relaxed) == 0u; }\n"
-  "constant constexpr ulong mesh_step_caller = " XSTR(METAL_CALLER) "UL;\n"
-  "constant constexpr uint mesh_step_look = " XSTR(STEP_LOOK) ";\n"
-  "static inline bool mesh_step_stopped(constant mesh_args &p, device uchar *vb) { "
-  "return p.polls && ((volatile coherent(system) device const ulong *)vb)[6] != 0UL; }\n"
-  "static inline void mesh_step_fail(constant mesh_args &p, ulong cause, uint polls, device uchar *vb) { "
+  "static inline void mesh_step_check(constant mesh_args &p, ulong status, device uchar *ring, device uchar *vb) { "
   "if (!p.polls) return; "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
+  "ulong cause; "
+  "(void)ring; if (status != ~0UL && status >= 1 + p.scalar) return; "
+  "cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
   "if (!mesh_step_claim(vb)) { const ulong g = mesh_wait_bounded((volatile coherent(system) device const ulong *)(v + 2), 1, p.polls); "
   "if (g) mesh_publish(v + 2, g); return; } "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(polls); mesh_publish(v + 2, p.at + 1); }\n"
-  "static inline void mesh_step_check(constant mesh_args &p, ulong status, device uchar *ring, device uchar *vb) { "
-  "(void)ring; if (!p.polls || (status != ~0UL && status >= 1 + p.scalar)) return; "
-  "mesh_step_fail(p, status == ~0UL ? " XSTR(METAL_LOST) "UL : ((volatile coherent(system) device const ulong *)vb)[6] ? " XSTR(METAL_REVOKED) "UL : "
-  XSTR(METAL_BOUND) "UL, p.polls, vb); }\n"
+  "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
   "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *ring, device uchar *vb, uint i) { "
   "if (i == 0) mesh_step_check(p, mesh_step_wait(p, words + p.aux, vb), ring, vb); "
   "threadgroup_barrier(mem_flags::mem_device); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "return !(p.polls && ((volatile coherent(system) device const ulong *)vb)[2]); }\n"
-  "static inline bool mesh_step_enter_group(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first, bool stop, uint i, "
-  "threadgroup ulong *tg) { "
-  "if (i == 0) tg[0] = mesh_step_enter(p, vb, progress, first) && !(stop && mesh_step_stopped(p, vb)) ? 0UL : 1UL; "
-  "threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "return tg[0] == 0UL; }\n"
-  "static inline bool mesh_step_await_group(constant mesh_args &p, device uchar *words, device uchar *ring, device uchar *vb, uint i, "
-  "threadgroup ulong *tg) { "
-  "if (i == 0) { mesh_step_check(p, mesh_step_wait(p, words + p.aux, vb), ring, vb); tg[0] = p.polls && ((volatile coherent(system) device const ulong *)vb)[2] ? 1UL : 0UL; } "
-  "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup); "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "return tg[0] == 0UL; }\n"
+  "return !(p.polls && ((volatile device const ulong *)vb)[2]); }\n"
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0) for (uint u = 0; u < p.count; u++) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux) + u, p.scalar); }\n"
@@ -117,8 +92,8 @@ static NSString *const KERNELS =
   @"\n"
   "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, device ulong *progress, uint i, uint g, threadgroup ulong *tg\n"
   "#define ENTER(first) if (!mesh_step_enter(p, vb, progress, first)) return;\n"
-  "#define ENTER_G if (!mesh_step_enter_group(p, vb, progress, true, false, i, tg + 3)) return;\n"
-  "#define STOPPED mesh_step_stopped(p, vb)\n"
+  "#define ENTER_G if (i == 0) tg[3] = mesh_step_enter(p, vb, progress, true) ? 0UL : 1UL; threadgroup_barrier(mem_flags::mem_threadgroup); if (tg[3]) return;\n"
+  "#define STOPPED (p.polls && ((volatile coherent(system) device const ulong *)vb)[6] != 0UL)\n"
   "#define STOP if (STOPPED) return;\n"
   "#define GROUP_STOP if (i == 0) tg[2] = STOPPED ? 1UL : 0UL; threadgroup_barrier(mem_flags::mem_threadgroup); if (tg[2]) return;\n"
   "#define HEAD(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]]) { body_##name(d, s, p, d, vb, progress, i, g, nullptr); } static void body_##name(PARAMS)\n"

@@ -1665,10 +1665,6 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
     if (cause == METAL_LOST)
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost (its stream's landed words ~0) at position %llu", node,
                        (unsigned long long)(at - 1));
-    if (cause == METAL_CALLER)
-      return comm_fail(comm, ncclRemoteError, "the caller's own kernel stopped (a wait of its own at its bound of %llu polls, or its "
-                       "host's stop) before position %llu on the channel to node %u: its gate closed there, so nothing past it was published",
-                       (unsigned long long)atomic_load_explicit(v + 4, memory_order_relaxed), (unsigned long long)(at - 1), node);
     return comm_fail(comm, ncclRemoteError, "position %llu on the channel to node %u landed nothing within %llu polls of a GPU wait (its "
                      "stream's bound, ncclMeshStream polls): the peer's work there began that much later, or its link was lost",
                      (unsigned long long)(at - 1), node, (unsigned long long)atomic_load_explicit(v + 4, memory_order_relaxed));

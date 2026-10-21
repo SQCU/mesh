@@ -43,9 +43,8 @@ void *metal_retain(void *object);
    past which the dispatch records a failure, and every later dispatch gated on those words reads it and does nothing,
    so the host finds the failure there after the command buffer (nccl-mesh.c comm_failure) and the call fails as a
    value.  The failure words: [0] the cause (METAL_BOUND the bound reached, METAL_LOST the link's ~0, METAL_REVOKED a
-   revoke, METAL_CALLER a caller's own wait; a landing is none, whatever its bytes), [1] the claim (its low 32 bits
-   exchanged for 1 by every wait that fails, the one that found 0 recording [0], [3], [4] and [2]: nccl-mesh-metal.m
-   mesh_step_claim), [2] 1 + the position
+   revoke; a landing is none, whatever its bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that
+   fails, the one that found 0 recording [0], [3], [4] and [2]: nccl-mesh-metal.m mesh_step_claim), [2] 1 + the position
    (the gate, stored last by the claimant, by the GPU alone; a loser re-stores the value it read; it may close while a
    threadgroup runs, so each thread's reading is its own), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow, and [6] the host's stop (a revoke's), which
    every wait reads and records.  The bound is the caller's, carried per crossing (nccl.h
@@ -58,10 +57,6 @@ void *metal_retain(void *object);
 #define METAL_BOUND 1
 #define METAL_LOST 2
 #define METAL_REVOKED 4
-/* the caller's own kernel stopped: a wait of its own at its bound, or its host's stop (metal-microbench docs/kernels.md
-   Any program, the resident run: a level's sync, MetalReplayHalt), recorded by STEPS' mesh_step_fail on each crossing's
-   failure words its kernel holds, so no later publication of the call sends rows past an unsynchronized wait */
-#define METAL_CALLER 8
 /* NULL where it cannot be made, *message then what failed (struct metal_result's message) */
 struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls, const char **message);
 /* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
