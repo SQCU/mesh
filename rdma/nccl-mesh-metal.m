@@ -806,10 +806,7 @@ static uint64_t ring_take(struct track_ring *t, uint64_t sequence, uint64_t byte
 struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
   struct recording *r = program->recording;
   program->recording = NULL;
-  /* items that run no step (a fused crossing's: its two steps are its caller's kernels', metal_send_deferred and
-     metal_land_deferred, never recorded) are no dispatch: their credit, dependencies and counts order nothing that runs,
-     and the counts are this dispatch's own, so nothing is encoded between the publishing kernel and the landing one */
-  if (!r || !r->tracks || !r->ops) { recording_free(r); return METAL_DONE; }
+  if (!r || !r->tracks) { recording_free(r); return METAL_DONE; }
   @autoreleasepool {
     const char *message = NULL;
     struct kernels *k = program_kernels(program, &message);
