@@ -53,7 +53,7 @@ observations. The evidence file (MESH_INSTANCES or ~/.cache/mesh/instances.json)
 whole wherever it lies: the coefficients, the bandwidth, the configurations observed, the served readings and the
 attention readings themselves, the attention model and the fused readings; made on a node of its chip and GPU cores
 from observations read on that node (each row names its node: a probe's and a bandwidth read's their own, a served
-reading's its instance table's); a node without it, or with another chip's or core count's, is refused. A choice is
+reading's the evidence it was priced by); a node without it, or with another chip's or core count's, is refused. A choice is
 the argmin over the admissible instances of a slice at its rows: of the instances served readings read at that slice
 and rows (observe's rows, each its readings' median) where there are any, a measurement at a shape outranking the
 model there, else of the fit's prices (every measurement, a probe's too, moves the coefficients for every other shape).
@@ -1228,25 +1228,25 @@ def _write(path, document):
     os.replace(new, path)
 
 
-def reading_table(reading):
-    """The instance table a served reading was served with (it names it: engine.generation.table) and the node that
-    resolved it and served the reading (the table's node and cores: resolve), (path, table, [chip, GPU cores]); None
-    where the reading, its table or the table's node is missing."""
+def reading_evidence(reading):
+    """The node a served reading was read on: the instance evidence the engine priced it by (it names the file:
+    engine.generation.evidence; the engine evaluates its instances and attention plans from it, metal-microbench
+    docs/kernels.md#the-instance-fit), whose node and cores are the node's, [chip, GPU cores]; None where the reading,
+    its evidence or the evidence's node is missing."""
     try:
-        path = json.loads(Path(reading).read_text())['engine']['generation']['table']
-        table = json.loads(Path(path).read_text())
+        evidence = json.loads(Path(json.loads(Path(reading).read_text())['engine']['generation']['evidence']).read_text())
     except (OSError, KeyError, TypeError, ValueError):
         return None
-    return (path, table, [table['node'], table['cores']]) if table.get('node') and table.get('cores') else None
+    return [evidence['node'], evidence['cores']] if evidence.get('node') and evidence.get('cores') else None
 
 
 _SERVED = {}
 
 
 def served_node(reading):
-    """The node a served reading was read on (reading_table), [chip, GPU cores], or None."""
+    """The node a served reading was read on (reading_evidence), [chip, GPU cores], or None."""
     if reading not in _SERVED:
-        _SERVED[reading] = (reading_table(reading) or (None, None, None))[2]
+        _SERVED[reading] = reading_evidence(reading)
     return _SERVED[reading]
 
 
@@ -1409,21 +1409,20 @@ def _fit(args):
 
 def _observe(args):
     """A served reading's profile (metal-microbench tools/reading.py read --profile: per class, per command label its least
-    us a dispatch) as observations of its instances, each row naming the node it was read on (the reading's own instance
-    table's: reading_table): each label's slices the export's products of its shape and widths (products: a slice's own,
+    us a dispatch) as observations of its instances, each row naming the node it was read on (the instance evidence the
+    engine priced the reading by: reading_evidence): each label's slices the export's products of its shape and widths (products: a slice's own,
     a stack's, a couple's gate and up summed; their units' mean), its time less the class's floor (its least command), a
     label without its LOADS taking --loads (the form the reading's library had); and each decode class's attention plans
     (a dimension's vector form, or its tile with its merge stage where the class paid one: merged) as attention rows, at
-    the window or --ctx positions, each at the part count the reading's table named for that dimension's layers at the
-    class (0: the engine's own count, as in every table before part counts). An instance whose label names the prologue
+    the window or --ctx positions, each at the engine's own part count (0: the engine evaluates its plans from its
+    evidence and takes none from outside). An instance whose label names the prologue
     or the publication after its sizes (paired_of: a consumer, a producer publishing its output; metal-microbench
     docs/kernels.md#stacked-products) is a row of its own kind (`paired`), which readings keep apart and the fit's model
     reads none of; one naming another epilogue alone is not read (epilogue reads it)."""
     import re
-    served = reading_table(args.reading)
-    if served is None:
-        raise SystemExit(f'{args.reading}: names no instance table that names its node (engine.generation.table; resolve writes node and cores)')
-    table_path, table, made = served
+    made = reading_evidence(args.reading)
+    if made is None:
+        raise SystemExit(f'{args.reading}: names no instance evidence that names its node (engine.generation.evidence: a fit writes node and cores)')
     reading = json.loads(Path(args.reading).read_text())
     streamed = Streamed(args.export, 'cpu')
     record = _record(args.program) if args.program else None
@@ -1448,7 +1447,7 @@ def _observe(args):
                             'source': str(Path(args.reading).resolve()), 'node': made, 'paired': paired, **mean_units(units)})
     text = _text_config(args.export)
     windows = {text['head_dim']: text.get('sliding_window', 0), text.get('global_head_dim') or text['head_dim']: 0}
-    kinds, named, held = text.get('layer_types') or [], {}, {}
+    kinds, held = text.get('layer_types') or [], {}
     part = record['ranks'][args.rank] if record else None
     for L, kind in enumerate(kinds):
         layer = ((part or {}).get('layers') or [None] * len(kinds))[L]
@@ -1458,25 +1457,19 @@ def _observe(args):
     for dims, counts in held.items():
         if len(counts) != 1:
             print(f'{args.reading}: the member\'s layers of {dims} channels hold {sorted(counts)} query heads, one a reading; their attention rows not kept')
-    for e in table.get('attention', []):
-        dims = text['head_dim'] if kinds[e['layer']] == 'sliding_attention' else text.get('global_head_dim') or text['head_dim']
-        named.setdefault((e['plan'], dims, e['rows']), set()).add(e.get('parts', 0))
     for cls, commands in reading['engine']['profile']['commands'].items():
         for dims, window in windows.items() if cls.startswith('decode') else ():
             if len(held.get(dims, ())) != 1:
                 continue
             heads = next(iter(held[dims]))
-            for plan, labels in (('vector', [f'decode_attention_{dims}', f'decode_attention_{dims}_2']), ('tile', [f'decode_attention_tile_{dims}'])):
-                seen = [commands[l]['least_us'] for l in labels if l in commands]
+            for plan, label in (('vector', rf'decode_attention_{dims}(?:_[12])?(?:_mesh_[a-z]+_[0-9]+_)?'), ('tile', rf'decode_attention_tile_{dims}(?:_mesh_[a-z]+_[0-9]+_)?')):
+                seen = [c['least_us'] for l, c in commands.items() if re.fullmatch(label, l)]
                 if seen:
                     merge = commands.get(f'decode_attention_merge_{dims}', {}).get('least_us', 0.0) if plan == 'tile' else 0.0
                     rows, positions = int(cls.split()[1]), window or args.ctx
-                    parts = named.get((plan, dims, rows), {0})
-                    if len(parts) != 1:
-                        raise SystemExit(f'{table_path}: the {plan} plan at {dims} channels and {rows} rows names part counts {sorted(parts)}, one a reading')
                     out.append({'kind': 'attention', 'plan': plan, 'dims': dims, 'rows': rows, 'heads': heads, 'positions': positions, 'window': window,
                                 'reads': attention_reads(plan, dims, rows, heads, positions), 'best_us': min(seen) + merge,
-                                'parts': parts.pop(), 'merged': merge > 0, 'source': str(Path(args.reading).resolve()), 'node': made})
+                                'parts': 0, 'merged': merge > 0, 'source': str(Path(args.reading).resolve()), 'node': made})
     with open(args.out, 'a') as f:
         for row in out:
             f.write(json.dumps(row) + '\n')
@@ -1547,7 +1540,7 @@ def _epilogue(args):
     here = list(node())
     for reading in (args.fused, args.separate):
         if served_node(reading) != here:
-            raise SystemExit(f'{reading}: read on {served_node(reading) or "no named node"} (its instance table\'s), not this {here[0]} ({here[1]} GPU cores)')
+            raise SystemExit(f'{reading}: read on {served_node(reading) or "no named node"} (its instance evidence\'s), not this {here[0]} ({here[1]} GPU cores)')
     _, runs = products(slices(Streamed(args.export, 'cpu'), _record(args.program) if args.program else None, args.rank))
     path = evidence_path()
     known = json.loads(path.read_text()) if path.exists() else {}
