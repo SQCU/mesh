@@ -6,6 +6,7 @@ KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources
 FW=/usr/libexec/ApplicationFirewall/socketfilterfw
 
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+export HOME=~root
 launchctl enable system/com.openssh.sshd 2>/dev/null
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
 RECORDED=$(cat "$MESH_ROOT/admin-user" 2>/dev/null)
@@ -78,7 +79,7 @@ try "no startup delay"    systemsetup -setwaitforstartupafterpowerfailure 0
 try "computer sleep off"  systemsetup -setcomputersleep Never
 try "network time"        systemsetup -setusingnetworktime on
 try "auto-boot"           nvram auto-boot=true
-try "screensaver off"     sudo -u "$ADMIN_USER" defaults -currentHost write com.apple.screensaver idleTime -int 0
+try "screensaver off"     sudo -H -u "$ADMIN_USER" defaults -currentHost write com.apple.screensaver idleTime -int 0
 try "no auto updates"     defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false
 try "no update restart"   defaults write /Library/Preferences/com.apple.commerce AutoUpdateRestartRequired -bool false
 try "firewall off"        "$FW" --setglobalstate off

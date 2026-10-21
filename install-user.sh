@@ -33,7 +33,7 @@ provide_http(){
 mkdir -p "$D/bin" "$D/etc" "$D/log" "$D/viz" "$A" "$HOME/.local/bin"
 install -C -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
 install -C -m 755 "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py"
-install -C -m 755 "$R/bin/mesh-peers.sh" "$D/bin/mesh-peers.sh"
+install -C -m 755 "$R/bin/mesh-peers.sh" "$R/bin/mesh-rdma.sh" "$D/bin/"
 install -C -m 755 "$R/bin/mesh-observe.py" "$D/bin/mesh-observe.py"
 install -C -m 755 "$R/bin/mesh-top.py" "$D/bin/mesh-top.py"
 install -C -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$R/bin/mesh_restart.py" "$D/bin/"
