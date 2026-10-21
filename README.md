@@ -556,6 +556,9 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
 ## Collectives
 
+A program that uses the mesh, step by step, with what the bridge, the collective client and your own service each do:
+[docs/writing-a-service.md](docs/writing-a-service.md) (its program: `examples/chain-service.py`).
+
 The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL.md) (libnccl-mesh, the C
 library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of

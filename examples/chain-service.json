@@ -1,0 +1,11 @@
+{
+  "input": "chain-input.npy",
+  "weights": "chain-weights.npz",
+  "output": "chain-output.npy",
+  "rows": 8,
+  "width": 1024,
+  "steps": 4096,
+  "chunk": 256,
+  "parts": [512, 512],
+  "check": 8
+}
