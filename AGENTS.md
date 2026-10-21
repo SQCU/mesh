@@ -154,7 +154,9 @@ This authorization applies to every mesh machine.
 
 ## Collectives and tensor parallelism
 
-Read `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
+Read `design/pages-and-functions.md` first: the algorithm on two peers and on infinitely many Minis, and why
+waiting on anything but stamped pages fails on both (its analysis: metal-microbench
+`docs/mesh_distributed_reduction_analysis.md`). Then `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
 `~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. A collective is a compiled program
 made ahead of time along trees of an explicit link map (`rdma/mesh-plan.h`, `rdma/mesh-collective.c`). Using
 the library: `rdma/NCCL.md`; PyTorch programs: `rdma/torch-mesh/README.md`; NumPy: `rdma/mesh_mpi.py`; where
