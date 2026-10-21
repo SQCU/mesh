@@ -31,44 +31,39 @@
 
 // The commit rule (README, Performance), one for every caller: eager calls and compiled graphs, the library's own
 // callers and a user's program alike, with no region, mode or counter a caller enters.  Its work is throughput: the GPU
-// fed with the fewest command buffers.  The GPU starts a command buffer at most every 13-19 us whatever it holds
-// (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication (work a peer waits on) is a
-// floor of its own.  A publication is committed at once while at most the node's lead of the buffers its stream
-// committed are still in flight; otherwise it joins torch's open command buffer.  That buffer is committed before the
-// GPU drains: each buffer the stream commits signals its count on `progress` as the GPU reaches its end (a shared
-// event's value is the GPU's progress at once; a completion handler runs 7-9 us later, at the 99th percentile 20-60),
-// and a listener on torch's queue applies the rule again once the count reaches the committed count less the lead, so
-// the open buffer is committed while the GPU still holds `lead` buffers and never idles for the host's next call.  In
-// flight counts the buffers this library committed, not torch's own.  A host wait commits at once rather than at the
-// count, as the host encodes nothing more meanwhile: the library's (commit, host_wait) and torch's own
-// (torch.mps.synchronize, torch.accelerator.synchronize, .item() and .cpu() commit torch's open buffer and wait:
-// MPSStream::synchronize COMMIT_AND_WAIT).  torch 2.14's synchronize calls run off its queue, so a listener commit can
-// meet one (REVIEW-commit-rule.md).
+// fed with the fewest command buffers while the host keeps issuing.  The GPU starts a command buffer at most every
+// 13-19 us whatever it holds (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication (work
+// a peer waits on) is a floor of its own.  Each buffer the library commits signals its count on `progress` as the GPU
+// reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us later, at the
+// 99th percentile 20-60).  A publication is committed at once while at most the node's lead of those buffers are
+// still in flight, read from the event's value then; otherwise it joins torch's open command buffer.  The next
+// publication applies the rule again, and a host wait commits the open buffer, since nothing else would: the
+// library's (commit, host_wait) and torch's own (torch.mps.synchronize, torch.accelerator.synchronize, .item() and
+// .cpu() commit torch's open buffer and wait: MPSStream::synchronize COMMIT_AND_WAIT).  A host that blocks outside
+// torch while a publication waits stalls its peer, which is the program's to avoid; the peer's bounded wait ends the
+// call as a value.  In flight counts the buffers this library committed, not torch's own.
 
-// The node's lead: how many of a stream's committed buffers may still be in flight when its open buffer is committed,
+// The node's lead: how many of a stream's committed buffers may still be in flight when a publication commits at once,
 // a measured quantity of the node (configure: backend.py reads it once from the node's record).  A stream made before
 // it is configured throws.
 static std::atomic<int64_t> lead_{-1};
 
 // One torch MPS stream's commits and group workspace, held by the stream (made at its first group and never freed:
-// torch's streams live as long as the process, and a notification may arrive at any time).  Its commit state
-// (committed, open, armed) is read and written on torch's queue alone, where the host's groups are encoded
-// (dispatch_sync) and where the listener delivers its notifications, so it takes no lock and no caller enters it.  The
-// rest (streamed, scratch, holders) is the host's, and workspace is freed outside torch's queue (a free may enter that
-// queue: torch's MPSAllocator adds completed handlers through it).
+// torch's streams live as long as the process, and the library's workspace allocator holds it as its context).  Its
+// commit state (committed, open) is read and written by the host inside torch's queue (dispatch_sync), where torch
+// encodes its own work, so it takes no lock, no caller enters it, and no thread but the host's touches torch's stream.
+// The rest (streamed, scratch, holders) is the host's, and workspace is freed outside torch's queue (a free may enter
+// that queue: torch's MPSAllocator adds completed handlers through it).
 struct MeshStream {
   at::mps::MPSStream *const mps;
   const uint64_t lead;
   id<MTLSharedEvent> const progress;
-  MTLSharedEventListener *const listener;
   // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
   // the root command buffer a publication joined (MPSCommandBuffer rootCommandBuffer, which commitAndContinue
   // commits), retained until it is committed by this stream or by torch's own commits, which carry the publication
   // with them; nil while none waits
   id<MTLCommandBuffer> open = nil;
-  // a notification asked at a count not yet reached when it was asked, which Metal delivers as the count arrives
-  bool armed = false;
   // whether a group was issued on this stream since the host path last waited for it
   bool streamed = false;
   // the workspace of the group being encoded (the library's workspace allocator's context is the MeshStream, which
@@ -77,8 +72,7 @@ struct MeshStream {
   std::map<uint64_t, std::vector<at::Tensor>> holders;
 
   MeshStream(at::mps::MPSStream *stream, uint64_t depth)
-      : mps(stream), lead(depth), progress([stream->device() newSharedEvent]),
-        listener([[MTLSharedEventListener alloc] initWithDispatchQueue:stream->queue()]) {}
+      : mps(stream), lead(depth), progress([stream->device() newSharedEvent]) {}
 
   // On torch's queue: whether a publication still waits in torch's open buffer, the root it joined not yet committed
   // (one torch committed needs no buffer of ours, which would cost the GPU a start of its own).
@@ -98,31 +92,11 @@ struct MeshStream {
     open = nil;
   }
 
-  // On torch's queue, the rule: a publication waiting in the open buffer is committed while at most `lead` buffers
-  // are in flight; else the listener is asked to apply the rule again at the count committed - lead (at least 1, as
-  // more than `lead` are in flight).  A count reached by the time it was asked is applied here at once, so nothing
-  // rests on Metal delivering a notification asked for a count already reached; one delivered late finds nothing
-  // waiting, or applies the rule to what waits then.
-  void rule() {
-    if (!waiting()) return;
-    if (committed - progress.signaledValue <= lead) return signalled(false);
-    if (armed) return;
-    const uint64_t at = committed - lead;
-    MeshStream *self = this;
-    [progress notifyListener:listener atValue:at block:^(id<MTLSharedEvent>, uint64_t) {
-      @autoreleasepool {
-        self->armed = false;
-        self->rule();
-      }
-    }];
-    armed = progress.signaledValue < at;
-    if (!armed) rule();
-  }
-
-  // On torch's queue, as a group's encoding ends: a publication encoded in torch's open buffer.
+  // On torch's queue, as a group's encoding ends, the rule: a publication encoded in torch's open buffer, committed
+  // with every publication waiting there while at most `lead` buffers are in flight, else left to join it.
   void published() {
     if (!waiting()) open = [mps->commandBuffer().rootCommandBuffer retain];
-    rule();
+    if (committed - progress.signaledValue <= lead) signalled(false);
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
@@ -153,8 +127,8 @@ static MeshStream &stream_of(at::mps::MPSStream *mps) {
   return *found->second;
 }
 
-// Every MeshStream made so far: those of the torch streams a group was issued on (none before any was, so the host path
-// makes no MPS stream).
+// Every MeshStream made so far: those of the torch streams a group was issued on (none before any was, so the host
+// path makes no MPS stream).
 static std::vector<MeshStream *> streams_made() {
   std::lock_guard<std::mutex> guard(*streams_lock_);
   std::vector<MeshStream *> made;

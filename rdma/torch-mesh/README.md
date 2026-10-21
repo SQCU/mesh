@@ -377,33 +377,31 @@ w = s["lm_head"].to("cpu")                        # decoded
 - On two ranks every all-reduce is the direct exchange: one crossing.
 - One commit rule for every caller (`_stream.mm`, "The commit rule"): eager calls and compiled graphs, the library's
   own callers and user programs alike. Nothing is entered, wrapped or opted into, and how a program is written does
-  not decide how fast its collectives are. The rule's work is throughput, the GPU fed with the fewest command buffers:
-  the GPU starts a command buffer at most every 13-19 us whatever it holds (metal-microbench docs/measurement.md,
-  2026-10-02), so a buffer for each publication is a floor of its own.
-  - A publication (work a peer waits on) is committed at once while at most the node's commit lead of the buffers
-    its stream committed are in flight. Otherwise it joins torch's open command buffer.
+  not decide how fast its collectives are. The rule's work is throughput, the GPU fed with the fewest command buffers
+  while the host keeps issuing: the GPU starts a command buffer at most every 13-19 us whatever it holds
+  (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication is a floor of its own.
   - Each buffer the library commits signals its count on a shared event as the GPU reaches its end. A shared event's
     value is the GPU's progress at once, while a completion handler runs 7-9 us later (20-60 at the 99th percentile).
-  - A listener (`MTLSharedEventListener`, on torch's stream queue) applies the rule again once that count reaches the
-    committed count less the lead. So the open buffer is committed while the GPU still holds `lead` buffers, and the
-    GPU never idles for the host's next call.
-  - In flight counts the buffers the library committed, not torch's own.
-  - A host wait commits at once rather than at the count, since the host encodes nothing more meanwhile. The
+  - A publication (work a peer waits on) is committed at once, with every publication waiting in the open buffer,
+    while at most the node's commit lead of those buffers are in flight, read from the event's value then. Otherwise
+    it joins torch's open command buffer. In flight counts the library's buffers, not torch's own.
+  - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
     library's: the host path, `counted`, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
-  - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written on
-    torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. A group's workspace
-    is held until the library retires the group (`ncclMeshRetired`), never by the commit.
-  - Open: torch 2.14's `synchronize` calls run off the stream's queue, so a listener commit can meet one
-    (`REVIEW-commit-rule.md`). The first build looks for it.
+  - A host that blocks outside torch while a publication waits in the open buffer stalls its peer. Avoiding that is
+    the program's responsibility; the peer's bounded wait ends the call as a value
+    ([NCCL.md](../NCCL.md#bounded-waits)).
+  - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
+    host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
+    but the host's touches torch's stream. A group's workspace is held until the library retires the group
+    (`ncclMeshRetired`), never by the commit.
 - The node's commit lead is a measured quantity of the node, carried as data: `commit_lead` in the JSON document
   `MESH_STREAM` names, else `~/.cache/mesh/stream.json`, read once when a group is made. A node without it fails there,
-  naming the record. No probe writes it yet: until one does, it is written by hand from the node's measured listener
-  delay and buffer start. Every lead keeps the GPU fed eventually; the lead sets how many buffers the GPU still holds when
-  the commit is posted, which should cover the listener's delay (7-9 us, 20-60 at the 99th percentile) plus a buffer's
-  start (13-19 us). `stream.example.json` holds 1, the depth of the 10-02 rule (mesh 3c00d37: a publication joined the
-  open buffer while two buffers were in flight).
+  naming the record. The lead sets how many of the library's buffers the GPU may still hold when a publication commits
+  at once: a deeper lead commits more buffers, a shallower one gathers more publications into one. No probe writes the
+  record yet: until one does, it is written by hand. `stream.example.json` holds 1, the depth of the 10-02 rule (mesh
+  3c00d37: a publication joined the open buffer while two buffers were in flight).
 - `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
   point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
   targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`
