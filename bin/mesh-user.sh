@@ -30,11 +30,10 @@ uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
 "$uv" pip install -q --python "$venv/bin/python" -r "$source/rdma/requirements.txt" || exit 1
 "$venv/bin/python" "$source/rdma/mesh_c_build.py" >/dev/null || exit 1
 "$venv/bin/python" -c 'import sys, sysconfig; open(sysconfig.get_paths()["purelib"] + "/mesh.pth", "w").write(sys.argv[1] + "\n")' "$source/rdma" || exit 1
-sum=$(cat "$source"/rdma/libnccl-mesh.dylib "$source"/rdma/torch-mesh/setup.py "$source"/rdma/torch-mesh/torch_mesh/* 2>/dev/null | shasum)
+sum=$({ cat "$source/rdma/libnccl-mesh.dylib"; cd "$source/rdma/torch-mesh" && git ls-files -z | xargs -0 cat; } 2>/dev/null | shasum)
 if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   build=$(mktemp -d) || exit 1
-  cp -R "$source/rdma/torch-mesh/." "$build/"
-  rm -rf "$build/build" "$build"/torch_mesh/*.so
+  (cd "$source/rdma/torch-mesh" && git ls-files -z | xargs -0 tar -cf -) | tar -xf - -C "$build" || exit 1
   MESH_RDMA="$source/rdma" "$uv" pip install -q --python "$venv/bin/python" --no-build-isolation --reinstall-package torch-mesh "$build"
   status=$?; rm -rf "$build"
   [ "$status" = 0 ] || exit "$status"

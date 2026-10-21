@@ -59,7 +59,7 @@ stage() {
   st=$(cd "$st" && pwd -P)
   taskpolicy -b make -C "$st/rdma" all install > "$log" 2>&1 || { why="make -C rdma all install failed ($log)"; return 1; }
   taskpolicy -b "$venv/bin/python" "$st/rdma/mesh_c_build.py" >> "$log" 2>&1 || { why="the bindings do not build ($log)"; return 1; }
-  sum=$(cat "$st"/rdma/libnccl-mesh.dylib "$st"/rdma/torch-mesh/setup.py "$st"/rdma/torch-mesh/torch_mesh/* 2>/dev/null | shasum)
+  sum=$({ cat "$st/rdma/libnccl-mesh.dylib"; cd "$st/rdma/torch-mesh" && git ls-files -z | xargs -0 cat; } 2>/dev/null | shasum)
   if [ "$sum" != "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" ]; then
     (cd "$st/rdma/torch-mesh" && MESH_RDMA="$st/rdma" taskpolicy -b "$venv/bin/python" setup.py -q build_ext \
       -b "$S/stage/torch-mesh.build" -t "$S/stage/torch-mesh.objects") >> "$log" 2>&1 \
