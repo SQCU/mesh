@@ -67,12 +67,38 @@ The rank service in metal-microbench is a service of this kind for a language mo
 
 ## How the example moves its data
 
-Rank 0 holds the files, and at the start it sends each rank that rank's rows of A and B. Before each chunk of steps, it
-broadcasts that chunk's inputs to every rank. Each step then makes one all-reduce, and nothing else crosses. Rank 0
-copies one chunk of outputs to the host at the end of the chunk, not once a step.
+Rank 0 holds the files. At the start it reads the input's shape and broadcasts two numbers, the steps and the rows, so
+every rank knows them. Then it sends each rank that rank's rows of A and B.
+
+The inputs are one operand: a block of rows for each step. They move through a ring of slots in the region, one slot a
+step. Each rank has two rings, one for the inputs and one for the sums. Rank 0 copies inputs from its file into its
+ring a block at a time. The copy goes on the GPU's own queue, a block ahead of the steps that read it, and the host does
+not wait for it.
+
+Each input crosses one step early. Before step t's kernel, the host issues the broadcast of e_{t+1}. It waits for it
+just before step t+1's kernel, the first thing that reads it. So the input crosses while step t computes. (The
+library may finish it a little sooner, at step t's all-reduce, since a call finishes every call issued before it. The
+input has landed by then.) Each step then makes one all-reduce of its part of z, and nothing else crosses.
+
+At the end of each block, rank 0 puts a copy of that block's outputs on the GPU's queue as well. The copy writes
+straight into the output file's memory. So no step waits for the host, and the host waits for the GPU only as the
+next section says.
 
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
 place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
+
+## The rings
+
+How deep is a ring? The configuration gives `ring_bytes`, the bytes of the region the two rings may hold on each node.
+Each ring gets as many slots as fit, but never more slots than the stream has steps. If the whole stream fits, the ring
+is the whole stream, and no slot is used twice. If it does not fit, the ring is split into two blocks. While the GPU
+works through one block, rank 0's copies fill the other. If `ring_bytes` cannot hold two slots in each ring, the service
+stops with an error. It never picks a depth of its own.
+
+The host may run ahead of the GPU, but never by more than one ring. At the end of each block it puts a mark on the
+GPU's queue. At the start of a block, it waits for the mark one ring back. A whole block is still queued then, so the
+GPU never waits for the host. This wait keeps the work in flight, and the memory it holds, no larger than the ring.
+Nothing else in the loop waits.
 
 ## The step kernel
 
@@ -85,23 +111,35 @@ has a limit, the patience, so a stuck kernel ends instead of hanging the GPU.
 The kernel does three things. First, each worker writes its slice of x = e_t + tanh(z), where z is the last step's sum.
 Second, the workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the
 rank's part of z from y and its rows of B. The all-reduce then adds the parts on the same stream, and the next step's
-kernel starts once that sum has landed. A chunk's steps run inside `_stream.batch`, the region torch-mesh's compiler
-puts around a compiled graph. There, a step's all-reduce joins the open command buffer instead of paying for a commit
-of its own. The host waits for nothing until the chunk ends, which is that region's one rule.
+kernel starts once that sum has landed.
 
-The number of workers is the largest power of two that fits the GPU's cores and divides the widths. A product is split
-along K where a worker has fewer items than simdgroups. How many rows a simdgroup takes at once is chosen by timing each
-choice on the rank itself, at the start. Each run prints two times a step: the whole step, and the all-reduce alone. The
-gap between them is what the kernel and its hand-offs cost.
+G is the largest power of two that fits the GPU's cores. The width and the rank's share must both be multiples of 8
+times G. If one is not, the service stops with an error that names the nearest values that are. It never drops to a
+smaller G, since that would run slow without saying so.
+
+The rows are not built into the kernel. The row count is a word the host passes with each step. The kernel's work
+items are pairs: a group of rows and a tile of columns. Only the size of a row group, RG, is built in, since it sets
+how many registers a simdgroup uses. So one compiled kernel serves any row count that is a multiple of 8 times RG, up
+to the capacity the configuration gives. A product is split along K where a worker has fewer items than simdgroups.
+That split is a word too, worked out once for each row count.
+
+At the start, each rank picks its RG by timing. For each choice, it runs the step kernel alone on its own GPU, `trials`
+steps back to back, at the input's row count. The inputs are zeros and nothing crosses. The host's clock reads the time
+from one full wait to the next (`kernel_alone` in the code), and the rank keeps the fastest choice. That time on one GPU
+only picks RG, so it is not printed as a result. The times that count are those of the whole chain on both Macs.
 
 ## The configuration
 
-The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the rows,
-the width, the steps, the chunk and the parts. It also says how many first steps to check, and gives the kernel's
-threads, its patience and how many steps each timing takes. A part is how many rows of A and B a rank holds, in rank order. The service never
-guesses a part. A balancer that measures the calls writes the parts. Both Macs are always loaded fully.
+The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
+width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
+two rings. It also says how many first steps to check, and gives the kernel's threads, its patience and how many steps
+each timing takes. The input file says how many steps and rows there are, so the configuration does not. Every value
+must be there. The service has no defaults, and a missing value is an error.
+
+A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
+measures the calls writes the parts. Both Macs are always loaded fully.
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
-sample.
+sample, and its ring holds a quarter of the sample stream so that the ring wraps.
 
 These lines make sample inputs and weights for it:
 
@@ -124,9 +162,10 @@ RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
   ~/.venv-mesh-uv/bin/python examples/chain-service.py examples/chain-service.json
 ```
 
-Each rank prints one line at the end. It gives the rows, the steps and the seconds. It gives the throughput of all
-streams together and of each stream, and the time per step. Rank 0 also prints how far its first steps are from a
-plain float64 run of the same rule. To keep the service up, make it a launchd job from
+Each rank prints one line at the end. It gives the parts, the rows, the steps, the ring's depth and block, and the
+seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four times
+a step: the whole step, the host's time to issue it, the host's time waiting on the ring, and the all-reduce alone.
+Rank 0 also prints how far its first steps are from a plain float64 run of the same rule. To keep the service up, make it a launchd job from
 [templates/](../templates/), as the README's "Adding a workload" says.
 
 ## What to read next

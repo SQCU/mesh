@@ -46,22 +46,24 @@ inline void partial(device const half* src, uint ld, device const half* wp, uint
 }
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint RT, uint RG, uint KIN, uint TILES, uint KS, uint SG, typename Epi>
-inline void stage(device const half* src, uint ld, device const half* Wt, uint tile0, uint sgid, threadgroup float* red, thread Epi& epi) {
-    constexpr uint GROUPS = RT / RG, ITEMS = TILES * GROUPS, PER = SG / KS, KT = KIN / 8;
-    for (uint pass = 0; pass < ITEMS; pass += PER) {
-        uint item = pass + sgid / KS, seg = sgid % KS;
-        bool active = item < ITEMS && sgid < PER * KS;
-        uint ct = item / GROUPS, g = item % GROUPS;
+template <uint RG, uint KIN, uint TILES, uint SG, typename Epi>
+inline void stage(device const half* src, uint ld, device const half* Wt, uint tile0, uint groups, uint ks, uint sgid,
+                  threadgroup float* red, thread Epi& epi) {
+    constexpr uint KT = KIN / 8;
+    const uint items = TILES * groups, per = SG / ks;
+    for (uint pass = 0; pass < items; pass += per) {
+        uint item = pass + sgid / ks, seg = sgid % ks;
+        bool active = item < items && sgid < per * ks;
+        uint ct = item / groups, g = item % groups;
         simdgroup_float8x8 acc[RG];
         for (uint r = 0; r < RG; r++) acc[r] = simdgroup_float8x8(0.0f);
-        if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tile0 + ct) * KT * 64, seg * KT / KS, (seg + 1) * KT / KS, acc);
+        if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tile0 + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
         for (uint r = 0; r < RG; r++) {
-            if (KS > 1) {
+            if (ks > 1) {
                 simdgroup_store(acc[r], red + sgid * 64, 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 if (active && seg == 0)
-                    for (uint j = 1; j < KS; j++) {
+                    for (uint j = 1; j < ks; j++) {
                         simdgroup_float8x8 p; simdgroup_load(p, red + (sgid + j) * 64, 8);
                         for (uint e = 0; e < 2; e++) acc[r].thread_elements()[e] += p.thread_elements()[e];
                     }
@@ -93,7 +95,7 @@ struct Summand {
 };
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint TILE, uint K, uint S, uint G, uint KS0, uint KS1, uint RT, uint RG, uint THREADS, uint PATIENCE>
+template <uint TILE, uint K, uint S, uint G, uint RG, uint THREADS, uint PATIENCE>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
                        device const half* Z [[buffer(3)]], device half* X [[buffer(4)]], device half* Y [[buffer(5)]],
@@ -102,13 +104,14 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
                        uint tid [[thread_index_in_threadgroup]], uint sgid [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]], uint w [[threadgroup_position_in_grid]]) {
     static_assert(TILE == 8, "simdgroup matrices are 8 x 8");
-    constexpr uint SG = THREADS / 32, R = TILE * RT, Sx = K / G, Sy = S / G;
+    constexpr uint SG = THREADS / 32, Sx = K / G, Sy = S / G;
     threadgroup float red[SG * 64];
     threadgroup atomic_uint stop;
     if (tid == 0) atomic_store_explicit(&stop, 0u, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     const bool first = words[0] != 0;
     uint phase = words[1];
+    const uint R = words[2], groups = R / (TILE * RG), ks0 = words[3], ks1 = words[4];
     for (uint q = tid; q < R * Sx; q += THREADS) {
         uint i = (q / Sx) * K + w * Sx + q % Sx;
         X[i] = half(float(E[i]) + (first ? 0.0f : tanh(float(Z[i]))));
@@ -116,9 +119,9 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 1u)) return;
     Activated activated{Y, w * Sy, S};
-    stage<RT, RG, K, Sy / 8, KS0, SG>(X, K, At, w * (Sy / 8), sgid, red, activated);
+    stage<RG, K, Sy / 8, SG>(X, K, At, w * (Sy / 8), groups, ks0, sgid, red, activated);
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 2u)) return;
     Summand summand{P, w * Sx, K};
-    stage<RT, RG, S, Sx / 8, KS1, SG>(Y, S, Bt, w * (Sx / 8), sgid, red, summand);
+    stage<RG, S, Sx / 8, SG>(Y, S, Bt, w * (Sx / 8), groups, ks1, sgid, red, summand);
 }
