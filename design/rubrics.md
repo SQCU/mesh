@@ -507,11 +507,28 @@ layers; see Inversions.
 **D7. Mediated use of the mesh.**
 - Ranks higher: the form that knows less about links, peers, routes and the bridge, and reaches the mesh only through
   the collectives API and its own node's bridge.
-- Lower pole: reading the bridge's region, watching its process, probing links per call, ssh or Wi-Fi to a cabled peer.
+- Lower pole: reading the bridge's region, watching its process, probing links per call, Wi-Fi to a cabled peer.
 - Upper pole: topology unknown to the program; a node asks its own bridge what neighbours it has.
 - Ranked:
-  - "sshing into a terminal mode on a mesh peer" ≺ "querying their own mesh bridge" (10-16);
-  - "flaky ssh" in a call's path ≺ none (10-07).
+  - a node learning its neighbours by "sshing into a terminal mode on a mesh peer" ≺ "querying their own mesh bridge"
+    (10-16);
+  - Wi-Fi to a peer cabled to this node ≺ its cable: "you should never be using networking over wifi etc when it is
+    physically and literally tethered / cabled to a host machine" (10-16).
+- ssh, by namespace (the operator, 10-20: "without attributino to which namespaces networking prohibitions were about,
+  the prohibitions are not salient judgements"):
+  - libraries, transport or compute blocking on ssh ≺ none; a test script or launcher using ssh is not ranked: "aight if
+    libs and hteu nderlying transport and compute are never blocking on ssh it's fine, it's not a seriosu problem if a
+    test script uses ssh (not *really*)" (10-07, three minutes after "why is ssh involved in any part of the mesh
+    algorithmset?", which answered an agent's "waiting on a late-starting peer over flaky ssh");
+  - administering the substrate over ssh, as PRRTE starts its daemons, is accepted: "'ssh stays for one job:
+    administering the substrate itself (installing or upgrading a bridge), as PRRTE uses it only to start its
+    daemons.' sounds fine" (10-16); refusing to reach a cabled node over its cable and use it ≺ doing so (10-20,
+    metal-microbench AGENTS.md);
+  - a call's part started per call by ssh, a command plane or by hand ≺ ranks started as Megatron-LM's are: "are you
+    trying to add ssh or a command plane for no reason even though this sounds like it introduces preventable latency?
+    ssh isn't a reliable connection so this sounsd like a way to wriggle a bespoke protocol back into the code here yet
+    again... i better not hear anything about 'you start code by hand' either since that is clearly not how megatron-lm
+    starts up in pytorch" (10-19).
 
 **D8. Memory the program knows it needs.**
 - Ranks higher: the form whose buffers are sized by the program itself from its configuration, held from load and
