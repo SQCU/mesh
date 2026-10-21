@@ -87,13 +87,14 @@ struct send_gate {
   uint32_t capacity;
 };
 /* design/transport.md section 14: a data lane's progress, the bridge's alone, counted in the lane's own units (its i-th
-   its stream's MESH_STREAM_PAIRS i + its stripe): the units it has posted SENDs for (`sent`, the send thread's), and
+   its stream's MESH_STREAM_PAIRS i + its stripe): the units it has posted SENDs for (`sent`, the send thread's) and
+   those of them whose posting time it stored (`timed`, the send thread's: mesh-link.c link_send), and
    received (`posted` receives posted, `got` landed, the receive thread's, posted at most `window` units ahead: the
    lane's share of the completion queue in its frames), whether its receives were posted (`armed`, the receive
    thread's), and its requests, one a slot of its stripe each way (`sends`, `receives`, made as the link connects;
    the last of `sends` the dud's, from the bridge's all-ones block) */
 struct lane_state {
-  uint64_t sent,posted,got;
+  uint64_t sent,timed,posted,got;
   uint32_t window,armed;
   struct prepared_send *sends;
   struct prepared_receive *receives;
@@ -126,8 +127,11 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
    each data lane's progress (`lane`, struct lane_state), the arena page of the stream's rings (`rings`, leased as the
    port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream), and the stream's holding, the send thread's alone: the
    owner word it serves (`held`, 0 none), the most each class's holder declared as it read (`seen`), and where a holding
-   ended, the unit of each class before which every unit has gone, the unsupplied ones as duds (`final`); and the
-   receive thread's first unit of each class not yet released in order (`released`, mesh-link.c stream_landed).  Lane
+   ended, the unit of each class before which every unit has gone, the unsupplied ones as duds (`final`); each class's
+   time rings (mesh.h struct mesh_stream), their addresses the link's own, set as its streams open (`posted_at`, the
+   send thread's; `landed_at`, the receive thread's: mesh-link.c streams_open); and the receive thread's first unit of
+   each class not yet released in order (`released`, mesh-link.c stream_landed) and not yet given its landing time
+   (`timed`, mesh-link.c link_receive), on a line of their own, apart from the send thread's (`alive_flight`).  Lane
    MESH_LANE_KEEPALIVE's frames (design/transport.md: one whenever the link is up, every `keepalive_ns` while the
    stream is held, else every MESH_PLATFORM_NS/5; the send thread's frame in flight), and its page: the keepalive's
    block */
@@ -145,10 +149,16 @@ struct link {
   uint32_t peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing,psn;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2],released[MESH_LINK_STREAMS][2];
+  uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2];
+  _Atomic uint64_t *posted_at[MESH_LINK_STREAMS][2];
   uint64_t wire[MESH_LINK_STREAMS];
   _Atomic int alive_flight;
+  _Alignas(128) uint64_t released[MESH_LINK_STREAMS][2];
+  uint64_t timed[MESH_LINK_STREAMS][2];
+  _Atomic uint64_t *landed_at[MESH_LINK_STREAMS][2];
 };
+_Static_assert(offsetof(struct link,released)%128==0 && offsetof(struct link,landed_at)==offsetof(struct link,released)+128,
+  "the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's agent on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct agent_message).  The
    parent's: open the device (AGENT_OPEN), make the link's lanes (AGENT_MAKE, naming the link's keepalive page, which the

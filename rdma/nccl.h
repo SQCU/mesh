@@ -981,6 +981,24 @@ const char* ncclMeshMetalSteps(void);
    EOVERFLOW mid-group (a failed group), so a caller that encodes several windows ahead bounds each window's records by it (the
    records a step encodes, read across one step's encode). */
 void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
+/* The number comm's next group takes (*group): every group the communicator issues takes the next number, from 0 in
+   the order they are issued, whatever its elements and whether it crosses a link (each ncclGroupEnd, and each call
+   outside ncclGroupStart and ncclGroupEnd, a group of its own); a group refused as a value before it is issued (an
+   invalid group or argument, a revoked communicator, a lease's GPU work past the deadline) takes none.
+   ncclInvalidArgument where comm or group is NULL. */
+ncclResult_t ncclMeshPosition(ncclComm_t comm, uint64_t* group);
+/* For each of comm's groups in [first, first + count) (numbered as ncclMeshPosition gives them), issued[i] and
+   ended[i]: `issued`, the earliest time this node's bridge posted the first unit of the group's first out run on any of
+   its channels; `ended`, the later of `issued` and the latest time the last unit of its last in run on any channel
+   landed here; times are ns of this node's monotonic clock (CLOCK_UPTIME_RAW's), converted here from the ticks its
+   bridge stored beside the units' ready and landed words (design/transport.md section 14).  0 in both where any of
+   those units is untimed (its bridge's time ring of 16,384 units a stream class lapped it, or has not stored it yet)
+   or the group has left the record (the last 65,536 groups of the communicator; one not yet issued has not entered
+   it); a group that crosses no link (no elements, a member the tree does not join, a communicator of one rank) records
+   no units and is 0 too.  Read as ready and landed words are: no bridge call, no request, no file.  ncclSuccess, or
+   ncclInvalidUsage for a communicator of two ranks or more without streams (its init has not made its channels)
+   (ncclInvalidArgument where comm is NULL, or issued or ended is NULL and count is not 0). */
+ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint64_t* issued, uint64_t* ended);
 /* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
    in it: the library's, made at the lease's first such call and released by ncclMemFree, the buffer a tensor allocator
    or the caller's kernels bind over the lease (mesh 3981ca80^'s).  A Metal-path collective whose ncclMeshBuffer names

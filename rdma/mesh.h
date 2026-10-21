@@ -19,7 +19,7 @@
 #define MESH_VERSION 131u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the window a bridge
    before it left where its layout is this one (design/transport.md section 2, the window outlives its bridge) */
-#define MESH_LAYOUT 132u
+#define MESH_LAYOUT 133u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -34,8 +34,11 @@
 #define MESH_FRAME 4096u
 #define MESH_STREAM_LARGE_UNITS 512u
 #define MESH_STREAM_SMALL_UNITS 256u
+/* design/transport.md section 14: the entries of each of a stream class's two time rings (struct mesh_stream) */
+#define MESH_STREAM_TIMES 16384u
 _Static_assert(38+25<=63,"an owner word");
-_Static_assert(!(MESH_STREAM_LARGE_UNITS&(MESH_STREAM_LARGE_UNITS-1)) && !(MESH_STREAM_SMALL_UNITS&(MESH_STREAM_SMALL_UNITS-1)),"a ring's units a power of two");
+_Static_assert(!(MESH_STREAM_LARGE_UNITS&(MESH_STREAM_LARGE_UNITS-1)) && !(MESH_STREAM_SMALL_UNITS&(MESH_STREAM_SMALL_UNITS-1)) &&
+  !(MESH_STREAM_TIMES&(MESH_STREAM_TIMES-1)),"a ring's units a power of two");
 /* design/transport.md: the pause between a port's hellos and between the bridge's liveness turns */
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 /* design/transport.md, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
@@ -67,15 +70,21 @@ _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_e
    client holds it and every unit its last holder declared has gone, the first unit a holder then supplies of each class
    (`next`); and its holder's: its owner word (`owner`, taken 0 to its own while `free`, as rows are, and let go to 0),
    and the units of each class it will supply, up to `declared` (an absolute sequence), by the uptime `deadline` (ns): a
-   declared unit not supplied by then, or by the holding's end, goes as a dud */
+   declared unit not supplied by then, or by the holding's end, goes as a dud.  Per class, two time rings the bridge alone
+   writes (`posted_at`, `landed_at`, region offsets, each on lines of its own) of MESH_STREAM_TIMES entries of two words:
+   unit u's, entry u mod MESH_STREAM_TIMES, 1 + u and the ticks (mach_absolute_time, unconverted) read once at the end of
+   the send thread's pass that posted u, or of the receive thread's pass that released it, after every post or landed
+   word of the pass; its first word 0 while its second is stored, so an entry whose first word does not read 1 + u
+   around its second has no time for u (lapped, or not yet stored) */
 struct mesh_stream {
   _Atomic uint32_t peer,live;
   uint32_t unit[2],units[2];
   uint64_t in[2],out[2],ready[2],landed[2];
   _Atomic uint64_t bandwidth,wire,free,next[2];
   _Atomic uint64_t owner,declared[2],deadline;
+  uint64_t posted_at[2],landed_at[2];
 };
-_Static_assert(sizeof(struct mesh_stream)==160,"mesh_stream");
+_Static_assert(sizeof(struct mesh_stream)==192,"mesh_stream");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
    the record's sequence in that boot, the bytes of its bridge's window its clients may hold (the window less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware

@@ -356,6 +356,12 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   and every unit before it have landed. A run has landed once its last unit's word says so, whichever lanes it rode.
 - Clients see the stream's rings and words, its `peer` node, `wire`, `live`, `free` and `next`. They never see a port,
   lane, queue pair, request or completion.
+- The words only the bridge writes: landed, `live`, `free`, `next`, and each class's two time rings (`posted_at`,
+  `landed_at`, mesh.h struct mesh_stream): unit u's entry, u mod MESH_STREAM_TIMES, holds 1 + u and the ticks
+  (mach_absolute_time, unconverted) read once at the end of the send thread's pass that posted u, or of the receive
+  thread's pass that released it, after every post or landed word of the pass, never between two and never before a
+  landed word. The library reads them as it reads landed words and converts the ticks to ns (nccl.h ncclMeshTimes): no
+  request, wake or file.
 
 **Holding it.**
 - A process holds a stream as it holds rows: it takes the owner word from 0 to its own while `free` reads 1

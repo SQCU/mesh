@@ -33,8 +33,11 @@ int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
    communicator's init exchanges.  The holder declares the units of a class it will supply, up to `declared`
    (absolute) and its `deadline` (uptime ns): mesh_stream_declare; a live holder's is UINT64_MAX, never reached, and a
    holder that can supply no more sets it to now; a declared unit not supplied by its deadline, or by the holding's
-   end, goes as a dud (all ones) */
-struct mesh_stream_view { unsigned char *in,*out; _Atomic uint64_t *ready,*landed; uint32_t unit,units; };
+   end, goes as a dud (all ones).  The class's two time rings, the bridge's to write (mesh.h struct mesh_stream
+   `posted_at`, `landed_at`): unit u's posting or landing time (mach_absolute_time ticks) is the second word of entry u
+   mod MESH_STREAM_TIMES where its first word reads 1 + u both before and after the second is read (the first two loads
+   acquiring), else u has none */
+struct mesh_stream_view { unsigned char *in,*out; _Atomic uint64_t *ready,*landed,*posted_at,*landed_at; uint32_t unit,units; };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,int large,struct mesh_stream_view *);
 int mesh_stream_declare(struct mesh_ctx *,uint32_t stream,int large,uint64_t declared,uint64_t deadline);
 #endif

@@ -69,7 +69,8 @@ int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,int large,struct m
   if(atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client)return EPERM;
   const uint32_t c=!large;
   *view=(struct mesh_stream_view){.in=(unsigned char *)m+x->in[c],.out=(unsigned char *)m+x->out[c],.ready=(_Atomic uint64_t *)((char *)m+x->ready[c]),
-    .landed=(_Atomic uint64_t *)((char *)m+x->landed[c]),.unit=x->unit[c],.units=x->units[c]};
+    .landed=(_Atomic uint64_t *)((char *)m+x->landed[c]),.posted_at=(_Atomic uint64_t *)((char *)m+x->posted_at[c]),
+    .landed_at=(_Atomic uint64_t *)((char *)m+x->landed_at[c]),.unit=x->unit[c],.units=x->units[c]};
   return 0;
 }
 int mesh_stream_declare(struct mesh_ctx *context,uint32_t stream,int large,uint64_t declared,uint64_t deadline){

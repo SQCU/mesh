@@ -28,6 +28,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <mach/mach_time.h>
 
 
 enum { WHAT_SEND = 16, WHAT_RECV, WHAT_COUNTED };
@@ -277,13 +278,20 @@ struct channel {
    GPU work's failure records and the gate every later dispatch reads, and the stop a revoke sets; `violation` the Metal
    buffer over them) and its failure once kept (`failed`, its message `failure`: comm_fail); `last`, the count of the last
    GPU program signalling `finished` that touched it (`touched`, `next_touched` while one is encoded: program_end), and
-   `refreshed` its declarations' last refresh (ncclMeshComplete); `runs`, its host-path groups running; `revoked`, set by
+   `refreshed` its declarations' last refresh (ncclMeshComplete); the number its next group issued takes (`groups`:
+   group_numbered) and, of its last GROUP_TIMES groups, group g's at g mod GROUP_TIMES, each channel's first unit of the
+   group's first out run and last unit of its last in run, each plus one (`timed`, a channel's 0 where the group has no
+   position on it: schedule_group, ncclMeshTimes); `runs`, its host-path groups running; `revoked`, set by
    ncclCommRevoke and ncclCommDestroy, failing every group after it; `peers`, its bootstrap's sockets, kept for its life
    once its init succeeds (NCCL's bootstrapState), which a revoke shuts down and comm_free closes, under `guard`, and the
    end of its bootstrap's present phase (`until`, bootstrap_open, gather).  A
    non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy joins it), `async`
    ncclInProgress until it ends and `why` its failure's message (its id 0 while none is kept) */
 struct attach;
+/* the groups a communicator's record of units holds (`timed`): as many as the Metal 4 argument ring's records
+   (nccl-mesh-metal.m RECORDS, a group's dispatches one at least), within which a caller bounds the groups it encodes ahead
+   (ncclMeshMetal4Records) */
+#define GROUP_TIMES 65536u
 struct ncclComm {
   struct mesh_link_map map;
   struct mesh_wire wire;
@@ -308,7 +316,7 @@ struct ncclComm {
   struct channel *channels;
   _Atomic uint64_t *words;
   void *violation;
-  uint64_t last, refreshed;
+  uint64_t last, refreshed, groups, (*timed)[2];
   struct ncclComm *next_touched;
   _Atomic int runs;
 };
@@ -376,7 +384,7 @@ static void comm_free(struct ncclComm *comm) {
   for (uint32_t h = 0; h < comm->count; h++) metal_release(comm->channels[h].buffer);
   if (comm->violation) metal_release(comm->violation);
   comm_leave(comm);
-  free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->toward);
+  free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->toward); free(comm->timed);
   pthread_mutex_destroy(&comm->guard);
   free(comm->members); free(comm->forms);
   free(comm);
@@ -1139,8 +1147,8 @@ static int channel_buffer(struct channel *ch) {
    class on that class of the stream toward the rank's node, its out units from this end's hold and its in units from
    the peer's first out (the bridge sends a stream's units in order): taken from the peer's report where either end took
    the stream at this init (comm_hold takes every stream it holds); its map
-   (map_of), its wire (its bridge's block: every paired bridge's is one) and its failure words.  0, or ENOMEM; EPROTO
-   where a stream is not the wire's or no hold is of a joined node */
+   (map_of), its wire (its bridge's block: every paired bridge's is one), its failure words and its record of its groups'
+   units (`timed`).  0, or ENOMEM; EPROTO where a stream is not the wire's or no hold is of a joined node */
 static int comm_join(struct ncclComm *comm, const struct report *reports) {
   const struct hdr *m = comm->attach->context.M;
   const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank, node = reports[me].node;
@@ -1172,6 +1180,7 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
       if (!status) atomic_store(&comm->attach->wrapped, 1);
     }
   }
+  if (!status && !(comm->timed = calloc((size_t)GROUP_TIMES * comm->count + 1, sizeof *comm->timed))) status = ENOMEM;
   return status;
 }
 
@@ -2001,10 +2010,19 @@ static size_t bytes_at(const struct message *m, size_t count, size_t *k, uint64_
   return length;
 }
 
+/* the next number of comm's groups taken by a group it issues (`groups`), as the group takes group_lock, and its slot of
+   the record cleared: a group that crosses no link records no unit (ncclMeshTimes gives it 0); schedule_group records
+   a crossing group's in it.  Under group_lock */
+static void group_numbered(struct ncclComm *comm) {
+  if (comm->timed) memset(comm->timed + (comm->groups % GROUP_TIMES) * comm->count, 0, comm->count * sizeof *comm->timed);
+  comm->groups++;
+}
+
 /* each channel's positions for the group, from the last scheduled one's end (mesh_group_lay), each step's positions
    and the receive before it (mesh-plan.h mesh_steps_before) kept, a receive with none done; and each position's runs,
    out from this end's next unit and in from the peer's, a run as many units as its piece's bytes (mesh_wire_units: a
-   filler's one) */
+   filler's one); the group's first out unit and last in unit on each channel recorded under the number it took
+   (`timed`, group_numbered: ncclMeshTimes) */
 static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule *plans) {
   const uint32_t N = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   size_t total = 1;
@@ -2046,6 +2064,9 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
       p->runs[2 * t] = run_from(ch->laid, mesh_wire_units(&comm->wire, ch->large, sent), ch->view.units);
       p->runs[2 * t + 1] = run_from(ch->taken, mesh_wire_units(&comm->wire, ch->large, got), ch->view.units);
     }
+    uint64_t *timed = comm->timed[((comm->groups - 1) % GROUP_TIMES) * comm->count + h];
+    timed[0] = positions ? 1 + p->runs[0].first : 0;
+    timed[1] = positions ? p->runs[2 * positions - 1].first + p->runs[2 * positions - 1].units : 0;
     ch->end += positions;
   }
   for (size_t i = 0; i < n && !result; i++) {
@@ -2328,6 +2349,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
   }
   if (late) return fail(ncclSystemError, "a lease's GPU work (ncclMeshMemUse) did not reach its point within the platform's deadline");
   pthread_mutex_lock(&group_lock);
+  group_numbered(comm);
   if (remote) result = comm_failure(comm);
   if (!result && remote && comm_issued(comm))
     result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
@@ -3097,6 +3119,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
                                     "(ncclMeshFusableRooted)");
   if (!result && revoked(comm)) result = revoked_fail(comm);
   pthread_mutex_lock(&group_lock);
+  if (!result) group_numbered(comm);
   if (!result && remote) result = comm_failure(comm);
   if (!result) result = plan_calls(comm, list, n);
   if (!result && list[0].fused && (!remote || !list[0].bound ||
@@ -3240,6 +3263,50 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
 void ncclMeshMetal4Records(uint64_t *issued, uint64_t *capacity) { metal_records(issued, capacity); }
+
+/* unit u's time in a stream class's time ring (mesh-call.h struct mesh_stream_view `posted_at`, `landed_at`), read as
+   ready and landed words are: its bridge's mach_absolute_time ticks; 0 where it has none */
+static uint64_t time_of(const _Atomic uint64_t *ring, uint64_t u) {
+  const _Atomic uint64_t *entry = ring + 2 * (u % MESH_STREAM_TIMES);
+  const uint64_t tag = atomic_load_explicit(entry, memory_order_acquire), at = atomic_load_explicit(entry + 1, memory_order_acquire);
+  return tag == 1 + u && atomic_load_explicit(entry, memory_order_relaxed) == 1 + u ? at : 0;
+}
+
+ncclResult_t ncclMeshPosition(ncclComm_t comm, uint64_t *group) {
+  if (!comm || !group) return fail(ncclInvalidArgument, "comm or group is NULL");
+  pthread_mutex_lock(&group_lock);
+  *group = comm->groups;
+  pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
+
+ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint64_t *issued, uint64_t *ended) {
+  if (!comm || (count && (!issued || !ended))) return fail(ncclInvalidArgument, "comm, issued or ended is NULL");
+  if (!comm->timed && comm->nranks > 1) return fail(ncclInvalidUsage, "communicator %s holds no stream", comm->name);
+  /* the bridges' ticks (mach_absolute_time) in ns of the same clock, CLOCK_UPTIME_RAW's */
+  static mach_timebase_info_data_t base;
+  pthread_mutex_lock(&group_lock);
+  if (!base.denom) mach_timebase_info(&base);
+  for (uint64_t i = 0; i < count; i++) {
+    const uint64_t g = first + i;
+    uint64_t begun = UINT64_MAX, done = 0;
+    int timed = g < comm->groups && comm->groups - g <= GROUP_TIMES;
+    for (uint32_t h = 0; timed && h < comm->count; h++) {
+      const uint64_t *units = comm->timed[(g % GROUP_TIMES) * comm->count + h];
+      if (!units[0]) continue;
+      const uint64_t posted = time_of(comm->channels[h].view.posted_at, units[0] - 1),
+                     landed = time_of(comm->channels[h].view.landed_at, units[1] - 1);
+      timed = posted && landed;
+      begun = posted < begun ? posted : begun;
+      done = landed > done ? landed : done;
+    }
+    timed = timed && begun != UINT64_MAX;
+    issued[i] = timed ? (uint64_t)((unsigned __int128)begun * base.numer / base.denom) : 0;
+    ended[i] = timed ? (uint64_t)((unsigned __int128)(done > begun ? done : begun) * base.numer / base.denom) : 0;
+  }
+  pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
 
 
 /* whether a rank's moves of a program are at most one SEND and one receive, each of every part: the whole operand in one
