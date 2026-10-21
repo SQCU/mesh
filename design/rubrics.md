@@ -113,7 +113,14 @@ layers; see Inversions.
   - a narrow measurement (tok/s alone, or KL alone) ≺ a wide one, for no reason or excuse;
   - a measurement of KL alone ≺ one of aggregate throughput Paretos alone that lacks the KL it should have had;
   - a regression patched ≺ a regression unwritten (metal-microbench d673284, 10-19: "d673 will not be accepted adn
-    does not need to be reviewed").
+    does not need to be reviewed");
+  - a description of one device's performance, for any reason, ≺ the mesh collective's: "if we are programming MESH
+    COLLECTIVE OPS we are measuring the MESH COLLECTIVE therefore something has GONE WRONG if you are trying to
+    describe SINGLE DEVICE PERFORMANCE in any capacity for any reason at any time" (10-21);
+  - a run set aside because one member was busy, or two runs' times compared to clear code ≺ the run read for what
+    the balancer did and what the collective's output did: "you aren't allowed to compare times and the load balancing
+    and SECOND ENTIRE SOC AND CPU AND GPU exist SPECIFICALLY TO INCREASE OUTPUT AGGREGATE PERFORMANCE IN ALL
+    CIRCUMSTANCES" (10-21).
 - KL at the unembedding, against LiteRT's pair KL. While shapes work is unfinished: an export of more bytes at a lower
   KL ≺ the export of fewest bytes within a KL of 2.0.
 - Two forms whose times differ by under 3% rank equal on time.
