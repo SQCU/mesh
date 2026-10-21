@@ -18,8 +18,9 @@ inline bool await_stamps(device atomic_uint* stamps, uint target, uint sgid, uin
                          threadgroup atomic_uint* stop, device atomic_uint* err, uint cause) {
     if (sgid == 0) {
         for (uint polls = 0;; polls++) {
-            uint v = lane < G ? atomic_load_explicit(&stamps[lane], memory_order_relaxed) : 0xffffffffu;
-            if (simd_all(v >= target)) break;
+            bool seen = true;
+            for (uint i = lane; i < G; i += 32) seen = seen && atomic_load_explicit(&stamps[i], memory_order_relaxed) >= target;
+            if (simd_all(seen)) break;
             if (polls > PATIENCE) {
                 if (lane == 0) { atomic_store_explicit(stop, 1u, memory_order_relaxed); atomic_fetch_or_explicit(err, cause, memory_order_relaxed); }
                 break;

@@ -75,30 +75,36 @@ step. Each rank has two rings, one for the inputs and one for the sums. Rank 0 c
 ring a block at a time. The copy goes on the GPU's own queue, a block ahead of the steps that read it, and the host does
 not wait for it.
 
-Each input crosses one step early. Before step t's kernel, the host issues the broadcast of e_{t+1}. It waits for it
-just before step t+1's kernel, the first thing that reads it. So the input crosses while step t computes. (The
-library may finish it a little sooner, at step t's all-reduce, since a call finishes every call issued before it. The
-input has landed by then.) Each step then makes one all-reduce of its part of z, and nothing else crosses.
+Each input crosses one step early. Before step t's kernel, the host issues the broadcast of e_{t+1}, and rank 0's GPU
+sends it right there. So the input crosses while step t computes. The library lands it at step t's all-reduce, since a
+call finishes every call issued before it. The wait just before step t+1's kernel, the first thing that reads the
+input, then finds it done and adds nothing. It stays there, since that is where the input is read. Each step makes one
+all-reduce of its part of z, and nothing else crosses.
 
-At the end of each block, rank 0 puts a copy of that block's outputs on the GPU's queue as well. The copy writes
-straight into the output file's memory. So no step waits for the host, and the host waits for the GPU only as the
-next section says.
+At the end of each block, rank 0 puts tanh of that block's sums, and a copy of them, on the GPU's queue as well. The
+copy writes straight into the output file's memory. No step waits for the host, and the next section says when the
+host waits for the GPU.
 
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
 place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
 
 ## The rings
 
-How deep is a ring? The configuration gives `ring_bytes`, the bytes of the region the two rings may hold on each node.
-Each ring gets as many slots as fit, but never more slots than the stream has steps. If the whole stream fits, the ring
-is the whole stream, and no slot is used twice. If it does not fit, the ring is split into two blocks. While the GPU
-works through one block, rank 0's copies fill the other. If `ring_bytes` cannot hold two slots in each ring, the service
-stops with an error. It never picks a depth of its own.
+The input ring is two blocks deep. While the GPU works through one block, rank 0's copies fill the other. The sum ring
+is one block deep: a block's sums are copied out at the block's end, before the next block writes over them.
 
-The host may run ahead of the GPU, but never by more than one ring. At the end of each block it puts a mark on the
-GPU's queue. At the start of a block, it waits for the mark one ring back. A whole block is still queued then, so the
-GPU never waits for the host. This wait keeps the work in flight, and the memory it holds, no larger than the ring.
-Nothing else in the loop waits.
+How long is a block? The configuration gives `ring_bytes`, the bytes of the region the two rings may hold on each node.
+If each ring can hold the whole stream, a block is the whole stream, and no slot is used twice. If not, a block is a third
+of the slots that fit: two blocks for the inputs and one for the sums. If `ring_bytes` cannot hold three slots, the
+service stops with an error. It never picks a depth of its own.
+
+The host may run ahead of the GPU, but never by more than the input ring. At the end of each block it puts a mark on
+the GPU's queue. At the start of a block, it waits for the mark two blocks back, so one block is still queued.
+
+There is a second bound, and today it is the tighter one. Metal's queue holds at most 64 command buffers not yet done,
+and torch makes the host wait when it is full. Today each publication and each copy ends a command buffer, so the host
+gets about 32 steps ahead and the ring's mark never waits. The host's time a step then includes that wait. Once the
+library ends a command buffer only when the GPU needs one, the ring's mark is the bound.
 
 ## The step kernel
 
@@ -139,7 +145,7 @@ must be there. The service has no defaults, and a missing value is an error.
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
 measures the calls writes the parts. Both Macs are always loaded fully.
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
-sample, and its ring holds a quarter of the sample stream so that the ring wraps.
+sample. Its `ring_bytes` holds three blocks of 512 steps, so the sample's rings wrap many times.
 
 These lines make sample inputs and weights for it:
 
@@ -162,10 +168,12 @@ RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
   ~/.venv-mesh-uv/bin/python examples/chain-service.py examples/chain-service.json
 ```
 
-Each rank prints one line at the end. It gives the parts, the rows, the steps, the ring's depth and block, and the
-seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four times
-a step: the whole step, the host's time to issue it, the host's time waiting on the ring, and the all-reduce alone.
-Rank 0 also prints how far its first steps are from a plain float64 run of the same rule. To keep the service up, make it a launchd job from
+Each rank prints one line at the end. It gives the parts, the rows, the steps, the block, the two rings' depths and
+the seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four
+times a step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and
+the all-reduce alone. It gives the bytes a step's two collectives move, and those bytes a second. Rank 0 also checks
+two windows of steps against a plain float64 run of the same rule: the first steps, and the first steps of the last
+block, which start from rank 0's own output. The second window reads slots the ring has used before. To keep the service up, make it a launchd job from
 [templates/](../templates/), as the README's "Adding a workload" says.
 
 ## What to read next

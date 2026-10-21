@@ -10,10 +10,12 @@ import torch_mesh
 
 import chain
 
+RING_BLOCKS = 2
+
 
 # docs/writing-a-service.md#the-function
-def reference(inputs, a, b, steps):
-    x, out = inputs[0], []
+def reference(inputs, a, b, steps, carried):
+    x, out = inputs[0] + carried, []
     for t in range(steps):
         out.append(np.tanh(np.tanh(x @ a.T) @ b))
         if t + 1 < steps:
@@ -26,9 +28,9 @@ def operand(config, rank):
     shape, inputs = torch_mesh.empty(2, dtype=torch.int64, device='cpu'), None
     if rank == 0:
         inputs = np.load(config['input'], mmap_mode='r')
-        if (inputs.ndim != 3 or inputs.shape[2] != config['width'] or inputs.dtype != np.float16
+        if (inputs.ndim != 3 or 0 in inputs.shape or inputs.shape[2] != config['width'] or inputs.dtype != np.float16
                 or not inputs.flags.c_contiguous):
-            raise ValueError('The input is C-ordered float16 [steps, rows, width]')
+            raise ValueError('The input is C-ordered float16 [steps, rows, width], none of them 0')
         shape[0], shape[1] = inputs.shape[:2]
     dist.broadcast(shape, src=0)
     steps, rows = shape.tolist()
@@ -60,14 +62,16 @@ def shares(config, rank, size):
 
 # docs/writing-a-service.md#the-rings
 def ring(config, steps, rows):
-    slot = rows * config['width'] * 2
-    slots = config['ring_bytes'] // (2 * slot)
-    if slots < 2:
-        raise ValueError(f'ring_bytes {config["ring_bytes"]} holds fewer than two slots of {slot} bytes in each of the '
-                         f'two rings; two slots each are {4 * slot} bytes')
-    if slots >= steps:
-        return steps, steps
-    return 2 * (slots // 2), slots // 2
+    slot = rows * config['width'] * torch.half.itemsize
+    slots = config['ring_bytes'] // slot
+    if slots >= 2 * steps:
+        return steps, steps, steps
+    block = slots // (RING_BLOCKS + 1)
+    if block < 1:
+        raise ValueError(f'ring_bytes {config["ring_bytes"]} holds {slots} slots of {slot} bytes; the input ring of '
+                         f'{RING_BLOCKS} blocks and the sum ring of one take {RING_BLOCKS + 1} slots at least, '
+                         f'{(RING_BLOCKS + 1) * slot} bytes')
+    return block, min(steps, RING_BLOCKS * block), block
 
 
 # docs/writing-a-service.md#the-rings
@@ -78,12 +82,12 @@ def span(first, steps, block, depth):
 
 class Pace:
     # docs/writing-a-service.md#the-rings
-    def __init__(self, depth, block):
-        self.blocks, self.marks, self.waited = depth // block, collections.deque(), 0.0
+    def __init__(self):
+        self.marks, self.waited = collections.deque(), 0.0
 
     # docs/writing-a-service.md#the-rings
     def wait(self):
-        if len(self.marks) == self.blocks:
+        if len(self.marks) == RING_BLOCKS:
             began = time.perf_counter()
             self.marks.popleft().synchronize()
             self.waited += time.perf_counter() - began
@@ -95,41 +99,55 @@ class Pace:
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def chain_stream(step, rank, steps, block, depth, E, P, inputs, outputs):
-    e, p, pace = E.unbind(0), P.unbind(0), Pace(depth, block)
+def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
+    e, p, pace = E.unbind(0), P.unbind(0), Pace()
+    deep, sums = len(e), len(p)
     if rank == 0:
-        held, slots = span(0, steps, block, depth)
+        held, slots = span(0, steps, block, deep)
         E[slots].copy_(torch.from_numpy(inputs[held]), non_blocking=True)
-    landing = {0: dist.broadcast(e[0], src=0, async_op=True)}
+    landing = dist.broadcast(e[0], src=0, async_op=True)
     for t in range(steps):
         if t % block == 0:
             pace.wait()
             if rank == 0 and t + block < steps:
-                held, slots = span(t + block, steps, block, depth)
+                held, slots = span(t + block, steps, block, deep)
                 E[slots].copy_(torch.from_numpy(inputs[held]), non_blocking=True)
-        if t + 1 < steps:
-            landing[t + 1] = dist.broadcast(e[(t + 1) % depth], src=0, async_op=True)
-        landing.pop(t).wait()
-        step(e[t % depth], p[(t - 1) % depth], p[t % depth], t == 0)
-        dist.all_reduce(p[t % depth])
+        ahead = dist.broadcast(e[(t + 1) % deep], src=0, async_op=True) if t + 1 < steps else None
+        landing.wait()
+        step(e[t % deep], p[(t - 1) % sums], p[t % sums], t == 0)
+        dist.all_reduce(p[t % sums])
+        landing = ahead
         if (t + 1) % block == 0 or t + 1 == steps:
             if rank == 0:
-                held, slots = span(t - t % block, steps, block, depth)
-                torch.from_numpy(outputs[held]).copy_(torch.tanh(P[slots]), non_blocking=True)
+                held, slots = span(t - t % block, steps, block, sums)
+                drained = O[:held.stop - held.start]
+                torch.tanh(P[slots], out=drained)
+                torch.from_numpy(outputs[held]).copy_(drained, non_blocking=True)
             if t + 1 < steps:
                 pace.mark()
     return pace.waited
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def crossings(steps, block, depth, P):
-    p, pace = P.unbind(0), Pace(depth, block)
+def crossings(steps, block, P):
+    p, pace = P.unbind(0), Pace()
     for t in range(steps):
         if t % block == 0:
             pace.wait()
-        dist.all_reduce(p[t % depth])
+        dist.all_reduce(p[t % len(p)])
         if (t + 1) % block == 0 and t + 1 < steps:
             pace.mark()
+
+
+# docs/writing-a-service.md#running-it
+def checked(config, inputs, outputs, full, steps, block):
+    count, weights, found = config['check'], [w.astype(np.float64) for w in full], {}
+    for first in sorted({0, (steps - 1) // block * block}):
+        last = min(steps, first + count)
+        carried = np.asarray(outputs[first - 1], np.float64) if first else 0.0
+        expected = reference(np.asarray(inputs[first:last], np.float64), *weights, last - first, carried)
+        found[first] = float(np.max(np.abs(expected - outputs[first:last])))
+    return found
 
 
 # docs/writing-a-service.md#the-configuration
@@ -141,36 +159,39 @@ def main():
         raise ValueError('The configuration gives one part a rank')
     width = config['width']
     steps, rows, inputs = operand(config, rank)
-    depth, block = ring(config, steps, rows)
+    block, deep, sums = ring(config, steps, rows)
     a, b, full = shares(config, rank, size)
     step = chain.Step(a, b, rows, config['row_capacity'], config['threads'], config['patience'], config['trials'])
     del a, b
-    E = torch_mesh.empty(depth, rows, width, dtype=torch.half)
-    P = torch_mesh.empty(depth, rows, width, dtype=torch.half)
+    E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
+    P = torch_mesh.empty(sums, rows, width, dtype=torch.half)
+    O = torch.empty(block, rows, width, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width)) if rank == 0 else None
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    paced = chain_stream(step, rank, steps, block, depth, E, P, inputs, outputs)
-    issuing = time.perf_counter() - began - paced
+    paced = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
+    hosted = time.perf_counter() - began - paced
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
     step.check()
     dist.barrier()
     torch.mps.synchronize()
     began = time.perf_counter()
-    crossings(steps, block, depth, P)
+    crossings(steps, block, P)
     torch.mps.synchronize()
     crossing = time.perf_counter() - began
-    summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, ring_depth=depth,
-                   block=block, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
+    moved = 2 * rows * width * torch.half.itemsize
+    summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, block=block,
+                   input_ring=deep, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, step_microseconds=seconds / steps * 1e6,
-                   issue_microseconds=issuing / steps * 1e6, paced_microseconds=paced / steps * 1e6,
-                   crossing_microseconds=crossing / steps * 1e6, kernel={key: step.args[key] for key in chain.ARGS})
+                   host_microseconds=hosted / steps * 1e6, paced_microseconds=paced / steps * 1e6,
+                   crossing_microseconds=crossing / steps * 1e6, collective_bytes_per_step=moved,
+                   collective_gigabytes_per_second=moved * steps / seconds / 1e9,
+                   kernel={key: step.args[key] for key in chain.ARGS})
     if rank == 0 and config['check']:
-        count = config['check']
-        expected = reference(np.asarray(inputs[:count], np.float64), *(w.astype(np.float64) for w in full), count)
-        summary.update(check_steps=count, check_max_difference=float(np.max(np.abs(expected - outputs[:count]))))
+        summary.update(check_steps=config['check'],
+                       check_max_difference=checked(config, inputs, outputs, full, steps, block))
     print(json.dumps(summary), flush=True)
     dist.destroy_process_group()
 
