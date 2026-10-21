@@ -983,7 +983,7 @@ uint64_t ncclMeshRetired(void);
    a copy; a reduce's peer publishes and its root lands, combined; an all-reduce and an all-gather both; both 0 where
    it is not fusable.  Such a call on a stream whose `fused` is set writes those steps' records and returns their
    bindings in *fused, and encodes the rest of the group as ever; the caller runs each as an all-reduce's: its
-   publishing kernel before the call, its landing kernel after it. */
+   publishing kernel encoded after the call returns (it needs the bindings), its landing kernel after that one. */
 typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2, ncclMeshFuseAllGather = 3 } ncclMeshFuseKind;
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int* publishes, int* lands);
