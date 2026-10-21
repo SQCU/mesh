@@ -803,6 +803,7 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
+  module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
   module.def("encode", &encode);
   module.def("timed", &timed);
   module.def("sequence", &sequence);

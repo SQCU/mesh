@@ -186,3 +186,19 @@ On the M5 and the Mini, at 8 rows, width 1,024, parts [512, 512] and the sample'
 - **Float64 check:** `check_max_difference` for windows 0 and 3584 about the size of `2e2a2718`'s first-steps reading.
   The ragged shares change which worker computes a tile, not a tile's arithmetic. The K splits now come from the
   larger share, so a column's sum may split along K differently: its last bits may differ (C8), its size should not.
+
+## Settings removed at integration (the operator, 2026-10-21)
+
+"if it's parametric it's chosen by an optimization process, and if it's nonparametric it's not a choice".
+
+- **`patience` is structural.** A wait's bound exists so a GPU is never held past the platform's limit. The library
+  defines that bound once: `NCCL_MESH_POLLS` loads, holding a GPU at most `MESH_PLATFORM_NS`, 5 s. `_stream` exports
+  it as `polls`, and the kernel's PATIENCE is that value. The chain's stamp waits are device-scope loads, faster than
+  the system-scope loads the bound was set on, so the same count holds a GPU for less.
+- **`threads` is parametric.** It is now chosen by the same timing argmin as RG. The candidates are powers of two of
+  simdgroups, ended by the first thread count whose pipeline the device refuses to build; no device maximum is written
+  down.
+- **`trials` is parametric, but it belongs to the timing, not the service.** Each candidate is timed over one block, the
+  ring's own unit of steps.
+- **`ring_bytes` stays.** It is the region memory the service is given, an operand, like a process's memory limit.
+- **D2: settings ≺ structure and measurement.**

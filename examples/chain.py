@@ -37,12 +37,27 @@ def workers(K, S):
 
 
 # docs/writing-a-service.md#the-step-kernel
-def plans(K, S, rows, threads, patience):
-    if rows < TILE or rows % TILE or threads % 32:
-        raise ValueError(f'chain step: rows {rows} are a multiple of {TILE}, threads {threads} of 32')
+def plans(K, S, rows, threads):
+    if rows < TILE or rows % TILE:
+        raise ValueError(f'chain step: rows {rows} are a multiple of {TILE}')
     G, RT = workers(K, S), rows // TILE
-    return [dict(TILE=TILE, K=K, S=S, G=G, RG=RG, THREADS=threads, PATIENCE=patience)
+    return [dict(TILE=TILE, K=K, S=S, G=G, RG=RG, THREADS=threads, PATIENCE=_stream.polls)
             for RG in (1 << i for i in range(RT.bit_length())) if RT % RG == 0]
+
+
+# docs/writing-a-service.md#the-step-kernel
+def candidates(K, S, rows):
+    found, threads = plans(K, S, rows, 32), 64
+    for args in found:
+        _pipeline(args)
+    while True:
+        more = plans(K, S, rows, threads)
+        try:
+            for args in more:
+                _pipeline(args)
+        except RuntimeError:
+            return found
+        found, threads = found + more, 2 * threads
 
 
 # docs/writing-a-service.md#the-step-kernel
@@ -65,20 +80,20 @@ def _pipeline(args):
 
 class Step:
     # docs/writing-a-service.md#the-step-kernel
-    def __init__(self, a, b, rows, capacity, threads, patience, trials):
+    def __init__(self, a, b, rows, capacity, trials):
         S, K = a.shape
         tiled = lambda w: w.reshape(w.shape[0] // TILE, TILE, w.shape[1] // TILE, TILE).permute(2, 0, 1, 3).contiguous()
         self.At, self.Bt = tiled(a.T), tiled(b)
         self.capacity = capacity
         self.X = torch.empty(capacity, K, dtype=torch.half, device='mps')
         self.Y = torch.empty(capacity, S, dtype=torch.half, device='mps')
-        candidates = plans(K, S, rows, threads, patience)
-        self.stamps = torch.zeros(candidates[0]['G'], dtype=torch.int32, device='mps')
+        tried = candidates(K, S, rows)
+        self.stamps = torch.zeros(tried[0]['G'], dtype=torch.int32, device='mps')
         self.err = torch.zeros(1, dtype=torch.int32, device='mps')
         self.phase = 0
         e, p = torch.zeros(2, rows, K, dtype=torch.half, device='mps')
         self.kernel_alone = {}
-        for args in candidates:
+        for args in tried:
             self.use(args)
             self.plan(rows)
             self(e, p, p, True)
@@ -87,9 +102,9 @@ class Step:
             for _ in range(trials):
                 self(e, p, p, False)
             torch.mps.synchronize()
-            self.kernel_alone[args['RG']] = (time.perf_counter() - began) / trials
+            self.kernel_alone[args['THREADS'], args['RG']] = (time.perf_counter() - began) / trials
         self.check()
-        self.use(min(candidates, key=lambda args: self.kernel_alone[args['RG']]))
+        self.use(min(tried, key=lambda args: self.kernel_alone[args['THREADS'], args['RG']]))
         self.plan(rows)
 
     # docs/writing-a-service.md#the-step-kernel

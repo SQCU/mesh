@@ -6,8 +6,5 @@
   "parts": [512, 512],
   "row_capacity": 64,
   "ring_bytes": 25165824,
-  "check": 8,
-  "threads": 1024,
-  "patience": 16777216,
-  "trials": 32
+  "check": 8
 }

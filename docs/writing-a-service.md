@@ -115,7 +115,8 @@ Each step on a rank is one kernel, run through torch-mesh's own calls. `streamed
 template in [examples/chain.metal](../examples/chain.metal), `_stream.pipeline` compiles it, and `_stream.encode` puts
 it on torch's stream, so no host waits for it ([examples/chain.py](../examples/chain.py)). The rank's GPU cores run it
 as G workers that are all on the GPU at once. They hand work to each other through stamp words in memory. Every wait
-has a limit, the patience, so a stuck kernel ends instead of hanging the GPU.
+has a limit, so a stuck kernel ends instead of hanging the GPU. The limit is the library's own, `NCCL_MESH_POLLS` loads
+(`_stream.polls`), which holds a GPU at most the platform's 5 seconds. It is not a setting.
 
 The kernel does three things. First, each worker writes its slice of x = e_t + tanh(z), where z is the last step's sum.
 Second, the workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the
@@ -137,17 +138,18 @@ how many registers a simdgroup uses. So one compiled kernel serves any row count
 to the capacity the configuration gives. A product is split along K where a worker has fewer items than simdgroups.
 That split is a word too, worked out once for each row count.
 
-At the start, each rank picks its RG by timing. For each choice, it runs the step kernel alone on its own GPU, `trials`
-steps back to back, at the input's row count. The inputs are zeros and nothing crosses. The host's clock reads the time
+At the start, each rank picks its threads and its RG by timing. The thread counts tried are powers of two of 32-thread
+simdgroups, up to the largest whose pipeline the GPU builds. For each choice, it runs the step kernel alone on its own
+GPU, one block of the ring's steps back to back, at the input's row count. The inputs are zeros and nothing crosses. The host's clock reads the time
 from one full wait to the next (`kernel_alone` in the code), and the rank keeps the fastest choice. That time on one GPU
-only picks RG, so it is not printed as a result. The times that count are those of the whole chain on both Macs.
+only picks the threads and RG, so it is not printed as a result. The times that count are those of the whole chain on both Macs.
 
 ## The configuration
 
 The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
 width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
-two rings. It also says how many first steps to check, and gives the kernel's threads, its patience and how many steps
-each timing takes. The input file says how many steps and rows there are, so the configuration does not. Every value
+two rings. It also says how many first steps to check. The kernel's threads and row grouping are measured,
+and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and rows there are, so the configuration does not. Every value
 must be there. The service has no defaults, and a missing value is an error.
 
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
