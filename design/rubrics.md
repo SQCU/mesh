@@ -120,7 +120,14 @@ layers; see Inversions.
   - a run set aside because one member was busy, or two runs' times compared to clear code ≺ the run read for what
     the balancer did and what the collective's output did: "you aren't allowed to compare times and the load balancing
     and SECOND ENTIRE SOC AND CPU AND GPU exist SPECIFICALLY TO INCREASE OUTPUT AGGREGATE PERFORMANCE IN ALL
-    CIRCUMSTANCES" (10-21).
+    CIRCUMSTANCES" (10-21);
+  - a measurement without the TP ratio (the parts tuple the balancer set) ≺ one logging aggregate tok/s, the TP ratio
+    and per-stream tok/s, two such cases giving a linear fit: "you can compute a linear fit from 2 cases; logging
+    aggregate; tp ratio; per-stream will add enough dimensionality that you will never become confused about whether
+    there was conflated load on one machine or another" (10-21);
+  - a run with no work split across devices (a TP ratio of one member) ≺ every run with a split, and it enters no
+    comparison for the mesh library: "if no work is split across devices (tuple len == 1) for the tp ratio, then the run
+    is not qualified for any sort of comparison for the mesh lib at all" (10-21).
 - KL at the unembedding, against LiteRT's pair KL. While shapes work is unfinished: an export of more bytes at a lower
   KL ≺ the export of fewest bytes within a KL of 2.0.
 - Two forms whose times differ by under 3% rank equal on time.
