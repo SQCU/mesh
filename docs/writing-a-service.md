@@ -186,8 +186,9 @@ block, which start from rank 0's own output. The second window reads slots the r
 
 The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling
 its kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the
-first block's time. It then gives the time a step of the later blocks takes, from timestamps the GPU's stream records
-at each block's end, and the rows a second those blocks reach. The whole-run times include the first block; these do
+first block's time. It then gives the time a step of the later blocks takes, and the rows a second they reach. A block's
+end is the moment the host's wait on its mark returns: the host issues ahead of the GPU, so it is already waiting
+when the block ends, and no wait is added to take the time. The whole-run times include the first block; these do
 not.
 
 ## What to read next

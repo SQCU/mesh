@@ -83,25 +83,20 @@ def span(first, steps, block, depth):
 class Pace:
     # docs/writing-a-service.md#the-rings
     def __init__(self):
-        self.marks, self.bounds, self.waited = collections.deque(), [], 0.0
-        self.bound()
-
-    # docs/writing-a-service.md#running-it
-    def bound(self):
-        self.bounds.append(torch.mps.Event(enable_timing=True))
-        self.bounds[-1].record()
-        return self.bounds[-1]
+        self.marks, self.done, self.waited = collections.deque(), [], 0.0
 
     # docs/writing-a-service.md#the-rings
     def wait(self):
         if len(self.marks) == RING_BLOCKS:
             began = time.perf_counter()
             self.marks.popleft().synchronize()
-            self.waited += time.perf_counter() - began
+            self.done.append(time.perf_counter())
+            self.waited += self.done[-1] - began
 
     # docs/writing-a-service.md#the-rings
     def mark(self):
-        self.marks.append(self.bound())
+        self.marks.append(torch.mps.Event())
+        self.marks[-1].record()
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
@@ -136,9 +131,7 @@ def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
                 torch.from_numpy(outputs[held]).copy_(drained, non_blocking=True)
             if t + 1 < steps:
                 pace.mark()
-            else:
-                pace.bound()
-    return pace.waited, pace.bounds, first
+    return pace.waited, pace.done, first
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
@@ -183,13 +176,13 @@ def main():
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    paced, bounds, first = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
+    paced, done, first = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
     hosted = time.perf_counter() - began - paced
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
     step.check()
-    blocks = [a.elapsed_time(b) / 1e3 for a, b in zip(bounds, bounds[1:])]
-    steady = sum(blocks[1:]) / (steps - block) if len(blocks) > 1 else None
+    steady = (began + seconds - done[0]) / (steps - block) if done else None
+    opened = done[0] - began if done else None
     dist.barrier()
     torch.mps.synchronize()
     began = time.perf_counter()
@@ -201,7 +194,7 @@ def main():
                    input_ring=deep, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, step_microseconds=seconds / steps * 1e6,
                    host_microseconds=hosted / steps * 1e6, paced_microseconds=paced / steps * 1e6,
-                   first_issue_milliseconds=first * 1e3, first_block_milliseconds=blocks[0] * 1e3,
+                   first_issue_milliseconds=first * 1e3, first_block_milliseconds=opened * 1e3 if done else None,
                    steady_step_microseconds=steady * 1e6 if steady else None,
                    steady_aggregate_rows_per_second=rows / steady if steady else None,
                    crossing_microseconds=crossing / steps * 1e6, collective_bytes_per_step=moved,
