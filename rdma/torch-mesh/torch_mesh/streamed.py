@@ -177,13 +177,6 @@ FORMS = ('LOADS', 'H', 'RING')
 PERS = (8, 16, 24, 32, 48)
 WIDTH_CLASSES = (4, 8, 12, 15)
 WIDTH_CLASS = [0] + [next(c for c in WIDTH_CLASSES if c >= w) for w in range(1, 16)]
-# Of metal-microbench metal/rows.metal: the largest epilogue's floats (mmb_heads::stage) and a prologue's floats past its row
-# (mmb_norm_add::stage: its partial sums and two words).
-EPILOGUE_FLOATS, PROLOGUE_FLOATS = 2 * 512 + 33, 34
-# The prologue whose readings a consumer's choice reads (its instance's last type, mmb_norm_add_<slots>), and the epilogue
-# of a producer publishing its output (metal-microbench docs/kernels.md#stacked-products: an instance read with either is
-# kept apart from the same instance alone, '' its kind).
-PAIRED = ('mmb_norm_add', 'mmb_publish')
 
 
 def evidence_path():
@@ -265,12 +258,9 @@ class Fit:
         made = cls(cores, known['gbps'], known['coefficients'], known.get('factors'))
         made.configurations = {tuple(c) for c in known.get('configurations', [])} or None
         made.admitted = set(known.get('forms_at_bar', {}))
-        if any('paired' not in r for r in known['readings']):
-            raise RuntimeError(f'{path}: fitted before its readings named their paired kind (`python -m torch_mesh.streamed fit` again over '
-                               f'its observations, on this node: metal-microbench docs/kernels.md#the-instance-fit, Evidence)')
         made.read = {}
         for r in known['readings']:
-            made.read.setdefault((*r['slice'], r['paired']), {})[tuple(r['instance'])] = r['us']
+            made.read.setdefault(tuple(r['slice']), {})[tuple(r['instance'])] = r['us']
         made.attention_read = {tuple(r[k] for k in ATTENTION_READ): r['us'] for r in known['attention_readings']}
         made.attention, made.fused = known.get('attention') or {}, known.get('fused') or {}
         return made
@@ -357,7 +347,7 @@ def rows_class(rows):
     return 1 if rows <= 1 else 2 if rows <= 2 else 4
 
 
-def candidates(s, rows, op='product', tables=False, widths=15, admitted=frozenset(), staged=()):
+def candidates(s, rows, op='product', tables=False, widths=15, admitted=frozenset()):
     """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class); 8 or
     16 rows the cooperative tensor (M 8 or 16), the ceiling round's instance family (the coop's M 8 work, read at eight rows,
     at or above the ALUs' four-row time on every served slice of the Mini and all but one of the M5's, and the ALUs at eight
@@ -368,8 +358,7 @@ def candidates(s, rows, op='product', tables=False, widths=15, admitted=frozense
     either sums (H: fp32, or the fp16 pair sums every H tiles for each H<h> the node `admitted` at the KL bar where the
     slice admits it, admits), on the cooperative tensor either ring (RING); `op` couple: the gate and up products together
     (its slice their units summed). A form is taken where its factor prices it below its form 0 (FORMS), each candidate
-    listed after its form 0. A consumer taking its prologue (`staged`: its band layout, each band's slab; a couple's (0, 1)),
-    only where its threadgroup memory with the prologue's stage fits (stage_bytes: structure, not a price)."""
+    listed after its form 0."""
     T, out = s['columns'] // 32, []
     halves = sorted({int(f[1:]) for f in admitted if f[:1] == 'H' and f[1:].isdigit()})
     js = sorted({-(-T // -(-T // max(1, -(-T // per)))) for per in PERS})
@@ -395,41 +384,7 @@ def candidates(s, rows, op='product', tables=False, widths=15, admitted=frozense
         for sk, bands in ((2, 2), (1, 4), (1, 1)):
             if (s['outputs'] // 32) % bands == 0:
                 out += [dict(kernel='coop', M=M, SK=sk, BANDS=bands, J=J, LOADS=loads, RING=ring) for J in js for loads in (0, 1) for ring in (0, 1)]
-    out = [c for c in out if not staged or stage_bytes(c, s['columns'], slots_of(c, staged)) <= threadgroup_bytes()]
     return [dict(c, **f) for c in out for f in [{}] + [{'H': h} for h in halves if admits(c, 'H', h, widths)]]
-
-
-def slots_of(spec, slabs):
-    """The slots a threadgroup of instance `spec` stages taking a consumer's prologue: the most slabs any BANDS consecutive
-    bands of the band layout `slabs` (each band's slab) read; a couple's gate's and up's (streamed.metal mmb_norm_add's
-    SLOTS, metal-microbench instance_fit.swift InstanceSpec.slots)."""
-    if spec['kernel'] == 'couple':
-        return 2
-    b = spec['BANDS']
-    return max((len(set(slabs[i:i + b])) for i in range(0, len(slabs), b)), default=1)
-
-
-def stage_bytes(spec, columns, slots):
-    """The threadgroup bytes of instance `spec` on `columns` input columns taking a consumer's prologue of `slots` slots
-    (metal-microbench docs/kernels.md#stacked-products, the prologue; streamed.metal's kernels with P staged): its coded
-    input, its rows of its K share of each slab it stages (a couple's gate's and up's whole), beside its region (its sums, the
-    largest epilogue's stage or the row's floats, the most) and a ring's slots and widths (streamed_coop)."""
-    k = spec['kernel']
-    if k == 'couple':
-        return 4 * max(2 * spec['SK'] * spec['R'] * 32, columns + PROLOGUE_FLOATS) + 2 * slots * spec['R'] * columns
-    per, bands, sk, ring = -(-(columns // 32) // spec['J']), spec['BANDS'], spec['SK'], spec.get('RING', 0)
-    rows = spec['R'] if k == 'alu' else spec['M']
-    sums = 0 if ring >= 8 else bands * sk * rows * 32
-    rings = 0 if k != 'coop' else 2 * (2 if ring else 1) * bands * sk * (32 * 40 if ring else 1) + (4 * 2 * bands * sk if ring >= 8 else 0)
-    return 4 * max(sums, EPILOGUE_FLOATS, columns + PROLOGUE_FLOATS) + rings + 2 * slots * rows * per * 32
-
-
-def threadgroup_bytes():
-    """A threadgroup's memory on this node's GPU (MTLDevice maxThreadgroupMemoryLength, read once through _stream)."""
-    from . import _stream
-    if 'threadgroup' not in _PIPELINES:
-        _PIPELINES['threadgroup'] = int(_stream.threadgroup_bytes())
-    return _PIPELINES['threadgroup']
 
 
 def admits(spec, form, value, widths):
@@ -464,17 +419,17 @@ def configuration(spec):
     return (k, spec['SK'], spec['BANDS'], spec['F'], spec['LUT'])
 
 
-def choose(fit, s, rows, op='product', tables=False, read=None, widths=15, staged=()):
+def choose(fit, s, rows, op='product', tables=False, read=None, widths=15):
     """The argmin over the candidates of the configurations its evidence observed (None where there is none), or at a
     rows class the fit explores, of the configurations named for it (measured once, in the next profile), and its price
     (us): where candidates were `read` at the slice and rows (read_key: their readings' median), the least read (a
     measurement at a shape outranks the model there), else the fit's argmin. Forms named for the class (fit.forms: a
     resolve's --explore, FORM<v>) change only those arguments, where the instance admits them (admits): of the slice's
     least read instance where it was read and no configurations are named (its pair, the same instance in the form),
-    else of each candidate in its form 0 (a form any H whose steps F divides). `staged`: candidates'."""
+    else of each candidate in its form 0 (a form any H whose steps F divides)."""
     allowed = fit.explore.get(rows, fit.configurations)
     forced = fit.forms.get(rows, {})
-    listed = candidates(s, rows, op, tables, widths, fit.admitted, staged)
+    listed = candidates(s, rows, op, tables, widths, fit.admitted)
     if forced:
         formed = lambda c: dict(c, **{k: v for k, v in forced.items() if admits(c, k, v, widths)})
         held = min(read, key=read.get) if read and rows not in fit.explore else None
@@ -495,26 +450,13 @@ def read_key(spec):
 
 
 def readings(obs):
-    """Each slice's (outputs, columns, width class, rows, and the kind an instance was read paired with: PAIRED, '' alone)
-    instances read in served profiles (observe's rows: the step's own conditions, not a probe's) by read_key, and their
-    readings' median us."""
+    """Each slice's (outputs, columns, width class, rows) instances read in served profiles (observe's rows: the step's
+    own conditions, not a probe's) by read_key, and their readings' median us."""
     out = {}
-    for spec, s, rows, us, shape, paired in obs:
+    for spec, s, rows, us, shape in obs:
         if shape.startswith('profile'):
-            out.setdefault((s['outputs'], s['columns'], width_class(spec['WIDTHS']), rows, paired), {}).setdefault(read_key(spec), []).append(us)
+            out.setdefault((s['outputs'], s['columns'], width_class(spec['WIDTHS']), rows), {}).setdefault(read_key(spec), []).append(us)
     return {k: {c: sorted(v)[len(v) // 2] for c, v in read.items()} for k, read in out.items()}
-
-
-def paired_of(types):
-    """The kind of PAIRED an instance's label names after its sizes (`types`: its E and P, '_'-joined, P with its slots),
-    '' where it names none, None where it names only an epilogue other than a publication (read apart: epilogue)."""
-    import re
-    prologue, publication = PAIRED
-    if not types:
-        return ''
-    if re.search(rf'(?:^|_){prologue}_[0-9]+$', types):
-        return prologue
-    return publication if types == publication else None
 
 
 def spec_arguments(spec, T, widths, finish=False):
@@ -573,25 +515,21 @@ def spec_of(text):
     return spec
 
 
-def admitted(spec, outputs, columns, rows, staged=()):
-    """Instance `spec` on a slice of `outputs` x `columns` at `rows` input rows, or an error where the slice does not admit
-    it (its bands not a multiple of BANDS; a cooperative instance's rows past its M; a consumer's (`staged`: candidates')
-    stage past a threadgroup's memory)."""
+def admitted(spec, outputs, rows):
+    """Instance `spec` on a slice of `outputs` coded rows at `rows` input rows, or an error where the slice does not admit
+    it (its bands not a multiple of BANDS; a cooperative instance's rows past its M)."""
     if spec['kernel'] != 'panel' and (outputs // 32) % spec.get('BANDS', 1):
         raise ValueError(f'{spec}: {outputs // 32} bands, not a multiple of its BANDS')
     if spec['kernel'] == 'coop' and rows > spec['M']:
         raise ValueError(f'{spec}: {rows} rows past its M (the cooperative product holds every row in one threadgroup)')
-    if staged and stage_bytes(spec, columns, slots_of(spec, staged)) > threadgroup_bytes():
-        raise ValueError(f'{spec}: its prologue\'s stage past a threadgroup\'s {threadgroup_bytes()} bytes (stage_bytes)')
     return spec
 
 
-def decomposition_of(spec, outputs, columns, widths, rows, staged=()):
+def decomposition_of(spec, outputs, columns, widths, rows):
     """A decomposition operand's entry for instance `spec` on a slice of `outputs` x `columns` (width class `widths`) at
     `rows` input rows (metal-microbench docs/kernels.md#decompositions: {"kernel", "args", "names", "grid", "threads",
-    "shares"}, the args in ARGUMENTS' order; admitted, `staged` the band layout of a consumer taking the prologue: the
-    engine refuses an entry whose stage does not fit there too, InstanceTable.kept)."""
-    kernel, arguments = spec_arguments(admitted(spec, outputs, columns, rows, staged), columns // 32, widths)
+    "shares"}, the args in ARGUMENTS' order; admitted)."""
+    kernel, arguments = spec_arguments(admitted(spec, outputs, rows), columns // 32, widths)
     grid, threads, shares = launch(spec, outputs, rows)
     return {'kernel': kernel, 'args': list(arguments), 'names': list(ARGUMENTS[kernel]), 'grid': list(grid), 'threads': threads, 'shares': shares}
 
@@ -797,7 +735,7 @@ class Matrix(torch.Tensor):
         spec: spec_of) where given, else the instance fit's choice; its spec, name and instantiation, threadgroups x and y,
         threads, K shares."""
         if decomposition is not None:
-            spec = dict(admitted(decomposition, self.rows, self.columns, rows))
+            spec = dict(admitted(decomposition, self.rows, rows))
         else:
             spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op), widths=self.widths)
         if spec['kernel'] == 'coop' and spec.get('RING', 0) < 8 and coop_slots() is None:
@@ -958,16 +896,15 @@ def mean_units(units):
     return {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
 
 
-def couple(fit, sg, su, rows, read=None, widths=15, staged=()):
+def couple(fit, sg, su, rows, read=None, widths=15):
     """The couple instance of gate and up (slice units sg and su, width class `widths`) at `rows` and its price (choose:
     `read` its readings) where it was read at the slice and rows, or the fit prices its argmin below their own products
-    and the GELU's dispatch (a dispatch's fixed cost); else (None, None). `staged` (0, 1) where it takes the residual
-    stream's prologue (gate|up's input not rotated: metal-microbench InstanceTable.synthesize(couple:))."""
+    and the GELU's dispatch (a dispatch's fixed cost); else (None, None)."""
     pair = pair_units(sg, su)
-    _, t = choose(fit, pair, rows, 'couple', widths=widths, staged=staged)
+    _, t = choose(fit, pair, rows, 'couple', widths=widths)
     if not read and (t is None or t >= sum(choose(fit, u, rows, widths=widths)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']):
         return None, None
-    return choose(fit, pair, rows, 'couple', read=read, widths=widths, staged=staged)
+    return choose(fit, pair, rows, 'couple', read=read, widths=widths)
 
 
 def _no(m, what):
@@ -1267,12 +1204,11 @@ def _records(path):
 
 def observations(paths, here):
     """The observations of probe, bandwidth and profile records made on node `here` ((chip, GPU cores): node): the
-    admissible instances' (rows of instance, units, rows_in, best_us: (spec, units, rows, us, shape)), those read paired
-    with a prologue or a publication (observe's `paired`: (spec, units, rows, us, shape, paired)), the decode attention
-    plans' rows (kind attention) and the bandwidth reads (kind bandwidth). A record holding a row of another node, or of
-    none, is refused, naming the nodes its rows name: a node's evidence is read on it (metal-microbench
+    admissible instances' (rows of instance, units, rows_in, best_us: (spec, units, rows, us, shape)), the decode
+    attention plans' rows (kind attention) and the bandwidth reads (kind bandwidth). A record holding a row of another
+    node, or of none, is refused, naming the nodes its rows name: a node's evidence is read on it (metal-microbench
     docs/kernels.md#the-instance-fit, Evidence)."""
-    out, paired, attention, bandwidth, foreign = [], [], [], [], {}
+    out, attention, bandwidth, foreign = [], [], [], {}
     for path in paths:
         for row in _records(path):
             if row['node'] != list(here):
@@ -1285,15 +1221,11 @@ def observations(paths, here):
                 spec = parse_instance(row['instance'])
                 if spec['kernel'] == 'alu' and spec['R'] > 4:
                     continue
-                seen = (spec, {k: row[k] for k in UNITS}, row['rows_in'], row['best_us'], row.get('form', row['instance']).split(' R')[0])
-                if row.get('paired'):
-                    paired.append(seen + (row['paired'],))
-                else:
-                    out.append(seen)
+                out.append((spec, {k: row[k] for k in UNITS}, row['rows_in'], row['best_us'], row.get('form', row['instance']).split(' R')[0]))
     if foreign:
         raise SystemExit(f'observations not read on this {here[0]} ({here[1]} GPU cores): '
                          + '; '.join(f'{p} holds rows of {", ".join(sorted(n))}' for p, n in foreign.items()))
-    return out, paired, attention, bandwidth
+    return out, attention, bandwidth
 
 
 PLANS = ('vector', 'tile')
@@ -1368,10 +1300,9 @@ def _fit(args):
     and attention readings (attention_readings) themselves, so the file is the whole of what prices the node's
     instances wherever it lies (a like node's copy among them; the records stay where they were read); the bandwidth the
     median of its bandwidth reads (bandwidth), else, a refit, the one this node's evidence was fitted at. The epilogues'
-    and forms' entries (fused, forms_at_bar) are kept. Instances read paired with a prologue or a publication are
-    readings of their own (readings' paired), never the model's."""
+    and forms' entries (fused, forms_at_bar) are kept."""
     here = node()
-    obs, paired, attention, bandwidth = observations(args.observations, here)
+    obs, attention, bandwidth = observations(args.observations, here)
     path = evidence_path()
     kept = json.loads(path.read_text()) if path.exists() else {}
     if bandwidth:
@@ -1399,8 +1330,7 @@ def _fit(args):
               'held_out': {'median_log_error': held[len(held) // 2], 'median_regret': regrets[len(regrets) // 2],
                            'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors,
               'attention': attention_fit(attention),
-              'readings': [{'slice': list(k[:4]), 'paired': k[4], 'instance': list(c), 'us': us}
-                           for k, read in sorted(readings([o + ('',) for o in obs] + paired).items()) for c, us in sorted(read.items())],
+              'readings': [{'slice': list(k), 'instance': list(c), 'us': us} for k, read in sorted(readings(obs).items()) for c, us in sorted(read.items())],
               'attention_readings': [dict(zip(ATTENTION_READ, k), us=us) for k, us in sorted(attention_readings(attention).items())],
               'fused': kept.get('fused', {}), 'forms_at_bar': kept.get('forms_at_bar', {})}
     _write(path, record)
@@ -1415,10 +1345,7 @@ def _observe(args):
     label without its LOADS taking --loads (the form the reading's library had); and each decode class's attention plans
     (a dimension's vector form, or its tile with its merge stage where the class paid one: merged) as attention rows, at
     the window or --ctx positions, each at the engine's own part count (0: the engine evaluates its plans from its
-    evidence and takes none from outside). An instance whose label names the prologue
-    or the publication after its sizes (paired_of: a consumer, a producer publishing its output; metal-microbench
-    docs/kernels.md#stacked-products) is a row of its own kind (`paired`), which readings keep apart and the fit's model
-    reads none of; one naming another epilogue alone is not read (epilogue reads it)."""
+    evidence and takes none from outside)."""
     import re
     made = reading_evidence(args.reading)
     if made is None:
@@ -1434,17 +1361,16 @@ def _observe(args):
     for cls, commands in reading['engine']['profile']['commands'].items():
         rows, floor = int(cls.split()[1]), min(c['least_us'] for c in commands.values())
         for label, c in commands.items():
-            found = re.fullmatch(r'(streamed_(alu|coop|couple|panel)_[0-9]+(?:_[0-9]+)*)(?:_([a-z][a-z0-9_]*))? (\d+)x(\d+)', label)
-            paired = found and paired_of(found.group(3))
-            if paired is None:
+            found = re.fullmatch(r'streamed_(alu|coop|couple|panel)_([0-9_]+) (\d+)x(\d+)', label)
+            if not found:
                 continue
-            spec = parse_instance(found.group(1), args.loads)
-            outputs, columns = int(found.group(4)), int(found.group(5))
+            spec = parse_instance(label.split()[0], args.loads)
+            outputs, columns = int(found.group(3)), int(found.group(4))
             units, n = shapes.get((spec['kernel'] == 'couple', outputs, columns, width_class(spec['WIDTHS']))), min(rows, spec.get('R', rows))
             if units:
                 out.append({'instance': '_'.join(['streamed_' + spec['kernel']] + [str(spec[k]) for k in ARGUMENTS[spec['kernel']]]),
                             'rows_in': n, 'best_us': max(c['least_us'] - floor, 0.1), 'form': f'profile {outputs}x{columns} R{n}',
-                            'source': str(Path(args.reading).resolve()), 'node': made, 'paired': paired, **mean_units(units)})
+                            'source': str(Path(args.reading).resolve()), 'node': made, **mean_units(units)})
     text = _text_config(args.export)
     windows = {text['head_dim']: text.get('sliding_window', 0), text.get('global_head_dim') or text['head_dim']: 0}
     kinds, held = text.get('layer_types') or [], {}
@@ -1482,10 +1408,8 @@ def fused_ratios(fused, separate, rows_of):
     first, cold ticks): [log least ratio, log median ratio] of the fused form (the first reading) against the product
     apart (the second) and the row the kind replaces, us a dispatch (metal-microbench docs/kernels.md#stacked-products, the
     epilogues; #the-instance-fit, the finish). An epilogue (`rows_of`: its name to its row's label) runs in the instance
-    whose name ends in it, apart the same instance without it (a consumer's taking its prologue in both: its name's last
-    type the prologue, apart named with streamed_plain before it, as streamed_weights.swift streamedInstance names them);
-    the finish ('finish') is a one-share ALU instance finishing its rows (OUT 1), apart the same instance's partials (OUT
-    0) and their streamed_finish of the same shape."""
+    whose name ends in it, apart the same instance without it; the finish ('finish') is a one-share ALU instance finishing
+    its rows (OUT 1), apart the same instance's partials (OUT 0) and their streamed_finish of the same shape."""
     import re
     profiles = [json.loads(Path(p).read_text())['engine']['profile'] for p in (fused, separate)]
     one, two = (p['commands'] for p in profiles)
@@ -1495,16 +1419,16 @@ def fused_ratios(fused, separate, rows_of):
             continue
         a, b = one[cls], two[cls]
         for label in a:
-            found = re.fullmatch(r'(streamed_(?:alu|coop)_[0-9]+(?:_[0-9]+)*)(?:_([a-z][a-z_]*?))?(_' + PAIRED[0] + r'_[0-9]+)? (\d+x\d+)', label)
+            found = re.fullmatch(r'(streamed_(?:alu|coop)_[0-9_]+)(?:_([a-z_]+))? (\d+x\d+)', label)
             if not found:
                 continue
-            name, kind, prologue, shape = found.groups()
+            name, kind, shape = found.groups()
             spec = parse_instance(name)
-            if kind is None and prologue is None and spec['kernel'] == 'alu' and spec['OUT'] == 1:
+            if kind is None and spec['kernel'] == 'alu' and spec['OUT'] == 1:
                 kind, plain = 'finish', '_'.join(['streamed_alu'] + [str(0 if k == 'OUT' else spec[k]) for k in ARGUMENTS['alu']]) + ' ' + shape
                 row = f'streamed_finish {shape}'
             elif kind in rows_of:
-                plain, row = f'{name}{"_streamed_plain" + prologue if prologue else ""} {shape}', rows_of[kind]
+                plain, row = f'{name} {shape}', rows_of[kind]
             else:
                 continue
             if plain in b and row in b:
@@ -1817,7 +1741,7 @@ def _decompose(args):
             chosen = choose(fit, units, rows, widths=m.widths)[0] if fit is not None else None
             if chosen is not None and chosen['kernel'] == 'coop' and chosen.get('RING', 0) < 8 and coop_slots() is None:
                 chosen = None
-            listed = [admitted(spec, m.rows, m.columns, rows) for spec in specs] + ([chosen] if chosen is not None and chosen not in specs else [])
+            listed = [admitted(spec, m.rows, rows) for spec in specs] + ([chosen] if chosen is not None and chosen not in specs else [])
             forms = _probe_forms(m, listed, rows, x, reference, copies, m.label)
             xr, y = x[:rows].contiguous(), _half(rows, m.rows)
             torch.mm(xr, dense.T, out=y)
@@ -2091,8 +2015,8 @@ def _resolve(args):
     for (op, outputs, columns, widths, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
         pair = op == 'couple' and (mean_units([u[0] for u in units]), mean_units([u[1] for u in units]))
         for rows in classes:
-            spec, t = (couple(fit, *pair, rows, fit.read.get((outputs, columns, widths, rows, '')), widths) if pair
-                       else choose(fit, mean_units(units), rows, op, tables, fit.read.get((outputs, columns, widths, rows, '')), widths))
+            spec, t = (couple(fit, *pair, rows, fit.read.get((outputs, columns, widths, rows)), widths) if pair
+                       else choose(fit, mean_units(units), rows, op, tables, fit.read.get((outputs, columns, widths, rows)), widths))
             if spec is None or spec['kernel'] == 'coop' and coop_slots() is None:
                 continue
             kernel, arguments = spec_arguments(spec, columns // 32, widths)
