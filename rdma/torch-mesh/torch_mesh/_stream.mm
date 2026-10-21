@@ -713,6 +713,7 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
+  module.def("threadgroup_bytes", [] { return (int64_t)at::mps::MPSDevice::getInstance()->device().maxThreadgroupMemoryLength; });
   module.def("encode", &encode);
   module.def("timed", &timed);
   module.def("sequence", &sequence);
