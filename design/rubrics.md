@@ -93,6 +93,11 @@ Text in source, documents or notes that an agent wrote without citing the operat
 written text takes precedence over claude written text without a citation to user text" (10-21, of a docstring's
 "No solo run and no fit" read as ruling out the operator's linear fit).
 
+Two demands that seem to oppose each other are a problem space of more dimensions, holding different phenomena, each
+ranked on its own; never a reason for wrong code or for delay: "as always, all antinomies are higher dimensional problem
+spaces which contain multiple different phenomena and are never reasons to write plainly wrong-code or procrastinate
+work" (10-21; "Two channels" is one such space).
+
 Each rubric has the two kinds of dimension the operator scores separately: abstract ones that apply to the whole layer,
 and a few fine-grained ones about particular mechanisms. Some comparisons rank in opposite directions in different
 layers; see Inversions.
