@@ -514,21 +514,7 @@ layers; see Inversions.
     (10-16);
   - Wi-Fi to a peer cabled to this node ≺ its cable: "you should never be using networking over wifi etc when it is
     physically and literally tethered / cabled to a host machine" (10-16).
-- ssh, by namespace (the operator, 10-20: "without attributino to which namespaces networking prohibitions were about,
-  the prohibitions are not salient judgements"):
-  - libraries, transport or compute blocking on ssh ≺ none; a test script or launcher using ssh is not ranked: "aight if
-    libs and hteu nderlying transport and compute are never blocking on ssh it's fine, it's not a seriosu problem if a
-    test script uses ssh (not *really*)" (10-07, three minutes after "why is ssh involved in any part of the mesh
-    algorithmset?", which answered an agent's "waiting on a late-starting peer over flaky ssh");
-  - administering the substrate over ssh, as PRRTE starts its daemons, is accepted: "'ssh stays for one job:
-    administering the substrate itself (installing or upgrading a bridge), as PRRTE uses it only to start its
-    daemons.' sounds fine" (10-16); refusing to reach a cabled node over its cable and use it ≺ doing so (10-20,
-    metal-microbench AGENTS.md);
-  - a call's part started per call by ssh, a command plane or by hand ≺ ranks started as Megatron-LM's are: "are you
-    trying to add ssh or a command plane for no reason even though this sounds like it introduces preventable latency?
-    ssh isn't a reliable connection so this sounsd like a way to wriggle a bespoke protocol back into the code here yet
-    again... i better not hear anything about 'you start code by hand' either since that is clearly not how megatron-lm
-    starts up in pytorch" (10-19).
+- ssh and TCP: see "Two channels" (below the kinds), which ranks them; neither is struck out.
 
 **D8. Memory the program knows it needs.**
 - Ranks higher: the form whose buffers are sized by the program itself from its configuration, held from load and
@@ -633,6 +619,48 @@ to allow it; memory safety is not a requirement but zero reducible overhead is a
 In every layer, a form that adds a mechanism to survive another layer's failure ranks below the form that removes the
 failure at its owner (M4). The operator, 10-18: "features which call for error correction or protocols are almost
 without exception superfluous and wrapping or preserving another errorful feature".
+
+## Two channels: the slow reliable one and the fast prenegotiated one
+
+The operator, 10-21, verbatim: "when would tcp notionally be allowed if you have tow connection modes: one that is fast
+and must be prenegotiated so that it can happen almost instantly, and another that is reliable but hundreds of times
+slower? the answer will not be all or nothing." And of the answer below: "All of these are correct. ... from this we will
+realize that the pairwise ranking rubric exists for a reason: to tease apart antinomies that claudes will try to invent
+when tehy are not sure what to do wrt multiple agendas that are active at once and demand different hings at different
+times" (10-21). Not "no ssh", and not a slow handshake between every layer: the slow channel ranks by where its cost
+lands relative to the fast path it serves.
+
+Where the slow channel (TCP, ssh) ranks higher: wherever the fast path cannot exist yet, paid once per long-lived object.
+- Pairing a cable: before the queue pairs are made and connected, RDMA has no channel at all; the bridge exchanges
+  queue-pair numbers and GIDs over its control socket once a link (M2's "pairing of a new cable").
+- A communicator's bootstrap: NCCL's own rendezvous over TCP sockets (C1, the literature's form; the operator kept its
+  gather and first-position agreement, 10-19: "Keep both"); with communicators kept across calls (M8) its milliseconds
+  are spread over thousands of calls, a few nanoseconds each.
+- Administering the substrate: installing or upgrading a bridge, starting daemons, ssh as PRRTE uses it (10-16: "'ssh
+  stays for one job: administering the substrate itself (installing or upgrading a bridge), as PRRTE uses it only to
+  start its daemons.' sounds fine"); a cabled node reached over its cable and used (10-20).
+- Rare records between bridges: the map's flooding, at the bridge's own time scale, never per transfer.
+
+Where it ranks lower:
+- On a per-call or per-step path: at 10⁴–10⁵ ns against about 2 × 10³ ns for a SEND into a posted receive (crossings
+  measured at 1.9 µs, 10-17), a TCP exchange per call is a few percent of a 3 ms step against "1% overhead is not
+  acceptable" (M8); per step, worse. ssh per call is 10⁶–10⁸ ns: "are you trying to add ssh or a command plane for no
+  reason even though this sounds like it introduces preventable latency? ssh isn't a reliable connection so this sounsd
+  like a way to wriggle a bespoke protocol back into the code here yet again... i better not hear anything about 'you
+  start code by hand' either since that is clearly not how megatron-lm starts up in pytorch" (10-19).
+- Deciding the fast path's state while it runs: a TCP END closing an RDMA transfer (M2: "the closer's END on the TCP
+  control socket ≺ the completion on the transfer's own queue pair"), a TCP-timed detector concluding an RDMA link: "why
+  is there a separate network interface using a separate network protocol wtih different latency timing than the rdma
+  underpinning the transport doing random things to bridges???" (10-20). The slow channel has its own failure and timing
+  domain, and does not govern a channel whose failures are its own completions.
+- Carrying data or calls the fast path could carry: a call's text on the host path, ssh to start a call's part. And
+  libraries, transport or compute blocking on ssh ≺ none; a test script using ssh is not ranked: "aight if libs and hteu
+  nderlying transport and compute are never blocking on ssh it's fine, it's not a seriosu problem if a test script uses
+  ssh (not *really*)" (10-07).
+
+So the slow channel bootstraps and administers the fast path's long-lived objects; it is never on the per-call path, and
+it never decides a running RDMA channel's state. A call between machines is data landing in a resident program's posted
+buffers (M1: "a client which runs very fast when the right buffers have just appeared asynchronously in memory").
 
 ## Failure across interfaces
 
