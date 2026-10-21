@@ -166,28 +166,14 @@ static inline T streamed_value(P partials, ulong at, uint shares, uint stride, T
 // threadgroup has stored its share of output rows [first, first + width), every thread calls E::after with the partials
 // (stored through E::partials: coherent(device) where another threadgroup of the dispatch reads them), the rows' order and
 // scales, the K shares and E::stage floats of threadgroup memory (the product's own, past its reduction); E decides which
-// threadgroup consumes what (the last to arrive of the threadgroups holding the rows it reads), its stores through the
-// product's stamp policy S's pointers. streamed_plain consumes nothing: the partials are the product's output.
+// threadgroup consumes what (the last to arrive of the threadgroups holding the rows it reads). streamed_plain consumes
+// nothing: the partials are the product's output.
 struct streamed_plain {
     enum : uint { stage = 1 };
     typedef device float *partials;
-    template <typename S, typename P>
+    template <typename P>
     void after(P, device const int *, device const float *, device atomic_uint *, streamed_dims, uint, uint, uint, threadgroup float *, uint,
                uint) constant {}
-};
-
-// A kernel's stamp policy, its last template argument (metal-microbench docs/kernels.md Any program, the stamped form):
-// enter(record, run, thread, open) before its work, which it does only where enter is true, and leave(record, thread) at
-// each of its exits; in<T> and out<T> the pointers it reads its inputs and writes its outputs through. streamed_unstamped,
-// every kernel's own form, waits on nothing and raises nothing through plain pointers; the library's STEPS mesh_stamped
-// (nccl.h ncclMeshMetalSteps) waits on its producers' counts, raises its own, and reads and writes coherent at device
-// scope. A kernel binds its record at buffer 30 and its run word at buffer 19, which only a stamped instance reads.
-struct streamed_unstamped {
-    template <typename T> using in = device const T *;
-    template <typename T> using out = device T *;
-    static constexpr constant bool stamped = false;
-    bool enter(device uchar *, device const uint *, uint, threadgroup uint *) const { return true; }
-    void leave(device uchar *, uint) const {}
 };
 
 // The GELU of a gate value times an up value (tanh form, its inner term clamped to [-20, 20]).
@@ -223,28 +209,27 @@ static inline float streamed_rms(float s, uint count, float eps, threadgroup flo
 // A partials pointer read four floats at a time, its coherence kept.
 template <typename P> struct streamed_fours { typedef device const float4 *type; };
 template <> struct streamed_fours<coherent(device) device float *> { typedef coherent(device) device const float4 *type; };
-template <> struct streamed_fours<coherent(device) device const float *> { typedef coherent(device) device const float4 *type; };
 
 // A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
 // coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
-// has summed it into plain values, from `plain` (shares == 0, row stride `rows`, read through S's pointers). The row
-// order permutes within the range. V elements a thread (1, or 4: float4 partials, int4 orders and float4 scales; first,
-// count, rows and stride multiples of 4). Ends with a threadgroup barrier.
-template <uint V = 1, typename S = streamed_unstamped, typename P>
+// has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
+// range. V elements a thread (1, or 4: float4 partials, int4 orders and float4 scales; first, count, rows and stride
+// multiples of 4). Ends with a threadgroup barrier.
+template <uint V = 1, typename P>
 static inline void streamed_rows(P partials, device const half *plain, device const int *order,
                                  device const float *scale, uint n, uint first, uint count, uint rows, uint shares,
                                  uint stride, threadgroup float *vals, uint t, uint threads) {
     if (V == 4) {
         for (uint q = t; q < count / 4; q += threads) {
             const ulong at = (ulong(n) * rows + first) / 4 + q;
-            if (shares == 0) { ((threadgroup float4 *)vals)[q] = float4(((typename S::template in<half4>)plain)[at]); continue; }
+            if (shares == 0) { ((threadgroup float4 *)vals)[q] = float4(((device const half4 *)plain)[at]); continue; }
             const int4 o = ((device const int4 *)order)[first / 4 + q] - int(first);
             const float4 v = streamed_value((typename streamed_fours<P>::type)partials, at, shares, stride / 4, ((device const float4 *)scale)[first / 4 + q]);
             vals[o.x] = v.x; vals[o.y] = v.y; vals[o.z] = v.z; vals[o.w] = v.w;
         }
     } else {
         for (uint i = t; i < count; i += threads) {
-            if (shares == 0) { vals[i] = float(((typename S::template in<half>)plain)[ulong(n) * rows + first + i]); continue; }
+            if (shares == 0) { vals[i] = float(plain[ulong(n) * rows + first + i]); continue; }
             const uint r = first + i;
             vals[uint(order[r]) - first] = streamed_value(partials, ulong(n) * rows + r, shares, stride, scale[r]);
         }
@@ -265,17 +250,14 @@ static inline float mesh_rope(float x, float y, bool low, uint pair, uint dims, 
 // One head of D channels of row n finished (metal-microbench docs/kernels.md#decode-attention, the heads): its values
 // from streamed_rows (a product's partials, or plain rows: shares 0, row stride `rows`, from channel `first`), their RMS
 // norm (streamed_rms, eps 1e-6), times gamma where given (staged in `gs` before the reductions), the rotary embedding over
-// its first `pairs` frequency pairs at `position`, stored to `out` and to `line` (a KV line), each where given, the rows
-// read and the stores made through the stamp policy S's pointers.
-template <bool Precise, typename S = streamed_unstamped, typename P>
+// its first `pairs` frequency pairs at `position`, stored to `out` and to `line` (a KV line), each where given.
+template <bool Precise, typename P>
 static inline void mesh_head(P partials, device const half *plain, device const int *order, device const float *scale, uint n, uint first,
                              uint D, uint rows, uint shares, uint stride, device const half *gamma, uint pairs, uint position, float theta,
                              device half *out, device half *line, threadgroup float *vals, threadgroup float *gs, threadgroup float *partial,
                              uint t, uint threads) {
-    typedef typename S::template out<half> O;
-    const O o = (O)out, l = (O)line;
     for (uint i = t; i < D; i += threads) gs[i] = gamma ? float(gamma[i]) : 1.0f;
-    streamed_rows<1, S>(partials, plain, order, scale, n, first, D, rows, shares, stride, vals, t, threads);
+    streamed_rows(partials, plain, order, scale, n, first, D, rows, shares, stride, vals, t, threads);
     float s = 0.0f;
     for (uint i = t; i < D; i += threads) s += vals[i] * vals[i];
     const float rms = streamed_rms(s, D, 1e-6f, partial, t, threads);
@@ -283,8 +265,8 @@ static inline void mesh_head(P partials, device const half *plain, device const 
         const uint p = i < D / 2 ? i : i - D / 2, other = i < D / 2 ? i + D / 2 : i - D / 2;
         const float x = vals[i] * rms * gs[i];
         const half value = half(p < pairs ? mesh_rope<Precise>(x, vals[other] * rms * gs[other], i < D / 2, p, D, position, theta) : x);
-        if (o) o[i] = value;
-        if (l) l[i] = value;
+        if (out) out[i] = value;
+        if (line) line[i] = value;
     }
 }
 
@@ -410,9 +392,9 @@ static inline uint fragment_word(uint held, device const uint *words, uint span,
 }
 
 // A tile of word `word` (width b > 0) loaded: its planes into w and x times half its step into x (a 1-bit tile read by
-// tables only its word), x read through xs's pointer type X.
-template <uint R, uint WIDTHS, uint LUT, uint LOADS, uint N, typename S, typename X>
-static inline __attribute__((always_inline)) void fragment_fetch(uint word, device const uint *planes, X xs, uint columns,
+// tables only its word).
+template <uint R, uint WIDTHS, uint LUT, uint LOADS, uint N, typename S>
+static inline __attribute__((always_inline)) void fragment_fetch(uint word, device const uint *planes, device const half *xs, uint columns,
         uint rows, uint k, thread uint (&w)[N], thread S (&x)[R][4]) {
     const uint b = (word >> 12) & 15u;
     device const uint *at = planes + ((word & 0xFFFu) << 5);
@@ -420,7 +402,7 @@ static inline __attribute__((always_inline)) void fragment_fetch(uint word, devi
     fragment_load<WIDTHS, LOADS>(at, b, w);
     const S h = S(0.5f * fragment_step(word));
     for (uint n = 0; n < R; n++) {
-        const X xr = xs + ulong(min(n, rows - 1)) * columns + k;
+        device const half *xr = xs + ulong(min(n, rows - 1)) * columns + k;
         for (uint j = 0; j < 4; j++) x[n][j] = S(xr[8 * j]) * h;
     }
 }
@@ -447,10 +429,10 @@ static inline __attribute__((always_inline)) void fragment_use(uint word, thread
 // tiles in flight: their planes and x loaded before either is decoded (F 1: a tile's loads, x and decode in one region of
 // its nonzero width, the hfma2 probe's walk: docs/kernels.md#the-decode-steps-couples, the four-row couple). Each lane's
 // 8 R sums (acc[n][p]: rows 2p and 2p + 1; the rows past `rows` repeat the last row's loads), fp32, or with H > 0 the fp16
-// pair sums added into them every H tiles and at the walk's end. X: the input's pointer type (fragment_fetch).
-template <uint R, uint SK, uint STEPS, uint WIDTHS, uint LUT, uint F, uint LOADS, uint H, typename X>
+// pair sums added into them every H tiles and at the walk's end.
+template <uint R, uint SK, uint STEPS, uint WIDTHS, uint LUT, uint F, uint LOADS, uint H>
 static inline __attribute__((always_inline)) void fragment_walk(device const uint *codes, device const uint *words, uint base,
-        device const float *tables, X xs, uint columns, uint rows, uint first, uint span, uint part,
+        device const float *tables, device const half *xs, uint columns, uint rows, uint first, uint span, uint part,
         uint lane, thread float2 (&acc)[R][4]) {
     static_assert(H % F == 0 && (H == 0 || FRAGMENT_MAX(WIDTHS) <= 11), "fp16 pair sums: whole steps of F, widths exact in half2");
     constexpr uint N = FRAGMENT_MAX(WIDTHS);
@@ -492,53 +474,41 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
 // lanes and simdgroups into partials[share][n][row] (OUT 0: coded row order, the row scale not applied, then consumed by
 // the epilogue E) or finished (OUT 1, one share covering K: each with its row's scale, capped where cap > 0, at row
 // order[r] of ys, row stride d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS:
-// fragment_load's; H: fragment_walk's (0 the fp32 sums, else the fp16 pair sums added into them every H tiles). S: its
-// stamp policy (streamed_unstamped), x, the partials and ys through its pointers where E's are plain.
-template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, uint H, typename E = streamed_plain,
-          typename S = streamed_unstamped>
+// fragment_load's; H: fragment_walk's (0 the fp32 sums, else the fp16 pair sums added into them every H tiles).
+template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, uint H, typename E = streamed_plain>
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
                          device half *ys [[buffer(11)]], device const int *order [[buffer(12)]],
                          device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
                          constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
-                         device const uint *run [[buffer(19)]], device uchar *stamp [[buffer(30)]],
                          uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, COLUMNS = TILES * 32, SUMS = BANDS * SK * R * 32;
     threadgroup float region[SUMS > E::stage ? SUMS : E::stage];
-    threadgroup uint open;
     threadgroup float (*sums)[SK][R][32] = (threadgroup float (*)[SK][R][32])region;
-    typedef metal::conditional_t<S::stamped, coherent(device) device float *, typename E::partials> P;
-    typedef typename S::template out<half> Y;
-    const P stores = (P)partials;
-    const Y finished = (Y)ys;
+    const typename E::partials stores = (typename E::partials)partials;
     const uint local = simd / SK, part = simd % SK, band = group.x * BANDS + local, rows = d.rows;
     const uint first = group.y * PER, span = min(TILES, first + PER) - first, pitch = d.pitch ? d.pitch : TILES, word = bands[band];
-    if (S{}.enter(stamp, run, thread_id, &open)) {
-        float2 acc[R][4];
-        float out[R];
-        fragment_walk<R, SK, STEPS, WIDTHS, LUT, F, LOADS, H>(codes, tiles + band * pitch + first, streamed_base(word), tables,
-                                                 (typename S::template in<half>)xs + streamed_slab(word, d.inputs, COLUMNS), COLUMNS, rows,
-                                                 first, span, part, lane, acc);
-        const uint row = fragment_reduce<R>(acc, lane, out);
-        for (uint n = 0; n < R; n++) sums[local][part][n][row] = out[n];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint i = thread_id; i < BANDS * R * 32; i += BANDS * SK * 32) {
-            const uint at = i / (R * 32), n = (i / 32) % R, r = i % 32;
-            if (n >= rows) continue;
-            float total = 0.0f;
-            for (uint s = 0; s < SK; s++) total += sums[at][s][n][r];
-            const uint output = (group.x * BANDS + at) * 32 + r;
-            if (OUT == 0) { stores[ulong(group.y) * d.split + n * d.outputs + output] = total; continue; }
-            const float value = rowScale[output] * total;
-            finished[ulong(n) * d.stride + uint(order[output])] = half(streamed_capped(value, d.cap));
-        }
-        if (OUT == 0)
-            epilogue.template after<S>(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32);
+    float2 acc[R][4];
+    float out[R];
+    fragment_walk<R, SK, STEPS, WIDTHS, LUT, F, LOADS, H>(codes, tiles + band * pitch + first, streamed_base(word), tables,
+                                             xs + streamed_slab(word, d.inputs, COLUMNS), COLUMNS, rows, first, span, part, lane, acc);
+    const uint row = fragment_reduce<R>(acc, lane, out);
+    for (uint n = 0; n < R; n++) sums[local][part][n][row] = out[n];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = thread_id; i < BANDS * R * 32; i += BANDS * SK * 32) {
+        const uint at = i / (R * 32), n = (i / 32) % R, r = i % 32;
+        if (n >= rows) continue;
+        float total = 0.0f;
+        for (uint s = 0; s < SK; s++) total += sums[at][s][n][r];
+        const uint output = (group.x * BANDS + at) * 32 + r;
+        if (OUT == 0) { stores[ulong(group.y) * d.split + n * d.outputs + output] = total; continue; }
+        const float value = rowScale[output] * total;
+        ys[ulong(n) * d.stride + uint(order[output])] = half(streamed_capped(value, d.cap));
     }
-    S{}.leave(stamp, thread_id);
+    if (OUT == 0) epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32);
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
@@ -546,39 +516,31 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
 // SK simdgroups along K each walking both matrices in lock step (2F tiles in flight); APART 1, SK simdgroups of each
 // matrix (the first SK gate's, the rest up's: one walk's code for both, F tiles in flight). hidden[n][r] =
 // GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
-// last row's loads and are not written. H: fragment_walk's. S: its stamp policy (streamed_alu's), gx, ux and hidden
-// through its pointers.
-template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H, typename S = streamed_unstamped>
+// last row's loads and are not written. H: fragment_walk's.
+template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H>
 kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device const uint *gateTiles [[buffer(1)]],
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
                             device const uint *upBands [[buffer(8)]], device const half *ux [[buffer(9)]],
                             device const float *upScale [[buffer(10)]], device half *hidden [[buffer(11)]],
                             device const float *gateScale [[buffer(13)]], constant streamed_dims &dims [[buffer(15)]],
-                            device const uint *run [[buffer(19)]], device uchar *stamp [[buffer(30)]],
                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     constexpr uint STEPS = (TILES + SK - 1) / SK, COLUMNS = TILES * 32, THREADS = (APART ? 64 : 32) * SK;
     threadgroup float sums[2][SK][R][32];
-    threadgroup uint open;
-    typedef typename S::template in<half> X;
-    typedef typename S::template out<half> Y;
-    const X gi = (X)gx, ui = (X)ux;
-    const Y made = (Y)hidden;
     const uint band = group.x, rows = d.rows, pitch = d.pitch ? d.pitch : TILES;
-    const bool live = S{}.enter(stamp, run, thread_id, &open);
-    if (live && APART) {
+    if (APART) {
         const uint matrix = simd / SK, part = simd % SK;
         const bool up = matrix != 0;
         float2 acc[R][4];
         float out[R];
         fragment_walk<R, SK, STEPS, WIDTHS, 0, F, LOADS, H>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * pitch,
-                                                 streamed_base((up ? upBands : gateBands)[band]), nullptr, up ? ui : gi, COLUMNS,
+                                                 streamed_base((up ? upBands : gateBands)[band]), nullptr, up ? ux : gx, COLUMNS,
                                                  rows, 0, TILES, part, lane, acc);
         const uint row = fragment_reduce<R>(acc, lane, out);
         for (uint n = 0; n < R; n++) sums[matrix][part][n][row] = out[n];
-    } else if (live) {
+    } else {
         const uint kb = fragment_kb(lane);
         device const uint *gw = gateTiles + band * pitch, *uw = upTiles + band * pitch;
         const uint gheld = fragment_words<SK, STEPS>(gw, TILES, simd, lane), uheld = fragment_words<SK, STEPS>(uw, TILES, simd, lane);
@@ -593,14 +555,14 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
             const uint gw0 = fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), uw0 = fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i);
             uint g[FRAGMENT_MAX(WIDTHS)], u[FRAGMENT_MAX(WIDTHS)];
             fragment_x<H> gxs[R][4], uxs[R][4];
-            if ((gw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw0, gp, gi, COLUMNS, rows, k, g, gxs);
-            if ((uw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw0, up, ui, COLUMNS, rows, k, u, uxs);
+            if ((gw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw0, gp, gx, COLUMNS, rows, k, g, gxs);
+            if ((uw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw0, up, ux, COLUMNS, rows, k, u, uxs);
             if constexpr (F > 1) {
                 const uint gw1 = fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), uw1 = fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1);
                 uint g1[FRAGMENT_MAX(WIDTHS)], u1[FRAGMENT_MAX(WIDTHS)];
                 fragment_x<H> gxs1[R][4], uxs1[R][4];
-                if ((gw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw1, gp, gi, COLUMNS, rows, k + 32 * SK, g1, gxs1);
-                if ((uw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw1, up, ui, COLUMNS, rows, k + 32 * SK, u1, uxs1);
+                if ((gw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw1, gp, gx, COLUMNS, rows, k + 32 * SK, g1, gxs1);
+                if ((uw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw1, up, ux, COLUMNS, rows, k + 32 * SK, u1, uxs1);
                 if ((gw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw0, g, gxs, nullptr, 0, gacc, gt, gcorr);
                 if ((uw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(uw0, u, uxs, nullptr, 0, uacc, ut, ucorr);
                 if ((gw1 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw1, g1, gxs1, nullptr, 0, gacc, gt, gcorr);
@@ -617,15 +579,14 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         for (uint n = 0; n < R; n++) { sums[0][simd][n][row] = gout[n]; sums[1][simd][n][row] = uout[n]; }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = thread_id; live && i < R * 32; i += THREADS) {
+    for (uint i = thread_id; i < R * 32; i += THREADS) {
         const uint n = i / 32, r = i % 32;
         if (n >= rows) continue;
         float gs = 0.0f, us = 0.0f;
         for (uint s = 0; s < SK; s++) { gs += sums[0][s][n][r]; us += sums[1][s][n][r]; }
         const uint output = band * 32 + r;
-        made[ulong(n) * d.outputs + output] = half(streamed_gelu_of(gateScale[output] * gs, upScale[output] * us));
+        hidden[ulong(n) * d.outputs + output] = half(streamed_gelu_of(gateScale[output] * gs, upScale[output] * us));
     }
-    S{}.leave(stamp, thread_id);
 }
 
 // The bandwidth read (metal-microbench docs/kernels.md#the-instance-fit, Evidence; streamed.py bandwidth): every thread
@@ -735,19 +696,18 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 // scale[j] * factor * values[order[j]]; with STRIDE s > 0 (a literal: a run-time stride's division cost every row its
 // time) written in blocks of s columns, block-major ([columns / s][rows][s]: a tensor operation's operand rows s apart
 // whatever the width). A row kernel ending in its consumers' inputs (metal-microbench docs/kernels.md#stacked-products,
-// the rows) calls it with its own staged row, storing through its stamp policy S's pointers.
-template <uint STRIDE, typename S = streamed_unstamped, typename V>
+// the rows) calls it with its own staged row.
+template <uint STRIDE, typename V>
 static inline void streamed_gather(V values, float factor, device const int *order, device half *first, device const float *scale,
                                    device half *second, device const float *secondScale, device half *third,
                                    device const float *thirdScale, uint inputs, uint columns, uint rows, uint n, uint t, uint threads) {
-    typedef typename S::template out<half4> Y;
     for (uint q = t; q < columns / 4; q += threads) {
         const int4 o = ((device const int4 *)order)[q];
         const float4 v = factor * float4(float(values[o.x]), float(values[o.y]), float(values[o.z]), float(values[o.w]));
         const ulong at = STRIDE ? (ulong(4 * q / max(STRIDE, 1u)) * rows + n) * STRIDE + 4 * q % max(STRIDE, 1u) : ulong(n) * columns + 4 * q;
-        *(Y)(first + at) = half4(((device const float4 *)scale)[q] * v);
-        if (inputs > 1) *(Y)(second + at) = half4(((device const float4 *)secondScale)[q] * v);
-        if (inputs > 2) *(Y)(third + at) = half4(((device const float4 *)thirdScale)[q] * v);
+        *(device half4 *)(first + at) = half4(((device const float4 *)scale)[q] * v);
+        if (inputs > 1) *(device half4 *)(second + at) = half4(((device const float4 *)secondScale)[q] * v);
+        if (inputs > 2) *(device half4 *)(third + at) = half4(((device const float4 *)thirdScale)[q] * v);
     }
 }
 
@@ -1151,8 +1111,7 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
             stores[ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + which) * 32 + r] = total;
         }
     }
-    epilogue.template after<streamed_unstamped>(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id,
-                                                BANDS * GROUP * 32);
+    epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * GROUP * 32);
 }
 
 // The right-input and destination element maps of matmul2d<M, 32, 32> at one simdgroup (fp16 operands, fp32
