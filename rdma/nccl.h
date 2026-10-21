@@ -983,7 +983,11 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
    them with its kernels and keeps no copy.  mesh_step_enter's and mesh_step_await's results are the calling thread's
    (the gate a failed wait closes may close while a threadgroup runs): every thread of the threadgroup calls them, skips
    only stores by them, and decides a release (mesh_step_release holds a barrier) by one thread's reading shared through
-   threadgroup memory. */
+   threadgroup memory.  mesh_stamped is a caller's kernel's stamp policy (metal-microbench docs/kernels.md Any program,
+   the stamped form; its record's words and the stamp operand's gate, nccl-mesh-metal.m STEPS): enter(record, run, i,
+   open), its producers' counts awaited by thread 0 at most the operand's polls in all, the gate read with each load, the
+   threadgroup's reading shared through `open`; leave(record, i), its own count raised once the threadgroup's stores are
+   fenced at device scope; in<T> and out<T>, its inputs' and outputs' pointers at device coherence. */
 const char* ncclMeshMetalSteps(void);
 /* The Metal 4 form's argument records this process has encoded on the default device (`issued`, counting from its first
    program) and how many its ring holds unread by the GPU at most (`capacity`): an encode past that refuses with

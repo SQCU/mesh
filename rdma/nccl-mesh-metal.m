@@ -16,6 +16,8 @@
 /* the loads a wait makes between its reads of its communicator's stop word (failure word [6], a revoke's) and its gate
    ([2], a failure's) */
 #define STEP_LOOK 4096u
+/* the most producers a stamped command waits on (mesh_stamped; metal-microbench metal_recording.m MetalStampWaits) */
+#define STAMP_WAITS 8u
 
 /* a step of a compiled program, the library's one implementation of it (metal-microbench docs/acceptance-20261014.md
    A39), after rdma/mesh.metal: libnccl-mesh's kernels call these, and so does a caller's kernel that runs a step its
@@ -48,7 +50,21 @@
    are compiled here, under mesh.metal's pragma: a header after it, MetalPerformancePrimitives', may end that pragma).
    The library's own kernels that write a stream class's out ring or ready words (a send, a release) do nothing once the
    stop word is set (STOP, GROUP_STOP: read by thread 0 alone where the threadgroup meets a barrier), so none writes them
-   after a revoke. */
+   after a revoke.
+   mesh_stamped (metal-microbench docs/kernels.md Any program, the stamped form): a caller's kernel's stamp policy, the
+   order between commands of one encoder with no barrier between them carried by counts at device scope, mesh_step_wait's
+   and mesh_last_arrival's shapes.  Its record (bound at the caller's index, `record`) is words: [0] its byte offset in
+   the stamp operand, [1] its count line's offset (0: it raises none), [2] its producers (at most STAMP_WAITS), [3] its
+   command, [4, 4 + STAMP_WAITS) each producer's count line's offset and [4 + STAMP_WAITS, 4 + 2 STAMP_WAITS) its
+   threadgroups; the operand's first line [0] the gate (0 open), [1] the polls of a threadgroup's wait, [2] 1 + the
+   command whose wait closed the gate; `run` the replay's run of the invocation (0 its first).  enter: thread 0 loads
+   each producer's count until it holds (run + 1) its threadgroups (wrap-safe), the gate read with every load at system
+   coherence (the host stores it at its deadline), at most polls loads in all, where it claims and closes the gate; its
+   reading shared past a barrier and a device fence, true where the gate held none (no producers: true, no barrier).
+   leave: a device fence by every thread, a device barrier, thread 0's relaxed add of one to the count (no count:
+   nothing).  A threadgroup that read the gate closed skips its work and still leaves, so every count reaches its run's
+   target and every later wait ends at its first look.  in<T> and out<T> are its inputs' and outputs' pointers,
+   coherent at device scope, which a stamped command's producers write and it reads in the same segment. */
 static NSString *const STEPS =
   @"\nusing namespace metal;\n"
   XSTR(ARGS(mesh_args, ulong, uint)) ";\n"
@@ -82,7 +98,37 @@ static NSString *const STEPS =
   "template <typename T> static inline void mesh_step_store(constant mesh_args &p, device uchar *slot, ulong k, T value) { "
   "((volatile coherent(system) device T *)(slot + p.dst))[k] = value; }\n"
   "template <typename T = half4> static inline T mesh_step_read(constant mesh_args &p, device uchar *slot, ulong k) { "
-  "return mesh_payload((volatile coherent(system) device const T *)(slot + p.src) + k); }\n";
+  "return mesh_payload((volatile coherent(system) device const T *)(slot + p.src) + k); }\n"
+  "struct mesh_stamped { "
+  "template <typename T> using in = coherent(device) device const T *; "
+  "template <typename T> using out = coherent(device) device T *; "
+  "static constexpr constant bool stamped = true; "
+  "bool enter(device uchar *record, device const uint *run, uint i, threadgroup uint *open) const { "
+  "device const uint *r = (device const uint *)record; "
+  "if (r[2] == 0u) return true; "
+  "if (i == 0) { "
+  "device uchar *base = record - r[0]; "
+  "volatile coherent(system) device uint *gate = (volatile coherent(system) device uint *)base; "
+  "const uint polls = ((device const uint *)base)[1], next = *run + 1u; "
+  "uint shut = *gate, k = 0; "
+  "for (uint w = 0; w < r[2] && !shut; w++) { "
+  "device atomic_uint *count = (device atomic_uint *)(base + r[4 + w]); "
+  "const uint target = next * r[4 + " XSTR(STAMP_WAITS) " + w]; "
+  "while (!shut && as_type<int>(atomic_load_explicit(count, memory_order_relaxed) - target) < 0) { "
+  "shut = gate[0]; "
+  "if (!shut && ++k >= polls) { "
+  "shut = 1u; "
+  "if (atomic_exchange_explicit((device atomic_uint *)base, 1u, memory_order_relaxed) == 0u) gate[2] = r[3] + 1u; } } } "
+  "*open = shut ? 0u : 1u; } "
+  "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup); "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); "
+  "return *open != 0u; } "
+  "void leave(device uchar *record, uint i) const { "
+  "device const uint *r = (device const uint *)record; "
+  "if (r[1] == 0u) return; "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); "
+  "threadgroup_barrier(mem_flags::mem_device); "
+  "if (i == 0) atomic_fetch_add_explicit((device atomic_uint *)(record - r[0] + r[1]), 1u, memory_order_relaxed); } };\n";
 
 /* the kernels, after STEPS: each operator's arithmetic is written once (op_int, op_float, op_f8, merge_row: the partials
    merge, a thread a row), a landing being the wait and then the combine's body; it is the host's (nccl-mesh.c

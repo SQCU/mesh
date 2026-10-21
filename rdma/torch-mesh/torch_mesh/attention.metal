@@ -164,7 +164,9 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
 // The gathered store (metal-microbench docs/kernels.md#decode-attention, the epilogue): a thread's four outputs from `out`
 // at their places in o's gathered input (O[n columns + inverse[c]] = scale[inverse[c]] value) where `columns` is nonzero,
 // else in place. The places are 32-bit element indices (an operand of fewer than 2^32 elements; out and columns multiples
-// of 4, so one column c for the four), held from the task's start to its store.
+// of 4, so one column c for the four), held from the task's start to its store. O: the store's pointer, plain or coherent
+// at device scope (a consumer awaiting the store's count in the same segment: metal-microbench docs/kernels.md Any
+// program, the stamped form).
 __attribute__((always_inline)) static inline void mesh_gathered_places(uint out, device const int *inverse, device const float *scale, uint columns,
                                                                       thread uint4 &dst, thread float4 &cs) {
     dst = uint4(out) + uint4(0, 1, 2, 3);
@@ -179,9 +181,11 @@ __attribute__((always_inline)) static inline void mesh_gathered_places(uint out,
     }
 }
 
-__attribute__((always_inline)) static inline void mesh_gathered_store(device half *O, uint4 dst, float4 scale, uint columns, float4 value) {
-    if (columns == 0) { *(device half4 *)(O + dst.x) = half4(value); return; }
-    for (uint i = 0; i < 4; ++i) O[dst[i]] = half(scale[i] * value[i]);
+template <typename O>
+__attribute__((always_inline)) static inline void mesh_gathered_store(O out, uint4 dst, float4 scale, uint columns, float4 value) {
+    typedef metal::conditional_t<metal::is_same<O, device half *>::value, device half4 *, coherent(device) device half4 *> Q;
+    if (columns == 0) { *(Q)(out + dst.x) = half4(value); return; }
+    for (uint i = 0; i < 4; ++i) out[dst[i]] = half(scale[i] * value[i]);
 }
 
 // Single, a threadgroup of D / 4 threads a row (thread d its float4 d): a row's J parts (P, mesh_split_parts) merged into
