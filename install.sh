@@ -142,6 +142,12 @@ st=$(rdma_ctl status 2>&1)
 [ "$st" = enabled ] && ok "enabled, nvram $(nvram rdma-enable 2>/dev/null | awk '{print $2}')" \
                     || bad "rdma is '$st', physical Recovery OS visit required"
 
+sec "7a. Tailnet"
+[ -f "$REPO/tailscale.key" ] && install -m 600 -o root -g wheel "$REPO/tailscale.key" "$MESH_ROOT/tailscale.key"
+"$MESH_ROOT/bin/mesh-tailscale-init.sh"
+[ -d /Applications/Tailscale.app ] && ok "tailnet: Tailscale.app" || {
+  [ -x "$MESH_ROOT/bin/tailscaled" ] && ok "tailscaled $(cat "$MESH_ROOT/tailscale/version" 2>/dev/null)" || bad "tailscaled not built ($MESH_ROOT/log/tailscale.log)"; }
+
 sec "8. Daemons"
 J=$MESH_ROOT/jobs
 mkplist(){
@@ -172,8 +178,12 @@ mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
+TSJ=io.mesh.tailscale; [ -d /Applications/Tailscale.app ] && TSJ=
+[ -n "$TSJ" ] && mkplist io.mesh.tailscale "<string>$MESH_ROOT/bin/tailscaled</string><string>--statedir=$MESH_ROOT/tailscale</string><string>--socket=/var/run/tailscaled.socket</string>" \
+  "  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>1</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper $TSJ; do
   port=
   case "$L" in io.mesh.telemetry) port=8788 ;; io.mesh.observer) port=8787 ;; esac
   upid=$(launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')
@@ -192,6 +202,7 @@ for label in io.mesh.telemetry io.mesh.observer; do
       && ok "$label userspace provider loaded" || bad "$label has no provider loaded"; }
 done
 for L in $kick; do launchctl kickstart -k "system/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
+"$MESH_ROOT/bin/mesh-tailscale-init.sh"
 
 try "complete cartlane application realized" "$MESH_ROOT/bin/mesh-python" "$REPO/bin/mesh-application.py" deploy --source "$REPO" --target "$MESH_ROOT/applications/cartlane"
 

@@ -53,6 +53,7 @@ done
 [ $((_lanok+_rdma)) -lt 2 ] && { echo "[$(ts)] DEGRADED planes=$((_lanok+_rdma)) lan=$_lanok fabric_link=$_fab rdma_peer=$_rdma"; drift=1; }
 [ -x /usr/local/mesh/bin/mesh-networks.sh ] && /usr/local/mesh/bin/mesh-networks.sh
 [ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
+[ -x /usr/local/mesh/bin/mesh-tailscale-init.sh ] && /usr/local/mesh/bin/mesh-tailscale-init.sh
 _user=$(cat /usr/local/mesh/admin-user 2>/dev/null); _uid=$(id -u "$_user" 2>/dev/null)
 if ! pgrep -qf '/install\.sh'; then
   if [ -n "$_uid" ]; then

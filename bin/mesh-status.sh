@@ -8,6 +8,8 @@ b "HEALTH"; [ -f /var/run/mesh-health ] && sed -e 's/^warn=/WARN /' -e 's/^/  /'
 b "REMOTE"; for p in 22:ssh 5900:screensharing; do
   nc -z 127.0.0.1 "${p%%:*}" >/dev/null 2>&1 && echo "  ${p##*:} (${p%%:*}): OPEN" || echo "  ${p##*:} (${p%%:*}): CLOSED"
 done
+T="/usr/local/mesh/bin/tailscale --socket=/var/run/tailscaled.socket"; [ -d /Applications/Tailscale.app ] && T=/Applications/Tailscale.app/Contents/MacOS/tailscale
+echo "  tailnet: $($T status --json 2>/dev/null | plutil -extract BackendState raw -o - - 2>/dev/null || echo 'not answering') $($T ip -4 2>/dev/null)$([ -d /Applications/Tailscale.app ] && echo ' (Tailscale.app)')"
 b "NETWORK"; for i in en0 en1 bridge0; do echo "  $i: $(ipconfig getifaddr $i 2>/dev/null || echo '<none>')"; done
 b "LINKS"
 _lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
