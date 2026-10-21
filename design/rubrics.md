@@ -95,19 +95,26 @@ layers; see Inversions.
 
 **Quantities.** These are read alongside the rankings. They are indexed absolutely, so they are not part of any
 ranking.
-- Throughput in tok/s, per stream and aggregate, with step latency, overhead, and bandwidth per stream against aggregate
-  bandwidth: the form every measurement takes, for every change that touches a call's path, against the form before
-  it. Throughput per stream and aggregate trade against each other along a Pareto curve, and each backend (the engine,
-  LiteRT, a hybrid) has its own where they differ in any sense; a KL is never reported without them. The operator,
-  10-20, verbatim: "avoid reporting on kl div when we are not also reporting on aggregate throughput and throughput
-  per stream (which forms a tradeoff w/ a clear pareto curve if we have measured anything at all, with different
-  backends serving different pareto curves where they differ in any sense)"; "if you were logging the throughput,
-  latency, overhead, and per-stream bandwidth vs aggregate bandwdith in tokens/s this would have been reported and
-  unwritten as an obvious regression, brittleness, and deviation from acceptable and satisfactory preexisting code
-  immediately"; "this is yet another point to be written in the rubric if it is not already; that is to say the
-  perfomrance measurementsa nd what form they take." A change whose measurement ranks below the form before it is
-  unwritten, not patched (metal-microbench d673284, 10-19: "d673 will not be accepted adn does not need to be
-  reviewed").
+- Throughput in tok/s, per stream and aggregate. A measurement is ranked like any form, pairwise, by what it
+  contains. The operator, 10-20, verbatim: "the rubric contains pairwise comparable qualitative judgemetns that can
+  compare any two things. therefore we cannot use that notion [a rule that every change be measured]; instead, we say
+  that meausrements which do not contian those specific values are lesser than measurements which do, and that there
+  is no reason or excuse for narrowness of measurement, e.g. to only record tok/sec or only kl divergence, and that any
+  measurement which only records kl divergence is always worse than a measurement which should have contained a
+  measurement of kl div, but instead only measured aggregate throughpout paretos." The values: aggregate tok/s, tok/s
+  per stream, step latency, overhead, and bandwidth per stream against aggregate bandwidth; throughput per stream and
+  aggregate trade along a Pareto curve, each backend (the engine, LiteRT, a hybrid) its own where they differ in any
+  sense. Earlier words of 10-20: "avoid reporting on kl div when we are not also reporting on aggregate throughput and
+  throughput per stream (which forms a tradeoff w/ a clear pareto curve if we have measured anything at all, with
+  different backends serving different pareto curves where they differ in any sense)"; "if you were logging the
+  throughput, latency, overhead, and per-stream bandwidth vs aggregate bandwdith in tokens/s this would have been
+  reported and unwritten as an obvious regression, brittleness, and deviation from acceptable and satisfactory
+  preexisting code immediately". Ranked:
+  - a measurement without those values ≺ one with them;
+  - a narrow measurement (tok/s alone, or KL alone) ≺ a wide one, for no reason or excuse;
+  - a measurement of KL alone ≺ one of aggregate throughput Paretos alone that lacks the KL it should have had;
+  - a regression patched ≺ a regression unwritten (metal-microbench d673284, 10-19: "d673 will not be accepted adn
+    does not need to be reviewed").
 - KL at the unembedding against LiteRT's pair KL. Up to 2.0 is allowed while shapes work is unfinished.
 - A difference under 3% counts as equal.
 - Latency more than 3 times the hardware's per hop is forbidden.
