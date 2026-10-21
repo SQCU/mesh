@@ -160,9 +160,6 @@ marked as the review's.
   apart.
 - **D1 and D4.** `Pace` and the rings live in the example. The library's `replay` needs the same pacing (the review's
   finding 7). One form in torch_mesh ranks higher.
-- **D6.** RG chosen by a solo timing ≺ RG chosen from the chain's own first blocks: one candidate a block, timed
-  between the marks and swapped by `Step.use` between blocks. That is a choice made between calls (C5), on the mesh's
-  own calls.
 - **C4, the wait's form.** `torch.mps.Event.synchronize` parks on a condition variable (torch `MPSEvent.mm`). A spin on
   `query()` ranks higher, though it is once a block.
 
@@ -195,10 +192,19 @@ On the M5 and the Mini, at 8 rows, width 1,024, parts [512, 512] and the sample'
   defines that bound once: `NCCL_MESH_POLLS` loads, holding a GPU at most `MESH_PLATFORM_NS`, 5 s. `_stream` exports
   it as `polls`, and the kernel's PATIENCE is that value. The chain's stamp waits are device-scope loads, faster than
   the system-scope loads the bound was set on, so the same count holds a GPU for less.
-- **`threads` is parametric.** It is now chosen by the same timing argmin as RG. The candidates are powers of two of
-  simdgroups, ended by the first thread count whose pipeline the device refuses to build; no device maximum is written
-  down.
-- **`trials` is parametric, but it belongs to the timing, not the service.** Each candidate is timed over one block, the
-  ring's own unit of steps.
+- **`threads` and `trials` are gone, and so is choosing the kernel by timing.**
+  - At 9f12d82a each rank built every instance it could, over thread counts and RG. It timed each one alone on zeros
+    for one block (`kernel_alone`, `trials`) and kept the fastest.
+  - The operator, 2026-10-21: "i don't want you to introduce an empirical load balancing hardcode shim somewhere yet
+    again which is almost certainly going to be hardcoded then dsicoverd to be somehow unexpectedly totally wrong when
+    the code is run in a slightly different context or on a different compute capability level".
+  - Now one instance is built (`widest`, `chain.py`). THREADS is the largest threadgroup the device builds for this
+    kernel. The rank compiles at 32 threads and doubles until the pipeline is refused, so this is a capability read and
+    not a timing. RG is 1. Nothing is timed or chosen by speed, and `chain-service.py` passes the Step no timing budget.
+  - So section 13's D6 pair describes the timed form that this replaces. The Open section's D6 item, which proposed RG
+    timed on the chain's own blocks, is withdrawn.
+  - D6: a choice priced by one device's timing ≺ no price (the 10-17 pair: a fitted price ≺ no price). Quantities: one
+    device's performance used for any reason ≺ the collective's. D11: the timed form sat at the lower pole, an autotune
+    matched by exact shape.
 - **`ring_bytes` stays.** It is the region memory the service is given, an operand, like a process's memory limit.
-- **D2: settings ≺ structure and measurement.**
+- **D2: settings ≺ structure.**

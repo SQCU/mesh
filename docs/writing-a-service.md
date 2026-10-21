@@ -138,18 +138,17 @@ how many registers a simdgroup uses. So one compiled kernel serves any row count
 to the capacity the configuration gives. A product is split along K where a worker has fewer items than simdgroups.
 That split is a word too, worked out once for each row count.
 
-At the start, each rank picks its threads and its RG by timing. The thread counts tried are powers of two of 32-thread
-simdgroups, up to the largest whose pipeline the GPU builds. For each choice, it runs the step kernel alone on its own
-GPU, one block of the ring's steps back to back, at the input's row count. The inputs are zeros and nothing crosses. The host's clock reads the time
-from one full wait to the next (`kernel_alone` in the code), and the rank keeps the fastest choice. That time on one GPU
-only picks the threads and RG, so it is not printed as a result. The times that count are those of the whole chain on both Macs.
+Each rank builds one instance of the kernel. Its RG is 1, so a work item is one tile of 8 rows by one tile of 8
+columns. Its threads are the most the GPU builds this kernel for. The rank compiles the kernel at 32 threads, one
+simdgroup, and doubles the count until the GPU refuses to build the pipeline. It keeps the last count that built. That
+compile reads what the GPU can run. Nothing is timed, and no choice is made by speed.
 
 ## The configuration
 
 The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
 width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
-two rings. It also says how many first steps to check. The kernel's threads and row grouping are measured,
-and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and rows there are, so the configuration does not. Every value
+two rings. It also says how many first steps to check. The kernel's threads are the most the GPU builds, its row
+group is one tile, and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and rows there are, so the configuration does not. Every value
 must be there. The service has no defaults, and a missing value is an error.
 
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
@@ -171,7 +170,7 @@ np.savez('chain-weights.npz', a=(g.standard_normal((1024, 1024)) / 32).astype(np
 
 Start one rank on each node from that node's own checkout, and launch it as torchrun would, with `RANK`, `WORLD_SIZE`,
 `MASTER_ADDR` and `MASTER_PORT`. `MASTER_ADDR` is rank 0's address on the cable. Nothing starts a process on another
-node.
+node. A person or an agent starts each run, and nothing keeps the service resident.
 
 ```
 RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
@@ -183,8 +182,7 @@ the seconds. It gives the rows a second of all streams together and the steps a 
 times a step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and
 the all-reduce alone. It gives the bytes a step's two collectives move, and those bytes a second. Rank 0 also checks
 two windows of steps against a plain float64 run of the same rule: the first steps, and the first steps of the last
-block, which start from rank 0's own output. The second window reads slots the ring has used before. To keep the service up, make it a launchd job from
-[templates/](../templates/), as the README's "Adding a workload" says.
+block, which start from rank 0's own output. The second window reads slots the ring has used before.
 
 ## What to read next
 
