@@ -79,10 +79,9 @@ them into every rank's ring. Both go on the GPU's own queue, and the host does n
 that broadcast just before the next block's first step, the first thing that reads it. A step then has two host calls:
 its kernel and one all-reduce of its part of z. Nothing else crosses during a block.
 
-The broadcast runs on a group of its own (`dist.new_group`), which the library gives its own stream on the link. The
-library finishes every call on one group in the order they were issued. If the inputs shared the chain's group, a
-block's first all-reduce would also wait for the next block's 8 MB of inputs, about 2.7 ms once a block on the pair.
-On their own group, only the wait before the next block's first step lands them.
+The library lands each block's broadcast sooner than that wait, though. A call finishes every call issued before it, so
+the block's first all-reduce lands the next block's inputs too. That all-reduce waits for the whole block's bytes to
+arrive, once a block.
 
 At the end of each block, rank 0 puts tanh of that block's sums, and a copy of them, on the GPU's queue as well. The
 copy writes straight into the output file's memory. No step waits for the host, and the next section says when the

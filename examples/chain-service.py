@@ -100,22 +100,22 @@ class Pace:
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def fill(E, rank, inputs, first, steps, block, group):
+def fill(E, rank, inputs, first, steps, block):
     held, slots = span(first, steps, block, len(E))
     if rank == 0:
         E[slots].copy_(torch.from_numpy(inputs[held]), non_blocking=True)
-    return dist.broadcast(E[slots], src=0, group=group, async_op=True)
+    return dist.broadcast(E[slots], src=0, async_op=True)
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs, group):
+def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
     e, p, pace = E.unbind(0), P.unbind(0), Pace()
     deep, sums = len(e), len(p)
-    landing = fill(E, rank, inputs, 0, steps, block, group)
+    landing = fill(E, rank, inputs, 0, steps, block)
     for t in range(steps):
         if t % block == 0:
             pace.wait()
-            ahead = fill(E, rank, inputs, t + block, steps, block, group) if t + block < steps else None
+            ahead = fill(E, rank, inputs, t + block, steps, block) if t + block < steps else None
             landing.wait()
             landing = ahead
         issued = time.perf_counter()
@@ -161,7 +161,6 @@ def main():
     config = json.loads(open(sys.argv[1]).read())
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
-    inputs_group = dist.new_group(list(range(size)))
     if len(config['parts']) != size:
         raise ValueError('The configuration gives one part a rank')
     width = config['width']
@@ -177,7 +176,7 @@ def main():
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    paced, done, first = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs, inputs_group)
+    paced, done, first = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
     hosted = time.perf_counter() - began - paced
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
