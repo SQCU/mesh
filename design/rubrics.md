@@ -89,6 +89,10 @@ quoted as a pair. Where they give only one, neither is quoted, so that no dimens
 `A ≺ B` means A ranks below B. Every ranked pair is the operator's own judgement in this project, dated (UTC). The
 quotations are the operator's, from this project's sessions.
 
+Text in source, documents or notes that an agent wrote without citing the operator's words ≺ the operator's text: "user
+written text takes precedence over claude written text without a citation to user text" (10-21, of a docstring's
+"No solo run and no fit" read as ruling out the operator's linear fit).
+
 Each rubric has the two kinds of dimension the operator scores separately: abstract ones that apply to the whole layer,
 and a few fine-grained ones about particular mechanisms. Some comparisons rank in opposite directions in different
 layers; see Inversions.
