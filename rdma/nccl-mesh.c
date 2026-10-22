@@ -1617,7 +1617,9 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
    peer's): one unit a filler's, a piece's bytes in whole units, and a run that would pass the ring's end starting at its
    next lap, the units it skips supplied as fillers, since the bridge sends a stream's units strictly in order.  A
    group declares its units to the bridge before it supplies any (declare), so a member that fails mid-group is
-   replaced at its peers by duds, and a run's landing is its last unit's (the bridge releases a stream's units in order). ---------- */
+   replaced at its peers by duds, whose landings fail their groups (design/transport.md section 10), and a run's landing
+   is its last unit's (the bridge releases a stream's units in order, and sends every unit of a holding after a dud as
+   one). ---------- */
 
 #define LAG MESH_LAG
 
@@ -1652,7 +1654,8 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
 }
 
 /* the communicator's failure: the one it kept; a revoke; one its GPU work recorded in its failure words (a wait's
-   bound reached, its link lost: nccl-mesh-metal.h METAL_*; a counted all-to-all past its layout); else a stream it holds
+   bound reached, its link lost, a dud landed: nccl-mesh-metal.h METAL_*; a counted all-to-all past its layout); else a
+   stream it holds
    no longer its own (a bridge's restart, or a pairing lost and made again, opens every stream new: mesh-call.h
    mesh_stream_held), kept now (comm_fail), so ncclCommGetAsyncError reads it before any group runs on it; ncclSuccess
    where none.  Under group_lock */
@@ -1668,6 +1671,9 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
     if (cause == METAL_LOST)
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost (its stream's landed words ~0) at position %llu", node,
                        (unsigned long long)(at - 1));
+    if (cause == METAL_DUD)
+      return comm_fail(comm, ncclRemoteError, "position %llu on the channel to node %u landed as a dud: the group of the member there, or "
+                       "of one it relays, failed, was revoked or ended (design/transport.md section 10)", (unsigned long long)(at - 1), node);
     return comm_fail(comm, ncclRemoteError, "position %llu on the channel to node %u landed nothing within %llu polls of a GPU wait (its "
                      "stream's bound, ncclMeshStream polls): the peer's work there began that much later, or its link was lost",
                      (unsigned long long)(at - 1), node, (unsigned long long)atomic_load_explicit(v + 4, memory_order_relaxed));
@@ -2103,8 +2109,10 @@ static void declare(struct ncclComm *comm, int again) {
 
 /* design/transport.md section 14: a communicator that can no longer supply what it declared (its group failed, or it
    was revoked or destroyed): every channel's declared units given the deadline now, so the bridge sends at once, as
-   duds, each one no group supplied, and its peers' positions land rather than wait (a dud is what is placed where a
-   send must happen and its producer is gone: not a value any consumer reads as a signal, design/rubrics.md M4); a live holder's units are
+   duds, each one no group supplied, and its peers' positions land rather than wait, their groups failing there (a dud
+   is what is placed where a send must happen and its producer is gone, its bytes no value any consumer reads as a
+   signal, design/rubrics.md M4; its peer's bridge tells it by its SEND and marks its landed word, section 10, so a
+   member past a failed one fails rather than complete on filler, at any depth of a tree); a live holder's units are
    never given a deadline (declare: UINT64_MAX), so no dud reaches a peer of a producer still at work (design/rubrics.md
    C5, Quantities, the operator 10-20).  Only a holding still the communicator's own is written (mesh_stream_held): a
    stream opened new since (a restart or a pairing made again) may be another communicator's, which this one must not
@@ -2174,21 +2182,24 @@ static void supply(const struct channel *ch, const struct run *r, const void *by
     atomic_store_explicit(ch->view.ready + u % units, 1 + u / units, memory_order_release);
 }
 
-/* a channel's in run on the host: 1 once it has landed (its last unit's landed word at least 1 + its cycle: the bridge releases a
-   stream's units in order), 0 before; -1 where its link was lost (a word ~0).  What landed is the run's bytes, a dud's
-   among them, which no consumer reads as anything but bytes (design/rubrics.md M4) */
+/* a channel's in run on the host: 1 once it has landed (its last unit's landed word, its bits but MESH_DUD, at least 1 +
+   its cycle: the bridge releases a stream's units in order), 0 before; -1 where its link was lost (a word ~0); -2 where
+   it landed as a dud (MESH_DUD, the bridge's: design/transport.md section 10; its bridge sends every unit of a holding
+   after a dud as one, so a run with a dud among its units has one as its last), which fails the group: its producer's
+   failed, and no byte of it is read as a signal (design/rubrics.md M4) */
 static int landing(const struct channel *ch, const struct run *r) {
   const uint64_t units = ch->view.units, last = r->first + r->units - 1;
   const uint64_t word = atomic_load_explicit(ch->view.landed + last % units, memory_order_acquire);
-  if (word == UINT64_MAX) return -1;
-  return word >= 1 + last / units;
+  if ((word & ~MESH_DUD) < 1 + last / units) return 0;
+  return word == UINT64_MAX ? -1 : word & MESH_DUD ? -2 : 1;
 }
 
 /* every channel's positions published and consumed on the host: a SEND's piece supplied into its run, a REDUCE's
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct exchange's
-   sums go to a copy, as its SENDs read the operand); a landing that reads the link's loss fails it, and so does
-   a revoke, at its next look: a peer's process gone or its communicator revoked ends its bindings, whose duds land here
-   (design/transport.md sections 5 and 14: a client's wait is a loop that stops on a word, never on a clock; a peer that
+   sums go to a copy, as its SENDs read the operand); a landing that reads the link's loss or a dud fails it, and so
+   does a revoke, at its next look: a peer's process gone or its communicator revoked ends its bindings, whose duds land
+   here, and so does a member's past it, which sends its own units as duds once its group failed (comm_fail, nil_send)
+   (design/transport.md sections 5, 10 and 14: a client's wait is a loop that stops on a word, never on a clock; a peer that
    computes for long is waited for).  Every look spins: nothing parks.  A position whose publication reads in place
    what its consumption writes (sends_what_lands) is consumed once it is published.  Its positions then count as
    awaited for the GPU work after it (`waited`) */
@@ -2205,8 +2216,11 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
         const struct run *r = p->runs + 2 * (at - p->start) + 1;
         const int landed = landing(ch, r);
         if (!landed) break;
-        if (landed < 0)
+        if (landed == -1)
           return fail(ncclRemoteError, "the link to node %u was lost at position %llu (its stream's landed words ~0)", ch->node, (unsigned long long)at);
+        if (landed < 0)
+          return fail(ncclRemoteError, "position %llu on the channel to node %u landed as a dud: the group of the member there, or of one "
+                      "it relays, failed, was revoked or ended (design/transport.md section 10)", (unsigned long long)at, ch->node);
         struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
         if (m) {
           struct steps *s = m->c->bound;

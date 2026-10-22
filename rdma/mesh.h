@@ -34,6 +34,12 @@
 #define MESH_FRAME 4096u
 #define MESH_STREAM_LARGE_UNITS 512u
 #define MESH_STREAM_SMALL_UNITS 256u
+/* design/transport.md section 10: a unit's dud bit, the top bit of its words (struct mesh_stream), above any cycle's 1 +
+   cycle.  In a landed word, the bridge's: the unit came as a dud (1 + its cycle with this bit), or its link was lost
+   (~0, which has it too); a consumer compares the word's other bits with 1 + the cycle it awaits, and a landing with the
+   bit is its group's failure.  In a ready word, its holder's: the unit is supplied as a dud (its producer's group has
+   failed), which its bridge sends as one */
+#define MESH_DUD (UINT64_C(1)<<63)
 /* design/transport.md section 14: the entries of each of a stream class's two time rings (struct mesh_stream) */
 #define MESH_STREAM_TIMES 16384u
 _Static_assert(38+25<=63,"an owner word");
@@ -63,8 +69,9 @@ _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_e
 /* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, the bridge's to
    write; per class c (0 large, 1 small) its rings, the in ring the bridge's receives land in and the out ring its holder
    supplies (`in`, `out`, region offsets), of `units[c]` units of `unit[c]` bytes, a word a unit its holder stores to
-   supply it (`ready`: 1 plus the unit's cycle, its sequence over the ring) and a word a unit the bridge stores as it
-   lands (`landed`: 1 plus its cycle; ~0 once the link is lost: a landing only raises a word, so ~0 stands); its share of
+   supply it (`ready`: 1 plus the unit's cycle, its sequence over the ring, with MESH_DUD where it is supplied as a dud)
+   and a word a unit the bridge stores as it lands (`landed`: 1 plus its cycle, with MESH_DUD where it came as a dud; ~0
+   once the link is lost: a landing only raises a word's other bits, so ~0 stands); its share of
    the link's bandwidth; `wire`, the stream's identity, the same at both its ends and no other stream's between the two
    nodes, by which the two ends of a communicator hold the two ends of one stream (0 until it is live); `free` while no
    client holds it and every unit its last holder declared has gone, the first unit a holder then supplies of each class

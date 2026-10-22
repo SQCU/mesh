@@ -4,12 +4,14 @@
    forward-progress guarantee: the no-cross-queue-spin rule).  Each kernel runs as the walk encodes it, in the walk's
    order, its body transcribed from nccl-mesh-kernels.h's: copies and combines in host memory (the host path's arithmetic,
    nccl-mesh.c combine_into, premultiply and truncdiv, which nccl-mesh.c exports hidden to this file where
-   MESH_HOST_EXECUTOR is defined), a run's ready words release-stored, a wait for a landing a poll of its run's last
-   unit's landed word (mesh.metal mesh_wait_bounded: until it reaches 1 + the cycle or the bridge stores ~0, for at most
-   the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, and at most MESH_PLATFORM_NS,
-   design/transport.md), its failure (the bound reached, the link lost; a revoke named where the stop word [6] is set)
-   recorded in the failure words [0], [3], [4] and [2], which the library reads after the program, every later step
-   running as made; a step naming no words records in the program's (metal_gate), as nccl-mesh-metal.m dispatch_as binds them.
+   MESH_HOST_EXECUTOR is defined), a run's ready words release-stored (with MESH_DUD once a wait of the communicator has
+   failed, mesh_step_release's), a wait for a landing a poll of its run's last unit's landed word (mesh.metal
+   mesh_remote_wait_bounded: until its bits but MESH_DUD reach 1 + the cycle, the bridge's ~0 and a dud's landing among
+   them, for at most the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, and at most
+   MESH_PLATFORM_NS, design/transport.md), its failure (the bound reached, the link lost, a dud landed; a revoke named
+   where the stop word [6] is set) recorded in the failure words [0], [3], [4] and [2], which the library reads after
+   the program, every later step running as made; a step naming no words records in the program's (metal_gate), as
+   nccl-mesh-metal.m dispatch_as binds them.
    A buffer is a host address (metal_wrap returns its address; metal_contents it); what metal_scratch, metal_shared and
    metal_event made is counted and freed with its last release.  A step run by a caller's kernel (metal_send_deferred,
    metal_land_deferred: a fused crossing's, on either form) is refused, since no kernel of a caller's runs here.  Built as
@@ -141,12 +143,13 @@ static _Atomic uint64_t *words_of(struct metal_program *program, void *given, ui
   *polls = v ? program->polls : 0;
   return v;
 }
-/* mesh_step_wait: the word until it reaches 1 + cycle (or ~0), at most `polls` looks (0: one) and at most
-   MESH_PLATFORM_NS (a host look being far slower than a GPU load, design/transport.md), reading no other word */
+/* mesh_step_wait: the word until its bits but MESH_DUD reach 1 + cycle (~0 and a dud's landing among them), at most
+   `polls` looks (0: one) and at most MESH_PLATFORM_NS (a host look being far slower than a GPU load,
+   design/transport.md), reading no other word */
 static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls) {
   const uint64_t target = 1 + cycle, deadline = now_ns() + MESH_PLATFORM_NS;
   uint64_t seen = atomic_load_explicit(word, memory_order_acquire);
-  for (uint64_t k = 1; seen < target && k < polls; k++) {
+  for (uint64_t k = 1; (seen & ~MESH_DUD) < target && k < polls; k++) {
     if (!(k & 63) && now_ns() > deadline) break;
     /* N ranks share the host's cores with N bridges: a wait that runs long yields them */
     if (k > 4096) usleep(20);
@@ -156,12 +159,14 @@ static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls
   return seen;
 }
 
-/* mesh_step_check: a wait's failure recorded where none is yet ([2] clear): a revoke, the link lost (~0) or the bound reached;
-   a landing is none, whatever its bytes */
+/* mesh_step_check: a wait's failure recorded where none is yet ([2] clear): a revoke, the link lost (~0), a dud's landing
+   (its word's MESH_DUD: its producer's group failed, design/transport.md section 10) or the bound reached; any other
+   landing is none, whatever its bytes */
 static void step_check(const struct metal_wait *w, _Atomic uint64_t *v, uint32_t polls, uint64_t status) {
   if (!v || !polls || atomic_load_explicit(v + 2, memory_order_acquire)) return;
+  const int landed = (status & ~MESH_DUD) >= 1 + w->cycle;
   const uint64_t cause = atomic_load_explicit(v + 6, memory_order_acquire) ? METAL_REVOKED : status == UINT64_MAX ? METAL_LOST
-                       : status < 1 + w->cycle ? METAL_BOUND : 0;
+                       : !landed ? METAL_BOUND : status & MESH_DUD ? METAL_DUD : 0;
   if (!cause) return;
   atomic_store_explicit(v, cause, memory_order_relaxed);
   atomic_store_explicit(v + 3, w->channel, memory_order_relaxed);
@@ -175,11 +180,14 @@ static void step_await(const struct metal_wait *w, _Atomic uint64_t *v, uint32_t
   atomic_thread_fence(memory_order_acquire);
 }
 
-/* mesh_step_release: the run's ready words stored, each after every store before it */
-static void step_release(const struct metal_release *r) {
+/* mesh_step_release: the run's ready words stored, each after every store before it, with MESH_DUD where a wait of the
+   communicator whose failure words it names has failed ([2], which this executor's waits store as they fail, in its
+   one order), so its units go as duds */
+static void step_release(const struct metal_release *r, _Atomic uint64_t *v, uint32_t polls) {
   atomic_thread_fence(memory_order_release);
+  const uint64_t value = v && polls && atomic_load_explicit(v + 2, memory_order_acquire) ? r->value | MESH_DUD : r->value;
   for (uint32_t u = 0; u < r->count; u++)
-    atomic_store_explicit((_Atomic uint64_t *)at(r->buffer, r->word) + u, r->value, memory_order_release);
+    atomic_store_explicit((_Atomic uint64_t *)at(r->buffer, r->word) + u, value, memory_order_release);
 }
 
 /* a step as the walk encodes it: its kind and arguments, and the failure words and bound it names (words_of, read
@@ -270,11 +278,11 @@ static void run_op(const struct op *o) {
   case OP_TRUNCDIV:
     if (o->n) nccl_mesh_truncdiv(o->type, at(o->dst, o->dst_offset), at(o->src, o->src_offset), o->n, o->scalar);
     return;
-  case OP_PUBLISH: step_release(&o->release); return;
+  case OP_PUBLISH: step_release(&o->release, v, polls); return;
   case OP_SPIN: step_await(&o->wait, v, polls); return;
   case OP_SEND_SMALL:
     memmove(at(o->release.buffer, o->release.slot), at(o->src, o->src_offset), o->n);
-    step_release(&o->release);
+    step_release(&o->release, v, polls);
     return;
   case OP_LAND:
     step_await(&o->wait, v, polls);
@@ -428,7 +436,7 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
 
 /* whether track tr's next item of `cursor` may run: its own `need` holds (a publication's, its track has consumed
    `need` positions; a consumption's, its track's publications have passed position `need` - 1), every dependency holds
-   and, a consumption, its landing came (its word at 1 + the cycle, or ~0) */
+   and, a consumption, its landing came (its word's bits but MESH_DUD at 1 + the cycle: ~0 and a dud's among them) */
 static int item_ready(const struct track *tr, int cursor, const uint64_t *count, uint32_t self) {
   const struct cursor *k = tr->cursor + cursor, *out = tr->cursor + METAL_PUBLISH;
   const struct item *it = k->item + k->next;
@@ -436,11 +444,12 @@ static int item_ready(const struct track *tr, int cursor, const uint64_t *count,
   for (uint32_t d = 0; d < it->ndeps; d++)
     if (count[it->deps[d].other] < it->deps[d].count) return 0;
   if (cursor != METAL_CONSUME || !it->awaits) return 1;
-  return atomic_load_explicit((_Atomic uint64_t *)at(it->wait.buffer, it->wait.word), memory_order_acquire) >= 1 + it->wait.cycle;
+  return (atomic_load_explicit((_Atomic uint64_t *)at(it->wait.buffer, it->wait.word), memory_order_acquire) & ~MESH_DUD) >= 1 + it->wait.cycle;
 }
 
 /* a track's item that cannot run, its bound reached: its wait's failure recorded (mesh_step_check: the bound, the
-   link's ~0, a revoke), or, an item waiting on its credit or a dependency alone, the bound at its position */
+   link's ~0, a dud's landing, a revoke), or, an item waiting on its credit or a dependency alone, the bound at its
+   position */
 static void item_expired(const struct item *it) {
   if (!it->v || !it->polls || atomic_load_explicit(it->v + 2, memory_order_acquire)) return;
   if (it->awaits) { step_check(&it->wait, it->v, it->polls, atomic_load_explicit((_Atomic uint64_t *)at(it->wait.buffer, it->wait.word), memory_order_acquire)); return; }

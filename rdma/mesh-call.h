@@ -28,12 +28,14 @@ int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
    it: its in and out rings, a ready word and a landed word a unit, its unit's bytes and its units; 0, EINVAL, EPERM
    where the client does not hold it, or ENOLINK.  The holder supplies unit u (its sequence in the class, from the
    class's `next`) once slot u mod units of the out ring holds the unit's bytes: ready[u mod units] := 1 + u / units,
-   after a release fence; unit u from the peer has landed in slot u mod units of the in ring once landed[u mod units]
-   reads at least 1 + u / units (~0: the link lost); the peer's units begin at the peer's `next`, which the
-   communicator's init exchanges.  The holder declares the units of a class it will supply, up to `declared`
-   (absolute) and its `deadline` (uptime ns): mesh_stream_declare; a live holder's is UINT64_MAX, never reached, and a
-   holder that can supply no more sets it to now; a declared unit not supplied by its deadline, or by the holding's
-   end, goes as a dud (all ones).  The class's two time rings, the bridge's to write (mesh.h struct mesh_stream
+   after a release fence (with mesh.h MESH_DUD: supplied as a dud, which its bridge sends as one, as every later unit of
+   the holding); unit u from the peer has landed in slot u mod units of the in ring once landed[u mod units], its bits
+   but MESH_DUD, reads at least 1 + u / units, and it is the peer's own unit where MESH_DUD is clear (set: it came as a
+   dud, or, ~0, the link was lost; either fails the consumer's group, design/transport.md section 10); the peer's units
+   begin at the peer's `next`, which the communicator's init exchanges.  The holder declares the units of a class it
+   will supply, up to `declared` (absolute) and its `deadline` (uptime ns): mesh_stream_declare; a live holder's is
+   UINT64_MAX, never reached, and a holder that can supply no more sets it to now; a declared unit not supplied by its
+   deadline, or by the holding's end, goes as a dud (all ones, MESH_DUD_SHORT bytes short of its unit: mesh-bridge.h).  The class's two time rings, the bridge's to write (mesh.h struct mesh_stream
    `posted_at`, `landed_at`): unit u's posting or landing time (mach_absolute_time ticks) is the second word of entry u
    mod MESH_STREAM_TIMES where its first word reads 1 + u both before and after the second is read (the first two loads
    acquiring), else u has none */

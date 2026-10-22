@@ -29,16 +29,17 @@
    has begun (nccl-mesh-metal.m record4: a record is written again only once its dispatch began); a classic dispatch's
    record is its setBytes, its sequence 0, and it stores none.  It reads nothing, and its result is true (kept
    so that a caller's kernel that tests it, metal-microbench metal/layers.metal, compiles as it is).
-   mesh_step_wait: a wait on its run's last unit's landed word at p.aux for 1 + p.scalar, at most p.polls loads
-   (mesh_wait_bounded: the program's bound, at most NCCL_MESH_POLLS, metal_begin), ended by the landing, by the link's
-   loss (~0) or by the bound, reading nothing but that word.  mesh_step_claim: failure word [1]'s low half exchanged for
+   mesh_step_wait: a wait on its run's last unit's landed word at p.aux for 1 + p.scalar in its bits but MESH_DUD, at
+   most p.polls loads (mesh_remote_wait_bounded: the program's bound, at most NCCL_MESH_POLLS, metal_begin), ended by the
+   landing, a dud's among them, by the link's loss (~0) or by the bound, reading nothing but that word.
+   mesh_step_claim: failure word [1]'s low half exchanged for
    1, true in the one caller that found it 0, so of every wait that fails (a dispatch's threadgroups', the tracks') one
    records.  mesh_step_check: the wait's failure recorded by its claimant in failure words [0] (its cause, nccl-mesh-metal.h
    METAL_*), [3] and [4] and then [2], stored last by the claimant; a loser records nothing and waits for nothing: a
-   revoke, the link lost or the bound reached; a landing
-   is no failure, whatever its bytes (a dud's among them: placed where a send must happen and its producer is gone,
-   never a value a consumer reads as a signal, design/rubrics.md M4), and it reads the failure words, claims and fences
-   only where it failed.  The host reads the record after the command buffer and fails the group as a value
+   revoke, the link lost, the bound reached, or a dud's landing (its word's MESH_DUD, the bridge's: design/transport.md
+   section 10, its producer's group failed, so a member past a failed one never completes on filler); any other landing
+   is no failure, whatever its bytes (no byte is read as a signal, design/rubrics.md M4), and it reads the failure words,
+   claims and fences only where it failed.  The host reads the record after the command buffer and fails the group as a value
    (nccl-mesh.c comm_failure); no kernel halts on it (METAL_COUNTED_ARRIVED reads it to report its call's outcome).  mesh_step_await: a landing awaited by thread 0 and checked, then the
    threadgroup past a device barrier and one system-scope fence, its payload then read with mesh_payload (a running
    kernel sees the NIC's stores late without a fence: mesh.metal mesh_wait_bounded); every threadgroup of
@@ -46,7 +47,12 @@
    kept as mesh_step_enter's.  mesh_step_release: a piece the threadgroup stored into its run's slots, then, after a
    device barrier, thread 0's one system-scope fence (mesh.metal mesh_publish: every thread's stores of the piece
    visible before any ready word the bridge acts on) and its units' ready words (p.count from p.aux, each p.scalar): a
-   publication is one threadgroup's, one fence.  A caller's kernel stores its piece's element k of type T with
+   publication is one threadgroup's, one fence; with the failure words (the library's own kernels'), each p.scalar with
+   MESH_DUD where a wait of the communicator has failed (their claim, read after the fence, which follows every
+   observation that ordered this publication after that wait: a dispatch boundary, a track's count), so its bridge sends
+   the units as duds and no member past this one completes on a piece a failed wait made (design/transport.md section
+   10); a caller's kernel's release (no failure words: a fused crossing, two ranks, its publication before its landing)
+   stores p.scalar.  A caller's kernel stores its piece's element k of type T with
    mesh_step_store and reads its peer's with mesh_step_read<T> (half4 where it names none: float16 fourths), so it names
    no transport qualifier of its own (they are compiled here, under mesh.metal's pragma: a header after it,
    MetalPerformancePrimitives', may end that pragma). */
@@ -57,15 +63,16 @@ static NSString *const STEPS =
   "static inline bool mesh_step_enter(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first) { "
   "(void)vb; if (p.sequence && first) *progress = p.sequence; return true; }\n"
   "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, device uchar *vb) { "
-  "(void)vb; return mesh_wait_bounded((volatile coherent(system) device const ulong *)word, 1 + p.scalar, p.polls); }\n"
+  "(void)vb; return mesh_remote_wait_bounded((volatile coherent(system) device const ulong *)word, p.scalar, p.polls); }\n"
   "static inline bool mesh_step_claim(device uchar *vb) { "
   "return atomic_exchange_explicit((device atomic_uint *)(vb + 8), 1u, memory_order_relaxed) == 0u; }\n"
   "static inline void mesh_step_check(constant mesh_args &p, ulong status, device uchar *ring, device uchar *vb) { "
   "if (!p.polls) return; "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
+  "const bool landed = (status & ~MESH_DUD) >= 1 + p.scalar; "
   "ulong cause; "
-  "(void)ring; if (status != ~0UL && status >= 1 + p.scalar) return; "
-  "cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
+  "(void)ring; if (landed && !(status & MESH_DUD)) return; "
+  "cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : landed ? " XSTR(METAL_DUD) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
   "if (!mesh_step_claim(vb)) return; "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
@@ -77,6 +84,12 @@ static NSString *const STEPS =
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0 && p.count) { volatile coherent(system) device ulong *w = (volatile coherent(system) device ulong *)(words + p.aux); "
   "mesh_publish(w, p.scalar); for (uint u = 1; u < p.count; u++) w[u] = p.scalar; } }\n"
+  "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, device uchar *vb, uint i) { "
+  "threadgroup_barrier(mem_flags::mem_device); "
+  "if (i == 0 && p.count) { volatile coherent(system) device ulong *w = (volatile coherent(system) device ulong *)(words + p.aux); "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
+  "const ulong value = p.polls && ((volatile coherent(system) device const uint *)vb)[2] != 0u ? p.scalar | MESH_DUD : p.scalar; "
+  "for (uint u = 0; u < p.count; u++) w[u] = value; } }\n"
   "template <typename T> static inline void mesh_step_store(constant mesh_args &p, device uchar *slot, ulong k, T value) { "
   "((volatile coherent(system) device T *)(slot + p.dst))[k] = value; }\n"
   "template <typename T = half4> static inline T mesh_step_read(constant mesh_args &p, device uchar *slot, ulong k) { "
@@ -131,10 +144,10 @@ static NSString *const KERNELS =
   "FLOATING(bf16, bfloat)\n"
   "FLOAT8(e4m3, false)\n"
   "FLOAT8(e5m2, true)\n"
-  "GROUP(publish) { ENTER_G mesh_step_release(p, d, i); }\n"
+  "GROUP(publish) { ENTER_G mesh_step_release(p, d, vb, i); }\n"
   "GROUP(send_small) { ENTER_G volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); "
   "LOOP x[k] = y[k]; "
-  "mesh_step_release(p, a, i); }\n"
+  "mesh_step_release(p, a, vb, i); }\n"
   "GROUP(land_copy) { ENTER_G AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
   "GROUP(spin) { ENTER_G if (i == 0) mesh_step_check(p, mesh_step_wait(p, d + p.aux, vb), s, vb); }\n"
   "static inline ulong counted_rows(device const long *c, ulong first, ulong count) { ulong rows = 0; for (ulong k = 0; k < count; ++k) rows += c[first + k] > 0 ? ulong(c[first + k]) : 0UL; return rows; }\n"
@@ -211,6 +224,7 @@ static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
    completion on two or more tracks (a group on one track is plain dispatches: nccl-mesh.c complete_track): one thread
    group a track, its thread 0 choosing the next item of either cursor whose own conditions hold (a consumption first):
    a publication's credit (its track's count at `need`) and dependencies; a consumption's dependencies, its landing
+   (its word's bits but MESH_DUD at its target: a dud's landing is one, which its wait's check records as a failure)
    and, where its position's publication reads in place what it writes (`need` the position + 1; 0 none), that
    publication run (the publication cursor past its position); every thread running the item's steps by their bodies,
    and a consumption's end raising the track's count (system scope, release).  A group that chooses nothing for the
@@ -231,7 +245,7 @@ static NSString *const TRACKS =
   "if (it.cursor == 0 && count[t] < it.need) return false; "
   "for (uint k = 0; k < it.deps; k++) if (count[deps[it.first_dep + k].other] < deps[it.first_dep + k].count) return false; "
   "if (it.cursor != 1 || it.wait_op == ~0u) return true; "
-  "return *(volatile coherent(system) device const ulong *)it.word >= it.target; }\n"
+  "return (*(volatile coherent(system) device const ulong *)it.word & ~MESH_DUD) >= it.target; }\n"
   "static inline void track_expired(constant track_item &it, constant track_op *ops, uint polls) { "
   "if (it.wait_op != ~0u) { constant track_op &w = ops[it.wait_op]; mesh_step_check(w.p, *(volatile coherent(system) device const ulong *)it.word, w.s, w.v); return; } "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)it.v; "

@@ -255,9 +255,11 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
   - A wait polls the landed word of its run's last unit and nothing else: each poll one `volatile coherent(system)` load
     after a system-scope fence (`mesh.metal` `mesh_wait_bounded`; without it a running kernel saw the host's store
     milliseconds late: metal-microbench tools/poll_probe.m, 2026-10-21), and one more fence after the observed landing
-    before the payload is read (`mesh_step_await`). The bridge sets the word `~0` where the link is lost; the stream's
-    `polls` bounds the wait ([Bounded waits](#bounded-waits)). No kernel stops at a stop word or at another wait's
-    failure ([Failures](#failures)).
+    before the payload is read (`mesh_step_await`). The bridge sets the word `~0` where the link is lost and raises it
+    with `MESH_DUD` where a dud landed, the wait comparing its other bits (`mesh.metal` `mesh_remote_wait_bounded`) and
+    its check recording either as a failure; the stream's `polls` bounds the wait ([Bounded waits](#bounded-waits)). No
+    kernel stops at a stop word or at another wait's failure ([Failures](#failures)); a publication after a failed wait
+    of its communicator goes as duds.
 
 ### What each program owns
 
@@ -329,7 +331,7 @@ for groups such as the counted all-to-all among three or more ranks.
 Every GPU wait is bounded (design/transport.md; the operator, 2026-10-18: "you cannot be using a low level
 kernel like a dma or networking send/rcv channel for more than 5 seconds without something happening/concluding").
 `ncclMeshStream.polls` is the most loads of a landed word one wait of the group makes (`rdma/mesh.metal`
-`mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
+`mesh_remote_wait_bounded`, `mesh_wait_bounded`'s loop on the word's bits but `MESH_DUD`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
 `NCCL_MESH_POLLS` (nccl.h), is `NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings
 pass 0. A wait that reaches its bound records its position, its channel and the bound in its communicator's failure
 words, and the group fails as a value after its command buffer (`ncclCommGetAsyncError`, or the communicator's next
@@ -467,9 +469,17 @@ The library keeps no clock that fails a group. A host-path group's waits end at 
 landed word's `~0` or at its bound ([Bounded waits](#bounded-waits)). A group declares its units to its bridge as it is issued, with no deadline while its
 member lives. A member that fails, is revoked or ends has the units it declared and did not supply sent at once as
 duds: all ones, placed where a send must happen and its producer is gone (design/transport.md section 10). Its peers
-land them as bytes like any other. A dud is no signal and fails nothing at the consumer; the failure is the
-producer's own (design/rubrics.md M4: "nothing else changes"; M10). A peer that has not yet issued its group is waited
-for, a host-path group's wait on it until a landing or a revoke. The failure is returned:
+land them as bytes like any other, and no byte of one is read as a signal (design/rubrics.md M4). The peer's bridge
+tells a dud by its SEND (`MESH_DUD_SHORT` short of its unit) and raises its landed word with `MESH_DUD` (`mesh.h`), and
+a group whose wait lands one fails there (`ncclRemoteError`; on the GPU, `METAL_DUD` in its failure words), as at a
+lost link. A member whose group failed sends its later units as duds: the host path's at its failure (`nil_send`), the
+GPU's publications after a failed wait of the communicator at once (`mesh_step_release`, the ready word's `MESH_DUD`),
+and its bridge every unit of a holding after its first dud. So a member past a failed one fails its call rather than
+complete on filler, at any depth of the trees, while a member whose result does not depend on the failed one's may
+complete (design/transport.md section 10: on three nodes or more the member a dud reaches need not be joined to the
+member that failed, and "every member sees the failure" held only between linked members; the 2026-10-21 reviews, C1
+and B2). A peer that has not yet issued its group is waited for, a host-path group's wait on it until a landing or a
+revoke. The failure is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
@@ -478,7 +488,7 @@ for, a host-path group's wait on it until a landing or a revoke. The failure is 
 
 and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
 fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, which they
-land and complete with: the failure stays with the member that failed. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
+land and fail at, as every member does whose call depends on what the failed member did not send. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
 init) on the map as it is then (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of
 returning if the link topo changed mid function execution"). A communicator keeps the map its init made, so a change
 that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator

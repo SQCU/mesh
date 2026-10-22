@@ -69,7 +69,10 @@
    mesh_stream_declare, with no deadline while its member lives: no dud reaches the peer of a producer still at
    work), so a member that fails, is revoked or ends mid-group is replaced at its peers by duds, at once, all ones:
    what is placed where a send must happen and its producer is gone, which its peers land as bytes like any other and
-   never read as a signal (design/transport.md section 10, design/rubrics.md M4: nothing else changes).  No payload is
+   never read as a signal (design/rubrics.md M4).  Its peer's bridge tells a dud by its SEND and marks its landed word
+   (mesh.h MESH_DUD: design/transport.md section 10), and a group that lands one fails there (ncclRemoteError), as at
+   a lost link; a member whose group failed sends its later units as duds (its GPU publications after a failed wait
+   too), so a member past a failed one, at any depth of the trees, fails rather than complete on filler.  No payload is
    checked, so calls that do not pair (a separate send and receive in the same order on two ranks, unequal counts,
    different collectives) are the caller's error and are not detected.  Uneven segments are their own calls
    (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
@@ -92,14 +95,16 @@
    lands and nothing can be published for MESH_PLATFORM_NS.  A group whose positions lie on one channel completes as
    plain dispatches in the stream's order, each position published before it is consumed; a group on two or more,
    with each channel progressing on its own (rdma/NCCL.md "One track", "Per-channel progress").  A wait is a kernel
-   polling the landed word of its run's last unit and nothing else (rdma/mesh.metal mesh_wait_bounded), which the
-   bridge sets ~0 where the link is lost; every wait is bounded: the stream's `polls` is the most loads of the word a wait makes,
+   polling the landed word of its run's last unit and nothing else (rdma/mesh.metal mesh_remote_wait_bounded), which
+   the bridge sets ~0 where the link is lost and raises with MESH_DUD where a dud landed; every wait is bounded: the
+   stream's `polls` is the most loads of the word a wait makes,
    the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
    period of one load on the node's GPU: rdma/NCCL.md "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is
-   NCCL_MESH_POLLS (design/transport.md).  A wait that reaches its bound or reads a lost link records its
+   NCCL_MESH_POLLS (design/transport.md).  A wait that reaches its bound or reads a lost link or a dud records its
    cause, position and channel in its communicator's failure words, on which no kernel halts (every later dispatch runs as
-   encoded, a later wait ending at its landing or its own bound), and the group fails as a value after its command
-   buffer (ncclCommGetAsyncError, or the communicator's next group).
+   encoded, a later wait ending at its landing or its own bound, and every later publication of the communicator's
+   going as duds), and the group fails as a value after its command buffer (ncclCommGetAsyncError, or the
+   communicator's next group).
    The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
    id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
    classic form's.  The group is encoded as compute dispatches between the encoder's commands before and after it, bound
@@ -149,8 +154,9 @@
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
    communicator whose group failed fails its later groups, made again on the map current then (ncclCommDestroy, then an
    init).  No timer of the library's declares a peer lost: a landing that reads ~0 (the bridge's, at its link's loss or
-   its stop), a GPU wait's bound or a host wait's MESH_PLATFORM_NS ends the group, and a group on a lost link or whose
-   peer's position never landed fails with ncclRemoteError; a failure the Metal path finds after its group returned is
+   its stop) or a dud's (MESH_DUD: the group of the member there, or of one it relays, failed), a GPU wait's bound or a
+   host wait's MESH_PLATFORM_NS ends the group, and a group on a lost link, whose peer's position never landed or
+   landed as a dud fails with ncclRemoteError; a failure the Metal path finds after its group returned is
    the communicator's asynchronous error (ncclCommGetAsyncError) and the next group's result.  A
    Metal-path group that returns a failure signals nothing the library waits for: the commands it left in the stream's
    command buffer are not committed after the communicator's ncclCommDestroy or ncclCommAbort, which wait for none of
@@ -995,7 +1001,9 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
    order, a classic kernel's form of them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_check, mesh_step_await,
    mesh_step_release, mesh_step_store and mesh_step_read (any element type), addressed on a channel's stream class (a run's slots and ready words to
    release, its last unit's landed word to await and its first unit to read); the library's own, so the caller compiles
-   them with its kernels and keeps no copy.  Every thread of the threadgroup calls mesh_step_await and
+   them with its kernels and keeps no copy.  mesh_step_await records a dud's landing as a failure (METAL_DUD); a
+   caller's mesh_step_release (p, words, i) stores the ready words as given, and the library's own kernels' form (p,
+   words, v, i) with MESH_DUD once a wait of the communicator has failed.  Every thread of the threadgroup calls mesh_step_await and
    mesh_step_release (each holds a barrier); mesh_step_enter's and mesh_step_await's results are true (no kernel halts on a
    failure: rdma/NCCL.md "Bounded waits"), kept so that a kernel testing them compiles as it is. */
 const char* ncclMeshMetalSteps(void);

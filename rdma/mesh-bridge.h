@@ -88,10 +88,13 @@ struct prepared_send {
 _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_send)==128 &&
   offsetof(struct prepared_send,span)==0 && offsetof(struct prepared_send,request)==16 &&
   offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=64,"M29");
-/* design/transport.md: a lane unit's receive, its request and SGE into the unit's slot of the stream's in ring */
+/* design/transport.md: a lane unit's receive, its request and SGE into the unit's slot of the stream's in ring, and
+   whether the unit last landed there came as a dud (`dud`: its completion MESH_DUD_SHORT bytes short of the unit, the
+   receive thread's, written as it lands and read as the unit is released: mesh-link.c lane_landed, stream_landed) */
 struct prepared_receive {
   _Alignas(64) struct ibv_recv_wr request;
   struct ibv_sge span;
+  uint32_t dud;
 };
 _Static_assert(sizeof(struct prepared_receive)==64,"a unit's receive");
 /* A queue pair's SEND gate: the send thread's frames posted and retired (each request carries its queue
@@ -108,7 +111,7 @@ struct send_gate {
    received (`posted` receives posted, `got` landed, the receive thread's, posted at most `window` units ahead: the
    lane's share of the completion queue in its frames), whether its receives were posted (`armed`, the receive
    thread's), and its requests, one a slot of its stripe each way (`sends`, `receives`, made as the link connects;
-   the last of `sends` the dud's, from the bridge's all-ones block) */
+   the last of `sends` the dud's, from the bridge's all-ones block, MESH_DUD_SHORT short of the unit) */
 struct lane_state {
   uint64_t sent,timed,posted,got;
   uint32_t window,armed;
@@ -149,7 +152,10 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    each data lane's progress (`lane`, struct lane_state), the arena page of the stream's rings (`rings`, leased as the
    port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream), and the stream's holding, the send thread's alone: the
    owner word it serves (`held`, 0 none), the most each class's holder declared as it read (`seen`), and where a holding
-   ended, the unit of each class before which every unit has gone, the unsupplied ones as duds (`final`); each class's
+   ended, the unit of each class before which every unit has gone, the unsupplied ones as duds (`final`), and the first
+   unit of each class it sent as a dud since its holding was taken, from which every unit goes as one (`dud`: 1 + that
+   unit, 0 none; design/transport.md section 10: a run any of whose units is a dud has a dud as its last unit, the one
+   its consumer awaits); each class's
    time rings (mesh.h struct mesh_stream), their addresses the link's own, set as its streams open (`posted_at`, the
    send thread's; `landed_at`, the receive thread's: mesh-link.c streams_open); and the receive thread's first unit of
    each class not yet released in order (`released`, mesh-link.c stream_landed) and not yet given its landing time
@@ -163,6 +169,12 @@ enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 #define LINK_ALIVE_HEARD (UINT64_C(4)<<56)
 #define LINK_ALIVE_BYTES 16u
 #define LINK_ALIVE_RECEIVES 256u
+/* design/transport.md section 10: a dud's SEND is this many bytes short of its unit, its 4 KiB frames the same
+   (TN3205: a SEND covers its receive's frames; the keepalive's 16 bytes into a frame's receive are the same shape), so
+   the receiving bridge tells a dud from a supplied unit by its receive's completion (byte_len) alone, never by its bytes;
+   a completion of any other length is a supplied unit's */
+#define MESH_DUD_SHORT 16u
+_Static_assert(MESH_DUD_SHORT<MESH_FRAME && !(MESH_DUD_SHORT&15),"a dud's last frame partial, its length 16-byte aligned");
 struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,refused,lanes;
@@ -171,7 +183,7 @@ struct link {
   uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing,psn;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2];
+  uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2],dud[MESH_LINK_STREAMS][2];
   _Atomic uint64_t *posted_at[MESH_LINK_STREAMS][2];
   uint64_t wire[MESH_LINK_STREAMS];
   _Atomic int alive_flight;
