@@ -335,9 +335,10 @@ No static IPs. Identity travels with the machine:
 A Bonjour `<LocalHostName>.local` name is not identity: macOS renames a running machine when another claims its name
 (AGENTS.md, "A node is its hardware; names are virtual").
 
-That link-local is *exactly* the value the paired RDMA device reports as `GID[0]`,
-so a port's IP address and its RDMA identity are the same number. Nothing depends on
-a GID index, and the address encodes node identity rather than cable position — it
+That link-local is *exactly* the value the paired RDMA device reports as one of its GIDs (`GID[0]` on macOS 26;
+on macOS 27 the M5 Ultra's devices list another address first, `23ff:…`, then the link-local at `GID[1]`), so a port's
+IP address and its RDMA identity are the same number. The bridge chooses the GID that is the link-local
+(`rdma/mesh-verbs.h` `device_gid`), never an index, and the address encodes node identity rather than cable position — it
 survives being unplugged and replugged into a different port on a different machine.
 
 macOS does not autoconfigure link-local on an interface with no network service, so

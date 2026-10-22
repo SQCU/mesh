@@ -36,16 +36,28 @@ struct mesh_device {
   union ibv_gid gid;
   uint8_t gid_index;
 };
-/* the port's own address (its GID) and its index in the port's GID table, the first entry the table holds: a Thunderbolt
-   port's table does not always begin at index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and
-   index 0's empty address failed every queue pair's connection with EIO) */
+/* the port's own address (its GID) and its index in the port's GID table: the entry that is the port's link-local
+   address (fe80::/64, the EUI-64 of its interface's MAC, README "Addressing"), which the peer at the cable's other end
+   reaches; else the first entry the table holds.  A Thunderbolt port's table does not always begin at index 0 (the
+   Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed every queue
+   pair's connection with EIO), and its first entry is not always the link-local: the M5 Ultra Studio's macOS 27
+   rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its fe80:: link-local, [2] its fd6d ULA, and
+   the Mini (macOS 26) failed every lane's connection toward [0] with EIO */
 static __attribute__((unused)) int device_gid(struct mesh_device *device){
+  int first=-1;
+  union ibv_gid found;
   for(int i=0;i<device->port.gid_tbl_len && i<256;i++){
     union ibv_gid g;
+    int nonzero=0;
     if(ibv_query_gid(device->context,1,i,&g))continue;
-    for(int b=0;b<16;b++)if(g.raw[b]){device->gid=g;device->gid_index=(uint8_t)i;return 0;}
+    for(int b=0;b<16;b++)nonzero|=g.raw[b];
+    if(!nonzero)continue;
+    if(g.raw[0]==0xfe && (g.raw[1]&0xc0)==0x80){device->gid=g;device->gid_index=(uint8_t)i;return 0;}
+    if(first<0){first=i;found=g;}
   }
-  return ENXIO;
+  if(first<0)return ENXIO;
+  device->gid=found;device->gid_index=(uint8_t)first;
+  return 0;
 }
 /* design/transport.md */
 /* design/transport.md */
