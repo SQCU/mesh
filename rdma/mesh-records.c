@@ -200,7 +200,7 @@ void clients_turn(int liveness){
     changed|=owner!=owners[s];owners[s]=owner;
   }
   unreleased|=changed;
-  if(unreleased)unreleased=mesh_retired_release(M)!=0;
+  if(unreleased || liveness)unreleased=mesh_retired_release(M)!=0;
   streams_let_go();
   busy_tell();
 }

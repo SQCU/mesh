@@ -431,7 +431,9 @@ uint32_t mesh_retired_release(struct hdr *m){
 
 /* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
    while they stay hot, then the head reclaimed (mesh_buffer_reclaim: its pages' arena bits, then its rows' hot bits),
-   so no client claims a row or page of it before it is whole again */
+   so no client claims a row or page of it before it is whole again; while a stream's receives may still land in the
+   client's pages (struct mesh_stream `touching`), the head closed instead, which the bridge releases once none does
+   (mesh_retired_release, each liveness turn) */
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   struct hdr *m=c->M;
   struct mesh_buffer *buffer=row<mesh_rows(m)?&mesh_buffers(m)[row]:NULL;
@@ -440,6 +442,7 @@ int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
      atomic_load_explicit(&buffer->closed,memory_order_acquire))return EINVAL;
   for(uint32_t r=row+1;r<row+rows;r++)atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_relaxed);
   mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,rows);
+  if(mesh_touched(m,c->client)){atomic_store_explicit(&buffer->closed,1,memory_order_release);return 0;}
   mesh_buffer_reclaim(m,row);
   return 0;
 }
