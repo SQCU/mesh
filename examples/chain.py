@@ -15,7 +15,8 @@ from torch_mesh.streamed import instance, node
 
 # docs/writing-a-service.md#the-step-kernel
 SOURCE = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_name('chain.metal').read_text()
-ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PATIENCE', 'PEERS')
+ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PEERS')
+STAGES = 3
 PAGE = resource.getpagesize()
 RING_BLOCKS = 2
 _PIPELINES = {}
@@ -41,6 +42,12 @@ def _width():
 def paged(count, dtype=torch.half):
     size = torch.tensor([], dtype=dtype).element_size()
     return -(-count * size // PAGE) * PAGE // size
+
+
+# docs/writing-a-service.md#the-step-kernel
+def publications(crossing, peers):
+    records = crossing.publish if crossing else ()
+    return [w for k in range(peers) for w in fused._words(records[k] if k < len(records) else (0,) * 6)]
 
 
 # docs/writing-a-service.md#the-step-kernel
@@ -86,21 +93,21 @@ def form(K, S, rows, peers, held):
         if not RB:
             raise ValueError(f'chain step: {SG} simdgroups hold no {tile} x {tile} float partial each in '
                              f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory')
-        args = dict(TILE=tile, K=K, S=S, G=G, RG=RG, RB=RB, THREADS=SG * simd, SIMD=simd, PATIENCE=_stream.polls, PEERS=peers)
-        handle = _pipeline(args)
-        threads = _stream.pipeline_facts(handle)[0]
+        args = dict(TILE=tile, K=K, S=S, G=G, RG=RG, RB=RB, THREADS=SG * simd, SIMD=simd, PEERS=peers)
+        handles = [_pipeline(stage, args) for stage in range(STAGES)]
+        threads = min(_stream.pipeline_facts(handle)[0] for handle in handles)
         if threads >= args['THREADS']:
             break
         if RG == 1:
             raise RuntimeError(f'chain step {args}: its pipeline holds {threads} threads a threadgroup, fewer than its '
                                f'{SG} simdgroups')
         RG //= 2
-    return handle, args, [rows, *splits(RG, SG)]
+    return handles, args, [rows, *splits(RG, SG)]
 
 
 # docs/writing-a-service.md#the-step-kernel
-def _pipeline(args):
-    name, line = instance('chain_step', *(args[a] for a in ARGS))
+def _pipeline(stage, args):
+    name, line = instance('chain_step', stage, *(args[a] for a in ARGS))
     if name not in _PIPELINES:
         _PIPELINES[name] = _stream.pipeline(SOURCE + '\n' + line + '\n', name)
     return _PIPELINES[name]
@@ -119,13 +126,10 @@ class Step:
         self.slot = paged(capacity * K)
         self.landing = torch_mesh.empty(peers * self.slot, dtype=torch.half)
         self.sent = None
-        self.forms = {}
+        self.forms, self.landings, self.published = {}, {}, {}
         self.plan(rows)
         self.args = self.forms[rows][1]
-        self.stamps = torch.zeros(self.args['G'], dtype=torch.int32, device='mps')
-        self.err = torch.zeros(1, dtype=torch.int32, device='mps')
         self.arrivals = torch.zeros(1, dtype=torch.int32, device='mps')
-        self.phase = 0
 
     # docs/writing-a-service.md#the-step-kernel
     def plan(self, rows):
@@ -133,33 +137,30 @@ class Step:
             raise ValueError(f'chain step: {rows} rows, past the capacity {self.capacity}')
         if rows not in self.forms:
             self.forms[rows] = form(self.K, self.S, rows, self.peers, self.held)
+            self.landings[rows] = [self.landing[q * self.slot:q * self.slot + rows * self.K].view(rows, self.K)
+                                   for q in range(self.peers)]
 
     # docs/writing-a-service.md#the-step-kernel
     def __call__(self, e, p, out, previous):
-        landings = [self.landing[q * self.slot:q * self.slot + p.numel()].view_as(p) for q in range(self.peers)]
-        crossing = fused.exchange(p, landings, _stream.polls)
-        self._encode(e, p, out, previous, crossing, 0)
-        self.sent = p
-        self.phase += 2
+        crossing = fused.exchange(p, self.landings[e.shape[0]], _stream.polls)
+        self._encode(e, p, out, previous, crossing, self.published.get(p.data_ptr()))
+        self.published[p.data_ptr()], self.sent = crossing, p
         return crossing
 
     # docs/writing-a-service.md#the-step-kernel
     def land(self, e, out, previous):
-        self._encode(e, None, out, previous, None, 1)
+        self._encode(e, None, out, previous, None, None)
 
     # docs/writing-a-service.md#the-step-kernel
-    def _encode(self, e, p, out, previous, crossing, last):
-        handle, args, words = self.forms[e.shape[0]]
-        fused.encode(handle, [self.At, self.Bt, e, out, self.X, self.Y, p, self.stamps, self.err, self.arrivals,
-                              self.sent if self.sent is not None else self.X],
-                     [int(previous is None), self.phase, *words, last, int(out is not None), 0], 15,
-                     args['G'], 1, args['THREADS'], self.peers, land=previous, publish=crossing)
-
-    # docs/writing-a-service.md#the-step-kernel
-    def check(self):
-        cause = int(self.err.item())
-        if cause:
-            raise RuntimeError(f'chain step {self.args}: a wait ran past its patience (causes {cause:#x})')
+    def _encode(self, e, p, out, previous, crossing, earlier):
+        handles, args, words = self.forms[e.shape[0]]
+        buffers = [self.At, self.Bt, e, out, self.X, self.Y, p, self.arrivals, self.sent if self.sent is not None else self.X]
+        constants = [int(previous is None), int(out is not None), *words, 0, *publications(earlier, self.peers)]
+        G, threads = args['G'], args['THREADS']
+        fused.encode(handles[0], buffers, constants, 15, G, 1, threads, self.peers, land=previous)
+        if crossing:
+            fused.encode(handles[1], buffers, constants, 15, G, 1, threads, self.peers)
+            fused.encode(handles[2], buffers, constants, 15, G, 1, threads, self.peers, publish=crossing)
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data

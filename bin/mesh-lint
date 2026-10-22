@@ -149,12 +149,41 @@ def metal_functions(clean):
     return list(functions(clean))
 
 
-def check_metal(path, text):
+LANDED = r'\b(?:mesh_step_read|mesh_payload)\b'
+
+
+def readers_of(paths):
+    """Names of the Metal functions that read landed bytes (mesh_step_read, mesh_payload), over every .metal file of the
+    run: a product in one file reaches a loader in another by name (design/lint.md K5-OPERAND)."""
+    return {name for p in paths if p.suffix == '.metal'
+            for name, _, body, _ in functions(strip_c(p.read_text(errors='replace'))) if re.search(LANDED, body)}
+
+
+def check_metal(path, text, readers=frozenset()):
     clean = strip_c(text)
     publishing = 'mesh_step_release' in clean
     threadgroup_names = set(re.findall(r'threadgroup\s+[\w:<>\s]+?\b(\w+)\s*\[', clean))
+    reads = re.compile(r'\b(?:mesh_step_read|mesh_payload' + ''.join('|' + re.escape(r) for r in sorted(readers)) + r')\s*[<(]')
     for name, _, body, at in metal_functions(clean):
         lines = body.split('\n')
+        if 'simdgroup_multiply_accumulate' in body:
+            for k, ln in enumerate(lines):
+                if reads.search(ln):
+                    find(path, line_of(clean, at) + k, 'K5-OPERAND', f'{name}: a product\'s k-loop reads landed bytes '
+                         'system-coherent, once per column tile: stage the operand once into threadgroup memory',
+                         'GPU audit 2026-10-22 (30-45 us of an 89 us LSTM tick); CUTLASS; Volkov and Demmel 2008')
+        for k, ln in enumerate(lines):
+            if 'mesh_last_arrival' not in ln:
+                continue
+            before = next((b for b in reversed(lines[:k]) if b.strip()), '')
+            if 'threadgroup_barrier' in before:
+                find(path, line_of(clean, at) + k - 1, 'K6-RELEASE', f'{name}: a barrier before mesh_last_arrival, which '
+                     'fences and barriers itself', 'GPU audit 2026-10-22: the release path\'s order, no more')
+            if 'mesh_step_release' in '\n'.join(lines[k:]):
+                find(path, line_of(clean, at) + k, 'K6-RELEASE', f'{name}: mesh_last_arrival\'s acquire fence, then '
+                     'mesh_step_release\'s seq_cst fence: two system fences back to back; count the arrival after the '
+                     'worker\'s fence and let the release\'s one fence order it', 'GPU audit 2026-10-22: the release '
+                     'path\'s order, no more')
         spin_at = next((i for i, ln in enumerate(lines) if re.search(r'\bfor\s*\([^;]*;\s*;|\bwhile\s*\(', ln)), None)
         if spin_at is not None and re.search(r'atomic_load_explicit|coherent\(system\)', body) and name not in SANCTIONED_WAITS:
             k = spin_at
@@ -344,12 +373,13 @@ def main():
     parser.add_argument('--strict', action='store_true', help='exit 1 on any finding')
     args = parser.parse_args()
     paths = sources(args.paths)
+    readers = readers_of(paths)
     for path in paths:
         text = path.read_text(errors='replace')
         if path.suffix in ('.c', '.m', '.mm', '.h'):
             check_c(path, text)
         elif path.suffix == '.metal':
-            check_metal(path, text)
+            check_metal(path, text, readers)
         elif path.suffix == '.py':
             check_python(path, text)
     if not args.paths:

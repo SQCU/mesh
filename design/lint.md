@@ -60,6 +60,20 @@ backend complexity out of linear algebra.
     has ended.
   - Right: `mesh_step_write`.
 - **K4-LAND.** Landed bytes read without `mesh_step_read`. Source: nccl-mesh-kernels.h STEPS.
+- **K5-OPERAND.** A product's k-loop (a function with `simdgroup_multiply_accumulate`) reads landed bytes
+  system-coherent, directly or through a loader that does (`mesh_step_read`, `mesh_payload`; loaders found by name
+  over every `.metal` file of the run). Each column tile then loads the same operand again.
+  - Source: GPU audit 2026-10-22: the LSTM's loader read u this way, 30-45 µs of an 89 µs tick at width 1024. Standard
+    GEMM operand tiling: CUTLASS; Volkov and Demmel, "Benchmarking GPUs to tune dense linear algebra" (SC 2008).
+  - Wrong: `half2 load(uint row) const { return mesh_step_read<half2>(p, ...); }` called from the k-loop.
+  - Right: one parallel system-coherent pass copies a K-chunk of the operand into threadgroup memory after the
+    landing wait; `simdgroup_load` reads it there for every column tile (examples/lstm.metal `Segments::fill`).
+- **K6-RELEASE.** A fence or barrier the release order does not need.
+  - A barrier just before `mesh_last_arrival`, which fences and barriers itself.
+  - `mesh_last_arrival`'s trailing fence, then `mesh_step_release`'s seq_cst system fence: two fences back to back.
+  - Source: GPU audit 2026-10-22: the last worker ran three system fences and four barriers before storing `ready`.
+  - Right: each worker's stores, its fence and its arrival count; then, in the last, the release's one fence and the
+    store (examples/chain.metal `release`).
 - **semantic SEM-XTG.** Data written by one threadgroup and read by another within one dispatch, through memory that
   is not `coherent(device)`.
   - Source: MSL; mesh ebdef267. It held on one die and failed on the M5 Ultra's two.

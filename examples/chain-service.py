@@ -57,6 +57,7 @@ def shares(config, rank, size, folds):
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
     e, p, pace = E.unbind(0), P.unbind(0), chain.Pace()
+    o = (None,) * block if O is None else O.unbind(0)
     deep, sums = len(e), len(p)
     landing, crossing = chain.fill(E, rank, inputs, 0, steps, block), None
     for t in range(steps):
@@ -65,16 +66,13 @@ def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
             ahead = chain.fill(E, rank, inputs, t + block, steps, block) if t + block < steps else None
             landing.wait()
             landing = ahead
-        issued = time.perf_counter()
-        crossing = step(e[t % deep], p[t % sums], None if O is None else O[(t - 1) % block], crossing)
-        if t == 0:
-            first = time.perf_counter() - issued
+        crossing = step(e[t % deep], p[t % sums], o[(t - 1) % block], crossing)
         if t % block == 0 and t:
             chain.drain(t - block, steps, block, O, outputs)
             pace.mark()
-    step.land(e[(steps - 1) % deep], None if O is None else O[(steps - 1) % block], crossing)
+    step.land(e[(steps - 1) % deep], o[(steps - 1) % block], crossing)
     chain.drain((steps - 1) // block * block, steps, block, O, outputs)
-    return pace.waited, pace.done, first
+    return pace.waited, pace.done
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
@@ -110,11 +108,10 @@ def main():
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    paced, done, first = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
+    paced, done = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
     hosted = time.perf_counter() - began - paced
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
-    step.check()
     steady = (began + seconds - done[0]) / (steps - block - 1) if done else None
     opened = done[0] - began if done else None
     dist.barrier()
@@ -128,7 +125,7 @@ def main():
                    input_ring=deep, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, step_microseconds=seconds / steps * 1e6,
                    host_microseconds=hosted / steps * 1e6, paced_microseconds=paced / steps * 1e6,
-                   first_issue_milliseconds=first * 1e3, first_block_milliseconds=opened * 1e3 if done else None,
+                   first_block_milliseconds=opened * 1e3 if done else None,
                    steady_step_microseconds=steady * 1e6 if steady else None,
                    steady_aggregate_rows_per_second=rows / steady if steady else None,
                    crossing_microseconds=crossing / steps * 1e6, collective_bytes_per_step=moved,

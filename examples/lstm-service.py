@@ -73,7 +73,8 @@ def shares(config, rank, size, held):
 # docs/writing-a-service.md#the-lstm
 def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
     e, pace, L = E.unbind(0), chain.Pace(), tick.L
-    landing, first = chain.fill(E, rank, inputs, 0, steps, block), None
+    o = (None,) * block if O is None else O.unbind(0)
+    landing = chain.fill(E, rank, inputs, 0, steps, block)
     for s in range(steps + L - 1):
         if s < steps and s % block == 0:
             pace.wait()
@@ -81,17 +82,14 @@ def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
             landing.wait()
             landing = ahead
         t = s - L
-        issued = time.perf_counter()
-        tick(steps, e[min(s, steps - 1) % len(e)], O[t % block] if O is not None and t >= 0 else None)
-        if s == 0:
-            first = time.perf_counter() - issued
+        tick(steps, e[min(s, steps - 1) % len(e)], o[t % block] if t >= 0 else None)
         if O is not None and t >= 0 and (t + 1) % block == 0:
             chain.drain(t + 1 - block, steps, block, O, outputs)
         if s < steps and s % block == 0 and s:
             pace.mark()
-    tick.land(e[(steps - 1) % len(e)], O[(steps - 1) % block] if O is not None else None)
+    tick.land(e[(steps - 1) % len(e)], o[(steps - 1) % block])
     chain.drain((steps - 1) // block * block, steps, block, O, outputs)
-    return pace.waited, pace.done, first
+    return pace.waited, pace.done
 
 
 # docs/writing-a-service.md#the-lstm
@@ -115,7 +113,7 @@ def main():
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    paced, done, first = lstm_stream(tick, rank, steps, block, E, O, inputs, outputs)
+    paced, done = lstm_stream(tick, rank, steps, block, E, O, inputs, outputs)
     hosted = time.perf_counter() - began - paced
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
@@ -126,7 +124,7 @@ def main():
                    steps=steps, ticks=ticks, block=block, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, tick_microseconds=seconds / ticks * 1e6,
                    latency_ticks=L, host_microseconds=hosted / ticks * 1e6, paced_microseconds=paced / ticks * 1e6,
-                   first_issue_milliseconds=first * 1e3, steady_tick_microseconds=steady * 1e6 if steady else None,
+                   steady_tick_microseconds=steady * 1e6 if steady else None,
                    sent_bytes_per_tick=moved, kernel={key: tick.args[key] for key in lstm.ARGS})
     print(json.dumps(summary), flush=True)
     dist.destroy_process_group()
