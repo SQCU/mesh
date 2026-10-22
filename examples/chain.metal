@@ -150,7 +150,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
             z = tanh(float(half(sum)));
             if (words.drains) out[i] = half(z);
         }
-        X[i] = half(float(E[i]) + z);
+        X[i] = half(float(mesh_step_read<half>((device const uchar *)E, i)) + z);
     }
     if (words.last) return;
     publish(stamps, w, tid, phase);

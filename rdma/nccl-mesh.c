@@ -2582,7 +2582,16 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
     result = gpu(metal_send_deferred(program, m->data.buffer, m->data.offset, &release, fusing.out->publish[fusing.published]),
                  "a fused publication's record");
     fusing.published += !result;
-  } else result = gpu(metal_publish(program, &release), "a publication");
+  } else {
+    void *operands[64];
+    size_t n = 0;
+    for (uint64_t at = ch->published; at < upto; at++) {
+      if (n == sizeof operands / sizeof *operands) { metal_uses(program, operands, n, 0); n = 0; }
+      operands[n++] = out_at(g, h, at)->data.buffer;
+    }
+    metal_uses(program, operands, n, 0);
+    result = gpu(metal_publish(program, &release), "a publication");
+  }
   if (!result) { ch->published = upto; *published = 1; }
   return result;
 }
@@ -3237,6 +3246,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (uint32_t b = 1; st && b < st->buffers && !result && !c->direct; b++)
       result = gpu(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset, own.buffer, own.offset, bytes), "a scratch copy");
   }
+  for (uint32_t h = 0; !result && gate && g && h < comm->count; h++)
+    for (size_t k = 0; k < g->plans[h].ins; k++) metal_uses(program, &g->plans[h].in[k].data.buffer, 1, 1);
   if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;

@@ -365,6 +365,16 @@ static struct args release_args(const struct metal_release *r, size_t dst_offset
                        .sent = pages_to_word(r->sent_target)};
 }
 
+void metal_uses(struct metal_program *program, void *const *buffers, size_t n, int write) {
+  if (!n || recording_on(program) || program->encoder4) return;
+  @autoreleasepool {
+    if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
+    const MTLResourceUsage usage = write ? (MTLResourceUsageRead | MTLResourceUsageWrite) : MTLResourceUsageRead;
+    for (size_t k = 0; k < n; k++)
+      if (buffers[k]) [program->encoder useResource:(id<MTLBuffer>)buffers[k] usage:usage];
+  }
+}
+
 struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
   return dispatch(program, KIND_publish, r->words, NULL, NULL, NULL, release_args(r, 0), 1, 1);
 }
@@ -374,6 +384,7 @@ struct metal_result metal_open_gate(struct metal_program *program, void *words, 
 }
 
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
+  metal_uses(program, &w->data, w->data != NULL, 1);
   return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
 }
 

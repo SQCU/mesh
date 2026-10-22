@@ -87,6 +87,6 @@ def encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, pu
     for crossing, bindings in ((land, 'land'), (publish, 'publish')):
         records = getattr(crossing, bindings) if crossing else ()
         words += [w for k in range(peers) for w in _words(records[k] if k < len(records) else _NONE)]
-    _stream.encode(handle, buffers, words, at, gx, gy, threads)
+    _stream.encode(handle, buffers, words, at, gx, gy, threads, bool(land or publish))
     if publish:
         _stream.fused_published()

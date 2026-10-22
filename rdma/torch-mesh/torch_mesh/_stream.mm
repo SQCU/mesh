@@ -626,8 +626,12 @@ static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
           (int64_t)state.staticThreadgroupMemoryLength};
 }
 
+static id<MTLResidencySet> fused_residency_;
+// A kernel that runs a fused crossing's steps (`fused`) reaches the library's counts, landing buffers and records by
+// address, through the residency set, which Metal does not hazard-track: its encoder declares every buffer of the set,
+// so its pass is ordered against the library's dispatches that name them (nccl-mesh-metal.h metal_uses).
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
-                   int64_t at, int64_t gx, int64_t gy, int64_t threads) {
+                   int64_t at, int64_t gx, int64_t gy, int64_t threads, bool fused) {
   if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));
   id<MTLComputePipelineState> state = pipelines_[handle];
   std::vector<id<MTLBuffer>> bound(buffers.size(), nil);
@@ -647,6 +651,9 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
     for (size_t i = 0; i < bound.size(); i++)
       if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
     [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
+    if (fused && fused_residency_)
+      for (id<MTLAllocation> held in fused_residency_.allAllocations)
+        [encoder useResource:(id<MTLResource>)held usage:MTLResourceUsageRead | MTLResourceUsageWrite];
     [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
   });
 }
@@ -823,7 +830,6 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
 // was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a buffer from
 // it.  A call the library does not fuse (a tensor that is no region tensor or does not start on a page) fails as a
 // value, the library's refusal; nothing falls back to a slower form.  The peers are every other rank, in rank order.
-static id<MTLResidencySet> fused_residency_;
 static std::vector<void *> fused_queues_;
 
 static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
@@ -925,7 +931,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
-  module.def("encode", &encode);
+  module.def("encode", &encode, pybind11::arg("handle"), pybind11::arg("buffers"), pybind11::arg("constants"), pybind11::arg("at"),
+             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::arg("fused") = false);
   module.def("timed", &timed);
   module.def("sequence", &sequence);
   module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });

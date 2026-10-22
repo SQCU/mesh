@@ -121,6 +121,13 @@ struct metal_wait { void *words, *violation, *data; size_t word, sent_word, data
    deferred publication's record, read by mesh_step_sent; 0 none). */
 struct metal_release { void *words; size_t word; mesh_pages value; size_t sent_word; mesh_pages sent_target; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
+/* Buffers a dispatch reaches through no binding of its own (a publication's operands, a landing's or a gate's landing
+   buffers), declared on the classic form's encoder before it, with write use where `write`: Metal orders a pass after
+   the passes that write (or, for a write, read) a tracked buffer only where both name it, and the library's counts
+   dispatches otherwise name the counts page alone (a publish could run before its operand's bytes were written, or a
+   caller's kernel that stores `ready` by address after a later publish).  The Metal 4 form orders its passes by its
+   barriers; a recorded program by its replay. */
+void metal_uses(struct metal_program *, void *const *buffers, size_t n, int write);
 /* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
