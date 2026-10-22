@@ -7,6 +7,7 @@ GO_VERSION=${MESH_GO_VERSION:-1.27.3}
 ts(){ date '+%F %T'; }
 [ -d /Applications/Tailscale.app ] && exit 0
 mkdir -p "$M/tailscale"
+label=$(ioreg -a -rd1 -c IOPlatformExpertDevice | plutil -extract 0.IOPlatformSerialNumber raw -o - - | tr 'A-Z' 'a-z')
 if [ ! -x "$M/bin/tailscaled" ] || [ "$(cat "$M/tailscale/version" 2>/dev/null)" != "$TS_VERSION" ]; then
   floor=$(awk '$1=="#define" && $2=="MESH_DISK_FLOOR_GIB"{print $3}' "$M/bin/mesh-disk.h" 2>/dev/null)
   free=$(df -k "$M" | awk 'NR==2{print $4}')
@@ -31,14 +32,16 @@ fi
 T="$M/bin/tailscale --socket=/var/run/tailscaled.socket"
 state=$($T status --json 2>/dev/null | plutil -extract BackendState raw -o - - 2>/dev/null)
 case "$state" in
-  Running|Starting) ;;
+  Running|Starting)
+    [ "$($T status --json 2>/dev/null | plutil -extract Self.HostName raw -o - - 2>/dev/null)" = "$label" ] \
+      || { $T set --hostname="$label" && echo "[$(ts)] tailnet label set to $label, the hardware serial"; } ;;
   "") echo "[$(ts)] tailscaled not answering on /var/run/tailscaled.socket" ;;
   *)
     if [ -s "$M/tailscale.key" ]; then
-      $T up --auth-key="file:$M/tailscale.key" --hostname="$(scutil --get LocalHostName)" --timeout=60s \
-        && echo "[$(ts)] tailnet joined from $state" || echo "[$(ts)] tailnet join failed from $state"
+      $T up --auth-key="file:$M/tailscale.key" --hostname="$label" --timeout=60s \
+        && echo "[$(ts)] tailnet joined from $state as $label" || echo "[$(ts)] tailnet join failed from $state"
     else
-      $T up --hostname="$(scutil --get LocalHostName)" --timeout=10s
+      $T up --hostname="$label" --timeout=10s
       echo "[$(ts)] tailnet $state and no $M/tailscale.key: log in at the URL above"
     fi ;;
 esac

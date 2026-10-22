@@ -78,7 +78,8 @@ pre-approved Tailscale auth key, not ephemeral), are not in the fetched tarball.
 for f in networks.conf tailscale.key; do ssh node.local "sudo sh -c 'umask 077; cat > /usr/local/mesh/$f'" < $f; done
 ```
 
-The keeper's next pass (within 60 s) adds the networks and joins the tailnet as the node's `LocalHostName`. Disable
+The keeper's next pass (within 60 s) adds the networks and joins the tailnet labeled with the node's hardware serial
+number (never a host name: AGENTS.md, "A node is its hardware; names are virtual"). Disable
 the node's key expiry in the Tailscale admin console (or use a tagged key, whose nodes do not expire), or the node
 must log in again when its node key expires.
 
@@ -313,8 +314,11 @@ else. The bridge interface itself has to be destroyed.
 
 No static IPs. Identity travels with the machine:
 
-- Bonjour `<LocalHostName>.local`
+- the host UUID (`IOPlatformUUID`), from which the bridge's node id and the fabric identity address below are drawn
 - IPv6 link-local on each fabric port, EUI-64 from that port's own MAC
+
+A Bonjour `<LocalHostName>.local` name is not identity: macOS renames a running machine when another claims its name
+(AGENTS.md, "A node is its hardware; names are virtual").
 
 That link-local is *exactly* the value the paired RDMA device reports as `GID[0]`,
 so a port's IP address and its RDMA identity are the same number. Nothing depends on

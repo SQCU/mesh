@@ -135,7 +135,7 @@ networksetup -ordernetworkservices "${svcs[@]}" "$TB_SERVICE" >/dev/null 2>&1
 last=$(networksetup -listallnetworkservices | sed '1d;s/^\*//' | grep -v '^$' | tail -1)
 [ "$last" = "$TB_SERVICE" ] && ok "service order: $TB_SERVICE last of $((${#svcs[@]}+1))" \
                             || bad "service order: last is '$last', a peer could steal the default route"
-ok "identity: $(scutil --get LocalHostName).local"
+ok "identity: host UUID $(ioreg -a -rd1 -c IOPlatformExpertDevice | plutil -extract 0.IOPlatformUUID raw -o - -)"
 
 sec "7. RDMA"
 st=$(rdma_ctl status 2>&1)

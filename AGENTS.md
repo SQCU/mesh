@@ -91,6 +91,39 @@ Caches and propagation delays are not a reason to reach for a hash. They resolve
 themselves; a pin does not. Trading a transient for a permanent is always the wrong
 trade, and a stale node can simply be reached and re-run.
 
+## A node is its hardware; names are virtual
+
+The operator, 2026-10-21: "from this point onwards, we never rely on something like a
+localhostname as a name or identifier for something which we are programming.
+localhostnames are apparently a legacy thing, can be named automatically, collide,
+etc. undignifed, and we almost certainly do not need them for anything algorithmic",
+and "we should be able to use any kind of virtualization of 'names' such that we never
+rely on anything like, again, that localhostname thing, which makes no promises of
+selectivity or unique identifiability or anything of the sort".
+
+A node's identity is its host UUID (`IOPlatformUUID`, `gethostuuid()`). The bridge's
+node id, the fabric ULA (`mesh-router-init.sh`) and node-info's `node_id` are all drawn
+from it; the hardware serial number is the same machine's other fixed identifier. Code
+that selects, matches, deduplicates, addresses or labels a node keys on that identity or
+on something derived from it. A name a person uses is a virtual layer over the identity:
+a table keyed by identity, resolved by the code, never the other way round.
+
+Never read `LocalHostName`, `ComputerName`, `HostName`, `hostname`, `gethostname()`,
+`socket.gethostname()` or `platform.node()` to identify, select, match or label a node,
+and never write one into anything a program reads back (a beacon's instance name, a
+map's name field, a tailnet label). macOS assigns them in Setup Assistant and renames a
+running machine on its own when another claims the same name. On 2026-10-21 the second
+M5 Ultra Studio came up as `mdots-Mac-Studio`, macOS renamed the first, an hour into its
+service, to `mdots-Mac-Studio-2`, and `mdots-Mac-Studio.local`, its beacon and
+`mesh-peers` all pointed at the other machine.
+
+Reliance that predates this rule is debt to remove, not precedent: the beacon's
+instance name (`bin/mesh-beacon.sh`) and the keeper's check of it, `mesh-peers`' self
+test and its merge of bridge records with announcements by name, node-info's `name`,
+self detection in `mesh-top.py`, `viz/serve.py` and `user/mesh-telemetry.py`, the
+bridge map's `name` (`rdma/mesh-link.c`), and the bootstrap's `gethostname()`
+(`rdma/nccl-mesh.c`).
+
 ## Fail toward access
 
 When something goes wrong, the fallback must be the *more* accessible state:
@@ -124,6 +157,8 @@ node access). They do not govern the RDMA collective or TP code.
 - [ ] No capability gated on type, model, location, or network.
 - [ ] No new branch that can skip a capability.
 - [ ] No comments added to code.
+- [ ] No host name (`LocalHostName`, `ComputerName`, `HostName`, `gethostname()`) read
+      to identify, select, match or label a node; identity is the host UUID.
 - [ ] Every failure path ends in the more accessible state.
 - [ ] Nothing writes `authorized_keys`, network order, firewall, or power policy in
       a way that could reduce access. Merge, never truncate.
