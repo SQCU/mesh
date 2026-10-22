@@ -25,8 +25,12 @@
    streams is live is lost and pairs again from 0); no communicator presents filler */
 #define MESH_VERSION 134u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
-   before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 138u
+   before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).  139:
+   each writer's words of a stream on a line of their own (MESH_LINE, struct mesh_stream) */
+#define MESH_LAYOUT 139u
+/* hw.cachelinesize on Apple silicon: the line a store makes another core's copy of invalid, so words of different
+   writers lie on different lines (design/lint.md L1-LINE) */
+#define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -93,15 +97,17 @@ static inline struct mesh_pages mesh_pages_load(const _Atomic uint64_t *word){ r
 static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){ atomic_store_explicit(word,p.n,memory_order_release); }
 /* a holding's `sent` and `landed` once its link is lost */
 #define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
-/* design/transport.md section 14: a stream's two lanes one way over its pairing (0 its SENDs, 1 its receives), the
-   bridge's, on a line of its own: each lane's units posted, and completed (a SEND done, a receive landed); the stream's
-   pages posted that way are its two lanes' units posted together.  The row each unit names is slot u mod
-   MESH_LANE_UNITS of its lane's ring that way (struct mesh_stream `rows`, MESH_ABSENT where it names none), so the
-   units posted and not completed, the plan's window in flight (W(t), design/extents-and-liveness.md), name the rows a
-   lane still holds (mesh-dataflow.c mesh_pinned).  A unit's row and its lane's count are told before the unit is posted, and it is posted only while its
-   holding is still its holder's (its owner word not given, its client not retired: mesh-link.c holding_kept), so a
-   lease returned or retired after its holder gave or died is held by none but units posted before */
-struct mesh_posts { _Alignas(64) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
+/* design/transport.md section 14: a stream's two lanes one way over its pairing (0 its SENDs, 1 its receives), on a
+   line of its own, its one writer's (the port child's send thread, or its receive thread): each lane's units posted,
+   and completed (a SEND done, a receive landed); the stream's pages posted that way are its two lanes' units posted
+   together.  The row each unit names is slot u mod MESH_LANE_UNITS of its lane's ring that way (struct mesh_stream
+   `rows`, MESH_ABSENT where it names none), so the units posted and not completed, the plan's window in flight (W(t),
+   design/extents-and-liveness.md), name the rows a lane still holds (mesh-dataflow.c mesh_pinned).  A unit's row and
+   then its lane's count are stored, the count with release, before the unit is posted (mesh-link.c unit_told), and a
+   holding's units are posted only before the holding's end, which the send thread publishes in the stream's owner
+   word after both threads' last post of it (mesh-link.c stream_free), so a reader that has read that word read every
+   count and row of the holding */
+struct mesh_posts { _Alignas(MESH_LINE) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
 #define MESH_LANE_UNITS 4096u
 _Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
 /* the slot of a stream's rings (`rows`, a region offset) holding the row of unit u of lane `lane` one way (`way`) */
@@ -113,7 +119,9 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    until it is live): the bridge's.  `owner`: 0 while the stream is free; a holder takes it from 0 to its own; its
    holder gives it by setting MESH_STREAM_GIVEN in it, and the bridge does so for a holder gone; the bridge then ends the
    holding at once (nothing more of it posted), makes the holding's words new (every count 0) and stores 0 where nothing
-   of it is outstanding (design/transport.md section 14, "A holding's end").  `posts`,
+   of it is outstanding (design/transport.md section 14, "A holding's end"): that store, after the holding's last post,
+   publishes its end, and a reclaimer reads `posts` for a holder's rows only once it has read the owner word past the
+   holder's holding (mesh-dataflow.c mesh_pinned).  `posts`,
    the bridge's: each of the stream's two lanes' units over its pairing, each way, posted and completed, counted from 0
    as the port's child makes the link's queue pairs, and `rows` (a region offset) their rings of the rows the units
    name, and `child` and `child_start`, the pid and start (mesh-dataflow.h mesh_started) of the port's child that
@@ -132,22 +140,33 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  The two time rings
    (`posted_at`, `landed_at`, region offsets) of MESH_STREAM_TIMES entries of two words: entry e's, slot e mod
    MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last page
-   landed; its first word 0 while its second is stored.  Nothing in it names a frame or a queue pair */
+   landed; its first word 0 while its second is stored.  Nothing in it names a frame or a queue pair.  Its words lie
+   on MESH_LINE lines by writer (layout 139): the stream's opening's (`peer` to `child_start`); the holder's (`owner`,
+   `sends`, `lands`); `ready`, the GPU's or the holder's; the send thread's `sent` and `taken[0]`, which ends that line;
+   the receive thread's `taken[1]`, which begins the next, and `landed`; and `posts`, a line each way, so no count the
+   GPU waits on shares a line with a word another writer stores */
 struct mesh_stream {
-  _Alignas(64) _Atomic uint32_t peer;
+  _Alignas(MESH_LINE) _Atomic uint32_t peer;
   _Atomic uint32_t live;
   uint64_t lists,posted_at,landed_at,rows;
   _Atomic uint64_t bandwidth,wire;
-  _Alignas(64) _Atomic uint64_t owner;
-  _Atomic uint64_t sends,lands;
-  _Alignas(64) _Atomic uint64_t ready;
-  _Alignas(64) _Atomic uint64_t sent;
-  _Atomic uint64_t landed,taken[2];
   _Atomic uint32_t child;
   uint64_t child_start;
+  _Alignas(MESH_LINE) _Atomic uint64_t owner;
+  _Atomic uint64_t sends,lands;
+  _Alignas(MESH_LINE) _Atomic uint64_t ready;
+  _Alignas(MESH_LINE) _Atomic uint64_t sent;
+  uint64_t sent_line[MESH_LINE/8-2];
+  _Atomic uint64_t taken[2];
+  _Atomic uint64_t landed;
   struct mesh_posts posts[2];
 };
-_Static_assert(sizeof(struct mesh_stream)==384,"mesh_stream");
+_Static_assert(sizeof(struct mesh_stream)==7*MESH_LINE && _Alignof(struct mesh_stream)==MESH_LINE,"mesh_stream");
+_Static_assert(offsetof(struct mesh_stream,owner)==1*MESH_LINE && offsetof(struct mesh_stream,ready)==2*MESH_LINE &&
+  offsetof(struct mesh_stream,sent)==3*MESH_LINE && offsetof(struct mesh_stream,taken[0])==4*MESH_LINE-8 &&
+  offsetof(struct mesh_stream,taken[1])==4*MESH_LINE && offsetof(struct mesh_stream,landed)==4*MESH_LINE+8 &&
+  offsetof(struct mesh_stream,posts[0])==5*MESH_LINE && offsetof(struct mesh_stream,posts[1])==6*MESH_LINE,
+  "a writer's words a line of their own");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
    record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware

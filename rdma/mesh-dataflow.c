@@ -8,8 +8,6 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
-/* design/transport.md */
-static void mesh_reclaim(struct hdr *);
 
 /* design/transport.md: the node's region mapped, `writable` (a client's) or read-only (a reader's, which attaches no
    client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge
@@ -325,14 +323,16 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
 
 /* design/algorithm-sources.md#programkernel_call */
 /* The cursor resumes where the last allocation ended, so preparing N operands over P pages costs
-   O(P) in total rather than O(N*P); a full scan and then a reclaim still back it, so the result is
-   the same page the unresumed scan would have returned whenever nothing has been released. */
+   O(P) in total rather than O(N*P); a full scan and then a release and reclaim still back it, so the result is
+   the same page the unresumed scan would have returned whenever nothing has been released.  The release is the
+   bridge's own (mesh_retired_release): a lease closed while a holding its client gave was still ending (mesh_pinned)
+   is released here once the end is published, not only at the bridge's next turn. */
 static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
                               _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
   uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
   uint32_t first=mesh_scan(count,align,resume,end,own,hot);
   if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,begin,end,own,hot);
-  if(first==MESH_ABSENT){ mesh_reclaim(c->M); first=mesh_scan(count,align,begin,end,own,hot); }
+  if(first==MESH_ABSENT){ mesh_retired_release(c->M); first=mesh_scan(count,align,begin,end,own,hot); }
   if(first==MESH_ABSENT){ errno=ENOMEM; return MESH_ABSENT; }
   *cursor=first+count;
   return first;
@@ -408,25 +408,36 @@ static void mesh_reclaim(struct hdr *m){
   }
 }
 
-/* design/transport.md section 14; design/extents-and-liveness.md, d: whether a row of `first` to `first` + `count` is in
-   W(t), a request outstanding on some stream's lane naming its page: a unit posted and not completed, a receive not
-   landed or a SEND not done (mesh.h struct mesh_posts: the plan's window in flight, at most a lane's queue each way).
-   A row is held for nothing else: a holder that gave or died has no future write targeting any other of its rows (the
-   bridge posts a unit only while its holding is its holder's, and tells it first: mesh-link.c unit_told), so they are
-   released at once, and a row in W(t) once its unit completes or the port child that posted it is gone (its pid and
-   start, struct mesh_stream `child`, no longer a live process: its queue pairs, and the requests on them, went with
-   it), whichever launch of the bridge spawned it.  Each lane's units completed are read before those posted, every
-   read sequentially consistent after the caller's give or retirement */
-static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
+/* design/transport.md section 14; design/extents-and-liveness.md, d: whether a row of `first` to `first` + `count`, a
+   lease of `client`, is in W(t), a request outstanding on some stream's lane naming its page: a unit posted and not
+   completed, a receive not landed or a SEND not done (mesh.h struct mesh_posts: the plan's window in flight, at most a
+   lane's queue each way), or may yet be.  A row is held for nothing else: a holder that gave or died has no future
+   write targeting any other of its rows, so they are released at once, and a row in W(t) once its unit completes or
+   the port child that posted it is gone (its pid and start, struct mesh_stream `child`, no longer a live process: its
+   queue pairs, and the requests on them, went with it), whichever launch of the bridge spawned it.
+   Each stream's owner word is read first (acquire).  Where it still names the client and the client gave it or
+   retired, the bridge has not yet published the holding's end (mesh-link.c stream_free) and may post more of it in the
+   pass under way: held while the child that serves it lives.  Otherwise the word read is the end's store or one after
+   it, which follows both progress threads' every tell of the holding (mesh-link.c unit_told: row, then count, with
+   release; `ended`, `stopped`, then stream_free), so the counts and rows read after it hold every unit of the holding.
+   Each lane's units completed are read before those posted */
+static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count,uint64_t client){
+  const int gone=atomic_load_explicit(&mesh_client_at(m,client)->owner,memory_order_acquire)!=client;
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
     const struct mesh_stream *x=mesh_stream_at(m,s);
+    const uint64_t owner=atomic_load_explicit(&x->owner,memory_order_acquire);
     int live=-1;
+    if((owner&~MESH_STREAM_GIVEN)==client && ((owner&MESH_STREAM_GIVEN) || gone)){
+      live=mesh_holds((pid_t)atomic_load_explicit(&x->child,memory_order_acquire),x->child_start);
+      if(live)return 1;
+    }
     for(int way=0;x->rows && way<2;way++)
       for(int lane=0;lane<2;lane++){
-        const uint64_t done=atomic_load(&x->posts[way].done[lane]),posted=atomic_load(&x->posts[way].posted[lane]);
-        if(done<posted && live<0){const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);}
+        const uint64_t done=atomic_load_explicit(&x->posts[way].done[lane],memory_order_acquire);
+        const uint64_t posted=atomic_load_explicit(&x->posts[way].posted[lane],memory_order_acquire);
+        if(done<posted && live<0)live=mesh_holds((pid_t)atomic_load_explicit(&x->child,memory_order_acquire),x->child_start);
         for(uint64_t u=done;live>0 && u<posted && u-done<MESH_LANE_UNITS;u++)
-          if(atomic_load(mesh_unit_row(m,x->rows,way,lane,u))-first<count)return 1;
+          if(atomic_load_explicit(mesh_unit_row(m,x->rows,way,lane,u),memory_order_relaxed)-first<count)return 1;
       }
   }
   return 0;
@@ -439,7 +450,7 @@ uint32_t mesh_retired_release(struct hdr *m){
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
-    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && mesh_pinned(m,row,buffer->pages/m->block)){kept++;continue;}
+    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && mesh_pinned(m,row,buffer->pages/m->block,owner)){kept++;continue;}
     if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
        atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
       atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
@@ -454,8 +465,9 @@ uint32_t mesh_retired_release(struct hdr *m){
 /* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
    while they stay hot, then the head reclaimed (mesh_buffer_reclaim: its pages' arena bits, then its rows' hot bits),
    so no client claims a row or page of it before it is whole again; while a request outstanding on a lane names a page
-   of it (mesh_pinned), the head closed instead, which the bridge releases once none does (mesh_retired_release, each
-   liveness turn) */
+   of it, or a holding the client gave has not yet been ended by its bridge (mesh_pinned), the head closed instead,
+   which the bridge releases once neither holds (mesh_retired_release, each liveness turn), as does an allocation that
+   finds no room (mesh_allocate) */
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   struct hdr *m=c->M;
   struct mesh_buffer *buffer=row<mesh_rows(m)?&mesh_buffers(m)[row]:NULL;
@@ -464,7 +476,7 @@ int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
      atomic_load_explicit(&buffer->closed,memory_order_acquire))return EINVAL;
   for(uint32_t r=row+1;r<row+rows;r++)atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_relaxed);
   mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,rows);
-  if(mesh_pinned(m,row,rows)){atomic_store_explicit(&buffer->closed,1,memory_order_release);return 0;}
+  if(mesh_pinned(m,row,rows,c->client)){atomic_store_explicit(&buffer->closed,1,memory_order_release);return 0;}
   mesh_buffer_reclaim(m,row);
   return 0;
 }

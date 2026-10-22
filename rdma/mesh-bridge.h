@@ -97,11 +97,13 @@ _Static_assert(sizeof(union mesh_network_event)==48,"M24");
    census's requests and completions */
 #define MESH_GATE_MASK ((UINT64_C(1)<<48)-1)
 struct send_gate {
-  _Alignas(64) struct frames posted,retired;
+  _Alignas(64) struct frames posted;
+  struct frames retired;
   uint64_t requests,completions;
   struct frames capacity;
 };
 /* whether the gate holds `f` frames more than it has posted and not retired */
+_Static_assert(sizeof(struct send_gate)==64,"a gate half a line, both halves the send thread's");
 static inline int gate_holds(const struct send_gate *gate,struct frames f){
   return ((gate->posted.n-gate->retired.n)&MESH_GATE_MASK)+f.n<=gate->capacity.n;
 }
@@ -117,12 +119,16 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
    landed (`got`), the receive thread's, at most `window` receives ahead (the fewer frames of the lane's share and its
    receive queue, over a unit's frames: mesh-link.c lane_reset).  A lane's units outstanding one way are at most a
    ring of MESH_LANE_UNITS rows (the window, and the SEND gate's capacity, bounded by it: mesh-link.c lane_reset,
-   link_connect), so the ring holds every one's row (mesh.h struct mesh_posts) */
+   link_connect), so the ring holds every one's row (mesh.h struct mesh_posts).  The send thread's words and the receive
+   thread's each on a line of their own (mesh.h MESH_LINE) */
 struct lane_state {
-  uint64_t sent,done;
-  _Alignas(64) uint64_t posted,got;
+  _Alignas(MESH_LINE) uint64_t sent;
+  uint64_t done;
+  _Alignas(MESH_LINE) uint64_t posted;
+  uint64_t got;
   uint32_t window;
 };
+_Static_assert(offsetof(struct lane_state,posted)==MESH_LINE && sizeof(struct lane_state)==2*MESH_LINE,"a thread's words a line of their own");
 /* design/transport.md section 14: an entry a progress thread has taken from a holding's list, its own copy, typed: its
    rows (`row`, `pages`), its `base`, its word (`word`: a send entry's naming none the holding's `ready`; NULL for a
    landing entry naming none, or one not whole), and the index of its first page over the holding (`page`); `whole` 0
@@ -201,12 +207,12 @@ struct link {
   _Atomic uint64_t *posted_at[MESH_LINK_STREAMS];
   _Atomic uint64_t begun[MESH_LINK_STREAMS],ended[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
-  _Alignas(128) _Atomic uint64_t stopped[MESH_LINK_STREAMS];
+  _Alignas(MESH_LINE) _Atomic uint64_t stopped[MESH_LINK_STREAMS];
   uint64_t rnumber[MESH_LINK_STREAMS],rheld[MESH_LINK_STREAMS];
   struct walk landing[MESH_LINK_STREAMS];
   _Atomic uint64_t *landed_at[MESH_LINK_STREAMS];
 };
-_Static_assert(offsetof(struct link,stopped)%128==0,"the receive thread's words a line of their own");
+_Static_assert(offsetof(struct link,stopped)%MESH_LINE==0,"the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
    parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE, naming the link's pages, its spare page
@@ -331,7 +337,7 @@ extern uint64_t held_pages;
 extern char model[MESH_MODEL_BYTES];
 
 /* whether a client's slot is still `owner`'s */
-static inline int owned(uint64_t owner){ return owner && atomic_load(&mesh_client_at(M,owner)->owner)==owner; }
+static inline int owned(uint64_t owner){ return owner && atomic_load_explicit(&mesh_client_at(M,owner)->owner,memory_order_acquire)==owner; }
 
 /* the functions each translation unit calls of the other's */
 void sysctl_text(const char *name,char *out,size_t room);

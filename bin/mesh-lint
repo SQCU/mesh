@@ -110,6 +110,13 @@ def check_c(path, text):
     clean = strip_c(text)
     rel = path.relative_to(ROOT).as_posix()
     path_re = DATA_PATH.get(rel)
+    for m in re.finditer(r'\b(?:_Alignas|alignas)\s*\((?:[^()]|\([^()]*\))*\)', clean):
+        end = clean.find(';', m.end())
+        declaration = clean[m.end():end]
+        if end > 0 and '{' not in declaration and ',' in re.sub(r'\([^()]*\)|\[[^\]]*\]', '', declaration):
+            find(path, line_of(clean, m.start()), 'L2-ALIGNAS', 'an alignment specifier on a declaration of several '
+                 'members aligns each of them (C11 6.7.5), so words meant to share a line start lines of their own: '
+                 'one declarator an aligned declaration', 'bridge audit 2026-10-22, item 3 (struct lane_state)')
     for m in re.finditer(r'IBV_QPS_RESET|IBV_QPS_ERR|ibv_destroy_qp|\bdestroy_qp\b', clean):
         find(path, line_of(clean, m.start()), 'M3-QP', 'a queue pair moved to RESET or ERR, or destroyed, inside the '
              'running process', 'design/rubrics.md M3; operator 2026-10-22: the documented flush only, unused')

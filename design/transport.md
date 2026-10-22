@@ -393,23 +393,39 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   compiled plans which do not change dynamically during a chain of function calls"). Three page counts over the
   holding, each in its list's order with every page before: `ready` (the holder's: produced), `sent` and `landed` (the
   bridge's: SENDs completed; landed). A send entry's page k is ready once the word at `word` (0: the holding's
-  `ready`) reads at least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at
-  least `base`. The holder never sees a lane, a unit, a frame or a queue pair.
+  `ready`) reads at least `base` + k + 1. A landing entry names no word: its receives are posted as the plan presents
+  them (what a landing writes, below). The holder never sees a lane, a unit, a frame or a queue pair.
 - Every SEND and every receive is one whole page, the page its row names (the bridge reads the row's page as it posts
   it: one read a page). A send entry whose rows lie outside the page table, or a row that holds no page, goes as duds,
   and such a landing entry's pages land in the spare page (the port's link page). So a SEND always fills its receive
   exactly (TN3205), ends whose lists differ garble their own pages and never fail the link, and neither end knows the
   other's addresses.
 - The send thread posts a unit from its page once the entry's word says the page is ready; the receive thread posts
-  each receive straight into its page (at most a window ahead) once the entry's word says the page's reader released
-  it (a page is written again only after release), and raises `landed` once every page before has landed, whichever
-  lane carried it. A SEND whose receive is not yet posted waits in the hardware's credit (TN3205): posting a receive is
-  the credit, and nothing else paces a holding (no lag).
+  each receive straight into its page as the entry is presented (at most a window ahead), and raises `landed` once
+  every page before has landed, whichever lane carried it. A SEND whose receive is not yet posted waits in the
+  hardware's credit (TN3205): posting a receive is the credit, and nothing else paces a holding (no lag).
+- What a landing writes. The operator, 2026-10-22: "data procesisng code gets to write their own guards in their own
+  source. if source says to write continuously into ab uffer, the nic must write continuously into that buffer even
+  if this means that dat aprocessing code can race or lose parts of a stream." And on 2026-10-21, that programs own
+  their buffers' order: "keep only the landing wait, one acquire fence, a poll bound for the node". So:
+  - the transport writes landings as the plan presents them;
+  - a program that reuses a buffer guards that buffer in its own source, or races;
+  - landings are not ordered after the stream's earlier work. Here the contract departs from NCCL's stream
+    semantics, whose kernels copy out of NCCL's own buffers after the stream's earlier work.
 - The words only the bridge writes: `live`, `sent`, `landed`, `taken`, `posts` (each of the stream's two lanes' units
   over its pairing each way, posted and completed), `rows` (the rings of the row each unit names, `MESH_LANE_UNITS` a
   lane each way) and the two time rings (`posted_at`: an entry's first SEND posted;
-  `landed_at`: its last page landed; mach_absolute_time ticks read once at the end of the pass). The time rings are
-  measurement and decide nothing.
+  `landed_at`: its last page landed; mach_absolute_time ticks read once in the pass, after its counts). The time
+  rings are measurement and decide nothing.
+- Lines (layout 139, the bridge audit of 2026-10-22). Each writer's words of a stream lie on a 128-byte line of their
+  own (`hw.cachelinesize`; mesh.h `MESH_LINE`), so a store by one writer does not take a line from a reader of
+  another's: the holder's `owner`, `sends` and `lands`; `ready`, the GPU's or the holder's; the send thread's `sent`
+  and `taken[0]`; the receive thread's `taken[1]` and `landed`; and `posts`, a line each way. A lane's progress at the
+  child is the same: the send thread's SENDs posted and done, and the receive thread's receives posted and landed, on
+  lines of their own (`struct lane_state`). design/lint.md L1-LINE checks it.
+- The count first. A completion pass stores the count a GPU waits on (`sent` or `landed`, with release) before
+  anything else: the clock read, `posts`, and the time rings come after it, and the clock is read only where an entry
+  is to be timed.
 
 **Holding it** (version 133; the operator, 2026-10-22, on the holding's start of 129-132: "something is sampled
 diachronically four times then we do a funny little guess ... this entire code path needs to be remove and rewritten
@@ -444,8 +460,8 @@ statistic, not a data dependent control flow for a collective verb or a bridge t
   on waiting for a future communicator's filler: "dispose of".
 - One communicator holds a stream at a time; communicators that share a node pair hold different streams of its link,
   each end taking the stream of the least `wire` free at both. An init is refused (EBUSY) only where none is.
-- A SEND is posted when its row's word (`ready`) passes it; a receive when its row's word says its reader released it.
-  Both are data, and neither has a deadline.
+- A SEND is posted when its row's word (`ready`) passes it; a receive as its entry is presented, within its lane's
+  window. Both are data, and neither has a deadline.
 
 **A holding's end** (version 134; the operator, 2026-10-22: "if we have a graph serializaiton that we know tells us
 that specific buffers used by a specific lcient have no future writes targeting them they can be freed earlier? ...
@@ -457,12 +473,16 @@ D(P) the extents a program declares, U(P, t) those it uses, L(P, t) those some l
 W(t) those requests already handed to the hardware reference, the plan's window in flight.
 - The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`), and the event loop does so for
   a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The send thread ends the
-  holding at once at the give, or at its client's retirement: nothing more of it is posted, its entries taken and not
-  posted are dropped, and the receive thread is told. Each unit is told before it is posted (its row in its lane's
-  ring, then its lane's count, sequentially consistent) and posted only while its holding is still its holder's (its
-  owner word not given, its client's slot its own: mesh-link.c `unit_told`). A client that gives or retires and then
-  reads the lanes' units therefore sees every unit that will ever be posted for the holding. Nothing in the bridge
-  closes a holding with its peer: no message, no totals, no clock.
+  holding at the first pass that reads the give, or its client's retirement: nothing more of it is posted, its entries
+  taken and not posted are dropped, and the receive thread is told (`ended`). Each progress thread reads whether the
+  holding is still its holder's (its owner word not given, its client's slot its own) once a pass, never a unit
+  (mesh-link.c `holding_kept`). Each unit is told before it is posted: its row in its lane's ring, then its lane's
+  count, with release (`unit_told`); nothing is read back and nothing awaited (design/lint.md S1-SEQCST: the
+  sequentially consistent store and loads each unit took until layout 139 made the core wait for its store to be seen).
+  The holding's end orders the rest: the receive thread stores `stopped` after its last post of the holding, and the
+  send thread stores the owner word (`stream_free`) after reading it. So a reader that has read the owner word past the
+  holding has read every unit ever posted for it (`mesh_pinned`, under Rows). Nothing in the bridge closes a holding
+  with its peer: no message, no totals, no clock.
 - Once the receive thread has stopped too, the send thread reads the stream's two lanes. Where every SEND posted has
   completed and every receive posted has landed, the holding's words are made new and the owner word goes to 0: the
   stream is free.
@@ -483,8 +503,13 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   most a lane's queue each way, and nothing else is held. A holder's halt (its give or its death) leaves L(P, t) empty,
   so it frees every row outside W(t) at once (design/extents-and-liveness.md, d): a lease of it is released at once,
   by the client's return (`mesh_lease_return`) or the bridge's release of a retired client's
-  (`mesh_retired_release`). A lease with a row in W(t) is closed instead and released at the bridge's next turn after
-  its units complete, or once the port child that posted them is gone: a work request's buffer is the hardware's until
+  (`mesh_retired_release`). The reclaim reads each stream's owner word first, with acquire. Where it still names the
+  holder and the holder gave or retired, the end is not yet published and the pass under way may post more of the
+  holding, so the lease is held while the child serving it lives. Otherwise the word read is the end's store or a later
+  one, which follows every tell of the holding, so the counts and rows read after it name every unit the holding
+  posted. A lease with a row in W(t), or returned before its holding's end was published, is closed instead and
+  released at the bridge's next turn after its units complete, or at an allocation that finds no room
+  (mesh-dataflow.c `mesh_allocate`), or once the port child that posted them is gone: a work request's buffer is the hardware's until
   it completes or until the queue pair holding it is gone with the process that owns it (verbs), so each stream records
   that child's pid and start (`child`, `child_start`, as the client slots identify processes) and its units count only
   while that process lives. A lease returned while its holder still holds the stream and its presented entries still name it

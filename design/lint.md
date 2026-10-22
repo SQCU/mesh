@@ -80,6 +80,12 @@ backend complexity out of linear algebra.
 - **L1-LINE.** Two words with different writers share a cache line (`hw.cachelinesize`; 128 bytes on Apple silicon).
   The writers are the table `WRITERS` in `bin/mesh-lint`; the offsets come from a compiled `offsetof` probe.
   - Source: bridge audit 2026-10-22, item 3.
+- **L2-ALIGNAS.** An alignment specifier on a declaration of several members. C11 6.7.5 applies it to each declarator,
+  so each member starts a boundary of its own: words meant to share a line are split, and the struct grows.
+  - Source: bridge audit 2026-10-22, item 3. `_Alignas(64) uint64_t posted,got;` put `got` on a line apart from
+    `posted` in `struct lane_state`, and `struct send_gate` was 128 bytes, not 64.
+  - Wrong: `_Alignas(MESH_LINE) uint64_t sent,done;`
+  - Right: `_Alignas(MESH_LINE) uint64_t sent;` then `uint64_t done;`
 - **S1-SEQCST.** A sequentially consistent atomic on the per-unit path: a store then a load, so the core waits for the
   store to be seen. Source: bridge audit, item 4.
 
