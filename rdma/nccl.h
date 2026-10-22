@@ -15,7 +15,7 @@
    A rank is a process on a node, a client of its node's resident bridge (mesh-flow): the rank asks, the bridge does.
    It passes no region, map file, silent bound or queue-pair count, and keeps no step executor of its own: every
    crossing a program makes between nodes is one of these calls, and this library (nccl-mesh.c's walk of a program's
-   steps, nccl-mesh-metal.m's kernels) is the only code that publishes a piece, lands or combines it, and waits on it.
+   steps, nccl-mesh-kernels.h's kernels) is the only code that publishes a piece, lands or combines it, and waits on it.
 
    Communicators.  ncclCommInitRank is NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else the
    listener ncclGetUniqueId opens, on the node's fabric address where it holds one; the bindings take

@@ -20,6 +20,42 @@ cc app.c -I ~/mesh/rdma -L ~/mesh/rdma -lnccl-mesh -Wl,-rpath,$HOME/mesh/rdma
 A rank is a process on a node, a client of that node's bridge; it starts no bridge and names no device, address, port
 or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`).
 
+### The library's kernels
+
+libnccl-mesh's own Metal kernels (`nccl-mesh-kernels.h`, after `mesh.metal`'s primitives) are compiled when the
+library is built, never in a process that runs it. They are named by the kernels' SHA-256: the hash of their text and
+of the line that compiles it. That hash is compiled into `libnccl-mesh.dylib`, and `make -C rdma install` puts two
+files beside the dylib:
+
+- `libnccl-mesh.<SHA-256>.metallib`: the kernels as AIR, which every Apple GPU's driver takes. It is the committed
+  `vendor/libnccl-mesh.metallib` (vendor/PROVENANCE.md).
+- `libnccl-mesh.<SHA-256>.binarchive`: this node's binary archive, the GPU code of every kernel's pipeline for this
+  node's GPU. The build tool (`nccl-mesh-kernels.m`) makes it from the metallib at every install, in about 0.9 s, so
+  an archive is never copied between nodes.
+
+A process loads both at its first Metal collective and looks up every pipeline in the archive with
+`MTLPipelineOptionFailOnBinaryArchiveMiss`, so it compiles no kernel. On the M5 this takes about 3 ms (the library
+0.2 ms, the archive 1 ms, 72 pipelines 1.7 ms), where compiling took about 100 ms, and about 250 ms after any change to
+the text. Where a file is missing, or the archive lacks a kernel (the system's GPU compiler changed: an OS update since
+the install), the collective fails as a value. Its message starts with `make -C rdma install`, which makes both anew,
+and names the file. Run that install after every OS update. A failed load keeps nothing, so the same process's next
+collective loads the files the install made.
+
+`install` installs every other image first, then the kernels' files and `libnccl-mesh.dylib` (`install-nccl`). So a
+failure of the kernels leaves the bridge's images installed and the node's earlier libnccl-mesh in place. Earlier
+kernels' files stay, for a process that mapped an earlier library but has not loaded its kernels yet; `make -C rdma
+clean-kernels` removes them, run by hand where no such process runs.
+
+Only a machine with the Metal toolchain compiles the AIR: an Xcode with its Metal toolchain component, named by
+`DEVELOPER_DIR` (on this mesh, the M5 alone). `make -C rdma kernels` (which `install` runs) checks the committed record,
+`vendor/libnccl-mesh.sha256`: the kernels' SHA-256 the AIR was compiled from, then the AIR's own. Where both match, the
+committed AIR is used. Where either does not, the kernels are compiled into `vendor/`, and the two files are committed
+with the change to the kernels (`nccl-mesh-kernels.h`, `mesh.metal`, or the compile line). On a machine without the
+toolchain that compile fails, and `make` names the build to run: it never installs AIR of other kernels.
+
+`ncclMeshMetalSteps()` is unchanged: a caller that compiles its own kernels after the steps (metal-microbench,
+torch-mesh's `_stream`) compiles them in its own process, as before. Only the library's own kernels moved to build time.
+
 ## Communicators
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`

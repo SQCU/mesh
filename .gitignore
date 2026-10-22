@@ -5,6 +5,8 @@ rdma/mesh-flow
 rdma/mesh-heartbeat
 rdma/mesh-stat
 rdma/*.dylib
+rdma/*.metallib
+rdma/*.binarchive
 rdma/Mesh.swiftmodule
 rdma/Mesh.swiftdoc
 rdma/Mesh.swiftsourceinfo
