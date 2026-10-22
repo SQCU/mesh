@@ -176,10 +176,11 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
 ## The capability
 
 A capability file states what Apple documents about a GPU family: its threads and threadgroup memory a threadgroup,
-the alignment of that memory, and the edge of its matrix unit. [etc/compute/apple9.json](../etc/compute/apple9.json)
-covers the M4-series, and [etc/compute/apple10.json](../etc/compute/apple10.json) the M5-series. Each names its sources,
-Apple's Metal Feature Set Tables and the Metal Shading Language Specification, and its `family` as a number: n of Metal's
-`MTLGPUFamilyApple<n>`.
+the alignment of that memory, and the edge of its matrix unit. [etc/compute/apple7.json](../etc/compute/apple7.json)
+covers the M1-series, [apple8.json](../etc/compute/apple8.json) the M2-series, [apple9.json](../etc/compute/apple9.json)
+the M3- and M4-series, and [apple10.json](../etc/compute/apple10.json) the M5-series: every family with the matrix unit
+the step kernel multiplies on, Apple7 and later. Each names its sources, Apple's Metal Feature Set Tables and the Metal
+Shading Language Specification, and its `family` as a number: n of Metal's `MTLGPUFamilyApple<n>`.
 
 The configuration names the directory that holds the files, and each rank takes from it the file of its own GPU,
 `apple<n>.json`, where n is the newest Apple family its Metal device supports (`chain.capability`). torch-mesh's
