@@ -1,4 +1,5 @@
 #include "mesh-call.h"
+#include "mesh-observe.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,13 +15,15 @@ static struct mesh_stream *stream_held(struct hdr *m,uint32_t stream){
 }
 uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
-  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
-    const struct mesh_stream *x=mesh_stream_at(m,p);
-    const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed);
-    if(!node || !atomic_load_explicit(&x->live,memory_order_acquire))continue;
-    int seen=0;
-    for(uint32_t k=0;k<count;k++)seen|=reach[k].node==node;
-    if(!seen)reach[count++]=(struct mesh_reach){.node=node,.bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)};
+  for(uint32_t link=0;m && link<m->streams/MESH_LINK_STREAMS && link<MESH_PORTS && count<room;link++){
+    struct mesh_reach made={0};
+    for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
+      const struct mesh_stream *x=mesh_stream_at(m,link*MESH_LINK_STREAMS+s);
+      const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed);
+      if(!node || !atomic_load_explicit(&x->live,memory_order_acquire) || (made.node && node!=made.node))continue;
+      made.node=node;made.streams++;made.bandwidth+=atomic_load_explicit(&x->bandwidth,memory_order_relaxed);
+    }
+    if(made.streams)reach[count++]=made;
   }
   return count;
 }

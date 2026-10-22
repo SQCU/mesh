@@ -575,11 +575,13 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
    none once its pairing is lost (B10: read as the guard stands and between its steps; a guard not held within
    MESH_PLATFORM_NS halts the port, its pairing with it, port_wait), each in the port's agent and once in its life
    (design/transport.md section 14, "A process a port"): the lanes made (LINK_JOB_MAKE: the port's own address read
-   again, then a UC queue pair in INIT for each lane of the link's plan, d6dceac's verbs_up, each lane's share of the
-   completion queues the plan's lanes alone dividing them: design/HETEROGENEOUS-LINKS.md; EALREADY for a make asked
-   again); or connected to the peer's (LINK_JOB_CONNECT, the plan's lanes alone: RTR, then RTS, each lane's number and
-   gate set, the keepalive's first receives posted where the plan has its lane, every data lane's requests made over
-   its stripe of the stream's rings, and the port's progress threads started).  No queue pair is moved to another
+   again, then a UC queue pair in INIT for each lane of the link's plan in lane_order, d6dceac's verbs_up, until the
+   device refuses one, the lanes made and the refusal kept (`made`, `refusal`: design/HETEROGENEOUS-LINKS.md P2, a make
+   the device refuses part of is the plan of the fewer, never a failure of the link); EALREADY for a make asked
+   again); or connected to the peer's (LINK_JOB_CONNECT, the connected plan's lanes alone, each lane's share of the
+   completion queues those lanes alone dividing them: RTR, then RTS, each lane's number and gate set, the keepalive's
+   first receives posted where the plan has its lane, every data lane's requests made over its stripe of the stream's
+   rings, and the port's progress threads started).  No queue pair is moved to another
    state, destroyed or forgotten after it: the in-place RESET of 127 panicked the M5 in AppleThunderboltRDMA on its
    first run (2026-10-19, design/RDMA-KERNEL-RECOVERY.md), and the kernel releases every object at the agent's exit, its
    one end */
@@ -599,8 +601,11 @@ static int link_make(struct port *port,const struct link_numbers *numbers){
      lane's connection at the peer with EIO (2026-10-19, after the Mini's power loss) */
   if(ibv_query_port(port->device.context,1,&attributes))return errno?errno:EIO;
   port->device.port=attributes;
-  if((error=device_gid(&port->device,port->name)) || (error=link_lapsed(l,numbers)) || (error=pair_up(p,l->plan)))return error;
-  l->share=(uint32_t)MIN(p->completion->cqe,p->sent->cqe)/MAX(plan_lanes(l->plan),1u);
+  if((error=device_gid(&port->device,port->name)) || (error=link_lapsed(l,numbers)))return error;
+  uint8_t lane[MESH_LINK_LANES];
+  uint32_t count=0;
+  for(uint32_t i=0;i<MESH_LINK_LANES;i++)if(l->plan>>lane_order[i]&1)lane[count++]=lane_order[i];
+  l->refusal=pair_up(p,lane,count,MESH_LINK_LANES,&l->made);
   return 0;
 }
 static void lane_reset(struct port *port,uint32_t k);
@@ -622,6 +627,7 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
   struct mesh_verbs *p=&l->provider;
   const uint32_t plan=l->plan;
   int error=0;
+  l->share=p->completion && p->sent?(uint32_t)MIN(p->completion->cqe,p->sent->cqe)/MAX(plan_lanes(plan),1u):0;
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)error=queue_receive(p,(int)k,numbers->peer[k],numbers->lid,numbers->gid);
   if(!error)error=link_lapsed(l,numbers);
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)error=queue_send(p,(int)k);
@@ -649,17 +655,19 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
    this connect comes MESH_PLATFORM_NS and an agent's exit after the loss, and its communicators start no group after it.
    The streams opened are those the link's plan has lanes for (design/HETEROGENEOUS-LINKS.md): the rest stay as the
    loss, the adoption or the region's making left them, not live and not free, so no client takes one.  Each stream's
-   share of the bandwidth is the link's over MESH_LINK_STREAMS however many are live, so the map's figure for a link
-   (mesh-plan.h mesh_map, the lesser of its ends') is alike for links of every plan */
+   share of the bandwidth is the link's over its live streams (the first ones one bit a second more for the remainder),
+   so the shares of a link's live streams together are the link's, which its reach entry tells with their count
+   (mesh-call.h mesh_nodes_reached, mesh-plan.h struct mesh_reach) */
 static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
   struct link *l=&port->link;
-  for(uint32_t s=0;s<plan_streams(l->plan);s++){
+  const uint32_t streams=plan_streams(l->plan);
+  for(uint32_t s=0;s<streams;s++){
     struct mesh_stream *x=stream_of(port,s);
     atomic_store_explicit(&x->owner,0,memory_order_release);
     stream_words_reset(port,s);
     for(uint32_t c=0;c<2;c++){l->posted_at[s][c]=stream_words(x->posted_at[c]);l->landed_at[s][c]=stream_words(x->landed_at[c]);}
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
-    atomic_store_explicit(&x->bandwidth,bandwidth/MESH_LINK_STREAMS,memory_order_relaxed);
+    atomic_store_explicit(&x->bandwidth,bandwidth/streams+(s<bandwidth%streams),memory_order_relaxed);
     atomic_store_explicit(&x->wire,l->wire[s],memory_order_relaxed);
     atomic_store_explicit(&x->next[0],0,memory_order_relaxed);atomic_store_explicit(&x->next[1],0,memory_order_relaxed);
     atomic_store_explicit(&x->free,1,memory_order_release);
@@ -684,12 +692,13 @@ static void link_job(struct port *port,int job){
     wake();
   });
 }
-/* a LINK telling the peer every lane of this end's pairing, the lanes of its plan (`count` theirs): each one's queue pair
-   number and first sequence number, as its agent told them (AGENT_MADE), 0 for a lane the plan leaves out */
+/* a LINK telling the peer every lane this end's pairing made, the plan's in lane_order until its device refused one
+   (`count` theirs, every lane of the plan where it refused none): each one's queue pair number and first sequence
+   number, as its agent told them (AGENT_MADE), 0 for a lane not made */
 static void link_tell(struct port *port){
   const struct link *l=&port->link;
-  struct message said={.kind=LINK,.count=plan_lanes(l->plan)};
-  for(uint32_t k=0;k<MESH_LINK_LANES;k++)if(l->plan>>k&1){said.pair[k][0]=l->qpn[k];said.pair[k][1]=(l->psn+k)&0xffffff;}
+  struct message said={.kind=LINK,.count=plan_lanes(l->made)};
+  for(uint32_t k=0;k<MESH_LINK_LANES;k++)if(l->made>>k&1){said.pair[k][0]=l->qpn[k];said.pair[k][1]=(l->psn+k)&0xffffff;}
   port_say(port,said,NULL,0);
 }
 /* the link of a port lost (its peer's loss, a failure, the bridge stopping): its lanes served no more and left as they
@@ -837,7 +846,15 @@ static void link_turn(struct port *port){
       port_lost(port,result);
       return;
     }
-    else if(job==LINK_JOB_MAKE){l->state=LINK_MADE;link_tell(port);}
+    else if(job==LINK_JOB_MAKE){
+      l->state=LINK_MADE;
+      if(l->made!=l->plan)
+        say("link %u (%s): %u of the plan's %u queue pairs made toward node %u (plan %#x, made %#x), its device refusing the "
+            "next: %s; the link connects the plan of the fewer queue pairs either end made (design/HETEROGENEOUS-LINKS.md P2: a "
+            "peer bridge that makes its plan whole or not at all names this LINK a mismatch, and the link pairs again)\n",
+            port->index,port->name,plan_lanes(l->made),plan_lanes(l->plan),port->peer,l->plan,l->made,strerror(l->refusal));
+      link_tell(port);
+    }
     else{
       l->state=LINK_UP;
       say("link %u (%s): %u lanes up toward node %u (plan %#x: %u stream%s, keepalive %s), each lane's share %u frames\n",
@@ -869,7 +886,10 @@ static void link_turn(struct port *port){
     l->lanes=1;
     agent_job(port,LINK_JOB_MAKE);
   }
-  else if(l->state==LINK_MADE && l->heard){l->state=LINK_CONNECTING;agent_job(port,LINK_JOB_CONNECT);}
+  else if(l->state==LINK_MADE && l->heard){
+    l->state=LINK_CONNECTING;l->plan=link_plan(MIN(plan_lanes(l->made),l->peer_made));
+    agent_job(port,LINK_JOB_CONNECT);
+  }
 }
 /* design/transport.md B12 (22891630^ mesh-flight.h's pending-operation age, per port: its dispatch's
    `job_at` in place of flight_begin's stamp, its `done` in place of flight_end's): a port whose open's or link's job
@@ -914,23 +934,24 @@ static void ports_stalled(void){
   }
   atomic_store_explicit(&stalled,any,memory_order_relaxed);
 }
-/* a peer's LINK: every lane of its pairing and the address they were made on (its port's LID and GID as its make read
-   them, which its hello's may predate: the connect's address, and an end of each stream's identity alike at both ends,
-   stream_wire), heard once, before this end's connect, its lanes this end's plan's (both ends plan from the same two
-   budgets: design/HETEROGENEOUS-LINKS.md); any other is a protocol error, the link lost (a port whose
-   agent was asked for its lanes greets no peer once its link is lost until its next agent opens it:
-   design/transport.md section 14, "A process a port") */
+/* a peer's LINK: every lane its pairing made and the address they were made on (its port's LID and GID as its make
+   read them, which its hello's may predate: the connect's address, and an end of each stream's identity alike at both
+   ends, stream_wire), heard once, before this end's connect: the queue pairs its make made (`count`, kept as
+   `peer_made`), the first of lane_order, at most the plan's (both ends plan from the same two budgets and make until
+   their devices refuse: design/HETEROGENEOUS-LINKS.md P2), so both ends connect link_plan of the fewer either made
+   (link_turn); any other is a protocol error, the link lost (a port whose agent was asked for its lanes greets no peer
+   once its link is lost until its next agent opens it: design/transport.md section 14, "A process a port") */
 static void link_heard(struct port *port,const struct message *heard){
   struct link *l=&port->link;
-  if(heard->count!=plan_lanes(l->plan)){
-    say("link %u (%s): node %u's LINK names %u lanes, this end's plan %u (plan %#x): %s\n",port->index,port->name,port->peer,heard->count,
-        plan_lanes(l->plan),l->plan,port->heard.count?"the two ends planned apart":"its bridge states no budget and makes every lane, "
-        "and this port holds fewer: the link pairs once that node runs a bridge that states its budget");
+  if(l->heard || (l->state!=LINK_DOWN && l->state!=LINK_MADE)){port_lost(port,EPROTO);return;}
+  if(heard->count>plan_lanes(l->plan)){
+    say("link %u (%s): node %u's LINK names %u lanes, past this end's plan of %u (plan %#x): %s\n",port->index,port->name,port->peer,
+        heard->count,plan_lanes(l->plan),l->plan,port->heard.count?"the two ends planned apart":"its bridge states no budget and makes "
+        "every lane, and this port holds fewer: the link pairs once that node runs a bridge that states its budget");
     port_lost(port,EPROTO);
     return;
   }
-  if(l->heard || (l->state!=LINK_DOWN && l->state!=LINK_MADE)){port_lost(port,EPROTO);return;}
-  memcpy(l->peer,heard->pair,sizeof l->peer);
+  memcpy(l->peer,heard->pair,sizeof l->peer);l->peer_made=heard->count;
   port->heard.lid=heard->lid;memcpy(port->heard.gid,heard->gid,16);
   l->heard=1;
   link_turn(port);
@@ -946,18 +967,19 @@ static void message_heard(struct port *port,const struct message *heard,const un
   else if(heard->kind==LINK)link_heard(port,heard);
   else port_lost(port,EPROTO);
 }
-/* a message heard on a port's control socket: the first its peer's hello (the link paired, its plan the fewer queue
-   pairs of the two ends', design/HETEROGENEOUS-LINKS.md, its lanes made: link_turn), then each taken (message_heard) */
+/* a message heard on a port's control socket: the first its peer's hello (the link paired, its plan that of the fewer
+   queue pairs of the two ends', design/HETEROGENEOUS-LINKS.md, its lanes made until the device refuses one:
+   link_turn), then each taken (message_heard) */
 static void port_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(!port->greeted){
     if(heard->kind!=HELLO || heard->block!=M->block*M->pgsz || (port->peer && heard->node!=port->peer)){port_lost(port,EPROTO);return;}
     port->peer=heard->node;port->peer_port=heard->port;port->heard=*heard;port->greeted=1;
     const uint32_t theirs=hello_budget(heard->count);
-    port->link.plan=link_plan(MIN(port->budget,theirs));
+    port->link.plan=link_plan(MIN(port->budget,theirs));port->link.made=port->link.peer_made=0;port->link.refusal=0;
     struct mesh_link_info *link=&mesh_links(M)[port->index];
     atomic_store_explicit(&link->bandwidth,port->bandwidth,memory_order_relaxed);
     atomic_fetch_add_explicit(&link->pairings,1,memory_order_relaxed);
-    say("link %u (%s): paired with node %u (queue pairs for the link: this port's %u, its %u%s; plan %#x, %u lanes, %u stream%s)\n",
+    say("link %u (%s): paired with node %u (queue pairs for the link: this port's %u, its %u%s; plan %#x to make, %u lanes, %u stream%s)\n",
         port->index,port->name,port->peer,port->budget,theirs,heard->count?"":", its bridge stating none",port->link.plan,
         plan_lanes(port->link.plan),plan_streams(port->link.plan),plan_streams(port->link.plan)==1?"":"s");
     link_set(port,port->peer,MESH_PAIRED,0);
@@ -1549,9 +1571,10 @@ static void agent_heard(struct port *port){
       if(l->job!=(heard.kind==AGENT_MADE?LINK_JOB_MAKE:LINK_JOB_CONNECT) || heard.pairing!=l->job_pairing)continue;
       l->result=heard.result;l->refused=heard.refused;
       if(heard.kind==AGENT_MADE && !heard.result){
-        memcpy(l->qpn,heard.qpn,sizeof l->qpn);l->psn=heard.psn;l->share=heard.share;
+        memcpy(l->qpn,heard.qpn,sizeof l->qpn);l->psn=heard.psn;l->made=heard.lanes;l->refusal=heard.refusal;
         port->lid=heard.lid;memcpy(port->gid,heard.gid,16);
       }
+      if(heard.kind==AGENT_CONNECTED && !heard.result)l->share=heard.share;
       atomic_store_explicit(&l->done,1,memory_order_release);
     }
     else if(heard.kind==AGENT_BROKEN && current && l->state==LINK_UP)atomic_fetch_or(&l->broken,heard.broken);
@@ -1601,7 +1624,7 @@ static void agent_reaped(struct port *port){
   if(port->job){port->result=ECHILD;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
   if(l->job){l->result=ECHILD;l->refused=0;atomic_store_explicit(&l->done,1,memory_order_release);}
   streams_cancel(port);
-  l->state=LINK_DOWN;l->lanes=l->heard=0;l->share=0;l->plan=0;
+  l->state=LINK_DOWN;l->lanes=l->heard=0;l->share=0;l->plan=l->made=l->peer_made=0;l->refusal=0;
   memset(l->qpn,0,sizeof l->qpn);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
   port->opening=1;
@@ -1782,7 +1805,7 @@ static void agent_command(struct port *port,const struct agent_message *heard){
   int refused=l->job?EBUSY:agent_halted || atomic_load(&faulted) || atomic_load(&unguarded) || atomic_load(&terminated)?ECANCELED:0;
   if(!refused && job==LINK_JOB_CONNECT){
     memcpy(l->peer,heard->peer,sizeof l->peer);port->heard.lid=heard->lid;memcpy(port->heard.gid,heard->gid,16);
-    port->peer=heard->node;agent_bandwidth=heard->bandwidth;
+    port->peer=heard->node;agent_bandwidth=heard->bandwidth;l->plan=heard->lanes;
     refused=lanes_room(port);
   }
   if(refused){
@@ -1812,12 +1835,13 @@ static void agent_jobs(struct port *port){
                              .refused=l->refused};
   if(!said.result && l->job_pairing!=atomic_load(&l->pairing))said.result=ECANCELED;
   if(!said.result && job==LINK_JOB_MAKE){
-    for(uint32_t k=0;k<MESH_LINK_LANES;k++)said.qpn[k]=l->plan>>k&1?l->provider.queues[k].pair->qp_num:UINT32_MAX;
-    said.psn=l->provider.psn;said.share=l->share;
+    for(uint32_t k=0;k<MESH_LINK_LANES;k++)said.qpn[k]=l->made>>k&1?l->provider.queues[k].pair->qp_num:UINT32_MAX;
+    said.psn=l->provider.psn;said.lanes=l->made;said.refusal=l->refusal;
     port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
     said.lid=port->lid;memcpy(said.gid,port->gid,16);
   }
   else if(!said.result){
+    said.share=l->share;
     streams_open(port,port->peer,agent_bandwidth);
     atomic_store(&l->served,l->plan);
     if(atomic_load(&l->pairing)!=l->job_pairing){atomic_store(&l->served,0);said.result=ECANCELED;}

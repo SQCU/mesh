@@ -786,7 +786,7 @@ static int map_of(struct ncclComm *comm, const struct report *reports) {
     for (uint32_t b = a + 1; b < n; b++) links += joined(reports, a, b, &bandwidth);
   struct mesh_link_map *map = &comm->map;
   *map = (struct mesh_link_map){MESH_LINKS_GRAPH, n, links, calloc(links + 1, sizeof *map->link), calloc(links + 1, sizeof *map->bandwidth), 0,
-                                calloc((size_t)n * n + 1, sizeof *map->next), calloc(n + 1, sizeof *map->mark)};
+                                calloc((size_t)n * n + 1, sizeof *map->next), calloc(n + 1, sizeof *map->mark), NULL};
   if (!map->link || !map->bandwidth || !map->next || !map->mark) { map_free(map); return ENOMEM; }
   uint32_t l = 0;
   for (uint32_t a = 0; a < n; a++) {

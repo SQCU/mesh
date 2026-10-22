@@ -59,7 +59,7 @@ static const struct { const char *name, *family; uint32_t n; } maps[] = {
   {"pair", "line", 2}, {"line4", "line", 4}, {"ring5", "ring", 5}, {"star8", "star", 8}, {"torus6", "torus", 6}, {"torus8", "torus", 8}};
 static uint32_t map_trees(size_t m, int packed, uint32_t (*link)[2], uint32_t **root, uint32_t **parent, double **weight) {
   const uint32_t n = maps[m].n, most = packed ? 2 : 1;
-  struct mesh_link_map map = {MESH_LINKS_GRAPH, n, 0, link, NULL, 0, NULL, NULL};
+  struct mesh_link_map map = {MESH_LINKS_GRAPH, n, 0, link, NULL, 0, NULL, NULL, NULL};
   map.links = family_cables(maps[m].family, n, link);
   *root = calloc((size_t)n * most + 1, sizeof **root); *parent = calloc((size_t)n * n * most + 1, sizeof **parent);
   *weight = calloc((size_t)n * most + 1, sizeof **weight);

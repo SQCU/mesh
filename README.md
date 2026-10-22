@@ -204,8 +204,10 @@ ACK, and a per-controller IOMMU so a buffer is registered separately per device.
 The queue pairs are not the same everywhere: the M5 Ultra on macOS 27 reports `max_qp` 3
 on every device, not 11, and its driver keeps a queue pair of each device for itself. A
 link's two bridges state what their devices hold and make the lanes both can, ten where
-both hold ten and one stream's two where either holds two
-([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
+both hold ten and one stream's two where either holds two; each makes them until its
+device refuses one, and both connect what the fewer made. The map lists each link with
+its streams, the communicators it carries at once, and two cables between two nodes are
+two links ([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
 
 RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of

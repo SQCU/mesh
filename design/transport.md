@@ -396,13 +396,16 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   parent: the same image (its LC_UUID checked, so a binary replaced on disk is no agent of a running parent), in a
   process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the region,
   makes and connects the link's queue pairs (its plan's, from the queue pairs both ends' devices hold, each end's told
-  in its HELLO: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)) and runs the port's progress threads. The parent asks it to open,
+  in its HELLO, made in one order until the device refuses one, each end's count told in its LINK, and connected the
+  plan of the fewer either made: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) P2) and runs the port's progress
+  threads. The parent asks it to open,
   make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes, absorbed
   faults, guards not held and terminations it heard. Queue pairs exist only in an agent, and an agent is the bridge
   ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
 - A link's queue pairs are made once and connected once in an agent's life. None is moved to another state,
   destroyed or forgotten; the kernel releases them at the agent's exit. A link takes every queue pair its device holds
-  for it (ten of a macOS 26 device's ten; two of the M5 Ultra's macOS 27 device's two by max_qp − 1), so a returning peer's lanes
+  for it (ten of a macOS 26 device's ten; two of the M5 Ultra's macOS 27 device's two by max_qp − 1; fewer where the
+  device refuses its make sooner), so a returning peer's lanes
   cannot exist beside the old ones, and the old agent's exit is their one release (RESET panicked the M5 on 10-19;
   destroy is ruled out by its history, M3).
 - A link lost once its agent was asked for lanes (a farewell, the control socket's end, a failed completion, the link
@@ -436,4 +439,6 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 - XMAGIC carries MESH_VERSION, so bridges of different versions never pair (129, 130, 131), and a client refuses a region of another version: both ends of a link, and every client, run the rule.
   A change that keeps every exchange of a version's meaning and adds information only in a field that version sends
   as 0 keeps the version: the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) ride a HELLO's `count`, a
-  peer's 0 there meaning a bridge before them, which makes every lane, and two ends that both hold ten pair as before.
+  peer's 0 there meaning a bridge before them, which makes every lane, and two ends that both hold ten pair as before;
+  a LINK's `count` is the queue pairs its make made, its plan's wherever the device refused none, so a make until
+  refused is the budget bridges' wire wherever their make would have succeeded.
