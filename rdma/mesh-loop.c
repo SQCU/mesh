@@ -7,7 +7,8 @@
        FAMILY one of line, ring, star, complete, torus (two rows of N/2), double (a line whose neighbours two cables
        join, parallel links); N bridges (.build/loop/mesh-flow-loop) of a
        region of REGION_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
-       returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
+       the shared memory names MESH_LOOP_PREFIX's (default /meshloop): its regions PREFIX0 .. PREFIX<N-1> and its fabric
+       PREFIX-fabric; returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
      mesh-loop nccl DIRECTORY COUNT host|walk
        N ranks, one a node: all-reduce, all-gather, reduce-scatter, broadcast and reduce from each root, and a send and
        receive around the ring, of COUNT float32 each, every value exact; `host` the host path (a NULL stream), `walk`
@@ -40,12 +41,11 @@
 
 #define LOOP_NODES 8
 #define LOOP_CABLES 32
-#define LOOP_FABRIC "/meshloop-fabric"
 extern char **environ;
 
 struct loop_node { uint32_t node; char region[32]; pid_t pid; };
 struct loop_cable { int a, b; uint16_t listen[2]; };
-struct loop_map { char family[16]; int n, cables; uint64_t region_bytes; struct loop_node node[LOOP_NODES]; struct loop_cable cable[LOOP_CABLES]; };
+struct loop_map { char family[16], fabric[32]; int n, cables; uint64_t region_bytes; struct loop_node node[LOOP_NODES]; struct loop_cable cable[LOOP_CABLES]; };
 
 static uint64_t clock_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static int usage(void) {
@@ -93,7 +93,7 @@ static int map_write(const char *directory, const struct loop_map *map) {
   if (map_path(directory, path, sizeof path)) return ENAMETOOLONG;
   FILE *f = fopen(path, "w");
   if (!f) return errno;
-  fprintf(f, "%s %d %d %llu\n", map->family, map->n, map->cables, (unsigned long long)map->region_bytes);
+  fprintf(f, "%s %d %d %llu %s\n", map->family, map->n, map->cables, (unsigned long long)map->region_bytes, map->fabric);
   for (int i = 0; i < map->n; i++)
     fprintf(f, "%u %s %d\n", map->node[i].node, map->node[i].region, (int)map->node[i].pid);
   for (int c = 0; c < map->cables; c++)
@@ -106,8 +106,8 @@ static int map_read(const char *directory, struct loop_map *map) {
   FILE *f = fopen(path, "r");
   if (!f) return errno;
   unsigned long long region_bytes = 0;
-  int ok = fscanf(f, "%15s %d %d %llu", map->family, &map->n, &map->cables, &region_bytes) == 4 && map->n > 0 && map->n <= LOOP_NODES &&
-           map->cables >= 0 && map->cables <= LOOP_CABLES;
+  int ok = fscanf(f, "%15s %d %d %llu %31s", map->family, &map->n, &map->cables, &region_bytes, map->fabric) == 5 && map->n > 0 &&
+           map->n <= LOOP_NODES && map->cables >= 0 && map->cables <= LOOP_CABLES;
   map->region_bytes = region_bytes;
   for (int i = 0; ok && i < map->n; i++) {
     unsigned node; int pid;
@@ -135,7 +135,7 @@ static int plist_write(const char *directory, const struct loop_map *map, int i)
              "(mesh-loop)</string>\n<key>region_bytes</key><integer>%llu</integer>\n"
              "<key>loop</key><dict>\n<key>region</key><string>%s</string>\n<key>fabric</key><string>%s</string>\n"
              "<key>node</key><integer>%u</integer>\n<key>ports</key><array>\n",
-          i, i, map->family, map->n, (unsigned long long)map->region_bytes, map->node[i].region, LOOP_FABRIC, map->node[i].node);
+          i, i, map->family, map->n, (unsigned long long)map->region_bytes, map->node[i].region, map->fabric, map->node[i].node);
   for (int c = 0; c < map->cables; c++) {
     const struct loop_cable *k = map->cable + c;
     if (k->a != i && k->b != i) continue;
@@ -190,10 +190,12 @@ static int loop_up(const char *family, int n, uint64_t region_mib, const char *d
   char binary[PATH_MAX];
   if (bridge_path(binary, sizeof binary)) return 1;
   mkdir(directory, 0755);
-  shm_unlink(LOOP_FABRIC);
+  const char *prefix = getenv("MESH_LOOP_PREFIX") && *getenv("MESH_LOOP_PREFIX") ? getenv("MESH_LOOP_PREFIX") : "/meshloop";
+  snprintf(map.fabric, sizeof map.fabric, "%s-fabric", prefix);
+  shm_unlink(map.fabric);
   for (int i = 0; i < n; i++) {
     map.node[i] = (struct loop_node){.node = (uint32_t)(i + 1)};
-    snprintf(map.node[i].region, sizeof map.node[i].region, "/meshloop%d", i);
+    snprintf(map.node[i].region, sizeof map.node[i].region, "%s%d", prefix, i);
     shm_unlink(map.node[i].region);
   }
   for (int c = 0; c < map.cables; c++) { map.cable[c].listen[0] = free_port(); map.cable[c].listen[1] = free_port(); }
@@ -232,7 +234,7 @@ static int loop_down(const char *directory) {
     for (int i = 0; i < map.n; i++) if (map.node[i].pid > 0 && !kill(map.node[i].pid, 0)) left = 1;
     if (left) usleep(100000);
   }
-  shm_unlink(LOOP_FABRIC);
+  shm_unlink(map.fabric);
   for (int i = 0; i < map.n; i++) shm_unlink(map.node[i].region);
   printf("{\"loop\":\"down\",\"nodes\":%d,\"stopped\":%s}\n", map.n, left ? "false" : "true");
   return left;
