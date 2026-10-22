@@ -252,10 +252,12 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one `mesh_step_binding`
     record, and its stream names a `residencySet`, which the library fills with the buffers the bindings name and the
     caller makes resident for its queue (torch-mesh's `torch_mesh/fused.py` on torch's stream).
-  - A wait polls the landed word of its run's last unit and nothing else: each poll one `volatile coherent(system)`
-    load, no fence between polls. The bridge sets the word `~0` where the link is lost; the stream's `polls` bounds the
-    wait ([Bounded waits](#bounded-waits)). No kernel stops at a stop word or at another wait's failure
-    ([Failures](#failures)).
+  - A wait polls the landed word of its run's last unit and nothing else: each poll one `volatile coherent(system)` load
+    after a system-scope fence (`mesh.metal` `mesh_wait_bounded`; without it a running kernel saw the host's store
+    milliseconds late: metal-microbench tools/poll_probe.m, 2026-10-21), and one more fence after the observed landing
+    before the payload is read (`mesh_step_await`). The bridge sets the word `~0` where the link is lost; the stream's
+    `polls` bounds the wait ([Bounded waits](#bounded-waits)). No kernel stops at a stop word or at another wait's
+    failure ([Failures](#failures)).
 
 ### What each program owns
 
