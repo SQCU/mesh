@@ -140,7 +140,7 @@ static void farewell_text(int64_t code,char *out,size_t room){
   else if(code>0)snprintf(out,room,"signal %lld",(long long)code);
   else snprintf(out,room,"no reason given");
 }
-struct known known[MESH_KNOWN];
+uint8_t node_uuid[16];
 void wake(void){
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
@@ -578,7 +578,7 @@ static void port_flush(struct port *port){
 void port_say(struct port *port,struct message said,const void *payload,uint32_t bytes){
   if(port->control<0 || (said.kind!=HELLO && !port->greeted))return;
   said.magic=XMAGIC;said.node=M->node;said.boot=M->boot;said.block=M->block*M->pgsz;said.port=port->index;said.bytes=bytes;
-  said.lid=port->lid;memcpy(said.gid,port->gid,16);
+  said.lid=port->lid;memcpy(said.gid,port->gid,16);memcpy(said.uuid,node_uuid,16);
   size_t length=port->out_length+sizeof said+bytes;
   if(length-port->out_sent>MESH_UNSENT){port_lost(port,ENOBUFS);return;}
   if(length>port->out_room){
@@ -983,11 +983,19 @@ static void message_heard(struct port *port,const struct message *heard,const un
   else if(heard->kind==LINK)link_heard(port,heard);
   else port_lost(port,EPROTO);
 }
+/* AGENTS.md, "A node is its hardware": of each port, the last host told sharing this node's number (mesh-records.c
+   number_shared) */
+static uint8_t hello_told[MESH_PORTS][16];
 /* a message heard on a port's control socket: the first its peer's hello (the link paired, its plan the fewer queue
-   pairs of the two ends', design/HETEROGENEOUS-LINKS.md, its lanes made: link_turn), then each taken (message_heard) */
+   pairs of the two ends', design/HETEROGENEOUS-LINKS.md, its lanes made: link_turn), then each taken (message_heard); a
+   hello of this node's own number pairs nothing, as one heard on the hellos' group does not (hello_heard), and one from
+   another host is told (a loop cable is dialed by its ports, never by a hello heard) */
 static void port_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(!port->greeted){
-    if(heard->kind!=HELLO || heard->block!=M->block*M->pgsz || (port->peer && heard->node!=port->peer)){port_lost(port,EPROTO);return;}
+    if(heard->kind==HELLO && heard->node==M->node)number_shared(heard->node,node_uuid,heard->uuid,hello_told[port->index],port,"a hello");
+    if(heard->kind!=HELLO || heard->node==M->node || heard->block!=M->block*M->pgsz || (port->peer && heard->node!=port->peer)){
+      port_lost(port,EPROTO);return;
+    }
     port->peer=heard->node;port->peer_port=heard->port;port->heard=*heard;port->greeted=1;
     const uint32_t theirs=hello_budget(heard->count);
     port->link.plan=link_plan(MIN(port->budget,theirs));
@@ -998,7 +1006,10 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
         port->index,port->name,port->peer,port->budget,theirs,heard->count?"":", its bridge stating none",port->link.plan,
         plan_lanes(port->link.plan),plan_streams(port->link.plan),plan_streams(port->link.plan)==1?"":"s");
     link_set(port,port->peer,MESH_PAIRED,0);
-    /* a port newly paired is sent every record the map holds, this node's first */
+    /* a port newly paired is sent every record the map holds, this node's first: the peer holds each in its database
+       while no path of its own reaches it (neither end's record names the other until the link's streams are live at
+       its end), and its map takes them all once one does, whichever end's record arrives last (mesh-records.c
+       map_publish) */
     for(uint64_t i=0;port->greeted && i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node!=M->node)
       port_say(port,(struct message){.kind=RECORD},mesh_records(M)+i,sizeof(struct mesh_record));
     if(port->greeted)link_turn(port);
@@ -1137,21 +1148,27 @@ static void port_hello(struct port *port){
   setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_IF,&port->interface,sizeof port->interface);
   struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=everyone,.sin6_scope_id=port->interface};
   struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
+  memcpy(said.uuid,node_uuid,16);
   sendto(hello,&said,sizeof said,0,(struct sockaddr *)&to,sizeof to);
 }
 /* design/transport.md: a node heard on a port: the lower node dials the higher's listener on the address
    it heard from, the higher answers its hello so the lower hears it at once; a port not open is opened (its open's job
    out, or its registration refused, aside: design/transport.md B16, #registration), so a port whose link
-   job or open failed pairs again on hearing its peer, never on a clock */
+   job or open failed pairs again on hearing its peer, never on a clock.  A hello of this node's own number is this
+   node's own (a cable between two of its ports) or another host's that shares the number, told (number_shared); neither
+   pairs */
 static void hello_heard(void){
   struct message heard;struct sockaddr_in6 from;socklen_t length=sizeof from;
   while(recvfrom(hello,&heard,sizeof heard,0,(struct sockaddr *)&from,&length)==(ssize_t)sizeof heard){
     struct port *port=port_at(from.sin6_scope_id);
     length=sizeof from;
-    if(!port || heard.magic!=XMAGIC || heard.kind!=HELLO || heard.node==M->node || port->control>=0)continue;
+    if(!port || heard.magic!=XMAGIC || heard.kind!=HELLO)continue;
+    if(heard.node==M->node){number_shared(heard.node,node_uuid,heard.uuid,hello_told[port->index],port,"a hello");continue;}
+    if(port->control>=0)continue;
     if(!port->open){if(!port->job && !port->refused)port->opening=1;continue;}
     if(M->node>heard.node){
       struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
+      memcpy(said.uuid,node_uuid,16);
       sendto(hello,&said,sizeof said,0,(struct sockaddr *)&from,sizeof from);
       continue;
     }
@@ -2119,15 +2136,19 @@ int main(int argc,char **argv){
 #ifndef MESH_LOOP_FABRIC
   boots_hold(argv[1]);
 #endif
-  uuid_t uuid;struct timespec bound={5,0};
-  if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
+  struct timespec bound={5,0};
+  if(gethostuuid(node_uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(node_uuid,sizeof node_uuid);}
   uint32_t node=0;
-  for(int i=0;i<16;i++)node=(node*0x01000193u)^uuid[i];
+  for(int i=0;i<16;i++)node=(node*0x01000193u)^node_uuid[i];
   node=(node&0x7fffffffu)?node&0x7fffffffu:1;
-  /* design/transport.md: a loop bridge's node and region its configuration's; its links are
-     dialed on its cables' own listeners, so its listener and hello socket take any port */
+  /* design/transport.md: a loop bridge's node and region its configuration's, and its host UUID the host's mixed with
+     its region's name (FNV-1a), so each of a host's loop bridges is a host of its own; its links are dialed on its
+     cables' own listeners, so its listener and hello socket take any port */
 #ifdef MESH_LOOP_FABRIC
   node=loop_config.node;
+  uint64_t mixed=UINT64_C(14695981039346656037);
+  for(const char *c=loop_config.region;*c;c++){mixed^=(uint8_t)*c;mixed*=UINT64_C(1099511628211);}
+  for(int i=0;i<8;i++)node_uuid[8+i]^=(uint8_t)(mixed>>(8*i));
   const char *region=loop_config.region;
   const uint16_t service=0;
   loop_fabric(loop_config.fabric);
@@ -2166,7 +2187,8 @@ int main(int argc,char **argv){
      since the start, on the wall clock */
   const uint64_t wall=clock_gettime_nsec_np(CLOCK_REALTIME);
   M->boot=boot_next(argv[1],wall,adopted?M->boot:0);M->node=node;M->idle_since=wall;
-  say("bridge node %u: region %s %s\n",node,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
+  char identity[37];uuid_unparse_lower(node_uuid,identity);
+  say("bridge node %u (host %s): region %s %s\n",node,identity,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;
