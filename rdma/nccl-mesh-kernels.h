@@ -209,15 +209,22 @@ static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
 
 /* the track kernel (nccl-mesh-metal.h metal_tracks; rdma/NCCL.md "Per-channel progress"), after KERNELS, for a
    completion on two or more tracks (a group on one track is plain dispatches: nccl-mesh.c complete_track): one thread
-   group a track, its thread 0 choosing the next item of either cursor whose own conditions hold (a consumption first):
-   a publication's credit (its track's count at `need`) and dependencies; a consumption's dependencies, its landing
-   and, where its position's publication reads in place what it writes (`need` the position + 1; 0 none), that
-   publication run (the publication cursor past its position); every thread running the item's steps by their bodies,
-   and a consumption's end raising the track's count (system scope, release).  A group that chooses nothing for the
-   program's polls of passes records its blocked items' failures (mesh_step_check for a landing, else the bound at its
-   position, by its claimant: mesh_step_claim) and ends once nothing more can run; a track ends at its own bound, as a
-   wait does, and reads no other track's failure.  The records' layouts are struct track_head, track, track_item,
-   track_op and track_dep below, the host's alike; struct track_op's kind one of KINDS_OF's, the enum the host's */
+   group serving every track in turn, as the host executor's one loop does (nccl-mesh-host.c metal_tracks), so no
+   track waits on a thread group Metal has not made resident: a dispatch's thread groups are not promised to run at
+   once, and a track whose progress needed another group's (a dependency on its count, or a landing whose peer awaits
+   this node's publication on it) would wait on one that may not run until it ends.  Its thread 0 looks at each track
+   from the one after the last served, choosing the first next item of either cursor whose own conditions hold (a
+   consumption first): a publication's credit (its track's count at `need`) and dependencies; a consumption's
+   dependencies, its landing and, where its position's publication reads in place what it writes (`need` the position
+   + 1; 0 none), that publication run (the publication cursor past its position).  Every thread runs the item's steps by
+   their bodies, and a consumption's end raises its track's count (system scope, release).  A track's cursors and its
+   phase (running; its blocked items' failures recorded; ended) are its struct track_state, in the ring.  Each look at a
+   blocked track is one load of what it awaits; once the dispatch has looked the program's polls of times since an item
+   last ran (a wait's bound: at most that many loads without progress, however many tracks are blocked), every running
+   track records its blocked items' failures (mesh_step_check for a landing, else the bound at its position, by its
+   claimant: mesh_step_claim), and a track that runs nothing at its next look ends; the dispatch ends once every track
+   has, and no track reads another's failure.  The records' layouts are struct track_head, track, track_item, track_op,
+   track_dep and track_state below, the host's alike; struct track_op's kind one of KINDS_OF's, the enum the host's */
 static NSString *const TRACKS =
   @"\n"
   "enum { " XSTR(KINDS_OF(KIND_ENUM)) " };\n"
@@ -225,7 +232,8 @@ static NSString *const TRACKS =
   "struct track_item { ulong position, need, target; device ulong *word; device uchar *v; uint first_op, ops, first_dep, deps, wait_op, cursor; };\n"
   "struct track_dep { ulong count; uint other, pad; };\n"
   "struct track { uint first[2], count[2]; };\n"
-  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint tracks, polls; };\n"
+  "struct track_state { uint next[2], phase, pad; };\n"
+  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off, state_off, sequence, progress_off; uint tracks, polls; };\n"
   "static inline bool track_ready(constant track_item &it, constant track_dep *deps, volatile coherent(system) device ulong *count, uint t) { "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "if (it.cursor == 0 && count[t] < it.need) return false; "
@@ -239,32 +247,41 @@ static NSString *const TRACKS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n";
 static NSString *const TRACK_KERNEL =
-  @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
+  @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], "
   "uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { "
   "constant track_head &h = *(constant track_head *)base; "
-  "if (t >= h.tracks) return; "
-  "constant track &tr = ((constant track *)(base + h.tracks_off))[t]; "
+  "constant track *trs = (constant track *)(base + h.tracks_off); "
   "constant track_item *items = (constant track_item *)(base + h.items_off); "
   "constant track_op *ops = (constant track_op *)(base + h.ops_off); "
   "constant track_dep *deps = (constant track_dep *)(base + h.deps_off); "
   "volatile coherent(system) device ulong *count = (volatile coherent(system) device ulong *)(ring + h.count_off); "
-  "threadgroup ulong tg[4]; threadgroup uint pick[2]; "
-  "uint next0 = 0, next1 = 0; ulong looks = 0; bool expired = false; "
+  "device track_state *state = (device track_state *)(ring + h.state_off); "
+  "threadgroup ulong tg[4]; threadgroup uint pick[3]; "
+  "uint start = 0, looks = 0; "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(ring + h.progress_off), h.sequence); "
   "for (;;) { "
-  "if (i == 0) { uint chosen = ~0u, left = 0; "
-  "if (next1 < tr.count[1]) { left = 1; constant track_item &c = items[tr.first[1] + next1]; "
-  "if ((next0 >= tr.count[0] || items[tr.first[0] + next0].position >= c.need) && track_ready(c, deps, count, t)) { chosen = tr.first[1] + next1; next1++; } } "
-  "if (chosen == ~0u && next0 < tr.count[0]) { left = 1; if (track_ready(items[tr.first[0] + next0], deps, count, t)) { chosen = tr.first[0] + next0; next0++; } } "
-  "if (chosen != ~0u) { looks = 0; expired = false; } "
-  "else if (left && expired) left = 0; "
-  "else if (left && ++looks >= h.polls) { "
-  "if (next1 < tr.count[1]) track_expired(items[tr.first[1] + next1], ops, h.polls); "
-  "if (next0 < tr.count[0]) track_expired(items[tr.first[0] + next0], ops, h.polls); expired = true; } "
-  "pick[0] = chosen; pick[1] = left; } "
+  "if (i == 0) { uint chosen = ~0u, served = 0, left = 0; "
+  "for (uint k = 0; k < h.tracks && chosen == ~0u; k++) { "
+  "const uint t = start + k < h.tracks ? start + k : start + k - h.tracks; "
+  "device track_state &s = state[t]; constant track &tr = trs[t]; "
+  "if (s.phase == 2) continue; "
+  "bool more = false; "
+  "if (s.next[1] < tr.count[1]) { more = true; constant track_item &c = items[tr.first[1] + s.next[1]]; "
+  "if ((s.next[0] >= tr.count[0] || items[tr.first[0] + s.next[0]].position >= c.need) && track_ready(c, deps, count, t)) chosen = tr.first[1] + s.next[1]++; } "
+  "if (chosen == ~0u && s.next[0] < tr.count[0]) { more = true; if (track_ready(items[tr.first[0] + s.next[0]], deps, count, t)) chosen = tr.first[0] + s.next[0]++; } "
+  "if (chosen != ~0u) { s.phase = 0; served = t; } "
+  "else if (!more || s.phase == 1) s.phase = 2; "
+  "else { left = 1; looks++; } } "
+  "if (chosen != ~0u) { looks = 0; start = served + 1 < h.tracks ? served + 1 : 0; } "
+  "else if (left && looks >= h.polls) { looks = 0; "
+  "for (uint t = 0; t < h.tracks; t++) { device track_state &s = state[t]; constant track &tr = trs[t]; "
+  "if (s.phase != 0) continue; "
+  "if (s.next[1] < tr.count[1]) track_expired(items[tr.first[1] + s.next[1]], ops, h.polls); "
+  "if (s.next[0] < tr.count[0]) track_expired(items[tr.first[0] + s.next[0]], ops, h.polls); s.phase = 1; } } "
+  "pick[0] = chosen; pick[1] = served; pick[2] = left || chosen != ~0u; } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "const uint chosen = pick[0]; "
-  "if (!pick[1]) return; "
+  "const uint chosen = pick[0], t = pick[1]; "
+  "if (!pick[2]) return; "
   "if (chosen != ~0u) { constant track_item &it = items[chosen]; "
   "for (uint k = 0; k < it.ops; k++) { constant track_op &o = ops[it.first_op + k]; device ulong *progress = (device ulong *)o.d; "
   "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } "
