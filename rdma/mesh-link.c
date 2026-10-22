@@ -204,7 +204,7 @@ static void stream_words_reset(struct port *port,uint32_t s);
    a client gone: streams_let_go) ends, every unit of each class up to the most its holder declared or supplied (its
    ring's ready words) going, the unsupplied ones as duds, and one unit more (`final`: a peer waiting on a unit no holder
    supplies reads a dud); a stream held by none whose lanes have sent every unit before `final` is free, its next units
-   `next`, and an owner word taken while it is free is served from then (`held`) */
+   `next`, and an owner word taken while it is free is served from then (`held`), none of its units a dud yet (`dud`) */
 static void stream_turn_one(struct port *port,uint32_t s){
   struct link *l=&port->link;
   struct mesh_stream *x=stream_of(port,s);
@@ -215,7 +215,7 @@ static void stream_turn_one(struct port *port,uint32_t s){
       const _Atomic uint64_t *ready=stream_words(x->ready[c]);
       uint64_t end=MAX(atomic_load_explicit(&x->declared[c],memory_order_acquire),l->seen[s][c]);
       for(uint32_t slot=0;slot<units;slot++){
-        const uint64_t word=atomic_load_explicit(ready+slot,memory_order_acquire);
+        const uint64_t word=atomic_load_explicit(ready+slot,memory_order_acquire)&~MESH_DUD;
         if(word)end=MAX(end,(word-1)*units+slot+1);
       }
       l->final[s][c]=MAX(l->final[s][c],end+1);
@@ -224,7 +224,9 @@ static void stream_turn_one(struct port *port,uint32_t s){
   }
   if(l->held[s])return;
   if(owner){
-    if(atomic_load_explicit(&x->free,memory_order_acquire)){atomic_store_explicit(&x->free,0,memory_order_relaxed);l->held[s]=owner;}
+    if(atomic_load_explicit(&x->free,memory_order_acquire)){
+      atomic_store_explicit(&x->free,0,memory_order_relaxed);l->held[s]=owner;l->dud[s][0]=l->dud[s][1]=0;
+    }
     return;
   }
   if(atomic_load_explicit(&x->free,memory_order_relaxed) || !atomic_load_explicit(&x->live,memory_order_acquire))return;
@@ -246,9 +248,12 @@ static int link_held(const struct link *l){
   return 0;
 }
 /* design/transport.md section 14: a data lane's SENDs, one pass of its port's send thread: each unit of its stripe the
-   stream's holder declared, posted from its slot of the out ring where supplied (its ready word 1 plus its cycle), else,
-   once the holder's deadline has passed, as a dud from the all-ones block (its last request); after a holding, each unit
-   before its end (`final`), the unsupplied ones as duds at once; each while the lane's gate holds its frames
+   stream's holder declared, posted from its slot of the out ring where supplied (its ready word's other bits 1 plus its
+   cycle), as a dud from the all-ones block (its last request) where supplied as one (the word's MESH_DUD) or, once the
+   holder's deadline has passed, not supplied; after a holding, each unit before its end (`final`), the unsupplied ones
+   as duds at once; from the first dud of the holding on (`dud`), every unit as a dud (section 10: a producer that gave up
+   mid-run, its run's last units supplied after a dud of its, sends no run whose last unit reads as data); each while
+   the lane's gate holds its frames
    (ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's); the completions are
    the link's (link_send); a failed post is the lane's (lane_lost).  Whether it posted a unit */
 static int lane_send(struct port *port,uint32_t k){
@@ -272,8 +277,9 @@ static int lane_send(struct port *port,uint32_t k){
   for(;;){
     const uint64_t i=s->sent,u=MESH_STREAM_PAIRS*i+stripe;
     if(u>=declared)break;
-    int dud=0;
-    if(atomic_load_explicit(ready+u%units,memory_order_acquire)<1+u/units){
+    const uint64_t word=atomic_load_explicit(ready+u%units,memory_order_acquire);
+    int dud=(l->dud[t][c] && u+1>=l->dud[t][c]) || word&MESH_DUD;
+    if((word&~MESH_DUD)<1+u/units){
       if(holding){
         if(deadline==UINT64_MAX)break;
         if(!clock)clock=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -287,6 +293,7 @@ static int lane_send(struct port *port,uint32_t k){
     posting.wr_id=((uint64_t)k<<48)|(gate->posted&MESH_GATE_MASK);
     const int error=q->send(q->pair,&posting,&bad);
     if(error){lane_lost(port,k,error<0?-error:error);break;}
+    if(dud && !l->dud[t][c])l->dud[t][c]=u+1;
     __atomic_store_n(&s->sent,i+1,__ATOMIC_RELEASE);gate->requests++;
   }
   return s->sent!=first;
@@ -308,28 +315,32 @@ static int lane_post(struct port *port,uint32_t k){
   return 0;
 }
 /* design/transport.md section 14: the stream's units of class c released in order, on the port's receive thread: unit
-   u's landed word raised to 1 plus its cycle (a compare-exchange: ~0, the link's loss, stands) once it and every unit
-   before it have landed (u has once its lane has received past it, a lane's receives completing in the order posted),
-   so a run has landed once its last unit's word reads it, whichever lanes its units rode (`released`: the first unit
-   not yet released) */
+   u's landed word raised to 1 plus its cycle, with MESH_DUD where the unit came as a dud (its receive's `dud`; section
+   10), a compare-exchange on the word's other bits (~0, the link's loss, stands), once it and every unit before it have
+   landed (u has once its lane has received past it, a lane's receives completing in the order posted), so a run has
+   landed once its last unit's word reads it, whichever lanes its units rode (`released`: the first unit not yet
+   released) */
 static void stream_landed(struct port *port,uint32_t s,uint32_t c){
   struct link *l=&port->link;
   const struct mesh_stream *x=stream_of(port,s);
-  const uint32_t units=x->units[c];
+  const uint32_t units=x->units[c],each=units/MESH_STREAM_PAIRS;
   uint64_t u=l->released[s][c];
-  while(l->lane[MESH_LANE_FIRST+2*(s*MESH_STREAM_PAIRS+u%MESH_STREAM_PAIRS)+c].got>u/MESH_STREAM_PAIRS){
+  for(const struct lane_state *lane;(lane=l->lane+MESH_LANE_FIRST+2*(s*MESH_STREAM_PAIRS+u%MESH_STREAM_PAIRS)+c)->got>u/MESH_STREAM_PAIRS;u++){
     _Atomic uint64_t *word=stream_words(x->landed[c])+u%units;
-    const uint64_t value=1+u/units;
+    const uint64_t value=(1+u/units)|(lane->receives[u/MESH_STREAM_PAIRS%each].dud?MESH_DUD:0);
     uint64_t was=atomic_load_explicit(word,memory_order_relaxed);
-    while(was<value && !atomic_compare_exchange_weak_explicit(word,&was,value,memory_order_release,memory_order_relaxed)){}
-    u++;
+    while((was&~MESH_DUD)<(value&~MESH_DUD) && !atomic_compare_exchange_weak_explicit(word,&was,value,memory_order_release,memory_order_relaxed)){}
   }
   l->released[s][c]=u;
 }
-/* design/transport.md: a data lane's next unit landed (its stream's unit MESH_STREAM_PAIRS got + its stripe), its
-   receives posted on, and the stream's units of its class released in order (stream_landed) */
-static void lane_landed(struct port *port,uint32_t k){
+/* design/transport.md: a data lane's next unit landed (its stream's unit MESH_STREAM_PAIRS got + its stripe), `bytes`
+   long (its completion's byte_len): a dud where that is MESH_DUD_SHORT short of the unit (section 10), recorded in its
+   receive; its receives posted on, and the stream's units of its class released in order (stream_landed) */
+static void lane_landed(struct port *port,uint32_t k,uint32_t bytes){
   struct lane_state *s=port->link.lane+k;
+  const struct mesh_stream *x=stream_of(port,lane_stream(k));
+  const uint32_t c=lane_class(k);
+  s->receives[s->got%(x->units[c]/MESH_STREAM_PAIRS)].dud=bytes==x->unit[c]-MESH_DUD_SHORT;
   s->got++;
   const int error=lane_post(port,k);
   if(error)lane_lost(port,k,error);
@@ -410,7 +421,8 @@ static void link_send(struct port *port,uint32_t posted){
     for(;s->timed<s->sent;s->timed++)stream_time(ring,MESH_STREAM_PAIRS*s->timed+lane_stripe(k),at);
   }
 }
-/* the link's receive completions, one pass of the port's receive thread: a data lane's unit landed (lane_landed), a
+/* the link's receive completions, one pass of the port's receive thread: a data lane's unit landed (lane_landed, its
+   completion's length telling a dud), a
    keepalive frame heard (its receive posted again), a failed one failing the link (link_failed); then, where the pass
    released a unit (of the stream classes of `landed`, a bit a lane a unit landed on), one read of the ticks after every
    landed word the pass raised, stored as the landing time of each unit it released (design/transport.md section 14,
@@ -433,7 +445,7 @@ static void link_receive(struct port *port){
       const int error=link_alive_listen(port,1);
       if(error)lane_lost(port,lane,error);
     }
-    else if(lane>=MESH_LANE_FIRST && (status_opcode>>32)&IBV_WC_RECV){lane_landed(port,lane);landed|=UINT32_C(1)<<lane;}
+    else if(lane>=MESH_LANE_FIRST && (status_opcode>>32)&IBV_WC_RECV){lane_landed(port,lane,done[i].byte_len);landed|=UINT32_C(1)<<lane;}
   }
   uint64_t at=0;
   while(landed){
@@ -747,7 +759,8 @@ static void link_lost(struct port *port){
 }
 /* design/transport.md section 14: data lane k's requests made over its stripe of the stream's rings at its link's
    connect (each slot's SEND from the out ring and receive into the in ring, at the lkeys of the device's registration,
-   and the dud's from the all-ones block), its sequences 0, and its receive window the lane's share of the completion
+   and the dud's from the all-ones block, MESH_DUD_SHORT short of the unit), its sequences 0, and its receive window the
+   lane's share of the completion
    queue in its frames (at most its slots); on the port's queue in the connect's job, before any progress thread serves
    it.  Its stream's words are the stream's opening's (streams_open), not the lane's */
 static void lane_reset(struct port *port,uint32_t k){
@@ -766,7 +779,7 @@ static void lane_reset(struct port *port,uint32_t k){
     in->request=(struct ibv_recv_wr){.wr_id=k,.sg_list=&in->span,.num_sge=1};
   }
   struct prepared_send *dud=s->sends+each;
-  dud->span=wire_span(&port->device,payload,(uint64_t)ones*M->pgsz,unit);
+  dud->span=wire_span(&port->device,payload,(uint64_t)ones*M->pgsz,unit-MESH_DUD_SHORT);
   dud->request=(struct ibv_send_wr){.sg_list=&dud->span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
   const uint32_t frames=unit/MESH_FRAME,room=MIN(l->share/frames,l->provider.queues[k].receive_capacity);
   *s=(struct lane_state){.window=MAX(1,MIN(each,room)),.sends=s->sends,.receives=s->receives};

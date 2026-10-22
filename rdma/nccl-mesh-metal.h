@@ -3,7 +3,7 @@
    mesh_stream_view: its out ring and ready words, its in ring and landed words) is one buffer over the region's pages
    the bridge took for it.  A wait for a landing is rdma/mesh.metal's mesh_wait_bounded (nccl-mesh-metal.m
    mesh_step_wait) on the landed word of its run's last unit at that unit's cycle (the bridge releases a stream's units
-   in order), ended by the landing, by the link's loss (the
+   in order), ended by the landing, by a dud's landing (the word's MESH_DUD, mesh.h), by the link's loss (the
    bridge's ~0) or by its program's bound (metal_begin's polls), reading no other word. */
 #ifndef NCCL_MESH_METAL_H
 #define NCCL_MESH_METAL_H
@@ -42,8 +42,9 @@ void *metal_retain(void *object);
    past which the dispatch records a failure, which the host finds there after the command buffer (nccl-mesh.c
    comm_failure) and the call fails as a value; no kernel halts on the record (a counted all-to-all's end reads it to report its outcome), every later dispatch running as encoded,
    a later wait ending at its own landing or bound.  The failure words: [0] the cause (METAL_BOUND the bound reached,
-   METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6]; a landing is none, whatever its
-   bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording [0],
+   METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6], METAL_DUD a dud's landing, its word's
+   MESH_DUD: its producer's group failed, design/transport.md section 10; a landing is none, whatever its bytes), [1] the
+   claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording [0],
    [3], [4] and [2]: nccl-mesh-kernels.h mesh_step_claim), [2] 1 + the position (stored last by the claimant, by the GPU
    alone, which the host reads, as METAL_COUNTED_ARRIVED does), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow,
    and [6] the host's stop (a revoke's), which a failed wait reads to name its cause.  The bound is the caller's, carried per crossing (nccl.h
@@ -56,6 +57,7 @@ void *metal_retain(void *object);
 #define METAL_BOUND 1
 #define METAL_LOST 2
 #define METAL_REVOKED 4
+#define METAL_DUD 8
 /* The classic form: the kernels encoded into the caller's id<MTLCommandBuffer>, in its compute encoder (`encoder`, left
    open) or one made here, each dispatch's arguments its setBytes.  With `residency` (an id<MTLResidencySet>; NULL: none),
    a fused group's: its deferred steps' records are the device's argument ring's, as the Metal 4 form's are, and the
@@ -101,7 +103,9 @@ struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, 
    piece); its failure recorded in `violation`'s words at position `at` of channel `channel`. */
 struct metal_wait { void *buffer, *violation; size_t word, slot; uint64_t cycle, at; uint32_t channel; };
 /* A run's release: in `buffer` (a channel's stream class), `count` ready words from `word`, each stored `value` (1 plus the
-   units' cycle) after every store before it; its first unit's slot of the out ring at `slot`. */
+   units' cycle) after every store before it, with MESH_DUD where a wait of the communicator whose failure words the
+   release names (the program's: metal_gate) has failed (their claim, [1]), so its units go as duds, never as data a
+   failed wait's piece made (design/transport.md section 10); its first unit's slot of the out ring at `slot`. */
 struct metal_release { void *buffer; size_t word, slot; uint64_t value; uint32_t count; };
 /* a run's release, its slots as they are (an empty position's too) */
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);

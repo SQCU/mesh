@@ -29,8 +29,9 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   transport (no RDMA WRITE or READ), a SEND and the receive it fills must cover the same number of 4 KiB frames, and a
   SEND is held by the hardware's credit until the peer has a receive posted.
 - **A readiness word.** A 64-bit word in shared memory with exactly one writer and one or more readers: a client's
-  "supplied" word for a position it sends, the bridge's "landed" word for a position it received. All-ones
-  (~0) in a landed word is a position whose data never came (section 10).
+  "supplied" word for a position it sends, the bridge's "landed" word for a position it received. A landed word
+  with its top bit set (mesh.h MESH_DUD) is a position whose data never came: ~0 where its link was lost, 1 + its
+  cycle with the bit where a dud came in its place (section 10).
 
 Nothing else is needed to move data: rows, requests naming rows, completions, and readiness words.
 
@@ -276,13 +277,49 @@ written at each boot, and the node stays reachable by ssh in between.
 ## 10. Duds
 
 If a client has not supplied a position it scheduled by the position's deadline (the call's own, at most the
-platform's 5 s), the bridge sends a dud: the scheduled number of frames of all-ones. The bridge chooses which rows
-every SEND names, so a dud is a SEND whose SGE names the bridge's own all-ones rows (one run as long as the longest
-position, written once at its start): nothing is copied into the client's rows or anywhere else. The receiving
-bridge's receive fills as for any SEND, so every posted receive is consumed in order and nothing is left posted.
+platform's 5 s), the bridge sends a dud: the scheduled number of frames of all-ones, `MESH_DUD_SHORT` (16) bytes short
+of the position's units (mesh-bridge.h). The bridge chooses which rows every SEND names, so a dud is a SEND whose SGE
+names the bridge's own all-ones rows (one run as long as the longest position, written once at its start): nothing is
+copied into the client's rows or anywhere else. The receiving bridge's receive fills as for any SEND (a SEND covers
+its receive's frames, TN3205; the keepalive's 16 bytes into a frame's receive are the same shape), so every posted
+receive is consumed in order and nothing is left posted.
 
-All-ones reads as failed wherever it lands: it is NaN in fp16 (0xFFFF) and fp32 (0xFFFFFFFF), and ~0 in a landed
-word. A dud is a client error, recorded against the client and its call, never a transport error.
+A dud is told by its SEND, never by its bytes. All-ones is a value like any other (an integer's -1, a mask), and the
+arithmetic drops it without a trace where it is NaN (a float max or min, the partials merge's row with no weight), so
+its bytes say nothing. The receiving bridge reads each receive's completion: one `MESH_DUD_SHORT` short of its unit is
+a dud's, and the bridge raises that unit's landed word, in order as any landing, to 1 + its cycle with the top bit set
+(mesh.h `MESH_DUD`). A consumer compares the word's other bits with 1 + the cycle it awaits, so its wait ends there as
+at any landing (and a dud of an earlier cycle in the slot is no landing of a later one), and a landing with the bit is
+its group's failure: ncclRemoteError, as at a lost link, whose ~0 has the bit too. The bytes land as bytes like any
+other, no consumer reads them as a signal (design/rubrics.md M4), and no arithmetic changes. A completion of any other
+length is a supplied unit's, so a provider that reported no length would leave every landing as before.
+
+Why the consumer fails. Between two nodes, the member a dud reaches is the failed one's only peer, and the loss or
+the failure ends both. On three or more, "every member sees the failure" holds only between members a link joins: on
+the line MacBook - mini - m5ult1, the MacBook-mini cable dropping mid-call fails the mini (its landed words ~0), whose
+units toward m5ult1 then go as duds over a healthy link; read as bytes, m5ult1 completed "ok" with the MacBook's and
+the mini's contributions left out (NaN, or integers silently wrong), and its next call met a communicator the mini had
+failed (the 2026-10-21 reviews, C1 and B2; design/HETEROGENEOUS-LINKS.md section 7, "ok with every value wrong"). With
+the mark, m5ult1's group fails, and so does every member past it, by induction along the call's dataflow:
+
+- a consumption awaits its run's last unit's landed word (the host path's `landing`; the GPU's `mesh_step_await`,
+  `spin` and the tracks' waits), so a member that consumes a dud fails its group;
+- a bridge that has sent a dud of a holding sends every later unit of it as one (mesh-link.c `lane_send`), so a run
+  with a dud among its units (its producer gave up while publishing it) has a dud as its last unit;
+- a member whose group failed supplies nothing more as data. The host path returns at its failure, and its declared
+  units go as duds (libnccl-mesh `nil_send`). On the GPU a failed wait records its failure and every later dispatch
+  runs as encoded, so each publication after a failed wait of its communicator stores its ready words with
+  `MESH_DUD` (a unit supplied as a dud: nccl-mesh-kernels.h `mesh_step_release`), which its bridge sends at once as
+  duds, and `nil_send` sends the rest once the host reads the failure.
+
+So a member whose result depends on a failed member's missing contribution fails its call, at any depth of any tree
+(a line, a ring, a star; links of any lane count, the dud riding the stream's own lane), and a member whose result
+does not may complete. Nothing is sent but the call's own units, nothing is waited for, and no link is cancelled but
+the one lost (a relay's other links stay up: design/rubrics.md M4's contagion is a party's failure ending what does
+not depend on it). A revocation sent to every member over the bootstrap's sockets would not do: those carry no order
+with a stream's units, so a member could land the duds, read no revocation yet, and return ok.
+
+A dud is a client error, recorded against the client and its call, never a transport error.
 
 Positions of a call whose client failed, was revoked or exited are sent as duds at once, without waiting for a
 deadline. Received positions whose consumer is gone land in their rows, and the rows are released as they land.
@@ -391,8 +428,11 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   the bridge sends its unsupplied declared units as duds at once. A consumer's own wait stays bounded where it waits.
 
 **Duds, and a holding's end.**
-- The send thread posts unit u when its ready word reads `1 + u / units`. Where u is declared, not supplied, and the
-  deadline has passed, it posts a dud: a SEND from the bridge's all-ones block.
+- The send thread posts unit u when its ready word reads `1 + u / units` (in its bits but `MESH_DUD`). Where u is
+  declared, not supplied, and the deadline has passed, or supplied with `MESH_DUD` (its producer's group failed), it
+  posts a dud: a SEND from the bridge's all-ones block, `MESH_DUD_SHORT` short of the unit; from a holding's first dud
+  on, every unit of the holding goes as one (section 10).
+- The receive thread raises a unit's landed word with `MESH_DUD` where its receive completed `MESH_DUD_SHORT` short.
 - When the owner word changes, the send thread ends the holding: every unit up to the most declared or supplied goes,
   the unsupplied ones as duds, and one unit more. Once every lane has sent them, the stream is free again, its `next`
   the first unit after them.

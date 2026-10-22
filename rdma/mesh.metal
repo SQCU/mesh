@@ -10,6 +10,12 @@
 #pragma METAL internals : enable
 #include <metal_stdlib>
 
+// A landed word's dud bit (mesh.h MESH_DUD, design/transport.md section 10): set by the bridge where the unit came as a
+// dud (1 + its cycle with it) or the link was lost (~0, which has it too). A landing's wait compares the word's other
+// bits with 1 + the cycle it awaits, so a dud of an earlier cycle is no landing of a later one, and a landing with the
+// bit is its group's failure, never data.
+#define MESH_DUD 0x8000000000000000UL
+
 // The word at `word` once it holds at least `target`, with a fence before each load and no bound: no wait takes it, and it and mesh_remote_wait are kept only for a libnccl-mesh.dylib built before 4efbec2f, whose STEPS
 // call mesh_remote_wait (metal-microbench metal_runtime.swift joins a dylib's STEPS to this file); both go once no
 // node's dylib is older (design/transport.md).
@@ -23,10 +29,15 @@ __attribute__((always_inline)) static inline W mesh_wait(volatile coherent(syste
     return seen;
 }
 
-// A landing's completion word (M07) once it holds 1 plus the invocation's cycle (M30; 0 in a one-pass program), or
-// UINT64_MAX once its link was cancelled (M12); the word returned tells the two apart.
+// A landing's completion word (M07) once its bits but MESH_DUD hold 1 plus the invocation's cycle (M30; 0 in a one-pass
+// program), its link cancelled (M12: UINT64_MAX) among them; the word returned tells a landing from a dud's (MESH_DUD).
 __attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coherent(system) device const ulong *completion, ulong cycle) {
-    return mesh_wait(completion, 1 + cycle);
+    ulong seen;
+    do {
+        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
+        seen = *completion;
+    } while ((seen & ~MESH_DUD) < 1 + cycle);
+    return seen;
 }
 
 // The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load), each after a
@@ -50,11 +61,19 @@ __attribute__((always_inline)) static inline W mesh_wait_bounded(volatile cohere
     return seen;
 }
 
-// A landing's completion word (M07) once it holds 1 plus the invocation's cycle (M30; 0 in a one-pass program), or
-// UINT64_MAX once its link was cancelled (M12), or as it is after `polls` loads; the word returned tells the three apart.
+// A landing's completion word (M07) once its bits but MESH_DUD hold 1 plus the invocation's cycle (M30; 0 in a one-pass
+// program), its link cancelled (M12: UINT64_MAX) among them, or as it is after `polls` loads, each after a fence as
+// mesh_wait_bounded's; the word returned tells the four apart: a landing, a dud's (MESH_DUD), the link's loss, the bound
+// (its other bits short of 1 + cycle).
 __attribute__((always_inline)) static inline ulong mesh_remote_wait_bounded(volatile coherent(system) device const ulong *completion, ulong cycle,
                                                                              uint polls) {
-    return mesh_wait_bounded(completion, 1 + cycle, polls);
+    ulong seen;
+    uint k = 0u;
+    do {
+        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
+        seen = *completion;
+    } while ((seen & ~MESH_DUD) < 1 + cycle && ++k < polls);
+    return seen;
 }
 
 // A landed slot's value, loaded through volatile coherent(system) (the NIC wrote it) in the widest words that divide it.
