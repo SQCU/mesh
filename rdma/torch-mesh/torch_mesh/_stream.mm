@@ -616,13 +616,18 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   return (int64_t)pipelines_.size() - 1;
 }
 
-// What Metal reports of the device a kernel runs on (its MTLDevice: maxThreadsPerThreadgroup's width,
-// maxThreadgroupMemoryLength, in that order) and of a compiled kernel (its pipeline: maxTotalThreadsPerThreadgroup, which
-// its registers may hold below the device's, threadExecutionWidth, staticThreadgroupMemoryLength, in that order): the
-// facts a specializer checks its configuration against, and reads where no document states them.
-static std::tuple<int64_t, int64_t> device_facts() {
+// What Metal reports of the device a kernel runs on (its MTLDevice: its Apple GPU family, the n of the newest
+// MTLGPUFamilyApple<n> it supports, asked from Apple1 up, since a GPU of a family supports every earlier one's ("a higher
+// GPU version is always a superset of an earlier version in the same GPU family": Apple, Detecting GPU features and Metal
+// software versions); maxThreadsPerThreadgroup's width; maxThreadgroupMemoryLength; in that order) and of a compiled
+// kernel (its pipeline: maxTotalThreadsPerThreadgroup, which its registers may hold below the device's,
+// threadExecutionWidth, staticThreadgroupMemoryLength, in that order): the facts a specializer selects and checks its
+// configuration by, and reads where no document states them.
+static std::tuple<int64_t, int64_t, int64_t> device_facts() {
   id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
-  return {(int64_t)device.maxThreadsPerThreadgroup.width, (int64_t)device.maxThreadgroupMemoryLength};
+  int64_t family = 0;
+  while ([device supportsFamily:(MTLGPUFamily)(MTLGPUFamilyApple1 + family)]) family++;
+  return {family, (int64_t)device.maxThreadsPerThreadgroup.width, (int64_t)device.maxThreadgroupMemoryLength};
 }
 
 static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
