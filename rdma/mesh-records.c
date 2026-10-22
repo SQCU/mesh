@@ -117,15 +117,15 @@ static void map_publish(void){
   }
   free(next);free(reached);free(order);
 }
-/* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), name, boot, host and facts are
-   the held one's changes only its health and sequence, written under the region's health serial and never the map's:
-   the map serial moves only where the mesh changes, and a health sample is no change of the mesh (nor of which nodes a
-   path reaches: that is the nodes and their reached nodes alone) */
+/* design/transport.md: a record whose links (each its node, streams and bandwidth), name, boot, host and facts are the
+   held one's changes only its health and sequence, written under the region's health serial and never the map's: the
+   map serial moves only where the mesh changes, and a health sample is no change of the mesh (nor of which nodes a
+   path reaches: that is the nodes and their links alone) */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
   int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
     a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model) && !memcmp(a->uuid,b->uuid,sizeof a->uuid);
   for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
-    same=a->reach[k].node==b->reach[k].node && a->reach[k].bandwidth==b->reach[k].bandwidth;
+    same=a->reach[k].node==b->reach[k].node && a->reach[k].streams==b->reach[k].streams && a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
 }
 static void health_put(struct mesh_record *held,const struct mesh_record *record){

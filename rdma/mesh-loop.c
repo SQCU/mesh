@@ -4,7 +4,8 @@
    readings that exercise what two nodes cannot show: collectives over 3 to 8 node maps.
 
      mesh-loop up FAMILY N REGION_MIB DIRECTORY
-       FAMILY one of line, ring, star, complete, torus (two rows of N/2); N bridges (.build/loop/mesh-flow-loop) of a
+       FAMILY one of line, ring, star, complete, torus (two rows of N/2), double (a line whose neighbours two cables
+       join, parallel links); N bridges (.build/loop/mesh-flow-loop) of a
        region of REGION_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
        returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
      mesh-loop nccl DIRECTORY COUNT host|walk
@@ -70,7 +71,7 @@ static int family_cables(const char *family, int n, struct loop_map *map) {
   if (!strcmp(family, "line") || !strcmp(family, "ring")) {
     for (int i = 0; i + 1 < n; i++) CABLE(i, i + 1);
     if (!strcmp(family, "ring") && n > 2) CABLE(n - 1, 0);
-  } else if (!strcmp(family, "star")) for (int i = 1; i < n; i++) CABLE(0, i);
+  } else if (!strcmp(family, "double")) for (int i = 0; i + 1 < n; i++) { CABLE(i, i + 1); CABLE(i, i + 1); } else if (!strcmp(family, "star")) for (int i = 1; i < n; i++) CABLE(0, i);
   else if (!strcmp(family, "complete")) { for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) CABLE(i, j); }
   else if (!strcmp(family, "torus")) {
     if (n % 2 || n < 4) return -1;
@@ -162,19 +163,8 @@ static int degree(const struct loop_map *map, int i) {
   for (int c = 0; c < map->cables; c++) d += map->cable[c].a == i || map->cable[c].b == i;
   return d;
 }
-/* the nodes node i's cables reach, each once: what its bridge's streams reach once every cable has paired */
-static int neighbours(const struct loop_map *map, int i) {
-  int d = 0;
-  for (int c = 0; c < map->cables; c++) {
-    const int other = map->cable[c].a == i ? map->cable[c].b : map->cable[c].b == i ? map->cable[c].a : -1;
-    int seen = other < 0;
-    for (int e = 0; !seen && e < c; e++)
-      seen = (map->cable[e].a == i && map->cable[e].b == other) || (map->cable[e].b == i && map->cable[e].a == other);
-    d += !seen;
-  }
-  return d;
-}
-/* every bridge's map holding the n nodes and its own cables paired, within `seconds` */
+/* every bridge's map holding the n nodes and its own cables paired (mesh_reached: a link an entry, so node i's bridge
+   lists its degree once every cable has paired, two cables toward one node two), within `seconds` */
 static int converged(const struct loop_map *map, double seconds) {
   const uint64_t deadline = clock_ns() + (uint64_t)(seconds * 1e9);
   int done = 0;
@@ -186,7 +176,7 @@ static int converged(const struct loop_map *map, double seconds) {
       uint32_t node = 0;
       if (mesh_loop_bind(map->node[i].region)) return EINVAL;
       const int records = mesh_nodes_health(health, LOOP_NODES + 1), count = mesh_reached(reached, MESH_STREAMS, &node);
-      done = records == map->n && count == neighbours(map, i);
+      done = records == map->n && count == degree(map, i);
     }
     if (!done) usleep(100000);
   }

@@ -11,11 +11,14 @@ extern "C" {
    declarations and integer constants only.  Every execution reads its node's bridge here when it starts, and no
    consumer gathers, parses or joins bridge records itself. */
 
-/* This node's bridge (design/transport.md section 14): its node, and the nodes it reaches, each with the bandwidth of
-   its stream toward it in bits a second; returns their count (at most `capacity` written; 0: the node alone), or
-   -errno where the bridge is unreachable.  A node is all a client names of the mesh: never a link, port or queue pair
-   (design/rubrics.md, Three kinds of source). */
-struct mesh_reach { uint32_t node,padding; uint64_t bandwidth; };
+/* This node's bridge (design/transport.md section 14): its node, and its links up, one entry a link (a cable: two links
+   toward one node are two entries), each with the node it reaches, its `streams` (the communicators the link carries at
+   once toward that node, as many as its plan has lane pairs for: design/HETEROGENEOUS-LINKS.md; 0 in a record of a
+   bridge before stream counts, which states none) and its `bandwidth` in bits a second (its live streams' shares
+   together); returns their count (at most `capacity` written; 0: the node alone), or -errno where the bridge is
+   unreachable.  A node is all a client names of the mesh: never a port or queue pair (design/rubrics.md, Three kinds of
+   source). */
+struct mesh_reach { uint32_t node,streams; uint64_t bandwidth; };
 int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node);
 /* The node's bridge's region: its arena's bytes (what its configuration registered at device up, the bridge's own pages
    included) and the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
@@ -32,10 +35,13 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
      MESH_LINKS_GRAPH  the links as given, either way, any connected graph (a ring, a tree or a mesh's links
                        among them, unoriented)
    bandwidth (NULL: none given) is link i's bandwidth either way in bits a second, a hardware fact (mesh_map's: the
-   lesser of its two ends' streams' bandwidths as their bridges report them, mesh_reached; 0 where none reports one),
-   which the
+   lesser of its two ends' as their bridges report them, mesh_reached; 0 where none reports one), which the
    routes and the packed trees read: of routes of equally few links the one over the faster hops (mesh_routes), and a
-   hop's capacity (mesh_trees_pack).
+   hop's capacity (mesh_trees_pack).  `streams` (NULL: none given) is link i's streams, the communicators it carries at
+   once (mesh_map's: the lesser of its two ends' as their bridges report them, mesh_reached; 0 where neither states
+   one): a communicator holds one stream toward each member it is joined to, so the communicators two nodes take at
+   once are their links' streams together (a further one is refused at its init, EBUSY: rdma/NCCL.md).  No planner
+   function reads it; mesh_map writes it, and mesh_map_members carries it where both maps give it.
    `relays` (a graph's, with a table) more nodes, numbered from `nodes`, that a route may cross and that hold no rank:
    a collective's ranks are the map's first `nodes`, and its links may join any of its nodes and relays (a
    communicator's map has none: the bridges forward nothing, nccl-mesh.c map_of).  `mark` (NULL: each node's number)
@@ -47,10 +53,10 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
    nodes are linked where the route between them crosses no other of them (relays alone), and that hop's bytes cross
    every link of it (mesh_trees_pack).  Without one, two nodes are linked where a link joins them.  Several links listed
    between one pair are parallel: the planner counts them together at n times the slowest one's bandwidth (mesh_routes,
-   mesh_trees_pack); mesh_map lists one link a pair.  `link`, `bandwidth`, `next` and `mark` are the caller's
-   storage. */
+   mesh_trees_pack); mesh_map lists every link, so two nodes joined by two cables are two links.  `link`, `bandwidth`,
+   `next`, `mark` and `streams` are the caller's storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
-struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark; };
+struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark,*streams; };
 /* 0 where a map is one, else EINVAL: every link's nodes among its nodes and relays; a ring one cycle through every node
    with one link into each; a tree nodes-1 links, one into each node but the root, every node reaching the root; with a
    table (a graph's, where it has relays), its every entry a node or relay its row's node is linked to, or that node.  A
@@ -83,21 +89,26 @@ uint32_t mesh_route_path(const struct mesh_link_map *,uint32_t a,uint32_t b,uint
    mesh_routes makes of its links): map node i the whole map's node members[i] (one it does not hold is linked to
    nothing), the whole map's other nodes its relays (numbered from n, ascending), each with its mark (the whole
    map's, written where map->mark is given), its links every link of the whole map renumbered (a mesh's every pair,
-   at its listed bandwidth or none), and its table the whole map's, written where map->next is given: so two members
+   at its listed bandwidth or none), each with its streams where both maps give them (map->streams and
+   whole->streams; 0 for a mesh's pair it lists no link of), and its table the whole map's, written where map->next is
+   given: so two members
    are linked where their route crosses no other member, and that hop's bytes cross each link of its route
    (mesh_trees_pack).  n 0: the whole map itself.  whole_node[i] (NULL: none) the whole map's node map node i is
    (whole->nodes for a member it does not hold).  The kind MESH_LINKS_MESH where there are no relays and a link joins
    every pair (several a pair's parallel links), else MESH_LINKS_GRAPH.  On entry map->nodes and map->links are the
-   room of whole_node, mark and next's rows (the map's nodes and relays together), and of link and bandwidth; returns the
+   room of whole_node, mark and next's rows (the map's nodes and relays together), and of link, bandwidth and streams;
+   returns the
    map's nodes, map->relays its relays, or -errno (ENOSPC: the room is short, map->nodes and map->links then the room
    needed; EINVAL: a member twice, relays and map->next or map->mark NULL, or a whole map with relays; ENOMEM).  The
    one rule mesh_map reads the bridges' records by. */
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map);
-/* The map of the node's bridge (design/transport.md) as of one map serial, from its records of the nodes every node's
-   bridge reaches (mesh_reached's views), so the same records give every member the same map: the whole map, its nodes
-   the records' ascending by bridge, two joined by one link where each one's bridge reaches the other, at the lesser
-   of the two ends' bandwidths (0 where either reports none), each node marked by its bridge's number, its
-   table mesh_routes';
+/* The map of the node's bridge (design/transport.md) as of one map serial, from its records of the links every node's
+   bridge has up (mesh_reached's views), so the same records give every member the same map: the whole map, its nodes
+   the records' ascending by bridge, two joined where each one's bridge reaches the other, by as many links as the
+   fewer of the two records lists toward the other (two cables between them two links: each record's entries toward
+   the other ranked by bandwidth, then streams, the faster first, and its k-th taken with the other's k-th), each at the
+   lesser of the two ends' bandwidths and of their streams (each 0 where neither end states one), the links of a pair
+   in that rank, each node marked by its bridge's number, its table mesh_routes';
    then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
    i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its
    bridge's record holds it, NUL-terminated ("" for a node with no record).  MESH_NAME_BYTES: a LocalHostName of up

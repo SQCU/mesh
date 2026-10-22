@@ -11,7 +11,8 @@
    count, or IBV_WC_LOC_LEN_ERR where the SEND is longer than the receive.  A queue pair moved to the error state
    flushes its posted receives and pending SENDs (IBV_WC_WR_FLUSH_ERR), as mesh-verbs.h pair_flush expects.  A device
    holds at most 10 queue pairs (a TB5 device's max_qp 11, 10 usable: design/transport.md), or its max_qp less one
-   where LOOPVERBS_MAX_QP names it (device_max_qp: design/HETEROGENEOUS-LINKS.md), a SEND at most half a ring
+   where LOOPVERBS_MAX_QP names it (device_max_qp: design/HETEROGENEOUS-LINKS.md), or fewer than it states where
+   LOOPVERBS_HOLDS names it (device_holds), a SEND at most half a ring
    (the port's max_msg_sz).  Pairing is the bridges' own (their control sockets on the loopback interface).  Only the
    bridge's verbs are provided: one scatter-gather entry a request, SEND and RECV on unreliable-connected queue pairs,
    one port. */
@@ -235,15 +236,24 @@ const char *ibv_get_device_name(struct ibv_device *device) { return device->name
    names it, entries `rdma_loop<i>=<max_qp>` apart by commas (3: an M5 Ultra's device on macOS 27,
    design/HETEROGENEOUS-LINKS.md), so the two ends of a loop cable can hold different numbers of queue pairs; a device
    holds its max_qp less one, as a TB5 device does on both */
-static int device_max_qp(const struct ibv_device *device) {
-  const char *list = getenv("LOOPVERBS_MAX_QP");
+static int device_entry(const char *variable, const struct ibv_device *device, int otherwise) {
+  const char *list = getenv(variable);
   const size_t length = strlen(device->name);
   for (const char *at = list; at && *at; at = strchr(at, ',') ? strchr(at, ',') + 1 : NULL)
     if (!strncmp(at, device->name, length) && at[length] == '=') return atoi(at + length + 1);
-  return LOOP_DEVICE_QPS + 1;
+  return otherwise;
+}
+static int device_max_qp(const struct ibv_device *device) { return device_entry("LOOPVERBS_MAX_QP", device, LOOP_DEVICE_QPS + 1); }
+/* the queue pairs a device makes before it refuses the next: its max_qp less one, or fewer where LOOPVERBS_HOLDS names
+   it (entries `rdma_loop<i>=<count>` as LOOPVERBS_MAX_QP's), its max_qp stated as ever: a device that holds fewer than
+   it states, as a machine whose devices share their queue pairs would (design/HETEROGENEOUS-LINKS.md P1, P2) */
+static int device_holds(const struct ibv_device *device) {
+  const int most = device_max_qp(device) - 1, held = device_entry("LOOPVERBS_HOLDS", device, most);
+  return held < most ? held : most;
 }
 
-/* each open device's queue pairs, refused past its max_qp less one as the TB5 device refuses them */
+/* each open device's queue pairs, refused past what it holds (device_holds), as the TB5 device refuses them past its
+   max_qp less one */
 static struct { struct ibv_context *context; int qps; } opened_[LOOP_DEVICES * 4];
 static int *device_qps(struct ibv_context *context) {
   for (size_t i = 0; i < sizeof opened_ / sizeof *opened_; i++)
@@ -386,7 +396,7 @@ struct ibv_qp *ibv_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *init) {
   q->qp.state = IBV_QPS_RESET;
   pthread_mutex_lock(&lock_);
   int *held = device_qps(pd->context);
-  const int most = device_max_qp(pd->context->device) - 1;
+  const int most = device_holds(pd->context->device);
   uint32_t number = LOOP_QPS;
   for (uint32_t k = 0; held && *held < most && k < LOOP_QPS && number == LOOP_QPS; k++) {
     const uint32_t at = (atomic_fetch_add(&fabric_->next, 1)) % LOOP_QPS;

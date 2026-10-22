@@ -102,58 +102,69 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   }
 }
 
-/* design/transport.md section 14: the one join of two nodes' records: 1 where each one's bridge reaches the other
-   (its record names the other among the nodes it reaches), *slowest the lesser bandwidth either reports (0: neither
-   reports one); else 0 */
-static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *slowest){
-  for(uint32_t i=0;i<record->reached && i<MESH_STREAMS;i++)
-    if(record->reach[i].node==node){
-      const uint64_t bandwidth=record->reach[i].bandwidth;
-      if(bandwidth && (!*slowest || bandwidth<*slowest))*slowest=bandwidth;
-      return 1;
-    }
-  return 0;
+/* design/transport.md section 14: the one join of two nodes' records.  A record's links toward `node` (its entries naming
+   it, a link an entry: mesh-call.h mesh_nodes_reached), ranked by bandwidth, then streams, the faster first, into
+   `ends` (room MESH_STREAMS); their count */
+static int mesh_reach_faster(const void *x,const void *y){
+  const struct mesh_reach *a=x,*b=y;
+  return a->bandwidth!=b->bandwidth?(a->bandwidth<b->bandwidth)-(a->bandwidth>b->bandwidth):(a->streams<b->streams)-(a->streams>b->streams);
 }
-static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *bandwidth){
-  uint64_t slowest=0;
-  const uint32_t ends[2]={mesh_paired(a,b->node,&slowest),mesh_paired(b,a->node,&slowest)};
-  if(!ends[0] || !ends[1])return 0;
-  *bandwidth=slowest;
-  return ends[0]<ends[1]?ends[0]:ends[1];
+static uint32_t mesh_paired(const struct mesh_record *record,uint32_t node,struct mesh_reach *ends){
+  uint32_t count=0;
+  for(uint32_t i=0;i<record->reached && i<MESH_STREAMS;i++)if(record->reach[i].node==node)ends[count++]=record->reach[i];
+  qsort(ends,count,sizeof *ends,mesh_reach_faster);
+  return count;
+}
+/* the lesser of two ends' figures, where either states one (0: neither does) */
+static uint64_t mesh_lesser(uint64_t a,uint64_t b){ return a && b?(a<b?a:b):a?a:b; }
+/* the links joining a and b: as many as the fewer of the two records lists toward the other (none where either lists
+   none: each one's bridge reaches the other), the k-th of each one's ranked links taken together, link k (its node b's)
+   at the lesser bandwidth and the lesser streams either end states, the faster first, at most `room` written; their
+   count */
+static uint32_t mesh_join(const struct mesh_record *a,const struct mesh_record *b,struct mesh_reach *link,uint32_t room){
+  struct mesh_reach ends[2][MESH_STREAMS];
+  const uint32_t one=mesh_paired(a,b->node,ends[0]),other=mesh_paired(b,a->node,ends[1]),joins=one<other?one:other;
+  for(uint32_t k=0;k<joins && k<room;k++)
+    link[k]=(struct mesh_reach){.node=b->node,.streams=(uint32_t)mesh_lesser(ends[0][k].streams,ends[1][k].streams),
+                                .bandwidth=mesh_lesser(ends[0][k].bandwidth,ends[1][k].bandwidth)};
+  return joins;
 }
 int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
-  uint64_t bandwidth=0;
-  const uint32_t joined=mesh_join(a,b,&bandwidth);
-  if(joined)*beta=bandwidth?8e9/(double)bandwidth:0;
-  return (int)joined;
+  struct mesh_reach fastest;
+  const uint32_t joins=mesh_join(a,b,&fastest,1);
+  if(joins)*beta=fastest.bandwidth?8e9/(double)fastest.bandwidth:0;
+  return joins!=0;
 }
 
-/* The records' whole map, its nodes ascending (the records sorted by node), one link where two join (mesh_join), at
-   the join's bandwidth, and its routing table (mesh-collective.c mesh_routes, each node marked by its bridge's number,
-   so every member that holds the same records makes the same routes) */
-struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; struct mesh_link_map map; };
+/* The records' whole map, its nodes ascending (the records sorted by node), each link where two join (mesh_join, the
+   faster first), at its bandwidth and streams, and its routing table (mesh-collective.c mesh_routes, each node marked
+   by its bridge's number, so every member that holds the same records makes the same routes) */
+struct mesh_whole { uint32_t n,(*link)[2],*mark,*next,*streams; uint64_t *bandwidth; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
 }
-static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->bandwidth);free(w->mark);free(w->next);}
+static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->bandwidth);free(w->streams);free(w->mark);free(w->next);}
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
   size_t joins=1;
-  uint64_t bandwidth;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=(size_t)mesh_join(r+a,r+b,&bandwidth);
+  struct mesh_reach join[MESH_STREAMS];
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=(size_t)mesh_join(r+a,r+b,join,MESH_STREAMS);
   *w=(struct mesh_whole){.n=n,.link=malloc(joins*sizeof *w->link),.bandwidth=malloc(joins*sizeof *w->bandwidth),
-    .mark=malloc(((size_t)n+1)*sizeof *w->mark),.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
-  if(!w->link || !w->bandwidth || !w->mark || !w->next)return ENOMEM;
+    .streams=malloc(joins*sizeof *w->streams),.mark=malloc(((size_t)n+1)*sizeof *w->mark),.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
+  if(!w->link || !w->bandwidth || !w->streams || !w->mark || !w->next)return ENOMEM;
   uint32_t links=0;
   for(uint32_t a=0;a<n;a++){
     w->mark[a]=r[a].node;
-    for(uint32_t b=a+1;b<n;b++)
-      if(mesh_join(r+a,r+b,&bandwidth)){
-        w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=bandwidth;links++;
+    for(uint32_t b=a+1;b<n;b++){
+      const uint32_t joined=mesh_join(r+a,r+b,join,MESH_STREAMS);
+      for(uint32_t k=0;k<joined;k++){
+        w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=join[k].bandwidth;w->streams[links]=join[k].streams;links++;
       }
+    }
   }
-  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.bandwidth=w->bandwidth,.relays=0,.next=NULL,.mark=w->mark};
+  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.bandwidth=w->bandwidth,.relays=0,.next=NULL,
+    .mark=w->mark,.streams=w->streams};
   const int error=n?mesh_routes(&w->map,w->next):0;
   if(!error)w->map.next=w->next;
   return error;
