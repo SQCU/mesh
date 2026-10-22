@@ -135,29 +135,44 @@ commit rule, the same for every caller (torch-mesh README, Performance). While t
 stream's buffers, it joins the open command buffer instead of paying for a commit of its own. The next step's
 publication, or the host's next wait, commits that buffer.
 
-G is the number of the GPU's cores, so the whole GPU works: one worker a core. The columns come in tiles of 8, and
-each worker takes a fair share of them. If there are n tiles, each worker takes n/G of them, rounded down, and the first
-few workers take one more, so the shares differ by one tile at most. y's columns over the share are split this way, and
-so are z's columns over the width. The width and the rank's share must be multiples of 8, with at least one tile for
-every core. If one is not, the service stops with an error that names the nearest values that would run.
+The kernel is compiled for its shape: the width K, the rank's share S and the row count. Each row count the service
+plans gets its own instance (`chain.form`). Every choice in it follows from three inputs: the shape, the capability
+file (below), and what Metal reports of the device and of the compiled kernel. Nothing is timed, and no choice is made
+by speed. A measurement of the sampled shapes checks the rules; it is never read back by the code.
 
-The rows are not built into the kernel. The row count is a word the host passes with each step. The kernel's work
-items are pairs: a group of rows and a tile of columns. Only the size of a row group, RG, is built in, since it sets
-how many registers a simdgroup uses. So one compiled kernel serves any row count that is a multiple of 8 times RG, up
-to the capacity the configuration gives. A product is split along K where a worker has fewer items than simdgroups.
-That split is a word too, worked out once for each row count.
+- **Tiles.** Columns and rows come in tiles of the matrix unit's edge (8 on Apple7 and later), so the width, the share
+  and the row count must be positive multiples of it.
+- **Workers.** G is the GPU's cores, or the larger stage's column tiles where there are fewer. Each worker takes a fair
+  share of a stage's tiles: n/G rounded down, the first few one more. y's columns over the share are split this way,
+  and so are z's columns over the width. Where a stage has fewer tiles than workers, the workers without one wait at its
+  stamps.
+- **Simdgroups.** A work item is a group of RG row tiles by one column tile, over K's tiles. A worker runs as many
+  simdgroups as the busier stage can keep working, each on one K tile at least, up to the device's limit, rounded
+  down to a power of two. The SIMD width is the compiled pipeline's (`threadExecutionWidth`), since no document states
+  it.
+- **Row groups.** RG is the largest power of two that divides the row tiles and keeps that many simdgroups working. A
+  larger RG loads each weight tile once for more rows. If the compiled pipeline then holds fewer threads than the
+  simdgroups need (`maxTotalThreadsPerThreadgroup`, which its registers set), RG halves.
+- **The K split.** Where a worker has fewer items than simdgroups, a product is split along K, ks ways, a power of two.
+  The ks partials of an item are summed as a tree in threadgroup memory: log2(ks) rounds, one barrier each, a batch of
+  RB row tiles' partials a round, RB as many as the threadgroup memory holds. The split is a word the host passes,
+  worked out once for each row count.
 
-Each rank builds one instance of the kernel. Its RG is 1, so a work item is one tile of 8 rows by one tile of 8
-columns. Its threads are the most the GPU builds this kernel for. The rank compiles the kernel at 32 threads, one
-simdgroup, and doubles the count until the GPU refuses to build the pipeline. It keeps the last count that built. That
-compile reads what the GPU can run. Nothing is timed, and no choice is made by speed.
+## The capability
+
+A capability file states what Apple documents about a GPU family: its threads and threadgroup memory a threadgroup,
+the alignment of that memory, and the edge of its matrix unit. [etc/compute/apple9.json](../etc/compute/apple9.json)
+covers the M4-series, and [etc/compute/apple10.json](../etc/compute/apple10.json) the M5-series. Each names its sources,
+Apple's Metal Feature Set Tables and the Metal Shading Language Specification. The service is given the file for the
+node it runs on. It checks the file against what Metal reports of the device and stops where they differ. What no
+document states, the SIMD width and how many threads a compiled kernel holds, is read from the compiled pipeline.
 
 ## The configuration
 
 The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
 width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
-two rings. It also says how many first steps to check. The kernel's threads are the most the GPU builds, its row
-group is one tile, and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and rows there are, so the configuration does not. Every value
+two rings. It also says how many first steps to check, and names the node's capability file. The kernel's form
+follows from the shape and that file, and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and rows there are, so the configuration does not. Every value
 must be there. The service has no defaults, and a missing value is an error.
 
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that

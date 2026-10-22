@@ -1,0 +1,12 @@
+{
+  "family": "Apple10",
+  "chips": ["A19-series", "M5-series"],
+  "sources": {
+    "family, threads, threadgroup memory": "Apple, Metal Feature Set Tables (developer.apple.com/metal/Metal-Feature-Set-Tables.pdf), read 2026-10-21: the Metal GPUs table, and the GPU implementation limits by family",
+    "simdgroup matrix": "Apple, Metal Shading Language Specification, SIMD-group matrix functions (simdgroup_half8x8, simdgroup_float8x8); Metal Feature Set Tables: SIMD-scoped matrix multiply operations, Apple7 and later"
+  },
+  "max_threads_per_threadgroup": 1024,
+  "threadgroup_memory_bytes": 32768,
+  "threadgroup_memory_alignment_bytes": 16,
+  "simdgroup_matrix_edge": 8
+}

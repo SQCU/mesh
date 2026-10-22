@@ -6,5 +6,6 @@
   "parts": [512, 512],
   "row_capacity": 64,
   "ring_bytes": 25165824,
-  "check": 8
+  "check": 8,
+  "capability": "../etc/compute/apple9.json"
 }

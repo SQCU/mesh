@@ -170,7 +170,7 @@ def main():
     steps, rows, inputs = operand(config, rank)
     block, deep, sums = ring(config, steps, rows)
     a, b, full = shares(config, rank, size)
-    step = chain.Step(a, b, rows, config['row_capacity'])
+    step = chain.Step(a, b, rows, config['row_capacity'], chain.capability(config['capability']))
     del a, b
     E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
     P = torch_mesh.empty(sums, rows, width, dtype=torch.half)

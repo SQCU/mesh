@@ -13,13 +13,13 @@ inline void publish(device atomic_uint* stamps, uint w, uint tid, thread uint& p
 }
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint G, uint PATIENCE>
+template <uint G, uint SIMD, uint PATIENCE>
 inline bool await_stamps(device atomic_uint* stamps, uint target, uint sgid, uint lane,
                          threadgroup atomic_uint* stop, device atomic_uint* err, uint cause) {
     if (sgid == 0) {
         for (uint polls = 0;; polls++) {
             bool seen = true;
-            for (uint i = lane; i < G; i += 32) seen = seen && atomic_load_explicit(&stamps[i], memory_order_relaxed) >= target;
+            for (uint i = lane; i < G; i += SIMD) seen = seen && atomic_load_explicit(&stamps[i], memory_order_relaxed) >= target;
             if (simd_all(seen)) break;
             if (polls > PATIENCE) {
                 if (lane == 0) { atomic_store_explicit(stop, 1u, memory_order_relaxed); atomic_fetch_or_explicit(err, cause, memory_order_relaxed); }
@@ -54,7 +54,7 @@ inline void partial(device const half* src, uint ld, device const half* wp, uint
 }
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint RG, uint KIN, uint SG, typename Epi>
+template <uint RG, uint RB, uint KIN, uint SG, typename Epi>
 inline void stage(device const half* src, uint ld, device const half* Wt, uint2 tiles, uint groups, uint ks, uint sgid,
                   threadgroup float* red, thread Epi& epi) {
     constexpr uint KT = KIN / 8;
@@ -66,19 +66,21 @@ inline void stage(device const half* src, uint ld, device const half* Wt, uint2 
         simdgroup_float8x8 acc[RG];
         for (uint r = 0; r < RG; r++) acc[r] = simdgroup_float8x8(0.0f);
         if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tiles.x + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
-        for (uint r = 0; r < RG; r++) {
-            if (ks > 1) {
-                simdgroup_store(acc[r], red + sgid * 64, 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                if (active && seg == 0)
-                    for (uint j = 1; j < ks; j++) {
-                        simdgroup_float8x8 p; simdgroup_load(p, red + (sgid + j) * 64, 8);
-                        for (uint e = 0; e < 2; e++) acc[r].thread_elements()[e] += p.thread_elements()[e];
+        for (uint r0 = 0; r0 < RG && ks > 1; r0 += RB) {
+            for (uint r = 0; r < RB; r++) simdgroup_store(acc[r0 + r], red + (sgid * RB + r) * 64, 8);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint s = 1; s < ks; s <<= 1) {
+                if (active && seg % (2 * s) == 0)
+                    for (uint r = 0; r < RB; r++) {
+                        simdgroup_float8x8 p; simdgroup_load(p, red + ((sgid + s) * RB + r) * 64, 8);
+                        for (uint e = 0; e < 2; e++) acc[r0 + r].thread_elements()[e] += p.thread_elements()[e];
+                        if (2 * s < ks) simdgroup_store(acc[r0 + r], red + (sgid * RB + r) * 64, 8);
                     }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            if (active && seg == 0) epi(acc[r], ct, g * RG + r);
         }
+        if (active && seg == 0)
+            for (uint r = 0; r < RG; r++) epi(acc[r], ct, g * RG + r);
     }
 }
 
@@ -106,7 +108,7 @@ struct Summand {
 struct chain_words { uint first, phase, rows, ks0, ks1, last, drains, pad; mesh_step_binding land, publish; };
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint TILE, uint K, uint S, uint G, uint RG, uint THREADS, uint PATIENCE>
+template <uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint PATIENCE>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
                        device half* out [[buffer(3)]], device half* X [[buffer(4)]], device half* Y [[buffer(5)]], device half* P [[buffer(6)]],
@@ -115,8 +117,9 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
                        uint tid [[thread_index_in_threadgroup]], uint sgid [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]], uint w [[threadgroup_position_in_grid]]) {
     static_assert(TILE == 8, "simdgroup matrices are 8 x 8");
-    constexpr uint SG = THREADS / 32;
-    threadgroup float red[SG * 64];
+    static_assert(THREADS % SIMD == 0 && RG % RB == 0, "whole simdgroups; whole batches of row groups");
+    constexpr uint SG = THREADS / SIMD;
+    threadgroup float red[SG * RB * 64];
     threadgroup atomic_uint stop;
     threadgroup uint last;
     if (tid == 0) atomic_store_explicit(&stop, atomic_load_explicit(err, memory_order_relaxed) ? 1u : 0u, memory_order_relaxed);
@@ -146,13 +149,13 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     }
     if (words.last) return;
     publish(stamps, w, tid, phase);
-    if (!await_stamps<G, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 1u)) return;
+    if (!await_stamps<G, SIMD, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 1u)) return;
     Activated activated{Y, ys.x * TILE, S};
-    stage<RG, K, SG>(X, K, At, ys, groups, ks0, sgid, red, activated);
+    stage<RG, RB, K, SG>(X, K, At, ys, groups, ks0, sgid, red, activated);
     publish(stamps, w, tid, phase);
-    if (!await_stamps<G, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 2u)) return;
+    if (!await_stamps<G, SIMD, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 2u)) return;
     Summand summand{P, x0, K};
-    stage<RG, S, SG>(Y, S, Bt, xs, groups, ks1, sgid, red, summand);
+    stage<RG, RB, S, SG>(Y, S, Bt, xs, groups, ks1, sgid, red, summand);
     constant mesh_step_binding& b = words.publish;
     mesh_step_enter(*b.p, b.v, b.progress, w == 0 && tid == 0);
     threadgroup_barrier(mem_flags::mem_device);

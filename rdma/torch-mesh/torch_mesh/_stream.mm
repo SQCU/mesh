@@ -616,6 +616,22 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   return (int64_t)pipelines_.size() - 1;
 }
 
+// What Metal reports of the device a kernel runs on (its MTLDevice: maxThreadsPerThreadgroup's width,
+// maxThreadgroupMemoryLength, in that order) and of a compiled kernel (its pipeline: maxTotalThreadsPerThreadgroup, which
+// its registers may hold below the device's, threadExecutionWidth, staticThreadgroupMemoryLength, in that order): the
+// facts a specializer checks its configuration against, and reads where no document states them.
+static std::tuple<int64_t, int64_t> device_facts() {
+  id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
+  return {(int64_t)device.maxThreadsPerThreadgroup.width, (int64_t)device.maxThreadgroupMemoryLength};
+}
+
+static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
+  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("pipeline_facts: no kernel " + std::to_string(handle));
+  id<MTLComputePipelineState> state = pipelines_[handle];
+  return {(int64_t)state.maxTotalThreadsPerThreadgroup, (int64_t)state.threadExecutionWidth,
+          (int64_t)state.staticThreadgroupMemoryLength};
+}
+
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
                    int64_t at, int64_t gx, int64_t gy, int64_t threads) {
   if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));
@@ -882,6 +898,8 @@ static void fused_published() {
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
+  module.def("device_facts", &device_facts);
+  module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
   module.def("encode", &encode);
   module.def("timed", &timed);
