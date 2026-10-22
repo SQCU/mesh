@@ -8,7 +8,7 @@
 #include "mesh-call.h"
 #include "mesh-observe.h"
 #include <dispatch/dispatch.h>
-#include <SystemConfiguration/SystemConfiguration.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <sys/event.h>
 #include <sys/ioctl.h>
 #include <sys/kern_event.h>
@@ -340,7 +340,6 @@ extern struct port ports[MESH_PORTS];
 extern uint32_t port_count;
 extern int events,listener,hello,network,unreleased,finding;
 extern uint64_t now,sequence;
-extern char host[MESH_NAME_BYTES];
 extern struct mesh_ctx bridge;
 extern _Atomic int found;
 extern uint64_t memory;

@@ -86,16 +86,17 @@ struct mesh_stream {
   uint64_t posted_at[2],landed_at[2];
 };
 _Static_assert(sizeof(struct mesh_stream)==192,"mesh_stream");
-/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
-   the record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
+/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
+   record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
    model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), the nodes its bridge `reached`, an entry a node: the
    node, its streams (the most any one cable's plan toward it holds) and the bandwidth of every cable up toward it
    together (mesh-plan.h struct mesh_reach; mesh-link.c record_reach: a node's streams stripe over all its cables), and its
    host UUID (`uuid`: gethostuuid, the identity its node number is drawn from, AGENTS.md "A node is its hardware"; a
    loop bridge's, its host's mixed with its region's name), by which two hosts that share a number are told apart and
-   logged (mesh-records.c number_shared) */
-struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t region,memory;
+   logged (mesh-records.c number_shared).  No host name: a name a person reads is a label the readers take from the name
+   table by node number (etc/mesh-nodes.json, rdma/peers.py label) */
+struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; uint8_t uuid[16]; };
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
    that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The

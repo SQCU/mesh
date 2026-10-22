@@ -102,9 +102,10 @@ static void map_publish(void){
     const int held=record_held(x->record.node)!=NULL;
     if(reached[k])next[kept++]=x->record;
     if(x->record.node==M->node || reached[k]==held)continue;
-    if(reached[k] && x->gone)say("node %u (%s) back after %.1f s\n",x->record.node,x->record.name,(double)(now-x->gone)/1e9);
-    else if(reached[k])say("node %u (%s) joined\n",x->record.node,x->record.name);
-    else say("node %u (%s) unreachable, heard %.1f s before\n",x->record.node,x->record.name,(double)(now-x->heard)/1e9);
+    char id[37];uuid_unparse_lower(x->record.uuid,id);
+    if(reached[k] && x->gone)say("node %u (host %s) back after %.1f s\n",x->record.node,id,(double)(now-x->gone)/1e9);
+    else if(reached[k])say("node %u (host %s) joined\n",x->record.node,id);
+    else say("node %u (host %s) unreachable, heard %.1f s before\n",x->record.node,id,(double)(now-x->heard)/1e9);
     x->gone=reached[k]?0:now;
   }
   if(kept!=n || memcmp(next,r,(size_t)n*sizeof *r)){
@@ -117,13 +118,13 @@ static void map_publish(void){
   }
   free(next);free(reached);free(order);
 }
-/* design/transport.md: a record whose links (each its node, streams and bandwidth), name, boot, host and facts are the
+/* design/transport.md: a record whose links (each its node, streams and bandwidth), boot, host and facts are the
    held one's changes only its health and sequence, written under the region's health serial and never the map's: the
    map serial moves only where the mesh changes, and a health sample is no change of the mesh (nor of which nodes a
    path reaches: that is the nodes and their links alone) */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
-  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
-    a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model) && !memcmp(a->uuid,b->uuid,sizeof a->uuid);
+  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && a->region==b->region && a->memory==b->memory &&
+    !memcmp(a->model,b->model,sizeof a->model) && !memcmp(a->uuid,b->uuid,sizeof a->uuid);
   for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
     same=a->reach[k].node==b->reach[k].node && a->reach[k].streams==b->reach[k].streams && a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
@@ -148,7 +149,6 @@ static void record_put(struct known *k,const struct mesh_record *record){
 }
 void record_changed(void){
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=wire.length-held_pages*M->pgsz,.memory=memory};
-  memcpy(own.name,host,sizeof own.name);
   memcpy(own.model,model,sizeof own.model);
   memcpy(own.uuid,node_uuid,sizeof own.uuid);
   own.reached=record_reach(own.reach,MESH_STREAMS);
@@ -195,7 +195,6 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   struct mesh_record heard;
   if(bytes!=sizeof heard)return;
   memcpy(&heard,payload,sizeof heard);
-  heard.name[sizeof heard.name-1]=0;
   heard.model[sizeof heard.model-1]=0;
   if(!heard.node || heard.reached>MESH_STREAMS)return;
   if(heard.node==M->node){number_shared(heard.node,node_uuid,heard.uuid,own_told,from,"a record");return;}

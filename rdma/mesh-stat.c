@@ -37,8 +37,9 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link, one a pair of
    nodes however many cables join them, by the two nodes' numbers with its bandwidth in bits a second, its cables'
    together, and its streams, the communicators it carries at once, each null where none is reported), its region in bytes with the bytes no lease holds (mesh_region), and every node's
-   record as the bridge holds it, however many: its name, its bridge's region, its memory and hardware model, its boot
-   and its available memory (mesh_nodes_health, design/transport.md; `nodes_errno` where they could not be read) */
+   record as the bridge holds it, however many: its node, its bridge's region, its memory and hardware model, its boot
+   and its available memory (mesh_nodes_health, design/transport.md; `nodes_errno` where they could not be read); no
+   name: a node is its number, and a reader labels it from the name table (etc/mesh-nodes.json, rdma/peers.py label) */
 int main(void){
   struct port_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,*streams=NULL,room=64,links=64;
@@ -92,9 +93,8 @@ int main(void){
   printf(",\"nodes\":[");
   for(int i=0;i<known;i++){
     const struct mesh_health *h=&health[i].health;
-    printf("%s{\"node\":%u,\"name\":\"",i?",":"",health[i].node);
-    for(const char *c=health[i].name;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
-    printf("\",\"region\":%llu,\"memory\":%llu,\"model\":\"",(unsigned long long)health[i].region,(unsigned long long)health[i].memory);
+    printf("%s{\"node\":%u,\"region\":%llu,\"memory\":%llu,\"model\":\"",i?",":"",health[i].node,
+           (unsigned long long)health[i].region,(unsigned long long)health[i].memory);
     for(const char *c=health[i].model;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
     printf("\",\"booted\":%llu,\"available\":%llu}",(unsigned long long)h->booted,(unsigned long long)h->available);
   }

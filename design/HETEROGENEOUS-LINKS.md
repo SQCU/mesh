@@ -274,13 +274,11 @@ same line at default budgets on this branch behaves identically (section 8, P6).
   matters on that link.
 - **P6. The line harness's unbounded sendrecv** (section 7). It predates this change and is a library and harness
   issue, not the transport's.
-- **P7. Host names in the bridge's area** (AGENTS.md debts, not changed here). `mesh-link.c` `host_name` publishes
-  SCDynamicStoreCopyLocalHostName as the record's `name`, which mesh-peers merges announcements by, so replacing it
-  means changing those consumers together: publish the host UUID (or the hardware serial) there and let readers map
-  identity to a person's name. `nccl-mesh.c` `ncclGetUniqueId` falls back to `gethostname()` for the bootstrap's
-  listen host when the node holds no fabric address. It should fall back to an address the node holds instead
-  (a global or link-local IPv6 of an up interface). Both changes reach beyond this branch's links and are left for
-  their own review.
+- **P7. Host names in the bridge's area** (AGENTS.md debts). The record's `name` (`mesh-link.c` `host_name`, which
+  published SCDynamicStoreCopyLocalHostName) is gone: a record carries its host UUID, and readers take a person's name
+  from the name table by node number (`peers.py` `label`). `nccl-mesh.c` `ncclGetUniqueId` falls back to
+  `gethostname()` for the bootstrap's listen host when the node holds no fabric address. It should fall back to an
+  address the node holds instead (a global IPv6 or IPv4 of an up interface).
 
 ## 9. Deploying it
 

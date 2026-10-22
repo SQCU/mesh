@@ -120,10 +120,13 @@ service, to `mdots-Mac-Studio-2`, and `mdots-Mac-Studio.local`, its beacon and
 The name table is `etc/mesh-nodes.json`, entries keyed by host UUID, read through
 `rdma/peers.py` (`host`, `table`, `label`): a node it does not list is `node <number>`.
 The beacon announces the host UUID; `mesh-peers`, node-info, `mesh-top`, the observer
-and telemetry key on the node number and take names from the table. Reliance that
-predates this rule and remains is debt to remove, not precedent: the bridge map's
-`name` (`rdma/mesh-link.c`, which also reaches metal-microbench's `tools/mesh/grid.py`
-name selection), and the bootstrap's `gethostname()` (`rdma/nccl-mesh.c`).
+and telemetry key on the node number and take names from the table. The bridge's
+record carries no name (`rdma/mesh.h` `struct mesh_record`: its node, boot and host
+UUID), and `mesh-stat` prints none. Reliance that predates this rule and remains is
+debt to remove, not precedent: `mesh_map`'s `name` operand and `struct
+mesh_node_health`'s `name` (`rdma/mesh-plan.h`; libmesh writes `""` there), the
+name selection of metal-microbench's `tools/mesh/grid.py`, and the bootstrap's
+`gethostname()` (`rdma/nccl-mesh.c`).
 
 ## Fail toward access
 
