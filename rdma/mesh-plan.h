@@ -346,8 +346,9 @@ struct mesh_block { uint32_t from,to,source,target,type,element_bytes; uint64_t 
    at one end and its receives at the other are the same parts in the same order (mesh_lay).  `blocks` are the same at
    every rank in from, to, elements, element and order (a rank reads `source` and `first` of its own blocks alone, and
    `target` and `at` of the blocks to it alone).  block[k] (NULL: not written) the index of the block step k moves a
-   part of; *relayed (NULL: not written) the bytes of `relay` the rank uses.  Their count, at most mesh_forward_room's
-   (UINT32_MAX where its room could not be had). */
+   part of; *relayed (NULL: not written) the bytes of `relay` the rank uses.  Their count, at most mesh_forward_room's;
+   UINT32_MAX, nothing written, where a block names a rank past the table's nodes or moves elements between two ranks
+   the table joins by no route, or its room could not be had. */
 uint32_t mesh_forward_steps(const struct mesh_routing *,uint32_t rank,const struct mesh_block *blocks,uint32_t count,uint32_t relay,
                             struct mesh_step *steps,uint32_t *block,uint64_t *relayed);
 /* The most steps mesh_forward_steps makes at a rank of a pattern: two a route of each block. */

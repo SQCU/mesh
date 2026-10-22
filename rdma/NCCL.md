@@ -521,7 +521,9 @@ whose consumptions free the rings' slots, so a metadata position on the fast pat
 had run (and a caller may commit its command buffer after several groups); a group's path is each rank's own, so one
 mechanism serves both. A stage that its peers' sockets do not complete within the deadline fails the communicator
 (NCCL's error state: their streams no longer meet alike). A caller that holds the pattern passes it
-(`ncclMeshGroupPattern`, `ncclMeshAlltoAllPattern`, `ncclMeshAlltoAllCountedPattern`) and the group skips the stage.
+(`ncclMeshGroupPattern`, `ncclMeshAlltoAllPattern`, `ncclMeshAlltoAllCountedPattern`), every rank alike or none, and
+the group skips the stage; a rank that gives it where its peers gather theirs never meets them at the stage, which
+ends at the deadline.
 
 **A group's point-to-point calls are the whole communicator's**: every member issues each such group, as every rank of
 a program runs the same program from the same inputs (design/rubrics.md "Megatron TP is its semantics"), each with its

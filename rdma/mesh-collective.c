@@ -1130,6 +1130,12 @@ static void mesh_routing_cut(const struct mesh_routing *g,uint32_t r0,uint32_t r
 static int mesh_block_moves(const struct mesh_routing *g,const struct mesh_block *x){
   return x->from!=x->to && x->from<g->nodes && x->to<g->nodes && x->elements;
 }
+/* whether block x is no block of g's: a rank past its nodes, or elements between two ranks it joins by no route */
+static int mesh_block_stray(const struct mesh_routing *g,const struct mesh_block *x){
+  if(x->from>=g->nodes || x->to>=g->nodes)return 1;
+  const size_t p=(size_t)x->from*g->nodes+x->to;
+  return mesh_block_moves(g,x) && g->pair[p]==g->pair[p+1];
+}
 
 uint32_t mesh_forward_room(const struct mesh_routing *g,const struct mesh_block *blocks,uint32_t count){
   uint64_t room=0;
@@ -1147,7 +1153,10 @@ uint32_t mesh_forward_steps(const struct mesh_routing *g,uint32_t rank,const str
   uint64_t parts=0,bytes=0;
   for(uint32_t i=0;i<count;i++)
     if(mesh_block_moves(g,blocks+i))parts+=g->pair[(size_t)blocks[i].from*n+blocks[i].to+1]-g->pair[(size_t)blocks[i].from*n+blocks[i].to];
-  uint64_t *part=malloc((parts+1)*sizeof *part),*offset=malloc((parts+1)*sizeof *offset),*relay_at=malloc((parts+1)*sizeof *relay_at);
+  int stray=0;
+  for(uint32_t i=0;i<count;i++)stray|=mesh_block_stray(g,blocks+i);
+  uint64_t *part=stray?NULL:malloc((parts+1)*sizeof *part),*offset=stray?NULL:malloc((parts+1)*sizeof *offset),
+           *relay_at=stray?NULL:malloc((parts+1)*sizeof *relay_at);
   uint32_t k=0,rounds=0;
   if(!part || !offset || !relay_at){free(part);free(offset);free(relay_at);return UINT32_MAX;}
   /* each part's elements and place in its block, and, at a rank between its route's ends, its place in `relay` */

@@ -420,6 +420,13 @@ static int routing_solve(struct ncclComm *comm) {
     routing_free(&made);
     return ENOMEM;
   }
+  /* the arrays the table holds, its room's rest given back (a realloc that fails keeps the room) */
+  void *start = realloc((void *)made.start, ((size_t)made.routes + 1) * sizeof *made.start);
+  if (start) made.start = start;
+  void *share = realloc((void *)made.share, ((size_t)made.routes + 1) * sizeof *made.share);
+  if (share) made.share = share;
+  void *node = realloc((void *)made.node, ((size_t)made.start[made.routes] + 1) * sizeof *made.node);
+  if (node) made.node = node;
   routing_keep(comm, &made);
   return 0;
 }
@@ -2725,8 +2732,10 @@ static ncclResult_t group_lower(struct call **list, size_t *n) {
    every member knows, the tensors after), and each call's pattern made whole from them.  A rank that issued no point
    call while another did takes an empty point exchange (it forwards); ranks whose records differ in their calls, or a
    pair whose sends and receives differ, fail the group alike, every rank from the one table, before it lays anything
-   (ncclInvalidUsage: the caller's).  Every member issues each such group (SPMD; nccl.h ncclGroupEnd), so the stage
-   meets every rank; one that never comes ends it at the platform's deadline (ncclRemoteError) */
+   (ncclInvalidUsage: the caller's).  Every member issues each such group with the same exchanges, a pattern given at
+   every rank or at none (SPMD; nccl.h ncclGroupEnd), so the stage meets every rank; a rank that never comes to it
+   (another program, or a pattern given where its peers gather theirs) ends it at the platform's deadline
+   (ncclRemoteError) */
 static ncclResult_t group_patterns(struct call **list, size_t *n) {
   const ncclComm_t comm = (*list)[0].comm;
   const int N = comm->nranks, me = comm->rank;
@@ -2775,16 +2784,20 @@ static ncclResult_t group_patterns(struct call **list, size_t *n) {
     uint64_t *none = calloc((size_t)N * N + 1, sizeof *none);
     result = none ? point_append(list, n, *list, none, 0) : fail(ncclSystemError, "out of memory");
   }
+  /* the calls the records describe, in their order (the point exchange, then the others in call order), each found
+     before any of them is made whole */
+  size_t *gathered = result ? NULL : calloc(calls + any + 1, sizeof *gathered), found = 0;
+  if (!result && !gathered) result = fail(ncclSystemError, "out of memory");
+  for (int pass = 0; !result && pass < 2; pass++)
+    for (size_t i = 0; i < *n && found < calls + any; i++)
+      if (exchange(*list + i) && !(*list)[i].whole && (*list)[i].point == !pass) gathered[found++] = i;
+  if (!result && found != calls + any)
+    result = fail(ncclInvalidUsage, "communicator %s: the group's point-to-point pattern given at this rank (ncclMeshGroupPattern) and gathered "
+                  "at another: every rank gives it, or none", comm->name);
   /* each call's pattern whole: block (a, b) rank a's sends toward b, checked against rank b's receives from a */
   for (uint64_t j = 0; !result && j < calls + any; j++) {
-    struct call *c = NULL;
-    for (size_t i = 0, seen = 0; !c && i < *n; i++) {
-      struct call *y = *list + i;
-      if (exchange(y) && !y->whole && (j < any ? y->point : !y->point) && (j < any || seen++ == j - any)) c = y;
-    }
-    uint64_t *full = c ? calloc((size_t)N * N + 1, sizeof *full) : NULL;
-    if (!c) { result = fail(ncclInvalidUsage, "communicator %s: the group's point-to-point pattern given at this rank (ncclMeshGroupPattern) and "
-                            "gathered at another: every rank gives it, or none", comm->name); break; }
+    struct call *c = *list + gathered[j];
+    uint64_t *full = calloc((size_t)N * N + 1, sizeof *full);
     if (!full) { result = fail(ncclSystemError, "out of memory"); break; }
     for (int a = 0; a < N; a++)
       for (int b = 0; !result && b < N; b++) {
@@ -2801,7 +2814,7 @@ static ncclResult_t group_patterns(struct call **list, size_t *n) {
     free(c->segments);
     c->segments = full; c->whole = 1; c->count = exchange_count(c);
   }
-  free(all); free(at);
+  free(gathered); free(all); free(at);
   return result;
 }
 
