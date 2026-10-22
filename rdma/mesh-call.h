@@ -36,8 +36,8 @@ struct mesh_stream_view {
 };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
 /* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list
-   (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL where its rows leave the
-   page table, EAGAIN where the list's slot is not yet taken (MESH_STREAM_ENTRIES presented
+   (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL where `at` is not a page's
+   first byte or its bytes leave the arena, EAGAIN where the list's slot is not yet taken (MESH_STREAM_ENTRIES presented
    and not taken: present it again), EPERM, or ENOLINK */
 int mesh_stream_present(struct mesh_ctx *,uint32_t stream,int land,struct mesh_entry entry);
 /* design/transport.md section 14: the holder's deadline (uptime ns): UINT64_MAX while it supplies, now where it can

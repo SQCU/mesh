@@ -18,12 +18,12 @@
    bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units, a SEND filling a receive of a whole unit.  It
    changes only where that contract does (the operator, 2026-10-21: "commits which do not change an interface 'contract'
    in any way are not interface-version changes regardless of their hashes").  132: every unit on a stream's lanes is
-   a page, landing in its row's own page (design/pages-and-functions.md), wherever the receiver's plan put it; a
-   holding's unit u goes on its stream's lane u mod 2 */
+   a whole page, landing in the page the receiver's plan put it in; a holding's unit u goes on its stream's lane
+   u mod 2 */
 #define MESH_VERSION 132u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 135u
+#define MESH_LAYOUT 134u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -61,15 +61,16 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
-/* design/pages-and-functions.md; design/transport.md section 14: an entry of a holding's send list or landing list: the
-   holder's rows from `row` on (a row a page), `bytes` of them, and the count that governs them: a send entry's byte k is
-   ready once the word at region offset `word` (0: the holding's `ready`) reads at least `base` + k + 1, and is sent from
-   its row's page wherever that is; a landing entry's pages land in its rows' own pages, wherever they are, once the word
-   at `word` (0: none) reads at least `base` (the rows released by their reader: design/pages-and-functions.md, a page
-   is written again only after release).  Every row's page is fixed by its holder's plan before the holding's first
-   call and stays its for the holding (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
-   compiled plans which do not change dynamically during a chain of function calls") */
-struct mesh_entry { uint64_t row,bytes,word,base; };
+/* design/transport.md section 14: an entry of a holding's send list or landing list: a run of the holder's own pages,
+   `bytes` of them from region offset `at` (a page's first byte: a lease's), and the count that governs them: a send
+   entry's byte k is ready once the word at region offset `word` (0: the holding's `ready`) reads at least `base` + k + 1;
+   a landing entry is received into once the word at `word` (0: none) reads at least `base` (its pages released by
+   their reader: design/pages-and-functions.md, a page is written again only after release).  `at` is the literal page
+   the holder's plan put the run in, compiled once from its page table before the holding's first call, so the bridge
+   reads no table on the data path (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
+   compiled plans which do not change dynamically during a chain of function calls"); scattered pages are several
+   entries */
+struct mesh_entry { uint64_t at,bytes,word,base; };
 /* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, its share of the
    link's bandwidth and `wire`, its identity, the same at both its ends and no other stream's between the two nodes (0
    until it is live): the bridge's.  A holder takes `owner` from 0 to its own while `free`; the bridge then makes the

@@ -363,22 +363,24 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   a stream's lanes is a whole page: page p of a holding goes on the stream's lane p mod 2.
 - Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
   GID and queue pair number) and which no other stream between the two nodes has.
-- A holding has two lists of entries the holder presents in order, each its own rows (`struct mesh_entry`: its first
-  row, any number of bytes over the rows from it, the count that governs them): a send list and a landing list. Each
-  list is a sequence of pages, and page i of a send list lands as page i of the peer's landing list. Each end lays its
-  own pages where its plan put them: scattered rows in one client may land as one run of rows in another, and one
-  buffer may go to several runs in several clients, with nothing copied. Every placement is the holder's plan, fixed
+- A holding has two lists of entries the holder presents in order, each a run of its own pages (`struct mesh_entry`:
+  the run's first page, as its literal region offset, any number of bytes, the count that governs them): a send list
+  and a landing list. Each list is a sequence of pages, and page i of a send list lands as page i of the peer's
+  landing list. Each end lays its own pages where its plan put them, a scattered buffer being several entries:
+  scattered pages in one client may land as one run in another, and one buffer may go to several runs in several
+  clients, with nothing copied. An entry's offset is compiled once from its holder's page table, so the bridge reads
+  no table on the data path. Every placement is the holder's plan, fixed
   before the holding's first call (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
   compiled plans which do not change dynamically during a chain of function calls"). Three byte counts over the holding, each in its
   list's order with every byte before: `ready` (the holder's: produced), `sent` and `landed` (the bridge's: SENDs
   completed; landed). The holder never sees a lane, a unit, a frame or a queue pair.
-- Every SEND and every receive is one whole page (an entry's last page too), found through its row
-  (design/pages-and-functions.md: the page table). So a SEND always fills its receive exactly (TN3205), ends whose
-  lists differ garble their own pages and never fail the link, and neither end knows the other's addresses.
-- The send thread posts a unit from its row's page once the entry's count covers its bytes; the receive thread posts
-  each receive straight into its row's own page (at most a window ahead) once the entry's word says the row's reader
-  released it (a page is written again only after release), and raises `landed` once every byte before has landed,
-  whichever lane carried it: the stamp of every row it covers. A SEND whose receive is not yet posted waits in the hardware's
+- Every SEND and every receive is one whole page (an entry's last page too), at its entry's offset plus the page's
+  place in it. So a SEND always fills its receive exactly (TN3205), ends whose lists differ garble their own pages and
+  never fail the link, and neither end knows the other's addresses.
+- The send thread posts a unit from its page once the entry's count covers its bytes; the receive thread posts each
+  receive straight into its page (at most a window ahead) once the entry's word says the page's reader released it (a
+  page is written again only after release), and raises `landed` once every byte before has landed, whichever lane
+  carried it: the stamp of every page it covers. A SEND whose receive is not yet posted waits in the hardware's
   credit (TN3205): posting a receive is the credit, and nothing else paces a holding (no lag, no fillers).
 - The words only the bridge writes: `live`, `free`, `begun`, `sent`, `landed`, `taken`, `touching`, `start` and the two
   time rings (`posted_at`: an entry's first SEND posted; `landed_at`: its last byte landed; mach_absolute_time ticks

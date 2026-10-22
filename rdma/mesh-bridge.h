@@ -36,8 +36,8 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
    (link_plan, design/HETEROGENEOUS-LINKS.md), of this layout: lane 0, the keepalive's (one-frame SENDs into the
    receiver's link block: link_alive), lane 1, on which nothing is posted, and from MESH_LANE_FIRST pairs, stream s on
    pair s (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1).  A holding's unit u is its page u, the whole page, on its
-   stream's lane MESH_LANE_FIRST + 2 s + u mod 2, landing in its row's own page at the receiver (design/
-   pages-and-functions.md), every page found through its row; a lane's units land in the order its SENDs were posted */
+   stream's lane MESH_LANE_FIRST + 2 s + u mod 2, landing in the page the receiver's plan put it in (design/
+   pages-and-functions.md); a lane's units land in the order its SENDs were posted */
 #define MESH_LINK_LANES 10u
 #define MESH_LANE_FIRST 2u
 #define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
@@ -106,8 +106,8 @@ struct lane_state {
 /* design/transport.md section 14: an entry a progress thread has taken from a holding's list, its own copy: the entry,
    the offset of its bytes in the list's sequence, the index of its first page over the holding (`page`), and per lane
    of its stream (c, pages p with p mod 2 = c) the index of its first unit in the lane's sequence over the holding and
-   its units there; `whole` 0 where it is not the holder's to name (a row not the holder's, or its word not one of the
-   region): its units go as duds, or land in the spare page */
+   its units there; `whole` 0 where it is not the holder's to name (not on a page, past the arena, over the bridge's own
+   pages, or its word not one of the region): its units go as duds, or land in the spare page */
 struct taken { struct mesh_entry entry; uint64_t offset,page,first[2],units[2]; uint32_t whole; };
 /* design/transport.md section 14: a holding's walk of one of its lists, one progress thread's: a ring of
    MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `timed` given a time, the

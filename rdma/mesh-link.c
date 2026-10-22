@@ -158,21 +158,24 @@ static inline uint64_t page_bytes(void){ return (uint64_t)M->block*M->pgsz; }
 static uint64_t link_block(const struct port *port);
 /* the arena offset of a port's spare page: its link block's second page */
 static inline uint64_t link_spare(const struct port *port){ return link_block(port)+page_bytes(); }
-/* design/pages-and-functions.md: the arena offset of row r's page, wherever its holder's plan put it */
-static inline uint64_t row_at(uint64_t r){ return atomic_load_explicit(&mesh_page(M)[r].address,memory_order_relaxed)-M->data_off; }
-/* design/pages-and-functions.md: whether rows [row, row + pages) are all `owner`'s (each row's owner word) */
-static int rows_held(uint64_t row,uint64_t pages,uint64_t owner){
-  if(!owner || row>=mesh_rows(M) || pages>mesh_rows(M)-row)return 0;
-  for(uint64_t r=row;r<row+pages;r++)if(atomic_load_explicit(&mesh_buffers(M)[r].owner,memory_order_relaxed)!=owner)return 0;
-  return 1;
+/* design/transport.md section 14: whether bytes [at, at + bytes) of the region touch a page the bridge holds itself
+   (the duds' block, a port's link pages or lists, the map), which no holding may name */
+static int bridge_touched(uint64_t at,uint64_t bytes){
+  const struct mesh_bridge_pages *own=mesh_bridge_pages(M);
+  const uint64_t pgsz=M->pgsz,first=(at-M->data_off)/pgsz,last=(at-M->data_off+(bytes?bytes:1)-1)/pgsz;
+  const uint32_t lists=(uint32_t)((uint64_t)MESH_LINK_STREAMS*(2*MESH_STREAM_ENTRIES*sizeof(struct mesh_entry)+4*MESH_STREAM_TIMES*8)/pgsz);
+  uint32_t page[2*MESH_PORTS+2],pages[2*MESH_PORTS+2],n=0;
+  for(uint32_t p=0;p<MESH_PORTS;p++){page[n]=own->link[p];pages[n++]=2*M->block;page[n]=own->lists[p];pages[n++]=lists;}
+  page[n]=own->ones;pages[n++]=M->block;page[n]=own->map;pages[n++]=own->map_pages;
+  for(uint32_t i=0;i<n;i++)if(page[i]!=MESH_ABSENT && first<(uint64_t)page[i]+pages[i] && last>=page[i])return 1;
+  return 0;
 }
+
 /* design/transport.md section 14: the entries a holder has presented on one of its lists taken into the walk, as far
-   as its ring has room: each copied once, whether it is the holder's to name (struct taken `whole`: its rows the
-   holder's) read, its pages counted on its stream's two lanes (page p of the holding on lane p mod 2), and the list's
-   `taken` stored past them */
+   as its ring has room: each copied once, whether it is the holder's to name (struct taken `whole`) read, its pages
+   counted on its stream's two lanes (page p of the holding on lane p mod 2), and the list's `taken` stored past them */
 static void walk_take(struct walk *w,struct mesh_stream *x,int land){
   const uint64_t n=atomic_load_explicit(land?&x->lands:&x->sends,memory_order_acquire),page=page_bytes();
-  const uint64_t owner=atomic_load_explicit(&x->owner,memory_order_relaxed);
   const struct mesh_entry *list=(const struct mesh_entry *)((char *)M+x->lists)+(uint64_t)land*MESH_STREAM_ENTRIES;
   uint64_t t=w->taken;
   for(;t<n && t-w->done<MESH_STREAM_ENTRIES;t++){
@@ -180,7 +183,8 @@ static void walk_take(struct walk *w,struct mesh_stream *x,int land){
     k->entry=list[t%MESH_STREAM_ENTRIES];
     const struct mesh_entry *e=&k->entry;
     const uint64_t pages=(e->bytes+page-1)/page;
-    k->whole=rows_held(e->row,pages,owner) && (!e->word || (e->word<=M->length-8 && !(e->word%8)));
+    k->whole=e->at>=M->data_off && !((e->at-M->data_off)%page) && pages*page<=M->length-e->at && !bridge_touched(e->at,pages*page) &&
+             (!e->word || (e->word<=M->length-8 && !(e->word%8)));
     k->page=w->pages;k->offset=w->bytes;
     for(uint32_t c=0;c<2;c++){
       k->first[c]=w->units[c];k->units[c]=(w->pages+pages+1-c)/2-(w->pages+1-c)/2;w->units[c]+=k->units[c];
@@ -289,8 +293,8 @@ static int link_held(const struct link *l){
 }
 /* design/transport.md section 14: a data lane's SENDs, one pass of its port's send thread: while a holding is served or
    ending, first duds up to its first index (`target`), then each unit of its lane in its send walk's order (page p of
-   the holding on lane p mod 2), the whole page, from
-   its row's page wherever that is once its entry's word says its bytes are ready, else as a dud from the all-ones block
+   the holding on lane p mod 2), the whole page, from its entry's own page (the literal place the holder's plan put it
+   in) once its entry's word says its bytes are ready, else as a dud from the all-ones block
    once the holder's deadline has passed or the holding is ending, an entry not the holder's to name all duds; each
    while the lane's gate holds its frames (ibv_post_send accepts past the queue's frames and corrupts later, so the gate
    is the caller's); the completions are the link's (link_send); a failed post is the lane's (lane_lost).  Whether it
@@ -315,7 +319,7 @@ static int lane_send(struct port *port,uint32_t k){
       if(!e)break;
       const uint64_t i=2*u+c-e->page,hi=MIN((i+1)*page,e->entry.bytes);
       const _Atomic uint64_t *word=e->entry.word?stream_words(e->entry.word):&x->ready;
-      if(e->whole && atomic_load_explicit(word,memory_order_acquire)>=e->entry.base+hi)at=row_at(e->entry.row+i);
+      if(e->whole && atomic_load_explicit(word,memory_order_acquire)>=e->entry.base+hi)at=e->entry.at-M->data_off+i*page;
       else if(e->whole && state==HOLD_SERVE){
         const uint64_t deadline=atomic_load_explicit(&x->deadline,memory_order_relaxed);
         if(deadline==UINT64_MAX)break;
@@ -371,8 +375,8 @@ static void stream_receive_turn(struct port *port,uint32_t t){
    on its port's receive thread each pass.  Lane 0, the keepalive's: one-frame receives into the link block's first
    page.  A stream's lane, each receive a whole page: while a holding is served, first spares up to its first index
    (`reach`: the peer's SENDs before the holding), then each unit of the lane in its landing walk's order (page p of the
-   holding on lane p mod 2) into its row's own page, wherever the holder's plan put it, once its entry's word allows
-   (the row released by its reader; an entry not the holder's to name into the spare page); while no holding is held
+   holding on lane p mod 2) into its entry's own page, the literal place the holder's plan put it in, once its entry's
+   word allows (the page released by its reader; an entry not the holder's to name into the spare page); while no holding is held
    here, one spare a lane, posted again as it lands (a peer's keepalive, or the last units of a holding this end
    ended, each waiting in the hardware's credit for it: TN3205).  0, or the post's error */
 static int lane_post(struct port *port,uint32_t k){
@@ -399,7 +403,7 @@ static int lane_post(struct port *port,uint32_t k){
       const struct taken *e=walk_unit(w,c,u);
       if(!e)break;
       if(e->entry.word && e->whole && atomic_load_explicit(stream_words(e->entry.word),memory_order_acquire)<e->entry.base)break;
-      if(e->whole)at=row_at(e->entry.row+2*u+c-e->page);
+      if(e->whole)at=e->entry.at-M->data_off+(2*u+c-e->page)*page;
     }
     struct ibv_sge span=wire_span(&port->device,page,at,page);
     struct ibv_recv_wr request={.wr_id=k,.sg_list=&span,.num_sge=1},*bad;
