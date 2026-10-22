@@ -134,12 +134,14 @@ struct metal_result metal_publish(struct metal_program *, const struct metal_rel
    caller's kernel that stores `ready` by address after a later publish).  The Metal 4 form orders its passes by its
    barriers; a recorded program by its replay. */
 void metal_uses(struct metal_program *, void *const *buffers, size_t n, int write);
-/* The stamp of a communicator's pool (nccl-mesh.c spare_take): word METAL_STAMP of its failure words' page, on a cache
-   line of its own, the greatest group whose readers of the pool's leases have ended, written by metal_stamp alone and
-   read by the host.  metal_stamp: `value` stored at `word` in `words` once every dispatch the program encoded before it
-   has ended, the greater value kept: on the classic form by its command buffer's completed handler (the GPU's end of
-   the buffer; nothing waits, and a buffer never committed stamps nothing), on the Metal 4 form by one dispatch after
-   the program's barrier, one system fence and one store, as metal_publish stores.  A release, never a wait. */
+/* The stamp words of a communicator's pool (nccl-mesh.c spare_take, stamp_end): the words of its failure words' page
+   from METAL_STAMP on, past their cache line, each holding the number of the last program end stored there, written by
+   metal_stamp alone and read by the host.  metal_stamp: `value` stored at `word` in `words` once every dispatch the
+   program encoded before it has ended: on the classic form by its command buffer's completed handler (the GPU's end
+   of that buffer; nothing waits, and a buffer never committed stamps nothing), on the Metal 4 form by one dispatch
+   after the barrier that ends the program's dispatches before it (each dispatch's barrier, device visibility), one
+   system-scope fence and one system-coherent store, as metal_publish stores.  Each program's end its own word, so
+   ends are seen in whatever order the GPU reaches them.  A release, never a wait. */
 #define METAL_STAMP 16
 struct metal_result metal_stamp(struct metal_program *, void *words, size_t word, uint64_t value);
 /* the wait alone (a COPY's landing in place, a group's end on `sent`), one threadgroup */

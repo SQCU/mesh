@@ -439,11 +439,14 @@ system call".
   operand, a tree's scratch, a combine's landing area). A lease of the pool is held by a group until it completes, and
   returned at `ncclCommDestroy`.
   - A later group takes it again only once the GPU has ended every command that read it, since a landing's receives
-    are posted as presented. The program that gives a lease back stores the pool's stamp at its end: on the classic
-    form by its command buffer's completed handler, on the Metal 4 form by one dispatch after its barrier
-    (`nccl-mesh-metal.h` `metal_stamp`, `METAL_STAMP`).
-  - `spare_take` counts a lease free once that stamp has reached the group that gave it back. Nothing waits, so the
-    pool grows by the groups the GPU has not ended.
+    are posted as presented. Each program frees exactly the leases it gave back, by its own end: it takes a stamp word
+    no lease names and stores its end's number there once every dispatch before has ended. On the classic form its
+    command buffer's completed handler stores it; on the Metal 4 form one dispatch after its barrier does
+    (`nccl-mesh-metal.h` `metal_stamp`, `METAL_STAMP`; `nccl-mesh.c` `stamp_end`).
+  - `spare_take` counts a lease free once its word reads its program's number. That holds in whatever order the caller
+    commits its programs, on any queues. Nothing waits, so the pool grows by the programs the GPU has not ended. A
+    lease whose program could not be stamped, or whose group was lost with its communicator, is kept until
+    `ncclCommDestroy`.
   - This is the narrow form. The operator's design replaces the pool (2026-10-22, relayed): a not-in-place
     reduction's extra pages are rows of the page table, landed into by scatter, read in place by the reduce and
     released by use count.

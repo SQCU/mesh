@@ -391,7 +391,7 @@ struct metal_result metal_stamp(struct metal_program *program, void *words, size
   id<MTLBuffer> held = (id<MTLBuffer>)words;
   [program->buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
     (void)done;
-    __atomic_fetch_max((uint64_t *)((char *)held.contents + word), value, __ATOMIC_RELEASE);
+    __atomic_store_n((uint64_t *)((char *)held.contents + word), value, __ATOMIC_RELEASE);
   }];
   return METAL_DONE;
 }

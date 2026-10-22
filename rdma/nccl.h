@@ -149,8 +149,9 @@
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
    communicator leases a pool of leases for the pages its groups send from and land in that are not the caller's (a
    reduce-scatter's operand, a tree's scratch, a combine's landing area), held by a group until it completes, taken
-   again once the GPU has ended every command that read them (a stamp the program that gave them back stores at its
-   end: its command buffer's completion, or the Metal 4 form's last dispatch), and returned at ncclCommDestroy.
+   again once the GPU has ended every command that read them (each program frees the leases it gave back by its own
+   end, a number it stores in a word of its own: its command buffer's completion, or the Metal 4 form's last
+   dispatch), and returned at ncclCommDestroy.
    ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,

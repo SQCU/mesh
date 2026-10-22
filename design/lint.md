@@ -38,7 +38,7 @@ backend complexity out of linear algebra.
 - **P1-SYNC.** A host sync in the step loop: `synchronize`, `.item()`, `.cpu()`, `.tolist()`, a barrier, or a blocking
   `copy_`. Functions the loop calls are included.
   - Source: the operator, 2026-10-22: "algorithmically unjustified halts, waits".
-  - A ring's flow control, which waits for the step that last read a slot, carries `meshlint: ring`.
+  - The program's own guard on reuse of its own buffer carries `meshlint: guard`.
 - **P5-CLOCK.** A clock read in the step loop. Same source as T1.
 
 ### Errors and guards
@@ -57,7 +57,9 @@ backend complexity out of linear algebra.
     their buffers' order, and the transport keeps the landing wait, one acquire fence and a poll bound.
   - Wrong: `mesh_stream_present(ctx, s, 1, (struct mesh_entry){row, pages, gate_at, gates + 1})`.
   - Right: `(struct mesh_entry){row, pages, 0, 0}`. A program that names pages again guards them in its own source.
-    The library's own pool is guarded by a stamp the reading program stores at its end (nccl-mesh.c `spare_take`).
+    The library's own pool is guarded by each program's own end: the program that gives leases back stores its end's
+    number in a stamp word of its own once its dispatches have ended, and `spare_take` reuses a lease once its word
+    reads that number (nccl-mesh.c `stamp_end`), in whatever order the caller commits its programs.
     A send entry's word stays: `ready` is the producer's own declaration that its pages are written.
 - **semantic SEM-META.** Error metadata consumed inside a call path, to branch, refuse or wait.
   - Source: design/pages-and-functions.md "Asynchronous error metadata".
@@ -115,9 +117,6 @@ backend complexity out of linear algebra.
     decoupling backend complexity from linear algebraic function complexity rather than for 'security' or 'memory
     safety'".
   - Right: the collective's allocation gives the buffer.
-- **P2-LAND1.** One landing buffer reused every crossing. The landing is then gated on this rank's own release, so each
-  step waits for a receive post and a credit. Source: bridge and GPU audits 2026-10-22, item 2. Right: a ring of two
-  or more slots, each gated on its last reader.
 - **P3-REPLAN.** A crossing planned again every step.
   - Source: host audit 2026-10-22, A.1; design/extents-and-liveness.md, a.
   - Right: presented once and started each step, as `MPI_Allreduce_init` and `MPI_Start`.

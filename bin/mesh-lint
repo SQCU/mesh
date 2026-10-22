@@ -267,7 +267,7 @@ def check_python(path, text):
             if callee(c) in ('perf_counter', 'monotonic', 'time') and not re.search(r'meshlint:\s*measure', text.split('\n')[c.lineno - 1]):
                 find(path, c.lineno, 'P5-CLOCK', 'a clock read in the step loop', 'operator 2026-10-22: no timing')
         for c, name in syncs(loop, set()):
-            if re.search(r'meshlint:\s*ring', text.split('\n')[c.lineno - 1]):
+            if re.search(r'meshlint:\s*guard', text.split('\n')[c.lineno - 1]):
                 continue
             find(path, c.lineno, 'P1-SYNC', f'`{name}` on the step loop\'s path: the host waits for the GPU',
                  'operator 2026-10-22: "algorithmically unjustified halts, waits"')
@@ -288,11 +288,6 @@ def check_python(path, text):
                      'operator 2026-10-22: "data processing code may never discover these abstracted features"; '
                      '"for performance reasons and for decoupling backend complexity from linear algebraic function '
                      'complexity rather than for \'security\'"')
-    for c in calls(tree):
-        if callee(c) == 'exchange' and len(c.args) > 1 and isinstance(c.args[1], ast.Attribute):
-            find(path, c.lineno, 'P2-LAND1', 'one landing buffer reused every crossing: the landing is gated on this '
-                 'rank\'s own release, so each step waits a receive post and a credit; give it a ring of two or more',
-                 'bridge audit 2026-10-22, item 2')
 
 
 def check_lines():
