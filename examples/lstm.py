@@ -68,22 +68,13 @@ def _pipeline(args):
     return _PIPELINES[name]
 
 
-# docs/writing-a-service.md#the-lstm
-def tiled(w, tile):
-    K, N = w.shape
-    return w.reshape(K // tile, tile, N // tile, tile).permute(2, 0, 1, 3).reshape(-1)
-
-
 class Tick:
     # docs/writing-a-service.md#the-lstm
     def __init__(self, weights, bias, rows, shares, rank, L, KIN, held):
-        H, HR, tile = sum(shares), shares[rank], held['simdgroup_matrix_edge']
+        H, HR = sum(shares), shares[rank]
         self.rows, self.shares, self.rank, self.L, self.HR = rows, shares, rank, L, HR
         self.handle, self.args, self.ks = form(KIN, H, HR, L, rows, len(shares), held)
-        sizes = [(KIN + H) * 4 * HR] + [2 * H * 4 * HR] * (L - 1)
-        layers = torch.split(weights, sizes)
-        self.W = torch.cat([tiled(w.view(4 * HR, -1).T, tile) for w in layers]).contiguous()
-        self.bias = bias.to('mps')
+        self.W, self.bias = weights, bias
         self.C = torch.zeros(L, rows, HR, dtype=torch.float32, device='mps')
         self.arrivals = torch.zeros(1, dtype=torch.int32, device='mps')
         self.S = torch_mesh.empty(SLOTS, chain.paged(L * rows * HR), dtype=torch.half)

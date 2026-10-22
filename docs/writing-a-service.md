@@ -294,11 +294,13 @@ The matmul's loader (`Segments`) finds a tile's segment and loads each lane's tw
 updates c and stores h through `mesh_step_write` into the tick's send slot. A layer that has not started (s < l) stores
 zeros there, its h(-1). Rank 0 writes the top layer's landed h to the output staging ring, as the chain does.
 
-**Configuration.** `input`, `weights`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
+**Configuration.** `input`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
 `shares` (one count of hidden units a rank, multiples of 8, their sum the width) and `capabilities`. The weights file
-holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order. Rank 0 gathers each rank's
-gate rows before the communicator exists (whole rows of [4H, K], no strided gather), and each rank transposes and
-tiles its own on its GPU.
+holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order. `weights` is a directory of one .npy file an array. Before the communicator exists, rank 0 reads them
+memory-mapped and writes each rank's gate rows, already tiled, into CPU region tensors, 64 tiles at a time. It then
+sends each rank its tiles, and each rank receives them into an MPS region tensor the kernel reads. Nothing the size of
+a weight matrix lives outside the region: a Studio's region wires 86 of its 96 GiB, and the rest is all that other
+memory has.
 
 ## What to read next
 

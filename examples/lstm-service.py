@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -11,6 +12,8 @@ import torch_mesh
 import chain
 import lstm
 
+CHUNK = 64
+
 
 # docs/writing-a-service.md#the-lstm
 def sizes(config, h):
@@ -19,22 +22,34 @@ def sizes(config, h):
 
 
 # docs/writing-a-service.md#the-lstm
-def prepared(config):
-    weights, shares, L = np.load(config['weights']), config['shares'], config['layers']
-    KIN, H = config['input_width'], sum(shares)
-    layers = []
+def prepared(config, tile):
+    shares, L, KIN = config['shares'], config['layers'], config['input_width']
+    H, folder = sum(shares), Path(config['weights'])
+    load = lambda name: np.load(folder / f'{name}.npy', mmap_mode='r')
     for l in range(L):
-        w_ih, w_hh, b = weights[f'w_ih_{l}'], weights[f'w_hh_{l}'], weights[f'b_{l}']
-        if w_ih.shape != (4 * H, KIN if l == 0 else H) or w_hh.shape != (4 * H, H) or b.shape != (4 * H,):
+        if (load(f'w_ih_{l}').shape != (4 * H, KIN if l == 0 else H) or load(f'w_hh_{l}').shape != (4 * H, H)
+                or load(f'b_{l}').shape != (4 * H,)):
             raise ValueError(f'Layer {l} is w_ih_{l} [4H, its input], w_hh_{l} [4H, H] and b_{l} [4H], H the sum of '
                              f'the shares')
-        layers.append((np.concatenate([w_ih, w_hh], 1), b))
     held = []
     for r, h in enumerate(shares):
+        w_size, b_size = sizes(config, h)
+        W = torch_mesh.empty(w_size, dtype=torch.half, device='cpu')
+        bias = torch_mesh.empty(b_size, dtype=torch.float32, device='cpu')
         units = np.arange(sum(shares[:r]), sum(shares[:r]) + h)
-        columns = np.stack([units, H + units, 2 * H + units, 3 * H + units], 1).reshape(-1)
-        held.append((np.concatenate([np.ascontiguousarray(w[columns], dtype=np.float16).reshape(-1) for w, _ in layers]),
-                     np.concatenate([b[columns] for _, b in layers]).astype(np.float32)))
+        rows = np.stack([units, H + units, 2 * H + units, 3 * H + units], 1).reshape(-1)
+        w, b, at = W.numpy(), bias.numpy(), 0
+        for l in range(L):
+            w_ih, w_hh = load(f'w_ih_{l}'), load(f'w_hh_{l}')
+            K, N = w_ih.shape[1] + H, 4 * h
+            tiles = w[at:at + N * K].reshape(N // tile, K // tile, tile, tile)
+            for c in range(0, N // tile, CHUNK):
+                picked = rows[c * tile:(c + CHUNK) * tile]
+                block = np.concatenate([w_ih[picked], w_hh[picked]], 1)
+                tiles[c:c + CHUNK] = block.reshape(-1, tile, K // tile, tile).transpose(0, 2, 3, 1)
+            b[l * N:(l + 1) * N] = load(f'b_{l}')[rows]
+            at += N * K
+        held.append((W, bias))
     return held
 
 
@@ -47,13 +62,11 @@ def shares(config, rank, size, held):
         dist.recv(W, src=0)
         dist.recv(bias, src=0)
         return W, bias
-    for r in range(size):
-        w, b = held[r]
-        parts = (W, bias) if r == 0 else (torch_mesh.empty(w.size, dtype=torch.half), torch_mesh.empty(b.size, dtype=torch.float32))
-        for part, array in zip(parts, (w, b)):
-            part.copy_(torch.from_numpy(array))
-            if r:
-                dist.send(part, dst=r)
+    for r in range(1, size):
+        for part in held[r]:
+            dist.send(part, dst=r)
+    W.copy_(held[0][0])
+    bias.copy_(held[0][1])
     return W, bias
 
 
@@ -84,7 +97,7 @@ def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
 # docs/writing-a-service.md#the-lstm
 def main():
     config = json.loads(open(sys.argv[1]).read())
-    held = prepared(config) if os.environ['RANK'] == '0' else None
+    held = prepared(config, chain.capability(config['capabilities'])['simdgroup_matrix_edge']) if os.environ['RANK'] == '0' else None
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     if len(config['shares']) != size:
