@@ -180,7 +180,9 @@ static inline const _Atomic uint64_t *region_word(uint64_t offset){
 }
 /* design/transport.md section 14: the entries a holder has presented on one of its lists taken into the walk, as far
    as its ring has room: each copied once and typed (struct taken), whether it is the holder's to name (`whole`) read,
-   its first page over the holding counted, and the list's `taken` stored past them */
+   its first page over the holding counted, and the list's `taken` stored past them.  A send entry's word is taken (0:
+   the holding's `ready`); a landing entry's is not: its pages are received into as presented (design/transport.md
+   section 14, what a landing writes) */
 static void walk_take(struct walk *w,struct mesh_stream *x,int land){
   const uint64_t n=atomic_load_explicit(land?&x->lands:&x->sends,memory_order_acquire);
   const struct mesh_entry *list=(const struct mesh_entry *)((char *)M+x->lists)+(uint64_t)land*MESH_STREAM_ENTRIES;
@@ -188,9 +190,9 @@ static void walk_take(struct walk *w,struct mesh_stream *x,int land){
   for(;t<n && t-w->done<MESH_STREAM_ENTRIES;t++){
     struct taken *k=w->ring+t%MESH_STREAM_ENTRIES;
     const struct mesh_entry e=list[t%MESH_STREAM_ENTRIES];
-    const _Atomic uint64_t *word=e.word?region_word(e.word):land?NULL:&x->ready;
+    const _Atomic uint64_t *word=land?NULL:e.word?region_word(e.word):&x->ready;
     k->row=mesh_entry_row(&e);k->pages=mesh_entry_pages(&e);k->base=mesh_entry_base(&e);
-    k->whole=mesh_rows_hold(M,k->row,k->pages) && (word || !e.word);
+    k->whole=mesh_rows_hold(M,k->row,k->pages) && (land || word);
     k->word=k->whole?word:NULL;
     k->page=w->pages;
     w->pages=mesh_pages_add(w->pages,k->pages);
@@ -388,9 +390,10 @@ static void stream_receive_turn(struct port *port,uint32_t t){
 }
 /* design/pages-and-functions.md "The NFE" step 2: stream t's receives, one pass of its port's receive thread, while
    its holding is served and both its lanes are: each page of the holding in order (the stream's page p on its lane
-   p mod 2), each lane at most its window ahead of its landings, into the page its row names once its entry's word
-   allows (the row released by its reader), and an entry not the holder's to name (rows outside the page table, a
-   holder's error) into the spare page; the holding read kept once a pass (holding_kept), so a give stops its receives
+   p mod 2), each lane at most its window ahead of its landings, into the page its row names as presented, nothing
+   awaited (a program that reuses its pages guards them in its own source: design/transport.md section 14, what a
+   landing writes), and an entry not the holder's to name (rows outside the page table, a holder's error) into the
+   spare page; the holding read kept once a pass (holding_kept), so a give stops its receives
    at the next pass as at the send thread; each unit told before it is posted (unit_told); a failed post is the lane's
    (lane_lost: its child's exit releases its row, mesh-dataflow.c mesh_pinned) */
 static void stream_post(struct port *port,uint32_t t,uint32_t served){
@@ -406,7 +409,6 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     if(s->posted>=s->got+s->window)break;
     const struct taken *e=walk_page(w,q);
     if(!e)break;
-    if(e->word && mesh_pages_lt(mesh_pages_load(e->word),e->base))break;
     struct ibv_sge span=spare_span(port),page;
     uint32_t row=MESH_ABSENT;
     if(e->whole){
@@ -2039,15 +2041,18 @@ static int region_open(const struct hdr *geometry,int *out){
 }
 
 /* the adopted region's bridge state made this bridge's, before any client reads it as live (`bridge_pid` set last): every
-   stream not live and held by none, its landed words ~0 (a lost pairing's holding ended with its bridge, and a
-   wait on it reads the loss; the next pairing opens each new, streams_open), the links' table cleared, a client slot
+   stream not live (so no take succeeds), its landed words ~0 (a lost pairing's holding ended with its bridge, and a
+   wait on it reads the loss), its owner word left as found: the port's next child stores 0 there as it opens the
+   stream new (streams_open), and that child is spawned only after the earlier launch's child of its device has
+   exited (child_spawn, EVFILT_PROC), so a reclaimer that reads the 0 reads after every post of that child (mesh-dataflow.c
+   mesh_pinned), where this bridge's store would have ordered nothing; the links' table cleared, a client slot
    whose retirement a process that died left half done finished (mesh_retire's walk, which any party can repeat to the
    same end), the closed rows released, a map or health serial a bridge that died mid-write left odd made even (its
    readers wait while it is odd), and the map's records this bridge's to write again (map_adopt) */
 static void region_adopt(void){
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_stream *x=mesh_stream_at(M,s);
-    atomic_store(&x->live,0);atomic_store(&x->owner,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
+    atomic_store(&x->live,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
     mesh_pages_store(&x->sent,MESH_PAGES_LOST);mesh_pages_store(&x->landed,MESH_PAGES_LOST);
   }
   struct mesh_link_info *links=mesh_links(M);
@@ -2061,7 +2066,7 @@ static void region_adopt(void){
     for(uint32_t row=0;row<mesh_rows(M);row++){
       struct mesh_buffer *buffer=&mesh_buffers(M)[row];
       if(atomic_load(&buffer->owner)!=(owner&~MESH_RETIRING))continue;
-      if(buffer->pages)atomic_store(&buffer->closed,1);
+      if(buffer->pages)mesh_lease_close(buffer);
       mesh_bits_clear(mesh_plane(M,MESH_ROW_OWN),row,1);
     }
     atomic_store(&slot->owner,0);

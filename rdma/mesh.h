@@ -26,8 +26,9 @@
 #define MESH_VERSION 134u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).  139:
-   each writer's words of a stream on a line of their own (MESH_LINE, struct mesh_stream) */
-#define MESH_LAYOUT 139u
+   each writer's words of a stream on a line of their own (MESH_LINE, struct mesh_stream).  140: a lease's `closed`
+   counts its closures (struct mesh_buffer) */
+#define MESH_LAYOUT 140u
 /* hw.cachelinesize on Apple silicon: the line a store makes another core's copy of invalid, so words of different
    writers lie on different lines (design/lint.md L1-LINE) */
 #define MESH_LINE 128u
@@ -55,13 +56,21 @@ _Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)) && !(MESH_STREAM_T
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor; design/transport.md, #M02: `pages`, on a lease's first row, its arena
-   pages (not the transport's pages, which are rows) */
+   pages (not the transport's pages, which are rows).  `closed`, on that row: bit 0 while the lease is closed (returned
+   or retired while a request may still name it, for its release: mesh-dataflow.c mesh_release), and above it the
+   row's closures counted, never reset, so the word never takes a value twice and a releaser's compare-and-swap from
+   the value it read fails where the lease was released or closed again since (mesh_lease_close) */
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
   uint32_t pages;
 };
 _Static_assert(sizeof(struct mesh_buffer)==32 && _Alignof(struct mesh_buffer)==32,"mesh_buffer");
+/* a lease's row closed: its closures one more and bit 0 set, a release store after what its closer wrote before */
+static inline void mesh_lease_close(struct mesh_buffer *b){
+  uint32_t was=atomic_load_explicit(&b->closed,memory_order_relaxed);
+  while(!atomic_compare_exchange_weak_explicit(&b->closed,&was,(was+2u)|1u,memory_order_release,memory_order_relaxed)){}
+}
 /* design/algorithm-sources.md#programtensor; design/transport.md */
 struct mesh_page_entry {
   _Alignas(16) _Atomic uint64_t mapping;
@@ -73,8 +82,9 @@ _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_e
    range of the holder's rows, `pages` of them from row `row` (each row a page: the range is the entry's block table,
    each row's page wherever the holder's plan put it, fixed before its first call), and the count that governs them,
    in pages: a send entry's page k is ready once the word at region offset `word` (0: the holding's `ready`) reads at
-   least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at least `base` (its
-   rows released by their reader: a page is written again only after release).  A page is a row's block (`block` arena
+   least `base` + k + 1; a landing entry's `word` and `base` are not read: its pages are received into as presented,
+   and a program that reuses them guards them in its own source (design/transport.md section 14, what a landing
+   writes).  A page is a row's block (`block` arena
    pages).  Every count of a holding is in pages and no page is named by a byte offset (`word` is a word's region
    offset), so nothing in the transport can lie off a page */
 struct mesh_entry { uint64_t row,pages,word,base; };

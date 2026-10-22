@@ -53,8 +53,11 @@ bridge adopts the region, the same memory, where its layout is that bridge's:
 - the port children register the same pages again, so nothing is wired twice and nothing is reloaded;
 - the bridge's own pages (each port's link pages, its streams' lists and time rings, the duds' block, the map) are
   recorded in the region and taken again;
-- every stream is set not live and held by none, its landed words ~0, so a communicator of the old pairing fails and is
-  made again, and the next pairing opens each stream new;
+- every stream is set not live (so no take succeeds), its landed words ~0, so a communicator of the old pairing fails
+  and is made again; its owner word is left as found, and the port's next child stores 0 there as it opens the stream
+  new (`streams_open`). That child is spawned only after the earlier launch's child of its device has exited
+  (`child_spawn`, EVFILT_PROC), so a reader of that 0 reads after every post of the old child. A store of 0 by the
+  adopting bridge would order nothing against them (`mesh_pinned`, section 14);
 - a retirement a dead process left half done is finished.
 
 A region a live bridge serves is never touched: a second bridge of the node ends at its port's bind, before it reads
@@ -393,8 +396,8 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   compiled plans which do not change dynamically during a chain of function calls"). Three page counts over the
   holding, each in its list's order with every page before: `ready` (the holder's: produced), `sent` and `landed` (the
   bridge's: SENDs completed; landed). A send entry's page k is ready once the word at `word` (0: the holding's
-  `ready`) reads at least `base` + k + 1. A landing entry names no word: its receives are posted as the plan presents
-  them (what a landing writes, below). The holder never sees a lane, a unit, a frame or a queue pair.
+  `ready`) reads at least `base` + k + 1. A landing entry names no word, and the bridge reads none: its receives are
+  posted as the plan presents them (what a landing writes, below). The holder never sees a lane, a unit, a frame or a queue pair.
 - Every SEND and every receive is one whole page, the page its row names (the bridge reads the row's page as it posts
   it: one read a page). A send entry whose rows lie outside the page table, or a row that holds no page, goes as duds,
   and such a landing entry's pages land in the spare page (the port's link page). So a SEND always fills its receive
@@ -507,9 +510,15 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   holder and the holder gave or retired, the end is not yet published and the pass under way may post more of the
   holding, so the lease is held while the child serving it lives. Otherwise the word read is the end's store or a later
   one, which follows every tell of the holding, so the counts and rows read after it name every unit the holding
-  posted. A lease with a row in W(t), or returned before its holding's end was published, is closed instead and
-  released at the bridge's next turn after its units complete, or at an allocation that finds no room
-  (mesh-dataflow.c `mesh_allocate`), or once the port child that posted them is gone: a work request's buffer is the hardware's until
+  posted. A lease with a row in W(t), or returned before its holding's end was published, is closed instead
+  (`mesh_lease_close`), and released once its units complete, or once the port child that posted them is gone. One
+  writer per lease state: a live client releases its own closed leases, at an allocation that finds no room
+  (`mesh_own_release`), and the bridge releases a retired client's, at its turn (`mesh_retired_release`). A release
+  is a compare-and-swap of the lease's `closed` word from the value read before its pin check. The word counts the
+  lease's closures and never takes a value twice, so a releaser that a release and a new closure overtook fails. Only
+  then is the lease's FREE bit set. The reclaim frees a lease only where its fetch-and took that bit, and the lease's
+  rows stay hot until it is freed, so no reclaimer frees a lease allocated since (`mesh_reclaim`, `mesh_lease_free`). A
+  work request's buffer is the hardware's until
   it completes or until the queue pair holding it is gone with the process that owns it (verbs), so each stream records
   that child's pid and start (`child`, `child_start`, as the client slots identify processes) and its units count only
   while that process lives. A lease returned while its holder still holds the stream and its presented entries still name it

@@ -140,6 +140,13 @@ def check_c(path, text):
             find(path, line_of(clean, at + body.index('allAllocations')), 'R1-USE', f'{name}: a dispatch declares every '
                  'allocation of a residency set, so its pass is ordered against every pass that names any of them: declare '
                  'the buffers its records name', 'GPU audit 2026-10-22, item 12')
+        for m in re.finditer(r'atomic_compare_exchange_\w+\(\s*&\s*([\w\[\]\.\->]+?)\s*,\s*&\s*(\w+)\s*,', body):
+            word, expected = m.group(1), m.group(2)
+            if re.search(r'atomic_store\w*\(\s*&\s*' + re.escape(word) + r'\s*,\s*' + re.escape(expected) + r'\s*[,)]', body[m.end():]):
+                find(path, line_of(clean, at + m.start()), 'A1-ABA', f'{name}: a claim by compare-and-swap on `{word}`, '
+                     f'then `{expected}` stored back: the word takes that value again, so a stale claimer\'s swap succeeds '
+                     'on a later holder\'s state; claim a word that never repeats a value (a generation), or a bit by '
+                     'fetch-and', 'rubric review 2026-10-22, finding 4 (mesh_retired_release)')
     for m in re.finditer(r'IBV_QPS_RESET|IBV_QPS_ERR|ibv_destroy_qp|\bdestroy_qp\b', clean):
         find(path, line_of(clean, m.start()), 'M3-QP', 'a queue pair moved to RESET or ERR, or destroyed, inside the '
              'running process', 'design/rubrics.md M3; operator 2026-10-22: the documented flush only, unused')

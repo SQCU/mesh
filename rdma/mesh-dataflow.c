@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <errno.h>
+/* design/transport.md */
+static void mesh_own_release(struct mesh_ctx *);
 
 /* design/transport.md: the node's region mapped, `writable` (a client's) or read-only (a reader's, which attaches no
    client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge
@@ -234,15 +236,15 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
 
 /* design/algorithm-sources.md#programtensor */
 /* design/transport.md: a client's slot given up (by its detach, or by the bridge where its process is
-   gone): its rows closed for the bridge to release (the streams it held are let go on the bridge's turn:
-   mesh-link.c streams_let_go) */
+   gone): its leases closed (mesh_lease_close) for the bridge to release (mesh_retired_release; the streams it held are
+   let go on the bridge's turn: mesh-link.c streams_let_go) */
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_client *slot=mesh_client_at(m,client);
   if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
-      if(buffer->pages)atomic_store_explicit(&buffer->closed,1,memory_order_release);
+      if(buffer->pages)mesh_lease_close(buffer);
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
   }
@@ -324,15 +326,15 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
 /* design/algorithm-sources.md#programkernel_call */
 /* The cursor resumes where the last allocation ended, so preparing N operands over P pages costs
    O(P) in total rather than O(N*P); a full scan and then a release and reclaim still back it, so the result is
-   the same page the unresumed scan would have returned whenever nothing has been released.  The release is the
-   bridge's own (mesh_retired_release): a lease closed while a holding its client gave was still ending (mesh_pinned)
-   is released here once the end is published, not only at the bridge's next turn. */
+   the same page the unresumed scan would have returned whenever nothing has been released.  The release is of this
+   client's own closed leases (mesh_own_release: a lease closed while a holding it gave was still ending, mesh_pinned,
+   released once the end is published); the bridge alone releases a retired client's (mesh_retired_release). */
 static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
                               _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
   uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
   uint32_t first=mesh_scan(count,align,resume,end,own,hot);
   if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,begin,end,own,hot);
-  if(first==MESH_ABSENT){ mesh_retired_release(c->M); first=mesh_scan(count,align,begin,end,own,hot); }
+  if(first==MESH_ABSENT){ mesh_own_release(c); first=mesh_scan(count,align,begin,end,own,hot); }
   if(first==MESH_ABSENT){ errno=ENOMEM; return MESH_ABSENT; }
   *cursor=first+count;
   return first;
@@ -345,7 +347,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
-    atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
+    atomic_fetch_and_explicit(&buffer->closed,~1u,memory_order_relaxed);
     buffer->pages=0;
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }
@@ -357,7 +359,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 /* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
    since that device came up (mesh-verbs.h device_up); a lease the region cannot meet is refused (ENOMEM).  The bits
    name no owner: a client's lease takes its pages with rows its slot owns (mesh-call.h mesh_section_create), which
-   carry them back at its retirement (mesh_buffer_reclaim) or its return (mesh_lease_return). */
+   carry them back at its retirement (mesh_retired_release, mesh_reclaim) or its return (mesh_lease_return). */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
@@ -382,28 +384,32 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
   }
 }
 
-/* design/algorithm-sources.md#programtensor */
-static void mesh_buffer_reclaim(struct hdr *m,uint32_t row){
+/* design/algorithm-sources.md#programtensor: the lease headed at `row`, `owner`'s, freed by its one freer (the owner
+   word taken from `owner` to 0, else nothing): its pages' arena bits, then its rows' hot bits, so no client claims a
+   row of it (mesh_claim refuses a hot row) before its pages are free */
+static void mesh_lease_free(struct hdr *m,uint32_t row,uint64_t owner){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
   if(!owner || !atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))return;
-  atomic_fetch_and_explicit(&mesh_plane(m,MESH_FREE)[row/64],~(UINT64_C(1)<<(row%64)),memory_order_relaxed);
   uint32_t pages=buffer->pages;
   for(uint32_t offset=0;offset<pages;offset+=m->block){
     uint32_t page=atomic_load_explicit(&mesh_page(m)[row+offset/m->block].mapping,memory_order_acquire);
     if(page!=MESH_ABSENT)mesh_bits_clear(mesh_arena_bits(m),page,m->block);
   }
-  atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
   mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),row,pages/m->block);
 }
 
-/* design/algorithm-sources.md#programtensor */
+/* design/algorithm-sources.md#programtensor: every released lease freed, each by the one reclaimer whose
+   fetch-and took its FREE bit (a reader of an older snapshot of the plane finds the bit gone and does nothing); a
+   released lease's rows stay hot until it is freed, so its owner word is the releaser's until then */
 static void mesh_reclaim(struct hdr *m){
   for(uint32_t word=0;word<mesh_words(m);word++){
-    uint64_t available=atomic_load_explicit(&mesh_plane(m,MESH_FREE)[word],memory_order_acquire);
+    _Atomic uint64_t *plane=&mesh_plane(m,MESH_FREE)[word];
+    uint64_t available=atomic_load_explicit(plane,memory_order_acquire);
     while(available){
-      uint32_t row=word*64+(uint32_t)__builtin_ctzll(available);available&=available-1;
-      mesh_buffer_reclaim(m,row);
+      const uint32_t row=word*64+(uint32_t)__builtin_ctzll(available);available&=available-1;
+      const uint64_t bit=UINT64_C(1)<<(row%64);
+      if(atomic_fetch_and_explicit(plane,~bit,memory_order_acq_rel)&bit)
+        mesh_lease_free(m,row,atomic_load_explicit(&mesh_buffers(m)[row].owner,memory_order_acquire));
     }
   }
 }
@@ -442,42 +448,54 @@ static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count,uint64_t clie
   }
   return 0;
 }
-/* design/algorithm-sources.md#programtensor; design/transport.md section 14: a retired client's closed rows released,
-   and a lease returned while a request still named a page of it, but those a request outstanding on a lane still
-   names (mesh_pinned); their count */
+/* design/algorithm-sources.md#programtensor; design/transport.md section 14: the closed lease headed at `row` released
+   where no request names it (mesh_pinned), of `client` (a live client's own) or, `client` 0, of a client retired (the
+   bridge's): one writer for each lease state.  Its closed word is read first, then its owner, which no one changes
+   while that closure stands (its rows stay hot); the release is that word's compare-and-swap from the value read to
+   bit 0 clear, which fails where the lease was released, or closed again, since (struct mesh_buffer `closed`: the word
+   never takes a value twice), and only then its FREE bit set.  1 where a request still names it */
+static int mesh_release(struct hdr *m,uint32_t row,uint64_t client){
+  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+  uint32_t closed=atomic_load_explicit(&buffer->closed,memory_order_acquire);
+  if(!(closed&1))return 0;
+  const uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
+  const int retired=owner && atomic_load_explicit(&mesh_client_at(m,owner)->owner,memory_order_acquire)!=owner;
+  if(!owner || (client?owner!=client:!retired))return 0;
+  if(mesh_pinned(m,row,buffer->pages/m->block,owner))return 1;
+  if(atomic_compare_exchange_strong_explicit(&buffer->closed,&closed,closed&~1u,memory_order_acq_rel,memory_order_relaxed))
+    mesh_bits_set(mesh_plane(m,MESH_FREE),row,1);
+  return 0;
+}
+/* design/algorithm-sources.md#programtensor; design/transport.md section 14: the bridge's release of every retired
+   client's closed leases but those a request outstanding on a lane still names, then the reclaim; their count */
 uint32_t mesh_retired_release(struct hdr *m){
   uint32_t kept=0;
-  for(uint32_t row=0;row<mesh_rows(m);row++){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
-    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && mesh_pinned(m,row,buffer->pages/m->block,owner)){kept++;continue;}
-    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
-       atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
-      atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-      mesh_bits_set(mesh_plane(m,MESH_FREE),row,1);
-      atomic_store_explicit(&buffer->owner,owner,memory_order_release);
-    }
-  }
+  for(uint32_t row=0;row<mesh_rows(m);row++)kept+=(uint32_t)mesh_release(m,row,0);
   mesh_reclaim(m);
   return kept;
 }
+/* a live client's release of its own closed leases, then the reclaim (mesh_allocate, where it finds no room) */
+static void mesh_own_release(struct mesh_ctx *c){
+  for(uint32_t row=0;row<mesh_rows(c->M);row++)mesh_release(c->M,row,c->client);
+  mesh_reclaim(c->M);
+}
 
 /* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
-   while they stay hot, then the head reclaimed (mesh_buffer_reclaim: its pages' arena bits, then its rows' hot bits),
-   so no client claims a row or page of it before it is whole again; while a request outstanding on a lane names a page
-   of it, or a holding the client gave has not yet been ended by its bridge (mesh_pinned), the head closed instead,
-   which the bridge releases once neither holds (mesh_retired_release, each liveness turn), as does an allocation that
-   finds no room (mesh_allocate) */
+   while they stay hot, then the head freed (mesh_lease_free: its pages' arena bits, then its rows' hot bits), so no
+   client claims a row or page of it before it is whole again; while a request outstanding on a lane names a page of
+   it, or a holding the client gave has not yet been ended by its bridge (mesh_pinned), the head closed instead
+   (mesh_lease_close), which the client releases at an allocation that finds no room (mesh_own_release) and the bridge
+   once the client has retired (mesh_retired_release) */
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   struct hdr *m=c->M;
   struct mesh_buffer *buffer=row<mesh_rows(m)?&mesh_buffers(m)[row]:NULL;
   const uint32_t rows=buffer?buffer->pages/m->block:0;
   if(!rows || rows>mesh_rows(m)-row || atomic_load_explicit(&buffer->owner,memory_order_acquire)!=c->client ||
-     atomic_load_explicit(&buffer->closed,memory_order_acquire))return EINVAL;
+     (atomic_load_explicit(&buffer->closed,memory_order_acquire)&1))return EINVAL;
   for(uint32_t r=row+1;r<row+rows;r++)atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_relaxed);
   mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,rows);
-  if(mesh_pinned(m,row,rows,c->client)){atomic_store_explicit(&buffer->closed,1,memory_order_release);return 0;}
-  mesh_buffer_reclaim(m,row);
+  if(mesh_pinned(m,row,rows,c->client)){mesh_lease_close(buffer);return 0;}
+  mesh_lease_free(m,row,c->client);
   return 0;
 }
 

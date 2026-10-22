@@ -98,6 +98,13 @@ backend complexity out of linear algebra.
     `posted` in `struct lane_state`, and `struct send_gate` was 128 bytes, not 64.
   - Wrong: `_Alignas(MESH_LINE) uint64_t sent,done;`
   - Right: `_Alignas(MESH_LINE) uint64_t sent;` then `uint64_t done;`
+- **A1-ABA.** A claim by compare-and-swap on a word that takes the same value again, such as an owner, released by
+  storing that value back. A claimer that read the value and stalled swaps successfully on a later holder's state.
+  - Source: rubric review 2026-10-22, finding 4. `mesh_retired_release` swapped a lease's owner to 0 and back, so a
+    client stalled there freed another client's live lease of the same rows.
+  - Wrong: `if(CAS(&b->owner,&o,0)){...; store(&b->owner,o);}`
+  - Right: claim a word that never repeats a value (a lease's `closed`, which counts its closures), or a bit by
+    fetch-and that proceeds only where the bit was set (`mesh_reclaim`).
 - **S1-SEQCST.** A sequentially consistent atomic on the per-unit path: a store then a load, so the core waits for the
   store to be seen. Source: bridge audit, item 4.
 - **R1-USE.** A dispatch declares every allocation of a residency set (`useResource` over `allAllocations`). Its pass

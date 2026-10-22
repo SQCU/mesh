@@ -21,7 +21,8 @@ uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t r
    earlier holdings left, constant until this holder presents.  Given by its index (MESH_STREAM_GIVEN set in its owner
    word), after which its bridge posts nothing more of the holding from its next pass and publishes the holding's end
    in the owner word: a lease the client returns before that is closed, and released once the end is published and no
-   unit outstanding names it (mesh-dataflow.c mesh_pinned) */
+   unit outstanding names it (mesh-dataflow.c mesh_pinned), by the client at an allocation that finds no room or by the
+   bridge once the client has retired */
 int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
 /* design/transport.md section 14, "A process a port": whether stream `stream` is still this client's holding of identity

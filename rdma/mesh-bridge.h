@@ -130,10 +130,10 @@ struct lane_state {
 };
 _Static_assert(offsetof(struct lane_state,posted)==MESH_LINE && sizeof(struct lane_state)==2*MESH_LINE,"a thread's words a line of their own");
 /* design/transport.md section 14: an entry a progress thread has taken from a holding's list, its own copy, typed: its
-   rows (`row`, `pages`), its `base`, its word (`word`: a send entry's naming none the holding's `ready`; NULL for a
-   landing entry naming none, or one not whole), and the index of its first page over the holding (`page`); `whole` 0
-   where it is not the holder's to name (rows past the page table, or its word not one of the region): its pages go as
-   duds, or land in the spare page */
+   rows (`row`, `pages`), its `base`, its word (`word`: a send entry's, naming none the holding's `ready`; NULL for a
+   landing entry, whose word is not read, or one not whole), and the index of its first page over the holding
+   (`page`); `whole` 0 where it is not the holder's to name (rows past the page table, or a send entry's word not one of
+   the region): its pages go as duds, or land in the spare page */
 struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _Atomic uint64_t *word; uint32_t whole; };
 /* design/transport.md section 14: a holding's walk of one of its lists, one progress thread's: a ring of
    MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `timed` given a time, `at` the
