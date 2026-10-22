@@ -6,8 +6,7 @@
 #include <sysexits.h>
 #include <mach/mach_time.h>
 
-/* mesh-verbs.h: the region's name, unlinked at exit (down), and the stop flag every loop reads */
-const char *shm;
+/* mesh-verbs.h: the stop flag every loop reads */
 _Atomic sig_atomic_t stop;
 
 struct hdr *M;
@@ -1366,7 +1365,6 @@ static void terminations_turn(void){
    its port's verbs objects (the kernel's), and a link once connected and then lost pairs again with the port's next
    agent */
 static char self_path[PATH_MAX],self_image[33];
-static const char *agent_fabric="-";
 static void image_uuid(char *out){
   const struct mach_header_64 *image=(const void *)_dyld_get_image_header(0);
   const struct load_command *command=(const void *)(image+1);
@@ -1388,7 +1386,7 @@ static void agent_send(struct port *port,struct agent_message said){
 }
 static void agent_reaped(struct port *port);
 /* a process of this image, not this bridge nor one of its agents, that is an agent of the port's device (its argv
-   `--agent REGION FABRIC DEVICE ...`): an agent of a launch whose parent ended unbidden, which holds the device's queue
+   `--agent DEVICE ...`): an agent of a launch whose parent ended unbidden, which holds the device's queue
    pairs until its exit (agent_leave, at most 2 MESH_PLATFORM_NS); its pid, or 0.  A device's queue pairs are one
    agent's at a time: a link takes as many as its device holds for it, up to MESH_LINK_LANES (ten of a macOS 26
    device's ten, design/HETEROGENEOUS-LINKS.md) */
@@ -1410,11 +1408,11 @@ static pid_t agent_elsewhere(const struct port *port){
     size_t size=room;
     if(sysctl(mib,3,arguments,&size,NULL,0) || size<sizeof argc)continue;
     memcpy(&argc,arguments,sizeof argc);
-    const char *at=arguments+sizeof argc,*end=arguments+size,*argv[5]={0};
+    const char *at=arguments+sizeof argc,*end=arguments+size,*argv[3]={0};
     at+=strnlen(at,(size_t)(end-at));
     while(at<end && !*at)at++;
-    for(int a=0;a<argc && a<5 && at<end;a++){argv[a]=at;at+=strnlen(at,(size_t)(end-at))+1;}
-    if(argc==9 && argv[1] && argv[4] && !strcmp(argv[1],"--agent") && !strcmp(argv[4],port->device.name))return pid;
+    for(int a=0;a<argc && a<3 && at<end;a++){argv[a]=at;at+=strnlen(at,(size_t)(end-at))+1;}
+    if(argc==7 && argv[1] && argv[2] && !strcmp(argv[1],"--agent") && !strcmp(argv[2],port->device.name))return pid;
   }
   return 0;
 }
@@ -1445,7 +1443,7 @@ static int agent_spawn(struct port *port){
   char index[16],page[16],alive[24];
   snprintf(index,sizeof index,"%u",port->index);snprintf(page,sizeof page,"%u",ones);
   snprintf(alive,sizeof alive,"%llu",(unsigned long long)keepalive_ns);
-  char *arguments[]={self_path,"--agent",(char *)shm,(char *)agent_fabric,port->device.name,index,page,alive,self_image,NULL};
+  char *arguments[]={self_path,"--agent",port->device.name,index,page,alive,self_image,NULL};
   posix_spawn_file_actions_t actions;
   posix_spawnattr_t attributes;
   posix_spawn_file_actions_init(&actions);
@@ -1652,8 +1650,8 @@ static void host_taken(void){
   atomic_store_explicit(&host_read_done,0,memory_order_release);
 }
 
-/* design/transport.md section 14, "A process a port": a port's agent, `mesh-flow --agent REGION FABRIC DEVICE INDEX
-   ONES KEEPALIVE IMAGE` as its parent spawned it (agent_spawn): the parent's region mapped (its magic, version and
+/* design/transport.md section 14, "A process a port": a port's agent, `mesh-flow --agent DEVICE INDEX ONES KEEPALIVE
+   IMAGE` as its parent spawned it (agent_spawn): the parent's region mapped (its magic, version and
    bridge the parent's), its port the parent's port INDEX on DEVICE (its streams' words the region's), the duds' block
    ONES and the keepalive the parent's, the provider's faults absorbed (fault_heard) and its peer interfaces'
    terminations heard (B9b: its lanes served no more at once, port_halt).  It takes the parent's messages on descriptor 3
@@ -1777,14 +1775,14 @@ static int agent_main(char **argv){
   signal(SIGPIPE,SIG_IGN);
   char image[33];
   image_uuid(image);
-  const unsigned long index=strtoul(argv[5],NULL,10);
-  if(strcmp(image,argv[8]) || index>=MESH_PORTS){
+  const unsigned long index=strtoul(argv[3],NULL,10);
+  if(strcmp(image,argv[6]) || index>=MESH_PORTS){
     say("agent of %s: this binary (%s) is not its bridge's (%s), or port %lu is past the bridge's: it ends (a binary replaced "
-        "since the bridge's launch takes the bridge's relaunch)\n",argv[4],image,argv[8],index);
+        "since the bridge's launch takes the bridge's relaunch)\n",argv[2],image,argv[6],index);
     return 1;
   }
   faults_install();
-  const int fd=shm_open(argv[2],O_RDWR);
+  const int fd=shm_open(MESH_NAME,O_RDWR);
   struct stat shape;
   if(fd<0 || fstat(fd,&shape))die("agent: its bridge's region");
   M=mmap(NULL,(size_t)shape.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
@@ -1795,8 +1793,8 @@ static int agent_main(char **argv){
   struct port *port=ports;
   *port=(struct port){.index=(uint32_t)index,.control=-1,.agent_fd=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
   port->link.provider.device=&port->device;port->link.page=port->link.rings=MESH_ABSENT;
-  snprintf(port->device.name,sizeof port->device.name,"%s",argv[4]);snprintf(port->name,sizeof port->name,"%s",argv[4]+5);
-  ones=(uint32_t)strtoul(argv[6],NULL,10);keepalive_ns=strtoull(argv[7],NULL,10);
+  snprintf(port->device.name,sizeof port->device.name,"%s",argv[2]);snprintf(port->name,sizeof port->name,"%s",argv[2]+5);
+  ones=(uint32_t)strtoul(argv[4],NULL,10);keepalive_ns=strtoull(argv[5],NULL,10);
   __atomic_store_n(&port_count,1,__ATOMIC_SEQ_CST);
   struct kevent64_s event;
   if((events=kqueue())<0)die("agent events");
@@ -1817,7 +1815,7 @@ static int agent_main(char **argv){
   }
 }
 
-/* design/transport.md section 2, the region and the heartbeat: the node's region opened by its name `name`.  The region a
+/* design/transport.md section 2, the region and the heartbeat: the node's region (MESH_NAME) opened.  The region a
    bridge before this one kept (a restart, SIGHUP; a crash) is adopted where its magic, layout version (MESH_LAYOUT) and
    layout (`geometry`, mesh_layout of this configuration's region) are this bridge's: the same memory, its clients'
    slots, rows and leases standing and the GPU buffers over them valid, its pages registered again by the port agents
@@ -1835,28 +1833,28 @@ static int region_same(const struct hdr *a,const struct hdr *b){
          a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->client_off==b->client_off && a->data_off==b->data_off &&
          a->length==b->length;
 }
-static int region_open(const char *name,const struct hdr *geometry,int *out){
-  int fd=shm_open(name,O_RDWR,0);
-  if(fd<0 && errno!=ENOENT){say("bridge: region %s not opened (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
+static int region_open(const struct hdr *geometry,int *out){
+  int fd=shm_open(MESH_NAME,O_RDWR,0);
+  if(fd<0 && errno!=ENOENT){say("bridge: region %s not opened (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
   if(fd>=0){
     struct stat shape;
-    if(fstat(fd,&shape)){say("bridge: region %s not read (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
+    if(fstat(fd,&shape)){say("bridge: region %s not read (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
     const size_t size=(size_t)shape.st_size;
     struct hdr *old=size>=sizeof(struct hdr)?mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0):NULL;
-    if(old==MAP_FAILED){say("bridge: region %s not mapped (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
+    if(old==MAP_FAILED){say("bridge: region %s not mapped (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
     if(old && old->magic==MESH_MAGIC){
       if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && region_same(old,geometry)){M=old;*out=fd;return 1;}
       __atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);
       say("bridge: region %s is expired (another layout, or released): this bridge ends, and its heartbeat unlinks it once no "
-          "holder of it lives and opens a bridge again\n",name);
+          "holder of it lives and opens a bridge again\n",MESH_NAME);
       boots_clear();
       exit(EX_TEMPFAIL);
     }
     if(old)munmap(old,size);
     close(fd);
-    shm_unlink(name);
+    shm_unlink(MESH_NAME);
   }
-  if((fd=shm_open(name,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
+  if((fd=shm_open(MESH_NAME,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
   if(ftruncate(fd,(off_t)geometry->length))die("ftruncate");
   fchmod(fd,MESH_MODE);
   M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
@@ -1910,7 +1908,7 @@ static void region_adopt(void){
 /* design/transport.md: the node's resident bridge; its one operand the path of its configuration (no default); a port's
    agent as its parent spawns it (agent_main) */
 int main(int argc,char **argv){
-  if(argc==9 && !strcmp(argv[1],"--agent"))return agent_main(argv);
+  if(argc==7 && !strcmp(argv[1],"--agent"))return agent_main(argv);
   if(argc!=2)die("usage: mesh-flow CONFIGURATION: the canonical property list bin/mesh-user.sh writes from the node's bridge configuration document (etc/bridge/README.md); the bridge has no default and does not start without one");
   char name[256];uint64_t region_bytes;
   const char *refused=configuration_read(argv[1],name,sizeof name,&region_bytes);
@@ -1938,8 +1936,7 @@ int main(int argc,char **argv){
   uint32_t node=0;
   for(int i=0;i<16;i++)node=(node*0x01000193u)^uuid[i];
   node=(node&0x7fffffffu)?node&0x7fffffffu:1;
-  /* design/transport.md: the node's region and its hello port, the mesh's */
-  const char *region=MESH_NAME;
+  /* design/transport.md: the node's hello port, the mesh's */
   const uint16_t service=(uint16_t)atoi(MESH_PORT);
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/transport.md */
@@ -1948,8 +1945,7 @@ int main(int argc,char **argv){
   struct hdr geometry={0};
   mesh_layout(&geometry,pg,1,(uint32_t)(region_bytes/pg));
   /* design/transport.md section 2: the bridge's port bound before its region is read, so a second bridge of the node
-     (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the region; a loop
-     bridge binds any port, so its harness alone keeps one bridge a region */
+     (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the region */
   int on=1;
   struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
   listener=socket(AF_INET6,SOCK_STREAM,0);hello=socket(AF_INET6,SOCK_DGRAM,0);network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
@@ -1961,12 +1957,11 @@ int main(int argc,char **argv){
      fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
     die("bridge sockets");
   int fd=-1;
-  const int adopted=region_open(region,&geometry,&fd);
-  shm=region;
+  const int adopted=region_open(&geometry,&fd);
   if(adopted)region_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
   M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
-  say("bridge node %u: region %s %s\n",node,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
+  say("bridge node %u: region %s %s\n",node,MESH_NAME,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;

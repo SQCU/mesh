@@ -10,7 +10,6 @@
 #include <errno.h>
 /* design/transport.md */
 static void mesh_reclaim(struct hdr *);
-#define MESH_REGION_NAME MESH_NAME
 
 /* design/transport.md: the node's region mapped, `writable` (a client's) or read-only (a reader's, which attaches no
    client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge
@@ -18,7 +17,7 @@ static void mesh_reclaim(struct hdr *);
    of this layout, or one expired,
    else the errno */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
-  int file=shm_open(MESH_REGION_NAME,writable?O_RDWR:O_RDONLY,0);
+  int file=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
   if(file<0)return errno;
   struct stat info;
   if(fstat(file,&info)){int error=errno;close(file);return error;}
