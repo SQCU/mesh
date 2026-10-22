@@ -407,7 +407,6 @@ ends within 15 s of its SIGTERM. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`; a port whose cable link is up with no RDMA peer is logged and held, never brought down (design/rubrics.md M3). Idempotent; run at boot (`io.mesh.fabric`) and by each run of `install.sh`. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric record: RDMA enablement and each device's link, as boot found them. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
-| `templates/` | LaunchDaemon template for workloads. Boot-time (`RunAtLoad`), once a boot, no login needed. |
 | `viz/` | the whole-fabric observer (`io.mesh.observer`, :8787) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-link.c`, `mesh-records.c`, `mesh-observe.h` and `mesh-bridge.h` (the bridge), `mesh-heartbeat.c` (its heartbeat), `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
@@ -568,17 +567,6 @@ until it is started again on the new one.
 ```
 
 The same locked mesh runtime serves these docs through `mesh-python`.
-
-## Adding a workload
-
-Copy `templates/io.mesh.job-EXAMPLE.plist` to
-`/Library/LaunchDaemons/io.mesh.job-<name>.plist`, point it at your script, then:
-
-```
-sudo launchctl bootstrap system /Library/LaunchDaemons/io.mesh.job-<name>.plist
-```
-
-Runs as root at boot with no login session, once a boot: launchd does not start it again after it exits.
 
 ## Collectives
 

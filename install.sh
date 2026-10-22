@@ -27,7 +27,7 @@ echo "provisioning $ADMIN_USER   ($REPO)"
 [ -n "$RECORDED" ] && [ "$RECORDED" != "$ADMIN_USER" ] && echo "admin user: $RECORDED -> $ADMIN_USER (MESH_USER)"
 
 sec "1. Layout"
-mkdir -p "$MESH_ROOT"/{bin,etc,jobs,log,templates,viz} /usr/local/bin
+mkdir -p "$MESH_ROOT"/{bin,etc,jobs,log,viz} /usr/local/bin
 kick=
 launchctl print system/io.mesh.beacon >/dev/null 2>&1 && ! cmp -s "$REPO/bin/mesh-beacon.sh" "$MESH_ROOT/bin/mesh-beacon.sh" && kick=io.mesh.beacon
 launchctl print system/io.mesh.router >/dev/null 2>&1 && ! { cmp -s "$REPO/bin/mesh-router-init.sh" "$MESH_ROOT/bin/mesh-router-init.sh" && cmp -s "$REPO/vendor/babeld-arm64" "$MESH_ROOT/bin/babeld"; } && kick="$kick io.mesh.router"
@@ -56,7 +56,6 @@ for L in io.mesh.keeper io.mesh.cartlane.learner io.mesh.cartlane.viewer; do lau
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$REPO/user/mesh-bandwidth.m" -o "$REPO/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 -o root -g wheel "$REPO/user/mesh-bandwidth" "$MESH_ROOT/bin/mesh-bandwidth"
 install -C -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/babeld"
-install -m 644 -o root -g wheel "$REPO"/templates/* "$MESH_ROOT/templates/" 2>/dev/null
 ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
 ln -sf "$MESH_ROOT/bin/mesh-observe.py" /usr/local/bin/mesh-observe
