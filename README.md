@@ -86,10 +86,13 @@ expiry is disabled in the Tailscale admin console or it joined with a tagged key
 whose key expired logs in again.
 
 **Gitignored documents.** Git carries everything a node converges to except two kinds of document, which reach a node
-over ssh from a peer that holds them:
+over ssh from a peer that holds them, when the node joins the mesh and to every node again when one changes (a network
+added, a key replaced, a standup recorded):
 - credentials (`networks.conf`, `tailscale.key`), because the repository is public;
 - `NODE-STANDUPS.md` at the checkout's root, the record of which macOS and toolchains each node had and what went
-  wrong at its standup (`ssh <node> 'cat > mesh/NODE-STANDUPS.md' < NODE-STANDUPS.md`).
+  wrong at its standup (`ssh <node> 'cat > mesh/NODE-STANDUPS.md' < NODE-STANDUPS.md`). The operator, 2026-10-22: it
+  is gitignored for "preventing agents from treating the happenstance of os versions as permanent or part of the
+  repo's versioning".
 
 Build products are gitignored too; each node builds its own.
 
