@@ -2247,12 +2247,21 @@ static uint64_t count_of(_Atomic uint64_t *word) { return atomic_load_explicit(w
    into bytes an earlier SEND of its call on its channel reads waits for `sent` past that SEND (struct message `sent`);
    then every send entry's bytes sent, so the caller may write its send buffer again.  A count that reads the link's
    loss fails the group, and so does a revoke, at its next look: a peer's process gone or its communicator revoked
-   ends its holdings, whose duds land here (design/transport.md sections 5 and 14: a client's wait is a loop that stops
-   on a word, never on a clock; a peer that computes for long is waited for).  Every look spins: nothing parks */
+   ends its holdings, whose duds land here; and so does MESH_PLATFORM_NS with nothing landed, consumed, published or
+   sent on any of its channels (design/rubrics.md C5's upper pole: "within a call, the only thing that ends a wait is the
+   data or the platform deadline", and M3, every wait ends in finite time; the operator: "why do you want to get rid of
+   a timeout that fixes infinite hangs anyways?"), the deadline moved on by every step that moves, so a peer that
+   computes for long and keeps landing is waited for.  Every look spins: nothing parks */
+static ncclResult_t quiet_fail(const struct ncclComm *comm, const char *what) {
+  return fail(ncclRemoteError, "communicator %s: %s on any channel for %.0f s, the platform's deadline (design/rubrics.md C5)",
+              comm->name, what, (double)MESH_PLATFORM_NS / 1e9);
+}
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
+  uint64_t until = 0, before = UINT64_MAX;
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
     int open = 0;
+    uint64_t moved = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
       struct schedule *p = plans + h;
@@ -2282,18 +2291,29 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
         ch->published++;
       }
       open |= ch->published < p->first[0] + p->outs || ch->consumed < p->first[1] + p->ins;
+      moved += ch->published + ch->consumed + count_of(ch->view.landed);
     }
     if (!open) break;
+    const uint64_t at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (moved != before) { before = moved; until = at + MESH_PLATFORM_NS; }
+    else if (at >= until) return quiet_fail(comm, "nothing landed, consumed or published");
   }
+  before = UINT64_MAX;
   for (int all = 0; !all;) {
     if (revoked(comm)) return revoked_fail(comm);
     all = 1;
+    uint64_t moved = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       const struct channel *ch = comm->channels + h;
       const uint64_t sent = plans[h].outs ? count_of(ch->view.sent) : 0;
       if (sent == UINT64_MAX) return fail(ncclRemoteError, "the link to node %u was lost before its SENDs completed (its holding's counts ~0)", ch->node);
       all &= !plans[h].outs || sent >= ch->out;
+      moved += sent;
     }
+    if (all) break;
+    const uint64_t at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (moved != before) { before = moved; until = at + MESH_PLATFORM_NS; }
+    else if (at >= until) return quiet_fail(comm, "no SEND completed");
   }
   for (uint32_t h = 0; h < comm->count; h++) {
     comm->channels[h].waited = comm->channels[h].consumed;
