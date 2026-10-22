@@ -29,6 +29,7 @@
 #include <poll.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
+#include <uuid/uuid.h>
 
 _Static_assert(sizeof(pthread_t)==8,"M17");
 
@@ -120,10 +121,12 @@ struct lane_state {
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
    sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` 1 + the
    queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
-   sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
+   sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets).  Every message
+   names its bridge's node and that node's host UUID (`uuid`, mesh.h struct mesh_record's), so a hello of this node's
+   number from another host is told (mesh-records.c number_shared) */
 enum { HELLO=1, FAREWELL, RECORD, LINK };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
-  uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
+  uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; uint8_t uuid[16]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
 /* the wire's magic: its base, MESH_VERSION and the wire's revision (1<<12, past any base and version's: every link heard
    within MESH_PLATFORM_NS or concluded, design/transport.md B1, B2, B3, which a bridge of the same version
@@ -262,12 +265,6 @@ struct port {
    with its record (mesh-program.c health_turn) */
 #define MESH_HEALTH_NS UINT64_C(10000000000)
 
-/* design/transport.md; design/transport.md: the nodes this bridge has heard of, when it last
-   heard each one's record (this node's clock), when it lost each, and the newest record it ever heard of each (its boot
-   and sequence), held apart from the map: RFC 2328 s13's database, so a record the map dropped is never taken, nor sent
-   on, again (a node's later boot is always newer); a full table gives the longest unheard of those its place */
-struct known { uint32_t node; uint64_t heard,gone,boot,sequence; };
-#define MESH_KNOWN 256
 /* design/transport.md section 14: a port's progress thread, `side` 0 its receives' and 1 its SENDs': it passes without
    pause while its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the
    port's guard word while it serves none, looking again every MESH_PAUSE_NS (the stop's `closing`) */
@@ -287,7 +284,8 @@ extern char host[MESH_NAME_BYTES];
 extern struct mesh_ctx bridge;
 extern _Atomic int found;
 extern uint64_t memory;
-extern struct known known[MESH_KNOWN];
+/* this node's host UUID (mesh.h struct mesh_record `uuid`), read once at the start */
+extern uint8_t node_uuid[16];
 extern uint64_t keepalive_ns;
 extern uint64_t owners[MESH_CLIENTS];
 extern uint32_t ones;
@@ -312,6 +310,7 @@ void map_adopt(void);
 struct mesh_record *record_held(uint32_t node);
 void health_turn(void);
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes);
+void number_shared(uint32_t node,const uint8_t *held,const uint8_t *heard,uint8_t *told,const struct port *port,const char *what);
 void port_lost(struct port *port,int64_t code);
 void clients_turn(int liveness);
 
