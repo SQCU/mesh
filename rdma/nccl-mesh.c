@@ -3131,7 +3131,9 @@ static ncclResult_t losses_through(uint64_t ticket) {
    order, whose order the caller's kernels keep: complete_track), each the whole of an
    ncclSend's, an ncclRecv's, an in-place ncclBroadcast's or an in-place ncclAllGather's (sendbuff recvbuff + rank x
    sendcount, NCCL's: the buffer the caller's kernel writes is the one sent), no combine (the caller's kernel combines:
-   an all-reduce or a reduce is the caller's ncclSend and ncclRecv in one group), no scratch */
+   an all-reduce or a reduce is the caller's ncclSend and ncclRecv in one group), no scratch, and no SEND of bytes its
+   call also receives (a forwarding rank, a broadcast tree's inner rank: a fused publication is released before the
+   kernel that reads the landing, so it would send the buffer's old bytes; ncclMeshFusableRooted answers 0 there) */
 static int fusable(const struct call *list, size_t n) {
   const int ranks = list[0].comm->nranks;
   uint8_t *seen = calloc((size_t)ranks, 1);
@@ -3151,6 +3153,12 @@ static int fusable(const struct call *list, size_t n) {
       const uint8_t bit = step->op == MESH_STEP_SEND ? 1 : 2;
       if (step->op == MESH_STEP_REDUCE || step->peer >= (uint32_t)ranks || seen[step->peer] & bit) whole = 0;
       else seen[step->peer] |= bit;
+      for (uint32_t j = 0; j < c->bound->count && whole && step->op == MESH_STEP_SEND; j++) {
+        const struct mesh_step *got = c->bound->steps + j;
+        if (got->op != MESH_STEP_SEND && piece_bytes(got) && got->buffer == step->buffer && got->first < step->first + step->piece.elements &&
+            step->first < got->first + got->piece.elements)
+          whole = 0;
+      }
     }
   }
   free(seen);
@@ -3204,16 +3212,19 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && remote) result = comm_failure(comm);
   if (!result) result = plan_calls(comm, list, n);
   if (!result) result = operands_check(list, n);
-  if (!result && list[0].fused && remote && !fusable(list, n))
-    result = fail(ncclInvalidUsage, "a fused crossing is ncclSend and ncclRecv in one group (the caller's kernel combining what lands with its own "
-                                    "part: an all-reduce's or a reduce's form), an in-place ncclBroadcast or an in-place ncclAllGather, at most one "
-                                    "SEND and one landing of a whole buffer toward each peer (ncclMeshFused's records; ncclMeshFusableRooted)");
   if (result) { pthread_mutex_unlock(&group_lock); calls_free(list, n); return result; }
+  /* a group on a fused stream that is no fused crossing (fusable: one that crosses no link, or not ncclSend and ncclRecv
+     toward each peer, an in-place broadcast or all-gather, at most one SEND and one landing of a whole buffer each,
+     forwarding nothing) is an ordinary group on that stream, its steps the library's: no record is written and both
+     counts are 0, so the caller's kernels publish and await nothing (a form choice, not a refusal) */
+  ncclMeshFused *const fused = list[0].fused && remote && fusable(list, n) ? list[0].fused : NULL;
+  if (list[0].fused && !fused) list[0].fused->publishes = list[0].fused->lands = 0;
+  for (size_t i = 0; i < n && !fused; i++) list[i].fused = NULL;
   if (finished) metal_collect(finished);
   void *const violation = remote ? comm->violation : NULL;
   const char *message = NULL;
   struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, polls, &message)
-                                         : metal_begin(list[0].command, list[0].encoder, list[0].fused ? list[0].residency : NULL, violation,
+                                         : metal_begin(list[0].command, list[0].encoder, fused ? list[0].residency : NULL, violation,
                                                        polls, &message);
   if (!program) {
     pthread_mutex_unlock(&group_lock); calls_free(list, n);
@@ -3256,7 +3267,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && remote) {
     if (!(g = calloc(1, sizeof *g)) || !(g->start = calloc(2 * (size_t)comm->count + 1, sizeof *g->start))) result = fail(ncclSystemError, "out of memory");
     else {
-      g->comm = comm; g->holder = holder; g->fused = list[0].fused != NULL;
+      g->comm = comm; g->holder = holder; g->fused = fused != NULL;
       g->end = g->start + comm->count;
       for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
       result = schedule(program, comm, list, n, holder, &g->plans, &gate);
@@ -3316,7 +3327,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       if (!result) result = retire(program);
     }
     if (g->fused) {
-      fusing.out = list[0].fused; fusing.room[0] = fusing.out->publishes; fusing.room[1] = fusing.out->lands;
+      fusing.out = fused; fusing.room[0] = fusing.out->publishes; fusing.room[1] = fusing.out->lands;
       fusing.published = fusing.landed = 0;
     }
     if (!result) result = walk(program, issuing ? g : NULL, issuing ? NULL : g, &published);
@@ -3330,7 +3341,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, list, n);
   program_end(program, list[0].encoder != NULL, result);
-  if (result && scheduled) walk_failed(comm, issue && !list[0].fused ? 0 : ticket, result);
+  if (result && scheduled) walk_failed(comm, issue && !fused ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   if (!scheduled) spares_give(comm, holder);
   pthread_mutex_unlock(&group_lock);

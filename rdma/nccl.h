@@ -232,7 +232,8 @@ typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
    binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel takes them through its
    argument table, a classic one as one record of its bytes (ncclMeshMetalSteps' mesh_step_binding, the six in this
    order).  The caller gives `publish` and `land` room for `publishes` and `lands` records (ncclMeshFusableRooted's
-   counts); the group writes its records in its peers' order (its channels') and sets the two counts to those written. */
+   counts); the group writes its records in its peers' order (its channels') and sets the two counts to those written:
+   0 and 0 where the group is not a fused crossing, which then runs as an ordinary group (ncclMeshFusableRooted). */
 typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
@@ -1021,9 +1022,13 @@ uint64_t ncclMeshRetired(void);
    mesh_step_read and combines them with its own part where it reduces.  A kernel that writes the send buffer again
    with no landing after the publication calls mesh_step_sent on the publication's bindings first.  The call encodes no
    dispatch of either fused step, so the caller's kernels are ordered by its stream alone: on the classic form, its
-   queue's order (a serial compute encoder's dispatches, its command buffers in commit order).  A group that is not
-   fusable on such a stream fails as a value (ncclInvalidUsage), and one on a classic stream without its residencySet
-   (ncclInvalidArgument).  The landing's receive is posted only once the publication has stored `ready` (its gate), so
+   queue's order (a serial compute encoder's dispatches, its command buffers in commit order).  A group on such a stream
+   that is not a fused crossing (one that crosses no link; more than one SEND or landing toward a peer, a combine or a
+   scratch; a SEND of bytes its call also receives, a forwarding rank's) is not refused: it runs as an ordinary group
+   on that stream, its steps encoded by the library as on any stream (issued where the stream asks issue, else
+   completed), writes no record and sets both counts to 0, so the caller's kernels publish and await nothing; as an
+   ordinary call it reads its send buffer at its place in the stream, so the kernel that writes it is encoded before
+   the call.  A group on a classic stream without its residencySet fails (ncclInvalidArgument).  The landing's receive is posted only once the publication has stored `ready` (its gate), so
    its landing buffer may be the one the previous crossing's landing kernel read.
    *publishes and *lands are this rank's fused steps where a fused group of `kind` rooted at `root` (an all-reduce's and
    an all-gather's root 0) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount) runs on comm

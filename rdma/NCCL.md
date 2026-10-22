@@ -283,7 +283,9 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     landings and every other rank one publication, a broadcast's and an all-gather's this rank's moves where the
     communicator's program moves whole operands (a forwarding rank, a chain's middle or a broadcast tree's inner rank,
     does not fuse), each where this rank has a channel to every peer the form uses (the communicator's map); else 0 and
-    0, and the caller issues the unfused call.
+    0, and the caller issues the unfused call. A group on a fused stream that is no fused crossing is not refused: it
+    runs as an ordinary group on that stream, its steps the library's, and sets both counts to 0, so the caller's
+    kernels publish and await nothing.
     - The caller's kernel writes its send buffer, and its last threadgroup to arrive calls `mesh_step_release` on each
       publication: one fence and one store of that holding's `ready`.
     - The kernel after it calls `mesh_step_await` on each landing (the landing, and its own SEND to that peer done) and
