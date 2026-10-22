@@ -2,9 +2,10 @@
    fabric's maps (mesh-loop.c family_cables: the pair, line 4, ring 5, star 8, torus 6 and 8), along each map's
    shortest-path trees and its packed trees (as libnccl-mesh makes them, nccl-mesh.c comm_routes, compile_form), at
    chunks 1 to 4, every root of a rooted collective, the all-reduce whole and two-phase, every node or the even nodes
-   contributing, over operands of 1, 4,096 and 1,000,003 float32 and 2^20 half, on mesh_wire_of's wire at a 16 KiB
-   block; mesh_group_advise over a group on each map and tree set (collectives, both counted all-to-alls, point-to-point
-   calls each way at two sizes).  It prints each one's advisories and a summary line, then the totals; it refuses
+   contributing, over operands of 1, 4,096 and 1,000,003 float32 and 2^20 half, cut on pages of 16 KiB (the region's on
+   Apple silicon: libnccl-mesh's own cuts lie on them, and a SEND's or COPY's piece off one fails its call); mesh_group_advise
+   over a group on each map and tree set (collectives, both counted all-to-alls, point-to-point calls each way at two
+   sizes).  It prints each one's advisories and a summary line, then the totals; it refuses
    nothing, exits 0.  `mesh-advise mutate`: programs and groups broken on purpose, each named with the check it must
    fire and whether it did. */
 #include "mesh-plan.h"
@@ -14,7 +15,8 @@
 #include <string.h>
 
 enum { CHECKS = 7, KINDS = 5, SHOWN = 4, MOST = 8 };
-static const char *const checks[CHECKS] = {"projection", "priorities", "depth", "causality", "hazard", "invocation", "bound"};
+static const char *const checks[CHECKS] = {"projection", "priorities", "alignment", "causality", "hazard", "invocation", "bound"};
+enum { PAGE = 16384 };
 static const char *const kinds[KINDS] = {"allreduce", "broadcast", "reduce", "reduce-scatter", "allgather"};
 
 struct tally { const char *label; uint32_t by_check[CHECKS]; };
@@ -81,9 +83,12 @@ static int rows_collective(struct rows *c, const struct mesh_trees *trees, uint3
   struct mesh_move *move = malloc((moves + 1) * sizeof *move);
   struct mesh_program program;
   int failed = !segment || !first || !log_weight || !move || mesh_compile(trees, what, root, whole, chunks, NULL, &program, segment, log_weight, first, move);
+  uint64_t sizes[MOST];
+  for (uint32_t s = 0; s < trees->nodes; s++) sizes[s] = operand.elements / trees->nodes + (s < operand.elements % trees->nodes);
+  const int nccl = what == MESH_REDUCE_SCATTER || what == MESH_ALLGATHER;
   for (uint32_t r = 0; !failed && r < trees->nodes; r++) {
     failed = !(c->steps[r] = malloc((first[r + 1] - first[r] + 1) * sizeof **c->steps));
-    if (!failed) c->count[r] = mesh_program_steps(&program, r, operand, c->steps[r]);
+    if (!failed) c->count[r] = mesh_program_steps_cut(&program, r, operand, nccl ? sizes : NULL, PAGE, c->steps[r]);
   }
   free(segment); free(first); free(log_weight); free(move);
   return failed;
@@ -110,17 +115,17 @@ static int rows_point(struct rows *c, uint32_t n, int send, uint32_t shift, stru
   return 0;
 }
 static uint32_t group_advise(const char *label, struct rows *rows, const uint32_t *kind, uint32_t calls, uint32_t n, uint32_t polls,
-                             uint32_t bound, const struct mesh_wire *wire, uint64_t *total) {
+                             uint32_t bound, uint64_t *total) {
   struct mesh_group_call call[16];
   for (uint32_t i = 0; i < calls; i++) call[i] = (struct mesh_group_call){kind[i], 0, rows[i].count, (const struct mesh_step *const *)rows[i].steps};
-  const struct mesh_group group = {n, calls, polls, bound, call};
+  const struct mesh_group group = {n, calls, polls, bound, call, PAGE};
   struct tally t = {label, {0}};
-  const uint32_t warnings = mesh_group_advise(&group, wire, warned, &t);
+  const uint32_t warnings = mesh_group_advise(&group, warned, &t);
   summary(&t, warnings, total, "");
   return warnings;
 }
 
-static int programs(const struct mesh_wire *wire) {
+static int programs(void) {
   static const struct mesh_operand operands[] = {{0, 4, 1}, {0, 4, 4096}, {0, 4, 1000003}, {1, 2, 1u << 20}};
   uint64_t count = 0, failed = 0, unchecked = 0, priorities_free = 0, admissible = 0, total[CHECKS] = {0}, by_kind[KINDS][CHECKS] = {{0}};
   uint64_t of_kind[KINDS] = {0};
@@ -157,12 +162,12 @@ static int programs(const struct mesh_wire *wire) {
                     failed++;
                   } else {
                     struct tally t = {label, {0}};
-                    const uint32_t warnings = mesh_program_advise(&program, wire, operands[o], warned, &t);
+                    const uint32_t warnings = mesh_program_advise(&program, operands[o], PAGE, warned, &t);
                     for (int c = 0; c < CHECKS; c++) by_kind[what][c] += t.by_check[c];
                     const int free_by_priorities = !t.by_check[0] && !t.by_check[1], checked = !t.by_check[0] && warnings != UINT32_MAX;
                     priorities_free += free_by_priorities; admissible += checked && !t.by_check[3]; unchecked += !checked;
                     char verdict[96];
-                    snprintf(verdict, sizeof verdict, "; deadlock-free by priorities: %s; admissible on the wire: %s", free_by_priorities ? "yes" : "no",
+                    snprintf(verdict, sizeof verdict, "; deadlock-free by priorities: %s; admissible on the lists: %s", free_by_priorities ? "yes" : "no",
                              checked ? (t.by_check[3] ? "no" : "yes") : "unchecked");
                     summary(&t, warnings, total, verdict);
                   }
@@ -171,7 +176,7 @@ static int programs(const struct mesh_wire *wire) {
       }
       free(root); free(parent); free(weight);
     }
-  printf("\nprograms %llu, not compiled %llu, deadlock-free by priorities %llu, admissible on the wire %llu, wire unchecked %llu\n",
+  printf("\nprograms %llu, not compiled %llu, deadlock-free by priorities %llu, admissible on the lists %llu, lists unchecked %llu\n",
          (unsigned long long)count, (unsigned long long)failed, (unsigned long long)priorities_free, (unsigned long long)admissible,
          (unsigned long long)unchecked);
   printf("program warnings:");
@@ -185,7 +190,7 @@ static int programs(const struct mesh_wire *wire) {
   return 0;
 }
 
-static void groups(const struct mesh_wire *wire) {
+static void groups(void) {
   static const uint32_t kind[] = {MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_HOSTED, MESH_GROUP_COUNTED,
                                   MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT};
   enum { CALLS = sizeof kind / sizeof *kind };
@@ -211,7 +216,7 @@ static void groups(const struct mesh_wire *wire) {
         snprintf(label, sizeof label, "group %s %s (allreduce, allgather, broadcast, all-to-all hosted and counted, 4 point-to-point) %s", maps[m].name,
                  packed ? "packed" : "shortest", gpu ? "GPU polls NCCL_MESH_POLLS" : "host");
         if (failed) { printf("%s: does not compile\n", label); break; }
-        group_advise(label, rows, kind, CALLS, n, gpu ? NCCL_MESH_POLLS : 0, gpu ? NCCL_MESH_POLLS : 0, wire, total);
+        group_advise(label, rows, kind, CALLS, n, gpu ? NCCL_MESH_POLLS : 0, gpu ? NCCL_MESH_POLLS : 0, total);
         count++;
       }
       for (int i = 0; i < CALLS; i++) rows_free(rows + i);
@@ -228,7 +233,7 @@ static void expect(const struct tally *t, int check) {
   tried++; fired += t->by_check[check] > 0;
   printf("%s: %s %s\n\n", t->label, checks[check], t->by_check[check] ? "fired" : "DID NOT FIRE");
 }
-static int mutate(const struct mesh_wire *wire) {
+static int mutate(void) {
   uint32_t link[64][2], *root, *parent;
   double *weight;
   const uint32_t trees_count = map_trees(0, 0, link, &root, &parent, &weight);
@@ -240,30 +245,38 @@ static int mutate(const struct mesh_wire *wire) {
   mesh_compile_room(&trees, 1, &parts, &moves);
   if (!trees_count || moves > 256 || parts > 64 || mesh_compile(&trees, MESH_ALLREDUCE, 0, 0, 1, NULL, &p, segment, log_weight, first, move)) return 1;
   memcpy(kept, move, sizeof move);
-  const struct mesh_operand small = {0, 4, 4096}, big = {0, 4, 1000003}, wide = {0, 600000, 3};
+  const struct mesh_operand small = {0, 4, 4096}, big = {0, 4, 1000003};
   struct tally t;
-#define PROGRAM(name, operand, check) do { t = (struct tally){name, {0}}; mesh_program_advise(&p, wire, operand, warned, &t); expect(&t, check); \
-    memcpy(move, kept, sizeof move); } while (0)
+#define PROGRAM(name, program, operand, check) do { t = (struct tally){name, {0}}; mesh_program_advise(&(program), operand, PAGE, warned, &t); \
+    expect(&t, check); memcpy(move, kept, sizeof move); } while (0)
   move[0].parts = 2; move[0].part = 0;
-  PROGRAM("M1 rank 0's first SEND carries two parts", small, 0);
+  PROGRAM("M1 rank 0's first SEND carries two parts", p, small, 0);
   for (uint32_t i = first[1]; i < first[2]; i++) if (move[i].op != MESH_STEP_SEND) { move[i].round++; break; }
-  PROGRAM("M2 rank 1's first receive a round later", small, 1);
+  PROGRAM("M2 rank 1's first receive a round later", p, big, 1);
   for (uint32_t r = 0; r < 2; r++) { struct mesh_move *a = move + first[r]; const struct mesh_move s = a[0]; a[0] = a[1]; a[1] = s; }
-  PROGRAM("M3 each rank's round-0 receive before its SEND", big, 3);
-  /* a receive into the part a SEND reads at the SEND's own positions is the executors' in-place order (one position
-     published before it is consumed: mesh_compile's two-node direct exchange), no hazard; the receive here covers
-     the whole operand, so its pieces meeting the SEND's lie at later positions, with no order from the SEND's */
+  PROGRAM("M3 each rank's round-0 receive before its SEND", p, big, 3);
+  /* a combine into the part a SEND reads on the same channel waits for that SEND's bytes sent (the executors' order:
+     mesh_compile's two-node direct exchange), no hazard; a COPY lands in place as its peer publishes it, which nothing
+     orders after this rank's SEND has landed at that peer */
   for (uint32_t i = first[0]; i < first[2]; i++)
-    if (!move[i].round && (i < first[1]) != (move[i].op == MESH_STEP_SEND)) { move[i].part = 0; move[i].parts = p.parts; }
-  PROGRAM("M4 rank 0's round-0 receive into the whole operand, the part it sends among it, past that SEND's positions", big, 4);
-  PROGRAM("M5 an element wider than a slot", wide, 2);
+    if (!move[i].round && (i < first[1]) != (move[i].op == MESH_STEP_SEND)) {
+      move[i].part = 0; move[i].parts = p.parts;
+      if (i < first[1]) move[i].op = MESH_STEP_COPY;
+    }
+  PROGRAM("M4 rank 0's round-0 receive a COPY into the whole operand, the part it sends among it", p, big, 4);
+  uint32_t split_segment[64], split_first[3];
+  double split_weight[64];
+  struct mesh_move split_move[256];
+  struct mesh_program split;
+  if (mesh_compile(&trees, MESH_ALLGATHER, 0, 0, 1, NULL, &split, split_segment, split_weight, split_first, split_move)) return 1;
+  PROGRAM("M5 an all-gather whose second segment starts off a page (1,000 float32)", split, ((struct mesh_operand){0, 4, 1000}), 2);
 #undef PROGRAM
   struct rows rows[3];
   uint32_t kind[3] = {MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE};
   memset(rows, 0, sizeof rows);
 #define GROUP(name, calls, n, polls, check) do { t = (struct tally){name, {0}}; struct mesh_group_call call[3]; \
     for (int i = 0; i < (calls); i++) call[i] = (struct mesh_group_call){kind[i], 0, rows[i].count, (const struct mesh_step *const *)rows[i].steps}; \
-    const struct mesh_group group = {n, calls, polls, NCCL_MESH_POLLS, call}; mesh_group_advise(&group, wire, warned, &t); expect(&t, check); \
+    const struct mesh_group group = {n, calls, polls, NCCL_MESH_POLLS, call, PAGE}; mesh_group_advise(&group, warned, &t); expect(&t, check); \
     for (int i = 0; i < 3; i++) rows_free(rows + i); } while (0)
   struct rows reduce, gather;
   memset(&reduce, 0, sizeof reduce); memset(&gather, 0, sizeof gather);
@@ -297,12 +310,9 @@ static int mutate(const struct mesh_wire *wire) {
 }
 
 int main(int argc, char **argv) {
-  struct mesh_wire wire;
-  mesh_wire_of(16384, &wire);
-  printf("wire: slot %llu, small %llu, block %llu, lag %u\n", (unsigned long long)wire.slot, (unsigned long long)wire.small,
-         (unsigned long long)wire.block, wire.lag);
-  if (argc > 1 && !strcmp(argv[1], "mutate")) return mutate(&wire);
-  programs(&wire);
-  groups(&wire);
+  printf("pages of %u bytes\n", (unsigned)PAGE);
+  if (argc > 1 && !strcmp(argv[1], "mutate")) return mutate();
+  programs();
+  groups();
   return 0;
 }

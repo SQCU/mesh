@@ -2,7 +2,7 @@
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
 node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
 the header's own: link maps, the trees every collective and message take, operands, collectives (compile: a program,
-the operand libnccl-mesh's ncclMeshCommInitRank takes), steps and the wire libnccl-mesh's channels run (wire()).
+the operand libnccl-mesh's ncclMeshCommInitRank takes) and steps, each one entry of a holding's send or landing list.
 Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the
 memory they move taken from the node's bridge's region (rdma/NCCL.md "Memory")."""
 import errno
@@ -210,14 +210,6 @@ def footprint(pid=0):
     return info[2 + 7]
 
 
-def wire(block=None):
-    """mesh_wire_of: the layout of libnccl-mesh's positions on a bound lane pair's rings (mesh-plan.h struct mesh_wire:
-    `slot`, `small`, `block`, `lag`) for `block` (None: this machine's page, the block every bridge's region takes)."""
-    made = ffi.new('struct mesh_wire *')
-    lib.mesh_wire_of(block if block is not None else os.sysconf('SC_PAGE_SIZE'), made)
-    return made
-
-
 def lease(nbytes):
     """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's region, whole pages already registered on its
     devices (design/transport.md), as a writable buffer (numpy.frombuffer and torch.frombuffer take it),
@@ -299,10 +291,12 @@ def compile(trees, what, root=0, whole=False, contributors=None, chunks=1):
                            keep=(segment, weight, first, move, words, trees))
 
 
-def steps(program, rank, piece):
-    """mesh_program_steps: rank's steps of `program` for the operand `piece`, in its order."""
+def steps(program, rank, piece, page=0):
+    """mesh_program_steps_cut: rank's steps of `program` for the operand `piece`, in its order, the program's own cuts on
+    `page` bytes (0: any element; libnccl-mesh cuts on its region's pages, so that each SEND's or COPY's piece starts on
+    one)."""
     made = ffi.new('struct mesh_step[]', max(1, program.c.first[program.nodes]))
-    count = lib.mesh_program_steps(program.c, rank, piece[0], made)
+    count = lib.mesh_program_steps_cut(program.c, rank, piece[0], ffi.NULL, page, made)
     return [ffi.new('struct mesh_step *', made[i]) for i in range(count)]
 
 
