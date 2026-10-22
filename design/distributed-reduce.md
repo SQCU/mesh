@@ -1,9 +1,8 @@
 # Distributed reduce over page tables
 
-Use the [complete replacement requirements](completion-requirements.md) for the
-current implementation and evidence inventory. The incident record below is
-historical; none of its citations establishes that the replacement caller has
-been implemented or that a measured latency bound has been met.
+The incident record below is historical; none of its citations establishes
+that the replacement caller has been implemented or that a measured latency
+bound has been met.
 
 The September 9, 2026 instruction deletes CRC/digest checking entirely. Mesh
 does not hash payloads, exchange or compare digests, or retain pages for checks.
@@ -20,9 +19,7 @@ only the calling context interprets and handles them. See the
 
 This is the specification for the next reduce runtime in `rdma/`. Every
 requirement below draws on published prior art; the operator's specification
-is binding for this repository. The
-[implementation audit](dataflow-implementation-audit.md) scopes the citations,
-records source divergences and states the performance evidence still required.
+is binding for this repository.
 
 ## Standard of correctness
 
@@ -174,12 +171,10 @@ execution; collective algorithms establish communication-volume bounds.
 These mechanisms make the design implementable. They do not establish that
 any cited system is literally this caller or that the caller is already built.
 
-The [primary-source comparison](dataflow-implementation-audit.md#what-is-mature-and-what-the-citations-actually-establish)
-replaces the original unqualified bibliography. It records where Monsoon,
-Active Messages, Legion, Naiad, NCCL, PyTorch async-TP and the end-to-end
-argument agree with this design and where their claims or implementations
-differ. In particular, their internal schedulers and protocol state do not
-authorize a second readiness representation in this repository's caller.
+Monsoon, Active Messages, Legion, Naiad, NCCL, PyTorch async-TP and the
+end-to-end argument agree with this design in places and differ in others; their
+internal schedulers and protocol state do not authorize a second readiness
+representation in this repository's caller.
 
 A configured function that needs every row is issued only when those rows
 are ready. A function with independent outputs may select their ready input
@@ -191,9 +186,7 @@ measurement. Monsoon is not a measurement of that Metal implementation.
 
 The record lists what went wrong: readiness state kept twice, wrong addresses
 and generation counts, and claims of validation with no run behind them. It is
-kept here so each one can be seen and fixed. The
-[audit table](dataflow-implementation-audit.md#record-of-divergence-and-the-ordinary-engineering-it-failed)
-adds historical evidence and dispositions without attributing motives.
+kept here so each one can be seen and fixed.
 
 - A `K_DIGEST` control frame carrying the sent hash, a mismatch poisoning the
   whole program through the status word, and a paragraph added to this
@@ -230,9 +223,8 @@ review's own evidence worthless.
 
 Readiness lives in the stamps. A new frame, handshake, phase, token, gate or
 scheduler that says it again breaks this repo's contract, before any timing.
-That is a design ruling. It is not a proof about time.
-The [performance obligations](dataflow-implementation-audit.md#minimum-expectations-of-performance)
-require matched baselines, measured local functions, physical-link traffic,
+That is a design ruling. It is not a proof about time. A performance claim
+needs matched baselines, measured local functions, physical-link traffic,
 launch and scan costs, and separate latency and throughput results.
 
 ## Failure of a participant

@@ -1,9 +1,8 @@
 # Pages and functions
 
-The [complete replacement requirements](completion-requirements.md) track the
-whole implementation and its acceptance evidence. On the actual Thunderbolt
-substrate, literal pages use SEND/RECV, as documented by Apple TN3205; software
-publication of a received page does not require hardware remote-write support.
+On the actual Thunderbolt substrate, literal pages use SEND/RECV, as documented
+by Apple TN3205; software publication of a received page does not require
+hardware remote-write support.
 Statements below about instant execution and topology-independent utilization
 express the desired absence of added control dependencies, not a zero-latency
 theorem or a measured performance guarantee.
@@ -261,8 +260,6 @@ owns numerical acceptance and whole-NFE repetition.
 The firing principle is tagged-token dataflow; operand slots and presence
 bits have hardware prior art in Monsoon. In-data flags, dependency-driven
 execution and pipelined reductions also have published implementations.
-The [citation audit](dataflow-implementation-audit.md) distinguishes those
-mechanisms from the exact caller required here, which remains an implementation
-obligation. It also records the divergent code and corrects the unmeasured
-claim of strict performance superiority. The binding reduce description and
+None of them is the exact caller required here, which remains an implementation
+obligation. The binding reduce description and
 historical incident record are in [distributed-reduce.md](distributed-reduce.md).

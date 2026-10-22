@@ -150,7 +150,7 @@ static void commit() {
 // (`context`) until the group is complete in the stream's order (MeshStream::retire); NULL where torch's allocator
 // throws, which fails the group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through
 // the library.  It runs on torch's queue, where an allocator that frees cached buffers would enter that queue again
-// (MPSAllocator release_cached_buffers): REVIEW-commit-rule.md.
+// (MPSAllocator release_cached_buffers): rdma/torch-mesh/README.md, the stream's commit state.
 static void *workspace(size_t bytes, void *context) {
   auto *s = static_cast<MeshStream *>(context);
   try {

@@ -241,34 +241,13 @@ recovery, [transport.md](transport.md); the collectives' API, [rdma/NCCL.md](../
 ## 2. Public surface (closed)
 
 Restored 2026-10-17 against the restored interfaces (mesh 604f210e deleted it with the Swift module's record; the
-module came back in 71bced9e, the Python surface in python/mesh). The importable library is the Swift module `Mesh`
-(`swift/Mesh.swift`, `Bounds.swift`, `Topology.swift`) over the C runtime (`rdma/mesh-call.c`, `mesh-dataflow.c`,
-`mesh-collective.c`, `mesh.h`, the node's resident bridge `mesh-flow.c`), and its Python surface `mesh` (`python/mesh`)
-over libnccl-mesh (`torch.distributed`'s "mesh" backend, rdma/torch-mesh) with torch operands; the kernels and layers
+Python surface came back in python/mesh; the Swift module, restored in 71bced9e, was deleted again in a8952de9 and its
+callers in 2fff7dfe). The importable library is the Python surface `mesh` (`python/mesh`) over the C runtime
+(`rdma/mesh-call.c`, `mesh-dataflow.c`, `mesh-collective.c`, `mesh.h`, the node's resident bridge) and libnccl-mesh
+(`torch.distributed`'s "mesh" backend, rdma/torch-mesh) with torch operands; the kernels and layers
 its examples compose (`examples/kernels.py`, `examples/nn.py`) are program type C, not the library (section 5):
 
 ```
-Mesh(region:, rank:, size:, workers:, inFlight:, placement:, nodes:) // the execution's name; rank r's bridge node
-Placement(owners:, routes:, work:, bytes:, cuts:, path:)  // explicit ownership, directed routes, optional bound inputs
-Placement.Edge(source, destination)                     // ordered endpoints; route excludes source and includes destination
-Mesh.tensor(on:sections:) -> [TensorPart]                 // storage of one term T_i or block Q'_j T(X) (Definition): contiguous sections, each with a rank
-Mesh.constant(on:bytes:initialize:) -> TensorPart
-TensorFunction.cpu / .metal(device) / .metal(device, operands:) / .resident(device) / .prediction(model, inputs:, outputs:)
-mesh_call_operand.load(at:as:)                           // logical element indexing through canonical backing
-Mesh.call(function, inputs:, outputs:, on:, worker:)
-Mesh.map(function, inputs: [[TensorPart]], outputs:, workers:)
-Mesh.send(part, to:, queue:) -> TensorPart
-Mesh.broadcast / scatter / allScatter / gather / allGather / allToAll // broadcast, allGather: mesh-collective.c's all-gather
-Mesh.reduce(parts, to:, using:, worker:) / reduceScatter(contributions, to:, using:, workers:) / allReduce(…)
-                                                          // mesh_compile's reduce, reduce-scatter, all-reduce: each step a send, a REDUCE the combine's call
-Mesh.start()                                              // realize storage, bindings, receives, links
-Mesh.invocation(slot).submit() -> generation              // admission of one instance
-MeshInvocation.result(generation) -> Result<Void, MeshError> // N2: one status load; busy until conclusion
-MeshError.busy / .link(peer:code:) / .function(call:code:)
-Mesh.syncOnRemoteFill(parts, index:)                      // explicit, diegetic, never default
-Mesh.observe() -> Topology                                // the bridges' map
-bounds(program, placement, topology, capability) -> Bounds // pure lower bounds; never picks a placement
-
 mesh.Program(backend, *, functions, group, timeout, trace)   // SPMD; realize() == start()
 Program.tensor(shape, block_shape, dtype, transferable, *, contiguous) -> Tensor  // blocks of Refs (views of backings)
 Program.kernel_call(kernel, *, out_shape, grid, in_specs, out_specs, peer)(*operands)  // kernel(program, inputs, outputs, coordinate)
@@ -284,10 +263,8 @@ examples/nn.py (type C): linear, ffn, rmsnorm, embedding, summed_embedding    //
 Program.report / MeshError(kind busy|link|function, code)
 ```
 
-Frontier, stated as measured: the module restored in 71bced9e has not been measured. Its commit credits it with the
-12B cooperative FFN's 1.145-1.31x over the M5 alone (metal-microbench 43724cb, b6efa23, 11a4a7a); those runs
-(2026-09-11/12) went through metal-microbench `tools/mesh/nfe.sh` on the mesh transport before `swift/Mesh.swift`
-existed. The partial-tensor library's own frontier is the deleted native executor's (mesh 57628982): the literature
+Frontier, stated as measured: the partial-tensor library's own frontier is the deleted native executor's (mesh
+57628982): the literature
 chain paired CPU 675.0 invocations/s, Metal 172.6; streamed 1,429.2 results/s against 962.9 whole (+48.6%). The
 Python surface's harnesses reproduce both, paired
 ([algorithm-sources.md#streaming-overlap-measurement](algorithm-sources.md#streaming-overlap-measurement)).
@@ -319,29 +296,29 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 Restored 2026-10-17 (deleted in 604f210e; L5 in 974b5046) against the restored surfaces; each row's text is the
 record's, its last sentence the restored surfaces' names.
 
-**L1. Partial tensor storage = sections with ranks.** A `TensorPart(rank, bytes)` is the storage of one term `T_i = T(Q_i X)` (layout `P`) or one block `Q'_j T(X)` (layout `S`) of the Definition; `Mesh.tensor(on:sections:)`. The partial itself is the mathematical term; the storage never carries more than its coordinates. Ref: Pallas BlockSpec. Check: a section is contiguous locally, addressable globally by `(rank, section)`; no hidden dense copy (I4); I23. Restored surfaces: Swift `TensorPart`; Python `Tensor` blocks and `Ref` views (`Program.tensor`, `region`).
+**L1. Partial tensor storage = sections with ranks.** A `TensorPart(rank, bytes)` is the storage of one term `T_i = T(Q_i X)` (layout `P`) or one block `Q'_j T(X)` (layout `S`) of the Definition; `Mesh.tensor(on:sections:)`. The partial itself is the mathematical term; the storage never carries more than its coordinates. Ref: Pallas BlockSpec. Check: a section is contiguous locally, addressable globally by `(rank, section)`; no hidden dense copy (I4); I23. Restored surfaces: Python `Tensor` blocks and `Ref` views (`Program.tensor`, `region`).
 
-**L2. Supplied function over sections.** `TensorFunction.cpu/.metal/.prediction`; `Mesh.call/map`. Ref: Pallas `pallas_call`; StarPU codelets. Check: I7; a CPU, a Metal and a Core ML function each bound through the same `call`. Not it: an expression compiler; a kernel zoo. Restored surfaces: Swift `TensorFunction`; Python `Program.kernel_call` with any supplied callable `kernel(program, inputs, outputs, coordinate)` (the library calls it and nothing else); the expressions evaluated by torch (nothing compiled) are `examples/kernels.py`'s, program type C (section 5).
+**L2. Supplied function over sections.** `TensorFunction.cpu/.metal/.prediction`; `Mesh.call/map`. Ref: Pallas `pallas_call`; StarPU codelets. Check: I7; a CPU, a Metal and a Core ML function each bound through the same `call`. Not it: an expression compiler; a kernel zoo. Restored surfaces: Python `Program.kernel_call` with any supplied callable `kernel(program, inputs, outputs, coordinate)` (the library calls it and nothing else); the expressions evaluated by torch (nothing compiled) are `examples/kernels.py`'s, program type C (section 5).
 
 **L3. Publish on visibility, fire on presence.** completion → `mesh_publish(row)` → for each consumer in the row's contiguous use range: decrement its pending count; zero enqueues it on its worker. No consumer evaluates "are my inputs present". Ref: Monsoon; Realm; TensorFlow Send/Recv; Naiad occurrence counts. Check: I2, I3, I17; `mesh_publish` walks one contiguous range and performs one decrement per use. Restored surfaces: Swift `rdma/mesh-call.c` (a call's pending count); Python `Program` (a token per (writer, reader) edge, a call firing at its last token, design/algorithm-sources.md#program).
 
 **L4. Ten collective verbs as movement + supplied combine.** §2 list; `reduce*` take `using: TensorFunction`. Ref: MPI-4.1 ch. 5; Rabenseifner/Patarasuk–Yuan; Gloo. Check: every verb is `send` + `call(combine)`; movement does no arithmetic; explicit destinations at every world size. Not it: gather-everything-then-sum; any verb inferred from `size`. Restored surfaces: Swift's verbs, bound to mesh-collective.c's compiled programs (`mesh_compile` along the members' trees, `mesh_program_steps_cut`): each step a `send`, a REDUCE step the supplied combine's `call`; gather, scatter and the all-to-all point to point; Python `mesh.collective` (a block row one libnccl-mesh call: movement `ncclMeshAllGatherV` or the all-to-all; a reduction by `SUM`, `MAX` or `MIN` `ncclMeshReduceScatterV` or the all-reduce, by `PARTIALS` the log-sum-exp merge; any other combine movement plus the supplied combine's kernel).
 
-**L5. Partial is a type.** A `P`-layout term of the Definition (full support, pending `+`) is typed: `TensorPart.partial: Bool` set on `reduceScatter/reduce` contributions; `Mesh.call` throws `MeshError.partialOperand(part)` at setup when a non-combine function binds a partial. Ref: DTensor `Partial`; Legion `reduce`; Korthikanti 2022. Check: one `throw` in `call`; no runtime state. Restored surfaces: Python `Partial` (`kernel_call` refuses a partial operand of any kernel that does not declare `combine`, TypeError at recording; `Partial.merge` refuses a contribution counted twice); Swift has no partial type yet.
+**L5. Partial is a type.** A `P`-layout term of the Definition (full support, pending `+`) is typed: `TensorPart.partial: Bool` set on `reduceScatter/reduce` contributions; `Mesh.call` throws `MeshError.partialOperand(part)` at setup when a non-combine function binds a partial. Ref: DTensor `Partial`; Legion `reduce`; Korthikanti 2022. Check: one `throw` in `call`; no runtime state. Restored surfaces: Python `Partial` (`kernel_call` refuses a partial operand of any kernel that does not declare `combine`, TypeError at recording; `Partial.merge` refuses a contribution counted twice).
 
 **L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. A *partial tensor* (Definition) has combine `+` and the exactness of I23; another associative combine is movement plus a supplied function and carries no claim beyond associativity. Ref: `MPI_Op`; Blelloch. Check: no special case for `+` in the movement. Restored surfaces: Swift `reduce(using:)` (the combine's calls placed by the compiled reduce's REDUCE steps); Python `op=` (`SUM`, `MAX`, `MIN` and `PARTIALS` go to libnccl-mesh; any supplied kernel declaring `combine` otherwise).
 
 **L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5. Restored surfaces: Swift's sections and leases; Python storage freed with its last view (a region lease returned with it, `mesh.lease`).
 
-**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Swift `Mesh.syncOnRemoteFill`, `examples/sync-on-remote-fill.swift`; Python `collective.sync_on_remote_fill` (bounded by the program's timeout), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
+**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11. Restored surfaces: Python `collective.sync_on_remote_fill` (bounded by the program's timeout), `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`.
 
 ### G — genericity
 
 **G1. Contraction is a two-operand `call`; K-partials are `reduceScatter` inputs.** caller: `call(dot, inputs:[x_k, w_k], outputs:[c_k])` per K-panel; `reduceScatter([[c_k]…], to:, using: add)`. Ref: SUMMA. Check: Gram `R(RᵀZ)` and FFN down-projection are the same calls with different operands; the Gram output feeds the next `call` with no copy. Not it: `nn.linear` inside mesh. Restored surfaces: Swift `call` + `reduceScatter(using:)` (examples/gram-chain.swift); Python `examples/nn.py` `linear` (K panels of `kernels.matmul`, `Partial`s summed tile by tile; program type C, outside the library) and `collective.reduce_scatter`.
 
-**G2. Indices as data.** `Mesh.map(function, inputs: [[x], [idx]], …)`; `idx` is a `TensorPart` whose presence gates the map; the supplied function does the indexed read. Ref: Pallas scalar prefetch; `jax.lax.gather`; Megablox. Check: routed-expert and neighbourhood callers exist outside mesh using only `map`; no routing code in mesh. Restored surfaces: Swift `Mesh.map` (examples/indexed-gather.swift); Python `BlockSpec(index_map, region_map)`, and in examples/kernels.py `gather` and an expression's `.at(row, column, mask, other)`.
+**G2. Indices as data.** `Mesh.map(function, inputs: [[x], [idx]], …)`; `idx` is a `TensorPart` whose presence gates the map; the supplied function does the indexed read. Ref: Pallas scalar prefetch; `jax.lax.gather`; Megablox. Check: routed-expert and neighbourhood callers exist outside mesh using only `map`; no routing code in mesh. Restored surfaces: Python `BlockSpec(index_map, region_map)`, and in examples/kernels.py `gather` and an expression's `.at(row, column, mask, other)`.
 
-**G3. Two callers, zero specialization.** `metal-microbench` and `xonotic/solver` both `import Mesh`; mesh imports neither. Check: I8; both build against the same module. Restored surfaces: the Swift module and the Python surface (the xonotic solver was deleted in 57628982; its restoration is open).
+**G3. Two callers, zero specialization.** `metal-microbench` and `xonotic/solver` both `import Mesh`; mesh imports neither. Check: I8; both build against the same module. Restored surfaces: the Python surface (the xonotic solver was deleted in 57628982; its restoration is open).
 
 ### N — instances and lifecycle
 
@@ -398,8 +375,8 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 - An expression compiler, kernel zoo, scalar DSL, or any numerics inside mesh (I7).
 - Migrating a caller's operators into mesh (I8), or a model/layer API in mesh.
 - The layering, the operator's (2026-10-17): "program type A in bridge, program type B in meshlib, program type C in
-  meshlib/examples". Type A is the node's resident bridge (rdma/mesh-flow.c), type B the library (the Swift module
-  `Mesh`, the C runtime, libnccl-mesh and its Python surface `python/mesh`), type C its examples. The Python
+  meshlib/examples". Type A is the node's resident bridge (rdma/mesh-flow.c), type B the library (the C runtime,
+  libnccl-mesh and its Python surface `python/mesh`), type C its examples. The Python
   surface's kernels and layers (`examples/kernels.py`, `examples/nn.py`: compositions over torch, restored 2026-10-17
   from the 09-14 library on the operator's "1: SOME FUCKING HIGHER ORDER FUNCTIONS FOR PARTIAL TENSORS",
   collective-goals-2026-09-14.md) are type C, so I7 and I8 hold of the library: it calls a supplied callable and

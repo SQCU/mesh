@@ -50,8 +50,7 @@ whole region (86 one-GiB extents), pairs the control socket, fails the make, and
 - Section 14, "A process a port": "makes and connects the link's ten queue pairs" and "A device holds ten usable queue
   pairs and a link takes all ten, so a returning peer's lanes cannot exist beside the old ones, and the old child's
   exit is their one release".
-- README.md, from TN3205: "10 UC queue pairs per device"; `rdma/mesh-verbs.h`: "max_qp: 11 (10 usable)";
-  `rdma/loopverbs.c`: `LOOP_DEVICE_QPS 10`.
+- README.md, from TN3205: "10 UC queue pairs per device"; `rdma/mesh-verbs.h`: "max_qp: 11 (10 usable)".
 
 Each statement was true of every device the mesh had. Nothing in the code read the count from the peer: both ends
 assumed that both devices held ten. This change edits those passages to say a link takes what both ends hold.
@@ -78,8 +77,7 @@ Before this change, in `rdma/`:
 | `mesh-link.c` `stream_turn`, `link_held`, `streams_cancel`, `streams_let_go`, `stream_rings`; `mesh-records.c` `busy_tell` | iterate the port's four stream slots | unchanged: a stream that is not live returns at once, and its rings stay leased |
 | `mesh-link.c` `streams_open` bandwidth `bandwidth / MESH_LINK_STREAMS` | each stream's share of the link, which `mesh_map` takes as the link's figure | unchanged, so a one-stream link and a four-stream link are compared on the same footing |
 | `mesh-link.c` `port_pass` | loops lanes 2..9 checking `served` | unchanged |
-| `loopverbs.c` `LOOP_DEVICE_QPS` 10 | the loop devices' max_qp 11 | still the default; `LOOPVERBS_MAX_QP=rdma_loop<i>=<max_qp>,...` sets a device's (section 7) |
-| `mesh-call.c`, `nccl-mesh.c` | a communicator holds one stream toward each other member's node; concurrency between two nodes = the link's live streams | unchanged; on a one-stream link a second concurrent communicator between the same two nodes is refused at init with EBUSY, as a value (section 7) |
+| `mesh-call.c`, `nccl-mesh.c` | a communicator holds one stream toward each other member's node; concurrency between two nodes = the link's live streams | unchanged; on a one-stream link a second concurrent communicator between the same two nodes is refused at init with EBUSY, as a value |
 
 Nothing outside `rdma/` reads the lane count.
 
@@ -194,7 +192,7 @@ keepalive lane.
 **Version.** MESH_VERSION stays 131 and MESH_LAYOUT stays 133. The full plan is byte for byte the 131 wire (the
 HELLO's `count`, which 131 sends as 0 and never reads, is the only new information), and the region's layout is
 unchanged. So:
-- a bridge of this branch and a 131 bridge whose devices both hold ten pair as two 131 bridges do (tested, section 7);
+- a bridge of this branch and a 131 bridge whose devices both hold ten pair as two 131 bridges do;
 - a bridge of this branch holding fewer than ten and a 131 bridge cannot pair. The 131 end makes ten and names ten. The
   new end logs "node N's LINK names 10 lanes, this end's plan 2 (plan 0xc): its bridge states no budget and makes every
   lane, and this port holds fewer: the link pairs once that node runs a bridge that states its budget", and both re-pair
@@ -228,28 +226,6 @@ all of them without sanction in rubric"). For versions to join one map:
    own length.
 4. *The region stays apart from the wire* (already so: MESH_LAYOUT), so a wire change never expires a region.
 
-## 7. Tested
-
-At the operator's request of 2026-10-21 (AGENTS.md's suspension of runtime testing of 2026-10-14 otherwise holds).
-All of it ran on node 1980260065 over loopverbs (shared memory; no verbs device was opened). `make -C rdma all` and
-`make -C rdma host` build with every warning an error. `loopverbs.c` takes `LOOPVERBS_MAX_QP` (entries
-`rdma_loop<i>=<max_qp>`) so the two ends of a loop cable can differ, refusing a device's queue pairs past
-`max_qp - 1` as a TB5 device does. With `mesh-loop`:
-
-| case | what came up | collectives |
-|---|---|---|
-| 2 nodes, max_qp 11 / 11 | "10 lanes up (plan 0x3ff: 4 streams, keepalive on), each lane's share 409 frames" | host 65,536 floats: 16 of 16 exact |
-| 2 nodes, 3 / 11 (node 521750041's case) | "2 lanes up (plan 0xc: 1 stream, keepalive off), each lane's share 2048 frames" at both ends | host 65,536: 16 of 16 exact; walk 1,000,003: exact; two communicators started together: one exact, the other refused at init with EBUSY |
-| 2 nodes, 3 / 3 | 0xc at both ends | walk 1,000,003: exact |
-| 3-node line, 5 / 11 and 10 / 11 | cable 0 "3 lanes up (plan 0xd: 1 stream, keepalive on)", cable 1 "9 lanes up (plan 0x3fd: 4 streams, keepalive on)" | 27 of 27 relayed readings exact on both paths; the ends' sendrecv refused as `mesh-loop.c` says it must be (no cable joins them) |
-| 2 nodes, 2 / 11 (budget 1) | "paired ... plan 0, 0 lanes, 0 streams", "0 lanes up", records flowing, no loss in 60 s | none (no stream) |
-| this branch / main's 131, max_qp 11 / 11 | 131's end: "10 lanes up"; this end: "its bridge stating none; plan 0x3ff", "10 lanes up" | host 65,536: 16 of 16 exact |
-| this branch at 3 / main's 131 | the logged mismatch above, re-pairing every 5 s | none |
-
-The 3-node line also showed a fault that predates this change: rank 1's sendrecv waits without bound on the host
-path, and returns "ok" with every value wrong on the walk path, once the ranks it pairs with have refused theirs. The
-same line at default budgets on this branch behaves identically (section 8, P6).
-
 ## 8. What remains
 
 - **P1. Measure what a 27 device holds.** The budget assumes `max_qp - 1`. To measure it, with node 521750041's
@@ -274,8 +250,9 @@ same line at default budgets on this branch behaves identically (section 8, P6).
   stream count so a planner knows how many communicators a node pair takes at once.
 - **P5. A keepalive on a two-lane link.** Done in section 10, on every link: lane 0's frame where the plan has lane 0,
   else a page of all ones on the stream's first lane while no stream is held.
-- **P6. The line harness's unbounded sendrecv** (section 7). It predates this change and is a library and harness
-  issue, not the transport's.
+- **P6. A host-path sendrecv whose peers refused theirs.** On the loop fabric's 3-node line (deleted in 736ce24d),
+  rank 1's sendrecv waited without bound on the host path, and returned "ok" with every value wrong on the walk path,
+  once the ranks it pairs with had refused theirs. It predates this change and is a library issue, not the transport's.
 - **P7. Host names in the bridge's area** (AGENTS.md debts). The record's `name` (`mesh-link.c` `host_name`, which
   published SCDynamicStoreCopyLocalHostName) is gone: a record carries its node number, and readers take a person's name
   from the name table by node number (`peers.py` `label`). `nccl-mesh.c` `ncclGetUniqueId` falls back to

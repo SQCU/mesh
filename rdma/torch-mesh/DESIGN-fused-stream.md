@@ -3,32 +3,13 @@
 Branch `fused-stream`, merged with mesh main (49eda816). The source was written and judged against design/rubrics.md.
 On this M5 it was built and installed in the branch's worktree, `mesh-advise` and `mesh-advise mutate` were run, the
 torch-mesh extension was built, and the chain kernel's instances were compiled in one process. Nothing has run on two
-ranks. The ranked pairs are in [REVIEW-fused-stream.md](REVIEW-fused-stream.md).
+ranks.
 
 A fused crossing is libnccl-mesh's one-shot all-reduce on n ranks, run by the caller's kernels. The kernel that makes
 a rank's part writes it into the rank's send tensor and releases it to every peer. The kernel after the call waits for
 each peer's part to land in its own landing tensor, then adds them to its own part. The library runs no kernel of its
 own for either step. (Until main's merge db7326b3 it was a two-rank in-place float16 sum through a slot of 61,440
 bytes; the sections below on the branch keep that history.)
-
-## Could torch's stream run it, as nccl.h stood at 2e2a2718?
-
-No.
-
-1. **The library refused it.** nccl-mesh.c:3128-3132 failed a fused call unless the stream was the Metal 4 form.
-   torch's stream is the classic form: `_stream.mm:136` built its `ncclMeshStream` with no argument table, no residency
-   set and no `fused`.
-2. **No place for the records.** The caller's kernel reads a fused step's arguments later, by address. Only the Metal 4
-   form had such a place, the device's argument ring (nccl-mesh-metal.m:315-317, 395-409), attached only by
-   `metal_begin4` (:454, :463). A classic dispatch passed its arguments with `setBytes` (:568). The two deferred steps
-   refused anything but Metal 4 (:643, :649).
-3. **Nothing resident.** A classic encoder makes a buffer resident only if it is bound, named by `useResource`, or in a
-   residency set. `metal_resident` did nothing without a set (:475).
-4. **No way to pass the bindings.** `_stream.encode` takes tensors and one block of 32-bit words (`_stream.mm:545-550`).
-   The bindings are six 64-bit addresses (nccl.h:186-188), and nccl.h named no record a classic kernel could take.
-5. **The steps' text was ready**, compiled after rdma/mesh.metal at Metal 4.0, as metal-microbench's rank compiles it.
-6. **The order.** The call comes first, since the publishing kernel needs the bindings it returns; the landing kernel
-   comes after the publishing one. On torch's stream that is the queue's order.
 
 ## The form
 
@@ -54,7 +35,7 @@ and then each of its channels is completed in the stream's order, one after anot
 
 | Call | Takes | Returns |
 |---|---|---|
-| `fused.steps()` | nothing | the Metal text to compile a kernel after: rdma/mesh.metal, then `ncclMeshMetalSteps` |
+| `fused.steps()` | nothing | the Metal text to compile a kernel after: `ncclMeshMetalPrelude`, rdma/mesh.metal and then the steps |
 | `fused.all_reduce(send, landings, polls, group=None)` | the rank's part; a landing tensor for each other rank, in rank order; `polls`, the landing waits' bound (`_stream.polls`, the library's); a group of n ranks | `Crossing(publish, land)`, a tuple of six addresses for each peer each. A call the library won't fuse raises with its reason; nothing slower runs. |
 | `fused.encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)` | `_stream.encode`'s arguments, the peer count, and the crossings it lands and publishes | nothing. One that publishes goes under the one commit rule. |
 

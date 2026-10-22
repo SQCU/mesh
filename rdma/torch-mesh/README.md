@@ -402,7 +402,10 @@ w = s["lm_head"].to("cpu")                        # decoded
   - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
     host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
     but the host's touches torch's stream. A group's workspace is held until the library retires the group
-    (`ncclMeshRetired`), never by the commit.
+    (`ncclMeshRetired`), never by the commit. The workspace is allocated on torch's queue, so under memory pressure
+    torch's allocator, freeing its cached buffers, enters that queue again (`MPSAllocator.mm`
+    `release_cached_buffers`): a deadlock, not an exception. A fix needs the library to report a group's scratch bytes
+    before encoding, or a pool grown off the queue: an `nccl.h` change.
 - `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
   point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
   targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`
