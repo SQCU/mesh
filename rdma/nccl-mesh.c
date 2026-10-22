@@ -3431,11 +3431,12 @@ ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint
 
 /* whether a rank's moves of a program are at most one SEND and one receive toward each peer, each of every part of what
    it moves: the whole operand in one piece, or (`gather`, an all-gather's) one segment's every part, its own sent and
-   another's received (a rank that forwards, a chain's middle, sends what it received and takes the unfused form); its
-   SENDs and receives counted into *sends and *receives */
+   another's received; a rank that forwards (a chain's middle, a broadcast tree's inner rank: it sends a part it also
+   receives, `held` marking each part's SEND and receive) takes the unfused form, since a fused publication is released
+   before the kernel that reads the landing; its SENDs and receives counted into *sends and *receives */
 static int whole_moves(const struct mesh_program *program, uint32_t rank, int gather, uint32_t ranks, uint32_t *sends, uint32_t *receives) {
-  uint8_t *seen = calloc(ranks, 1);
-  int whole = seen != NULL;
+  uint8_t *seen = calloc(ranks, 1), *held = calloc(program->parts ? program->parts : 1, 1);
+  int whole = seen && held;
   *sends = *receives = 0;
   for (uint32_t i = program->first[rank]; i < program->first[rank + 1] && whole; i++) {
     const struct mesh_move *m = program->move + i;
@@ -3449,9 +3450,16 @@ static int whole_moves(const struct mesh_program *program, uint32_t rank, int ga
     const int send = m->op == MESH_STEP_SEND;
     const uint8_t bit = send ? 1 : 2;
     if (within != m->parts || m->parts != parts || (gather && send != (s == rank)) || m->peer >= ranks || seen[m->peer] & bit) whole = 0;
-    else { seen[m->peer] |= bit; ++*(send ? sends : receives); }
+    else {
+      for (uint32_t p = m->part; p < m->part + m->parts; p++) {
+        if (held[p] & (bit ^ 3)) whole = 0;
+        held[p] |= bit;
+      }
+      seen[m->peer] |= bit; ++*(send ? sends : receives);
+    }
   }
   free(seen);
+  free(held);
   return whole;
 }
 

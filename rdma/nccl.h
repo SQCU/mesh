@@ -1030,8 +1030,9 @@ uint64_t ncclMeshRetired(void);
    of n ranks (one rank, or no elements, crosses nothing and has no fused step): an all-reduce's one-shot form n - 1 of
    each (the caller's send to and receive from every peer), a reduce's root n - 1 landings and every other rank one
    publication (the same calls, toward the root), a broadcast's and an all-gather's the SENDs and landings of this
-   rank's moves in the communicator's program, where it moves each whole operand in one entry each way (a configured
-   form that cuts it does not fuse: both 0).  `op` is not read: no fused step combines. */
+   rank's moves in the communicator's program, where it moves each whole operand in one entry each way and sends no
+   part it also receives (a configured form that cuts it, and a forwarding rank, a chain's middle or a broadcast tree's
+   inner rank, do not fuse: both 0).  `op` is not read: no fused step combines. */
 typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2, ncclMeshFuseAllGather = 3 } ncclMeshFuseKind;
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int* publishes, int* lands);
