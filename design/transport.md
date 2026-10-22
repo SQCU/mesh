@@ -21,7 +21,9 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
   either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
   [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)),
-  index 0, where the plan has it, carrying the keepalive frame; created, moved through INIT, RTR and RTS, on two
+  its streams' lane pairs (and lanes 0 and 1 where the plan has them, nothing posted on either), the keepalive a frame
+  on the small lane of a stream that serves no holding ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 10);
+  created, moved through INIT, RTR and RTS, on two
   completion queues of the port's device context.
 - **A posted receive.** An `ibv_recv_wr` with one SGE: an address in the region, a length, a key. The queue pair's
   next arriving SEND fills the oldest posted receive. Its completion is an entry in the receive completion queue.

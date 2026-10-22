@@ -33,13 +33,12 @@
 _Static_assert(sizeof(pthread_t)==8,"M17");
 
 /* design/transport.md section 14: a link's queue pairs, made once at its child's one pairing, are the lanes of its plan
-   (link_plan, design/HETEROGENEOUS-LINKS.md: all MESH_LINK_LANES where both ends' devices hold that many), of this layout:
-   lane MESH_LANE_KEEPALIVE the keepalive's, lane 1 reserved and unused, and from MESH_LANE_FIRST pairs, a pair's large
-   lane (MESH_LANE_FIRST + 2 p) and its small lane (+ 2 p + 1).  The link's MESH_LINK_STREAMS streams (mesh.h struct
-   mesh_stream) take a pair each, stream s pair s: its large lane carries a holding's whole pages, its small lane each
-   last page's frames, a SEND and the receive it fills alike at both ends (a lane's units land in order) */
+   (link_plan, design/HETEROGENEOUS-LINKS.md), of this layout: lanes 0 and 1, on which nothing is posted, and from
+   MESH_LANE_FIRST pairs, a pair's large lane (MESH_LANE_FIRST + 2 p) and its small lane (+ 2 p + 1).  The link's
+   MESH_LINK_STREAMS streams (mesh.h struct mesh_stream) take a pair each, stream s pair s: its large lane carries a
+   holding's whole pages, its small lane each last page's frames and the link's keepalive (link_alive), a SEND and the
+   receive it fills alike at both ends (a lane's units land in order) */
 #define MESH_LINK_LANES 10u
-#define MESH_LANE_KEEPALIVE 0u
 #define MESH_LANE_FIRST 2u
 #define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
 #define MESH_STREAM_PAIRS (MESH_LANE_PAIRS/MESH_LINK_STREAMS)
@@ -51,18 +50,25 @@ static inline uint32_t lane_stream(uint32_t k){ return (k-MESH_LANE_FIRST)/2; }
 /* TN3205 (README.md): a SEND and the receive it fills cover the same number of frames of MESH_FRAME bytes, a SEND held by
    the hardware's credit until its receive is posted; the bridge's alone */
 #define MESH_FRAME 4096u
-/* design/HETEROGENEOUS-LINKS.md: the lanes a link makes, a bit a lane of the layout above, from `budget`, the fewer of the
-   queue pairs its two ends' devices hold for it: every lane where both hold MESH_LINK_LANES (the layout of every bridge
-   before budgets, lane 1 with it); else no lane 1, the keepalive's lane where they hold three or more, and as many
-   streams' lane pairs as the rest holds, at most MESH_LINK_STREAMS (two queue pairs: one stream, no keepalive); none
-   where they hold fewer than one stream's two.  A link's streams past its lanes' are never live.  The plan of fewer
-   queue pairs is a subset of the plan of more */
+/* design/HETEROGENEOUS-LINKS.md sections 5 and 10: the lanes a link makes, a bit a lane of the layout above, from
+   `budget`, the fewer of the queue pairs its two ends' devices hold for it: every lane where both hold MESH_LINK_LANES;
+   else no lane 1, lane 0 where they hold three or more, and as many streams' lane pairs as the rest holds, at most
+   MESH_LINK_STREAMS (two queue pairs: one stream); none where they hold fewer than one stream's two.  Lanes 0 and 1 are
+   made as every bridge since budgets makes them, so the two ends' LINKs name the same lanes, and nothing is posted on
+   either: the keepalive takes no lane of its own, so every plan keeps it.  A link's streams past its lanes' are never
+   live.  The plan of fewer queue pairs is a subset of the plan of more */
 static inline uint32_t link_plan(uint32_t budget){
   if(budget>=MESH_LINK_LANES)return (UINT32_C(1)<<MESH_LINK_LANES)-1;
-  const uint32_t keepalive=budget>=3,pairs=(budget-keepalive)/(2*MESH_STREAM_PAIRS);
+  const uint32_t first=budget>=3,pairs=(budget-first)/(2*MESH_STREAM_PAIRS);
   const uint32_t streams=pairs<MESH_LINK_STREAMS?pairs:MESH_LINK_STREAMS;
-  return (keepalive<<MESH_LANE_KEEPALIVE)|(((UINT32_C(1)<<(2*MESH_STREAM_PAIRS*streams))-1)<<MESH_LANE_FIRST);
+  return first|(((UINT32_C(1)<<(2*MESH_STREAM_PAIRS*streams))-1)<<MESH_LANE_FIRST);
 }
+/* design/HETEROGENEOUS-LINKS.md section 10: the most nanoseconds a link that holds a stream goes without a SEND (frames
+   every 5 us kept the Mac mini's controller awake: its SEND completed in 1.9 us against 6.2 after a quiet stretch,
+   metal-microbench docs/measurement.md, 2026-10-17); a link that holds none goes MESH_PLATFORM_NS/5.  The bridge's own
+   figure: "only the bridge is allowed to know these configuration details" (the operator, 10-21, design/transport.md
+   section 14) */
+#define MESH_KEEPALIVE_NS UINT64_C(5000)
 static inline uint32_t plan_lanes(uint32_t plan){ return (uint32_t)__builtin_popcount(plan); }
 static inline uint32_t plan_streams(uint32_t plan){ return (uint32_t)__builtin_popcount(plan>>MESH_LANE_FIRST)/(2*MESH_STREAM_PAIRS); }
 _Static_assert(MESH_LINK_LANES<32,"a bit a lane");
@@ -111,8 +117,9 @@ struct walk { struct taken *ring; uint64_t taken,done,timed,bytes,units[2],at[2]
 /* design/transport.md section 14: a holding's state on its stream at the send thread: none (`HOLD_NONE`); begun, its
    start not yet frozen at the receive thread (`HOLD_ASKED`); its start stored, its peer's not yet told (`HOLD_BEGUN`);
    serving, each lane aligned with its peer's first (`HOLD_SERVE`); ending (`HOLD_END`).  At the receive thread: none
-   posted (`RECV_NONE`: a fresh pairing, or a holding begun and frozen), a holding's landing list served
-   (`RECV_SERVE`), spare receives (`RECV_SPARE`: a holding ended, the peer's SENDs to it received into the spare page) */
+   posted (`RECV_NONE`: a holding begun and frozen; at a fresh pairing the small lane's one spare, for the peer's
+   keepalive), a holding's landing list served (`RECV_SERVE`), spare receives (`RECV_SPARE`: a holding ended, the peer's
+   SENDs to it received into the spare page) */
 enum { HOLD_NONE, HOLD_ASKED, HOLD_BEGUN, HOLD_SERVE, HOLD_END };
 enum { RECV_NONE, RECV_SERVE, RECV_SPARE };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
@@ -129,14 +136,12 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    within MESH_PLATFORM_NS or concluded, design/transport.md B1, B2, B3, which a bridge of the same version
    without them breaks), so bridges of different versions or revisions drop each other's hellos and never pair */
 #define XMAGIC (0x4d595048u+MESH_VERSION+(1u<<12))
-/* design/transport.md: the most bytes a port holds unsent toward a peer that takes none */
-#define MESH_UNSENT (UINT64_C(64)<<20)
 /* design/transport.md section 14: a port's link lanes (MESH_LINK_LANES), its queue pairs made once and connected once
    in its child's life ("A process a port": `lanes` once the child was asked for them, the parent's; a link lost after it
    pairs again with the port's next child), on the two completion queues its device's context holds, each lane's share of them (`share`
    frames, a request one frame at least: no lane overruns its queues), and each lane's queue pair number (`qpn`, by which
    a completion names its lane).  Its state (LINK_DOWN; made and told, LINK_MADE; connecting; up), its job on the port's
-   queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled) and a registration its make refused (`refused`), the
+   queue (`job`, dispatched at `job_at`: mesh-link.c ports_stalled), the
    pairing it belongs to (`pairing`, moved at its loss and at a halt, mesh-link.c port_halt, so a job of a pairing gone
    makes no call and is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`); the lanes
    the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to clear where
@@ -148,37 +153,29 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    lane's SEND gate (`gate`: the frames posted and retired, the send thread's; its capacity, set as the lane connects),
    each data lane's progress (`lane`, struct lane_state), the arena page of the streams' lists and time rings (`lists`,
    leased as the port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream).  Each stream's holding at the send
-   thread: the owner it serves (`held`), its number over the pairing (`number`), its state (`hold`), its send walk
+   thread: the owner it serves (`held`), its number over the pairing (`number`, 0 while it has served none), its state (`hold`), its send walk
    (`sending`), each lane's first index for it (`target`, its peer's receives' first) and its peer's (`reach`), and
    the words it tells the receive thread (`asked`: the holding begun; `serving`: its start told, `reach` set; `ended`),
    its time ring (`posted_at`).  At the receive thread, on lines of their own: the holding it serves (`rnumber`), its
    state (`rstate`), each lane's receives posted when it froze (`frozen`, told in `frozen_at`), its landing walk
-   (`landing`), its time ring (`landed_at`).  Lane
-   MESH_LANE_KEEPALIVE's frames (design/transport.md: one whenever the link is up, every `keepalive_ns` while the
-   stream is held, else every MESH_PLATFORM_NS/5; the send thread's frame in flight), and its page: the keepalive's
-   block */
+   (`landing`), its time ring (`landed_at`).  The link's last SEND (`sent_at`, mach ticks, the send thread's: link_alive) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
-#define LINK_ALIVE_SENT (UINT64_C(3)<<56)
-#define LINK_ALIVE_HEARD (UINT64_C(4)<<56)
-#define LINK_ALIVE_BYTES 16u
-#define LINK_ALIVE_RECEIVES 256u
 struct link {
   struct mesh_verbs provider;
-  int state,job,result,heard,refused,lanes;
+  int state,job,result,heard,lanes;
   _Atomic int done;
   _Atomic uint32_t served,broken,pairing;
   uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,lists,job_pairing,psn;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t alive_at,job_at;
+  uint64_t sent_at,job_at;
   uint64_t held[MESH_LINK_STREAMS],number[MESH_LINK_STREAMS],target[MESH_LINK_STREAMS][2],reach[MESH_LINK_STREAMS][2];
   uint32_t hold[MESH_LINK_STREAMS];
   struct walk sending[MESH_LINK_STREAMS];
   _Atomic uint64_t *posted_at[MESH_LINK_STREAMS];
   _Atomic uint64_t asked[MESH_LINK_STREAMS],serving[MESH_LINK_STREAMS],ended[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
-  _Atomic int alive_flight;
   _Alignas(128) _Atomic uint64_t frozen_at[MESH_LINK_STREAMS];
   uint64_t rnumber[MESH_LINK_STREAMS],frozen[MESH_LINK_STREAMS][2],last[MESH_LINK_STREAMS][2];
   uint32_t rstate[MESH_LINK_STREAMS];
@@ -188,8 +185,8 @@ struct link {
 _Static_assert(offsetof(struct link,frozen_at)%128==0,"the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The
-   parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE, naming the link's keepalive page, which the
-   parent may lease after the child's spawn), connect them to the peer's (CHILD_CONNECT: the peer's lanes, address, node
+   parent's: open the device (CHILD_OPEN), make the link's lanes (CHILD_MAKE, naming the link's pages, its spare page
+   among them, which the parent may lease after the child's spawn), connect them to the peer's (CHILD_CONNECT: the peer's lanes, address, node
    and the link's bandwidth), serve no lane again (CHILD_HALT), end (CHILD_END).  The child's, each naming the pairing it
    was asked for: the device opened or not (CHILD_OPENED: its address and bandwidth, and in `lanes` the queue pairs the
    device holds for a link), the lanes made or not (CHILD_MAKE names the lanes of the plan in `lanes`; CHILD_MADE:
@@ -215,8 +212,8 @@ struct child_message {
 };
 /* a child that ends unbidden within this of its spawn counts toward its port's hold, from the second in a row (the boot
    ledger's rule, a port's: mesh-link.c child_reaped) */
-#define MESH_AGENT_SETTLE_NS (UINT64_C(60)*1000000000)
-#define TAG_AGENT (UINT64_C(1)<<58)
+#define MESH_CHILD_SETTLE_NS (UINT64_C(60)*1000000000)
+#define TAG_CHILD (UINT64_C(1)<<58)
 /* design/transport.md: a port, its link, its control socket's queues each way, its verbs work's queue (its
    open's job `job`, dispatched at `job_at`; `stuck` once a job of the port outlived MESH_PLATFORM_NS, or a progress
    thread did not hold within it, and the port was concluded around it, until the call returns and each progress thread
@@ -231,15 +228,17 @@ struct child_message {
    and guard told wakes the raiser parked on it, port_tell, port_wait), and the threads that post on its queue pairs
    (`thread`: its two progress threads, each storing itself as it starts, and its link job's while one runs, by which a
    provider's fault names its port, mesh-link.c fault_heard); the queue pairs its device holds for a link as its child
-   told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md) */
+   told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md); the registrations its device refused
+   in a row (`refusals`) and the time before which it is not opened again after one (`retry_at`: mesh-link.c port_opened)
+   */
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,stuck,budget;
+  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,stuck,budget,refusals;
   int64_t farewell;
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
   _Atomic int done,closing;
-  uint64_t next,bandwidth,job_at;
+  uint64_t next,bandwidth,job_at,retry_at;
   _Atomic uint64_t quiet_at;
   struct message heard;
   uint16_t lid;
@@ -252,7 +251,7 @@ struct port {
   _Atomic(pthread_t) thread[3];
   _Atomic uint64_t guard,guarded[2];
   /* the parent's: the port's child (design/transport.md section 14, "A process a port"): its process (0 none) and
-     socket, when it was spawned, the children in a row that ended unbidden within MESH_AGENT_SETTLE_NS of their spawn and
+     socket, when it was spawned, the children in a row that ended unbidden within MESH_CHILD_SETTLE_NS of their spawn and
      the hold they set before the next (`hold_to`), whether the port's link, lost once its lanes were asked for, waits
      to end its child (`recycle`) and whether that end was asked (`ending`), the part of its child's next message
      read (`child_in`, `child_held` bytes of it), and a child of its device from an earlier launch last found alive
@@ -296,7 +295,6 @@ extern struct mesh_ctx bridge;
 extern _Atomic int found;
 extern uint64_t memory;
 extern struct known known[MESH_KNOWN];
-extern uint64_t keepalive_ns;
 extern uint64_t owners[MESH_CLIENTS];
 extern uint32_t ones;
 /* the region's pages the bridge holds itself (the map, the links' pages and rings, the duds' block): its record's

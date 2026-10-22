@@ -186,14 +186,21 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
   /* the records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
-     (mesh-program.c health_put); a read that a health write overlapped is read again, at most 1024 times */
-  int count=-EAGAIN;
-  for(int tries=0;tries<1024;tries++){
+     (mesh-records.c health_put); a read that a health write overlapped is read again, and an odd serial (a write open)
+     waited on as mesh_records_read waits on the map's, ESRCH where the bridge went while it was open */
+  int count;
+  for(;;){
     const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
-    if(before&1)continue;
+    if(before&1){
+      if(os_sync_wait_on_address_with_timeout(&m->health,before,sizeof m->health,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid))){
+        count=-ESRCH;break;
+      }
+      continue;
+    }
     count=mesh_records_read(m,length,&r);
     if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
-    free(r);r=NULL;count=-EAGAIN;
+    free(r);r=NULL;
   }
   munmap(m,length);
   if(count<0)return count;

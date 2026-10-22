@@ -172,6 +172,9 @@ The keepalive lane comes first once a stream fits beside it. The reserved lane 1
 full plan is lane for lane the layout of MESH_VERSION 131. The plan of a smaller budget is always a subset of a
 larger one's.
 
+Section 10 moves the keepalive off lane 0. The plans stay as in this table, so the two ends' LINKs still match, but
+nothing is posted on lane 0 or lane 1, and every plan keeps the keepalive.
+
 - **Streams.** Streams beyond the plan's are never opened: not live, not free, never offered to a client
   (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports
   `bandwidth / MESH_LINK_STREAMS` as before, so the map's per-link figure is comparable across plans.
@@ -185,6 +188,7 @@ keepalive lane.
   value ("rank 0 could not hold its streams at its bridge"). The first runs exact.
 - No keepalive frames, so a controller that slows after a quiet stretch (etc/bridge/README.md, the Mac mini's 6-10 us
   after 40 us of nothing) is not kept warm. This costs latency on the first frames after a pause, not correctness.
+  Section 10 gives such a link the keepalive while its stream serves no holding.
 
 **Version.** MESH_VERSION stays 131 and MESH_LAYOUT stays 133. The full plan is byte for byte the 131 wire (the
 HELLO's `count`, which 131 sends as 0 and never reads, is the only new information), and the region's layout is
@@ -268,9 +272,8 @@ same line at default budgets on this branch behaves identically (section 8, P6).
 - **P4. Publish the plan.** `struct mesh_link_info` (the bridge's observation pages) has no room for the plan without a
   MESH_LAYOUT bump, so mesh-stat cannot show it yet; the log line does. A record's `reach` could carry each link's
   stream count so a planner knows how many communicators a node pair takes at once.
-- **P5. A keepalive on a two-lane link.** For example, a one-frame small-class unit sent by the bridge on the stream
-  while no holder holds it, agreed by both ends as a unit no client reads. Only if the controller's slow start
-  matters on that link.
+- **P5. A keepalive on a two-lane link.** Done in section 10, on every link: a dud frame on the small lane of a stream
+  that serves no holding.
 - **P6. The line harness's unbounded sendrecv** (section 7). It predates this change and is a library and harness
   issue, not the transport's.
 - **P7. Host names in the bridge's area** (AGENTS.md debts, not changed here). `mesh-link.c` `host_name` publishes
@@ -298,3 +301,91 @@ Either order works. Rebuilding node 1974797816 restarts its bridge, so the link 
 re-pair (the usual cost of a SIGHUP restart). Do it with no program running across that link. Once both node
 521750041 and node 1974797816 run it, their link should log "paired with node ... (queue pairs for the link: this
 port's 2, its 10; plan 0xc, 2 lanes, 1 stream)" and "2 lanes up".
+
+## 10. The keepalive on every link
+
+The operator, 2026-10-21: "if the keepalive service is a performance requirement why is there a context dependent
+control flow which can turn it off?" On the three nodes cabled all to all (the Mac mini and the two Studios), every
+link logged "plan 0xc: 1 stream, keepalive off". `link_plan` dropped the keepalive lane where the budget was small, and
+the configuration's `keepalive_us`, where a document left it out, turned the fast pace off.
+
+**What the keepalive is for.**
+- The operator's deadline (design/transport.md section 5, 2026-10-18): "you cannot be using a low level kernel like a
+  dma or networking send/rcv channel for more than 5 seconds without something happening/concluding."
+  design/rubrics.md, Quantities: "a channel 5 s without anything happening on it ≺ one that is never so long quiet."
+  Lane 0 sent a frame every MESH_PLATFORM_NS/5 (1 s) on a link that held nothing (B1 of the deleted
+  design/recovery.md).
+- Speed. A Thunderbolt controller that has been quiet is slow on its next frame. On the pair, after 40-50 us of nothing
+  the Mac mini's SEND completed 6.2 us after its post. With a frame every 5 us it completed in 1.9 us, and the decode
+  rose from 240.8 to 246-250 tok/s (metal-microbench docs/measurement.md, 2026-10-17).
+
+**The hardware facts it rests on.**
+- The Studios' macOS 27 devices report max_qp 3, and the driver keeps one queue pair of each device (section 4). A
+  link to a Studio has two queue pairs: one stream's large lane and small lane. No queue pair is left for a lane of
+  its own.
+- TN3205: a SEND fills the oldest receive its queue pair has posted, and the two must cover the same number of 4 KiB
+  frames. A SEND waits in the hardware's credit until the peer has a receive posted.
+- max_sge is 1 (section 1), so every SEND and every receive names one range.
+
+**The form.** The keepalive takes no queue pair of its own. It is a frame of the all-ones block on a stream's small
+lane (rdma/mesh-link.c `link_alive`).
+- When: the link has posted no SEND for MESH_PLATFORM_NS/5 while this end holds none of its streams, or for
+  MESH_KEEPALIVE_NS (5 us) while it holds one. Any SEND counts, so a link busy with data sends none.
+- Where: the small lane of the link's least stream that serves no holding at this end and has no SEND in flight on
+  that lane.
+- What: one SEND from the all-ones block, one frame as every small-lane receive is. On a stream that has served no
+  holding at this end this pairing it is 16 bytes: the peer's receive for it can only be a spare, since the peer
+  serves no holding of the stream until this end has told its start. Otherwise it is MESH_FRAME bytes, a whole dud.
+- Alignment: it is a SEND of the lane like any other, counted in the lane's SENDs. A holding's start words are each
+  lane's SENDs and receives posted so far, and each lane's first index for a holding is the greater of its own count
+  and its peer's (design/transport.md section 14). Both ends count the frame, so it never moves a holding's units.
+- Its receive: a stream that serves no holding receives into the spare page. After a holding that is the window of
+  spares, as before. At a fresh pairing it is one spare on the small lane (`lane_post`), so the frame has a receive
+  to fill. A frame sent before the peer posts one waits in credit, and the next holding's start counts it.
+- A peer that still serves a holding this end has ended (its client gone): the frame fills that holding's next
+  small-lane receive. It lands as a dud would, all ones (design/rubrics.md M4: "a dud landed as bytes like any
+  other").
+- Its pace is the bridge's own figure, MESH_KEEPALIVE_NS. "the bridge chooses, and it chooses based upoin the actual
+  driver and api the rdma firmware supplies. only the bridge is allowed to know these configuration details" (the
+  operator, 2026-10-21, design/transport.md section 14). The bridge no longer reads the configuration's `keepalive`, so
+  no document can turn the keepalive off. The parent still states the pace on a child's command line (MESH_CHILD_VERSION
+  unchanged), and a child of this build keeps its own, so a parent of an earlier build that states 0 sets nothing.
+- Lanes 0 and 1 are still made where the plan has them (section 5), so a bridge of the plans before this change pairs
+  with this one, and nothing is posted on them. An older bridge's frames on lane 0 wait in credit, harmlessly. A change
+  of MESH_VERSION could drop the two lanes and free their queue pairs.
+
+**What it cannot do.** A link sends no keepalive while every one of its streams serves a holding at this end. On a
+two-queue-pair link that is the one stream, held by a communicator. A timed frame on a held stream's lane would fill
+the receive the stream's next unit is owed, because the peer posts its receives in the holding's order ahead of the
+SENDs. Every later unit would then land one receive late. Counts cannot repair that inside a holding. The receiver
+could tell the frame from data only by a header (rubrics M2) or a copy (the operator, 10-21: "zero copy methods must
+always be used over access by copy"). An RDMA WRITE would fill no receive, but this transport has only SEND and RECV
+(TN3205). So during a holding on a two-queue-pair link the controller is not kept warm.
+What would change that:
+- a third usable queue pair (P1: measure what a macOS 27 device holds);
+- a second device context with its own queue pairs (P3);
+- a stream on one lane, every entry's last page sent whole: the landing contract changes, and a small crossing sends
+  16 KiB where it now sends 4 KiB.
+
+**Ranked (design/rubrics.md, rubric M; the bridge is mesh code).**
+- M8: a link with no keepalive (0xc before this change) ≺ a keepalive while a stream serves no holding (this change).
+  On a link of four or more queue pairs that holds one stream, the keepalive on an idle stream's small lane ≡ lane 0's.
+- M1: a lane, its receives and a frame kind kept for the keepalive alone ≺ a dud on a lane that exists anyway: one kind
+  of SEND, one kind of receive.
+- M4: a short frame filling a held receive (stale bytes counted as landed) ≺ an all-ones frame, which lands as a dud.
+  Chosen: the dud wherever the peer may still serve a holding, the 16-byte frame where it cannot.
+- M8, bytes: a whole frame every 5 us on a quiet held link (0.8 GB/s of wire and the peer's memory) ≺ 16 bytes on a
+  stream that has served no holding, as a held link's idle stream usually has.
+- M5: the pace in the consumer's configuration ≺ the bridge's own figure.
+- M2, M3: unchanged. The frame describes no traffic. It waits only in the hardware's credit, as every SEND does.
+- Lost: a link of four or more queue pairs whose every stream is held kept its controller warm on lane 0, and does
+  not now. Gained: the keepalive at every budget.
+- M6, mixed builds: a plan without lanes 0 and 1 (refused by every older bridge's LINK) ≺ the same plans, nothing
+  posted on the two lanes.
+- Rubric C (the library): unchanged. A client reads `sent` and `landed` over its holding only, and every frame comes
+  before a holding's first index.
+
+**Reviewed and built, not run.** A subagent reviewed the change against rubrics M and C before it was committed and
+found no way for the frame to move a holding's units (each lane's i-th SEND fills the peer's i-th receive: nothing is
+posted on a stream's lanes between its start's capture and its serving, at either end). `make -C rdma all` builds with
+every warning an error. Nothing was run, installed or deployed.

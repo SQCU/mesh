@@ -149,12 +149,16 @@ void health_turn(void){
   health_sent=now;health.available=available_now();
   record_changed();
 }
+/* a record heard: as much of it as this bridge's record holds, the rest 0 (design/HETEROGENEOUS-LINKS.md section 6,
+   item 3: struct mesh_record is only appended to, so a longer one's first bytes are this one; a change of MESH_STREAMS or
+   of the name's or the model's room is not an append, and moves MESH_VERSION), its reach at most MESH_STREAMS nodes;
+   one naming no node, or this node, is not another node's */
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes){
-  struct mesh_record heard;
-  if(bytes!=sizeof heard)return;
-  memcpy(&heard,payload,sizeof heard);
+  struct mesh_record heard={0};
+  memcpy(&heard,payload,MIN((size_t)bytes,sizeof heard));
   heard.name[sizeof heard.name-1]=0;
-  if(!heard.node || heard.node==M->node || heard.reached>MESH_STREAMS)return;
+  if(!heard.node || heard.node==M->node)return;
+  heard.reached=MIN(heard.reached,(uint32_t)MESH_STREAMS);
   heard.model[sizeof heard.model-1]=0;
   struct mesh_record *held=record_held(heard.node);
   struct known *k=known_at(heard.node);
