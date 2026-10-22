@@ -90,27 +90,30 @@ KERNEL_FILES = metallib binarchive
 # directory (the Command Line Tools: verbs.h, librdma).  Metal 4.0; floating point as MTLMathModeSafe; macOS 26.0's
 # AIR, the floor the library's Metal 4 calls need; every warning an error but an unused function (mesh.metal is every
 # consumer's header of primitives, and these kernels call some of them).  Where the record is these kernels' and that
-# AIR's, the committed AIR is used; where it is not, the kernels are compiled into vendor/ for a commit, and a machine
-# that cannot fails naming that build: never an AIR of other kernels.  Not in `all`, so that no image waits on it
-# (install-nccl takes it)
+# AIR's, the committed AIR is used; where it is not, the kernels are compiled here into .build/ (a node's checkout stays
+# its branch's: a pull is never blocked by a rewritten vendor/), `kernels` puts them in vendor/ for a commit, and a
+# machine that cannot compile fails naming that build: never an AIR of other kernels.  Not in `all`, so that no image
+# waits on it (install-nccl takes it)
 METAL = xcrun metal -std=metal4.0 -fmetal-math-mode=safe -mmacosx-version-min=26.0 -Wall -Werror -Wno-unused-function \
   -Wno-error=deprecated-declarations
 XCODE = DEVELOPER_DIR=$(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer))) \
   SDKROOT=macosx
 VENDOR = ../vendor
 kernels: .build/libnccl-mesh.metallib
+	@a=$$(shasum -a 256 < $<) && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 || { \
+	  cp $< $(VENDOR)/libnccl-mesh.metallib && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } > $(VENDOR)/libnccl-mesh.sha256 && \
+	  echo "rdma/Makefile: vendor/libnccl-mesh.metallib and vendor/libnccl-mesh.sha256 compiled anew: commit them" >&2; }
 .build/libnccl-mesh.metallib: .build/libnccl-mesh.sha256 $(wildcard $(VENDOR)/libnccl-mesh.sha256 $(VENDOR)/libnccl-mesh.metallib)
 	@[ -f $(VENDOR)/libnccl-mesh.metallib ] && a=$$(shasum -a 256 < $(VENDOR)/libnccl-mesh.metallib) && \
-	  { cat $<; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 || { \
+	  { cat $<; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 && cp $(VENDOR)/libnccl-mesh.metallib $@ || { \
 	  $(XCODE) $(METAL) -c -o .build/libnccl-mesh.air .build/libnccl-mesh.metal && \
-	  $(XCODE) xcrun metallib -o $(VENDOR)/libnccl-mesh.metallib .build/libnccl-mesh.air || { echo \
+	  $(XCODE) xcrun metallib -o $@ .build/libnccl-mesh.air || { echo \
 	    "rdma/Makefile: vendor/libnccl-mesh.metallib is not these kernels' AIR (vendor/libnccl-mesh.sha256 against" \
 	    "$<), and compiling them here ($(XCODE)) failed (above): where an Xcode has its Metal toolchain" \
 	    "(bin/mesh-devtools-init.sh), make -C rdma kernels, then commit vendor/libnccl-mesh.metallib and" \
 	    "vendor/libnccl-mesh.sha256 (rdma/NCCL.md, The library's kernels)" >&2; exit 1; }; \
-	  a=$$(shasum -a 256 < $(VENDOR)/libnccl-mesh.metallib) && { cat $<; echo "$${a%% *}"; } > $(VENDOR)/libnccl-mesh.sha256 && \
-	  echo "rdma/Makefile: vendor/libnccl-mesh.metallib and vendor/libnccl-mesh.sha256 compiled anew: commit them" >&2; }
-	cp $(VENDOR)/libnccl-mesh.metallib $@
+	  echo "rdma/Makefile: vendor/libnccl-mesh.metallib is not these kernels' AIR: compiled here into $@;" \
+	    "make -C rdma kernels puts it in vendor/ for a commit" >&2; }
 # this node's binary archive: every kind's pipeline compiled from the metallib for this machine's GPU by the build
 # tool, made at every install (the system's GPU compiler may change under an unchanged metallib: an OS update), by the
 # person or agent who runs it; a process looks each pipeline up in it and compiles none

@@ -395,7 +395,7 @@ the node's uplink.
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement, its instance name the host UUID and its TXT record the node's number, UUID, serial, model and RDMA state. Must never exit voluntarily. |
 | `etc/mesh-nodes.json` | the name table: each node's name for people, keyed by its host UUID (`rdma/peers.py` `table` and `label`; `node <number>` for a node it does not list). Read by `mesh-peers`, node-info, `mesh-top`, the observer and telemetry; never by anything that has to find a node. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
-| `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
+| `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code, and every `/Applications/Xcode*.app` readied for the library's kernels (license, first launch, Metal toolchain). Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
@@ -434,6 +434,21 @@ sudo rm /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 The marker file is load-bearing, not folklore: without it `softwareupdate -l` lists
 **zero** Command Line Tools labels; with it, two. `mesh-devtools-init` does this and
 is idempotent — it exits immediately when `verbs.h` is already resolvable.
+
+The Metal compiler is not in the Command Line Tools: it is an Xcode component, and
+`softwareupdate` offers no Xcode. Every node gets one, so that any node builds the
+library's kernels itself (`rdma/Makefile`, `kernels`). Copy an Xcode from a machine
+that has one, once per node, over the tailnet:
+
+```
+ditto -c --keepParent /Applications/Xcode-26.4.1.app - | ssh <node> 'sudo ditto -x - /Applications'
+```
+
+`mesh-devtools-init` then readies every `/Applications/Xcode*.app` headlessly
+(`xcodebuild -license accept`, `-runFirstLaunch`, `-downloadComponent MetalToolchain`,
+`xcrun --kill-cache` for root and the admin user), without changing the active
+developer directory, which stays the Command Line Tools. Xcode 26.4.1 runs on macOS 26
+and 27.
 
 Nothing else in the stack needs a toolchain either. `uv` is a prebuilt binary linking
 only system frameworks, and `uv python list` offers prebuilt CPython, so Python is

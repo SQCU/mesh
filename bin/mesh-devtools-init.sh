@@ -3,12 +3,16 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 LOG=/usr/local/mesh/log/devtools.log
 [ -d /usr/local/mesh/log ] && exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
+U=$(cat /usr/local/mesh/admin-user 2>/dev/null)
 for X in /Applications/Xcode*.app/Contents/Developer; do
+  [ -d "$X" ] || continue
   export DEVELOPER_DIR="$X"
   xcodebuild -license accept
   xcodebuild -runFirstLaunch
   xcodebuild -downloadComponent MetalToolchain
-  echo "[$(ts)] $X: $(xcrun metal --version 2>&1 | head -1)"
+  xcrun --kill-cache
+  [ -n "$U" ] && sudo -u "$U" xcrun --kill-cache
+  echo "[$(ts)] $X: $(SDKROOT=macosx xcrun metal --version 2>&1 | head -1)"
 done
 unset DEVELOPER_DIR
 SDK=$(xcrun --show-sdk-path 2>/dev/null)
