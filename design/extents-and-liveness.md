@@ -99,6 +99,103 @@ is exact.
   the program owns as possibly live, and every request as possibly unfinished. That is the weakest analysis, with the
   most state and the most waiting.
 
+## f. A call's end travels along its dependency graph
+
+### The mesh is a graph that changes
+The operator, 2026-10-22: "you need to treat the mesh as more distributional and having perpetually changing edges and
+topologies for all of time. this will expose new and unseen errors and new and unseen requirements, which is why the
+verbatim guidance from the user that all serivces must handle all graphs must be used rather than superficial evidence
+from one configuration of one environment that programs 'happen to work'".
+
+Nothing below relies on a configuration's shape, such as a pair or a triangle. Nodes join and leave, and links appear
+and go. A call's routes are tables compiled onto the graph as it is when the call is made, as collective compilers do
+for each topology ([TACCL][taccl]; [MSCCL-IR][msccl]).
+
+### The plan's dependency graph
+A call's plan is a DAG of hops. Each hop moves a piece over one link, from an extent at its sender to an extent at its
+receiver. On a piece's route a node is one of:
+- **a source**, which makes the piece;
+- **a forwarder**, which receives it and sends it on unchanged, with no reduction;
+- **a combiner**, which reduces several pieces into one before sending on;
+- **a terminal**, which consumes it.
+
+For every node, the plan says which received pieces feed which sent pieces: the identity for a forwarder, the
+reduction's inputs for a combiner. This "feeds" relation is static plan data.
+
+### Conclusion needs no message
+When a call succeeds, every extent is released locally, at its last use (e):
+- a forwarder's extent for a piece, when its out-hop's SEND completes;
+- a combiner's input, when its reduction has read it;
+- a terminal's extent, by its consumer's use count.
+
+Nothing travels. This is the earliest possible release, and it costs nothing.
+
+Dijkstra and Scholten detect when a diffusing computation has ended by sending acknowledgements back to its origin.
+That is needed because such a computation's extent is not known in advance ([Dijkstra and Scholten 1980][ds]). A
+compiled plan knows its extent, so each node knows its own last use and needs no acknowledgement.
+
+### Failure: the halt's cones
+A halt at a node ends the sources of some hops. A halt is the node's holding ending, its call revoked, or a link on a
+route lost. From the halted hops:
+- **The forward cone F** is every node and piece the feeds relation reaches downstream. Those pieces will never arrive.
+- **The backward cone B** is every node and piece upstream whose only consumers lie in F. Its work is now for nothing.
+
+No extent in F or B has a future use (d). Each is free at once, except what that node's W(t) holds.
+
+**Earliest knowledge.** By happened-before, a node can learn of the halt no earlier than a chain of messages from the
+halt reaches it ([Lamport 1978][lamport]). The pieces themselves would have travelled the routes. So a notice that
+travels the same routes, cut-through, reaches each node at the earliest time any signal could.
+
+**The fastest propagation is:**
+1. The halted hops' nodes originate a notice for the call that names the hops that ended.
+2. A node that receives it forwards it at once, before anything else, with no batching and no wait. It goes along
+   every out-hop in F (downstream) and every in-hop in B (upstream), by the plan's feeds relation.
+3. As it forwards, the node acts locally:
+   - it ends the call's holdings on those edges, posting nothing further for them;
+   - it frees every extent of the cones outside its W(t);
+   - it reports the status in its callers' `meta`.
+4. A notice names its call, so a second copy is dropped. Each node acts once per call.
+
+**What the notice is.**
+- It is a fact about the call's plan, not a message about data: no node waits on it to use data, it only ends and
+  frees (pages-and-functions.md, the addendum on messages about data).
+- It travels on the bridges' control channel, never on a data lane, because a lane carries only plan pages.
+- ULFM's revoke propagates over the communicator by reliable broadcast, and Ray's ownership carries a failure from
+  owners to borrowers; both carry the failure along the system's own graph ([ULFM][ulfm-sc18];
+  [Ray ownership][ray-own]). Here that graph is the plan's feeds relation, already compiled, so the cones are computed
+  rather than discovered. The broader setting is distributed garbage collection's reference graphs
+  ([Abdullahi and Ringwood 1998][dgc]).
+
+### What W(t) holds under a halt
+At a node, W(t) holds the requests already posted on the cones' edges: receives posted toward an upstream hop that
+will never send, and SENDs its downstream will never receive. Their rows are released when the requests complete or
+when their queue pair is gone (d).
+- The notice reaches both ends of each cone edge, so both end that edge's stream. No stream is left dead at one end
+  and live at the other.
+- On a link with one stream, that stream's end loses the link: the port process exits, and the next one pairs from 0.
+- On a link with several streams, a dead stream stays dead until its port process ends. Its W(t) is bounded by one
+  window.
+
+### Topology changes during a call
+A link lost on a route is itself a halt. Its two ends originate notices into their cones. A node that joins during a
+call holds no hop of that call's plan; it joins the next call's plan.
+
+### What each layer does
+- **The collective** compiles, with each call's plan, each node's feeds relation per piece. For each holding it gives
+  its bridge the edges that depend on each edge.
+- **The bridge**, on a holding's unclean end or on a notice:
+  - ends the dependent holdings;
+  - frees rows outside W(t);
+  - forwards the notice on the dependent edges' control channels.
+  
+  No timing, no inference, no waiting.
+- **The caller** reads the status in `meta` and decides whether to rerun.
+
+### To measure
+- **The control channel's hop latency,** which bounds the notice: h hops cost h of it. Data lanes would be faster,
+  and plan-only lanes rule them out.
+- **The time from a halt to the last row freed** in its cones, on graphs of several shapes.
+
 ## What follows for the mesh
 
 1. **The bridge never assumes an arbitrary access pattern.** The rows any request on a queue pair can reference are
@@ -157,3 +254,10 @@ Each took the most general program as its model, against (a)–(e):
 [drain]: https://lkml.iu.edu/1511.2/00504.html
 [chen]: https://arxiv.org/abs/1604.06174
 [checkmate]: https://arxiv.org/abs/1910.02653
+[taccl]: https://arxiv.org/abs/2111.04867
+[msccl]: https://arxiv.org/abs/2408.11008
+[ds]: https://www.cs.utexas.edu/~EWD/transcriptions/EWD06xx/EWD687.html
+[lamport]: https://amturing.acm.org/p558-lamport.pdf
+[ulfm-sc18]: https://icl.utk.edu/files/print/2018/ulfm-sc18.pdf
+[ray-own]: https://www.usenix.org/conference/nsdi21/presentation/cheng
+[dgc]: https://www.cs.kent.ac.uk/people/staff/rej/gcbib/gcbib.pdf
