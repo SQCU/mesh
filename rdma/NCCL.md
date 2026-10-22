@@ -249,7 +249,11 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     value before which the bridge posts no receive into its pages: the holding's own `ready` past the group's first
     publication on that channel (where that publication waits on no receive), else the communicator's gate word, which
     the group's first dispatch stores. So no receive lands in pages the stream's earlier work still reads or writes.
-    Meanwhile the peer's SEND waits in the hardware's credit.
+    Meanwhile the peer's SEND waits in the hardware's credit. A fused crossing's channel that only lands (a reduce's
+    root, a broadcast's receiver) is gated on the gate word, which the call stores: the caller's kernel that reads the
+    previous landing in the same buffer is encoded before the call. A channel that also publishes is gated on its
+    publication, which the caller's publishing kernel stores from its last threadgroup, so there the reading kernel may
+    be the publishing kernel itself, encoded after the call (torch_mesh/fused.py's step kernel).
   - **Group end.** The NIC reads a SEND's pages until the holding's `sent` passes them. So a group's end waits for its
     SENDs: folded into its last wait where it can be, else one wait on `sent`. The caller may then write its send
     buffer again.

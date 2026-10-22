@@ -1028,8 +1028,15 @@ uint64_t ncclMeshRetired(void);
    on that stream, its steps encoded by the library as on any stream (issued where the stream asks issue, else
    completed), writes no record and sets both counts to 0, so the caller's kernels publish and await nothing; as an
    ordinary call it reads its send buffer at its place in the stream, so the kernel that writes it is encoded before
-   the call.  A group on a classic stream without its residencySet fails (ncclInvalidArgument).  The landing's receive is posted only once the publication has stored `ready` (its gate), so
-   its landing buffer may be the one the previous crossing's landing kernel read.
+   the call.  A group on a classic stream without its residencySet fails (ncclInvalidArgument).  The landing's receive
+   is posted only once its gate opens.  On a channel where the group also publishes, the gate is that publication's
+   `ready`, which the caller's publishing kernel stores from its last threadgroup, so the landing buffer may be the one
+   the previous crossing's landing kernel read where that kernel is the publishing kernel itself (fused.py's step
+   kernel, which lands crossing t - 1 and publishes crossing t) or one encoded before it.  On a channel where the group only lands (a reduce's
+   root, a broadcast's receiver: no publication of its own to wait on) the gate is the communicator's gate word, which
+   the call stores in the stream: its receive is posted once the stream reaches the call, so where its landing buffer
+   is the one the previous crossing's landing kernel read, that kernel is encoded before the call (as for any buffer
+   an ordinary call writes); the library sees no kernel of the caller's, so it can order nothing after one.
    *publishes and *lands are this rank's fused steps where a fused group of `kind` rooted at `root` (an all-reduce's and
    an all-gather's root 0) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount) runs on comm
    of n ranks (one rank, or no elements, crosses nothing and has no fused step): an all-reduce's one-shot form n - 1 of

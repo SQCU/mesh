@@ -36,8 +36,10 @@ one store of that holding's `ready`.  The landing kernel: mesh_step_enter, then 
 each landing l in every threadgroup that reads (each its own wait, bounded by polls: the landed bytes, and this rank's
 send done, so the send tensor may be written again once it returns), then element k of that peer's part is
 mesh_step_read<T>(l.d + l.p->dst, k), loaded system-coherent (the NIC wrote it).  The landing tensor may be the same
-every crossing: its receive is posted only once this rank's publication has stored `ready`, after the kernel that read
-it before.  A kernel that writes the send tensor again with no landing kernel between calls
+every crossing: its receive is posted only once this rank's publication toward that peer has stored `ready`, after the
+kernel that read it before.  That holds because every channel of an all_reduce publishes; a channel that only lands (a
+reduce's root, a broadcast's receiver: nccl.h ncclMeshFused) is gated at the call, so there the kernel that reads the
+previous landing is encoded before the next call.  A kernel that writes the send tensor again with no landing kernel between calls
 mesh_step_sent(*b.p, b.a, b.v, tid) on the publication's bindings first.  polls bounds each wait in loads (0:
 NCCL_MESH_POLLS; _stream.polls is that bound, which holds a GPU at most the platform's 5 seconds: rdma/NCCL.md "Bounded
 waits").
