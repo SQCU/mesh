@@ -1,9 +1,14 @@
+import collections
 import json
+import math
+import time
 from pathlib import Path
 
 import resource
 
+import numpy as np
 import torch
+import torch.distributed as dist
 import torch_mesh
 from torch_mesh import _stream, argmax, fused
 from torch_mesh.streamed import instance, node
@@ -12,6 +17,7 @@ from torch_mesh.streamed import instance, node
 SOURCE = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_name('chain.metal').read_text()
 ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PATIENCE', 'PEERS')
 PAGE = resource.getpagesize()
+RING_BLOCKS = 2
 _PIPELINES = {}
 
 
@@ -131,7 +137,7 @@ class Step:
     # docs/writing-a-service.md#the-step-kernel
     def __call__(self, e, p, out, previous):
         landings = [self.landing[q * self.slot:q * self.slot + p.numel()].view_as(p) for q in range(self.peers)]
-        crossing = fused.all_reduce(p, landings, _stream.polls)
+        crossing = fused.exchange(p, landings, _stream.polls)
         self._encode(e, p, out, previous, crossing, 0)
         self.sent = p
         self.phase += 2
@@ -154,3 +160,71 @@ class Step:
         cause = int(self.err.item())
         if cause:
             raise RuntimeError(f'chain step {self.args}: a wait ran past its patience (causes {cause:#x})')
+
+
+# docs/writing-a-service.md#how-the-example-moves-its-data
+def operand(path, rank, width):
+    shape, inputs = torch_mesh.empty(2, dtype=torch.int64, device='cpu'), None
+    if rank == 0:
+        inputs = np.load(path, mmap_mode='r')
+        if (inputs.ndim != 3 or 0 in inputs.shape or inputs.shape[2] != width or inputs.dtype != np.float16
+                or not inputs.flags.c_contiguous):
+            raise ValueError('The input is C-ordered float16 [steps, rows, width], none of them 0')
+        shape[0], shape[1] = inputs.shape[:2]
+    dist.broadcast(shape, src=0)
+    steps, rows = shape.tolist()
+    return steps, rows, inputs
+
+
+# docs/writing-a-service.md#the-rings
+def ring(ring_bytes, steps, slot):
+    slots = ring_bytes // slot
+    if slots >= 2 * steps:
+        return steps, steps, steps
+    whole = PAGE // math.gcd(slot, PAGE)
+    block = slots // (RING_BLOCKS + 1) // whole * whole
+    if block < 1:
+        raise ValueError(f'ring_bytes {ring_bytes} holds {slots} slots of {slot} bytes; the input ring of '
+                         f'{RING_BLOCKS} blocks and the crossing ring of one take {RING_BLOCKS + 1} slots at least, '
+                         f'{(RING_BLOCKS + 1) * slot} bytes')
+    return block, min(steps, RING_BLOCKS * block), block
+
+
+# docs/writing-a-service.md#the-rings
+def span(first, steps, block, depth):
+    last = min(steps, first + block)
+    return slice(first, last), slice(first % depth, first % depth + last - first)
+
+
+class Pace:
+    # docs/writing-a-service.md#the-rings
+    def __init__(self):
+        self.marks, self.done, self.waited = collections.deque(), [], 0.0
+
+    # docs/writing-a-service.md#the-rings
+    def wait(self):
+        if len(self.marks) == RING_BLOCKS - 1:
+            began = time.perf_counter()
+            self.marks.popleft().synchronize()
+            self.done.append(time.perf_counter())
+            self.waited += self.done[-1] - began
+
+    # docs/writing-a-service.md#the-rings
+    def mark(self):
+        self.marks.append(torch.mps.Event())
+        self.marks[-1].record()
+
+
+# docs/writing-a-service.md#how-the-example-moves-its-data
+def fill(E, rank, inputs, first, steps, block):
+    held, slots = span(first, steps, block, len(E))
+    if rank == 0:
+        E[slots].copy_(torch.from_numpy(inputs[held]))
+    return dist.broadcast(E[slots], src=0, async_op=True)
+
+
+# docs/writing-a-service.md#how-the-example-moves-its-data
+def drain(first, steps, block, O, outputs):
+    if O is not None:
+        held = span(first, steps, block, len(O))[0]
+        torch.from_numpy(outputs[held]).copy_(O[:held.stop - held.start], non_blocking=True)

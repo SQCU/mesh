@@ -31,12 +31,12 @@ and then each of its channels is completed in the stream's order, one after anot
 `complete_track`). The tracks dispatch never runs for a fused group.
 
 **torch-mesh.** `torch_mesh/fused.py`, and a section of `_stream.mm` of its own (`fused_residency`, `metal_prelude`,
-`fused_all_reduce`, `fused_published`):
+`fused_exchange`, `fused_published`):
 
 | Call | Takes | Returns |
 |---|---|---|
 | `fused.steps()` | nothing | the Metal text to compile a kernel after: `ncclMeshMetalPrelude`, rdma/mesh.metal and then the steps |
-| `fused.all_reduce(send, landings, polls, group=None)` | the rank's part; a landing tensor for each other rank, in rank order; `polls`, the landing waits' bound (`_stream.polls`, the library's); a group of n ranks | `Crossing(publish, land)`, a tuple of six addresses for each peer each. A call the library won't fuse raises with its reason; nothing slower runs. |
+| `fused.exchange(send, landings, polls, group=None)` | the rank's part; a landing tensor for each other rank, in rank order, each its own size; `polls`, the landing waits' bound (`_stream.polls`, the library's); a group of n ranks | `Crossing(publish, land)`, a tuple of six addresses for each peer each. A call the library won't fuse raises with its reason; nothing slower runs. |
 | `fused.encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)` | `_stream.encode`'s arguments, the peer count, and the crossings it lands and publishes | nothing. One that publishes goes under the one commit rule. |
 
 - The kernel's constant block is its own words padded to an even count, then each peer's landing `mesh_step_binding`,
@@ -47,7 +47,7 @@ and then each of its channels is completed in the stream's order, one after anot
 
 ## The chain (examples/)
 
-The host makes two calls a step: `fused.all_reduce` of the step's part, which only writes the records (a publication
+The host makes two calls a step: `fused.exchange` of the step's part, which only writes the records (a publication
 and a landing for each peer), and the kernel's encode. One more dispatch after the last step lands the last crossing.
 
 **Landing crossing t − 1, at the start of step t's prologue.** For each peer's landing in turn:

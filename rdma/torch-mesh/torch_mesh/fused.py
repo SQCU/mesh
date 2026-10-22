@@ -1,19 +1,21 @@
 """Fused crossings on torch's MPS stream (rdma/nccl.h ncclMeshFusableRooted, ncclMeshFused; ../DESIGN-fused-stream.md):
 the one-shot exchange among n ranks, whose steps the caller's own kernels run, zero copy.  The kernel that makes a
 rank's part writes it into the rank's send tensor and publishes it to every peer, and the kernel after the call reads
-each peer's part from its landing tensor and adds them to its own (the sum is the caller's to make: the library cannot
-see when a kernel reads a landing buffer of its own, so it never combines a fused crossing).  The call is ncclSend of
+each peer's part from its landing tensor: it adds them to its own (an all-reduce, the chain) or reads them in place
+(an all-gather, the LSTM).  What it does with them is the caller's: the library cannot see when a kernel reads a
+landing buffer of its own, so it never combines a fused crossing.  The call is ncclSend of
 the send tensor to each other rank and ncclRecv from each into its own landing tensor, in one group; it dispatches no
 step.  The steps are the library's: a kernel
-source is compiled after steps() and calls them on the bindings all_reduce returns, which encode passes it.
+source is compiled after steps() and calls them on the bindings exchange returns, which encode passes it.
 
   steps()                                    the Metal text a kernel source is compiled after, from the library the
                                              process loaded (ncclMeshMetalPrelude): rdma/mesh.metal as it was built
                                              with, then its steps, struct mesh_step_binding among them
-  all_reduce(send, landings, polls, group=None)
+  exchange(send, landings, polls, group=None)
                                              the fused exchange of `send` (this rank's part) and `landings` (where each
-                                             other rank's part lands, in rank order, n - 1 of them): contiguous MPS
-                                             tensors of one dtype and size, each in a region tensor and starting on a
+                                             other rank's part lands, in rank order, n - 1 of them, each its own size
+                                             and dtype: a ragged all-gather lands a peer's share): contiguous MPS
+                                             tensors, each in a region tensor and starting on a
                                              page (torch_mesh.empty: a lease, which the bridge sends from and lands
                                              in); a Crossing, its publications' bindings and its landings', in rank
                                              order; one the library does not fuse raises (no slower form runs in its
@@ -64,15 +66,15 @@ def steps():
     return STEPS
 
 
-def all_reduce(send, landings, polls, group=None):
+def exchange(send, landings, polls, group=None):
     """The fused exchange over a mesh group of `send` (this rank's part, which its publishing kernel writes to every
-    peer) and `landings` (where each other rank's part lands, in rank order, which its landing kernel reads and adds to
-    its own): a Crossing, each publication's and each landing's six addresses (nccl.h ncclMeshFused).  One the library
+    peer) and `landings` (where each other rank's part lands, in rank order, each its own size, which its landing kernel
+    reads): a Crossing, each publication's and each landing's six addresses (nccl.h ncclMeshFused).  One the library
     does not fuse raises RuntimeError with the library's reason (ncclInvalidUsage: a tensor that is no region tensor, or
     does not start on a page)."""
     import torch.distributed as dist
     group = group or dist.distributed_c10d._get_default_group()
-    publish, land = _stream.fused_all_reduce(send, list(landings), group.handle, int(polls))
+    publish, land = _stream.fused_exchange(send, list(landings), group.handle, int(polls))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 

@@ -46,15 +46,25 @@ inline uint lane_element(uint lane) {
 }
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint RG>
-inline void partial(coherent(device) device const half* src, uint ld, device const half* wp, uint k0, uint k1, uint at,
-                    thread simdgroup_float8x8* acc) {
+struct Rows {
+    coherent(device) device const half* p; uint ld, at;
+    struct Tile {
+        coherent(device) device const half* p; uint ld, at;
+        half2 load(uint row) const { return *(coherent(device) device const half2*)(p + (row + at / 8) * ld); }
+    };
+    Tile tile(uint kt) const { return Tile{p + kt * 8 + at % 8, ld, at}; }
+};
+
+// docs/writing-a-service.md#the-step-kernel
+template <uint RG, typename A>
+inline void partial(thread const A& src, uint row0, device const half* wp, uint k0, uint k1, thread simdgroup_float8x8* acc) {
     for (uint kt = k0; kt < k1; kt++) {
         simdgroup_half8x8 b;
         simdgroup_load(b, wp + kt * 64, 8);
+        const auto t = src.tile(kt);
         for (uint r = 0; r < RG; r++) {
             simdgroup_half8x8 a;
-            half2 v = *(coherent(device) device const half2*)(src + (r * 8 + at / 8) * ld + kt * 8 + at % 8);
+            half2 v = t.load(row0 + r * 8);
             a.thread_elements()[0] = v[0];
             a.thread_elements()[1] = v[1];
             simdgroup_multiply_accumulate(acc[r], a, b, acc[r]);
@@ -63,9 +73,9 @@ inline void partial(coherent(device) device const half* src, uint ld, device con
 }
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint RG, uint RB, uint KIN, uint SG, typename Epi>
-inline void stage(coherent(device) device const half* src, uint ld, device const half* Wt, uint2 tiles, uint groups, uint ks, uint sgid,
-                  uint at, threadgroup float* red, thread Epi& epi) {
+template <uint RG, uint RB, uint KIN, uint SG, typename A, typename Epi>
+inline void stage(thread const A& src, device const half* Wt, uint2 tiles, uint groups, uint ks, uint sgid,
+                  threadgroup float* red, thread Epi& epi) {
     constexpr uint KT = KIN / 8;
     const uint items = tiles.y * groups, per = SG / ks;
     for (uint pass = 0; pass < items; pass += per) {
@@ -74,7 +84,7 @@ inline void stage(coherent(device) device const half* src, uint ld, device const
         uint ct = item / groups, g = item % groups;
         simdgroup_float8x8 acc[RG];
         for (uint r = 0; r < RG; r++) acc[r] = simdgroup_float8x8(0.0f);
-        if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tiles.x + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, at, acc);
+        if (active) partial<RG>(src, g * RG * 8, Wt + (tiles.x + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
         for (uint r0 = 0; r0 < RG && ks > 1; r0 += RB) {
             for (uint r = 0; r < RB; r++) simdgroup_store(acc[r0 + r], red + (sgid * RB + r) * 64, 8);
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -165,11 +175,13 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     if (!await_stamps<G, SIMD, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 1u)) return;
     const uint at = lane_element(lane);
     Activated activated{Y, ys.x * TILE, S, at};
-    stage<RG, RB, K, SG>(X, K, At, ys, groups, ks0, sgid, at, red, activated);
+    const Rows xs_rows{X, K, at};
+    stage<RG, RB, K, SG>(xs_rows, At, ys, groups, ks0, sgid, red, activated);
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, SIMD, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 2u)) return;
     Summand summand{P, x0, K, at};
-    stage<RG, RB, S, SG>(Y, S, Bt, xs, groups, ks1, sgid, at, red, summand);
+    const Rows ys_rows{Y, S, at};
+    stage<RG, RB, S, SG>(ys_rows, Bt, xs, groups, ks1, sgid, red, summand);
     for (uint q = 0; q < PEERS; q++) mesh_step_enter(*words.publish[q].p, words.publish[q].v, words.publish[q].progress, w == 0 && tid == 0);
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, G, tid, &last)) {

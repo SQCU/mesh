@@ -860,20 +860,29 @@ static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 // toward each other rank, on torch's stream, the stream's `fused` set; each publication's bindings and each landing's,
 // in rank order (ncclMeshFused, six GPU addresses each).  A dtype NCCL lacks moves as its bytes.  Nothing is committed
 // here: the publication is the caller's kernel, encoded after this returns (fused_published).
-static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_all_reduce(
+// a tensor's NCCL count and type: its elements of its own type, or its bytes where NCCL names no such type
+static std::pair<size_t, ncclDataType_t> counted(const at::Tensor &t) {
+  const ncclDataType_t type = kind(t.scalar_type());
+  return type == ncclNumTypes ? std::pair<size_t, ncclDataType_t>{(size_t)t.nbytes(), ncclUint8} : std::pair<size_t, ncclDataType_t>{(size_t)t.numel(), type};
+}
+
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_exchange(
     const at::Tensor &send, const std::vector<at::Tensor> &landings, int64_t comm, int64_t polls) {
   int rank = 0, ranks = 0;
   checked(ncclCommUserRank(communicator(comm), &rank));
   checked(ncclCommCount(communicator(comm), &ranks));
-  TORCH_CHECK(landings.size() == (size_t)(ranks - 1), "fused all_reduce: a landing tensor for each of the ", ranks - 1,
+  TORCH_CHECK(landings.size() == (size_t)(ranks - 1), "fused exchange: a landing tensor for each of the ", ranks - 1,
               " other ranks, not ", landings.size());
   for (const at::Tensor &landing : landings)
-    TORCH_CHECK(send.is_mps() && send.is_contiguous() && landing.is_mps() && landing.is_contiguous() &&
-                    send.scalar_type() == landing.scalar_type() && send.numel() == landing.numel(),
-                "fused all_reduce: send and landings are contiguous MPS tensors of one dtype and size (region tensors: torch_mesh.empty)");
-  TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused all_reduce: polls ", polls, " is not a 32-bit count of loads");
-  const ncclDataType_t type = kind(send.scalar_type()) == ncclNumTypes ? ncclUint8 : kind(send.scalar_type());
-  const size_t count = type == ncclUint8 && kind(send.scalar_type()) == ncclNumTypes ? (size_t)send.nbytes() : (size_t)send.numel();
+    TORCH_CHECK(send.is_mps() && send.is_contiguous() && landing.is_mps() && landing.is_contiguous(),
+                "fused exchange: send and landings are contiguous MPS tensors (region tensors: torch_mesh.empty)");
+  TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused exchange: polls ", polls, " is not a 32-bit count of loads");
+  const std::pair<size_t, ncclDataType_t> sent_as = counted(send);
+  const size_t count = sent_as.first;
+  const ncclDataType_t type = sent_as.second;
+  std::vector<std::pair<size_t, ncclDataType_t>> each;
+  for (const at::Tensor &landing : landings) each.push_back(counted(landing));
+  const auto *const sizes = each.data();
   const ncclMeshBuffer out = {(__bridge void *)at::native::mps::getMTLBufferStorage(send), (size_t)(send.storage_offset() * send.element_size())};
   std::vector<ncclMeshBuffer> in;
   for (const at::Tensor &landing : landings)
@@ -897,7 +906,8 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
       for (int q = 0, i = 0; q < ranks && !made; q++) {
         if (q == rank) continue;
         made = ncclSend(&sent, count, type, q, c, &on);
-        if (!made) made = ncclRecv(ins + i++, count, type, q, c, &on);
+        if (!made) made = ncclRecv(ins + i, sizes[i].first, sizes[i].second, q, c, &on);
+        i++;
       }
       const ncclResult_t ended = ncclGroupEnd();
       result = made ? made : ended;
@@ -952,6 +962,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("address", &address);
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
-  module.def("fused_all_reduce", &fused_all_reduce);
+  module.def("fused_exchange", &fused_exchange);
   module.def("fused_published", &fused_published);
 }

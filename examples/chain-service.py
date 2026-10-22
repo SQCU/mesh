@@ -1,6 +1,4 @@
-import collections
 import json
-import math
 import os
 import sys
 import time
@@ -11,8 +9,6 @@ import torch.distributed as dist
 import torch_mesh
 
 import chain
-
-RING_BLOCKS = 2
 
 
 # docs/writing-a-service.md#rotations
@@ -27,20 +23,6 @@ def rotated(w, block, axis):
         v = np.stack((v[..., 0, :] + v[..., 1, :], v[..., 0, :] - v[..., 1, :]), axis=-2) / np.sqrt(2.0)
         s *= 2
     return np.moveaxis(v.reshape(shape), -1, axis)
-
-
-# docs/writing-a-service.md#how-the-example-moves-its-data
-def operand(config, rank):
-    shape, inputs = torch_mesh.empty(2, dtype=torch.int64, device='cpu'), None
-    if rank == 0:
-        inputs = np.load(config['input'], mmap_mode='r')
-        if (inputs.ndim != 3 or 0 in inputs.shape or inputs.shape[2] != config['width'] or inputs.dtype != np.float16
-                or not inputs.flags.c_contiguous):
-            raise ValueError('The input is C-ordered float16 [steps, rows, width], none of them 0')
-        shape[0], shape[1] = inputs.shape[:2]
-    dist.broadcast(shape, src=0)
-    steps, rows = shape.tolist()
-    return steps, rows, inputs
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
@@ -72,70 +54,15 @@ def shares(config, rank, size, folds):
     return a, b
 
 
-# docs/writing-a-service.md#the-rings
-def ring(config, steps, rows):
-    slot = rows * config['width'] * torch.half.itemsize
-    slots = config['ring_bytes'] // slot
-    if slots >= 2 * steps:
-        return steps, steps, steps
-    whole = chain.PAGE // math.gcd(slot, chain.PAGE)
-    block = slots // (RING_BLOCKS + 1) // whole * whole
-    if block < 1:
-        raise ValueError(f'ring_bytes {config["ring_bytes"]} holds {slots} slots of {slot} bytes; the input ring of '
-                         f'{RING_BLOCKS} blocks and the sum ring of one take {RING_BLOCKS + 1} slots at least, '
-                         f'{(RING_BLOCKS + 1) * slot} bytes')
-    return block, min(steps, RING_BLOCKS * block), block
-
-
-# docs/writing-a-service.md#the-rings
-def span(first, steps, block, depth):
-    last = min(steps, first + block)
-    return slice(first, last), slice(first % depth, first % depth + last - first)
-
-
-class Pace:
-    # docs/writing-a-service.md#the-rings
-    def __init__(self):
-        self.marks, self.done, self.waited = collections.deque(), [], 0.0
-
-    # docs/writing-a-service.md#the-rings
-    def wait(self):
-        if len(self.marks) == RING_BLOCKS - 1:
-            began = time.perf_counter()
-            self.marks.popleft().synchronize()
-            self.done.append(time.perf_counter())
-            self.waited += self.done[-1] - began
-
-    # docs/writing-a-service.md#the-rings
-    def mark(self):
-        self.marks.append(torch.mps.Event())
-        self.marks[-1].record()
-
-
-# docs/writing-a-service.md#how-the-example-moves-its-data
-def fill(E, rank, inputs, first, steps, block):
-    held, slots = span(first, steps, block, len(E))
-    if rank == 0:
-        E[slots].copy_(torch.from_numpy(inputs[held]))
-    return dist.broadcast(E[slots], src=0, async_op=True)
-
-
-# docs/writing-a-service.md#how-the-example-moves-its-data
-def drain(first, steps, block, O, outputs):
-    if O is not None:
-        held = span(first, steps, block, len(O))[0]
-        torch.from_numpy(outputs[held]).copy_(O[:held.stop - held.start], non_blocking=True)
-
-
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
-    e, p, pace = E.unbind(0), P.unbind(0), Pace()
+    e, p, pace = E.unbind(0), P.unbind(0), chain.Pace()
     deep, sums = len(e), len(p)
-    landing, crossing = fill(E, rank, inputs, 0, steps, block), None
+    landing, crossing = chain.fill(E, rank, inputs, 0, steps, block), None
     for t in range(steps):
         if t % block == 0:
             pace.wait()
-            ahead = fill(E, rank, inputs, t + block, steps, block) if t + block < steps else None
+            ahead = chain.fill(E, rank, inputs, t + block, steps, block) if t + block < steps else None
             landing.wait()
             landing = ahead
         issued = time.perf_counter()
@@ -143,16 +70,16 @@ def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
         if t == 0:
             first = time.perf_counter() - issued
         if t % block == 0 and t:
-            drain(t - block, steps, block, O, outputs)
+            chain.drain(t - block, steps, block, O, outputs)
             pace.mark()
     step.land(e[(steps - 1) % deep], None if O is None else O[(steps - 1) % block], crossing)
-    drain((steps - 1) // block * block, steps, block, O, outputs)
+    chain.drain((steps - 1) // block * block, steps, block, O, outputs)
     return pace.waited, pace.done, first
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def crossings(steps, block, P):
-    p, pace = P.unbind(0), Pace()
+    p, pace = P.unbind(0), chain.Pace()
     for t in range(steps):
         if t % block == 0:
             pace.wait()
@@ -170,8 +97,8 @@ def main():
     if len(config['parts']) != size:
         raise ValueError('The configuration gives one part a rank')
     width = config['width']
-    steps, rows, inputs = operand(config, rank)
-    block, deep, sums = ring(config, steps, rows)
+    steps, rows, inputs = chain.operand(config['input'], rank, width)
+    block, deep, sums = chain.ring(config['ring_bytes'], steps, rows * width * torch.half.itemsize)
     a, b = shares(config, rank, size, folds)
     del folds
     step = chain.Step(a, b, rows, config['row_capacity'], size - 1, chain.capability(config['capabilities']))
