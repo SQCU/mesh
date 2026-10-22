@@ -88,7 +88,7 @@ inline void release(device atomic_uint* arrivals, uint G, uint tid, threadgroup 
     if (tid == 0) *last = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == G - 1 ? 1u : 0u;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (*last == 0u) return;
-    for (uint q = 0; q < PEERS; q++) mesh_step_release(*publish[q].p, publish[q].a, tid);
+    mesh_step_release(publish, PEERS, tid);
     mesh_arrival_reset(arrivals, 0, tid);
 }
 
@@ -132,15 +132,12 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     if constexpr (STAGE == 0) {
         const bool first = words.first != 0;
         const uint x0 = xs.x * TILE, xw = xs.y * TILE;
-        if (!first) {
+        if (!first)
             for (uint q = 0; q < PEERS; q++) {
                 constant mesh_step_binding& l = words.land[q];
                 mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
                 mesh_step_await(*l.p, l.a, l.v, tid);
             }
-        } else if (w == 0) {
-            mesh_arrival_reset(arrivals, 0, tid);
-        }
         for (uint q = tid; q < R * xw; q += THREADS) {
             uint i = (q / xw) * K + x0 + q % xw;
             float z = 0.0f;

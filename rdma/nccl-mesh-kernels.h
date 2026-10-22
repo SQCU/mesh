@@ -61,7 +61,9 @@
    operand already written through mesh_step_write by the caller's kernel (its last threadgroup to arrive calls it,
    after every other threadgroup's stores): a device barrier, then thread 0's one system-scope fence (mesh.metal
    mesh_publish: every store of the operand visible before the count the bridge acts on) and its one store of the
-   holding's `ready` (p.scalar at p.aux).  mesh_step_read: element k of a landing buffer the
+   holding's `ready` (p.scalar at p.aux); on n bindings b (a publication to each of n peers: ncclMeshFused's n - 1), the
+   device barrier and thread 0's one system-scope fence once, then each binding's store of its `ready`, so a kernel that
+   publishes to several peers pays one barrier and one fence.  mesh_step_read: element k of a landing buffer the
    NIC wrote, loaded system-coherent (mesh.metal mesh_payload; half4 where it names no type: float16 fourths), so the
    caller names no transport qualifier of its own (they are compiled here, under mesh.metal's pragma: a header after
    it, MetalPerformancePrimitives', may end that pragma). */
@@ -101,6 +103,11 @@ static NSString *const STEPS =
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux), p.scalar); }\n"
+  "static inline void mesh_step_release(constant mesh_step_binding *b, uint n, uint i) { "
+  "threadgroup_barrier(mem_flags::mem_device); "
+  "if (i != 0) return; "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
+  "for (uint q = 0; q < n; q++) *(volatile coherent(system) device ulong *)(b[q].a + b[q].p->aux) = b[q].p->scalar; }\n"
   "template <typename T> static inline void mesh_step_write(device uchar *operand, ulong k, T value) { "
   "((volatile coherent(system) device T *)operand)[k] = value; }\n"
   "template <typename T = half4> static inline T mesh_step_read(device const uchar *landing, ulong k) { "

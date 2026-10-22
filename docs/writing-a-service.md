@@ -124,7 +124,10 @@ service stops with an error. It never picks a depth of its own.
 
 The host may run ahead of the GPU, but never by more than the input ring. After each block's outputs are copied, one
 step into the next block, it puts a mark on the GPU's queue. At the start of a block, it waits for the newest mark, the
-one two blocks back, so one block is still queued.
+one two blocks back, so one block is still queued. This wait is the program's own guard on its lead (`Pace.wait`,
+marked `meshlint: guard`). Every step the host has encoded and the GPU has not begun holds records in the library's
+argument ring, and a caller that encodes ahead bounds those records itself (nccl.h `ncclMeshMetal4Records`). The wait
+reads no clock. The marks are timing events, which the service reads after the run (below).
 
 There is a second bound, and today it is the tighter one. Metal's queue holds at most 64 command buffers not yet done,
 and torch makes the host wait when it is full. Today each publication and each copy ends a command buffer, so the host
@@ -153,9 +156,11 @@ x and y cross a dispatch boundary, so they are plain memory, and `simdgroup_load
 operands. Each worker of the third stage writes its slice of the part straight into the step's send tensor, each
 element once through the library's `mesh_step_write` (a system-coherent store: the bridge sends as soon as `ready`
 passes, while the kernel's command buffer still runs). Then each worker fences its stores and counts its arrival, and
-the last to arrive releases the part to every peer: one fence and one store of each holding's `ready`
-(`mesh_step_release`), after which the bridge sends the tensor's own pages down each link. That is the order the
-release needs and no more: each worker's stores, its arrival, one release fence, the store. Nothing is copied. Within
+the last to arrive releases the part to every peer: one barrier and one system fence, then thread 0's store of each
+peer's `ready` (the library's `mesh_step_release` on the n - 1 bindings), after which the bridge sends the tensor's own
+pages down each link. That is the order the release needs and no more: each worker's stores, its arrival, one release
+fence, the stores. `arrivals` is made zeroed, and the last worker zeroes it again, so no kernel resets it at its
+start. Nothing is copied. Within
 a block, no kernel of the library's runs between two steps. The wait and the release are the library's own steps
 (`ncclMeshMetalPrelude`), which the kernel calls. A step's publication follows torch-mesh's one
 commit rule, the same for every caller (torch-mesh README, Performance). While the GPU still holds enough of the
@@ -266,17 +271,18 @@ RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
 ```
 
 Each rank prints one line at the end. It gives the parts, the rows, the steps, the block, the two rings' depths and the
-seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four times a
-step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and a plain
-all-reduce alone (the library's own kernels, not fused), the crossing the fused step no longer pays. It gives the bytes
+seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives three times a
+step: the whole step, the host's own time (with any wait inside torch and at the ring's mark), and a plain all-reduce
+alone (the library's own kernels, not fused), the crossing the fused step no longer pays. It gives the bytes
 a rank's crossing moves a step (its part out to each of the n - 1 peers, and each peer's part in), and those bytes a
 second.
 
 The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling its
 kernels the first time a collective runs. So the line gives the first block's time. It then gives the time a step of the later blocks takes, and the rows a second they reach. The first
-block's end is the moment the host's wait on its mark returns, and that mark comes one step into the next block, so the
-later steps counted are the ones after it: the host issues ahead of the GPU, so it is already waiting when the block
-ends, and no wait is added to take the time. The whole-run times include the first block; these do not.
+block's end is the GPU's time at its mark, one step into the next block, so the later steps counted are the ones after
+it. Each mark is a timing event on the stream (`torch.mps.Event`), and the service reads the events only after the run,
+so the step loop reads no clock and no wait is added to take the time. The whole-run times include the first block;
+these do not.
 
 ## The LSTM
 
@@ -303,9 +309,10 @@ the segments (`Segments::fill`, the segment outermost, so no segment lookup is l
 the R-row band system-coherent (the NIC wrote the landings) into threadgroup memory. Then `simdgroup_load` reads it
 there for every column tile the worker owns, where each tile once loaded its own copy system-coherent. The chunk is a
 fit, not a cost model: `lstm.form` gives the band the threadgroup memory left beside the K split's partials (`red`),
-each row padded by one tile (MLX steel/gemm's 16 bytes), in as few equal chunks as fit. Where a worker's items take more
-than one pass of its simdgroups (ks = 1, wide layers), each pass stages the chunks again: R x K halves a pass against
-the pass's weights, 32 tiles of K x 8 at least. The weights are tiled once at load, and their gate columns are laid out
+each row padded by one tile (MLX steel/gemm's 16 bytes), in as few equal chunks as fit. Where a layer's K is more than one
+chunk and a worker's items take more than one pass of its simdgroups (ks = 1, wide layers), each pass stages every
+chunk again. This is a known cost: the system-coherent band reads repeat, R x K halves a pass against the pass's
+weights, 32 tiles of K x 8 at least. The results are the same. The weights are tiled once at load, and their gate columns are laid out
 unit-major, so an 8-column tile holds two units' (i, f, g, o).
 
 **Epilogue.** A lane holds (i, f) or (g, o) of one unit and row. One `simd_shuffle_xor` pairs them, and the (i, f) lane

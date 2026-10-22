@@ -1,7 +1,6 @@
 import collections
 import json
 import math
-import time
 from pathlib import Path
 
 import resource
@@ -200,20 +199,19 @@ def span(first, steps, block, depth):
 class Pace:
     # docs/writing-a-service.md#the-rings
     def __init__(self):
-        self.marks, self.done, self.waited = collections.deque(), [], 0.0
+        self.marks, self.first = collections.deque(), None
 
     # docs/writing-a-service.md#the-rings
     def wait(self):
         if len(self.marks) == RING_BLOCKS - 1:
-            began = time.perf_counter()
-            self.marks.popleft().synchronize()
-            self.done.append(time.perf_counter())
-            self.waited += self.done[-1] - began
+            self.marks.popleft().synchronize()  # meshlint: guard
 
     # docs/writing-a-service.md#the-rings
     def mark(self):
-        self.marks.append(torch.mps.Event())
+        self.marks.append(torch.mps.Event(enable_timing=True))
         self.marks[-1].record()
+        if self.first is None:
+            self.first = self.marks[-1]
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data

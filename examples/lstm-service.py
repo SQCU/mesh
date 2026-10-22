@@ -89,7 +89,7 @@ def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
             pace.mark()
     tick.land(e[(steps - 1) % len(e)], o[(steps - 1) % block])
     chain.drain((steps - 1) // block * block, steps, block, O, outputs)
-    return pace.waited, pace.done
+    return pace.first
 
 
 # docs/writing-a-service.md#the-lstm
@@ -110,20 +110,23 @@ def main():
     E = torch_mesh.empty(deep, rows, KIN, dtype=torch.half)
     O = torch.empty(block, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H)) if rank == 0 else None
+    start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    paced, done = lstm_stream(tick, rank, steps, block, E, O, inputs, outputs)
-    hosted = time.perf_counter() - began - paced
+    start.record()
+    first = lstm_stream(tick, rank, steps, block, E, O, inputs, outputs)
+    end.record()
+    hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
     ticks = steps + L - 1
-    steady = (began + seconds - done[0]) / (ticks - block - 1) if done else None
+    steady = first.elapsed_time(end) / 1e3 / (ticks - block - 1) if first is not None else None
     moved = (size - 1) * rows * L * config['shares'][rank] * torch.half.itemsize
     summary = dict(rank=rank, size=size, shares=config['shares'], layers=L, rows=rows, input_width=KIN, width=H,
                    steps=steps, ticks=ticks, block=block, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, tick_microseconds=seconds / ticks * 1e6,
-                   latency_ticks=L, host_microseconds=hosted / ticks * 1e6, paced_microseconds=paced / ticks * 1e6,
+                   latency_ticks=L, host_microseconds=hosted / ticks * 1e6,
                    steady_tick_microseconds=steady * 1e6 if steady else None,
                    sent_bytes_per_tick=moved, kernel={key: tick.args[key] for key in lstm.ARGS})
     print(json.dumps(summary), flush=True)

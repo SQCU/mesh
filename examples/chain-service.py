@@ -72,7 +72,7 @@ def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
             pace.mark()
     step.land(e[(steps - 1) % deep], o[(steps - 1) % block], crossing)
     chain.drain((steps - 1) // block * block, steps, block, O, outputs)
-    return pace.waited, pace.done
+    return pace.first
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
@@ -105,15 +105,18 @@ def main():
     P = torch_mesh.empty(sums, chain.paged(rows * width), dtype=torch.half)[:, :rows * width].unflatten(1, (rows, width))
     O = torch.empty(block, rows, width, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width)) if rank == 0 else None
+    start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()
-    paced, done = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
-    hosted = time.perf_counter() - began - paced
+    start.record()
+    first = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
+    end.record()
+    hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
-    steady = (began + seconds - done[0]) / (steps - block - 1) if done else None
-    opened = done[0] - began if done else None
+    steady = first.elapsed_time(end) / 1e3 / (steps - block - 1) if first is not None else None
+    opened = start.elapsed_time(first) / 1e3 if first is not None else None
     dist.barrier()
     torch.mps.synchronize()
     began = time.perf_counter()
@@ -124,8 +127,8 @@ def main():
     summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, block=block,
                    input_ring=deep, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, step_microseconds=seconds / steps * 1e6,
-                   host_microseconds=hosted / steps * 1e6, paced_microseconds=paced / steps * 1e6,
-                   first_block_milliseconds=opened * 1e3 if done else None,
+                   host_microseconds=hosted / steps * 1e6,
+                   first_block_milliseconds=opened * 1e3 if first is not None else None,
                    steady_step_microseconds=steady * 1e6 if steady else None,
                    steady_aggregate_rows_per_second=rows / steady if steady else None,
                    crossing_microseconds=crossing / steps * 1e6, collective_bytes_per_step=moved,

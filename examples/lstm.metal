@@ -86,15 +86,12 @@ kernel void lstm_tick(device const half* W [[buffer(0)]], device const float* bi
     threadgroup half4 band[BAND / 4];
     threadgroup uint last;
     const bool first = words.first != 0;
-    if (!first) {
+    if (!first)
         for (uint q = 0; q < PEERS; q++) {
             constant mesh_step_binding& l = words.land[q];
             mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
             mesh_step_await(*l.p, l.a, l.v, tid);
         }
-    } else if (w == 0) {
-        mesh_arrival_reset(arrivals, 0, tid);
-    }
     const uint R = words.rows, groups = R / (TILE * RG), at = lane_element(lane);
     if (words.outs) {
         const Segments<SPAN, THREADS> top{E, prev, landing, words.seg[L - 1], words.counts[L - 1], 0u, R, tid,
