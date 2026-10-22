@@ -2,8 +2,8 @@
 
 This is the consolidated implementation contract for the September 9, 2026
 instruction to enumerate the remaining work, implement it together, run real
-inputs, and review source and execution until complete. User instructions govern;
-this document does not authorize exceptions. It supersedes completion implications
+inputs, and review source and execution until complete. User instructions govern.
+This document grants no exceptions. It supersedes completion implications
 in the chronological helper/evaluation notes. Those notes remain historical evidence.
 
 The operator subsequently deleted CRC/digest checking as a superfluous feature.
@@ -15,8 +15,9 @@ and old hashed measurements below are historical, not retained features.
 Initial source review: mesh `97d87e4`, metal-microbench `d177586`, both on `main`.
 At that review `runReduceScatter` called `mesh_pages_*`; compiling `mesh_rows_*`
 alongside it did not constitute migration. The current connected source rewrite
-replaces that caller and removes `mesh-pages.c/.h`. No build or execution of the
-rewrite has occurred: the operator prohibited interim execution. Historical
+replaces that caller and removes `mesh-pages.c/.h`. The rewrite has not been
+built or run. The reason given then: the operator had stopped runs of half-done
+work. No quote of that is kept here. Historical
 dispositions below remain open until the complete source/evidence review updates
 them; a deleted symbol alone does not close its obligation.
 
@@ -94,11 +95,11 @@ values, indices, metadata and page padding. This exceeds the old arena but fits
 within the operator's revised planning budget; it is not a hardware-capacity
 blocker. Finish C05 with the complete graph and actual backend layouts.
 
-Do not preserve the old separate dense/native allocations while also allocating
-page-backed copies. Configure the complete storage ownership first, then realize
-the corresponding bridge allocation and numerical bindings. The existing
-`mesh_pct + app_pct` wire-limit calculation also needs to follow that ownership;
-it must not count the same shared numerical pages twice.
+The old separate dense/native allocations go when the page-backed copies come.
+The two are not kept side by side. Configure the complete storage
+ownership first, then realize the corresponding bridge allocation and numerical
+bindings. The existing `mesh_pct + app_pct` wire-limit calculation also follows
+that ownership. It counts each shared numerical page once.
 
 The bridge remained paired and responsive with no attached computation when
 these values were read. No bridge restart or allocation change was made by this
@@ -387,7 +388,7 @@ explicit contract, not a claim that the paper specifies this ABI.
 The existing NCCL, Active Messages, Legion/Realm, StarPU, PaRSEC, OmpSs, Naiad,
 MapReduce/RDD and async tensor-parallel references describe related mechanisms;
 none grants an exemption from the page-storage or caller restrictions here.
-Their own control structures must not be imported merely because they are mature.
+Being mature is no reason to import their control structures.
 
 Apple's [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
 documents Thunderbolt RDMA as two-sided SEND/RECV, without hardware-initiated

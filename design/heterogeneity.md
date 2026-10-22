@@ -109,11 +109,11 @@ program uses its functions where a partitioned dimension is meant, and torch's o
    shape. These are stated for the program, never read from the ops it dispatches.
 2. Each rank's time for c units is a_r + b_r·c: b_r the sum over those classes of the class's rate on
    rank r's node times its work per unit, a_r the fixed terms counted once. The group's nodes in rank
-   order are the process group's `node` (torch-mesh reads each rank's from its bridge); never infer a
-   node from a host name or assume rank r is node r.
+   order are the process group's `node` (torch-mesh reads each rank's from its bridge). The node
+   comes from there, not from a host name, and rank r need not be node r.
    - If the store has no rate for a class at the program's dtype and shape, measure it on each node
      and add it to the node's record as its own class, with the record it came from, before deriving.
-     Never borrow another class's rate. The first weighted run on the pair derived fp32 MPS
+     Each class uses its own rate, because a borrowed one misleads. The first weighted run on the pair derived fp32 MPS
      programs' parts from the engine's fp16 projection rates (4.1x per FMA between the nodes, where
      these programs' matmuls run 2.6x), and the wait moved to the slower node (metal-microbench
      `docs/measurement.md` ledger, 2026-09-28).

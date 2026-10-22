@@ -111,9 +111,9 @@ Operator clarification, 2026-09-16:
 
 Storage sizing belongs to realization. It does not authorize a transport credit,
 acknowledgment, or destination-reuse wait. A private binding's exhausted row stack
-while other receive backing remains writable is an allocation defect. N1 must
-remove that artificial restriction and account for operand and lifecycle storage;
-it must not turn an unproved capacity assumption into a gate on ready transfers.
+while other receive backing remains writable is an allocation defect. N1 removes
+that false limit and counts operand and lifecycle storage. A guess about capacity
+that no one proved does not become a gate on ready transfers.
 
 ## The machine
 
@@ -227,7 +227,7 @@ recovery, [transport.md](transport.md); the collectives' API, [rdma/NCCL.md](../
 | I13 | Legitimacy is the Goal A period and the Goal B decoded tokens/s ratio on the actual two-node program. Drivers that run the actual TP program and time it (scatter_bench, goal_a.sh, run_pair.py, e2b_replay) are the measurement and are allowed; the rule against benchmarks forbids duplicate engines only. | the measured period / tokens-per-second ratio |
 | I14 | Prefer established mechanisms over invented ones; the collective is Megatron-LM TP2 (Shoeybi et al. 2019) with a reduce of row-split partials. No per-construct or per-function citation is required. | — |
 | I15 | No hand-written tests (operator 2026-09-06). Measured Goal A/B result records and overlap traces are allowed. | — |
-| I16 | Size is evidence, as the operator's judgement of one failing library (2026-09-15, quoted above). There is no line cap and no revert rule; never delete code that reached Goal A or Goal B. | — |
+| I16 | Size is evidence, as the operator's judgement of one failing library (2026-09-15, quoted above). There is no line cap and no revert rule. Code that reached Goal A or Goal B is kept: it is the evidence that the goal was reached. | — |
 | I17 | Indexed dataflow on the hot path. Realize logical rows, consumer ranges, storage capacity and backend bindings before execution. Runtime uses compact arrays for page mappings, queues, counts and operands; arrival-derived page indices and asynchronous placement are permitted. Remove linked-list traversal, avoidable metadata reconstruction and software transport admission gates. Physical arrival order never defines tensor coordinates or collective semantics. | — (design heuristic; no gating force) |
 | I18 | No guards or blocks that withhold ready work. Producers publish on visibility and return; dedicated TX/RX threads continuously drain completions and post available work. Queue polling, queue-empty observations, indexed placement, native status handling and completion-driven dependency/refcount updates are permitted. No implicit barrier, acknowledgement, reuse guard, blocking retry or wait for a particular value may hold up independent publication, transfer or consumption. Layout conversion is asynchronous dataflow for its own operands. | — (measured by Goal A/B) |
 | I19 | Library backlog; not a gate for Goal A/B. Recovery happens between NFEs, never inside one. A link failure concludes the in-flight instances as `Result` values (N2) within one completion; no path in TX/RX/publish/invoke retries, re-sends, or waits for a link to return. Re-pairing is the bridge's own bounded loop; resumption is the driver's next `submit`. The bridge never exits and never wedges the provider on a lost link (`design/transport.md`: destroy QP/CQ, deregister, re-create; never leave a verbs call blocked). | a link failure concludes the affected instances within one completion (trace) and no retry/re-send exists on TX/RX/publish/invoke (the W audit's conditional enumeration); the bridge pid is unchanged across a cable pull |resend\|reconnect" rdma/mesh-flow.c rdma/mesh-call.c` hits only the bridge's link controller, never a data-path function; group R rows |
