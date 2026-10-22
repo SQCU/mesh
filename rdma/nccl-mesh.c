@@ -3433,8 +3433,11 @@ ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint
    it moves: the whole operand in one piece, or (`gather`, an all-gather's) one segment's every part, its own sent and
    another's received; a rank that forwards (a chain's middle, a broadcast tree's inner rank: it sends a part it also
    receives, `held` marking each part's SEND and receive) takes the unfused form, since a fused publication is released
-   before the kernel that reads the landing; its SENDs and receives counted into *sends and *receives */
-static int whole_moves(const struct mesh_program *program, uint32_t rank, int gather, uint32_t ranks, uint32_t *sends, uint32_t *receives) {
+   before the kernel that reads the landing; a move toward a peer this rank has no channel to (toward[peer] < 0: the
+   communicator's map joins them by no link) has no fused step; its SENDs and receives counted into *sends and
+   *receives */
+static int whole_moves(const struct mesh_program *program, uint32_t rank, int gather, uint32_t ranks, const int *toward, uint32_t *sends,
+                       uint32_t *receives) {
   uint8_t *seen = calloc(ranks, 1), *held = calloc(program->parts ? program->parts : 1, 1);
   int whole = seen && held;
   *sends = *receives = 0;
@@ -3449,7 +3452,8 @@ static int whole_moves(const struct mesh_program *program, uint32_t rank, int ga
     }
     const int send = m->op == MESH_STEP_SEND;
     const uint8_t bit = send ? 1 : 2;
-    if (within != m->parts || m->parts != parts || (gather && send != (s == rank)) || m->peer >= ranks || seen[m->peer] & bit) whole = 0;
+    if (within != m->parts || m->parts != parts || (gather && send != (s == rank)) || m->peer >= ranks || toward[m->peer] < 0 || seen[m->peer] & bit)
+      whole = 0;
     else {
       for (uint32_t p = m->part; p < m->part + m->parts; p++) {
         if (held[p] & (bit ^ 3)) whole = 0;
@@ -3489,11 +3493,16 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
     const struct mesh_program *program = comm_compile(comm) ? NULL : program_of(comm, what, root, bytes);
     uint32_t sends = 0, receives = 0;
     const int whole = program && !program->scratch &&
-                      whole_moves(program, (uint32_t)comm->rank, what == MESH_ALLGATHER, (uint32_t)comm->nranks, &sends, &receives);
+                      whole_moves(program, (uint32_t)comm->rank, what == MESH_ALLGATHER, (uint32_t)comm->nranks, comm->toward, &sends, &receives);
     pthread_mutex_unlock(&group_lock);
     if (whole) { *publishes = (int)sends; *lands = (int)receives; }
     return ncclSuccess;
   }
+  /* the peers the form uses (an all-reduce's and a reduce root's every other rank, a reduce's other ranks the root),
+     each joined to this rank by a channel (comm's map, toward), else the form has no fused step here: its ncclSend
+     or ncclRecv toward an unjoined peer fails in plan_calls, and the caller takes the compiled program */
+  for (int q = 0; q < comm->nranks; q++)
+    if (q != comm->rank && (what == MESH_ALLREDUCE || rooted || q == root) && comm->toward[q] < 0) return ncclSuccess;
   const int peers = comm->nranks - 1;
   *publishes = what == MESH_ALLREDUCE ? peers : !rooted;
   *lands = what == MESH_ALLREDUCE ? peers : rooted ? peers : 0;
