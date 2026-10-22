@@ -46,19 +46,24 @@ static int serial_even(struct hdr *m,_Atomic uint64_t *word,uint64_t *before){
          MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return ESRCH;
   return 0;
 }
-static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){
-  for(uint64_t before;;){
-    if(serial_even(m,&m->map,&before))return -ESRCH;
-    uint64_t count=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
-    int fits=at<=length && count<=(length-at)/sizeof(struct mesh_record);
-    struct mesh_record *copy=fits?malloc((count?count:1)*sizeof *copy):NULL;
-    if(copy)memcpy(copy,(char *)m+at,count*sizeof *copy);
-    if(mesh_map_whole(m,before)){
-      if(!copy)return fits?-ENOMEM:-EINVAL;
-      *out=copy;return (int)count;
+static int mesh_records_read(int health,struct mesh_record **out){
+  struct hdr *m;size_t length;
+  const int error=mesh_open(0,&m,&length,NULL);
+  if(error)return -error;
+  int count;
+  for(uint64_t before,held=0;;){
+    if((health && serial_even(m,&m->health,&held)) || serial_even(m,&m->map,&before)){count=-ESRCH;break;}
+    const uint64_t n=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
+    const int fits=at<=length && n<=(length-at)/sizeof(struct mesh_record);
+    struct mesh_record *copy=fits?malloc((n?n:1)*sizeof *copy):NULL;
+    if(copy)memcpy(copy,(char *)m+at,n*sizeof *copy);
+    if(mesh_map_whole(m,before) && (!health || atomic_load_explicit(&m->health,memory_order_acquire)==held)){
+      count=copy?(int)n:fits?-ENOMEM:-EINVAL;*out=copy;break;
     }
     free(copy);
   }
+  munmap(m,length);
+  return count;
 }
 /* design/transport.md section 3, RECORD; section 15, "The library" */
 int mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint64_t *bandwidth){
@@ -74,29 +79,23 @@ int mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint64_t
   *bandwidth=slowest;
   return 1;
 }
-struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; struct mesh_link_map map; };
+struct mesh_whole { struct mesh_link_map map; uint32_t *next; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
 }
-static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->bandwidth);free(w->mark);free(w->next);}
+static void mesh_whole_free(struct mesh_whole *w){free(w->map.link);free(w->map.bandwidth);free(w->map.mark);free(w->next);}
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
-  size_t joins=1;
-  uint64_t bandwidth;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=(size_t)mesh_joined(r+a,r+b,&bandwidth);
-  *w=(struct mesh_whole){.n=n,.link=malloc(joins*sizeof *w->link),.bandwidth=malloc(joins*sizeof *w->bandwidth),
-    .mark=malloc(((size_t)n+1)*sizeof *w->mark),.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
-  if(!w->link || !w->bandwidth || !w->mark || !w->next)return ENOMEM;
-  uint32_t links=0;
+  const size_t joins=(size_t)n*(n?n-1:0)/2+1;
+  *w=(struct mesh_whole){.map={.kind=MESH_LINKS_GRAPH,.nodes=n,.link=malloc(joins*sizeof *w->map.link),.bandwidth=malloc(joins*sizeof *w->map.bandwidth),
+    .mark=malloc(((size_t)n+1)*sizeof *w->map.mark)},.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
+  if(!w->map.link || !w->map.bandwidth || !w->map.mark || !w->next)return ENOMEM;
   for(uint32_t a=0;a<n;a++){
-    w->mark[a]=r[a].node;
+    w->map.mark[a]=r[a].node;
     for(uint32_t b=a+1;b<n;b++)
-      if(mesh_joined(r+a,r+b,&bandwidth)){
-        w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=bandwidth;links++;
-      }
+      if(mesh_joined(r+a,r+b,w->map.bandwidth+w->map.links)){w->map.link[w->map.links][0]=a;w->map.link[w->map.links++][1]=b;}
   }
-  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.bandwidth=w->bandwidth,.relays=0,.next=NULL,.mark=w->mark};
   const int error=n?mesh_routes(&w->map,w->next):0;
   if(!error)w->map.next=w->next;
   return error;
@@ -117,29 +116,15 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
   return made;
 }
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map){
-  struct hdr *m;size_t length;struct mesh_record *r=NULL;
-  int error=mesh_open(0,&m,&length,NULL);
-  if(error)return -error;
-  int count=mesh_records_read(m,length,&r);
-  munmap(m,length);
-  if(count<0)return count;
-  int result=mesh_records_map(r,(uint32_t)count,members,n,node,map);
+  struct mesh_record *r=NULL;
+  const int count=mesh_records_read(0,&r);
+  const int result=count<0?count:mesh_records_map(r,(uint32_t)count,members,n,node,map);
   free(r);
   return result;
 }
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
-  struct hdr *m;size_t length;struct mesh_record *r=NULL;
-  int error=mesh_open(0,&m,&length,NULL);
-  if(error)return -error;
-  int count;
-  for(uint64_t before;;){
-    if(serial_even(m,&m->health,&before)){count=-ESRCH;break;}
-    count=mesh_records_read(m,length,&r);
-    if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
-    free(r);r=NULL;
-  }
-  munmap(m,length);
-  if(count<0)return count;
+  struct mesh_record *r=NULL;
+  const int count=mesh_records_read(1,&r);
   for(int i=0;i<count && (uint32_t)i<capacity;i++){
     out[i].node=r[i].node;
     out[i].region=r[i].region;out[i].memory=r[i].memory;

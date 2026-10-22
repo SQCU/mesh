@@ -1262,10 +1262,10 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   CFPropertyListRef list=data?CFPropertyListCreateWithData(NULL,data,kCFPropertyListImmutable,NULL,NULL):NULL;
   if(data)CFRelease(data);
   const char *refused=NULL;
-  CFTypeRef named=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("name")):NULL;
-  CFTypeRef sized=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("region_bytes")):NULL;
+  const int dictionary=list && CFGetTypeID(list)==CFDictionaryGetTypeID();
+  CFTypeRef named=dictionary?CFDictionaryGetValue(list,CFSTR("name")):NULL,sized=dictionary?CFDictionaryGetValue(list,CFSTR("region_bytes")):NULL;
   int64_t value=0;
-  if(!list || CFGetTypeID(list)!=CFDictionaryGetTypeID())refused="not a property list of a configuration (rdma/bridge_configuration.py writes it)";
+  if(!dictionary)refused="not a property list of a configuration (rdma/bridge_configuration.py writes it)";
   else if(!named || CFGetTypeID(named)!=CFStringGetTypeID() || !CFStringGetCString(named,name,(CFIndex)room,kCFStringEncodingUTF8))refused="its name is missing";
   else if(!sized || CFGetTypeID(sized)!=CFNumberGetTypeID() || !CFNumberGetValue(sized,kCFNumberSInt64Type,&value) || value<=0)
     refused="its region_bytes, a positive number of bytes, is missing";
@@ -1377,13 +1377,12 @@ static int child_main(int argc,char **argv){
 /* design/transport.md section 2; section 15, "The region" */
 static int region_open(const struct hdr *geometry,int *out){
   int fd=shm_open(MESH_NAME,O_RDWR,0);
-  if(fd<0 && errno!=ENOENT){say("bridge: region %s not opened (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
+  struct stat shape={0};
+  struct hdr *old=NULL;
+  const char *failed=fd<0?errno==ENOENT?NULL:"opened":fstat(fd,&shape)?"read":(size_t)shape.st_size<sizeof *old?NULL:
+                     (old=mmap(NULL,(size_t)shape.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0))==MAP_FAILED?"mapped":NULL;
+  if(failed){say("bridge: region %s not %s (%s): this bridge ends without touching it\n",MESH_NAME,failed,strerror(errno));exit(1);}
   if(fd>=0){
-    struct stat shape;
-    if(fstat(fd,&shape)){say("bridge: region %s not read (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
-    const size_t size=(size_t)shape.st_size;
-    struct hdr *old=size>=sizeof(struct hdr)?mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0):NULL;
-    if(old==MAP_FAILED){say("bridge: region %s not mapped (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
     if(old && old->magic==MESH_MAGIC){
       if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && !memcmp(&old->pgsz,&geometry->pgsz,3*sizeof old->pgsz) &&
          !memcmp(&old->streams,&geometry->streams,offsetof(struct hdr,boot)-offsetof(struct hdr,streams))){M=old;*out=fd;return 1;}
@@ -1392,7 +1391,7 @@ static int region_open(const struct hdr *geometry,int *out){
           "holder of it lives and opens a bridge again\n",MESH_NAME);
       exit(EX_TEMPFAIL);
     }
-    if(old)munmap(old,size);
+    if(old)munmap(old,(size_t)shape.st_size);
     close(fd);
     shm_unlink(MESH_NAME);
   }
