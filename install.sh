@@ -179,7 +179,8 @@ TSJ=io.mesh.tailscale; [ -d /Applications/Tailscale.app ] && TSJ=
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>1</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init $TSJ; do
+mkplist io.mesh.bridge-boot "<string>/bin/launchctl</string><string>bootstrap</string><string>user/$ADMIN_UID</string><string>$H/Library/LaunchAgents/io.mesh.bridge.plist</string>"
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.bridge-boot $TSJ; do
   port=
   case "$L" in io.mesh.telemetry) port=8788 ;; io.mesh.observer) port=8787 ;; esac
   upid=$(launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')
