@@ -1064,15 +1064,20 @@ ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t
    operand's bytes), its operand cut into those segments (mesh-plan.h mesh_program_steps_cut): one tree program over
    unequal segments, not a rooted call a rank.  Both paths, every type and operator of the equal calls.  Every rank
    passes the same counts: the program's steps on every rank are cut by them, and a rank whose counts differ from its
-   peers' lays other positions (the calls do not pair: ncclInvalidUsage, as unequal counts to the equal calls are). */
+   peers' lays other positions.  Such calls do not pair, which is the caller's error and is not detected, as unequal
+   counts to the equal calls are not (no rank holds another's counts, and no payload is checked: above): a rank lands
+   whatever its peer published at a position as its own piece there, or waits at a position its peer never publishes
+   as any wait on a peer that publishes nothing does (rdma/NCCL.md "Bounded waits", "Failures"), and its channels'
+   positions differ from its peers' for the communicator's later groups. */
 ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,
                                 cudaStream_t stream);
 ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
                                     ncclComm_t comm, cudaStream_t stream);
 /* MPI_Alltoallv with counts on the host: rank r sends sendcounts[q] elements to rank q, its segments packed in rank order
    in sendbuff, and receives recvcounts[q] elements from rank q into recvbuff, packed in rank order (rank r's
-   sendcounts[q] is rank q's recvcounts[r], else the calls do not pair: ncclInvalidUsage; sendcounts[rank] is
-   recvcounts[rank], its own segment copied).  The counted all-to-all's call (below) with its counts known to both
+   sendcounts[q] is rank q's recvcounts[r], else the calls do not pair, the caller's error, not detected, as
+   ncclMeshAllGatherV's unequal counts are not (above); sendcounts[rank] is recvcounts[rank], its own segment copied,
+   ncclInvalidArgument where they differ).  The counted all-to-all's call (below) with its counts known to both
    ends: no count crosses, and each pair's elements move as one message of their size, in one group.  ncclAlltoAll is
    it with every count `count`, and ncclGather and ncclScatter its rooted forms (every count 0 but toward or from the
    root), so recvbuff off a gather's root and sendbuff off a scatter's are not read and may be NULL.  Both paths. */
