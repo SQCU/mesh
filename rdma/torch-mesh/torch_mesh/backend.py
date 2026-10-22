@@ -164,8 +164,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return ProcessGroupMesh._of(made[0]), bytes(ffi.buffer(held))
 
     def revoke(self):
-        """This group's work in flight is revoked and none is issued after it (ncclCommRevoke): its peers land its
-        unsupplied positions as duds, and its own GPU waits end at their landings or their bounds."""
+        """This group's work in flight is revoked and none is issued after it (ncclCommRevoke): its bridge sends what
+        it published and nothing else, and its own GPU waits end at their landings or their bounds."""
         check(LIB.ncclCommRevoke(self.comm, 0))
 
     def size(self):

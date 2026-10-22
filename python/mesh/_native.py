@@ -72,8 +72,8 @@ class World:
 
     # design/algorithm-sources.md#mesherror
     def revoke(self):
-        """Every communicator's work in flight ends with an error, here and at its peers, and none is issued after it
-        (torch_mesh ProcessGroupMesh.revoke: ncclCommRevoke)."""
+        """Every communicator's work in flight here ends with an error, and none is issued after it (torch_mesh
+        ProcessGroupMesh.revoke: ncclCommRevoke); its peers' waits end at their own revoke."""
         groups = {g for g in self.groups.values() if g is not None} | ({self.group} if self.group is not None else set())
         for group in groups:
             group._get_backend(torch.device(self.device)).revoke()

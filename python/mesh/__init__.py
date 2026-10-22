@@ -14,7 +14,7 @@ on one compute thread; crossings and collectives are libnccl-mesh's (mesh._nativ
 member computes from the graph (each queue its own communicator), so their positions pair (rdma/NCCL.md "Rules a
 program keeps").  A failure is a value (Program.report, MeshError); every wait ends at an event (a call completing, a
 failure, close), never at a time, and close() abandoning work in flight revokes the program's communicators, so its
-crossings end with an error here and at its peers.
+crossings end with an error here (its peers' at their own close or revoke).
 
 The package is `mesh`, the import name rdma/mesh.py also takes: importing it loads that module from this checkout's
 rdma/ and carries its names (ffi, lib, lease, current, ...), so torch_mesh and mesh_mpi find what they import."""
