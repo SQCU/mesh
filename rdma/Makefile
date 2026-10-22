@@ -85,8 +85,9 @@ KERNEL_FILES = metallib binarchive
 # vendor/libnccl-mesh.sha256 (the kernels' SHA-256 it was compiled from, then the AIR's own; vendor/PROVENANCE.md), so
 # that a node with no Metal toolchain still installs.  The Metal toolchain is an Xcode with its Metal toolchain
 # component (XCODE): DEVELOPER_DIR's, or else the last /Applications/Xcode*.app, which bin/mesh-devtools-init.sh readies
-# on every node; it is the developer directory of the two commands below alone, and every other command here keeps the
-# active one (the Command Line Tools: verbs.h, librdma).  Metal 4.0; floating point as MTLMathModeSafe; macOS 26.0's
+# on every node.  The two commands below alone run under it and its own SDK (SDKROOT=macosx; xcrun otherwise takes a
+# newer Command Line Tools' SDK, whose version the AIR records), and every other command here keeps the active developer
+# directory (the Command Line Tools: verbs.h, librdma).  Metal 4.0; floating point as MTLMathModeSafe; macOS 26.0's
 # AIR, the floor the library's Metal 4 calls need; every warning an error but an unused function (mesh.metal is every
 # consumer's header of primitives, and these kernels call some of them).  Where the record is these kernels' and that
 # AIR's, the committed AIR is used; where it is not, the kernels are compiled into vendor/ for a commit, and a machine
@@ -94,16 +95,17 @@ KERNEL_FILES = metallib binarchive
 # (install-nccl takes it)
 METAL = xcrun metal -std=metal4.0 -fmetal-math-mode=safe -mmacosx-version-min=26.0 -Wall -Werror -Wno-unused-function \
   -Wno-error=deprecated-declarations
-XCODE = $(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer)))
+XCODE = DEVELOPER_DIR=$(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer))) \
+  SDKROOT=macosx
 VENDOR = ../vendor
 kernels: .build/libnccl-mesh.metallib
 .build/libnccl-mesh.metallib: .build/libnccl-mesh.sha256 $(wildcard $(VENDOR)/libnccl-mesh.sha256 $(VENDOR)/libnccl-mesh.metallib)
 	@[ -f $(VENDOR)/libnccl-mesh.metallib ] && a=$$(shasum -a 256 < $(VENDOR)/libnccl-mesh.metallib) && \
 	  { cat $<; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 || { \
-	  DEVELOPER_DIR=$(XCODE) $(METAL) -c -o .build/libnccl-mesh.air .build/libnccl-mesh.metal && \
-	  DEVELOPER_DIR=$(XCODE) xcrun metallib -o $(VENDOR)/libnccl-mesh.metallib .build/libnccl-mesh.air || { echo \
+	  $(XCODE) $(METAL) -c -o .build/libnccl-mesh.air .build/libnccl-mesh.metal && \
+	  $(XCODE) xcrun metallib -o $(VENDOR)/libnccl-mesh.metallib .build/libnccl-mesh.air || { echo \
 	    "rdma/Makefile: vendor/libnccl-mesh.metallib is not these kernels' AIR (vendor/libnccl-mesh.sha256 against" \
-	    "$<), and compiling them here under '$(XCODE)' failed (above): where an Xcode has its Metal toolchain" \
+	    "$<), and compiling them here ($(XCODE)) failed (above): where an Xcode has its Metal toolchain" \
 	    "(bin/mesh-devtools-init.sh), make -C rdma kernels, then commit vendor/libnccl-mesh.metallib and" \
 	    "vendor/libnccl-mesh.sha256 (rdma/NCCL.md, The library's kernels)" >&2; exit 1; }; \
 	  a=$$(shasum -a 256 < $(VENDOR)/libnccl-mesh.metallib) && { cat $<; echo "$${a%% *}"; } > $(VENDOR)/libnccl-mesh.sha256 && \
