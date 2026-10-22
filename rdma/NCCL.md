@@ -531,9 +531,11 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
 ## Failures
 
 The library's one clock that fails a group is the platform deadline of a host-path wait. A host-path group's waits
-end at their counts, at a count's `~0` (its bridge's, where the link is lost or the bridge stops), at a revoke, or once
-`MESH_PLATFORM_NS` passes with nothing landed, consumed or published on any of its channels (`ncclRemoteError`; each
-step that moves sets the deadline again); a GPU wait at its count, at a count's `~0` or at its bound ([Bounded
+end at their counts, at a count's `~0` (its bridge's, where the link is lost or the bridge stops), at its holding's
+end (its stream no longer the communicator's own: a pairing lost and made again, a bridge restarted), at a revoke, or
+once `MESH_PLATFORM_NS` passes with no entry finished on any of its channels (`ncclRemoteError`; each entry consumed,
+published, landed whole or sent sets the deadline again, and a page landing alone does not: a dud page drip, a
+keepalive into the holding of a producer that is gone, keeps no call waiting); a GPU wait at its count, at a count's `~0` or at its bound ([Bounded
 waits](#bounded-waits)). A group presents its entries to its bridge as it is issued, its
 holding's deadline none while its member lives. A member that fails, is revoked or ends has the pages it presented and
 did not publish sent at once as duds: all ones, placed where a send must happen and its producer is gone (design/transport.md section 10). Its peers

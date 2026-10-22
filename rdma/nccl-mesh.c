@@ -2262,16 +2262,25 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
    its send buffer in place, writing send op landed), a COPY's consumed once landed (it landed in place); a combine
    into bytes an earlier SEND of its call on its channel reads waits for `sent` past that SEND (struct message `sent`);
    then every send entry's bytes sent, so the caller may write its send buffer again.  A count that reads the link's
-   loss fails the group, and so does a revoke, at its next look: a peer's process gone or its communicator revoked
-   ends its holdings, whose duds land here; and so does MESH_PLATFORM_NS with nothing landed, consumed, published or
-   sent on any of its channels (design/rubrics.md C5's upper pole: "within a call, the only thing that ends a wait is the
-   data or the platform deadline", and M3, every wait ends in finite time; the operator: "why do you want to get rid of
-   a timeout that fixes infinite hangs anyways?"), the deadline moved on by every step that moves (two sums a look, one
-   of entries and one of pages, so no sum mixes the two), so a peer that computes for long and keeps landing is waited
-   for.  Every look spins: nothing parks */
+   loss on a channel with work left fails the group, and so does a revoke, and so does the end of a holding with work
+   left (its stream no longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge
+   restarted), at its next look: a peer's process gone or its communicator revoked ends its holdings, whose duds land
+   here; and so does MESH_PLATFORM_NS with no entry finished on any of its channels (design/rubrics.md C5's upper pole:
+   "within a call, the only thing that ends a wait is the data or the platform deadline", and M3, every wait ends in
+   finite time; the operator: "why do you want to get rid of a timeout that fixes infinite hangs anyways?"), the
+   deadline moved on only by an entry that finishes (one consumed or published, a landing entry landed whole, and in
+   the second loop pages sent), never by a page landing alone: a keepalive SEND of a peer whose holding ended lands
+   in this holding's next receive as a dud page (design/HETEROGENEOUS-LINKS.md section 10), and such a drip moved the
+   deadline a page at a time, so a P-page landing waited about P seconds; a peer that computes for long and keeps
+   landing whole entries is waited for.  Every look spins: nothing parks */
 static ncclResult_t quiet_fail(const struct ncclComm *comm, const char *what) {
   return fail(ncclRemoteError, "communicator %s: %s on any channel for %.0f s, the platform's deadline (design/rubrics.md C5)",
               comm->name, what, (double)MESH_PLATFORM_NS / 1e9);
+}
+static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel *ch) {
+  return fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended with the group's entries there not done (the "
+              "stream is no longer its own: its link lost and paired again, or its bridge restarted; design/transport.md section 14)",
+              comm->name, ch->node);
 }
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
   uint64_t until = 0, before = UINT64_MAX, came_before = UINT64_MAX;
@@ -2283,7 +2292,14 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
       struct schedule *p = plans + h;
-      while (ch->consumed < p->first[1] + p->ins) {
+      const uint64_t lands = p->first[1] + p->ins;
+      const mesh_pages now = count_of(ch->view.landed);
+      if (ch->consumed < lands && pages_lost(now))
+        return fail(ncclRemoteError, "the link to node %u was lost at landing entry %llu (its holding's counts ~0)", ch->node,
+                    (unsigned long long)ch->consumed);
+      if ((ch->consumed < lands || ch->published < p->first[0] + p->outs) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
+        return held_fail(comm, ch);
+      while (ch->consumed < lands) {
         const struct message *m = p->in + (ch->consumed - p->first[1]);
         struct steps *st = m->c->bound;
         const struct mesh_step *step = st->steps + m->step;
@@ -2308,14 +2324,16 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
         atomic_store_explicit(ch->view.ready, pages_to_word(m->end), memory_order_release);
         ch->published++;
       }
-      open |= ch->published < p->first[0] + p->outs || ch->consumed < p->first[1] + p->ins;
+      open |= ch->published < p->first[0] + p->outs || ch->consumed < lands;
       moved += ch->published + ch->consumed;
-      came += pages_to_word(count_of(ch->view.landed));
+      uint64_t whole = ch->consumed;
+      while (whole < lands && !pages_below(now, p->in[whole - p->first[1]].end)) whole++;
+      came += whole;
     }
     if (!open) break;
     const uint64_t at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (moved != before || came != came_before) { before = moved; came_before = came; until = at + MESH_PLATFORM_NS; }
-    else if (at >= until) return quiet_fail(comm, "nothing landed, consumed or published");
+    else if (at >= until) return quiet_fail(comm, "no entry landed whole, consumed or published");
   }
   before = UINT64_MAX;
   for (int all = 0; !all;) {
@@ -2326,6 +2344,8 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
       const struct channel *ch = comm->channels + h;
       const mesh_pages sent = plans[h].outs ? count_of(ch->view.sent) : none;
       if (pages_lost(sent)) return fail(ncclRemoteError, "the link to node %u was lost before its SENDs completed (its holding's counts ~0)", ch->node);
+      if (plans[h].outs && pages_below(sent, ch->out) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
+        return held_fail(comm, ch);
       all &= !plans[h].outs || !pages_below(sent, ch->out);
       moved += pages_to_word(sent);
     }
