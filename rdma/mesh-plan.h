@@ -270,12 +270,17 @@ uint32_t mesh_program_advise(const struct mesh_program *,const struct mesh_wire 
    collective's in call order (mesh_lay), then each counted all-to-all's (COUNTED and HOSTED), then its point-to-point
    calls, its j-th SEND to the peer beside its j-th receive from it (libnccl-mesh lay); each placement its call and
    mesh_lay's place (a point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at
-   the rank; the end.  HOSTED: a counted all-to-all whose counts both ends hold (ncclAlltoAll, ncclGather, ncclScatter,
-   ncclMeshAlltoAllV), NCCL's sends and receives of it (classifyCollToP2pTasks), each receive into its own segment. */
+   the rank; the end.  HOSTED: an all-to-all whose counts both ends of each hop hold (ncclAlltoAll, ncclGather,
+   ncclScatter, ncclMeshAlltoAllV: mesh_routed_steps), NCCL's sends and receives of it (classifyCollToP2pTasks), each
+   receive into its own segment, or into the forwarding member's buffer 2. */
 enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_POINT, MESH_GROUP_HOSTED };
 /* The receive before each step of a call of kind `kind` (mesh_steps_before; the walk's rule, a step's first position
-   waiting until that receive is consumed): none before a HOSTED call's, whose receives each progress alone, as NCCL's
-   per-peer sends and receives do, so no position of it waits on another channel's.  0, or ENOMEM. */
+   waiting until that receive is consumed): a HOSTED call's receives each progress alone, as NCCL's per-peer sends and
+   receives do, and a SEND of it waits on the receive of an earlier round that wrote what it reads (a member forwarding
+   a block sends it on once the block has landed there: mesh_routed_steps), the latest by round, then the steps' order;
+   so every wait of a HOSTED call is on a receive of a strictly earlier round, and each channel lays its rounds in
+   order (mesh_lay), which leaves its waits no cycle at any lag (an event waits only on events at earlier or equal
+   positions of its own channel, and on another channel's only at an earlier round).  0, or ENOMEM. */
 int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count,int32_t *before);
 struct mesh_group_call { uint32_t kind,padding; const uint32_t *count; const struct mesh_step *const *steps; };
 struct mesh_group { uint32_t nodes,calls,polls,bound; const struct mesh_group_call *call; };
@@ -288,9 +293,25 @@ uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,in
    segment) and from each one COPY (buffer 1 at q's); else (mesh 3981ca80^ run_counted's one exchange) to each q it has
    counts for, its counts (of `counts`' type, buffer 0 at q's first entry) and, where element.elements (the rows' room
    each pair's message carries) is not 0, those elements (buffer 1), and from each its counts (buffer 2 at q's place) and
-   then, after every counts receive, its rows (buffer 3).  Their count, at most 4 (nodes - 1). */
+   then, after every counts receive, its rows (buffer 3).  Their count, at most 4 (nodes - 1).  Every step is between
+   the call's two ends, so it runs where the map links every two ranks; the hosted form is mesh_routed_steps' with no
+   trees. */
 uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,int hosted,struct mesh_operand element,
                             struct mesh_operand counts,struct mesh_step *steps);
+/* An all-to-all's steps at `rank` of `nodes` (libnccl-mesh ncclAlltoAll, ncclGather and ncclScatter along the
+   communicator's trees; ncclMeshAlltoAllV with no trees; nccl-mesh.c counted_steps): sizes[a * nodes + b] the elements
+   rank a sends rank b (a == b its own, which moves nothing and holds its place), from a's buffer 0 at the elements
+   before b's in a's row to b's buffer 1 at the elements before a's in b's column.  Each block (a, b) with elements takes
+   the path between a and b in the heaviest tree of `root` (a gather's or a scatter's), or of b where root is -1 (the
+   all-to-all's: a message's path, mesh_trees_path), hop i in round i: a member of the path between its ends receives it
+   into its buffer 2, after the blocks it forwards before it in (a, b) order, and sends it on from there in the next
+   round, once it has landed (mesh_group_before: HOSTED).  So a block crosses only links of the trees and every hop's
+   two ends hold its size (sizes every rank holds alike).  trees NULL: every block in one hop (the direct exchange,
+   mesh_counted_steps' hosted form), its two ends alone reading its size, each its own row and column.  A round's SENDs,
+   then its receives, each in (a, b) order, so a hop's SENDs at one end and receives at the other are the same blocks
+   in the same order (mesh_lay).  Their count, at most 2 nodes (nodes - 1). */
+uint32_t mesh_routed_steps(uint32_t nodes,const struct mesh_trees *trees,int32_t root,uint32_t rank,const uint64_t *sizes,struct mesh_operand element,
+                           struct mesh_step *steps);
 /* A group's advisories: mesh_program_advise's checks over its calls laid together (projection of both ends' positions on
    each channel and of each call's steps, the point-to-point calls' together; causality over every call's steps on the
    shared positions; each call's priorities, depth and hazards), and bound (GPU waits of polls 0 or past `bound`: a wait
