@@ -3,7 +3,7 @@
 A node's bridge (`rdma/mesh-flow`) starts from one operand, its configuration: a document its consumer writes and
 passes, in JSON, TOML or YAML. `bin/mesh-user.sh CONFIGURATION [CHECKOUT]` reads it with the mesh library's one
 loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and region
-in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's agent
+in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's launchd agent
 definition, so the keeper's load at boot keeps it, and records the document's path beside it. A
 changed configuration is renamed into place and takes effect when the bridge stops itself, between calls (README.md,
 A new bridge on a node): its running calls are never ended for it. There

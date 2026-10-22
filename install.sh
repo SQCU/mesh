@@ -189,7 +189,7 @@ for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.
     retained=$((retained+1)); ok "$L listening on :$port (pid $upid); userspace provider retained"
     continue
   fi
-  if out=$("$REPO/bin/mesh-agent.sh" "$J/$L.plist.new" system "/Library/LaunchDaemons/$L.plist"); then
+  if out=$("$REPO/bin/mesh-launchd-agent.sh" "$J/$L.plist.new" system "/Library/LaunchDaemons/$L.plist"); then
     [ -n "$out" ] && { replaced=$((replaced+1)); ok "$out"; } || { retained=$((retained+1)); ok "$L loaded"; }
   else bad "$L NOT LOADED: $out"; fi
 done
@@ -201,11 +201,11 @@ done
 for P in /Library/LaunchDaemons/io.mesh.*.plist; do
   L=$(basename "$P" .plist)
   launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
-  if out=$("$REPO/bin/mesh-agent.sh" "$P" system); then [ -z "$out" ] || ok "$out"; else bad "$L NOT LOADED: $out"; fi
+  if out=$("$REPO/bin/mesh-launchd-agent.sh" "$P" system); then [ -z "$out" ] || ok "$out"; else bad "$L NOT LOADED: $out"; fi
 done
 for P in "$H/Library/LaunchAgents/"*.plist; do
   [ "$(plutil -extract LimitLoadToSessionType raw "$P" 2>/dev/null)" = Background ] || continue
-  if out=$("$REPO/bin/mesh-agent.sh" "$P" "user/$ADMIN_UID"); then [ -z "$out" ] || ok "$out"; else bad "$out"; fi
+  if out=$("$REPO/bin/mesh-launchd-agent.sh" "$P" "user/$ADMIN_UID"); then [ -z "$out" ] || ok "$out"; else bad "$out"; fi
 done
 for L in $kick; do launchctl kickstart -k "system/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
 for L in io.mesh.beacon io.mesh.telemetry io.mesh.observer; do launchctl kickstart "system/$L" >/dev/null 2>&1; done

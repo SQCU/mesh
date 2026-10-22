@@ -9,7 +9,7 @@ how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md
 
 The node's user keeps the library in the user's mesh checkout (`~/mesh`): `bin/mesh-user.sh` builds the bridge, the
 libraries and the Python bindings there, keeps the user's torch environment with torch-mesh and the checkout's library on
-its path (`~/.venv-mesh-uv`), and runs the bridge as the user's agent (`io.mesh.bridge`, design/transport.md) with
+its path (`~/.venv-mesh-uv`), and runs the bridge as the user's launchd agent (`io.mesh.bridge`, design/transport.md) with
 the node's bridge configuration, its one operand (`bin/mesh-user.sh CONFIGURATION`, etc/bridge/README.md; there is no
 default); no part of it needs root. A program links or imports the checkout's library:
 

@@ -399,7 +399,7 @@ the node's uplink.
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
-| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** No job runs on a schedule. The router and the tailnet's `tailscaled` are KeepAlive with `ThrottleInterval` 1 (launchd starts one again at once after an exit, at most once a second; its default is 10); the beacon, telemetry and the observer run from their load (`RunAtLoad`), once a boot, and launchd does not start one again after an exit (`install.sh` starts one that is not running); the bridge's is its own: its job runs its heartbeat (`ThrottleInterval` 60,
+| `bin/mesh-launchd-agent.sh` | `mesh-launchd-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** No job runs on a schedule. The router and the tailnet's `tailscaled` are KeepAlive with `ThrottleInterval` 1 (launchd starts one again at once after an exit, at most once a second; its default is 10); the beacon, telemetry and the observer run from their load (`RunAtLoad`), once a boot, and launchd does not start one again after an exit (`install.sh` starts one that is not running); the bridge's is its own: its job runs its heartbeat (`ThrottleInterval` 60,
 KeepAlive {SuccessfulExit: false}), which restarts the bridge, and itself, on a deploy's SIGHUP (design/transport.md
 section 2). The beacon, the router, telemetry and the observer take a new program by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs, or the documents telemetry and the observer read at their start, changed (`install-user.sh`'s for a userspace provider); an edit to a node's `observer.json` takes effect at the observer's next start (`sudo launchctl kickstart -k system/io.mesh.observer`). The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL; the heartbeat
 ends within 15 s of its SIGTERM. |
@@ -535,12 +535,12 @@ A node that has not converged since a push is the thing worth noticing, and you 
 
 ## A new bridge on a node
 
-Nothing stops a bridge but the bridge. Its agent's definition names its program and its configuration's path alone, so
+Nothing stops a bridge but the bridge. Its launchd agent's definition names its program and its configuration's path alone, so
 it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (`make all
 install` by hand, which installs the binary anew whenever libmesh changed) or a new configuration (`mesh-user.sh`
 renames it into place and then gives the binary a new file), and `mesh-user.sh` sends the bridge's heartbeat SIGHUP,
 which restarts the bridge keeping its region and runs its own new image (design/transport.md section 2); a process
-already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`). What each layer
+already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-launchd-agent.sh`). What each layer
 installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two versions
 until every node runs the new one, and a consumer's process holding the older library fails its calls as values until
 it is started again on the new one.
@@ -572,7 +572,7 @@ A program that uses the mesh, step by step, with what the bridge, the collective
 The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL.md) (libnccl-mesh, the C
 library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
-different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's agent
+different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's launchd agent
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes
 (`bin/mesh-user.sh CONFIGURATION [CHECKOUT]`; etc/bridge/README.md, with the two didactic examples; no default; design/transport.md; A new bridge on a node, above). What it owns and does:
 design/transport.md. It forwards nothing, runs no command and carries no request.
