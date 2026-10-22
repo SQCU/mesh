@@ -72,8 +72,8 @@ The first mesh transfer remains slower even with setup excluded: 7.432 GB/s,
 equivalent to about **30.0 ms/GiB more service time** than direct. Later complete
 GiB transfers remove most of that difference. This establishes first-use
 sensitivity; it does not yet distinguish memory preparation, CPU scheduling,
-or another cause. It must not be called irreducible link latency or hidden by
-averaging it into the repeated transfers.
+or another cause. It is not link latency that can't be cut. Averaging it into
+the repeated transfers would hide it.
 
 At a nominal 80 Gbit/s, payload serialization alone requires at least
 107.374 ms per GiB. Real framing and the achieved provider rate add cost. The
@@ -206,7 +206,7 @@ against the local baseline was 0.0003935084 (limit 0.002), with exact peer
 agreement in both cases. M5/M4 medians were 34.5306/34.5999 ms for one in flight
 and 54.6755/54.0809 ms for two. The local MPS baseline was 32.37475 ms, so the
 required TP latency improvement is still absent. The M5 two-in-flight maximum
-was 111.4771 ms; medians must not conceal that sample. Native internal storage
+was 111.4771 ms. The medians hide that sample, so it is named here. Native internal storage
 remains unverified. Both bridges were stopped after evaluation.
 
 ## Removal of the local SEND acknowledgement

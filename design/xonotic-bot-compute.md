@@ -9,9 +9,8 @@ policy data flow is controlled separately by [`SPECIFICATION.md`](SPECIFICATION.
 ## Purpose
 
 The reference game must expose useful application parallelism as live participant
-population grows. It must not manufacture a fixed matrix size, a fixed player count, or
-an artificial accelerator workload to make a hardware crossover coincide with a chosen
-demo. Connected players may join or depart at any time. The current roster is therefore
+population grows. It makes no fixed matrix size, fixed player count, or artificial
+accelerator workload to make a hardware crossover land on a chosen demo. Connected players may join or depart at any time. The current roster is therefore
 an observed row axis, not a configuration ceiling.
 
 The engine retains ordinary Xonotic world semantics. Tracing, navigation mutation,

@@ -36,8 +36,8 @@ Completion requires all of the following:
 
 Implementation claims live in `design/claims/`. Each claimfile cites the controlling
 specification, identifies the implementing data and control flow, and defines the
-measurements required to substantiate the claim. Source comments and docstrings are not
-claim storage and must not redefine these interfaces.
+measurements required to substantiate the claim. Claims do not live in source comments
+or docstrings, and those do not redefine these interfaces.
 
 No test suite is part of this release contract. Verification consists of builds, syntax
 and import checks, live measurements, mathematical invariants, telemetry support, and

@@ -22,7 +22,7 @@ The [August 30 execution record](../xonotic/README.md) separately reports 223 sn
 83 responses, 82 online updates, and both bridge bad counters remaining zero.
 [R37 in the agenda](AGENDA.md) records large-team gameplay; its no-responder window is evidence
 for gameplay scale, not evidence against the separate mesh-integrated runs.
-The operator's dozens-of-variants observation must not be reduced to that one window.
+The operator spoke of dozens of variants. That is more than this one window.
 
 | Review defect | Repair on `codex/availability-closure` | Verification / remaining boundary |
 |---|---|---|

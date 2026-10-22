@@ -100,7 +100,7 @@ nodes per cell. It checks node assignment, player membership, observation suppor
 preserved target height.
 
 Preserving disconnected components also exposes an infinite walking-distance value.
-That is useful evidence of an unknown route, but it must not become an infinite
+That is useful evidence of an unknown route. It does not become an infinite
 commitment sent to the engine. Commitment retains that distance, reports
 `route_known=false`, and uses straight-line travel time plus the policy extension
 as a finite estimate until a route is known. No target is removed.

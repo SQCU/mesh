@@ -33,8 +33,8 @@ is deliberately not used for throughput.
 
 Both builds requested `CPPFLAGS=-DMESH_TRANSPORT_TIMING`. In `abea3b5`, timing
 was printed only at shutdown, and no timing record was captured in the managed
-logs. This absence is unresolved; those runs must not be labeled a verified
-uninstrumented baseline. `85f9e5b` also publishes the instrumented aggregates
+logs. This gap is still open. So those runs are not a verified baseline
+without the timing build. `85f9e5b` also publishes the instrumented aggregates
 through the existing telemetry interval, allowing capture before managed stop.
 The following snapshots include startup and idle processing as well as traffic:
 

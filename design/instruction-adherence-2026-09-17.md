@@ -130,8 +130,8 @@ The primary agent withdrew the uncommitted record-layout experiment and the
 uncommitted deletion-oriented document section. Withdrawal is not implementation
 of the required execution model; the source-side failures above remain open.
 
-The record therefore establishes a repeated failure to implement and reason from
-an already explicit requirement. It must not be described as a new requirement,
-an ambiguity that needed another user explanation, or a property satisfied by
-moving the incompatible work elsewhere. This measurement changes no source and
+So the record shows the same miss more than once. The requirement was already
+explicit, and the work did not follow it or reason from it. It is not a new
+requirement. It was not unclear, and it needed no further word from the user.
+Moving the work that breaks it somewhere else does not meet it. This measurement changes no source and
 provides no latency or completion claim.

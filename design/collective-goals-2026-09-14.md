@@ -150,9 +150,9 @@ The subsequent transport clarification distinguishes two abstraction levels:
 
 > remember that a streaming transportmessagesize transport layer implementation should be totally transparent to all users of a send or receive api call exposed through our mesh api; this is something which is purely internal and have no effect on any caller or user of this api at any point in the future.
 
-The numerical partial is not a transport request. A tensor's byte count must not
-be limited by one request, and internal fragmentation must not change its shape,
-partition, numerical function or public send/receive declaration.
+The numerical partial is not a transport request. One request does not limit a
+tensor's byte count. Internal fragmentation does not change its shape, partition,
+numerical function or public send/receive declaration.
 
 The subsequent exact-tail clarification is authoritative:
 

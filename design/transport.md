@@ -119,8 +119,8 @@ and Van Horn, 1966):
    Deadlock and overcommit come from parties taking parts of what they need on their own (dining philosophers;
    Coffman's hold-and-wait); the fixes, an arbiter or one acquisition order, need the allocation state out of reach.
    `ibv_post_send` accepts posts past the queue's frames and corrupts later, so its credit has one writer.
-4. *State that outlives a client.* Posted receives, SENDs in flight, which landing belongs to whom. Progress of others
-   must not depend on a party that can vanish; only a single owner can always complete what it started.
+4. *State that outlives a client.* Posted receives, SENDs in flight, which landing belongs to whom. Others' progress
+   cannot hang on a party that can vanish. Only a single owner can always finish what it started.
 
 The only words both sides touch are single-writer readiness words: the client writes "supplied", the bridge writes
 "landed".

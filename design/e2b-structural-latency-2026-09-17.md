@@ -188,8 +188,8 @@ For the common final FFN chunk with no forwarding bindings and no host notices,
 the compiled path from CQ poll return to the presence store is **33 instructions,
 12 load instructions and four stores**. It still contains six conditional
 branches: poll error, empty CQ, completion status, forwarding count, final-row
-identity and notice count. Some are native-result checks; the others must not be
-hidden by saying “the path has no guards.”
+identity and notice count. Some are native-result checks. The others are real,
+so “the path has no guards” would be false.
 
 The essential dependency chain is
 
@@ -216,8 +216,8 @@ fails H6's zero-runtime-page-table-read target. That load is a memory-resolution
 cost, not numerical work. Recording commands does not change it.
 
 The full GPU consumer also retains visibility fences, peer selection and the
-summation. The E1d resident presence dependency is explicit; it must not be
-confused with a library-inserted host barrier. Nor does that permission make every
+summation. The E1d resident presence dependency is explicit. It is not a host
+barrier added by the library. Nor does that permission make every
 lookup around it free. The shader is unchanged by `fb3bab4`.
 
 RX posts available replacement receives after processing a completion. It drains

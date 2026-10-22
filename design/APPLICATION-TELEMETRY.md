@@ -92,7 +92,7 @@ missing, not a zero. Last-update row counts describe one optimizer step, not an 
 match or the batch of gradient steps. Update counts are not equal compute budgets.
 The policy cards also report fresh/history batch sizes and `schedule_updates` since
 the shared `fresh-attributed-v2` cadence began. Lifetime counts include the earlier
-outcome-only terminal optimizer defect and must not be treated as a matched experiment.
+outcome-only terminal optimizer defect. So they are not a matched experiment.
 The measured value-target variance includes fresh bootstrapped TD targets, not merely
 the variance of immediate rewards; zero terminal reward does not imply zero TD signal.
 
