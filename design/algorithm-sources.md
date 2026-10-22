@@ -1040,7 +1040,7 @@ of the same physical link; this operation does not deduplicate them.
 
 ### Link
 
-`port_bandwidth` (mesh-verbs.h): Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
+`port_bandwidth` (mesh-link.c): Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
 Bandwidth is bits per second: speed codes 1/2/4/8/16/32/64/128 mean
 2.5/5/10/10/14/25/50/100 Gb/s per lane; width codes 1/2/4/8 mean 1/4/8/12 lanes.
 Unrecognized codes yield zero (unavailable), without withholding the link.

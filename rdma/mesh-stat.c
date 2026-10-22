@@ -1,5 +1,5 @@
 #include "mesh-observe.h"
-#include "mesh-dataflow.h"
+#include "mesh-call.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -7,9 +7,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-/* the bridge's ports as it publishes them for its observation tools (mesh-observe.h), mesh-stat being one: each port's
-   peer node, phase and bandwidth, a port one the bridge found (its phase not MESH_UNKNOWN), the bridge finding them in
-   index order; the port count (at most `capacity` written), or -errno (ESRCH: no bridge runs) */
+/* design/transport.md section 15, "mesh-stat" */
 struct port_view { uint32_t peer,phase; uint64_t bandwidth; };
 static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
   const int file=shm_open(MESH_NAME,O_RDONLY,0);
@@ -32,12 +30,6 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
   munmap(m,(size_t)info.st_size);
   return count;
 }
-/* design/transport.md: the node's bridge as it publishes itself, one JSON line: whether it answers
-   (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase and bandwidth) and the
-   mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
-   numbers with its bandwidth in bits a second, null where none is reported), its region in bytes with the bytes no lease holds (mesh_region), and every node's
-   record as the bridge holds it: its node, its bridge's region, its memory and hardware model, its boot and its
-   available memory (mesh_nodes_health, design/transport.md) */
 int main(void){
   struct port_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;

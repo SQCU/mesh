@@ -226,7 +226,7 @@ Where a row's subject has a document of its own, that document describes it: the
 Restored 2026-10-17 against the restored interfaces (mesh 604f210e deleted it with the Swift module's record; the
 Python surface came back in python/mesh; the Swift module, restored in 71bced9e, was deleted again in a8952de9 and its
 callers in 2fff7dfe). The importable library is the Python surface `mesh` (`python/mesh`) over the C runtime
-(`rdma/mesh-call.c`, `mesh-dataflow.c`, `mesh-collective.c`, `mesh.h`, the node's resident bridge) and libnccl-mesh
+(`rdma/mesh-dataflow.c`, `mesh-collective.c`, `mesh.h`, the node's resident bridge) and libnccl-mesh
 (`torch.distributed`'s "mesh" backend, rdma/torch-mesh) with torch operands; the kernels and layers
 its examples compose (`examples/kernels.py`, `examples/nn.py`) are program type C, not the library (section 5):
 

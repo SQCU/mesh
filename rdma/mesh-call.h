@@ -1,47 +1,40 @@
 #ifndef MESH_CALL_H
 #define MESH_CALL_H
-#include "mesh-dataflow.h"
-/* design/algorithm-sources.md#programtensor: a lease of `count` slots of `bytes`, its rows and arena pages claimed by
-   compare-exchange (mesh-dataflow.c mesh_claim): a slot `pages` arena pages on `stride` rows from row `first`; 0, or the
-   refusal as a value (ENOMEM, ENOSPC) */
+#include "mesh.h"
+#include <errno.h>
+#include <libproc.h>
+#include <signal.h>
+/* design/transport.md section 15, "The library" */
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_cursor,arena_cursor; int fd; };
+int mesh_attach(struct mesh_ctx *);
+int mesh_detach(struct mesh_ctx *);
+static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
+static inline uint64_t mesh_started(pid_t process){
+  struct proc_bsdinfo info;
+  return process && proc_pidinfo(process,PROC_PIDTBSDINFO,0,&info,(int)sizeof info)==(int)sizeof info?
+         (uint64_t)info.pbi_start_tvsec*UINT64_C(1000000)+info.pbi_start_tvusec:0;
+}
+static inline int mesh_holds(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_gone(pid); }
+void mesh_retire(struct hdr *,uint64_t client);
+int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
+uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
+uint32_t mesh_arena_free(struct hdr *);
+int mesh_lease_return(struct mesh_ctx *,uint32_t row);
+uint32_t mesh_retired_release(struct hdr *,uint64_t client);
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
-/* design/transport.md section 14: the nodes this node's bridge has a live stream toward, each with its stream's
-   bandwidth (mesh-plan.h struct mesh_reach), at most `room`; their count */
+/* design/transport.md section 14, "Holding it" */
 uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
-/* design/transport.md section 14: the streams free to take (live, owner word 0), each one's node and its `wire`
-   (struct mesh_stream: its identity, alike at both its ends), at most `room`; their count.  The two ends of a
-   communicator take the stream of one wire between their nodes, one free at both: its init exchanges these */
 uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t room);
-/* design/transport.md section 14: the live stream of identity `wire`, held by this client as its rows are: its owner
-   word taken from 0 to the client's own by one compare-and-swap, `*stream` its index: 0, EINVAL, ENOLINK where no live
-   stream has the identity (one whose last holding ended with units outstanding is not live), EBUSY where another
-   client holds it or the bridge is still ending its last holding.  Its `posts` (mesh_stream_view) then read what its
-   earlier holdings left, constant until this holder presents.  Given by its index (MESH_STREAM_GIVEN set in its owner
-   word), after which its bridge posts nothing more of the holding from its next pass and publishes the holding's end
-   in the owner word: a lease the client returns before that is closed, and released once the end is published and no
-   unit outstanding names it (mesh-dataflow.c mesh_pinned), by the client at an allocation that finds no room or by the
-   bridge once the client has retired */
 int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
-/* design/transport.md section 14, "A process a port": whether stream `stream` is still this client's holding of identity
-   `wire`: live, its owner word this client's, its identity the one taken.  A pairing lost and made again opens every
-   stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
-/* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): its two
-   lists (0 the send list, 1 the landing list) and their counts presented and taken, its three page counts, its lanes'
-   units posted and completed each way over its pairing (`posts`), and its time rings; 0, EINVAL, EPERM where the
-   client does not hold it, or ENOLINK */
 struct mesh_stream_view {
   struct mesh_entry *list[2];
   _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed,*posted_at,*landed_at;
   const struct mesh_posts *posts;
 };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
-/* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list
-   (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL where its rows leave the
-   page table, EAGAIN where the list's slot is not yet taken
-   (MESH_STREAM_ENTRIES presented and not taken: present it again), EPERM, or ENOLINK */
 int mesh_stream_present(struct mesh_ctx *,uint32_t stream,int land,struct mesh_entry entry);
 #endif

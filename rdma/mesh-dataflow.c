@@ -1,4 +1,3 @@
-#include "mesh-dataflow.h"
 #include "mesh-call.h"
 #include <stdlib.h>
 #include <string.h>
@@ -7,15 +6,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
-#include <errno.h>
-/* design/transport.md */
-static void mesh_own_release(struct mesh_ctx *);
-
-/* design/transport.md: the node's region mapped, `writable` (a client's) or read-only (a reader's, which attaches no
-   client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge
-   runs on it now (it outlives a restart of its bridge, design/transport.md section 2): 0, EINVAL where it is no region
-   of this layout, or one expired,
-   else the errno */
+/* design/transport.md section 15, "The library" */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
   int file=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
   if(file<0)return errno;
@@ -32,8 +23,6 @@ static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
   if(fd)*fd=file;
   return 0;
 }
-
-/* design/transport.md section 14: this node's bridge's node and the nodes it reaches (mesh-plan.h mesh_reached) */
 int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -44,11 +33,6 @@ int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
   if(node)*node=m->node;
   munmap(m,length);return (int)count;
 }
-
-/* design/transport.md: the flows and awaiting programs the bridge holds and the wall clock (ns) at which it
-   last held none (0 while it holds any).  The bridge stores idle_since before busy (mesh-program.c busy_tell), and
-   idle_since is never 0 while it holds none (the region's boot from its start), so a read that meets it as it becomes
-   busy (busy 0 and idle_since 0: the old count, the new time) is a busy one and is told as one */
 int mesh_busy(uint64_t *busy,uint64_t *idle_since){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -57,8 +41,6 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since){
   if(!*busy && !*idle_since)*busy=1;
   munmap(m,length);return 0;
 }
-
-/* design/transport.md */
 int mesh_region(uint64_t *bytes,uint64_t *unleased){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -66,17 +48,15 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
   *bytes=(uint64_t)mesh_arena_pages(m)*m->pgsz;*unleased=(uint64_t)mesh_arena_free(m)*m->pgsz;
   munmap(m,length);return 0;
 }
-
-/* design/transport.md: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
-   copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open) */
+static int serial_even(struct hdr *m,_Atomic uint64_t *word,uint64_t *before){
+  while((*before=atomic_load_explicit(word,memory_order_acquire))&1)
+    if(os_sync_wait_on_address_with_timeout(word,*before,sizeof *word,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
+         MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return ESRCH;
+  return 0;
+}
 static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){
-  for(;;){
-    uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
-    if(before&1){
-      if(os_sync_wait_on_address_with_timeout(&m->map,before,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return -ESRCH;
-      continue;
-    }
+  for(uint64_t before;;){
+    if(serial_even(m,&m->map,&before))return -ESRCH;
     uint64_t count=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
     int fits=at<=length && count<=(length-at)/sizeof(struct mesh_record);
     struct mesh_record *copy=fits?malloc((count?count:1)*sizeof *copy):NULL;
@@ -88,25 +68,19 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
     free(copy);
   }
 }
-
-/* design/transport.md section 14: the one join of two nodes' records: 1 where each one's bridge reaches the other
-   (its record names the other among the nodes it reaches), *slowest the lesser bandwidth either reports (0: neither
-   reports one); else 0 */
-static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *slowest){
-  for(uint32_t i=0;i<record->reached && i<MESH_STREAMS;i++)
-    if(record->reach[i].node==node){
-      const uint64_t bandwidth=record->reach[i].bandwidth;
-      if(bandwidth && (!*slowest || bandwidth<*slowest))*slowest=bandwidth;
-      return 1;
-    }
-  return 0;
-}
+/* design/transport.md section 3, RECORD; section 15, "The library" */
 static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *bandwidth){
   uint64_t slowest=0;
-  const uint32_t ends[2]={mesh_paired(a,b->node,&slowest),mesh_paired(b,a->node,&slowest)};
-  if(!ends[0] || !ends[1])return 0;
+  for(int end=0;end<2;end++){
+    const struct mesh_record *r=end?b:a;
+    const uint32_t node=end?a->node:b->node;
+    uint32_t i=0;
+    while(i<r->reached && i<MESH_STREAMS && r->reach[i].node!=node)i++;
+    if(i>=r->reached || i>=MESH_STREAMS)return 0;
+    if(r->reach[i].bandwidth && (!slowest || r->reach[i].bandwidth<slowest))slowest=r->reach[i].bandwidth;
+  }
   *bandwidth=slowest;
-  return ends[0]<ends[1]?ends[0]:ends[1];
+  return 1;
 }
 int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
   uint64_t bandwidth=0;
@@ -114,10 +88,6 @@ int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
   if(joined)*beta=bandwidth?8e9/(double)bandwidth:0;
   return (int)joined;
 }
-
-/* The records' whole map, its nodes ascending (the records sorted by node), one link where two join (mesh_join), at
-   the join's bandwidth, and its routing table (mesh-collective.c mesh_routes, each node marked by its bridge's number,
-   so every member that holds the same records makes the same routes) */
 struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
@@ -145,9 +115,6 @@ static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w
   if(!error)w->map.next=w->next;
   return error;
 }
-
-/* design/algorithm-sources.md#meshobserve: mesh-plan.h mesh_map over a copy of the records: the whole map's
-   mesh_map_members over the members' records (count: a member no record holds) */
 static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t *members,uint32_t n,uint32_t *node,
                             struct mesh_link_map *map){
   struct mesh_whole w;
@@ -163,9 +130,6 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
   free(index);free(whole);mesh_whole_free(&w);
   return made;
 }
-
-/* a record carries no host name (mesh.h struct mesh_record; AGENTS.md "A node is its hardware; names are virtual"): a
-   name a person reads is the name table's by node number (rdma/peers.py) */
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
@@ -177,25 +141,13 @@ int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_
   free(r);
   return result;
 }
-
-/* design/transport.md */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
-  /* the records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
-     (mesh-records.c health_put); a read that a health write overlapped is read again, and an odd serial (a write open)
-     waited on as mesh_records_read waits on the map's, ESRCH where the bridge went while it was open */
   int count;
-  for(;;){
-    const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
-    if(before&1){
-      if(os_sync_wait_on_address_with_timeout(&m->health,before,sizeof m->health,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid))){
-        count=-ESRCH;break;
-      }
-      continue;
-    }
+  for(uint64_t before;;){
+    if(serial_even(m,&m->health,&before)){count=-ESRCH;break;}
     count=mesh_records_read(m,length,&r);
     if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
     free(r);r=NULL;
@@ -211,10 +163,6 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   free(r);
   return count;
 }
-
-/* design/transport.md C5 (8e716999's mesh.wait(serial), on this bound): the map's serial waited on until
-   it differs from *serial, the bridge's exit (ESRCH: its pid in the region 0 or another, or its process gone, read at
-   every wake and every MESH_PAUSE_NS re-look, as mesh_records_read reads it) or bound_ns (UINT64_MAX: none) */
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -233,28 +181,22 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   munmap(m,length);
   return error;
 }
-
-/* design/algorithm-sources.md#programtensor */
-/* design/transport.md: a client's slot given up (by its detach, or by the bridge where its process is
-   gone): its live leases closed (mesh_lease_close; one it closed, released or freed itself is left as it is) for the
-   bridge to release (mesh_retired_release; the streams it held are
-   let go on the bridge's turn: mesh-link.c streams_let_go) */
+/* design/transport.md section 2, the client slots */
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_client *slot=mesh_client_at(m,client);
-  if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
+  uint64_t own=client&~MESH_RETIRING;
+  if(!own || (!(client&MESH_RETIRING) && !atomic_compare_exchange_strong(&slot->owner,&own,own|MESH_RETIRING)))return;
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
-      if(buffer->pages)mesh_lease_close(buffer,client);
+    if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==own){
+      if(buffer->pages)mesh_lease_close(buffer,own);
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
   }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
-  /* design/transport.md */
   mesh_notify(&m->control);
 }
-
-int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
+static int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
   uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1);
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
@@ -266,7 +208,6 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
   }
   return EBUSY;
 }
-
 int mesh_attach(struct mesh_ctx *c){
   if(c->M) return 0;
   struct hdr *m;size_t length;int file;
@@ -275,12 +216,9 @@ int mesh_attach(struct mesh_ctx *c){
   *c=(struct mesh_ctx){.len=length,.fd=file};
   error=mesh_slot_take(c,m);
   if(error){munmap(m,length);close(file);*c=(struct mesh_ctx){0};return error;}
-  /* design/transport.md section 2: the expiry (a store, seq_cst) read again after the slot's compare-exchange
-     (seq_cst): a slot the heartbeat's read of the holders missed reads it expired here, and is let go */
   if(__atomic_load_n(&m->version,__ATOMIC_SEQ_CST)!=MESH_LAYOUT){mesh_detach(c);return EINVAL;}
   return 0;
 }
-
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
   mesh_retire(c->M,c->client);
@@ -289,14 +227,7 @@ int mesh_detach(struct mesh_ctx *c){
   *c=(struct mesh_ctx){0};
   return error;
 }
-
-/* design/algorithm-sources.md#programkernel_call */
-/* One first-fit scan over an explicit pair of bitmaps and an explicit range.  The caller names the
-   bitmaps because the arena bitmap is indexed by arena page and the row planes by row: they are two
-   index spaces and sharing one sizing is what forced rows >= pages.  A range found clear is claimed
-   word by word with a compare-exchange that expects its bits clear; where another client claimed one
-   first, the words taken are given back and the scan goes on from there, so two clients never hold
-   one range.  A claimed range still `hot` (released, not yet reclaimed) is given back likewise. */
+/* design/transport.md section 15, "The library" */
 static int mesh_claim(_Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t first,uint32_t count){
   uint32_t last=(first+count-1)/64,w=first/64;
   for(;w<=last;w++){
@@ -323,25 +254,17 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
   }
   return MESH_ABSENT;
 }
-
-/* design/algorithm-sources.md#programkernel_call */
-/* The cursor resumes where the last allocation ended, so preparing N operands over P pages costs
-   O(P) in total rather than O(N*P); a full scan and then a release and reclaim still back it, so the result is
-   the same page the unresumed scan would have returned whenever nothing has been released.  The release is of this
-   client's own closed leases (mesh_own_release: a lease closed while a holding it gave was still ending, mesh_pinned,
-   released once the end is published), as the bridge's turn releases every client's (mesh_retired_release). */
 static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
                               _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
   uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
   uint32_t first=mesh_scan(count,align,resume,end,own,hot);
   if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,begin,end,own,hot);
-  if(first==MESH_ABSENT){ mesh_own_release(c); first=mesh_scan(count,align,begin,end,own,hot); }
+  if(first==MESH_ABSENT){ mesh_retired_release(c->M,c->client); first=mesh_scan(count,align,begin,end,own,hot); }
   if(first==MESH_ABSENT){ errno=ENOMEM; return MESH_ABSENT; }
   *cursor=first+count;
   return first;
 }
-
-uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
+static uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   if(!count){ errno=EINVAL; return MESH_ABSENT; }
   uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT),&c->row_cursor);
   if(first==MESH_ABSENT) return first;
@@ -354,20 +277,11 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   }
   return first;
 }
-
-/* design/transport.md */
-/* design/transport.md */
-/* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
-   since that device came up (mesh-verbs.h device_up); a lease the region cannot meet is refused (ENOMEM).  The bits
-   name no owner: a client's lease takes its pages with rows its slot owns (mesh-call.h mesh_section_create), which
-   carry them back at its retirement (mesh_retired_release, mesh_reclaim) or its return (mesh_lease_return). */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
   return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
 }
-
-/* design/transport.md */
 uint32_t mesh_arena_free(struct hdr *m){
   const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);
   uint32_t held=0;
@@ -375,21 +289,40 @@ uint32_t mesh_arena_free(struct hdr *m){
     held+=(uint32_t)__builtin_popcountll(atomic_load_explicit(&mesh_arena_bits(m)[w],memory_order_relaxed)&mesh_word_mask(0,pages,w));
   return pages-held;
 }
-
-/* design/algorithm-sources.md#programtensor */
-void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t page,uint32_t index){
-  for(uint32_t offset=0;offset<pages;offset+=c->M->block){
-    struct mesh_page_entry *entry=&mesh_page(c->M)[first+offset/c->M->block];
-    atomic_store_explicit(&entry->mapping,((uint64_t)index<<32)|(page+offset),memory_order_relaxed);
-    atomic_store_explicit(&entry->address,(uintptr_t)mesh_at(c->M,page+offset)-(uintptr_t)c->M,memory_order_relaxed);
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
+  struct hdr *m=context->M;
+  if(!bytes || !count)return EINVAL;
+  size_t quantum=(size_t)m->block*m->pgsz,capacity=mesh_arena_pages(m);
+  if(bytes>capacity*(size_t)m->pgsz)return ENOMEM;
+  size_t span=(bytes+quantum-1)/quantum*m->block;
+  if(span>capacity/count)return ENOMEM;
+  uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
+  if(first==MESH_ABSENT)return errno;
+  for(uint32_t row=first;row<first+rows;row+=stride){
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+    buffer->pages=(uint32_t)span;
+    atomic_store_explicit(&buffer->owner,context->client,memory_order_release);
   }
+  mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
+  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
+  if(page==MESH_ABSENT){
+    int error=errno;
+    mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);
+    for(uint32_t r=first;r<first+rows;r++){mesh_buffers(m)[r].pages=0;atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_release);}
+    mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),first,rows);return error;
+  }
+  for(uint32_t slot=0;slot<count;slot++)
+    for(uint32_t offset=0;offset<(uint32_t)span;offset+=m->block){
+      struct mesh_page_entry *entry=&mesh_page(m)[first+slot*stride+offset/m->block];
+      atomic_store_explicit(&entry->mapping,((uint64_t)slot<<32)|(page+slot*(uint32_t)span+offset),memory_order_relaxed);
+      atomic_store_explicit(&entry->address,(uintptr_t)mesh_at(m,page+slot*(uint32_t)span+offset)-(uintptr_t)m,memory_order_relaxed);
+    }
+  *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride};
+  return 0;
 }
-
-/* design/algorithm-sources.md#programtensor: the lease headed at `row` freed by its one freer, the one whose swap moved
-   it from `from` (live, at its client's return; released, at the reclaim) to free (struct mesh_buffer `closed`), else
-   nothing: every one of its rows' owner words 0, its pages' arena bits, then its rows' hot bits, so no client claims a
-   row of it (mesh_claim refuses a hot row) before its pages are free, a row is claimed with owner 0, and no close or
-   release of its generation follows */
+void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){
+  return (char *)context->M+atomic_load_explicit(&mesh_page(context->M)[section.first+index*section.stride].address,memory_order_relaxed);
+}
 static void mesh_lease_free(struct hdr *m,uint32_t row,uint32_t from){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   uint32_t was=atomic_load_explicit(&buffer->closed,memory_order_acquire);
@@ -402,37 +335,7 @@ static void mesh_lease_free(struct hdr *m,uint32_t row,uint32_t from){
   }
   mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),row,pages/m->block);
 }
-
-/* design/algorithm-sources.md#programtensor: every released lease freed, each by the one reclaimer whose
-   fetch-and took its FREE bit and whose swap moved it from released to free (mesh_lease_free): a reader of an older
-   snapshot of the plane finds the bit gone, and a bit left on a row since freed and allocated again finds the row not
-   released, and does nothing */
-static void mesh_reclaim(struct hdr *m){
-  for(uint32_t word=0;word<mesh_words(m);word++){
-    _Atomic uint64_t *plane=&mesh_plane(m,MESH_FREE)[word];
-    uint64_t available=atomic_load_explicit(plane,memory_order_acquire);
-    while(available){
-      const uint32_t row=word*64+(uint32_t)__builtin_ctzll(available);available&=available-1;
-      const uint64_t bit=UINT64_C(1)<<(row%64);
-      if(atomic_fetch_and_explicit(plane,~bit,memory_order_acq_rel)&bit)
-        mesh_lease_free(m,row,MESH_LEASE_RELEASED);
-    }
-  }
-}
-
-/* design/transport.md section 14; design/extents-and-liveness.md, d: whether a row of `first` to `first` + `count`, a
-   lease of `client`, is in W(t), a request outstanding on some stream's lane naming its page: a unit posted and not
-   completed, a receive not landed or a SEND not done (mesh.h struct mesh_posts: the plan's window in flight, at most a
-   lane's queue each way), or may yet be.  A row is held for nothing else: a holder that gave or died has no future
-   write targeting any other of its rows, so they are released at once, and a row in W(t) once its unit completes or
-   the port child that posted it is gone (its pid and start, struct mesh_stream `child`, no longer a live process: its
-   queue pairs, and the requests on them, went with it), whichever launch of the bridge spawned it.
-   Each stream's owner word is read first (acquire).  Where it still names the client and the client gave it or
-   retired, the bridge has not yet published the holding's end (mesh-link.c stream_free) and may post more of it in the
-   pass under way: held while the child that serves it lives.  Otherwise the word read is the end's store or one after
-   it, which follows both progress threads' every tell of the holding (mesh-link.c unit_told: row, then count, with
-   release; `ended`, `stopped`, then stream_free), so the counts and rows read after it hold every unit of the holding.
-   Each lane's units completed are read before those posted */
+/* design/transport.md section 14, "A holding's end"; design/extents-and-liveness.md, d */
 static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count,uint64_t client){
   const int gone=atomic_load_explicit(&mesh_client_at(m,client)->owner,memory_order_acquire)!=client;
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
@@ -454,15 +357,6 @@ static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count,uint64_t clie
   }
   return 0;
 }
-/* design/algorithm-sources.md#programtensor; design/transport.md section 14: the closed lease headed at `row` released
-   where no request names it (mesh_pinned), of `client`, or of any client (`client` 0, the bridge's turn).  Its closed
-   word is read first, then its owner, which no one changes while its generation stands (its rows stay hot); the
-   release is that word's compare-and-swap from the closed value read to released, which fails where another released
-   it, or it was freed and its row allocated and closed again, since (struct mesh_buffer `closed`: the word takes each
-   value once at most), so two releasers that read one closure release it once; only then its FREE bit set.  At the
-   bridge's turn a lease found released has its FREE bit set again, so one whose releaser ended between its swap and
-   its bit is freed; the bit decides nothing alone (mesh_lease_free swaps from released).  1 where a request still
-   names it */
 static int mesh_release(struct hdr *m,uint32_t row,uint64_t client){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   uint32_t was=atomic_load_explicit(&buffer->closed,memory_order_acquire);
@@ -474,27 +368,20 @@ static int mesh_release(struct hdr *m,uint32_t row,uint64_t client){
   if(mesh_lease_move(buffer,&was,MESH_LEASE_CLOSED,MESH_LEASE_RELEASED))mesh_bits_set(mesh_plane(m,MESH_FREE),row,1);
   return 0;
 }
-/* design/algorithm-sources.md#programtensor; design/transport.md section 14: the bridge's release of every client's
-   closed leases, a live client's or a retired one's, but those a request outstanding on a lane still names, then the
-   reclaim; their count */
-uint32_t mesh_retired_release(struct hdr *m){
+uint32_t mesh_retired_release(struct hdr *m,uint64_t client){
   uint32_t kept=0;
-  for(uint32_t row=0;row<mesh_rows(m);row++)kept+=(uint32_t)mesh_release(m,row,0);
-  mesh_reclaim(m);
+  for(uint32_t row=0;row<mesh_rows(m);row++)kept+=(uint32_t)mesh_release(m,row,client);
+  for(uint32_t word=0;word<mesh_words(m);word++){
+    _Atomic uint64_t *plane=&mesh_plane(m,MESH_FREE)[word];
+    uint64_t available=atomic_load_explicit(plane,memory_order_acquire);
+    while(available){
+      const uint32_t row=word*64+(uint32_t)__builtin_ctzll(available);available&=available-1;
+      const uint64_t bit=UINT64_C(1)<<(row%64);
+      if(atomic_fetch_and_explicit(plane,~bit,memory_order_acq_rel)&bit)mesh_lease_free(m,row,MESH_LEASE_RELEASED);
+    }
+  }
   return kept;
 }
-/* a live client's release of its own closed leases, then the reclaim (mesh_allocate, where it finds no room) */
-static void mesh_own_release(struct mesh_ctx *c){
-  for(uint32_t row=0;row<mesh_rows(c->M);row++)mesh_release(c->M,row,c->client);
-  mesh_reclaim(c->M);
-}
-
-/* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
-   while they stay hot, then the head freed (mesh_lease_free: its pages' arena bits, then its rows' hot bits), so no
-   client claims a row or page of it before it is whole again; while a request outstanding on a lane names a page of
-   it, or a holding the client gave has not yet been ended by its bridge (mesh_pinned), the head closed instead
-   (mesh_lease_close), which the bridge releases at its turn once nothing names it (mesh_retired_release), as does the
-   client at an allocation that finds no room (mesh_own_release) */
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   struct hdr *m=c->M;
   struct mesh_buffer *buffer=row<mesh_rows(m)?&mesh_buffers(m)[row]:NULL;
@@ -507,8 +394,83 @@ int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   mesh_lease_free(m,row,MESH_LEASE_LIVE);
   return 0;
 }
-
-/* design/algorithm-sources.md#program */
-void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  mesh_bits_clear(mesh_plane(c->M,MESH_ROW_OWN),first,count);
+/* design/transport.md section 14, "Holding it" */
+uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
+  uint32_t count=0;
+  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
+    const struct mesh_stream *x=mesh_stream_at(m,p);
+    const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed);
+    if(!node || !atomic_load_explicit(&x->live,memory_order_acquire))continue;
+    int seen=0;
+    for(uint32_t k=0;k<count;k++)seen|=reach[k].node==node;
+    if(!seen)reach[count++]=(struct mesh_reach){.node=node,.bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)};
+  }
+  return count;
+}
+uint32_t mesh_streams_free(struct hdr *m,uint32_t *node,uint64_t *wire,uint32_t room){
+  uint32_t count=0;
+  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
+    const struct mesh_stream *x=mesh_stream_at(m,p);
+    if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->owner,memory_order_relaxed))continue;
+    node[count]=atomic_load_explicit(&x->peer,memory_order_relaxed);wire[count++]=atomic_load_explicit(&x->wire,memory_order_relaxed);
+  }
+  return count;
+}
+int mesh_stream_take(struct mesh_ctx *context,uint64_t wire,uint32_t *stream){
+  if(!context || !context->client || !stream || !wire)return EINVAL;
+  struct hdr *m=context->M;
+  for(uint32_t p=0;p<m->streams && p<MESH_STREAMS;p++){
+    struct mesh_stream *x=mesh_stream_at(m,p);
+    if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->wire,memory_order_relaxed)!=wire)continue;
+    uint64_t vacant=0;
+    if(!atomic_compare_exchange_strong_explicit(&x->owner,&vacant,context->client,memory_order_acq_rel,memory_order_acquire))return EBUSY;
+    *stream=p;
+    return 0;
+  }
+  return ENOLINK;
+}
+static struct mesh_stream *stream_held(struct hdr *m,uint32_t stream){
+  return stream<m->streams && stream<MESH_STREAMS?mesh_stream_at(m,stream):NULL;
+}
+void mesh_stream_give(struct mesh_ctx *context,uint32_t stream){
+  if(!context || !context->client)return;
+  struct mesh_stream *x=stream_held(context->M,stream);
+  uint64_t mine=context->client;
+  if(x)atomic_compare_exchange_strong(&x->owner,&mine,mine|MESH_STREAM_GIVEN);
+}
+int mesh_stream_held(struct mesh_ctx *context,uint32_t stream,uint64_t wire){
+  const struct mesh_stream *x=context?stream_held(context->M,stream):NULL;
+  return x && context->client && atomic_load_explicit(&x->live,memory_order_acquire) &&
+         atomic_load_explicit(&x->owner,memory_order_acquire)==context->client && atomic_load_explicit(&x->wire,memory_order_relaxed)==wire;
+}
+static struct mesh_stream *stream_owned(struct mesh_ctx *context,uint32_t stream,int *error){
+  struct mesh_stream *x=context && context->client?stream_held(context->M,stream):NULL;
+  *error=!context || !context->client?EINVAL:!x || !atomic_load_explicit(&x->live,memory_order_acquire)?ENOLINK:
+         atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client?EPERM:0;
+  return *error?NULL:x;
+}
+int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,struct mesh_stream_view *view){
+  int error;
+  struct mesh_stream *x=view?stream_owned(context,stream,&error):NULL;
+  if(!view)return EINVAL;
+  if(!x)return error;
+  char *m=(char *)context->M;
+  struct mesh_entry *lists=(struct mesh_entry *)(m+x->lists);
+  *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},.taken={&x->taken[0],&x->taken[1]},
+    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,
+    .posted_at=(_Atomic uint64_t *)(m+x->posted_at),.landed_at=(_Atomic uint64_t *)(m+x->landed_at),.posts=x->posts};
+  return 0;
+}
+int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct mesh_entry entry){
+  int error;
+  struct mesh_stream *x=stream_owned(context,stream,&error);
+  if(!x)return error;
+  const struct hdr *m=context->M;
+  if(land<0 || land>1 || !mesh_rows_hold(m,mesh_entry_row(&entry),mesh_entry_pages(&entry)))return EINVAL;
+  _Atomic uint64_t *presented=land?&x->lands:&x->sends;
+  const uint64_t e=atomic_load_explicit(presented,memory_order_relaxed);
+  if(e-atomic_load_explicit(&x->taken[land],memory_order_acquire)>=MESH_STREAM_ENTRIES)return EAGAIN;
+  ((struct mesh_entry *)((char *)m+x->lists))[(uint64_t)land*MESH_STREAM_ENTRIES+e%MESH_STREAM_ENTRIES]=entry;
+  atomic_store_explicit(presented,e+1,memory_order_release);
+  return 0;
 }
