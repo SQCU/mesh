@@ -273,7 +273,17 @@ same line at default budgets on this branch behaves identically (section 8, P6).
   while no holder holds it, agreed by both ends as a unit no client reads. Only if the controller's slow start
   matters on that link.
 - **P6. The line harness's unbounded sendrecv** (section 7). It predates this change and is a library and harness
-  issue, not the transport's.
+  issue, not the transport's. Cause (branch `kmesh-sendrecv`): `nccl-mesh.c` `plan_calls` failed a whole group for one
+  step toward a rank no link joins, before `schedule`, so the end ranks of the line declared nothing, not even their
+  steps toward the middle rank, which planned its group, declared it and waited for positions no one would lay (on the
+  host path with no bound, which is the design: a host wait ends at a landing, `~0` or a revoke). On two nodes every
+  member is linked, so the refusal never fired. Each rank decided from its own peers, so the refusal crossed from the
+  unlinked pair to the linked pairs of the same group. Now the unlinked step alone is dropped and its call fails at
+  its own rank after the group ran. The walk's "ok" was `launch_metal` returning the encode's result while the wait's
+  failure went to the failure words, which `mesh-loop` never read (`ncclCommGetAsyncError`); it reads them now. The
+  same branch fails a communicator at a refusal of one rank's own (a revoke, its communicator failed, GPU work late,
+  out of memory), its first such group laid and its first position on each channel sent as a dud, and bounds the
+  host path's wait at `MESH_PLATFORM_NS` with nothing landed or published, as nccl.h says (rdma/NCCL.md "Failures").
 - **P7. Host names in the bridge's area** (AGENTS.md debts, not changed here). `mesh-link.c` `host_name` publishes
   SCDynamicStoreCopyLocalHostName as the record's `name`, which mesh-peers merges announcements by, so replacing it
   means changing those consumers together: publish the host UUID (or the hardware serial) there and let readers map
