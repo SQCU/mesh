@@ -79,7 +79,7 @@ Before this change, in `rdma/`:
 | `mesh-link.c` `streams_open` bandwidth `bandwidth / MESH_LINK_STREAMS` | each stream's share of the link, which `mesh_map` takes as the link's figure | unchanged, so a one-stream link and a four-stream link are compared on the same footing |
 | `mesh-link.c` `port_pass` | loops lanes 2..9 checking `served` | unchanged |
 | `loopverbs.c` `LOOP_DEVICE_QPS` 10 | the loop devices' max_qp 11 | still the default; `LOOPVERBS_MAX_QP=rdma_loop<i>=<max_qp>,...` sets a device's (section 7) |
-| `mesh-call.c`, `nccl-mesh.c` | a communicator holds one stream toward each other member's node; concurrency between two nodes = the link's live streams | unchanged; on a one-stream link a second concurrent communicator between the same two nodes is refused at init with EBUSY, as a value (section 7) |
+| `mesh-call.c`, `nccl-mesh.c` | a communicator holds one stream toward each other member's node; concurrency between two nodes = the link's live streams | unchanged here; on a one-stream link a second concurrent communicator between the same two nodes was refused at init with EBUSY, as a value (section 7). Now it shares the stream its process and the peer's already hold, the communicators' groups serialized on it at each end (rdma/NCCL.md "Shared streams") |
 
 Nothing outside `rdma/` reads the lane count.
 
@@ -181,8 +181,13 @@ larger one's.
 
 **What a two-lane link costs.** Node 521750041's link to node 1974797816 gets the 0xc plan: one stream and no
 keepalive lane.
-- One communicator at a time between the two nodes. A second concurrent one is refused at its init with EBUSY as a
-  value ("rank 0 could not hold its streams at its bridge"). The first runs exact.
+- One stream between the two nodes. At this change a second concurrent communicator was refused at its init with
+  EBUSY as a value ("rank 0 could not hold its streams at its bridge"), so every ncclCommSplit whose color held both
+  ends, every ncclCommGrow and every torch subgroup across the link failed while the first communicator lived. Now
+  later communicators share the stream: a split's child, a grow, a shrink or a second init of
+  the same two processes take the stream they already hold, one communicator's groups at a time on it at each end, in
+  the order both ends issue them (rdma/NCCL.md "Shared streams"). Two communicators' groups on the link do not run
+  side by side; they run one after the other, each exact.
 - No keepalive frames, so a controller that slows after a quiet stretch (etc/bridge/README.md, the Mac mini's 6-10 us
   after 40 us of nothing) is not kept warm. This costs latency on the first frames after a pause, not correctness.
 

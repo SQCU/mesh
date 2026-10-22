@@ -36,9 +36,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
-- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
-  communicators hold one stream, and a link has four, so the world group and three subgroups use a node pair at once;
-  one more is refused (EBUSY) until a group is destroyed ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
+- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group. A link
+  has four streams, or one where either end is a macOS 27 M5 Ultra's; groups beyond them share a stream with a group
+  already on it, which carries one group's collectives at a time on each node, in the order every rank issues them
+  (torch's program order; [NCCL.md](../NCCL.md#shared-streams)).
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing (a dud's too) or a lost
   link; a GPU wait also at its bound, and a host-path wait at a revoke.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the

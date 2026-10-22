@@ -372,16 +372,23 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   (`mesh_stream_take`), and gives it back to 0 when its last communicator on it ends (`mesh_stream_give`). The bridge
   answers nothing; it lets go the word of a client whose process is gone (`streams_let_go`).
 - The holder's first units are the stream's `next`, which its communicator's init tells its peers through NCCL's
-  bootstrap. One communicator holds a stream at a time. Each channel's head credit (a position published once the
-  peer's position LAG back is consumed) sizes the ring for that channel alone, so two communicators on one ring could
-  write a slot before it is read. Communicators that share a node pair hold different streams of its link: an init's
-  first gather carries each rank's free streams (`mesh_streams_free`), and both ends of each pair of members take the
-  stream of the least `wire` free at both (`mesh_stream_take`), so the two ends of a communicator hold the two ends of
-  one stream. An init is refused (EBUSY) only where no stream toward a member's node is free at both ends.
+  bootstrap. A process holds a stream; its communicators use it. Each channel's head credit (a position published once
+  the peer's position LAG back is consumed) sizes the ring for that channel alone, so two communicators running groups
+  on one ring at once could write a slot before it is read. Communicators that share a node pair take different
+  streams of its link where it has them: an init's first gather carries each rank's free streams
+  (`mesh_streams_free`), and both ends of each pair of members take the stream of the least `wire` free at both
+  (`mesh_stream_take`), so the two ends of a communicator hold the two ends of one stream. Where none is free at both
+  ends (a one-stream link: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)), they share the stream of the least `wire`
+  both processes already hold, which keeps its one sequence of units: the communicators lay and run their groups on
+  it one communicator at a time at each end, in the order both ends issue them, so its positions obey one channel's
+  credit (libnccl-mesh `turn`; rdma/NCCL.md "Shared streams"). Its last communicator gives it back. An init is refused
+  (EBUSY) only where no stream toward a member's node is free at both ends or held by both processes.
 - The holder declares how far it will supply each class (`declared`), with a `deadline` (uptime ns) that a live holder
   leaves at UINT64_MAX: no unit of a producer still at work is ever sent as a dud (design/rubrics.md C5 and Quantities,
   the operator 10-20). A holder that can supply no more, its group failed or revoked, sets the deadline to now, and
-  the bridge sends its unsupplied declared units as duds at once. A consumer's own wait stays bounded where it waits.
+  the bridge sends its unsupplied declared units as duds at once. On a stream several communicators of the holder
+  share, the deadline is the stream's, so the next live group laid on it declares nothing until those duds have gone
+  and the peer's units before it have landed (libnccl-mesh `turn`). A consumer's own wait stays bounded where it waits.
 
 **Duds, and a holding's end.**
 - The send thread posts unit u when its ready word reads `1 + u / units`. Where u is declared, not supplied, and the

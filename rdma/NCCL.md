@@ -73,20 +73,26 @@ torch-mesh's `_stream`) compiles them in its own process, as before. Only the li
   - `config`: NULL, or `blocking` not 0, is a blocking init; `blocking` 0 is NCCL's non-blocking init (below).
   - Every rank passes the same values. `ncclCommInitRank` is this call with no paths, programs, small, name or config,
     and `ncclCommInitRankConfig` the same with its config.
-- Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
-  nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
-  it holds rows (the stream's owner word taken while the stream is free). The second carries each rank's holding's
-  status and where its streams' units start. A communicator names
-  nodes alone. An init fails as a value where two ranks are on one node (`ncclInvalidUsage`), where no stream
-  toward a member's node is free at both ends (EBUSY: a link has four, each held by one communicator) or the link is
-  gone (ENOLINK)
-  (`ncclSystemError`), or where its bootstrap's phase passes its bound (`ncclRemoteError`, ETIMEDOUT); what it held is
-  let go, and the next init reads the streams as they then stand.
-- Every wait of a bootstrap, blocking init or not, is a 100 ms slice after which the revoke and the phase's end are read
-  again (design/rubrics.md M3, C5). A phase ends `MESH_PLATFORM_NS` after the init began where no rank was met, and
-  `MESH_PLATFORM_NS` after its first rank met (the root's first accept, a non-root's connect) for the rest of it; the
-  second gather has its own `MESH_PLATFORM_NS`. A root that no rank meets therefore fails as a value and is made again
-  by its caller; nothing waits on a peer that never comes.
+- Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node, the
+  nodes its bridge reaches, the streams free to take and the streams its process already holds; each rank then holds a
+  stream toward each other member's node it is joined to: one free at both ends, taken as it takes rows (the stream's
+  owner word taken while the stream is free), else one both ranks' processes already hold toward each other's node,
+  shared ([Shared streams](#shared-streams)). The second carries each rank's holding's status and where its streams'
+  units start. A communicator names nodes alone. An init fails as a value where two ranks are on one node
+  (`ncclInvalidUsage`), where no stream toward a member's node is free at both ends or held by both processes (EBUSY)
+  or the link is gone (ENOLINK) (`ncclSystemError`), or where its bootstrap's peers stop arriving (`ncclRemoteError`,
+  ETIMEDOUT); what it held is let go, and the next init reads the streams as they then stand.
+- Every kernel call of a bootstrap, blocking init or not, returns within a 100 ms slice, after which the revoke and the
+  phase's end are read again (design/rubrics.md M3, C5; design/transport.md's platform deadline is a kernel call's).
+  Waiting for peers to show up is bounded by progress, never by one window from the first arrival, so ranks launched
+  seconds apart (ssh to four or six nodes) all meet: the root's phase ends once `nranks` x `MESH_PLATFORM_NS` pass with
+  no rank arriving (each rank met renews it: each of the n ranks may start up to that long after the one before it);
+  a rank's connect tries that long from its start (the root may start that much later); and a connected rank's first
+  gather waits for the table with no clock, ending at the table, at the root's close (its phase failed), at the root's
+  host lost (TCP keepalive on the bootstrap's sockets: probes once a socket has been silent `MESH_PLATFORM_NS`, five a
+  second apart) or at a revoke. The second gather, which follows the ranks' holds of their streams, has its own
+  `MESH_PLATFORM_NS`. A root that no rank meets therefore fails as a value and is made again by its caller; nothing
+  waits on a peer that never comes.
 - While the process holds a lease of a bridge that stopped, its next lease (`ncclRemoteError`), communicator
   (`ncclInvalidUsage`: the process's own leases, which only it can free) and `ncclCommRegister` are refused naming it,
   until it has freed every such lease: a process never holds leases of two regions. A node's region is most of its
@@ -100,12 +106,24 @@ torch-mesh's `_stream`) compiles them in its own process, as before. Only the li
 - A rank's connect and the root's accept hold nothing of the node's bridge: a rank attaches once its bootstrap has
   connected, or accepted every rank, and its report (its node and the nodes its bridge reaches) follows that attach. A
   blocking init's root waits in its accept, at most its phase's bound.
-- A rank's connect to its root gives up `MESH_PLATFORM_NS` after its first try: an init toward a root that does not
-  listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
+- A rank's connect to its root gives up `nranks` x `MESH_PLATFORM_NS` after its first try: an init toward a root that
+  does not listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
 - `ncclCommSplit` takes the ranks of a color and holds the child's streams over comm (NCCL's bootstrapSplit, with the
-  init's two gathers), streams of its own, as every init takes. `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
-  exchange among the rest, so it holds no stream: a shrink to one rank is made, and one to two ranks or more is refused
-  (`ncclInvalidUsage`, ENOLCK).
+  init's two gathers), as every init holds them: free ones, else the ones comm or another communicator of both
+  processes holds, shared. Every rank runs both gathers whatever the first gave it (a rank whose comm failed or was
+  revoked lays each as duds, so no rank waits on a gather another never laid), and the second carries each rank's
+  result of the first: every rank fails the split where any rank's first failed or its row landed as a dud (all ones:
+  a color of -1, NCCL_SPLIT_NOCOLOR), so no rank takes its color's members from a row a dud may have filled. A rank
+  whose second gather itself fails after its peers' completed fails alone (no exchange confirms the last one), and its
+  peers' child fails at its first group toward it, as a value.
+- `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, every remaining rank naming the
+  same ones, with no exchange among the rest (a departed member answers none): the new communicator shares comm's
+  stream toward each remaining member comm reaches ([Shared streams](#shared-streams)), and its map is comm's
+  restricted to the remaining members, so its routes relay through them alone and every one of them makes the same
+  communicator and the same programs. `NCCL_SHRINK_ABORT` revokes comm first, so its unsent units go as duds, and the
+  new communicator's first group waits until they have gone. Members the restricted map no longer joins fail its first
+  collective that needs a route between them, naming two (`ncclInvalidUsage`), as a value. `ncclCommGrow` is an init,
+  so its old members share comm's streams where a link has no other free.
 - Making a communicator, a lone rank's too, attaches the process's client of its node's bridge ([Memory](#memory)),
   so the node's bridge runs; it fails where `ncclMemAlloc` would.
 
@@ -450,6 +468,47 @@ whose program or point-to-point step moves bytes between two members not joined 
 (`ncclInvalidUsage`). A node a route would cross between two members takes part only as a member of the
 communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`).
 
+## Shared streams
+
+A link carries as many streams as its plan has lane pairs: four on two macOS 26 devices, one where either end is a
+macOS 27 M5 Ultra's (design/HETEROGENEOUS-LINKS.md). A communicator takes a stream free at both ends; where none is,
+it shares one its process and the peer's both already hold (a split's or a shrink's parent's, a grow's old members',
+a torch subgroup's world group's), and the stream's last communicator gives it back. A stream that a group of one of
+its communicators was refused on before the group was laid (below) is never shared again.
+
+- **One sequence, serialized, never partitioned.** A stream carries one sequence of units each way: the bridge sends
+  unit u only after every unit before it, and lands u only after every unit before it (design/transport.md section
+  14). Communicators sharing it take its units in the order their groups are laid, so no two groups' units interleave,
+  and both ends take the same units for the same group as long as both lay the same groups in the same order. A ring's
+  units cannot be split between communicators: one communicator's idle units would hold the other's.
+- **One communicator's groups at a time, at each end.** The ring's credit is a channel's (a position published once
+  the peer's position `LAG` back is consumed; the ring holds 2·`LAG` + 1 runs), so a group of B laid after one of A
+  could publish its first `LAG` positions while the peer still holds A's unread. So a group is laid on a shared stream
+  only after every group of another communicator there has completed at this end: another thread's host-path group
+  is waited for; another communicator's issued Metal-path groups are completed first, in the new group's own program;
+  a host-path group after another's GPU work there waits for it to finish (at most `MESH_PLATFORM_NS`), and fails as
+  a value while another's groups are issued and not complete, as it does after its own communicator's. Then this end
+  has consumed all of the peer's A positions, so the peer, which publishes position x after consuming this end's
+  x − `LAG`, holds at most `LAG` of this end's A positions unread, and B's first `LAG` positions fit beside them; B's
+  position t ≥ `LAG` is published after the peer's B position t − `LAG`, which the peer published only after its own
+  turn. On each stream class A's positions then B's obey, in one count, the rule of one channel, and the ring holds
+  what it holds for one communicator.
+- **Same order at both ends.** Communicators sharing a stream issue the groups that cross it in the same order on the
+  two ranks of it: NCCL's rule for communicators used together ("applications should ensure operations are submitted in
+  the same order across ranks"), which an SPMD program keeps by construction. Two threads issuing groups on two such
+  communicators at once leave the order to chance; the library does not detect a different order, which delivers the
+  wrong bytes.
+- **Failures.** A communicator that failed or was revoked still lays the groups it is given that cross a link, as
+  duds at once (design/transport.md section 10), so the stream stays the same sequence at both ends and its peers
+  land duds rather than wait. Its units unsent are given the deadline now, which is the stream's, so they also reach
+  units another communicator's GPU work encoded before them has not yet supplied; the next live group laid on the
+  stream waits until every unit laid before it has gone and every unit taken before it has landed (at most
+  `MESH_PLATFORM_NS` without one of them moving; past it its communicator fails and that group is laid as duds too).
+  A group refused at this end before it was laid (a lease's GPU work past the deadline, a host-path group after issued
+  groups, a point-to-point call toward a rank no link joins, out of memory), which its peer may have laid, spoils the
+  stream: every communicator sharing it fails its later groups (`ncclRemoteError`), so no live bytes follow a gap; each
+  is made again. A collective that cannot be planned is refused alike at every rank and spoils nothing.
+
 ## Rules a program keeps
 
 - One rank a node.
@@ -457,8 +516,9 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
   Separate send then receive calls in the same order on both sides do not pair: a channel has one position axis for
   both directions. The library does not detect it, nor unequal counts or different collectives on two ranks: no landed
   payload is checked, so these are the caller's error.
-- Communicators know nothing of one another, and no two hold one stream: a link has four, so four communicators use
-  a node pair at once, and a fifth is refused (EBUSY) until one of them is destroyed.
+- Communicators know nothing of one another. A link has as many streams as its plan (four, or one: [Shared
+  streams](#shared-streams)); communicators beyond them share one, and communicators sharing a stream issue the groups
+  that cross it in the same order on both of its ranks.
 
 ## Failures
 
@@ -473,8 +533,8 @@ for, a host-path group's wait on it until a landing or a revoke. The failure is 
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
-  streams is no longer its own (its link lost and paired again opens every stream new: design/transport.md section 14),
-  before any group runs on it,
+  streams is no longer its own (its link lost and paired again opens every stream new: design/transport.md section 14)
+  or a stream it shares is spoiled ([Shared streams](#shared-streams)), before any group runs on it,
 
 and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
 fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, which they
@@ -483,14 +543,15 @@ init) on the map as it is then (the operator, 2026-10-14: "it's okay for a funct
 returning if the link topo changed mid function execution"). A communicator keeps the map its init made, so a change
 that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator
 (metal-microbench makes each call's communicators at the call's start). A rank that departed is left out with
-`ncclCommShrink` (to one rank: [Communicators](#communicators)), and a joining one taken in with `ncclCommGetUniqueId`
-and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding streams of its own as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
+`ncclCommShrink`, the remaining ranks sharing comm's streams with no exchange among them ([Communicators](#communicators)),
+and a joining one taken in with `ncclCommGetUniqueId` and `ncclCommGrow`, an init at the id comm's root broadcasts on
+comm, holding streams as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and the units its groups
 declared and supplied nothing go at once as duds, so its peers' groups fail rather than wait); an init
 still running (a non-blocking one's) ends as a value, its host-path groups return at their next look, its GPU waits
 end at their landings or their bounds (no kernel stops at the revoke; a wait that reaches its bound after it names it as
-its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
-streams back. `ncclCommDestroy` awaits the command buffers the library committed for the communicator, at most
+its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked"), one crossing a link laid as duds
+so its peers land them rather than wait, until `ncclCommDestroy` gives its streams back. `ncclCommDestroy` awaits the command buffers the library committed for the communicator, at most
 `MESH_PLATFORM_NS`; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
 may take.
@@ -498,8 +559,8 @@ may take.
 A communicator takes no bytes of its node's region: its rings are its streams', the bridge's (`mesh.h`
 `struct mesh_stream`). The process holds one of its bridge's client slots (`mesh.h` `MESH_CLIENTS`) whatever its
 communicators; each communicator of two ranks or more holds a stream toward each member's node it is joined to from
-its init to its destruction, one communicator a stream (each channel's head credit sizes the stream's ring for that
-channel alone), of the four a link has.
+its init to its destruction: one free at both ends, else one shared with another communicator of the process, which
+carries one communicator's groups at a time at each end ([Shared streams](#shared-streams)).
 
 ## Environment
 

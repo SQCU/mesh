@@ -21,28 +21,35 @@
    listener ncclGetUniqueId opens, on the node's fabric address where it holds one; the bindings take
    MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets them), every rank's node (mesh_observe) meets there,
    the root listening on that host alone where it is an IPv6 address; the id is its name.  ncclCommInitRankConfig with
-   config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Its first gather carries each rank's
-   node, the nodes its bridge reaches and the streams free to take (mesh-call.h mesh_nodes_reached, mesh_streams_free);
-   each rank then holds, toward each other member's node it is joined to, the stream of the least identity free at both
-   ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (each channel's
-   head credit sizes its ring alone; a link has several, so communicators sharing a node pair hold their own; EBUSY where
-   none toward a member's node is free at both ends); the second gather,
-   bounded by mesh.h MESH_PLATFORM_NS a send or receive, carries each rank's holding's status and its streams' first
-   units, the peer's first unit out being this end's first in.  A communicator names nodes, never a link, port, lane
-   or queue pair.  An init fails as a value where two ranks are on one node, a stream is held by another process or
-   gone, or a peer is silent past that bound; what it held is then let go and the next init reads the streams as they
-   stand.  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
+   config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Ranks may arrive at the bootstrap
+   apart: the root waits while ranks keep arriving (nranks x mesh.h MESH_PLATFORM_NS without one ends it), a rank's
+   connect tries that long, and a connected rank waits for the first gather's table until the root sends it, closes
+   or its host is lost (TCP keepalive); every kernel call of it returns within 100 ms.  Its first gather carries each
+   rank's node, the nodes its bridge reaches, the streams free to take and the streams its process holds (mesh-call.h
+   mesh_nodes_reached, mesh_streams_free); each rank then holds, toward each other member's node it is joined to, the
+   stream of the least identity free at both ends, as it holds rows (mesh_stream_take: design/transport.md section
+   14), else the one of the least identity both ranks' processes already hold toward each other's node, shared: a
+   stream's units are one sequence, so communicators sharing it lay and run their groups on it one communicator at a
+   time at each end, which keeps each ring's credit one channel's (rdma/NCCL.md "Shared streams"; EBUSY where no
+   stream toward a member's node is free at both ends or held by both processes); the second gather, bounded by
+   MESH_PLATFORM_NS a send or receive, carries each rank's holding's status and its streams' first units, the peer's
+   first unit out being this end's first in.  A communicator names nodes, never a link, port, lane or queue pair.  An
+   init fails as a value where two ranks are on one node, no stream can be held toward a member's node, or a peer is
+   silent past those bounds; what it held is then let go and the next init reads the streams as they stand.  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
    every member from the same reports and kept for its life: no node outside the communicator is on it, since the
    bridges forward nothing, so two members no path between members joins fail a collective, and a call between two
    members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
-   Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
-   two ranks or more holds none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow meets at the bootstrap of the
-   id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke is NCCL's: comm's
+   Split holds its children's streams over comm (NCCL's bootstrapSplit, both of its gathers run at every rank, the
+   second carrying each rank's result of the first, so every rank fails where any rank's first failed or landed as a
+   dud), and Shrink makes no exchange: its communicator shares comm's streams toward the remaining members and routes
+   on comm's map restricted to them, every remaining rank naming the same departed ones.  ncclCommGrow meets at the
+   bootstrap of the id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke is NCCL's: comm's
    operations in flight are revoked and its resources kept (its streams stay held; the units its groups declared and
    supplied nothing for go at once as duds, so its peers' groups fail rather than wait), an init still
    running (a non-blocking one's) ends as a value, its host-path groups return at their next look and its GPU waits end
-   at their landings or their bounds (no kernel stops at the revoke), every later group on comm is refused (ncclInvalidUsage), ncclCommFinalize after
+   at their landings or their bounds (no kernel stops at the revoke), every later group on comm is refused (ncclInvalidUsage, one crossing a link
+   laid as duds so its peers land them rather than wait), ncclCommFinalize after
    it is not supported, and ncclCommGetAsyncError reads ncclSuccess once it is done; from any thread, under comm's own
    lock, never one a group holds while it waits.  ncclCommDestroy waits for the GPU work the library committed for comm
    at most MESH_PLATFORM_NS, then gives its streams back and frees it; work in a caller's encoder is the caller's to
@@ -86,9 +93,12 @@
    issue->published says whether anything was published (the caller then commits, so the peers' waits progress), and the
    issue pointer stays valid until ncclGroupEnd returns.  ncclMeshComplete completes it, with every group issued before
    it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
-   once, with every group before it; a host-path group fails while its own communicator's groups are issued and not
-   complete, and waits only for its own communicator's GPU work, at most MESH_PLATFORM_NS.  A host-path group spins on
-   its landings, never parks, and holds no lock another communicator's groups take; it fails as a value where nothing
+   once, with every group before it; a host-path group fails while its own communicator's groups, or those of a
+   communicator sharing one of its streams, are issued and not complete, and waits only for their GPU work, at most
+   MESH_PLATFORM_NS; a Metal-path group on a shared stream completes the groups of the communicator sharing it that are
+   issued first, in its own program (their results written there, a later ncclMeshComplete of them finding them
+   complete).  A host-path group spins on its landings, never parks, and holds no lock another
+   communicator's groups take; it fails as a value where nothing
    lands and nothing can be published for MESH_PLATFORM_NS.  A group whose positions lie on one channel completes as
    plain dispatches in the stream's order, each position published before it is consumed; a group on two or more,
    with each channel progressing on its own (rdma/NCCL.md "One track", "Per-channel progress").  A wait is a kernel
