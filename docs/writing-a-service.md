@@ -80,8 +80,11 @@ The rank service in metal-microbench is a service of this kind for a language mo
 
 ## How the example moves its data
 
-Rank 0 holds the files. At the start it reads the input's shape and broadcasts two numbers, the steps and the rows, so
-every rank knows them. Then it sends each rank that rank's rows of A and B.
+Rank 0 holds the files. Before the communicator exists it loads A and B and folds their rotations in, in float16:
+seconds of host work at a large width, which no peer's wait may span (a wait on the GPU ends at its stream's bound,
+about the platform's 5 s), while the other ranks wait in torch's rendezvous. Then it reads the input's shape and
+broadcasts two numbers, the steps and the rows, so every rank knows them, and sends each rank that rank's rows of A
+and B.
 
 The inputs are one operand: a block of rows for each step. They move through a ring of slots in the region, one slot a
 step. Each rank has two rings, one for the inputs and one for the sums.

@@ -1,6 +1,7 @@
 import collections
 import json
 import math
+import os
 import sys
 import time
 
@@ -43,24 +44,29 @@ def operand(config, rank):
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def shares(config, rank, size):
+def folded(config):
+    weights = np.load(config['weights'])
+    full = tuple(weights[name] for name in ('a', 'b'))
+    if any(w.shape != (sum(config['parts']), config['width']) for w in full):
+        raise ValueError('The weights a and b are [sum of the parts, width] each')
+    blocks = config['rotation_blocks']
+    return tuple(np.ascontiguousarray(rotated(w, block, axis), dtype=np.float16)
+                 for w, block, axis in zip(full, blocks, (1, 0)))
+
+
+# docs/writing-a-service.md#how-the-example-moves-its-data
+def shares(config, rank, size, folds):
     parts, width = config['parts'], config['width']
     a, b = (torch_mesh.empty(parts[rank], width, dtype=torch.half) for _ in range(2))
     if rank:
         dist.recv(a, src=0)
         dist.recv(b, src=0)
         return a, b
-    weights = np.load(config['weights'])
-    full = tuple(weights[name] for name in ('a', 'b'))
-    if any(w.shape != (sum(parts), width) for w in full):
-        raise ValueError('The weights a and b are [sum of the parts, width] each')
-    blocks = config['rotation_blocks']
-    folded = rotated(full[0], blocks[0], 1), rotated(full[1], blocks[1], 0)
     for r in range(size):
         begin = sum(parts[:r])
-        for held, w in zip((a, b), folded):
+        for held, w in zip((a, b), folds):
             part = held if r == 0 else torch_mesh.empty(parts[r], width, dtype=torch.half)
-            part.copy_(torch.from_numpy(np.ascontiguousarray(w[begin:begin + parts[r]])))
+            part.copy_(torch.from_numpy(w[begin:begin + parts[r]]))
             if r:
                 dist.send(part, dst=r)
     return a, b
@@ -158,6 +164,7 @@ def crossings(steps, block, P):
 # docs/writing-a-service.md#the-configuration
 def main():
     config = json.loads(open(sys.argv[1]).read())
+    folds = folded(config) if os.environ['RANK'] == '0' else None
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     if len(config['parts']) != size:
@@ -165,7 +172,8 @@ def main():
     width = config['width']
     steps, rows, inputs = operand(config, rank)
     block, deep, sums = ring(config, steps, rows)
-    a, b = shares(config, rank, size)
+    a, b = shares(config, rank, size, folds)
+    del folds
     step = chain.Step(a, b, rows, config['row_capacity'], size - 1, chain.capability(config['capabilities']))
     del a, b
     E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
