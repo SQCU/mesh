@@ -9,7 +9,8 @@
    published by one count and awaited on another, the receives combined on the host or the GPU: zero copy, an operand
    or a piece that is not a lease's page failing as a value (nccl.h, Memory). */
 #include "nccl.h"
-#include "mesh-collective.h"
+#include "mesh-call.h"
+#include "mesh-plan.h"
 #include "mesh.h"
 #include "nccl-mesh-metal.h"
 #include <errno.h>
@@ -549,8 +550,7 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
 
 /* the communicator's table made where it is not (comm_routes), each move of each program between two members a link
    joins (the caller's programs too: the bridges forward nothing, so a route through another node is refused as a
-   value), and the checker's thread on it (comm_advise); under group_lock */
-static void comm_advise(const struct ncclComm *comm);
+   value); under group_lock */
 static ncclResult_t comm_compile(struct ncclComm *comm) {
   if (comm->compiled) return ncclSuccess;
   ncclResult_t result = comm_routes(comm);
@@ -564,7 +564,6 @@ static ncclResult_t comm_compile(struct ncclComm *comm) {
   }
   if (result) { routes_free(comm, 0); return result; }
   comm->compiled = 1;
-  comm_advise(comm);
   return ncclSuccess;
 }
 
@@ -636,11 +635,9 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    bridge's next region; what the process holds of the expired one stays mapped and valid until it frees it.  No
    process ever holds two regions (design/transport.md section 2, the heartbeat). --- */
 
-/* a lease: its address, its first row, its bytes, the Metal buffer over it (lease_buffer, made at its first use; NULL
-   until then), and the points its caller's GPU work on it declared (ncclMeshMemUse: an event, the value it reaches once
-   that work is done, whether the work writes the lease), which a host-path group waits for (lease_wait) */
-struct point { void *event; uint64_t value; int write; };
-struct lease { void *address; uint32_t row; size_t bytes; void *buffer; struct point *points; size_t npoints; };
+/* a lease: its address, its first row, its bytes, and the Metal buffer over it (lease_buffer, made at its first use;
+   NULL until then) */
+struct lease { void *address; uint32_t row; size_t bytes; void *buffer; };
 /* design/transport.md section 14: the stream toward node `node` the process holds (`users` the communicator on it, 0
    none: the hold vacant), its holding's view, and the identity it was taken by (`wire`: mesh-call.h mesh_stream_held,
    comm_failure) */
@@ -1460,7 +1457,7 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
                   mesh_arena_pages(m), strerror(status));
   } else {
     *ptr = mesh_section_address(&a->context, lease, 0);
-    a->leases[a->count++] = (struct lease){*ptr, lease.first, (size_t)lease.pages * a->context.M->pgsz, NULL, NULL, 0};
+    a->leases[a->count++] = (struct lease){*ptr, lease.first, (size_t)lease.pages * a->context.M->pgsz, NULL};
   }
   pthread_mutex_unlock(&attach_lock);
   return result;
@@ -1488,8 +1485,6 @@ ncclResult_t ncclMemFree(void *ptr) {
         found = 1;
         row = a->leases[i].row;
         if (a->leases[i].buffer) metal_release(a->leases[i].buffer);
-        for (size_t k = 0; k < a->leases[i].npoints; k++) metal_release(a->leases[i].points[k].event);
-        free(a->leases[i].points);
         status = mesh_lease_return(&a->context, row);
         a->leases[i] = a->leases[--a->count];
       }
@@ -1518,15 +1513,6 @@ static int lease_buffer(const void *ptr, void **buffer, size_t *offset) {
   return status;
 }
 
-/* a lease's points that are reached dropped */
-static void points_prune(struct lease *l) {
-  size_t kept = 0;
-  for (size_t k = 0; k < l->npoints; k++)
-    if (metal_signaled(l->points[k].event) >= l->points[k].value) metal_release(l->points[k].event);
-    else l->points[kept++] = l->points[k];
-  l->npoints = kept;
-}
-
 /* the lease holding ptr, under attach_lock (NULL: none) */
 static struct lease *lease_at(const void *ptr) {
   for (struct attach *a = attaches; a; a = a->next)
@@ -1545,24 +1531,6 @@ ncclResult_t ncclMeshMemBuffer(const void *ptr, void **buffer, size_t *offset) {
   return status ? fail(ncclInvalidArgument, "ncclMeshMemBuffer: %p is in no lease of this process (ncclMemAlloc)", ptr) : ncclSuccess;
 }
 
-/* nccl.h ncclMeshMemUse: the point recorded on the lease holding ptr (its event retained until it is reached and
-   dropped, or the lease freed) */
-ncclResult_t ncclMeshMemUse(const void *ptr, size_t bytes, void *event, uint64_t value, int write) {
-  (void)bytes;
-  if (!ptr || !event) return fail(ncclInvalidArgument, "ncclMeshMemUse: a NULL argument");
-  pthread_mutex_lock(&attach_lock);
-  struct lease *l = lease_at(ptr);
-  struct point *grown = l ? realloc(l->points, (l->npoints + 1) * sizeof *grown) : NULL;
-  if (grown) {
-    l->points = grown;
-    points_prune(l);
-    l->points[l->npoints++] = (struct point){metal_retain(event), value, write != 0};
-  }
-  pthread_mutex_unlock(&attach_lock);
-  if (!l) return fail(ncclInvalidArgument, "ncclMeshMemUse: %p is in no lease of this process (ncclMemAlloc)", ptr);
-  return grown ? ncclSuccess : fail(ncclSystemError, "out of memory");
-}
-
 /* design/transport.md: `event` reached `value` by `until` (uptime ns): 1, else 0 (a host wait ends by the platform's
    deadline, and decides nothing but its own group's failure) */
 static int gpu_reached(void *event, uint64_t value, uint64_t until) {
@@ -1570,27 +1538,6 @@ static int gpu_reached(void *event, uint64_t value, uint64_t until) {
   return metal_signaled(event) >= value || (now < until && metal_wait(event, value, until - now));
 }
 
-/* a host-path group's wait for the points recorded on the lease holding ptr (none where it is no lease): its writers'
-   where the group reads it, every one where it writes it, each until the caller's GPU work reaches it (gpu_reached), all
-   by `until`: 0, or ETIMEDOUT */
-static int lease_wait(const void *ptr, int write, uint64_t until) {
-  if (!ptr) return 0;
-  for (;;) {
-    pthread_mutex_lock(&attach_lock);
-    struct lease *l = lease_at(ptr);
-    struct point wait = {NULL, 0, 0};
-    if (l) {
-      points_prune(l);
-      for (size_t k = 0; k < l->npoints && !wait.event; k++)
-        if (write || l->points[k].write) wait = (struct point){metal_retain(l->points[k].event), l->points[k].value, l->points[k].write};
-    }
-    pthread_mutex_unlock(&attach_lock);
-    if (!wait.event) return 0;
-    const int reached = gpu_reached(wait.event, wait.value, until);
-    metal_release(wait.event);
-    if (!reached) return ETIMEDOUT;
-  }
-}
 
 
 /* an operator made into the communicator's table (a freed slot, else one more), its handle past ncclNumOps */
@@ -1707,43 +1654,6 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
   return ncclSuccess;
 }
 
-/* design/transport.md, the checker of a communicator's table once it is compiled (comm_compile): its programs cut on
-   its pages, read by mesh_program_advise, each below its entry's bound, every warning
-   logged as NCCL logs one, on a thread of its own over a copy: nothing joins it, and it refuses nothing */
-struct advice { const struct ncclComm *comm; uint32_t entry; struct mesh_operand operand; };
-static void advise_warn(void *argument, const char *line) {
-  const struct advice *a = argument;
-  const struct mesh_program *x = &a->comm->entries[a->entry].program;
-  fprintf(stderr, "NCCL WARN communicator %s rank %d: program %u (collective %u, root %u), %llu elements of %u bytes: %s\n", a->comm->name,
-          a->comm->rank, a->entry, x->what, x->root, (unsigned long long)a->operand.elements, a->operand.element_bytes, line);
-}
-static void *advise_run(void *argument) {
-  struct ncclComm *comm = argument;
-  static const struct mesh_operand operands[] = {{ncclFloat32 + 1, 4, 1}, {ncclFloat32 + 1, 4, 4096}, {ncclFloat32 + 1, 4, 1000003},
-                                                 {ncclFloat16 + 1, 2, 1u << 20}};
-  for (uint32_t e = 0; e < comm->programs; e++)
-    for (size_t o = 0; o < sizeof operands / sizeof *operands; o++) {
-      struct advice a = {comm, e, operands[o]};
-      if (!comm->entries[e].below || operands[o].elements * operands[o].element_bytes < comm->entries[e].below)
-        mesh_program_advise(&comm->entries[e].program, operands[o], comm->page, advise_warn, &a);
-    }
-  comm_free(comm);
-  return NULL;
-}
-static void comm_advise(const struct ncclComm *comm) {
-  struct ncclComm *copy = comm->nranks > 1 ? calloc(1, sizeof *copy) : NULL;
-  if (!copy) return;
-  pthread_mutex_init(&copy->guard, NULL);
-  copy->nranks = comm->nranks; copy->rank = comm->rank; copy->page = comm->page;
-  memcpy(copy->name, comm->name, sizeof copy->name);
-  int made = (copy->entries = calloc((size_t)comm->programs + 1, sizeof *copy->entries)) != NULL;
-  for (uint32_t e = 0; made && e < comm->programs; e++)
-    if ((made = !program_copy(&copy->entries[e].program, &comm->entries[e].program))) copy->entries[copy->programs++].below = comm->entries[e].below;
-  pthread_t thread;
-  if (made && !pthread_create(&thread, NULL, advise_run, copy)) pthread_detach(thread);
-  else comm_free(copy);
-}
-
 /* -- a group ------------------------------------------------------------------------------------------- */
 
 /* where a step's bytes are: on the Metal path a buffer and a byte offset into it; on the host path an address (buffer
@@ -1808,7 +1718,7 @@ struct call {
   int combine, post;
   uint32_t unit;
   unsigned char pre[8];
-  /* a premultiplier in device memory (ncclScalarDevice), read into `pre` once its lease's GPU points are reached */
+  /* a premultiplier in device memory (ncclScalarDevice), read into `pre` when its group runs on the host */
   const void *scalar_at;
   int premultiplied, direct;
   struct steps *bound;
@@ -1977,7 +1887,7 @@ static uint32_t group_kind(const struct call *c) { return p2p(c) ? MESH_GROUP_PO
 static void group_of(const struct call *list, size_t n, uint32_t N, const struct mesh_step **steps, uint32_t *count,
                      struct mesh_group_call *calls, uint64_t page, struct mesh_group *group) {
   for (size_t i = 0; i < n; i++) calls[i] = (struct mesh_group_call){group_kind(list + i), 0, count + i * N, steps + i * N};
-  *group = (struct mesh_group){N, (uint32_t)n, 0, 0, calls, page};
+  *group = (struct mesh_group){N, (uint32_t)n, calls, page};
 }
 
 /* the next number of comm's groups taken by a group it issues (`groups`), as the group takes group_lock, and its slot of
@@ -2436,8 +2346,8 @@ static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
 }
 
 static int plan_direct(struct call *c, struct where own);
-/* one group on the host: its leases' GPU points reached, its communicator not failed (comm_failure) and its GPU work
-   finished, each within the platform's deadline; its calls planned, each crossing call's send buffer a lease
+/* one group on the host: its communicator not failed (comm_failure) and its GPU work finished within the platform's
+   deadline; its calls planned, each crossing call's send buffer a lease
    (operands_check), its operand made in place (in recvbuff where the call holds the whole operand, else a lease of the
    communicator's pool, plan_direct reading the send buffer in place where it may) and its scratch leases of the pool;
    its entries presented (schedule), run with the groups' lock released (run), then finished; a run's failure the
@@ -2456,10 +2366,6 @@ static ncclResult_t launch(struct call *list, size_t n) {
   }
   if (revoked(comm)) return revoked_fail(comm);
   const uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + MESH_PLATFORM_NS;
-  int late = 0;
-  for (size_t i = 0; i < n && !late; i++)
-    late = lease_wait(list[i].send, 0, until) || lease_wait(list[i].recv, 1, until) || lease_wait(list[i].scalar_at, 0, until);
-  if (late) return fail(ncclSystemError, "a lease's GPU work (ncclMeshMemUse) did not reach its point within the platform's deadline");
   for (size_t i = 0; i < n; i++)
     if (list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
   pthread_mutex_lock(&group_lock);
@@ -2759,9 +2665,9 @@ static uint32_t one_track(const struct inflight *through) {
    one serial order every rank builds alike: the next send entries published as soon as their steps' receives before
    them are consumed (a run of them one release; the fused crossing's alone), else the next landing consumed (its
    step's receive before it consumed, and a combine into bytes an earlier SEND of its call reads only once that SEND is
-   published: its wait then awaits `sent` past it); a program whose SEND waits on a receive that waits on that SEND,
-   which mesh_group_advise names, fails here.  No track is recorded, no thread picks, and no tracks dispatch runs: no
-   wait on one track can hold another channel's */
+   published: its wait then awaits `sent` past it); a program whose SEND waits on a receive that waits on that SEND
+   fails here.  No track is recorded, no thread picks, and no tracks dispatch runs: no wait on one track can hold
+   another channel's */
 static ncclResult_t complete_track(struct metal_program *program, struct inflight *through, uint32_t h, int *published) {
   struct ncclComm *const comm = through->comm;
   struct channel *ch = comm->channels + h;
@@ -3540,7 +3446,6 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
   return ncclSuccess;
 }
 
-const char *ncclMeshMetalSteps(void) { return metal_steps(); }
 const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
 
 ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }

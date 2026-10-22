@@ -164,9 +164,9 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
   return made;
 }
 
-/* mesh-plan.h's `name`, "" for every node: a record carries no host name (mesh.h struct mesh_record; AGENTS.md "A node is
-   its hardware; names are virtual"), and a name a person reads is the name table's by node number (rdma/peers.py) */
-int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map){
+/* a record carries no host name (mesh.h struct mesh_record; AGENTS.md "A node is its hardware; names are virtual"): a
+   name a person reads is the name table's by node number (rdma/peers.py) */
+int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
@@ -174,7 +174,6 @@ int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH
   munmap(m,length);
   if(count<0)return count;
   int result=mesh_records_map(r,(uint32_t)count,members,n,node,map);
-  for(uint32_t i=0;name && result>=0 && i<(uint32_t)result+map->relays;i++)name[i][0]=0;
   free(r);
   return result;
 }
@@ -204,7 +203,7 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   munmap(m,length);
   if(count<0)return count;
   for(int i=0;i<count && (uint32_t)i<capacity;i++){
-    out[i].node=r[i].node;out[i].name[0]=0;
+    out[i].node=r[i].node;
     out[i].region=r[i].region;out[i].memory=r[i].memory;
     memcpy(out[i].model,r[i].model,MESH_MODEL_BYTES);out[i].model[MESH_MODEL_BYTES-1]=0;
     out[i].health=r[i].health;

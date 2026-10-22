@@ -415,7 +415,7 @@ function value with `unsafeBitCast` is not equivalent: Swift can introduce an
 indirect-argument reabstraction thunk. Likewise, importing the launch as an Apple
 block introduces a context-retaining conversion thunk. Neither conversion is on
 the committed launch path. The concrete stored representation and the generated
-register assignment must agree; `native-audit` emits both sides for that review.
+register assignment must agree.
 See [direct Swift dispatch](transport.md).
 
 The engine’s `encodePrefillOutput` extraction and `encodeDecodeOutput` binding

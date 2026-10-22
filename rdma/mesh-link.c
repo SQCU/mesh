@@ -1676,12 +1676,11 @@ static int child_spawn(struct port *port){
     return error;
   }
   setsockopt(pair[0],SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on);
-  char index[16],page[16],alive[24];
+  char index[16],page[16];
   snprintf(index,sizeof index,"%u",port->index);snprintf(page,sizeof page,"%u",ones);
-  snprintf(alive,sizeof alive,"%llu",(unsigned long long)MESH_KEEPALIVE_NS);
   char version[16];
   snprintf(version,sizeof version,"%u",MESH_CHILD_VERSION);
-  char *arguments[]={self_path,"--child",version,port->device.name,index,page,alive,NULL};
+  char *arguments[]={self_path,"--child",version,port->device.name,index,page,NULL};
   posix_spawn_file_actions_t actions;
   posix_spawnattr_t attributes;
   posix_spawn_file_actions_init(&actions);
@@ -1824,8 +1823,8 @@ static void *control_watch(void *unused){
 }
 
 /* design/transport.md: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
-   the consumer's document (rdma/bridge_configuration.py): its name and its region in bytes (`region_bytes`); a `keepalive`
-   it states is not read (the keepalive's pace is the bridge's: MESH_KEEPALIVE_NS); NULL, or why it is refused */
+   the consumer's document (rdma/bridge_configuration.py): its name and its region in bytes (`region_bytes`); NULL, or
+   why it is refused */
 static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *region_bytes){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
@@ -1850,11 +1849,11 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   return refused;
 }
 
-/* design/transport.md section 14, "A process a port": a port's child, `mesh-flow --child VERSION DEVICE INDEX ONES
-   KEEPALIVE` as its parent spawned it (child_spawn), VERSION the contract's (mesh-bridge.h MESH_CHILD_VERSION): the parent's region mapped (its magic, version and
+/* design/transport.md section 14, "A process a port": a port's child, `mesh-flow --child VERSION DEVICE INDEX ONES` as
+   its parent spawned it (child_spawn; a parent of an earlier build adds its keepalive pace, which is not read: the
+   child keeps its own, MESH_KEEPALIVE_NS), VERSION the contract's (mesh-bridge.h MESH_CHILD_VERSION): the parent's region mapped (its magic, version and
    bridge the parent's), its port the parent's port INDEX on DEVICE (its streams' words the region's), the duds' block
-   ONES the parent's, KEEPALIVE the parent's pace (a child of this build keeps its own, MESH_KEEPALIVE_NS, so a parent of
-   an earlier build that stated 0 there sets no pace), the provider's faults absorbed (fault_heard) and its peer interfaces'
+   ONES the parent's, the provider's faults absorbed (fault_heard) and its peer interfaces'
    terminations heard (B9b: its lanes served no more at once, port_halt).  It takes the parent's messages on descriptor 3
    in order: an open, a make or a connect of its link as a job on its port's queue (link_job, device_open; one asked
    while a job is out, or while a halt of its own is not yet answered by the parent's, is refused), a halt (no lane
@@ -1970,7 +1969,7 @@ static void child_read(struct port *port){
 }
 static int child_main(int argc,char **argv){
   signal(SIGPIPE,SIG_IGN);
-  const unsigned long index=argc>=7?strtoul(argv[4],NULL,10):MESH_PORTS;
+  const unsigned long index=argc>=6?strtoul(argv[4],NULL,10):MESH_PORTS;
   if(index>=MESH_PORTS){say("child of %s: port %lu is past the bridge's, or its command line short: it ends\n",argc>3?argv[3]:"?",index);return 1;}
   faults_install();
   const int fd=shm_open(MESH_NAME,O_RDWR);

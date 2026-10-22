@@ -53,8 +53,8 @@ committed AIR is used. Where either does not, the kernels are compiled into `ven
 with the change to the kernels (`nccl-mesh-kernels.h`, `mesh.metal`, or the compile line). On a machine without the
 toolchain that compile fails, and `make` names the build to run: it never installs AIR of other kernels.
 
-`ncclMeshMetalSteps()` is unchanged: a caller that compiles its own kernels after the steps (metal-microbench,
-torch-mesh's `_stream`) compiles them in its own process, as before. Only the library's own kernels moved to build time.
+`ncclMeshMetalPrelude()` hands the steps' text to a caller that compiles its own kernels after them (metal-microbench,
+torch-mesh's `_stream`), which compiles them in its own process. Only the library's own kernels moved to build time.
 
 ## Communicators
 
@@ -135,7 +135,7 @@ nodes by the same rule.
 The bridges' records are a map whatever reaches what: a node that still has a record may be reached by no bridge,
 and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it is.
 `mesh_link_map_check` refuses only what is no map; whether a map joins every two of its nodes is
-`mesh_link_map_joined` (Python `mesh.joined`, which names the first two it leaves apart). The trees and the
+`mesh_link_map_joined`, which names the first two it leaves apart. The trees and the
 collectives run only on a map that joins their members: a communicator's collective on a map that does not fails as a
 value naming two members no path between members joins (`ncclInvalidUsage`).
 
@@ -144,7 +144,7 @@ paths, programs and forms; nothing is compared at run time.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR), the communicator's table of them. The caller passes its own table (`ncclMeshCommInitRank`'s `programs`;
-`mesh.compile` in Python, `chunks` its cut, `whole` the single-phase all-reduce); with none, the communicator compiles
+`mesh_compile`, `chunks` its cut, `whole` the single-phase all-reduce); with none, the communicator compiles
 the structural table at its first call that needs it, along the caller's `paths` or else the map's shortest-path trees
 (each member's in-tree of the map's routes, its parents among equals spread over the links):
 
@@ -502,9 +502,7 @@ Porting:
 - A host-path group waits for its own communicator's GPU groups alone and fails while one of them is issued and not
   complete; it spins on its landings, never parks, and holds no lock another communicator's groups take, so a rank
   waiting in a host-path collective (an `ncclBroadcast` from a peer) does not stop its other communicators.
-- `ncclMeshMemUse(ptr, bytes, event, value, write)` declares the caller's GPU work on a lease (an `MTLSharedEvent` and the value it reaches), which a
-  host-path group reading or writing that lease waits for (until the GPU's work reaches the value). `ncclCommRegister`
-  refuses a buffer outside the region.
+- `ncclCommRegister` refuses a buffer outside the region.
 
 ## Routes between unlinked ranks
 

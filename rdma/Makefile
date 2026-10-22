@@ -4,13 +4,9 @@
 IMAGES = libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib mesh-stat mesh-heartbeat mesh-flow
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 # every warning an error, but a deprecation in the installed binaries, which each node builds with its own SDK (a newer
-# one's deprecation must not leave a node's bridge unbuilt); native-audit keeps every warning an error
+# one's deprecation must not leave a node's bridge unbuilt)
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 all: $(IMAGES:%=.build/%)
-native-audit: .build/mesh-link.s .build/mesh-records.s .build/mesh-call.s .build/mesh-dataflow.s
-.build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-bridge.h mesh-dataflow.h mesh-call.h Makefile
-	mkdir -p .build
-	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 # design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
@@ -121,7 +117,7 @@ kernels: .build/libnccl-mesh.metallib
 	rm -f $@ && .build/nccl-mesh-kernels .build/libnccl-mesh.metallib $@
 .PHONY: .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
 .build/libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h \
-  mesh-collective.h mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
+  mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
 	cc -fblocks -O2 $(WARN) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-metal.m -L.build -lmesh \
@@ -130,14 +126,14 @@ kernels: .build/libnccl-mesh.metallib
 	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation
-.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
+.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh.h mesh-plan.h Makefile
 	mkdir -p .build
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
 # the built images; never an installed image (the launchd job's binary and the libraries clients map)
 clean:
 	rm -rf $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.metal .build/libnccl-mesh.sha256 \
 	  .build/libnccl-mesh.air $(KERNEL_FILES:%=.build/libnccl-mesh.%)
-.PHONY: all install clean native-audit
+.PHONY: all install clean
 
 # _mesh_c: the headers as one Python module (mesh_c_build.py), for the interpreter that imports it, bound to the
 # installed libraries it loads (make install puts them in rdma/; this target installs nothing, so it never stops the

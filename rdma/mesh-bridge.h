@@ -227,7 +227,7 @@ _Static_assert(offsetof(struct link,frozen_at)%128==0,"the receive thread's word
    provider's doorbell (CHILD_FAULTED), a guard not held within MESH_PLATFORM_NS (CHILD_UNGUARDED), its port's peer
    interface terminating (CHILD_TERMINATED, as the child heard it: B9b) */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,
-   declared: their command line, `mesh-flow --child VERSION DEVICE INDEX ONES KEEPALIVE` (its first three words the same
+   declared: their command line, `mesh-flow --child VERSION DEVICE INDEX ONES` (its first three words the same
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
    its bytes (the operator, 2026-10-21) */
@@ -312,9 +312,6 @@ struct known { uint32_t node; uint64_t heard,gone,boot,sequence; };
    pause while its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the
    port's guard word while it serves none, looking again every MESH_PAUSE_NS (the stop's `closing`) */
 struct progress { struct port *port; int side; };
-
-/* design/transport.md: a loop port's cable listener's event, its index */
-#define TAG_LOOP (UINT64_C(1)<<59)
 
 /* the state both translation units read, defined in mesh-link.c */
 extern struct hdr *M;

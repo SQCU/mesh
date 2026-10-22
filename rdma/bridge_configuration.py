@@ -2,9 +2,8 @@
 document in JSON, TOML or YAML, by its extension, read here into the one canonical form the bridge reads, a property
 list of its name (the document's stem), its purpose and its region in bytes (`region_bytes`).  A document states its
 `purpose` and its region, either `region_gib` (GiB) or `region_percent` (of the node's physical memory, read where this
-runs: the node's own bin/mesh-user.sh), and may state `keepalive_us`, the most microseconds its links' lanes go without a frame while
-an exclusive flow runs (design/transport.md; canonical `keepalive`, nanoseconds; a document that states
-none sends none), and nothing else; the region is at most the node's memory.  There is no default.
+runs: the node's own bin/mesh-user.sh), and nothing else; the region is at most the node's memory.  There is no
+default.
 
     python bridge_configuration.py DOCUMENT CANONICAL"""
 import json
@@ -28,8 +27,8 @@ def memory():
 
 
 def load(path):
-    """The document at `path` as the bridge reads it, {'name', 'purpose', 'region_bytes'} and 'keepalive' (ns) where it states
-    one; ValueError naming what it lacks."""
+    """The document at `path` as the bridge reads it, {'name', 'purpose', 'region_bytes'}; ValueError naming what it
+    lacks."""
     path = Path(path)
     reader = READERS.get(path.suffix.lower())
     if reader is None:
@@ -37,7 +36,7 @@ def load(path):
     document = reader(path.read_bytes())
     if not isinstance(document, dict):
         raise ValueError(f'{path}: a bridge configuration is a table of its purpose and its region')
-    unknown = sorted(set(document) - {'purpose', 'keepalive_us', *SIZES})
+    unknown = sorted(set(document) - {'purpose', *SIZES})
     if unknown:
         raise ValueError(f'{path}: {", ".join(unknown)}: no key of a bridge configuration')
     purpose = document.get('purpose')
@@ -52,13 +51,7 @@ def load(path):
     region_bytes = SIZES[sizes[0]](value, total)
     if region_bytes > total:
         raise ValueError(f'{path}: a region of {region_bytes} bytes is more than the node\'s {total} bytes of memory')
-    canonical = {'name': path.stem, 'purpose': ' '.join(purpose.split()), 'region_bytes': region_bytes}
-    if 'keepalive_us' in document:
-        keepalive = document['keepalive_us']
-        if isinstance(keepalive, bool) or not isinstance(keepalive, (int, float)) or keepalive <= 0:
-            raise ValueError(f'{path}: keepalive_us is a positive number of microseconds')
-        canonical['keepalive'] = max(1, int(round(keepalive * 1000)))
-    return canonical
+    return {'name': path.stem, 'purpose': ' '.join(purpose.split()), 'region_bytes': region_bytes}
 
 
 if __name__ == '__main__':

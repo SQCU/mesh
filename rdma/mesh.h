@@ -188,12 +188,6 @@ static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct m
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
-/* design/algorithm-sources.md#programcopy; design/transport.md */
-static inline uint32_t mesh_row_chunks(struct hdr *m,uint32_t row,uint64_t bytes){
-  uint64_t block=(uint64_t)m->block*m->pgsz;
-  uint64_t offset=atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed)-m->data_off;
-  return (uint32_t)((offset%block+bytes+block-1)/block);
-}
 
 static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint32_t lo=word*64,hi=lo+64,a=first>lo?first:lo,b=first+count<hi?first+count:hi;

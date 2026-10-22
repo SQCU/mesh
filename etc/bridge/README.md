@@ -25,9 +25,6 @@ A document has these keys:
 
 - `purpose`: one line stating what the configuration is for (required).
 - the region, exactly one of `region_gib` (GiB) or `region_percent` (of the node's physical memory).
-- `keepalive_us`: not read by the bridge. The keepalive's pace is the bridge's own (MESH_KEEPALIVE_NS, 5 us while a
-  link holds a stream), on every link whatever the document states (design/HETEROGENEOUS-LINKS.md section 10).
-  `rdma/bridge_configuration.py` still accepts the key.
 
 The region is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
 when the device comes up, before any queue pair exists. The bridge never deregisters it: the kernel releases the

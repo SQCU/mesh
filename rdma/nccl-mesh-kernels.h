@@ -2,7 +2,7 @@
    dispatches.  The text is compiled when the library is built, never in a process that runs it: the build tool
    (nccl-mesh-kernels.m) writes it out, the Makefile compiles it to libnccl-mesh.metallib (vendor/PROVENANCE.md), and
    each node's install makes its binary archive of every kind's pipeline; nccl-mesh-metal.m loads the two (kernels_of)
-   and hands STEPS to callers that compile their own kernels after it (nccl.h ncclMeshMetalSteps). */
+   and hands STEPS to callers that compile their own kernels after it (nccl.h ncclMeshMetalPrelude). */
 #ifndef NCCL_MESH_KERNELS_H
 #define NCCL_MESH_KERNELS_H
 #import <Foundation/Foundation.h>

@@ -52,7 +52,6 @@ uint64_t metal_signaled(void *event);
 /* 1 once `event` reaches `value`, 0 where `ns` pass first */
 int metal_wait(void *event, uint64_t value, uint64_t ns);
 void metal_release(void *object);
-void *metal_retain(void *object);
 
 /* A program's waits bounded by `polls` wherever a dispatch has failure words to record in (the program's, `violation`
    or metal_gate's, or those a wait names): at most `polls` loads of a count (rdma/mesh.metal mesh_wait_bounded), past
@@ -159,10 +158,8 @@ enum { METAL_PUBLISH, METAL_CONSUME };
 struct metal_result metal_record(struct metal_program *, uint32_t track, int cursor, uint64_t position, uint64_t need);
 struct metal_result metal_depend(struct metal_program *, uint32_t other, uint64_t count);
 struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const uint64_t *consumed);
-/* the steps' Metal text (after rdma/mesh.metal): the argument record, a deferred step's bindings as one record
-   (mesh_step_binding) and mesh_step_* */
-const char *metal_steps(void);
-/* rdma/mesh.metal as this library was built with it, then metal_steps' text: what a caller's kernel compiles after */
+/* rdma/mesh.metal as this library was built with it, then the steps' Metal text: the argument record, a deferred step's
+   bindings as one record (mesh_step_binding) and mesh_step_*; what a caller's kernel compiles after */
 const char *metal_prelude(void);
 void metal_keep(struct metal_program *, void *object);
 void metal_end(struct metal_program *, void *event, uint64_t value);

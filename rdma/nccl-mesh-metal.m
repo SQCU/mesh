@@ -175,7 +175,6 @@ void *metal_event(void) { return [(id<MTLDevice>)metal_device() newSharedEvent];
 uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signaledValue; }
 int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLSharedEvent>)event waitUntilSignaledValue:value timeoutMS:ns / 1000000]; }
 void metal_release(void *object) { [(id)object release]; }
-void *metal_retain(void *object) { return [(id)object retain]; }
 
 /* a stream's polls as a program's bound: 0, or more than NCCL_MESH_POLLS, is NCCL_MESH_POLLS
    (design/transport.md) */
@@ -597,8 +596,6 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
 }
 
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
-
-const char *metal_steps(void) { return STEPS.UTF8String; }
 
 /* mesh.metal's text as this library was built (.build/mesh_metal.h, xxd of it), then STEPS: made once, kept */
 const char *metal_prelude(void) {

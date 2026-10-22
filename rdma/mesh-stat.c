@@ -50,7 +50,7 @@ int main(void){
     nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);bandwidth=realloc(bandwidth,(links+1)*sizeof *bandwidth);
     if(!nodes || !link || !bandwidth)return 1;
     map=(struct mesh_link_map){.kind=MESH_LINKS_MESH,.nodes=room,.links=links,.link=link,.bandwidth=bandwidth};
-    count=mesh_map(NULL,0,nodes,NULL,&map);
+    count=mesh_map(NULL,0,nodes,&map);
     room=map.nodes;links=map.links;
   }
   uint64_t region=0,unleased=0,busy=0,idle_since=0;

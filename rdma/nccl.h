@@ -233,7 +233,7 @@ typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
 /* A fused crossing's steps, run by the caller's kernels (ncclMeshFusableRooted, below): a publication toward each peer
    it sends to and a landing from each peer it receives from, each one's six bindings' GPU addresses, in the library's
    binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel takes them through its
-   argument table, a classic one as one record of its bytes (ncclMeshMetalSteps' mesh_step_binding, the six in this
+   argument table, a classic one as one record of its bytes (ncclMeshMetalPrelude's mesh_step_binding, the six in this
    order).  The caller gives `publish` and `land` room for `publishes` and `lands` records (ncclMeshFusableRooted's
    counts); the group writes its records in its peers' order (its channels') and sets the two counts to those written:
    0 and 0 where the group is not a fused crossing, which then runs as an ordinary group (ncclMeshFusableRooted). */
@@ -1055,19 +1055,18 @@ uint64_t ncclMeshRetired(void);
 typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2, ncclMeshFuseAllGather = 3 } ncclMeshFuseKind;
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int* publishes, int* lands);
-/* The Metal text of the steps the library's kernels and a fused crossing's kernels run, after rdma/mesh.metal's: the
-   argument record (struct mesh_args), a fused step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's
-   order, a classic kernel's form of them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
+/* rdma/mesh.metal's text as this library was built with it, then the Metal text of the steps the library's kernels and
+   a fused crossing's kernels run: the whole of what a caller's kernel is compiled after, from the library the process
+   loaded, so it never reads a file that may be another build's (a checkout's mesh.metal newer or older than the
+   installed library), and needs no path to one.  The steps' text is the argument record (struct mesh_args), a fused
+   step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's order, a classic kernel's form of
+   them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
    mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_sent, mesh_step_release and mesh_step_read (any element type: a landed
    element, loaded system-coherent from the caller's own landing buffer), on a holding's counts (`ready` to store,
    `landed` and `sent` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.
    Every thread of the threadgroup calls mesh_step_await, mesh_step_sent and mesh_step_release (each holds a barrier);
    mesh_step_enter's and mesh_step_await's results are true (no kernel halts on a failure: rdma/NCCL.md "Bounded
    waits"), kept so that a kernel testing them compiles as it is. */
-const char* ncclMeshMetalSteps(void);
-/* rdma/mesh.metal's text as this library was built with it, then ncclMeshMetalSteps' text: the whole of what a caller's
-   kernel is compiled after, from the library the process loaded, so it never reads a file that may be another
-   build's (a checkout's mesh.metal newer or older than the installed library), and needs no path to one. */
 const char* ncclMeshMetalPrelude(void);
 /* The argument records this process has encoded on the default device (the Metal 4 form's dispatches' and either form's
    fused steps'; `issued`, counting from its first program) and how many its ring holds unread by the GPU at most
@@ -1104,13 +1103,6 @@ ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
    client reads in its own error path, after a lease or communicator failed, to free what it holds of that region, or
    end, before it leases again.  ncclInvalidArgument where expired is NULL. */
 ncclResult_t ncclMeshRegionExpired(int* expired);
-/* The caller's GPU work on the lease holding `ptr` (writing it where `write`, else reading it) is done once `event` (an
-   id<MTLSharedEvent>, retained until then) reaches `value` (mesh 3981ca80^'s, for leases): a host-path group that reads
-   the lease waits for its writers' points, one that writes it for every point, on the host, each until the caller's
-   GPU work reaches it, before the group takes any lock; a point reached is dropped, and ncclMemFree drops the rest.
-   `bytes` is not read (a point is the whole lease's).  The Metal path orders its work by its stream and reads no point.
-   ncclInvalidArgument where ptr is in no lease of this process. */
-ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t value, int write);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks entries, the same on
    every rank, any of them 0), the segments packed in rank order, so rank r's lies after the segments of the ranks
    before it.  ncclMeshAllGatherV sends counts[rank] elements of sendbuff and leaves every segment in recvbuff (in place

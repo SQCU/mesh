@@ -1,8 +1,7 @@
-#include "mesh-collective.h"
+#include "mesh-call.h"
+#include "mesh-plan.h"
 #include <errno.h>
 #include <math.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -351,17 +350,6 @@ static uint32_t mesh_trees_heaviest(const struct mesh_trees *trees,uint32_t r){
   for(uint32_t t=0;t<trees->count;t++)
     if(trees->root[t]==r && (best==trees->count || trees->log_weight[t]>trees->log_weight[best]))best=t;
   return best;
-}
-
-uint32_t mesh_trees_path(const struct mesh_trees *trees,uint32_t from,uint32_t to,uint32_t *path){
-  const uint32_t n=trees->nodes,t=to<n?mesh_trees_heaviest(trees,to):trees->count;
-  if(from>=n || t==trees->count)return 0;
-  uint32_t count=0;
-  for(uint32_t at=from;count<n;at=trees->parent[(size_t)t*n+at]){
-    path[count++]=at;
-    if(at==to)return count;
-  }
-  return 0;
 }
 
 /* The tree set's members' hops: each linked pair's route on the map's table, its physical links (u N + x, the sender's
@@ -736,10 +724,6 @@ static int mesh_program_ranges(const struct mesh_program *program,uint64_t eleme
   return 1;
 }
 
-uint32_t mesh_program_steps(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,struct mesh_step *steps){
-  return mesh_program_steps_cut(program,rank,operand,NULL,0,steps);
-}
-
 uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,const uint64_t *segments,
                                 uint64_t page,struct mesh_step *steps){
   if(rank>=program->nodes || !program->parts)return 0;
@@ -926,7 +910,7 @@ done:
 
 static uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
 
-/* whether steps are in round order (mesh_program_steps' order: a compiled program's are) */
+/* whether steps are in round order (mesh_program_steps_cut's order: a compiled program's are) */
 static int mesh_rounds_sorted(const struct mesh_step *steps,uint32_t count){
   for(uint32_t k=1;k<count;k++)if(steps[k].round<steps[k-1].round)return 0;
   return 1;
@@ -971,8 +955,8 @@ int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count
   return 0;
 }
 
-/* design/transport.md section 14: a group's calls laid together (libnccl-mesh schedule_group), a counted all-to-all's
-   steps (libnccl-mesh counted_steps), and the advisories.  The lists' rule, as libnccl-mesh runs it (nccl-mesh.c run,
+/* design/transport.md section 14: a group's calls laid together (libnccl-mesh schedule_group) and a counted
+   all-to-all's steps (libnccl-mesh counted_steps).  The lists' rule, as libnccl-mesh runs it (nccl-mesh.c run,
    complete): each direction between two ranks is one list, the sender's send list and the receiver's landing list,
    entry for entry; the sender publishes its entries in order (its holding's `ready`, one count), the receiver consumes
    them in order, each once it has landed (`landed`, one count); a step's first event, published or consumed, waits until
@@ -1022,333 +1006,4 @@ uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,i
       made[(*placed)++]=(struct mesh_group_place){i,0,{0,send!=0,at++}};
   }
   return at;
-}
-
-
-enum { MESH_ADVISE_PROJECTION, MESH_ADVISE_PRIORITIES, MESH_ADVISE_ALIGNMENT, MESH_ADVISE_CAUSALITY, MESH_ADVISE_HAZARD, MESH_ADVISE_INVOCATION,
-       MESH_ADVISE_BOUND, MESH_ADVISE_CHECKS };
-static const char *const mesh_advise_names[MESH_ADVISE_CHECKS]={"projection","priorities","alignment","causality","hazard","invocation","bound"};
-struct mesh_advice { void (*warn)(void *,const char *); void *arg; uint32_t count; };
-static void mesh_advise_say(struct mesh_advice *a,uint32_t check,const char *format,...) __attribute__((format(printf,3,4)));
-static void mesh_advise_say(struct mesh_advice *a,uint32_t check,const char *format,...){
-  a->count++;
-  if(!a->warn)return;
-  char line[768];
-  const int head=snprintf(line,sizeof line,"%s: ",mesh_advise_names[check]);
-  va_list list;
-  va_start(list,format);
-  vsnprintf(line+head,sizeof line-(size_t)head,format,list);
-  va_end(list);
-  a->warn(a->arg,line);
-}
-static const char *mesh_step_name(uint32_t op){ return op==MESH_STEP_SEND?"SEND":op==MESH_STEP_REDUCE?"REDUCE":"COPY"; }
-/* a step's entry: its list (UINT32_MAX: none, no bytes) and its index there */
-struct mesh_spot { uint32_t lane; uint64_t entry; };
-/* a list: rank a's sends to rank b, b's receives from a, its entries, its events from `base` (publications, then
-   consumptions) */
-struct mesh_list { uint32_t a,b; uint64_t entries,base; };
-static uint64_t mesh_event(const struct mesh_list *l,uint32_t consume,uint64_t e){ return l->base+(consume?l->entries:0)+e; }
-static void mesh_event_text(const struct mesh_list *lists,uint32_t count,uint64_t v,char *text,size_t room){
-  uint32_t h=0;
-  while(h+1<count && lists[h+1].base<=v)h++;
-  const struct mesh_list *l=lists+h;
-  const uint64_t x=v-l->base,e=x%l->entries;
-  if(x>=l->entries)snprintf(text,room,"rank %u consumes rank %u's entry %llu",l->b,l->a,(unsigned long long)e);
-  else snprintf(text,room,"rank %u publishes entry %llu to rank %u",l->a,(unsigned long long)e,l->b);
-}
-static int mesh_overlap(const struct mesh_step *x,const struct mesh_step *y){
-  return x->buffer==y->buffer && x->first<y->first+y->piece.elements && y->first<x->first+x->piece.elements;
-}
-/* the events reachable from `from` along `start`/`list` (forward or reverse), marked `generation` */
-static void mesh_reach(uint64_t from,const uint64_t *start,const uint64_t *list,uint32_t *mark,uint32_t generation,uint64_t *queue){
-  uint64_t head=0,tail=0;
-  mark[from]=generation;queue[tail++]=from;
-  while(head<tail){
-    const uint64_t v=queue[head++];
-    for(uint64_t i=start[v];i<start[v+1];i++)if(mark[list[i]]!=generation){mark[list[i]]=generation;queue[tail++]=list[i];}
-  }
-}
-/* step k of a rank's group: its move in its call, and the call where the group has several */
-struct mesh_grouped { const struct mesh_group *g; uint32_t **owner,*first; };
-static const char *mesh_move(const struct mesh_grouped *x,uint32_t r,uint32_t k,char *text,size_t room){
-  const uint32_t i=x->owner[r][k];
-  if(x->g->calls>1)snprintf(text,room,"call %u's move %u",i,k-x->first[(size_t)i*x->g->nodes+r]);
-  else snprintf(text,room,"move %u",k);
-  return text;
-}
-/* the event at which receive v's bytes are written into its buffer: a combine's at its consumption; a COPY lands in
-   place, so at the earliest when its peer publishes it */
-static uint64_t mesh_written(const struct mesh_list *lists,const struct mesh_step *v,const struct mesh_spot *y){
-  return mesh_event(lists+y->lane,v->op==MESH_STEP_REDUCE,y->entry);
-}
-
-uint32_t mesh_group_advise(const struct mesh_group *g,void (*warn)(void *,const char *),void *arg){
-  struct mesh_advice advice={warn,arg,0};
-  const uint32_t n=g->nodes,calls=g->calls;
-  /* bound: a GPU wait's loads past the platform's deadline (design/transport.md) */
-  if(g->bound && !g->polls)
-    mesh_advise_say(&advice,MESH_ADVISE_BOUND,"the group's GPU waits are unbounded (polls 0): a wait whose landing never comes holds its "
-                    "queue past the %u loads that conclude within the platform's deadline",g->bound);
-  else if(g->bound && g->polls>g->bound)
-    mesh_advise_say(&advice,MESH_ADVISE_BOUND,"the group's GPU waits make up to %u loads, past the %u that conclude within the platform's "
-                    "deadline",g->polls,g->bound);
-  struct mesh_step **steps=calloc((size_t)n+1,sizeof *steps);
-  int32_t **before=calloc((size_t)n+1,sizeof *before);
-  struct mesh_spot **spot=calloc((size_t)n+1,sizeof *spot);
-  uint32_t **owner=calloc((size_t)n+1,sizeof *owner),*first=calloc((size_t)calls*n+1,sizeof *first);
-  uint32_t *count=calloc((size_t)n+1,sizeof *count),most=1,widest=1,result=UINT32_MAX;
-  struct mesh_list *lists=malloc(((size_t)n*n+1)*sizeof *lists);
-  struct mesh_place *scratch=NULL;
-  struct mesh_group_place *ma=NULL,*mb=NULL;
-  uint64_t *from=NULL,*to=NULL,*start=NULL,*list=NULL,*back=NULL,*rlist=NULL,*queue=NULL,*remaining=NULL;
-  uint32_t *mark=NULL;
-  const struct mesh_grouped grouped={g,owner,first};
-  char text[2][64];
-  if(!steps || !before || !spot || !owner || !first || !count || !lists)goto done;
-  int points=0;
-  for(uint32_t i=0;i<calls;i++)points|=g->call[i].kind==MESH_GROUP_POINT;
-  for(uint32_t r=0;r<n;r++){
-    for(uint32_t i=0;i<calls;i++){count[r]+=g->call[i].count[r];if(g->call[i].count[r]+1>widest)widest=g->call[i].count[r]+1;}
-    const uint32_t room=count[r]+1;
-    steps[r]=malloc(room*sizeof **steps);before[r]=malloc(room*sizeof **before);spot[r]=malloc(room*sizeof **spot);
-    owner[r]=malloc(room*sizeof **owner);
-    if(!steps[r] || !before[r] || !spot[r] || !owner[r])goto done;
-    for(uint32_t i=0,k=0;i<calls;k+=g->call[i].count[r],i++){
-      const uint32_t c=g->call[i].count[r];
-      first[(size_t)i*n+r]=k;
-      if(c)memcpy(steps[r]+k,g->call[i].steps[r],c*sizeof **steps);
-      if(mesh_group_before(g->call[i].kind,steps[r]+k,c,before[r]+k))goto done;
-      for(uint32_t j=k;j<k+c;j++){owner[r][j]=i;if(before[r][j]>=0)before[r][j]+=(int32_t)k;}
-    }
-    for(uint32_t k=0;k<count[r];k++)spot[r][k]=(struct mesh_spot){UINT32_MAX,0};
-    if(count[r]+1>most)most=count[r]+1;
-  }
-  /* priorities: each rank's steps of a call by round, a round's SENDs before its receives (Dardha & Gay's priorities) */
-  for(uint32_t r=0;r<n;r++)for(uint32_t k=1;k<count[r];k++){
-    const struct mesh_step *p=steps[r]+k-1,*s=steps[r]+k;
-    if(owner[r][k]==owner[r][k-1] && (s->round<p->round || (s->round==p->round && s->op==MESH_STEP_SEND && p->op!=MESH_STEP_SEND)))
-      mesh_advise_say(&advice,MESH_ADVISE_PRIORITIES,"rank %u's %s (%s, round %u) follows its %s (%s, round %u): not in round order, "
-                      "a round's SENDs first",r,mesh_move(&grouped,r,k,text[0],sizeof *text),mesh_step_name(s->op),s->round,
-                      mesh_move(&grouped,r,k-1,text[1],sizeof *text),mesh_step_name(p->op),p->round);
-  }
-  /* projection: within each call (the point-to-point calls together, in call order), rank r's i-th SEND to p against
-     p's i-th receive from r, piece for piece (a collective's at one place of its operand, an all-to-all's or a
-     point-to-point call's each at its own end's); a SEND and its receive in one round */
-  for(uint32_t r=0;r<n;r++)for(uint32_t p=0;p<n;p++)for(uint32_t at=0;p!=r && at<=calls;at++){
-    if(at<calls?g->call[at].kind==MESH_GROUP_POINT:!points)continue;
-    const int placed=at<calls && g->call[at].kind==MESH_GROUP_COLLECTIVE;
-#define MESH_OF(x,k) (at<calls?owner[x][k]==at:g->call[owner[x][k]].kind==MESH_GROUP_POINT)
-    uint32_t i=0,j=0,sends=0,receives=0;
-    for(;;){
-      while(i<count[r] && !(steps[r][i].op==MESH_STEP_SEND && steps[r][i].peer==p && MESH_OF(r,i)))i++;
-      while(j<count[p] && !(steps[p][j].op!=MESH_STEP_SEND && steps[p][j].peer==r && MESH_OF(p,j)))j++;
-      if(i>=count[r] || j>=count[p])break;
-      const struct mesh_step *s=steps[r]+i,*v=steps[p]+j;
-      if((placed && s->first!=v->first) || s->piece.elements!=v->piece.elements || s->piece.element_bytes!=v->piece.element_bytes || s->piece.type!=v->piece.type)
-        mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"rank %u's SEND %u to rank %u (%s, round %u: elements [%llu, +%llu) of %u bytes) and "
-                        "its %s at rank %u (%s, round %u: [%llu, +%llu) of %u bytes) differ",r,sends,p,mesh_move(&grouped,r,i,text[0],sizeof *text),s->round,
-                        (unsigned long long)s->first,(unsigned long long)s->piece.elements,s->piece.element_bytes,mesh_step_name(v->op),p,
-                        mesh_move(&grouped,p,j,text[1],sizeof *text),v->round,(unsigned long long)v->first,(unsigned long long)v->piece.elements,
-                        v->piece.element_bytes);
-      else if(s->round!=v->round)
-        mesh_advise_say(&advice,MESH_ADVISE_PRIORITIES,"rank %u's SEND %u to rank %u (%s) is in round %u, its %s at rank %u (%s) in round %u",
-                        r,sends,p,mesh_move(&grouped,r,i,text[0],sizeof *text),s->round,mesh_step_name(v->op),p,mesh_move(&grouped,p,j,text[1],sizeof *text),v->round);
-      sends++;receives++;i++;j++;
-    }
-    for(;i<count[r];i++)sends+=steps[r][i].op==MESH_STEP_SEND && steps[r][i].peer==p && MESH_OF(r,i);
-    for(;j<count[p];j++)receives+=steps[p][j].op!=MESH_STEP_SEND && steps[p][j].peer==r && MESH_OF(p,j);
-#undef MESH_OF
-    if(sends!=receives){
-      if(at<calls)snprintf(text[0],64,"call %u",at);
-      else snprintf(text[0],64,"the point-to-point calls");
-      mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"rank %u sends %u messages to rank %u, which receives %u from it (%s)",r,sends,p,receives,
-                      text[0]);
-    }
-  }
-  /* projection on the lists: rank a's send list toward b against b's landing list from a (mesh_group_lay), entry for
-     entry, each of the same bytes */
-  scratch=malloc((size_t)widest*sizeof *scratch);ma=malloc((size_t)most*sizeof *ma);mb=malloc((size_t)most*sizeof *mb);
-  if(!scratch || !ma || !mb)goto done;
-  uint32_t list_count=0;
-  uint64_t events=0;
-  int balanced=1;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++){
-    if(a==b)continue;
-    uint32_t na=0,nb=0;
-    const uint64_t ea=mesh_group_lay(g,a,b,1,0,scratch,ma,&na),eb=mesh_group_lay(g,b,a,0,0,scratch,mb,&nb);
-    if(!ea && !eb)continue;
-#define MESH_AT(who,m) (first[(size_t)(m).call*n+(who)]+(m).place.step)
-    if(ea!=eb){
-      balanced=0;
-      mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"rank %u lays %llu entries on its send list to rank %u, which lays %llu on its landing list "
-                      "from it",a,(unsigned long long)ea,b,(unsigned long long)eb);
-    }
-    for(uint32_t k=0;k<na && k<nb;k++){
-      const struct mesh_step *s=steps[a]+MESH_AT(a,ma[k]),*v=steps[b]+MESH_AT(b,mb[k]);
-      if(mesh_step_bytes(s)!=mesh_step_bytes(v)){
-        balanced=0;
-        mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"entry %u from rank %u to rank %u: its SEND (%s) carries %llu bytes, its %s (%s) %llu",k,a,b,
-                        mesh_move(&grouped,a,MESH_AT(a,ma[k]),text[0],sizeof *text),(unsigned long long)mesh_step_bytes(s),mesh_step_name(v->op),
-                        mesh_move(&grouped,b,MESH_AT(b,mb[k]),text[1],sizeof *text),(unsigned long long)mesh_step_bytes(v));
-      }
-    }
-    const uint32_t h=list_count++;
-    lists[h]=(struct mesh_list){a,b,ea>eb?ea:eb,events};
-    events+=2*lists[h].entries;
-    for(uint32_t k=0;k<na;k++)spot[a][MESH_AT(a,ma[k])]=(struct mesh_spot){h,ma[k].place.entry};
-    for(uint32_t k=0;k<nb;k++)spot[b][MESH_AT(b,mb[k])]=(struct mesh_spot){h,mb[k].place.entry};
-#undef MESH_AT
-  }
-  if(!balanced || !events){result=advice.count;goto done;}
-  /* causality: the events under the lists' rule, a marked graph, whose every event occurs (in some order, no timing)
-     where it has no cycle (Lee & Messerschmitt's admissible schedule; Lustre's instantaneous dependency check) */
-  uint64_t edges=1;
-  for(uint32_t r=0;r<n;r++)edges+=2*(uint64_t)count[r]*count[r]+count[r];
-  edges+=3*events;
-  from=malloc(edges*sizeof *from);to=malloc(edges*sizeof *to);
-  start=calloc(events+1,sizeof *start);back=calloc(events+1,sizeof *back);remaining=calloc(events+1,sizeof *remaining);
-  queue=malloc((events+1)*sizeof *queue);mark=calloc(events+1,sizeof *mark);
-  if(!from || !to || !start || !back || !remaining || !queue || !mark)goto done;
-  uint64_t E=0;
-#define MESH_EDGE(x,y) do { from[E]=(x);to[E]=(y);E++; } while(0)
-  for(uint32_t h=0;h<list_count;h++){
-    const struct mesh_list *l=lists+h;
-    for(uint64_t e=0;e<l->entries;e++){
-      if(e){MESH_EDGE(mesh_event(l,0,e-1),mesh_event(l,0,e));MESH_EDGE(mesh_event(l,1,e-1),mesh_event(l,1,e));}
-      MESH_EDGE(mesh_event(l,0,e),mesh_event(l,1,e));
-    }
-  }
-  for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
-    const struct mesh_spot *s=spot[r]+k;
-    if(s->lane==UINT32_MAX || before[r][k]<0)continue;
-    const struct mesh_spot *w=spot[r]+before[r][k];
-    if(w->lane==UINT32_MAX)continue;
-    MESH_EDGE(mesh_event(lists+w->lane,1,w->entry),mesh_event(lists+s->lane,steps[r][k].op!=MESH_STEP_SEND,s->entry));
-  }
-  /* a combine into bytes that an earlier SEND of the same rank, call and channel reads (mesh_compile's two-node direct
-     exchange) waits until those bytes are sent, after the SEND's publication (libnccl-mesh consume) */
-  for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
-    const struct mesh_step *s=steps[r]+k;
-    const struct mesh_spot *x=spot[r]+k;
-    if(s->op!=MESH_STEP_SEND || x->lane==UINT32_MAX)continue;
-    for(uint32_t w=k+1;w<count[r];w++){
-      const struct mesh_step *v=steps[r]+w;
-      const struct mesh_spot *y=spot[r]+w;
-      if(v->op==MESH_STEP_REDUCE && owner[r][w]==owner[r][k] && y->lane!=UINT32_MAX && v->peer==s->peer && mesh_overlap(s,v))
-        MESH_EDGE(mesh_event(lists+x->lane,0,x->entry),mesh_event(lists+y->lane,1,y->entry));
-    }
-  }
-#undef MESH_EDGE
-  list=malloc((E+1)*sizeof *list);rlist=malloc((E+1)*sizeof *rlist);
-  if(!list || !rlist)goto done;
-  for(uint64_t i=0;i<E;i++){start[from[i]+1]++;back[to[i]+1]++;}
-  for(uint64_t v=0;v<events;v++){start[v+1]+=start[v];back[v+1]+=back[v];}
-  {
-    uint64_t *fill=remaining;
-    for(uint64_t v=0;v<events;v++)fill[v]=start[v];
-    for(uint64_t i=0;i<E;i++)list[fill[from[i]]++]=to[i];
-    for(uint64_t v=0;v<events;v++)fill[v]=back[v];
-    for(uint64_t i=0;i<E;i++)rlist[fill[to[i]]++]=from[i];
-  }
-  uint64_t head=0,tail=0;
-  for(uint64_t v=0;v<events;v++){remaining[v]=back[v+1]-back[v];if(!remaining[v])queue[tail++]=v;}
-  while(head<tail){
-    const uint64_t v=queue[head++];
-    for(uint64_t i=start[v];i<start[v+1];i++)if(!--remaining[list[i]])queue[tail++]=list[i];
-  }
-  if(tail<events){
-    /* a witness: back along events that never occur until one repeats, a cycle */
-    uint64_t v=0;
-    while(v<events && !remaining[v])v++;
-    for(uint64_t v2=0;v2<events;v2++)mark[v2]=0;
-    uint32_t steps_back=0;
-    while(!mark[v]){
-      mark[v]=++steps_back;
-      queue[steps_back-1]=v;
-      uint64_t u=v;
-      for(uint64_t i=back[v];i<back[v+1];i++)if(remaining[rlist[i]]){u=rlist[i];break;}
-      if(u==v)break;
-      v=u;
-    }
-    /* queue[i + 1] is an event queue[i] waits on: the cycle from v's first place, each waiting on the next */
-    char cycle[512]="",event[128];
-    size_t used=0;
-    const uint32_t first_on=mark[v]-1,length=steps_back-first_on;
-    for(uint32_t i=0;i<length && i<6 && used<sizeof cycle;i++){
-      mesh_event_text(lists,list_count,queue[first_on+i],event,sizeof event);
-      used+=(size_t)snprintf(cycle+used,sizeof cycle-used,"%s%s",i?" <- ":"",event);
-    }
-    mesh_advise_say(&advice,MESH_ADVISE_CAUSALITY,"%llu of the group's %llu events on its lists can never occur: a cycle of %u, %s%s",
-                    (unsigned long long)(events-tail),(unsigned long long)events,length,cycle,length>6?" <- ...":"");
-    result=advice.count;
-    goto done;
-  }
-  /* hazard: within a call, a SEND's bytes are read by the NIC from its publication until its peer has them (that
-     peer's consumption of it), so a receive after it that writes them (a combine at its consumption, a COPY where its
-     peer publishes it, landing in place) must follow that consumption, but for a combine on the SEND's own channel,
-     which waits for the bytes sent (write after read); and a receive before a SEND of what it writes must be consumed
-     before the SEND's publication (read after write) */
-  uint32_t generation=0;
-  for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
-    const struct mesh_step *s=steps[r]+k;
-    const struct mesh_spot *x=spot[r]+k;
-    if(s->op!=MESH_STEP_SEND || x->lane==UINT32_MAX)continue;
-    mesh_reach(mesh_event(lists+x->lane,1,x->entry),start,list,mark,++generation,queue);
-    for(uint32_t w=k+1;w<count[r];w++){
-      const struct mesh_step *v=steps[r]+w;
-      const struct mesh_spot *y=spot[r]+w;
-      if(owner[r][w]!=owner[r][k] || v->op==MESH_STEP_SEND || y->lane==UINT32_MAX || !mesh_overlap(s,v) ||
-         (v->op==MESH_STEP_REDUCE && v->peer==s->peer) || mark[mesh_written(lists,v,y)]==generation)
-        continue;
-      mesh_advise_say(&advice,MESH_ADVISE_HAZARD,"rank %u's %s %s (round %u, from rank %u) writes buffer %u's elements [%llu, +%llu) that its "
-                      "SEND %s (round %u, to rank %u) reads, with no order from the SEND's landing at rank %u to that write",r,mesh_step_name(v->op),
-                      mesh_move(&grouped,r,w,text[0],sizeof *text),v->round,v->peer,v->buffer,(unsigned long long)v->first,
-                      (unsigned long long)v->piece.elements,mesh_move(&grouped,r,k,text[1],sizeof *text),s->round,s->peer,s->peer);
-    }
-    mesh_reach(mesh_event(lists+x->lane,0,x->entry),back,rlist,mark,++generation,queue);
-    for(uint32_t w=0;w<k;w++){
-      const struct mesh_step *v=steps[r]+w;
-      const struct mesh_spot *y=spot[r]+w;
-      if(owner[r][w]!=owner[r][k] || v->op==MESH_STEP_SEND || y->lane==UINT32_MAX || !mesh_overlap(s,v))continue;
-      if(mark[mesh_event(lists+y->lane,1,y->entry)]!=generation)
-        mesh_advise_say(&advice,MESH_ADVISE_HAZARD,"rank %u's SEND %s (round %u, to rank %u) reads buffer %u's elements [%llu, +%llu) that its %s "
-                        "%s (round %u, from rank %u) writes, with no order from the receive's consumption to the SEND's publication",r,
-                        mesh_move(&grouped,r,k,text[0],sizeof *text),s->round,s->peer,s->buffer,(unsigned long long)s->first,
-                        (unsigned long long)s->piece.elements,mesh_step_name(v->op),mesh_move(&grouped,r,w,text[1],sizeof *text),v->round,v->peer);
-    }
-  }
-  result=advice.count;
-done:
-  for(uint32_t r=0;r<n;r++){
-    if(steps)free(steps[r]);
-    if(before)free(before[r]);
-    if(spot)free(spot[r]);
-    if(owner)free(owner[r]);
-  }
-  free(steps);free(before);free(spot);free(owner);free(first);free(count);free(lists);free(scratch);free(ma);free(mb);free(from);free(to);
-  free(start);free(list);free(back);free(rlist);free(queue);free(remaining);free(mark);
-  return result;
-}
-
-uint32_t mesh_program_advise(const struct mesh_program *program,struct mesh_operand operand,uint64_t page,void (*warn)(void *,const char *),
-                             void *arg){
-  const uint32_t n=program->nodes,segments=mesh_program_segments(program);
-  const int nccl=program->what==MESH_REDUCE_SCATTER || program->what==MESH_ALLGATHER;
-  struct mesh_step **steps=calloc((size_t)n+1,sizeof *steps);
-  uint32_t *count=calloc((size_t)n+1,sizeof *count),result=UINT32_MAX;
-  uint64_t *sizes=malloc(((size_t)segments+1)*sizeof *sizes);
-  for(uint32_t s=0;sizes && s<segments;s++)sizes[s]=operand.elements/segments+(s<operand.elements%segments);
-  for(uint32_t r=0;steps && count && sizes && r<n;r++){
-    if(!(steps[r]=malloc((program->first[r+1]-program->first[r]+1)*sizeof **steps)))goto done;
-    count[r]=mesh_program_steps_cut(program,r,operand,nccl?sizes:NULL,page,steps[r]);
-  }
-  if(steps && count && sizes){
-    const struct mesh_group_call call={MESH_GROUP_COLLECTIVE,0,count,(const struct mesh_step *const *)steps};
-    const struct mesh_group group={n,1,0,0,&call,page};
-    result=mesh_group_advise(&group,warn,arg);
-  }
-done:
-  for(uint32_t r=0;steps && r<n;r++)free(steps[r]);
-  free(steps);free(count);free(sizes);
-  return result;
 }

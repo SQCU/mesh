@@ -99,11 +99,8 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
    of the two ends' bandwidths (0 where either reports none), each node marked by its bridge's number, its
    table mesh_routes';
    then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
-   i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its
-   bridge's record holds it, NUL-terminated ("" for a node with no record).  MESH_NAME_BYTES: a LocalHostName of up
-   to 63 bytes and its NUL, the record's name field (mesh.h struct mesh_record). */
-#define MESH_NAME_BYTES 64
-int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map);
+   i's bridge.  Room and returns as mesh_map_members'. */
+int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map);
 /* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
    passes and writes it there; 0 where it differs, ETIMEDOUT where the bound passed, else an unreachable bridge's errno.
    Read (*serial 0) before mesh_map, it makes a later change end the next wait at once. */
@@ -124,9 +121,6 @@ struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const do
 /* 0 where the trees fit the map: each spans every node over the map's links and reaches its root, and every node
    roots at least one (a collective reduces toward and broadcasts from every node); else EINVAL. */
 int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
-/* A message's path from `from` to `to` in to's heaviest tree, the nodes from `from` to `to` inclusive (room for
-   `nodes`); their count, 0 where `to` roots no tree. */
-uint32_t mesh_trees_path(const struct mesh_trees *,uint32_t from,uint32_t to,uint32_t *path);
 /* Each node's spanning in-arborescences packed fractionally into the map's links, each way: Garg and Konemann's maximum
    concurrent flow [FOCS 1998], every root's trees together carrying one unit, each phase sending every root's unit
    along minimum-length arborescences [Chu & Liu 1965; Edmonds 1967] of the map's hops, a hop's length the sum of the
@@ -143,7 +137,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,u
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
 /* One step of one rank's part of a collective, in that rank's order (a compiled program's moves made elements,
-   mesh_program_steps).
+   mesh_program_steps_cut).
    SEND   publishes elements [first, first + piece.elements) of `buffer` to peer.
    REDUCE receives that typed piece from peer and combines it into `buffer` at `first`.
    COPY   receives that typed piece from peer into `buffer` at `first`.
@@ -206,9 +200,7 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts
 int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,uint32_t chunks,const uint64_t *contributors,
                  struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
 /* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
-   1] - first[rank]; their count: mesh_program_steps_cut with no sizes and no page (its cuts on any element). */
-uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mesh_operand,struct mesh_step *steps);
-/* The same over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one
+   1] - first[rank], over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one
    a segment in segment order: a reduce-scatter's and an all-gather's segment s is node s's, node s's of its
    contributors where it has them): segment s the segments[s] elements after the segments before it, the sizes as many
    as the program's segments (the most segment a part names, plus one) and summing to the operand's elements, a size 0
@@ -235,26 +227,12 @@ uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int
 /* Each step's receive before it (by round, then the steps' order) of any bytes, -1 where none: a step's first event
    waits until that receive is consumed, and so, by induction, every receive before it.  0, or ENOMEM. */
 int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before);
-/* A compiled program's advisories for an operand (design/transport.md), its steps cut as libnccl-mesh cuts them (its
-   own cuts on `page` bytes; a reduce-scatter's and an all-gather's segments NCCL's, the operand's elements over the
-   nodes, the first ones one element longer): warnings only, each a line "check: ..." handed to warn(arg, line), the
-   check one of projection (each pair's SENDs against its receives, and both ends' entries on each list), priorities
-   (each rank's steps by round, a round's SENDs first; a SEND and its receive in one round), alignment (a SEND's or a
-   COPY's piece that does not start on a page: such a call fails as a value), causality (the events of every list,
-   publications and consumptions in list order, a consumption after its publication, a step's first event after the
-   consumption of the receive before it, and a combine into what an earlier SEND of the same rank on the same channel
-   reads after that SEND's publication; a cycle among them is a deadlock) and hazard (a receive that writes what a SEND of the
-   same rank reads before the NIC is done reading it, or a SEND not ordered after a receive of what it reads).  It
-   refuses nothing and changes nothing; the count of warnings, UINT32_MAX where its room could not be had.  It is
-   mesh_group_advise of a group of the one call. */
-uint32_t mesh_program_advise(const struct mesh_program *,struct mesh_operand,uint64_t page,void (*warn)(void *,const char *),void *arg);
 /* design/transport.md, a group's calls on one communicator, as libnccl-mesh issues them between ncclGroupStart and
    ncclGroupEnd: call i of kind MESH_GROUP_*, its steps at rank r steps[r][0 .. count[r]) (a point-to-point call's at its
    own rank alone, one SEND or COPY; a row of none where count[r] is 0), every rank's collectives and counted
-   all-to-alls in one call order; `polls` its GPU waits' bound (nccl.h ncclMeshStream polls, one a group), `bound` the
-   most loads a wait may make (nccl.h NCCL_MESH_POLLS; 0: not read, a host group), and `page` the bytes an entry starts
-   on (0: not read).  mesh_group_lay: the entries rank `rank`'s calls take on its list toward `peer` (send 1: its send
-   list; 0: its landing list) from `at`, each collective's in call order (mesh_lay), then each counted all-to-all's
+   all-to-alls in one call order, and `page` the bytes an entry starts on (0: not read).  mesh_group_lay: the entries
+   rank `rank`'s calls take on its list toward `peer` (send 1: its send list; 0: its landing list) from `at`, each
+   collective's in call order (mesh_lay), then each counted all-to-all's
    (COUNTED and HOSTED), then its point-to-point calls in call order; each placement its call and mesh_lay's place (a
    point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at the rank; the end.
    So separate send and receive calls pair as NCCL's do: a rank's j-th point-to-point SEND to a peer is the peer's j-th
@@ -267,7 +245,7 @@ enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_POINT, MESH_GROUP_H
    per-peer sends and receives do, so no event of it waits on another channel's.  0, or ENOMEM. */
 int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count,int32_t *before);
 struct mesh_group_call { uint32_t kind,padding; const uint32_t *count; const struct mesh_step *const *steps; };
-struct mesh_group { uint32_t nodes,calls,polls,bound; const struct mesh_group_call *call; uint64_t page; };
+struct mesh_group { uint32_t nodes,calls; const struct mesh_group_call *call; uint64_t page; };
 struct mesh_group_place { uint32_t call,padding; struct mesh_place place; };
 uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
                         struct mesh_group_place *made,uint32_t *placed);
@@ -280,30 +258,16 @@ uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,in
    then, after every counts receive, its rows (buffer 3).  Their count, at most 4 (nodes - 1). */
 uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,int hosted,struct mesh_operand element,
                             struct mesh_operand counts,struct mesh_step *steps);
-/* A group's advisories: mesh_program_advise's checks over its calls laid together (projection of both ends' entries on
-   each list and of each call's steps, the point-to-point calls' together; causality over every call's steps on the
-   shared lists; each call's priorities, alignment and hazards), and bound (GPU waits of polls 0 or past `bound`: a wait
-   whose landing never comes holding its queue past the platform's deadline, design/transport.md).  Returns as
-   mesh_program_advise. */
-uint32_t mesh_group_advise(const struct mesh_group *,void (*warn)(void *,const char *),void *arg);
-/* The planner's rules' version: the trees, routes, compiles and lists above, and libnccl-mesh's table of programs made
-   of them (nccl-mesh.c comm_routes: the communicator's configured forms, nccl.h ncclMeshCommForms, then the caller's
-   programs, or every collective along the caller's paths or the shortest-path trees, uncut).  7: the single-phase
-   all-reduce's node that sends its operand to one node only and forwards nothing sends it from the operand itself (the
-   two-node direct exchange: no scratch).  8: a step is one entry of its holding's send list or landing list
-   (mesh_group_lay, each list in its own order), the program's own cuts on pages (mesh_program_steps_cut); no wire, no
-   positions, no fillers. */
-#define MESH_PLAN_VERSION 8u
 
 /* design/transport.md: what a node's record carries of its health to every bridge: `booted`, the wall
    clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes
    the kernel can give without pressure, the measure jetsam keeps: kern.memorystatus_level percent of hw.memsize). */
 struct mesh_health { uint64_t booted,available; };
-/* A node's record as its bridge last sent it: its bridge's node and host name, its bridge's region (bytes its clients may hold), the node's
+/* A node's record as its bridge last sent it: its bridge's node, its bridge's region (bytes its clients may hold), the node's
    memory (hw.memsize) and model (hw.model, NUL-terminated, MESH_MODEL_BYTES with its NUL; mesh.h struct mesh_record),
    and its health. */
 #define MESH_MODEL_BYTES 32
-struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; uint64_t region,memory; char model[MESH_MODEL_BYTES];
+struct mesh_node_health { uint32_t node; uint64_t region,memory; char model[MESH_MODEL_BYTES];
                           struct mesh_health health; };
 /* Every node's record the bridge holds (mesh_map's nodes, this node's own among them): their count (at most `capacity`
    written), or -errno where the bridge is unreachable. */
