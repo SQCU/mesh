@@ -247,6 +247,12 @@ __attribute__((visibility("hidden"))) void nccl_mesh_truncdiv(int t, void *dst, 
 struct redop { int used; ncclDataType_t type; unsigned char value[8]; uint32_t unit; };
 /* a compiled collective the communicator runs for the calls it fits (ncclMeshProgram), its own copy */
 struct entry { uint64_t below; struct mesh_program program; };
+/* a set of the region's streams, a bit each of MESH_STREAMS (mesh.h), by an index of them: an attach's holds (a
+   communicator's `held`), a report's nodes reached (`fresh`); words of 32 bits, so a report's at 32 streams is the one
+   word it was when the set was a uint32_t */
+struct streams { uint32_t bit[(MESH_STREAMS + 31) / 32]; };
+static void streams_add(struct streams *s, uint32_t k) { s->bit[k / 32] |= UINT32_C(1) << k % 32; }
+static int streams_have(const struct streams *s, uint32_t k) { return s->bit[k / 32] >> k % 32 & 1; }
 
 /* a channel (design/transport.md section 14): toward rank `peer` on node `node`, of class `large` (mesh-plan.h
    mesh_wire_large), on that class of the stream toward that node its process holds (mesh-call.h mesh_stream_view: its
@@ -312,7 +318,7 @@ struct ncclComm {
   size_t *scratch_bytes;
   uint32_t scratches, scratch_used, spents;
   struct attach *attach;
-  uint32_t held;
+  struct streams held;
   struct channel *channels;
   _Atomic uint64_t *words;
   void *violation;
@@ -725,11 +731,11 @@ static void comm_let_go(struct ncclComm *comm) {
   comm->binding = 0;
   for (uint32_t k = 0; k < MESH_STREAMS; k++) {
     struct hold *h = comm->attach->holds + k;
-    if (!(comm->held >> k & 1) || !h->users || --h->users) continue;
+    if (!streams_have(&comm->held, k) || !h->users || --h->users) continue;
     if (mesh_stream_held(&comm->attach->context, h->stream, h->wire)) mesh_stream_give(&comm->attach->context, h->stream);
     *h = (struct hold){0};
   }
-  comm->held = 0;
+  comm->held = (struct streams){{0}};
 }
 /* a communicator's holds let go (comm_let_go) and its hold of its attach let go */
 static void comm_leave(struct ncclComm *comm) {
@@ -751,7 +757,9 @@ static void comm_leave(struct ncclComm *comm) {
    for each) */
 struct report {
   int32_t rank, status;
-  uint32_t node, count, fresh, frees;
+  uint32_t node, count;
+  struct streams fresh;
+  uint32_t frees;
   struct mesh_reach reach[MESH_STREAMS];
   uint64_t start[MESH_STREAMS][2], free_wire[MESH_STREAMS];
   uint32_t free_node[MESH_STREAMS];
@@ -1079,7 +1087,7 @@ static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, con
 /* comm's hold of its stream toward node `node`, NULL where it holds none */
 static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node) {
   for (uint32_t k = 0; k < MESH_STREAMS; k++)
-    if ((comm->held >> k & 1) && comm->attach->holds[k].node == node) return comm->attach->holds + k;
+    if (streams_have(&comm->held, k) && comm->attach->holds[k].node == node) return comm->attach->holds + k;
   return NULL;
 }
 /* design/transport.md section 14: a stream toward each member's node this rank is joined to (joined) held for comm, the
@@ -1118,10 +1126,10 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     }
     if (status) break;
     const uint32_t index = (uint32_t)(h - a->holds);
-    h->users++; comm->held |= UINT32_C(1) << index; comm->binding = 1;
+    h->users++; streams_add(&comm->held, index); comm->binding = 1;
     for (uint32_t c = 0; !status && c < 2; c++) status = mesh_stream_view(&a->context, stream, !c, &h->view[c]);
     mine->start[k][0] = h->laid[0]; mine->start[k][1] = h->laid[1];
-    mine->fresh |= UINT32_C(1) << k;
+    streams_add(&mine->fresh, k);
   }
   pthread_mutex_unlock(&attach_lock);
   return status;
@@ -1165,7 +1173,7 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
     pthread_mutex_unlock(&attach_lock);
     if (!h) { status = EPROTO; break; }
     const uint32_t j = reach_of(reports + q, node), k = reach_of(reports + me, reports[q].node);
-    if ((reports[me].fresh >> k & 1) || (reports[q].fresh >> j & 1))
+    if (streams_have(&reports[me].fresh, k) || streams_have(&reports[q].fresh, j))
       for (uint32_t c = 0; c < 2; c++) h->taken[c] = reports[q].start[j][c];
     comm->toward[q] = (int)comm->count;
     for (int large = 1; !status && large >= 0; large--) {
@@ -1677,8 +1685,8 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
                      "rows past sendrows, a pair's past min(sendrows, capacity), or a rank's received rows past capacity); its rows past them "
                      "were not moved and its arrived word is 2");
   struct attach *a = comm->attach;
-  for (uint32_t k = 0; comm->held && k < MESH_STREAMS; k++)
-    if ((comm->held >> k & 1) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire))
+  for (uint32_t k = 0; k < MESH_STREAMS; k++)
+    if (streams_have(&comm->held, k) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire))
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost and paired again: communicator %s's stream there is no "
                        "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)",
                        a->holds[k].node, comm->name);
@@ -3756,7 +3764,7 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
   const int n = comm->nranks;
   const uint32_t split = comm->splits++;
   struct row { int64_t color, key; struct report report; } mine = {color, key, {.rank = comm->rank}}, *every = calloc((size_t)n, sizeof *every);
-  struct binding { int32_t status; uint32_t fresh; uint64_t start[MESH_STREAMS][2]; } bound = {0, 0, {{0}}}, *binds = calloc((size_t)n, sizeof *binds);
+  struct binding { int32_t status; struct streams fresh; uint64_t start[MESH_STREAMS][2]; } bound = {0, {{0}}, {{0}}}, *binds = calloc((size_t)n, sizeof *binds);
   int *ranks = calloc((size_t)n, sizeof *ranks), count = 0;
   struct report *reports = calloc((size_t)n, sizeof *reports);
   *newcomm = NULL;
