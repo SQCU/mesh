@@ -269,16 +269,17 @@ receives straight into the landing pages; the library never learns a unit, frame
     ticket on the last one's stream, their channels interleaved as tracks (a stream that asks issue gets that ticket);
     on the host path each runs on a thread of its own.
     Every one is launched whatever another's result; the first failure is returned.
-  - **Fused crossings.** A group whose steps that cross are one SEND and one landing in place, toward one peer, each of a
-    whole buffer (`ncclMeshFused`'s two records), runs both steps in the caller's own kernels. That is `ncclSend` and `ncclRecv` in
-    one group (an all-reduce's or a reduce's form: the caller combines what lands with its own part), either alone, an
-    in-place broadcast, or an in-place all-gather. On a stream whose `fused` is set, the call writes the steps' argument
-    records and returns their bindings (`ncclMeshFused`); the call dispatches neither step. It completes at once,
-    issued or not, the groups in flight before it completed first so that it completes alone on its channel, and one
-    that crosses no link returns its records all 0. Past two ranks the rule is the same: a chain's end fuses, its
-    forwarding middle does not (`ncclMeshFusableRooted` answers 0 there), and a fused group whose steps lie toward two
-    peers fails as a value before anything is presented. An all-reduce's or reduce's fused form is the caller's send
-    and receive toward one peer, which sums two ranks' parts alone.
+  - **Fused crossings.** A group whose steps that cross are at most one SEND and one landing in place toward each peer,
+    each of a whole buffer (`ncclMeshFused`'s records, a publication and a landing a peer), runs its steps in the
+    caller's own kernels. That is `ncclSend` and `ncclRecv` toward each peer in one group (an all-reduce's or a
+    reduce's one-shot form on n ranks: each rank sends its part to every peer and receives every peer's into a landing
+    buffer of its own, and the caller sums what lands with its own part), any of them alone, an in-place broadcast, or
+    an in-place all-gather. On a stream whose `fused` is set, the call writes the steps' argument records into the
+    caller's lists and returns their bindings (`ncclMeshFused`: room given, counts written); it dispatches no step. It
+    completes at once, issued or not, the groups in flight before it completed first, each of its channels in the
+    stream's order. `ncclMeshFusableRooted` gives the counts: an all-reduce's n - 1 of each, a reduce's root n - 1
+    landings and every other rank one publication, a broadcast's and an all-gather's this rank's moves where the
+    communicator's program moves whole operands (a forwarding rank, a chain's middle, does not fuse).
     - The caller's kernel writes its send buffer, and its last threadgroup to arrive calls `mesh_step_release`: one
       fence and one store of `ready`.
     - The kernel after it calls `mesh_step_await` (the landing, and its own SEND done) and reads its landing buffer with

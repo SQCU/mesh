@@ -227,11 +227,13 @@ struct mesh_trees;
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
 typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
-/* A fused crossing's two steps, run by the caller's kernels (ncclMeshFusableRooted, below): each one's six bindings' GPU
-   addresses, in the library's binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel
-   takes them through its argument table, a classic one as one record of its bytes (ncclMeshMetalSteps'
-   mesh_step_binding, the six in this order). */
-typedef struct { uint64_t publish[6], land[6]; } ncclMeshFused;
+/* A fused crossing's steps, run by the caller's kernels (ncclMeshFusableRooted, below): a publication toward each peer
+   it sends to and a landing from each peer it receives from, each one's six bindings' GPU addresses, in the library's
+   binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel takes them through its
+   argument table, a classic one as one record of its bytes (ncclMeshMetalSteps' mesh_step_binding, the six in this
+   order).  The caller gives `publish` and `land` room for `publishes` and `lands` records (ncclMeshFusableRooted's
+   counts); the group writes its records in its peers' order (its channels') and sets the two counts to those written. */
+typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
   void *commandEncoder;
@@ -998,20 +1000,21 @@ uint64_t ncclMeshRetired(void);
    residencySet, Metal path above; metal-microbench docs/kernels.md#collectives, Q5P's in-stream form and its one-sided
    fused crossings, and torch-mesh's torch_mesh/fused.py on torch's stream, the steps still this library's:
    docs/acceptance-20261014.md A39, A40).  A fused group, on a stream whose `fused` is set, is completed at once (issue
-   or not: issue->ticket 0), the groups in flight before it completed first, so it completes alone on its one channel,
-   and its steps that cross are at most one SEND and one landing in place (ncclMeshFused's two records), toward one
-   peer, each of a whole buffer, no combine: ncclSend(send, n, type,
-   peer) and ncclRecv(landing, n, type, peer) in one group (a two-rank all-reduce's or reduce's form: the library
-   cannot see when the caller's kernels read a landing area of its own, so the caller combines its own part with what
-   lands in its landing buffer), either alone, an in-place ncclBroadcast, or an in-place ncclAllGather (sendbuff
-   recvbuff + rank x sendcount, NCCL's), any type and any size, each buffer a lease's and starting on a page (Memory,
-   above).  The call presents its entries, encodes every other step of the
+   or not: issue->ticket 0), the groups in flight before it completed first, so it completes alone, each of its channels
+   in the stream's order, and its steps that cross are at most one SEND and one landing in place toward each peer
+   (ncclMeshFused's records), each of a whole buffer, no combine: ncclSend(send, n, type, q) and ncclRecv(landing_q, n,
+   type, q) toward each peer q in one group (an all-reduce's or a reduce's one-shot form: each rank sends its part to
+   every peer and receives every peer's; the library cannot see when the caller's kernels read a landing area of its
+   own, so the caller sums its own part with what lands in its landing buffers), any of them alone, an in-place
+   ncclBroadcast, or an in-place ncclAllGather (sendbuff recvbuff + rank x sendcount, NCCL's), any type and any size,
+   each buffer a lease's and starting on a page (Memory, above).  The call presents its entries, encodes every other step of the
    group as ever (its gate store, where its landing has no publication of its own to wait on) and the fused steps in no
    dispatch: their records are written and their bindings returned in *fused (each six GPU addresses, ncclMeshFused's
-   order; all 0 where the group has no such step, a group that crosses no link among them).  The publication: the caller's kernel that writes the operand (d +
-   record.dst: its send buffer) calls mesh_step_enter, writes it, and from its last threadgroup to arrive (the one that
-   knows every other threadgroup's stores are done: the caller's own count of arrivals) calls mesh_step_release on a,
-   one system fence and one store of the holding's `ready`; it is encoded after the call returns.  The landing: the
+   order; none where the group has no such step, a group that crosses no link among them).  A publication: the caller's
+   kernel that writes the operand (d + record.dst: its send buffer) calls mesh_step_enter on each publication's
+   bindings, writes it, and from its last threadgroup to arrive (the one that knows every other threadgroup's stores are
+   done: the caller's own count of arrivals) calls mesh_step_release on each publication's a, one system fence and one
+   store of that holding's `ready`; it is encoded after the call returns.  The landing: the
    kernel after it calls mesh_step_enter and mesh_step_await on a (every threadgroup may: each its own bounded wait for
    the holding's `landed` past the landing, and its `sent` past the group's send, so that once it returns the send
    buffer may be written again), then reads the landed bytes from d + record.dst (its landing buffer) with
@@ -1024,15 +1027,11 @@ uint64_t ncclMeshRetired(void);
    its landing buffer may be the one the previous crossing's landing kernel read.
    *publishes and *lands are this rank's fused steps where a fused group of `kind` rooted at `root` (an all-reduce's and
    an all-gather's root 0) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount) runs on comm
-   (two ranks or more; one rank, or no elements, crosses nothing and has no fused step): an all-reduce's form both (the
-   caller's send and receive), a reduce's root lands and its peer publishes (the same calls, one way), a broadcast's
-   root publishes and its peer lands, an all-gather both, where the communicator's program moves the broadcast's or the
-   all-gather's whole operand in one entry each way (a configured form that cuts it does not fuse); both 0 where it does
-   not fuse.  `op` is not read: no fused step combines.  Past two ranks the answer is the same rule: a rank whose
-   program's moves are one SEND and one receive toward one peer (a chain's end) fuses, one that forwards (a chain's
-   middle) or sends to two does not; an all-reduce's and a reduce's answer is the caller's ncclSend and ncclRecv toward
-   one peer, which sum two ranks' parts alone.  A fused group whose steps lie toward two peers fails as a value before
-   anything is presented. */
+   of n ranks (one rank, or no elements, crosses nothing and has no fused step): an all-reduce's one-shot form n - 1 of
+   each (the caller's send to and receive from every peer), a reduce's root n - 1 landings and every other rank one
+   publication (the same calls, toward the root), a broadcast's and an all-gather's the SENDs and landings of this
+   rank's moves in the communicator's program, where it moves each whole operand in one entry each way (a configured
+   form that cuts it does not fuse: both 0).  `op` is not read: no fused step combines. */
 typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2, ncclMeshFuseAllGather = 3 } ncclMeshFuseKind;
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int* publishes, int* lands);

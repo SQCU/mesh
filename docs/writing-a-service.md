@@ -136,12 +136,12 @@ reads that at its start and ends at once, so queued steps never spin again. The 
 (`_stream.polls`), which holds a GPU at most the platform's 5 seconds. It is not a setting.
 
 The kernel does three things, and it runs the step's crossing itself (torch-mesh's `fused`: rdma/nccl.h
-`ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for the peer's part of z
-to land, adds its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
+`ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for every peer's part of
+z to land, adds them to its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
 workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the rank's part
 of z from y and its rows of B, and publish it. Each worker writes its slice of the part straight into the step's send
-tensor, and the last worker to finish releases it: one fence and one store of the holding's `ready`, after which the
-bridge sends the tensor's own pages. Nothing is copied. Within a block, no kernel of the library's runs between two
+tensor, and the last worker to finish releases it to every peer: one fence and one store of each holding's `ready`,
+after which the bridge sends the tensor's own pages down each link. Nothing is copied. Within a block, no kernel of the library's runs between two
 steps. The wait and the release are the library's own steps (`ncclMeshMetalPrelude`), which the kernel calls. Each wait
 is bounded. A step's publication follows torch-mesh's one
 commit rule, the same for every caller (torch-mesh README, Performance). While the GPU still holds enough of the
@@ -176,9 +176,12 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
 
 ## The crossing
 
-A crossing is a send and a landing (torch-mesh's `fused.all_reduce(send, landing, polls)`): the step's part of z goes
-from the rank's send tensor, and the peer's lands in its landing tensor, which the next step's kernel reads and adds to
-its own part. The bridge sends from the send tensor's pages and posts its receives into the landing tensor's pages, so
+A crossing is one send to each peer and one landing from each (torch-mesh's `fused.all_reduce(send, landings,
+polls)`): the step's part of z goes from the rank's send tensor to each of the n - 1 other ranks, and each peer's part
+lands in its own slot of the rank's landing tensor; the next step's kernel reads the n - 1 slots and adds them to its
+own part. This is the one-shot all-reduce (each rank reads every peer's whole part and sums locally: one crossing a step,
+(n - 1) parts each way, over n - 1 links at once). It is the form for a part this small; the two-shot form
+(reduce-scatter, then all-gather: two crossings, each 1/n of a part) is the form for large parts. The bridge sends from the send tensor's pages and posts its receives into the landing tensor's pages, so
 both are region tensors (`torch_mesh.empty`) that start on a page: the bridge cuts a crossing into whole pages and the
 last page's frames, alike at both ends, and a range across a registration's extent could not be posted (design/
 transport.md section 14). The service lays its ring of sums on pages (`chain.paged`: each slot whole pages, its rows

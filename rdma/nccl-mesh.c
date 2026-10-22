@@ -2615,9 +2615,10 @@ static int publishable(struct ncclComm *comm, uint32_t h, uint64_t at) {
   return m && ready(m->c->bound, m->step);
 }
 
-/* the fused crossing of the group being encoded (nccl.h ncclMeshFusableRooted): its records' bindings, and whether its
-   publication and its landing were written in place of their dispatches; under group_lock, for one launch_metal */
-static struct { ncclMeshFused *out; int published, landed; } fusing;
+/* the fused crossing of the group being encoded (nccl.h ncclMeshFusableRooted): its records' lists, the room the
+   caller gave each (`room`: publications, landings), and the publications and landings written in place of their
+   dispatches; under group_lock, for one launch_metal */
+static struct { ncclMeshFused *out; uint32_t room[2], published, landed; } fusing;
 
 /* channel h's send entries [published, upto) published, their steps' bytes written by the stream's work before:
    one release storing the holding's `ready` past the last (one system fence, nccl-mesh-kernels.h mesh_step_release),
@@ -2631,8 +2632,11 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
   const struct metal_release release = {ch->buffer, ch->ready, m->end, ch->sent, m->end};
   ncclResult_t result;
   if (g->fused) {
-    result = gpu(metal_send_deferred(program, m->data.buffer, m->data.offset, &release, fusing.out->publish), "a fused publication's record");
-    fusing.published = !result;
+    if (fusing.published >= fusing.room[0])
+      return fail(ncclInvalidUsage, "a fused crossing's publications past the %u its ncclMeshFused has room for (ncclMeshFusableRooted)", fusing.room[0]);
+    result = gpu(metal_send_deferred(program, m->data.buffer, m->data.offset, &release, fusing.out->publish[fusing.published]),
+                 "a fused publication's record");
+    fusing.published += !result;
   } else result = gpu(metal_publish(program, &release), "a publication");
   if (!result) { ch->published = upto; *published = 1; }
   return result;
@@ -2675,8 +2679,10 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
                                     m->bytes / SIZE[m->c->type]), "a first combine");
     } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, kcount(m->c, m->bytes), &wait), "a landing");
   } else if (!result && g->fused) {
-    result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, &wait, fusing.out->land), "a fused landing's record");
-    fusing.landed = !result;
+    if (fusing.landed >= fusing.room[1])
+      return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshFusableRooted)", fusing.room[1]);
+    result = gpu(metal_land_deferred(program, m->data.buffer, m->data.offset, &wait, fusing.out->land[fusing.landed]), "a fused landing's record");
+    fusing.landed += !result;
   } else if (!result) result = gpu(metal_spin(program, &wait), "a wait");
   if (result) return result;
   if (!g->fused && sent > ch->sent_waited) ch->sent_waited = sent;
@@ -2752,6 +2758,15 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
 static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
   const uint32_t lone = one_track(through);
   if (lone != METAL_NONE) return complete_track(program, through, lone, published);
+  /* a fused group (the groups before it already complete: launch_metal) is records its caller's kernels run, no
+     dispatch: each of its channels completed in the stream's order, one after another */
+  if (through->fused) {
+    ncclResult_t result = ncclSuccess;
+    for (uint32_t h = 0; h < through->comm->count && !result; h++)
+      if (through->end[h][0] > through->start[h][0] || through->end[h][1] > through->start[h][1])
+        result = complete_track(program, through, h, published);
+    return result;
+  }
   size_t comms = 0, room = 0;
   struct ncclComm **comm = NULL;
   uint32_t *base = NULL, tracks = 0;
@@ -3093,31 +3108,34 @@ static ncclResult_t losses_through(uint64_t ticket) {
 }
 
 /* whether a group is a fused crossing's (nccl.h ncclMeshFused): its steps that cross at most one SEND and at most
-   one COPY in all (the two records ncclMeshFused holds: one publication, one landing), both toward one peer (one
-   channel, whose stream order the caller's kernels keep: complete_track; steps on two channels would be tracks' items,
-   which no caller's kernel runs), each the whole of an
+   one COPY toward each peer (a publication and a landing record each; each peer's channel completed in the stream's
+   order, whose order the caller's kernels keep: complete_track), each the whole of an
    ncclSend's, an ncclRecv's, an in-place ncclBroadcast's or an in-place ncclAllGather's (sendbuff recvbuff + rank x
    sendcount, NCCL's: the buffer the caller's kernel writes is the one sent), no combine (the caller's kernel combines:
    an all-reduce or a reduce is the caller's ncclSend and ncclRecv in one group), no scratch */
 static int fusable(const struct call *list, size_t n) {
-  uint32_t sends = 0, copies = 0, peer = UINT32_MAX;
-  for (size_t i = 0; i < n; i++) {
+  const int ranks = list[0].comm->nranks;
+  uint8_t *seen = calloc((size_t)ranks, 1);
+  if (!seen) return 0;
+  int whole = 1;
+  for (size_t i = 0; i < n && whole; i++) {
     const struct call *c = list + i;
     size_t length;
     const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, c->comm->rank, &length) : 0;
     if (!crosses(c)) continue;
     if (!p2p(c) && !((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) &&
                      same(c->send_at, (struct where){c->recv_at.buffer, c->recv_at.offset + before * SIZE[c->type]}) && c->bound->buffers == 1))
-      return 0;
-    for (uint32_t k = 0; k < c->bound->count; k++) {
-      const uint32_t op = c->bound->steps[k].op;
-      if (!piece_bytes(c->bound->steps + k)) continue;
-      if (op == MESH_STEP_REDUCE || (peer != UINT32_MAX && c->bound->steps[k].peer != peer)) return 0;
-      if (op == MESH_STEP_SEND ? ++sends > 1 : ++copies > 1) return 0;
-      peer = c->bound->steps[k].peer;
+      whole = 0;
+    for (uint32_t k = 0; k < c->bound->count && whole; k++) {
+      const struct mesh_step *step = c->bound->steps + k;
+      if (!piece_bytes(step)) continue;
+      const uint8_t bit = step->op == MESH_STEP_SEND ? 1 : 2;
+      if (step->op == MESH_STEP_REDUCE || step->peer >= (uint32_t)ranks || seen[step->peer] & bit) whole = 0;
+      else seen[step->peer] |= bit;
     }
   }
-  return 1;
+  free(seen);
+  return whole;
 }
 
 /* one group on the stream's command buffer (or, the Metal 4 form, its Metal 4 encoder: nccl-mesh-metal.h metal_begin4),
@@ -3169,8 +3187,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result) result = operands_check(list, n);
   if (!result && list[0].fused && remote && !fusable(list, n))
     result = fail(ncclInvalidUsage, "a fused crossing is ncclSend and ncclRecv in one group (the caller's kernel combining what lands with its own "
-                                    "part: an all-reduce's or a reduce's form), an in-place ncclBroadcast or an in-place ncclAllGather, the whole "
-                                    "operand one SEND and one landing (ncclMeshFused's two records; ncclMeshFusableRooted)");
+                                    "part: an all-reduce's or a reduce's form), an in-place ncclBroadcast or an in-place ncclAllGather, at most one "
+                                    "SEND and one landing of a whole buffer toward each peer (ncclMeshFused's records; ncclMeshFusableRooted)");
   if (result) { pthread_mutex_unlock(&group_lock); calls_free(list, n); return result; }
   if (finished) metal_collect(finished);
   void *const violation = remote ? comm->violation : NULL;
@@ -3265,8 +3283,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   }
   if (!result && gate) result = gpu(metal_publish(program, &(struct metal_release){comm->gate, 0, comm->gates, 0, 0}), "the group's gate");
   if (!result && g) {
-    int lands = 0, publishes = 0;
-    for (uint32_t h = 0; h < comm->count; h++) { publishes |= g->end[h][0] > g->start[h][0]; lands |= g->end[h][1] > g->start[h][1]; }
+    uint32_t lands = 0, publishes = 0;
+    for (uint32_t h = 0; h < comm->count; h++) {
+      publishes += (uint32_t)(g->end[h][0] - g->start[h][0]);
+      lands += (uint32_t)(g->end[h][1] - g->start[h][1]);
+    }
     /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
        library encodes no wait of it; the groups in flight before it are completed first, so it completes alone on its
        one channel's track (complete_track: the caller's kernels keep that stream's order) */
@@ -3275,11 +3296,15 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       result = complete(program, before, &published);
       if (!result) result = retire(program);
     }
-    if (g->fused) { fusing.out = list[0].fused; fusing.published = fusing.landed = 0; }
+    if (g->fused) {
+      fusing.out = list[0].fused; fusing.room[0] = fusing.out->publishes; fusing.room[1] = fusing.out->lands;
+      fusing.published = fusing.landed = 0;
+    }
     if (!result) result = walk(program, issuing ? g : NULL, issuing ? NULL : g, &published);
     if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))
-      result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publication and landing of its whole operand "
+      result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publications and landings of its whole operands "
                                       "(ncclMeshFusableRooted)");
+    if (g->fused) { fusing.out->publishes = fusing.published; fusing.out->lands = fusing.landed; }
     fusing.out = NULL;
     metal_gate(program, violation);
     for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
@@ -3385,12 +3410,15 @@ ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint
   return ncclSuccess;
 }
 
-/* whether a rank's moves of a program are at most one SEND and one receive, toward one peer, each of every part of what
-   it moves: the whole operand in one piece each way, or (`gather`, an all-gather's) one segment's every part, its own
-   sent and another's received (a rank that forwards, a chain's middle, takes the unfused form) */
-static int whole_moves(const struct mesh_program *program, uint32_t rank, int gather) {
-  uint32_t sends = 0, receives = 0, peer = UINT32_MAX;
-  for (uint32_t i = program->first[rank]; i < program->first[rank + 1]; i++) {
+/* whether a rank's moves of a program are at most one SEND and one receive toward each peer, each of every part of what
+   it moves: the whole operand in one piece, or (`gather`, an all-gather's) one segment's every part, its own sent and
+   another's received (a rank that forwards, a chain's middle, sends what it received and takes the unfused form); its
+   SENDs and receives counted into *sends and *receives */
+static int whole_moves(const struct mesh_program *program, uint32_t rank, int gather, uint32_t ranks, uint32_t *sends, uint32_t *receives) {
+  uint8_t *seen = calloc(ranks, 1);
+  int whole = seen != NULL;
+  *sends = *receives = 0;
+  for (uint32_t i = program->first[rank]; i < program->first[rank + 1] && whole; i++) {
     const struct mesh_move *m = program->move + i;
     const uint32_t s = program->segment[m->part];
     uint32_t parts = 0, within = 0;
@@ -3400,12 +3428,12 @@ static int whole_moves(const struct mesh_program *program, uint32_t rank, int ga
       within += of && p >= m->part && p < m->part + m->parts;
     }
     const int send = m->op == MESH_STEP_SEND;
-    if (within != m->parts || m->parts != parts || (gather && send != (s == rank)) || (peer != UINT32_MAX && m->peer != peer) ||
-        (send ? sends++ : receives++))
-      return 0;
-    peer = m->peer;
+    const uint8_t bit = send ? 1 : 2;
+    if (within != m->parts || m->parts != parts || (gather && send != (s == rank)) || m->peer >= ranks || seen[m->peer] & bit) whole = 0;
+    else { seen[m->peer] |= bit; ++*(send ? sends : receives); }
   }
-  return 1;
+  free(seen);
+  return whole;
 }
 
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
@@ -3422,8 +3450,9 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
     return ncclSuccess;
   if (!has_root(what)) root = 0;
   const int rooted = comm->rank == root;
-  /* an all-reduce and a reduce are the caller's ncclSend and ncclRecv (each rank both; a reduce's root lands and its
-     peer publishes), whatever their size; a broadcast and an all-gather the communicator's program, which a configured
+  /* an all-reduce and a reduce are the caller's ncclSend and ncclRecv toward every peer (an all-reduce's one-shot form:
+     each rank both, n - 1 of each; a reduce's root lands n - 1 and every other rank publishes one), whatever their
+     size; a broadcast and an all-gather the communicator's program, which a configured
      form that cuts the operand (chunked) moves in several entries and so does not fuse: the answer is its table's
      (the caller's, or the structural one compiled on its map, here where no group compiled it yet), its operand an
      all-gather's every rank's piece */
@@ -3431,13 +3460,16 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
     pthread_mutex_lock(&group_lock);
     const size_t bytes = (what == MESH_ALLGATHER ? (size_t)comm->nranks : 1) * count * SIZE[type];
     const struct mesh_program *program = comm_compile(comm) ? NULL : program_of(comm, what, root, bytes);
-    const int whole = program && !program->scratch && whole_moves(program, (uint32_t)comm->rank, what == MESH_ALLGATHER);
+    uint32_t sends = 0, receives = 0;
+    const int whole = program && !program->scratch &&
+                      whole_moves(program, (uint32_t)comm->rank, what == MESH_ALLGATHER, (uint32_t)comm->nranks, &sends, &receives);
     pthread_mutex_unlock(&group_lock);
-    if (!whole) return ncclSuccess;
+    if (whole) { *publishes = (int)sends; *lands = (int)receives; }
+    return ncclSuccess;
   }
-  const int both = what == MESH_ALLREDUCE || what == MESH_ALLGATHER;
-  *publishes = both || (what == MESH_BROADCAST) == rooted;
-  *lands = both || (what == MESH_REDUCE) == rooted;
+  const int peers = comm->nranks - 1;
+  *publishes = what == MESH_ALLREDUCE ? peers : !rooted;
+  *lands = what == MESH_ALLREDUCE ? peers : rooted ? peers : 0;
   return ncclSuccess;
 }
 
@@ -3487,8 +3519,16 @@ ncclResult_t ncclGroupEnd(void) {
   const size_t n = call_count;
   calls = NULL; call_count = call_capacity = 0;
   if (!n) { free(list); return ncclSuccess; }
-  for (size_t i = 0; i < n; i++)
-    if (list[i].fused) *list[i].fused = (ncclMeshFused){{0}, {0}};
+  for (size_t i = 0; i < n; i++) {
+    ncclMeshFused *f = list[i].fused;
+    if (!f) continue;
+    if ((f->publishes && !f->publish) || (f->lands && !f->land)) {
+      calls_free(list, n);
+      return fail(ncclInvalidArgument, "an ncclMeshFused with room for records and no list to hold them");
+    }
+    if (f->publishes) memset(f->publish, 0, f->publishes * sizeof *f->publish);
+    if (f->lands) memset(f->land, 0, f->lands * sizeof *f->land);
+  }
   int several = 0;
   for (size_t i = 1; i < n; i++) several |= list[i].comm != list[0].comm;
   if (!several) return launch_one(list, n);

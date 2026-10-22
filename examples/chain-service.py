@@ -189,7 +189,7 @@ def main():
     steps, rows, inputs = operand(config, rank)
     block, deep, sums = ring(config, steps, rows)
     a, b, full = shares(config, rank, size)
-    step = chain.Step(a, b, rows, config['row_capacity'], chain.capability(config['capability']))
+    step = chain.Step(a, b, rows, config['row_capacity'], size - 1, chain.capability(config['capability']))
     del a, b
     E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
     P = torch_mesh.empty(sums, chain.paged(rows * width), dtype=torch.half)[:, :rows * width].unflatten(1, (rows, width))
@@ -211,7 +211,7 @@ def main():
     crossings(steps, block, P)
     torch.mps.synchronize()
     crossing = time.perf_counter() - began
-    moved = 2 * rows * width * torch.half.itemsize
+    moved = 2 * (size - 1) * rows * width * torch.half.itemsize
     summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, block=block,
                    input_ring=deep, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, step_microseconds=seconds / steps * 1e6,
