@@ -78,7 +78,9 @@ struct mesh_entry { uint64_t at,bytes,word,base; };
    byte not ready goes as a dud (all ones), as at the holding's end (its owner word let go to 0).  The two time rings
    (`posted_at`, `landed_at`, region offsets) of MESH_STREAM_TIMES entries of two words: entry e's, slot e mod
    MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last byte
-   landed; its first word 0 while its second is stored.  Nothing in it names a lane, a unit, a frame or a queue pair */
+   landed; its first word 0 while its second is stored.  `touching`, the bridge's: the owner word of a holding whose landing
+   pages still have receives posted into them (0 none), whose rows the bridge releases only once it no longer reads it.
+   Nothing in it names a lane, a unit, a frame or a queue pair */
 struct mesh_stream {
   _Alignas(64) _Atomic uint32_t peer;
   _Atomic uint32_t live;
@@ -88,7 +90,7 @@ struct mesh_stream {
   _Atomic uint64_t deadline,sends,lands,told;
   _Alignas(64) _Atomic uint64_t ready;
   _Alignas(64) _Atomic uint64_t sent;
-  _Atomic uint64_t landed,taken[2];
+  _Atomic uint64_t landed,taken[2],touching;
   _Alignas(64) _Atomic uint64_t start[MESH_STREAM_START];
   _Alignas(64) _Atomic uint64_t peer_start[MESH_STREAM_START];
 };

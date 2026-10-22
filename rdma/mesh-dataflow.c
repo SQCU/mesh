@@ -416,11 +416,21 @@ static void mesh_reclaim(struct hdr *m){
   }
 }
 
-/* design/algorithm-sources.md#programtensor */
-void mesh_retired_release(struct hdr *m){
+/* design/transport.md section 14: whether a stream's receives still land in pages of `owner` (struct mesh_stream
+   `touching`) */
+static int mesh_touched(struct hdr *m,uint64_t owner){
+  for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++)
+    if(atomic_load_explicit(&mesh_stream_at(m,s)->touching,memory_order_acquire)==owner)return 1;
+  return 0;
+}
+/* design/algorithm-sources.md#programtensor; design/transport.md section 14: a retired client's closed rows released,
+   but those of an owner whose pages a stream's receives still land in; their count */
+uint32_t mesh_retired_release(struct hdr *m){
+  uint32_t kept=0;
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
+    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && mesh_touched(m,owner)){kept++;continue;}
     if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
        atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
       atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
@@ -429,6 +439,7 @@ void mesh_retired_release(struct hdr *m){
     }
   }
   mesh_reclaim(m);
+  return kept;
 }
 
 /* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
