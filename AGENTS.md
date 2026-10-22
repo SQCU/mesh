@@ -208,7 +208,7 @@ specification". The complete instruction is preserved in
 Repository-owned tests and verification harnesses have been removed. Review the complete data and execution flow
 against the user instructions and explicit algebra.
 
-On 2026-10-14 the operator stopped all runtime tests of code (T9). The stop holds until each item of metal-microbench `docs/acceptance-20261014.md` is met in source. Its `docs/principles.md` section 5 has the quote.
+On 2026-10-14 the operator stopped all runtime tests of code (T9). The stop holds until each item of metal-microbench `docs/acceptance-20261014.md` is met in source. Its `docs/principles.md` section 5 has the quote. The checklist records all 20 items attained on 2026-10-14.
 
 ## Source workflow
 
