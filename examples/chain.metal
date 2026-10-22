@@ -113,7 +113,8 @@ template <uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uin
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
                        device half* out [[buffer(3)]], device half* X [[buffer(4)]], device half* Y [[buffer(5)]], device half* P [[buffer(6)]],
                        device atomic_uint* stamps [[buffer(7)]], device atomic_uint* err [[buffer(8)]],
-                       device atomic_uint* arrivals [[buffer(9)]], constant chain_words& words [[buffer(15)]],
+                       device atomic_uint* arrivals [[buffer(9)]], device const half* Pprev [[buffer(10)]],
+                       constant chain_words& words [[buffer(15)]],
                        uint tid [[thread_index_in_threadgroup]], uint sgid [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]], uint w [[threadgroup_position_in_grid]]) {
     static_assert(TILE == 8, "simdgroup matrices are 8 x 8");
@@ -133,7 +134,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     constant mesh_step_binding& l = words.land;
     if (!first) {
         mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
-        mesh_step_await(*l.p, l.a, l.s, l.v, tid);
+        mesh_step_await(*l.p, l.a, l.v, tid);
     } else if (w == 0) {
         mesh_arrival_reset(arrivals, 0, tid);
     }
@@ -141,8 +142,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
         uint i = (q / xw) * K + x0 + q % xw;
         float z = 0.0f;
         if (!first) {
-            device const half* own = (device const half*)(l.d + l.p->dst);
-            z = tanh(float(half(float(own[i]) + float(mesh_step_read<half>(*l.p, l.s, i)))));
+            z = tanh(float(half(float(Pprev[i]) + float(mesh_step_read<half>(l.d + l.p->dst, i)))));
             if (words.drains) out[i] = half(z);
         }
         X[i] = half(float(E[i]) + z);
@@ -159,10 +159,6 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     constant mesh_step_binding& b = words.publish;
     mesh_step_enter(*b.p, b.v, b.progress, w == 0 && tid == 0);
     threadgroup_barrier(mem_flags::mem_device);
-    for (uint q = tid; q < R * xw; q += THREADS) {
-        uint i = (q / xw) * K + x0 + q % xw;
-        mesh_step_store(*b.p, b.d, i, P[i]);
-    }
     if (mesh_last_arrival<true>(arrivals, 0, G, tid, &last)) {
         mesh_step_release(*b.p, b.a, tid);
         mesh_arrival_reset(arrivals, 0, tid);

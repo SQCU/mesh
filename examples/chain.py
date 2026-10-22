@@ -1,13 +1,17 @@
 import json
 from pathlib import Path
 
+import resource
+
 import torch
+import torch_mesh
 from torch_mesh import _stream, argmax, fused
 from torch_mesh.streamed import instance, node
 
 # docs/writing-a-service.md#the-step-kernel
 SOURCE = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_name('chain.metal').read_text()
 ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PATIENCE')
+PAGE = resource.getpagesize()
 _PIPELINES = {}
 
 
@@ -28,6 +32,12 @@ def _width():
         probe = _stream.pipeline('kernel void width_probe(device uint* x [[buffer(0)]]) { x[0] = 0; }', 'width_probe')
         _PIPELINES['width'] = _stream.pipeline_facts(probe)[1]
     return _PIPELINES['width']
+
+
+# docs/writing-a-service.md#the-crossing
+def paged(count, dtype=torch.half):
+    size = torch.tensor([], dtype=dtype).element_size()
+    return -(-count * size // PAGE) * PAGE // size
 
 
 # docs/writing-a-service.md#the-step-kernel
@@ -106,6 +116,8 @@ class Step:
         self.K, self.S, self.held, self.capacity = K, S, held, capacity
         self.X = torch.empty(capacity, K, dtype=torch.half, device='mps')
         self.Y = torch.empty(capacity, S, dtype=torch.half, device='mps')
+        self.landing = torch_mesh.empty(paged(capacity * K), dtype=torch.half)
+        self.sent = None
         self.forms = {}
         self.plan(rows)
         self.args = self.forms[rows][1]
@@ -123,8 +135,9 @@ class Step:
 
     # docs/writing-a-service.md#the-step-kernel
     def __call__(self, e, p, out, previous):
-        crossing = fused.all_reduce(p, _stream.polls)
+        crossing = fused.all_reduce(p, self.landing[:p.numel()].view_as(p), _stream.polls)
         self._encode(e, p, out, previous, crossing, 0)
+        self.sent = p
         self.phase += 2
         return crossing
 
@@ -135,7 +148,8 @@ class Step:
     # docs/writing-a-service.md#the-step-kernel
     def _encode(self, e, p, out, previous, crossing, last):
         handle, args, words = self.forms[e.shape[0]]
-        fused.encode(handle, [self.At, self.Bt, e, out, self.X, self.Y, p, self.stamps, self.err, self.arrivals],
+        fused.encode(handle, [self.At, self.Bt, e, out, self.X, self.Y, p, self.stamps, self.err, self.arrivals,
+                              self.sent if self.sent is not None else self.X],
                      [int(previous is None), self.phase, *words, last, int(out is not None), 0], 15,
                      args['G'], 1, args['THREADS'], land=previous, publish=crossing)
 

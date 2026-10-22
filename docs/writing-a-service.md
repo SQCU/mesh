@@ -139,10 +139,11 @@ The kernel does three things, and it runs the step's crossing itself (torch-mesh
 `ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for the peer's part of z
 to land, adds its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
 workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the rank's part
-of z from y and its rows of B, and publish it. Each worker stores its slice of the part into the crossing's slot. The
-last worker to finish releases the slot, so the bridge sends it. Within a block, no kernel of the library's runs between
-two steps. The wait and the release are the library's own steps (`ncclMeshMetalSteps`), which the kernel calls. Each
-wait is bounded, and the release is one fence and the slot's ready words. A step's publication follows torch-mesh's one
+of z from y and its rows of B, and publish it. Each worker writes its slice of the part straight into the step's send
+tensor, and the last worker to finish releases it: one fence and one store of the holding's `ready`, after which the
+bridge sends the tensor's own pages. Nothing is copied. Within a block, no kernel of the library's runs between two
+steps. The wait and the release are the library's own steps (`ncclMeshMetalPrelude`), which the kernel calls. Each wait
+is bounded. A step's publication follows torch-mesh's one
 commit rule, the same for every caller (torch-mesh README, Performance). While the GPU still holds enough of the
 stream's buffers, it joins the open command buffer instead of paying for a commit of its own. The next step's
 publication, or the host's next wait, commits that buffer.
@@ -172,6 +173,18 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
   The ks partials of an item are summed as a tree in threadgroup memory: log2(ks) rounds, one barrier each, a batch of
   RB row tiles' partials a round, RB as many as the threadgroup memory holds. The split is a word the host passes,
   worked out once for each row count.
+
+## The crossing
+
+A crossing is a send and a landing (torch-mesh's `fused.all_reduce(send, landing, polls)`): the step's part of z goes
+from the rank's send tensor, and the peer's lands in its landing tensor, which the next step's kernel reads and adds to
+its own part. The bridge sends from the send tensor's pages and posts its receives into the landing tensor's pages, so
+both are region tensors (`torch_mesh.empty`) that start on a page: the bridge cuts a crossing into whole pages and the
+last page's frames, alike at both ends, and a range across a registration's extent could not be posted (design/
+transport.md section 14). The service lays its ring of sums on pages (`chain.paged`: each slot whole pages, its rows
+first), and its input ring's blocks start on pages. One landing tensor serves every step: the library posts a step's
+receive only once the rank's own publication of that step has stored `ready`, after the kernel that read the landing
+before. A crossing of any size fuses; the 61,440-byte limit is gone with the bridge's rings.
 
 ## The capability
 

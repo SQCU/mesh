@@ -1,5 +1,6 @@
 import collections
 import json
+import math
 import sys
 import time
 
@@ -82,7 +83,8 @@ def ring(config, steps, rows):
     slots = config['ring_bytes'] // slot
     if slots >= 2 * steps:
         return steps, steps, steps
-    block = slots // (RING_BLOCKS + 1)
+    whole = chain.PAGE // math.gcd(slot, chain.PAGE)
+    block = slots // (RING_BLOCKS + 1) // whole * whole
     if block < 1:
         raise ValueError(f'ring_bytes {config["ring_bytes"]} holds {slots} slots of {slot} bytes; the input ring of '
                          f'{RING_BLOCKS} blocks and the sum ring of one take {RING_BLOCKS + 1} slots at least, '
@@ -190,7 +192,7 @@ def main():
     step = chain.Step(a, b, rows, config['row_capacity'], chain.capability(config['capability']))
     del a, b
     E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
-    P = torch_mesh.empty(sums, rows, width, dtype=torch.half)
+    P = torch_mesh.empty(sums, chain.paged(rows * width), dtype=torch.half)[:, :rows * width].unflatten(1, (rows, width))
     O = torch.empty(block, rows, width, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width)) if rank == 0 else None
     torch.mps.synchronize()
