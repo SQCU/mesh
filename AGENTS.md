@@ -4,6 +4,22 @@ Read `THREAT-MODEL.md` first. This file is the operational rule that follows fro
 
 **Recovery is critical priority.** The transport, how it fails and how it recovers: `design/transport.md`.
 
+## Contiguous and non-contiguous tensors (final)
+
+<table><tr><td>
+
+> fi only one backend requires contiguity then the existence of other backends requires both contiguous and noncontiguous tensors to be supported. this is final.
+>
+> — the operator, 2026-10-22
+
+</td></tr></table>
+
+Every layer between a producer and its consumer (the collectives, the bridge, torch-mesh) takes contiguous and
+non-contiguous tensors alike: a tensor that crosses is a list of page runs on each side, scattered or gathered as its
+layout is. Contiguity is made only at the one consumer that requires it, in the page table, when it asks (design/
+SPECIFICATION.md, the operator 2026-09-14: "copy pages into a literal contiguous span and expose views to that
+contiguous view if an allocator or user says 'this one has to be contiguous'").
+
 ## The contract
 
 **Accessibility is required. Inaccessibility is contractually forbidden.**
