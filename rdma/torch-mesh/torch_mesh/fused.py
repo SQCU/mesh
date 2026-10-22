@@ -22,8 +22,11 @@ source is compiled after steps() and calls them on the bindings exchange returns
                                              place), any size and dtype fusing
   encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)
                                              _stream.encode's dispatch with `land`'s landing bindings and `publish`'s
-                                             publication bindings after the constants, `peers` of each; a dispatch that
-                                             publishes is a publication under the stream's one commit rule
+                                             publication bindings after the constants, `peers` of each, declaring the
+                                             buffers those bindings name (each landing's buffer, record and counts read,
+                                             each publication's record read and its operand and counts written) and no
+                                             other; a dispatch that publishes is a publication under the stream's one
+                                             commit rule
 
 The kernel's constant block at `at` is its own words padded to an even count, then the landings' mesh_step_bindings,
 then the publications' (all zero where encode is given none), each address two words, its low word first:
@@ -36,14 +39,18 @@ threadgroups write the part into the send tensor through mesh_step_write (system
 only once its command buffer has ended), then the last threadgroup to arrive (the kernel's own count of
 arrivals, after every other threadgroup's stores) calls mesh_step_release(*b.p, b.a, tid) for each: one system fence and
 one store of that holding's `ready`.  The landing kernel: mesh_step_enter, then mesh_step_await(*l.p, l.a, l.v, tid) for
-each landing l in every threadgroup that reads (each its own wait, bounded by polls: the landed bytes, and this rank's
-send done, so the send tensor may be written again once it returns), then element k of that peer's part is
-mesh_step_read<T>(l.d + l.p->dst, k), loaded system-coherent (the NIC wrote it).  The landing tensor may be the same
-every crossing: its receive is posted only once this rank's publication toward that peer has stored `ready`, after the
-kernel that read it before.  That holds because every channel of an all_reduce publishes; a channel that only lands (a
-reduce's root, a broadcast's receiver: nccl.h ncclMeshFused) is gated at the call, so there the kernel that reads the
-previous landing is encoded before the next call.  A kernel that writes the send tensor again with no landing kernel between calls
-mesh_step_sent(*b.p, b.a, b.v, tid) on the publication's bindings first.  polls bounds each wait in loads (0:
+each landing l in every threadgroup that reads (each its own wait for the landed bytes alone, bounded by polls), then
+element k of that peer's part is mesh_step_read<T>(l.d + l.p->dst, k), loaded system-coherent (the NIC wrote it).
+
+The transport writes landings as the plan presents them: the receive into a landing tensor is posted when the call
+presents it, so a peer's part may land there as soon as that peer publishes, before any earlier kernel of this rank
+that reads or writes those pages has run (the operator, 2026-10-22: "if source says to write continuously into ab
+uffer, the nic must write continuously into that buffer even if this means that dat aprocessing code can race or lose
+parts of a stream").  A program that names a landing tensor again guards it itself: rows for crossing t + 1 point at
+other pages until crossing t's are read (design/pages-and-functions.md, Freeing 7).  Likewise the NIC reads a send
+tensor's pages until its publication's `sent` passes them, and no landing wait covers that: a kernel that writes a send
+tensor again calls mesh_step_sent(*b.p, b.a, b.v, tid) first on the bindings of the publication that last sent from it
+(`sent` is a count, so a later publication's on the same channel covers it too).  polls bounds each wait in loads (0:
 NCCL_MESH_POLLS; _stream.polls is that bound, which holds a GPU at most the platform's 5 seconds: rdma/NCCL.md "Bounded
 waits").
 
@@ -59,6 +66,9 @@ from . import _stream
 STEPS = _stream.metal_prelude() + '\n'
 Crossing = namedtuple('Crossing', 'publish land')
 _NONE = (0,) * 6
+# the bindings a dispatch declares (_stream.encode reads, writes), by nccl.h ncclMeshFused's order (0 d, 2 the record,
+# 3 a): a landing's buffer, record and counts read; a publication's record read, its operand and counts written
+_DECLARED = {'land': ((0, 2, 3), ()), 'publish': ((2,), (0, 3))}
 
 
 def steps():
@@ -86,10 +96,13 @@ def encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, pu
     """_stream.encode of kernel `handle`, its constants followed by `land`'s `peers` landing bindings and `publish`'s
     `peers` publication bindings (module docstring); one that publishes is committed by the stream's rule for a
     publication."""
-    words = list(constants) + [0] * (len(constants) % 2)
+    words, reads, writes = list(constants) + [0] * (len(constants) % 2), [], []
     for crossing, bindings in ((land, 'land'), (publish, 'publish')):
         records = getattr(crossing, bindings) if crossing else ()
         words += [w for k in range(peers) for w in _words(records[k] if k < len(records) else _NONE)]
-    _stream.encode(handle, buffers, words, at, gx, gy, threads, bool(land or publish))
+        read, written = _DECLARED[bindings]
+        reads += [record[i] for record in records[:peers] for i in read]
+        writes += [record[i] for record in records[:peers] for i in written]
+    _stream.encode(handle, buffers, words, at, gx, gy, threads, reads, writes)
     if publish:
         _stream.fused_published()

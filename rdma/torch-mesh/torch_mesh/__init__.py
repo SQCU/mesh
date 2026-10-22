@@ -8,8 +8,8 @@ one commit rule (README, Performance).
 
 empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
 DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
-lies; records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the region (0:
-outside it).
+lies; records() is the region tensors' leases live now, address(t) where a tensor's bytes lie in the region (0:
+outside it), and cpu_view(t) a CPU tensor over a region tensor's own pages, which the host reads and writes in place.
 
 all_to_all_counted() is MPI_Alltoallv whose counts the GPU wrote (the torch operator torch_mesh::all_to_all_counted over
 libnccl-mesh's ncclMeshAlltoAllCounted): a mixture of experts' dispatch and combine with no host sync, counted() its
@@ -63,6 +63,16 @@ def address(tensor):
     """Where a tensor's bytes lie in the region (its first byte's address), 0 where they lie outside it."""
     from . import _stream
     return _stream.address(tensor)
+
+
+def cpu_view(tensor):
+    """A CPU tensor over the same pages as region tensor `tensor` (empty() made it, mps or cpu): its sizes, strides and
+    dtype, holding it for its life, so the host reads and writes its bytes where they lie and nothing is copied (the
+    region's pages are host memory, which the NIC reads and writes coherently with the CPU).  A CPU store and the GPU's
+    work on the same pages are the program's to order: a store before the commit of the command buffer that reads it.
+    RuntimeError where the tensor's bytes lie outside the region."""
+    from . import _stream
+    return _stream.cpu_view(tensor)
 
 
 class _Counted:

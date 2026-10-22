@@ -98,6 +98,11 @@ backend complexity out of linear algebra.
   - Right: `_Alignas(MESH_LINE) uint64_t sent;` then `uint64_t done;`
 - **S1-SEQCST.** A sequentially consistent atomic on the per-unit path: a store then a load, so the core waits for the
   store to be seen. Source: bridge audit, item 4.
+- **R1-USE.** A dispatch declares every allocation of a residency set (`useResource` over `allAllocations`). Its pass
+  is then ordered against every pass that names any of them, not only the buffers it reaches.
+  - Source: GPU audit 2026-10-22, item 12.
+  - Right: declare the buffers the dispatch's records name, each with its own use (torch_mesh/fused.py `_DECLARED`:
+    a landing's buffer, record and counts read; a publication's record read, its operand and counts written).
 
 ### Units, placement and planning
 - **U1-PAGE.** A unit's length is the whole page, not the plan's bytes.

@@ -56,6 +56,14 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   flight). Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
   it reads or writes region operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the region
   tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the region (0: outside it).
+- `torch_mesh.cpu_view(t)` is a CPU tensor over region tensor `t`'s own pages (MPS or CPU), with its sizes, strides and
+  dtype. It holds `t` for its life. The host reads and writes the bytes where they lie: no copy, no blit, no
+  synchronize.
+  - The region's pages are host memory, which the NIC reads and writes coherently with the CPU. So a rank that makes an
+    input on the host stores it straight into the pages a crossing sends from.
+  - A CPU store and the GPU's work on the same pages are the program's to order: a store comes before the commit of
+    the command buffer that reads it.
+  - A tensor outside the region raises (`torch_mesh.empty` makes one inside it).
   Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on region
   tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
   allocator's, and a collective that sends from one, or lands in one, across a link fails as a value

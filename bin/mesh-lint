@@ -135,6 +135,11 @@ def check_c(path, text):
             find(path, line_of(clean, m.start()), 'G1-GATE', 'a landing entry presented with a word: the transport would '
                  'hold its receives until a reader released the pages; a program guards the pages it names again in its '
                  'own source', 'operator 2026-10-22: "data procesisng code gets to write their own guards in their own source"')
+    for name, _, body, at in functions(clean):
+        if 'allAllocations' in body and 'useResource' in body:
+            find(path, line_of(clean, at + body.index('allAllocations')), 'R1-USE', f'{name}: a dispatch declares every '
+                 'allocation of a residency set, so its pass is ordered against every pass that names any of them: declare '
+                 'the buffers its records name', 'GPU audit 2026-10-22, item 12')
     for m in re.finditer(r'IBV_QPS_RESET|IBV_QPS_ERR|ibv_destroy_qp|\bdestroy_qp\b', clean):
         find(path, line_of(clean, m.start()), 'M3-QP', 'a queue pair moved to RESET or ERR, or destroyed, inside the '
              'running process', 'design/rubrics.md M3; operator 2026-10-22: the documented flush only, unused')

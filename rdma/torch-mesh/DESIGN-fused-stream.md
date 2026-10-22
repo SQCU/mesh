@@ -52,8 +52,9 @@ and a landing for each peer), and the kernel's encode. One more dispatch after t
 
 **Landing crossing t − 1, at the start of step t's prologue.** For each peer's landing in turn:
 1. Every thread of every worker calls `mesh_step_enter`, which stores the record's sequence in the ring's progress word
-   (one thread). Every thread calls `mesh_step_await`. In each worker, thread 0 polls the holding's `landed` word, and
-   its `sent` past this rank's send. Each poll is one `volatile coherent(system)` load after a fence, at most `polls`
+   (one thread). Every thread calls `mesh_step_await`. In each worker, thread 0 polls the holding's `landed` word
+   (since 2026-10-22 not `sent`: below).
+   Each poll is one `volatile coherent(system)` load after a fence, at most `polls`
    of them. Then the worker passes a barrier and one system-scope fence. Nothing reads a gate.
 2. Each worker's threads then read their own part from `p[t − 1]` and the worker's slice of each peer's part from that
    peer's landing tensor (`mesh_step_read<half>(l.d + l.p->dst, i)`). They add them in float32, own part first and the
@@ -70,10 +71,15 @@ and a landing for each peer), and the kernel's encode. One more dispatch after t
    system-scope fence (`mesh_publish`) and one store of that holding's `ready`.
 5. That worker resets the count. A run's first step resets it too, in worker 0's prologue, before any worker counts.
 
-No worker waits for another to publish. One landing tensor serves every step: the library posts a step's receives only
-once this rank's publication of that step has stored `ready`, after the kernel that read the landing before. The sum
-ring stays safe by the host's encode order: step t's kernel lands crossing t − 1, its wait covering `sent` past this
-rank's send, before it publishes crossing t.
+No worker waits for another to publish.
+
+Since 2026-10-22 the library gates no landing. A step's receives are posted as `fused.exchange` presents them, so the
+peer's part for crossing t may land while step t's kernel still reads crossing t − 1's from the same landing tensor.
+The operator: "if source says to write continuously into ab uffer, the nic must write continuously into that buffer
+even if this means that dat aprocessing code can race or lose parts of a stream". The program guards the pages it
+names again (design/pages-and-functions.md, Freeing: rows for NFE k+1 point at other pages until NFE k's are
+released). The landing wait no longer covers `sent` either: a kernel that writes a send tensor again first calls
+`mesh_step_sent` on the publication that last sent from it (torch_mesh/fused.py).
 
 **What moved in chain-service.py.** Step t − 1's output is written by step t's kernel. So a block's outputs are copied
 one step after the block ends, and the pace mark moves with that copy. The host still waits for the mark two blocks

@@ -25,6 +25,7 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <algorithm>
 #include <array>
 #include <vector>
 #include "nccl.h"
@@ -627,13 +628,44 @@ static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
 }
 
 static id<MTLResidencySet> fused_residency_;
-// A kernel that runs a fused crossing's steps (`fused`) reaches the library's counts, landing buffers and records by
-// address, through the residency set, which Metal does not hazard-track: its encoder declares every buffer of the set,
-// so its pass is ordered against the library's dispatches that name them (nccl-mesh-metal.h metal_uses).
+// The fused residency set's buffers by GPU address, read again when the set has grown (the library adds to it and
+// nothing removes a buffer from it: fused_residency).
+static std::map<uint64_t, id<MTLBuffer>> fused_buffers_;
+static NSUInteger fused_seen_ = 0;
+
+static id<MTLBuffer> fused_buffer(uint64_t address) {
+  if (!fused_residency_) return nil;
+  if (fused_residency_.allocationCount != fused_seen_) {
+    fused_buffers_.clear();
+    for (id<MTLAllocation> held in fused_residency_.allAllocations)
+      if ([(id)held conformsToProtocol:@protocol(MTLBuffer)]) fused_buffers_[((id<MTLBuffer>)held).gpuAddress] = (id<MTLBuffer>)held;
+    fused_seen_ = fused_residency_.allocationCount;
+  }
+  auto found = fused_buffers_.upper_bound(address);
+  if (found == fused_buffers_.begin()) return nil;
+  --found;
+  return address < found->first + found->second.length ? found->second : nil;
+}
+
+// A kernel that runs a fused crossing's steps reaches the library's buffers by address, through the residency set,
+// which makes them resident but declares no use of them.  Its encoder declares the buffers its records name at the
+// GPU addresses `reads` and `writes` (torch_mesh/fused.py encode: each landing's buffer, record and counts read, each
+// publication's record read and its operand and counts written), so its pass is ordered against the passes that name
+// those buffers (nccl-mesh-metal.h metal_uses), and against no other buffer of the set.
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
-                   int64_t at, int64_t gx, int64_t gy, int64_t threads, bool fused) {
+                   int64_t at, int64_t gx, int64_t gy, int64_t threads, const std::vector<uint64_t> &reads, const std::vector<uint64_t> &writes) {
   if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));
   id<MTLComputePipelineState> state = pipelines_[handle];
+  std::vector<std::pair<id<MTLBuffer>, MTLResourceUsage>> used;
+  for (int written = 0; written < 2; written++)
+    for (uint64_t address : written ? writes : reads) {
+      id<MTLBuffer> held = fused_buffer(address);
+      if (!held) throw std::runtime_error("encode: no buffer of the fused residency set holds address " + std::to_string(address));
+      const MTLResourceUsage usage = written ? MTLResourceUsageRead | MTLResourceUsageWrite : MTLResourceUsageRead;
+      auto same = std::find_if(used.begin(), used.end(), [&](const auto &u) { return u.first == held; });
+      if (same == used.end()) used.emplace_back(held, usage);
+      else same->second |= usage;
+    }
   std::vector<id<MTLBuffer>> bound(buffers.size(), nil);
   std::vector<NSUInteger> offsets(buffers.size(), 0);
   for (size_t i = 0; i < buffers.size(); i++)
@@ -651,9 +683,7 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
     for (size_t i = 0; i < bound.size(); i++)
       if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
     [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
-    if (fused && fused_residency_)
-      for (id<MTLAllocation> held in fused_residency_.allAllocations)
-        [encoder useResource:(id<MTLResource>)held usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    for (const auto &u : used) [encoder useResource:u.first usage:u.second];
     [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
   });
 }
@@ -807,6 +837,17 @@ static uint64_t address(const at::Tensor &t) {
   return (uint64_t)(uintptr_t)at;
 }
 
+// A CPU tensor over the same pages as region tensor `t` (address: an MPS one's bytes where they lie in its lease, or a
+// CPU one's), with t's sizes, strides and dtype, holding t (so its lease) for its life: the host reads and writes the
+// bytes in place, nothing copied.  The region's pages are the host's memory, which the NIC reads and writes coherently
+// with the CPU; a CPU store and the GPU's work on the same pages are ordered by the program (a store before the commit
+// of a command buffer that reads it).
+static at::Tensor cpu_view(const at::Tensor &t) {
+  const uint64_t where = address(t);
+  TORCH_CHECK(where, "cpu_view: the tensor's bytes are not in the region (torch_mesh.empty makes a tensor that is)");
+  return at::from_blob((void *)(uintptr_t)where, t.sizes(), t.strides(), [held = t](void *) { (void)held; }, t.options().device(at::kCPU));
+}
+
 // The region tensors' leases live now: each its address and bytes.
 static std::vector<std::pair<uint64_t, uint64_t>> records() {
   std::lock_guard<std::mutex> guard(region_tensors_lock_);
@@ -942,7 +983,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline_facts", &pipeline_facts);
   module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
   module.def("encode", &encode, pybind11::arg("handle"), pybind11::arg("buffers"), pybind11::arg("constants"), pybind11::arg("at"),
-             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::arg("fused") = false);
+             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::arg("reads") = std::vector<uint64_t>{},
+             pybind11::arg("writes") = std::vector<uint64_t>{});
   module.def("timed", &timed);
   module.def("sequence", &sequence);
   module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
@@ -960,6 +1002,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("commit", &commit);
   module.def("region_empty", &region_empty);
   module.def("address", &address);
+  module.def("cpu_view", &cpu_view);
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_exchange", &fused_exchange);
