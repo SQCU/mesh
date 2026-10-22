@@ -27,10 +27,10 @@ no close):
 Node 521750041's bridge, built from the same source and MESH_VERSION (131) as node 1974797816's, logs every 5 s:
 
 ```
-link 2 (en3): its agent N spawned
+link 2 (en3): its child N spawned
 rdma_en3: region of 92341796864 bytes (86 extents) registered in 0.165 s
 link 2 (en3): paired with node 1974797816
-link 2 (en3): lanes toward node 1974797816 not made: No space left on device; paired again with the port's next agent
+link 2 (en3): lanes toward node 1974797816 not made: No space left on device; paired again with the port's next child
 link 2 (en3): node 1974797816 lost: code 28
 ```
 
@@ -38,7 +38,7 @@ and node 1974797816's end logs `node 521750041 lost: code 52` (ENETRESET, the co
 cause: `rdma/mesh-bridge.h` fixed `MESH_LINK_LANES` at 10, `rdma/mesh-verbs.h` `device_up` set a device's usable
 queue pairs to `max_qp - 1` (2 here), `pair_up` returned ENOSPC when `pairs + count > max_pairs`, and `link_make`
 asked `pair_up(p, MESH_LINK_LANES)`. The check comes before any verbs object is made, so each 5 s cycle registers the
-whole region (86 one-GiB extents), pairs the control socket, fails the make, and recycles the port's agent.
+whole region (86 one-GiB extents), pairs the control socket, fails the make, and recycles the port's child.
 
 ## 2. What transport.md assumed
 
@@ -48,7 +48,7 @@ whole region (86 one-GiB extents), pairs the control socket, fails the make, and
 - Section 14, the stream: "Each link carries `MESH_LINK_STREAMS` (4) streams ... each on a lane pair of its own, since
   a queue pair carries one ring".
 - Section 14, "A process a port": "makes and connects the link's ten queue pairs" and "A device holds ten usable queue
-  pairs and a link takes all ten, so a returning peer's lanes cannot exist beside the old ones, and the old agent's
+  pairs and a link takes all ten, so a returning peer's lanes cannot exist beside the old ones, and the old child's
   exit is their one release".
 - README.md, from TN3205: "10 UC queue pairs per device"; `rdma/mesh-verbs.h`: "max_qp: 11 (10 usable)";
   `rdma/loopverbs.c`: `LOOP_DEVICE_QPS 10`.
@@ -64,7 +64,7 @@ Before this change, in `rdma/`:
 |---|---|---|
 | `mesh-bridge.h` `MESH_LINK_LANES` 10, `MESH_LANE_KEEPALIVE` 0, `MESH_LANE_FIRST` 2, `MESH_LANE_PAIRS` 4, `MESH_STREAM_PAIRS` 1, the static asserts, `lane_class`, `lane_stream`, `lane_stripe` | the lane layout: keepalive lane 0, lane 1 reserved and unused (the stripes lane deleted at 125, kept so indices did not move), stream s's large lane 2 + 2s and small lane 3 + 2s | unchanged; the layout is the index space, and a link makes the subset its plan names (`link_plan`) |
 | `mesh-bridge.h` `struct message` `pair[MESH_LINK_LANES][2]` and `count` | the wire's LINK: every lane's queue pair number and first PSN; `count` was always 10 | the same size; `count` is the plan's lanes, 0 in `pair` for a lane the plan leaves out; a HELLO's `count` carries the budget (section 5) |
-| `mesh-bridge.h` `struct link` `peer`, `qpn`, `gate`, `lane` arrays; `struct agent_message` `qpn`, `peer` | per-lane state, sized by the layout | unchanged in size; `plan` added to the link, `lanes` to the agent message, `budget` to the port |
+| `mesh-bridge.h` `struct link` `peer`, `qpn`, `gate`, `lane` arrays; `struct child_message` `qpn`, `peer` | per-lane state, sized by the layout | unchanged in size; `plan` added to the link, `lanes` to the child message, `budget` to the port |
 | `mesh-observe.h` `MESH_LINK_STREAMS` 4, `MESH_PORTS` = `MESH_STREAMS` / 4 = 8 | each port owns 4 stream slots of the region | unchanged: the slots stay, those beyond a link's plan are never live (no region layout change, `MESH_LAYOUT` 133 kept) |
 | `mesh-verbs.h` `device_up` `max_pairs = max_qp - 1` | a device's usable queue pairs | unchanged; it is now what the port states (its budget) |
 | `mesh-verbs.h` `pair_up(provider, count)` | made queue pairs 0..count-1, ENOSPC past `max_pairs` | `pair_up(provider, plan)`: one queue pair per lane of the plan, queue q lane q, the same ENOSPC check against the plan's count; the completion queues' poll entry kept in the provider |
@@ -72,7 +72,7 @@ Before this change, in `rdma/`:
 | `mesh-link.c` `link_connect` | RTR, RTS, `qpn`, gate of all ten; the keepalive's receives; `lane_reset` of lanes 2..9; four streams' `wire` | the plan's lanes alone; `qpn` UINT32_MAX for a lane left out (no queue pair has that number, `link_lane`); the keepalive's receives only where the plan has its lane; `wire` of the plan's streams |
 | `mesh-link.c` `link_send`, `link_receive` | polled through `queues[0].poll`, lane 0's | through the provider's `poll` (a plan without lane 0 has no `queues[0]` pair) |
 | `mesh-link.c` `link_tell`, `link_heard` | LINK `count` 10, checked to be 10 | the plan's lanes; a mismatch logged with its cause, then EPROTO as before |
-| `mesh-link.c` `agent_jobs` | `qpn` of all ten in AGENT_MADE; `served` = all ten bits | the plan's; `served` = the plan |
+| `mesh-link.c` `child_jobs` | `qpn` of all ten in CHILD_MADE; `served` = all ten bits | the plan's; `served` = the plan |
 | `mesh-link.c` `lanes_room` | request rooms for all eight data lanes | the plan's data lanes |
 | `mesh-link.c` `streams_open` | opened all four streams of the port | the plan's streams; the others stay not live and not free, so `mesh_streams_free` never offers them |
 | `mesh-link.c` `stream_turn`, `link_held`, `streams_cancel`, `streams_let_go`, `stream_rings`; `mesh-records.c` `busy_tell` | iterate the port's four stream slots | unchanged: a stream that is not live returns at once, and its rings stay leased |
@@ -103,9 +103,9 @@ shows nothing but its rdma_en3 cycle throughout. Node 1980260065 (this checkout'
 - The IORegistry on 27 holds, under every `AppleThunderboltRDMAInterface` (each listed twice in a tree walk, commit
   dabb136f), from boot and before any process opens the device: one `AppleThunderboltRDMAProtectionDomain`, one
   `AppleThunderboltRDMAKernelCQ` and one `AppleThunderboltRDMAKernelQP`, none with properties. There is one
-  `IORDMACM` in the whole tree. Each open context is an `IORDMAFamilyUC` user client (the bridge's agents held one
+  `IORDMACM` in the whole tree. Each open context is an `IORDMAFamilyUC` user client (the bridge's children held one
   on every port), and a user PD is another `AppleThunderboltRDMAProtectionDomain` under the interface (rdma_en3 shows
-  the agent's).
+  the child's).
 - On 26 (node 1980260065, passive) there are no kernel PD, CQ or QP objects, no IORDMACM, and each user queue pair is
   an `AppleThunderboltRDMAQueuePair` under its device's interface (ten on the device whose link is up).
 
@@ -124,7 +124,7 @@ affected: `device_up` reads the port active before it allocates.
 
 **The operator's questions, as far as the evidence goes.**
 - *Is max_qp per context or per device?* Not measured on 27. On 26 each user queue pair is an IORegistry object under
-  its device's interface, and transport.md section 14's history (an old agent's queue pairs blocking a new agent's
+  its device's interface, and transport.md section 14's history (an old child's queue pairs blocking a new child's
   make) points to a per-device count. On 27 the reported figures are identical in every context of every device.
 - *Does the driver's kernel QP change what a user QP is?* The kernel QP is a separate object, made at boot, one per
   device, beside a kernel PD and a kernel CQ. 27 also ships the connection manager (librdmacm, IORDMACM). The
@@ -132,7 +132,7 @@ affected: `device_up` reads the port active before it allocates.
   QP1. If it counts against max_qp as 26's unexplained "11, 10 usable" did, a 27 device holds 2 user queue pairs.
   Nothing queried suggests a user QP is otherwise different: the same 4095 work requests, one SGE, 16 MiB messages, no
   SRQ, no atomics, no memory windows.
-- *Do max_cq 6 and max_pd 6 constrain the design?* Not for one context a device: a port's agent takes one PD and two
+- *Do max_cq 6 and max_pd 6 constrain the design?* Not for one context a device: a port's child takes one PD and two
   CQs, and the kernel's one PD and one CQ leave at least five of each. They would bound a design that spreads one
   link over several contexts of a device (section 8, P3): at most two more contexts' CQ pairs.
 - *Can a QP on 27 carry what several did on 26?* No. On this transport a queue pair carries one ring, because a SEND
@@ -147,15 +147,15 @@ affected: `device_up` reads the port active before it allocates.
 
 ## 5. The change: each end states its budget, the link makes what both hold
 
-- **Budget.** A port's agent reads its device's usable queue pairs at its opening, `max_qp - 1` as before
-  (`mesh_device.max_pairs`), and tells the parent in AGENT_OPENED (`lanes`). The parent keeps it as the port's
+- **Budget.** A port's child reads its device's usable queue pairs at its opening, `max_qp - 1` as before
+  (`mesh_device.max_pairs`), and tells the parent in CHILD_OPENED (`lanes`). The parent keeps it as the port's
   `budget`.
 - **Stated in the HELLO.** The HELLO a bridge sends on a link's control socket carries `count` = 1 + its budget.
   `hello_budget(count)` reads it back, and a `count` of 0 is a bridge before budgets, which makes all
   `MESH_LINK_LANES`. The multicast discovery hellos are unchanged.
 - **The plan.** At the greeting each end computes `plan = link_plan(min(own budget, peer's budget))`, a bit a lane of
-  the existing layout. Both ends compute it from the same two numbers. It goes to the agent with AGENT_MAKE (`lanes`).
-  The agent makes one queue pair per lane of the plan (`pair_up`), tells them in AGENT_MADE, connects only those, and
+  the existing layout. Both ends compute it from the same two numbers. It goes to the child with CHILD_MAKE (`lanes`).
+  The child makes one queue pair per lane of the plan (`pair_up`), tells them in CHILD_MADE, connects only those, and
   serves `served = plan`. The LINK names the plan's lanes in `count` and is checked against this end's plan.
 
 | budget (the fewer of the two ends') | plan | lanes | streams | keepalive lane |
@@ -258,10 +258,10 @@ same line at default budgets on this branch behaves identically (section 8, P6).
 - **P2. Make until refused.** The device, not the stated budget, has the last word. Each end could make its plan's
   queue pairs in the order 2, 3, 0, 4, 5, 6, 7, 8, 9, 1, so that the first c made always contain `link_plan(c)`.
   It would stop at the first refusal and name in LINK how many it made, and both ends would connect
-  `link_plan(min(made, peer's made))`. Queue pairs made past that stay in INIT until the agent's exit. Two 131-
+  `link_plan(min(made, peer's made))`. Queue pairs made past that stay in INIT until the child's exit. Two 131-
   compatible ends both make ten, so the wire stays compatible. This removes the reliance on `max_qp - 1` for any
   hardware.
-- **P3. More streams on few queue pairs.** If P1 finds a per-context count, an agent can open more than one context on
+- **P3. More streams on few queue pairs.** If P1 finds a per-context count, a child can open more than one context on
   its device and spread a link's lanes over them, each context with its own two CQs (max_cq 6, one the kernel's,
   bounds it to two contexts). The progress threads would poll both pairs of CQs. Otherwise, more streams on two queue
   pairs would need a staging ring and a copy (section 4), which this design has refused so far.

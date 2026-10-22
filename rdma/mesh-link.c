@@ -6,8 +6,7 @@
 #include <sysexits.h>
 #include <mach/mach_time.h>
 
-/* mesh-verbs.h: the region's name, unlinked at exit (down), and the stop flag every loop reads */
-const char *shm;
+/* mesh-verbs.h: the stop flag every loop reads */
 _Atomic sig_atomic_t stop;
 
 struct hdr *M;
@@ -125,15 +124,6 @@ static void port_halt(struct port *port,_Atomic uint32_t *which){
    pass between frames on its keepalive lane while its port's stream is held; 0 where it states none (the idle beat
    alone: link_alive) */
 uint64_t keepalive_ns;
-#ifdef MESH_LOOP_FABRIC
-/* design/transport.md (mesh 800fe6bc^ mesh-flow-loop, on the resident bridge): a loop
-   bridge's configuration's `loop`: its region's name, its node, the loopverbs fabric it shares with the host's other
-   loop bridges (loopverbs.c loop_fabric), and its ports, each a loopverbs device and a cable: the loopback port this
-   end listens on for it and the peer end's, the lower of the two dialing the higher (in place of a link's hello) */
-void loop_fabric(const char *name);
-struct loop_port { char device[32]; uint16_t listen,peer; int fd; };
-static struct { char region[32],fabric[64]; uint32_t node,ports; struct loop_port port[MESH_PORTS]; } loop_config;
-#endif
 
 /* design/transport.md: a port's link pages: lane MESH_LANE_KEEPALIVE's block (its frames' source and sink), then the
    spare page the data lanes' spare receives land in (link_spare),
@@ -705,7 +695,7 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
    while one is made or connected: guard_raise), its verbs calls made on hearing the peer, from the peer's numbers as the
    job was started (`numbers`, its LID and GID among them: the event loop takes the peer's LINK and hello meanwhile), and
    none once its pairing is lost (B10: read as the guard stands and between its steps; a guard not held within
-   MESH_PLATFORM_NS halts the port, its pairing with it, port_wait), each in the port's agent and once in its life
+   MESH_PLATFORM_NS halts the port, its pairing with it, port_wait), each in the port's child and once in its life
    (design/transport.md section 14, "A process a port"): the lanes made (LINK_JOB_MAKE: the port's own address read
    again, then a UC queue pair in INIT for each lane of the link's plan, d6dceac's verbs_up, each lane's share of the
    completion queues the plan's lanes alone dividing them: design/HETEROGENEOUS-LINKS.md; EALREADY for a make asked
@@ -713,7 +703,7 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
    gate set, the keepalive's first receives posted where the plan has its lane, every data lane's requests made over
    its stripe of the stream's rings, and the port's progress threads started).  No queue pair is moved to another
    state, destroyed or forgotten after it: the in-place RESET of 127 panicked the M5 in AppleThunderboltRDMA on its
-   first run (2026-10-19, design/RDMA-KERNEL-RECOVERY.md), and the kernel releases every object at the agent's exit, its
+   first run (2026-10-19, design/RDMA-KERNEL-RECOVERY.md), and the kernel releases every object at the child's exit, its
    one end */
 struct link_numbers { uint32_t peer[MESH_LINK_LANES][2],pairing; uint16_t lid; uint8_t gid[16]; };
 static int link_lapsed(const struct link *l,const struct link_numbers *numbers){
@@ -769,7 +759,7 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
   for(uint32_t s=0;s<plan_streams(plan) && !error;s++)l->wire[s]=stream_wire(port,numbers,s);
   return error;
 }
-/* design/transport.md section 14, "A process a port": the link's streams opened as its lanes connect, by the agent
+/* design/transport.md section 14, "A process a port": the link's streams opened as its lanes connect, by the child
    before any lane is served, every one new: a holding of a lost pairing ended with it (its owner word 0: its holder's
    give, a compare-and-swap from its own client, then matches nothing, and its communicator reads its holding gone,
    mesh-call.h mesh_stream_held), its ready and landed words 0, its next units 0, its peer node, its share of the link's
@@ -778,7 +768,7 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
    of a lost pairing: no holder can, by letting go or by never letting go, keep a stream of the link from its next
    pairing (design/rubrics.md M4).  Nothing of
    the lost pairing is sent on it: that pairing's groups ended at their next look at a landed word ~0 (streams_cancel),
-   this connect comes MESH_PLATFORM_NS and an agent's exit after the loss, and its communicators start no group after it.
+   this connect comes MESH_PLATFORM_NS and a child's exit after the loss, and its communicators start no group after it.
    The streams opened are those the link's plan has lanes for (design/HETEROGENEOUS-LINKS.md): the rest stay as the
    loss, the adoption or the region's making left them, not live and not free, so no client takes one.  Each stream's
    share of the bandwidth is the link's over MESH_LINK_STREAMS however many are live, so the map's figure for a link
@@ -826,7 +816,7 @@ static void link_job(struct port *port,int job){
   });
 }
 /* a LINK telling the peer every lane of this end's pairing, the lanes of its plan (`count` theirs): each one's queue pair
-   number and first sequence number, as its agent told them (AGENT_MADE), 0 for a lane the plan leaves out */
+   number and first sequence number, as its child told them (CHILD_MADE), 0 for a lane the plan leaves out */
 static void link_tell(struct port *port){
   const struct link *l=&port->link;
   struct message said={.kind=LINK,.count=plan_lanes(l->plan)};
@@ -860,7 +850,7 @@ static uint32_t lists_pages(void){
 }
 /* design/transport.md section 14: the port's streams' lists and time rings, leased from the arena by the parent as the
    port first pairs (recorded in the region, so a bridge adopting the region takes the same pages: section 2) and held
-   for the region's life, every agent and bridge of the port's, told in the region (mesh.h struct mesh_stream `lists`,
+   for the region's life, every child and bridge of the port's, told in the region (mesh.h struct mesh_stream `lists`,
    `posted_at`, `landed_at`).  0, or ENOMEM where the region holds no room for them */
 static int stream_lists(struct port *port){
   struct link *l=&port->link;
@@ -880,7 +870,7 @@ static int stream_lists(struct port *port){
   l->lists=page;
   return 0;
 }
-/* design/transport.md section 14, "A process a port": the agent's walks of each stream's two lists, made at its first
+/* design/transport.md section 14, "A process a port": the child's walks of each stream's two lists, made at its first
    connect; 0, or ENOMEM */
 static int lanes_room(struct port *port){
   struct link *l=&port->link;
@@ -918,11 +908,11 @@ void streams_let_go(void){
    lane; connected: up, every lane served, the stream live); a job that failed loses the link (port_lost; a port whose
    make's registration was refused down until its link next comes on); while it is up, a lane a progress thread found
    failed (`broken`) loses it; then, while no port's job is out past MESH_PLATFORM_NS (B12) and once the port's last
-   quiet window has ended (B9), the lanes made once the port is paired (`lanes`: its agent asked for them), and connected
-   once both ends' are made, each by the port's agent and once in its life: a link lost once its lanes were asked for
-   pairs again with the port's next agent (design/transport.md section 14, "A process a port": port_lost, agent_turn,
-   agent_reaped) */
-static void agent_job(struct port *port,int job);
+   quiet window has ended (B9), the lanes made once the port is paired (`lanes`: its child asked for them), and connected
+   once both ends' are made, each by the port's child and once in its life: a link lost once its lanes were asked for
+   pairs again with the port's next child (design/transport.md section 14, "A process a port": port_lost, child_turn,
+   child_reaped) */
+static void child_job(struct port *port,int job);
 static void link_turn(struct port *port){
   struct link *l=&port->link;
   if(l->job){
@@ -933,7 +923,7 @@ static void link_turn(struct port *port){
     else if(result){
       const int refused=job==LINK_JOB_MAKE && l->refused;
       say("link %u (%s): lanes toward node %u not %s: %s; %s\n",port->index,port->name,port->peer,job==LINK_JOB_MAKE?"made":"connected",
-          strerror(result),refused?"the port is down until its link next comes on":"paired again with the port's next agent");
+          strerror(result),refused?"the port is down until its link next comes on":"paired again with the port's next child");
       if(refused){port->open=0;port->refused=l->refused;}
       port_lost(port,result);
       return;
@@ -968,9 +958,9 @@ static void link_turn(struct port *port){
       return;
     }
     l->lanes=1;
-    agent_job(port,LINK_JOB_MAKE);
+    child_job(port,LINK_JOB_MAKE);
   }
-  else if(l->state==LINK_MADE && l->heard){l->state=LINK_CONNECTING;agent_job(port,LINK_JOB_CONNECT);}
+  else if(l->state==LINK_MADE && l->heard){l->state=LINK_CONNECTING;child_job(port,LINK_JOB_CONNECT);}
 }
 /* design/transport.md B12 (22891630^ mesh-flight.h's pending-operation age, per port: its dispatch's
    `job_at` in place of flight_begin's stamp, its `done` in place of flight_end's): a port whose open's or link's job
@@ -1019,7 +1009,7 @@ static void ports_stalled(void){
    them, which its hello's may predate: the connect's address, and an end of each stream's identity alike at both ends,
    stream_wire), heard once, before this end's connect, its lanes this end's plan's (both ends plan from the same two
    budgets: design/HETEROGENEOUS-LINKS.md); any other is a protocol error, the link lost (a port whose
-   agent was asked for its lanes greets no peer once its link is lost until its next agent opens it:
+   child was asked for its lanes greets no peer once its link is lost until its next child opens it:
    design/transport.md section 14, "A process a port") */
 static void link_heard(struct port *port,const struct message *heard){
   struct link *l=&port->link;
@@ -1072,19 +1062,19 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
 }
 
 /* design/transport.md section 14, #loss: a link lost has its stream's landed words ~0 (streams_cancel: every client
-   waiting on one reads the loss); its lanes are served no more before its control socket closes (its agent told,
-   AGENT_HALT: no post on them once the peer can read the loss); no verbs call is made (design/RDMA-KERNEL-RECOVERY.md
-   "October 18").  A link whose agent was asked for its lanes (`lanes`) waits for that agent's end (`recycle`: agent_turn
+   waiting on one reads the loss); its lanes are served no more before its control socket closes (its child told,
+   CHILD_HALT: no post on them once the peer can read the loss); no verbs call is made (design/RDMA-KERNEL-RECOVERY.md
+   "October 18").  A link whose child was asked for its lanes (`lanes`) waits for that child's end (`recycle`: child_turn
    asks it once the port's quiet window has ended), whose exit the kernel's release of the lanes is, the port closed and
-   greeting no peer meanwhile, and pairs again with the port's next agent ("A process a port"); a port lost before its
+   greeting no peer meanwhile, and pairs again with the port's next child ("A process a port"); a port lost before its
    lanes were asked for and still open says hello at once (port_hello: the records go on).  Its quiet window begins (B9:
    no port job on it, and no exit, for MESH_PLATFORM_NS, the operator's bound on the termination a loss may follow) */
-static void agent_send(struct port *port,struct agent_message said);
+static void child_send(struct port *port,struct child_message said);
 void port_lost(struct port *port,int64_t code){
   quiet_until(&port->quiet_at,now+MESH_PLATFORM_NS);
   link_lost(port);
-  if(port->agent){
-    agent_send(port,(struct agent_message){.kind=AGENT_HALT,.pairing=atomic_load(&port->link.pairing)});
+  if(port->child){
+    child_send(port,(struct child_message){.kind=CHILD_HALT,.pairing=atomic_load(&port->link.pairing)});
     if(port->link.lanes && !stop){port->recycle=1;port->open=0;}
   }
   if(port->control>=0){close(port->control);port->control=-1;}
@@ -1125,23 +1115,23 @@ static struct port *port_at(uint32_t interface){
    job is out past MESH_PLATFORM_NS (design/transport.md B9, B12): the hellos' group joined on its
    interface, so the port hears them open or not (hello_heard, B16); its port read (none where the guard was not held
    within MESH_PLATFORM_NS: ETIMEDOUT, port_wait); a context that fails stays as it is, and the port with it, until its
-   agent ends (design/transport.md section 14: nothing made is forgotten or made again in a process).  The device is
-   its agent's: spawned here where the port has none (agent_spawn: not while its last agent's end is awaited, `recycle`,
-   nor before the hold an agent that ended unbidden set, `hold_to`), and asked to open it (AGENT_OPEN), its answer the
-   job's end (agent_heard) */
-static int agent_spawn(struct port *port);
+   child ends (design/transport.md section 14: nothing made is forgotten or made again in a process).  The device is
+   its child's: spawned here where the port has none (child_spawn: not while its last child's end is awaited, `recycle`,
+   nor before the hold a child that ended unbidden set, `hold_to`), and asked to open it (CHILD_OPEN), its answer the
+   job's end (child_heard) */
+static int child_spawn(struct port *port);
 static void port_open(struct port *port){
   if(port->job || port->stuck || !port->opening || port->control>=0 || now<port->quiet_at || port->recycle || now<port->hold_to ||
      atomic_load_explicit(&stalled,memory_order_relaxed))return;
-  if(!port->agent && agent_spawn(port))return;
+  if(!port->child && child_spawn(port))return;
   port->opening=0;
   port->interface=if_nametoindex(port->name);
   struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=port->interface};
   if(port->interface)setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
   port->job=1;port->job_at=now;atomic_store_explicit(&port->done,0,memory_order_relaxed);
-  agent_send(port,(struct agent_message){.kind=AGENT_OPEN});
+  child_send(port,(struct child_message){.kind=CHILD_OPEN});
 }
-/* the agent's open of its port's device, on its port's queue, guarded; its end told the agent's loop (agent_main) */
+/* the child's open of its port's device, on its port's queue, guarded; its end told the child's loop (child_main) */
 static void device_open(struct port *port){
   port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
@@ -1160,7 +1150,7 @@ static void device_open(struct port *port){
     wake();
   });
 }
-/* design/transport.md: a port's opening taken (its address and bandwidth as its agent told them, AGENT_OPENED): a
+/* design/transport.md: a port's opening taken (its address and bandwidth as its child told them, CHILD_OPENED): a
    device whose registration of the region it refused keeps
    the extents it took and opens again at its link's next coming on (device_up logged the extent and why); a device
    that failed otherwise, likewise, or at the next hello heard on it (hello_heard, design/transport.md B16);
@@ -1184,20 +1174,6 @@ static void port_opened(struct port *port){
 static void port_hello(struct port *port){
   if(!port->open || port->control>=0 || port->job || now<port->next)return;
   port->next=now+MESH_PAUSE_NS;
-#ifdef MESH_LOOP_FABRIC
-  /* design/transport.md: the cable's lower end dials the higher's listener on loopback, as a
-     link's lower node dials the higher's on the address it heard; the higher accepts (main, TAG_LOOP) */
-  for(uint32_t k=0;k<loop_config.ports;k++)if(!strcmp(loop_config.port[k].device,port->device.name) && loop_config.port[k].listen<loop_config.port[k].peer){
-    struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(loop_config.port[k].peer),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
-    port->control=socket(AF_INET6,SOCK_STREAM,0);
-    if(port->control<0 || fcntl(port->control,F_SETFL,O_NONBLOCK) || (connect(port->control,(struct sockaddr *)&to,sizeof to) && errno!=EINPROGRESS)){
-      port_lost(port,errno);return;
-    }
-    port->peer=0;port->connecting=1;
-    port_watch(port,EVFILT_WRITE);
-  }
-  return;
-#endif
   setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_IF,&port->interface,sizeof port->interface);
   struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=everyone,.sin6_scope_id=port->interface};
   struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
@@ -1284,12 +1260,6 @@ static void ports_find(void){
   dispatch_async(finder,^{
     struct ibv_device **list=ibv_get_device_list(NULL);
     uint32_t n=0;
-#ifdef MESH_LOOP_FABRIC
-    /* design/transport.md: the configuration's devices alone, in its order */
-    for(uint32_t k=0;k<loop_config.ports && n<MESH_PORTS;k++)snprintf(devices[n++],sizeof devices[0],"%s",loop_config.port[k].device);
-    if(list)ibv_free_device_list(list);
-    list=NULL;
-#endif
     for(int i=0;list && list[i] && n<MESH_PORTS;i++)if(!strncmp(ibv_get_device_name(list[i]),"rdma_",5))
       snprintf(devices[n++],sizeof devices[0],"%s",ibv_get_device_name(list[i]));
     if(list)ibv_free_device_list(list);
@@ -1305,7 +1275,7 @@ static void ports_found(void){
     for(uint32_t p=0;p<port_count;p++)known|=!strcmp(ports[p].device.name,devices[i]);
     if(known)continue;
     struct port *port=ports+port_count;
-    *port=(struct port){.index=port_count,.control=-1,.agent_fd=-1,.opening=1};
+    *port=(struct port){.index=port_count,.control=-1,.child_fd=-1,.opening=1};
     /* design/transport.md: the link's block, the pages leased for the port's index */
     port->link.pages=link_pages();
     port->link.page=link_page[port_count];
@@ -1352,7 +1322,6 @@ static void network_heard(int stopping){
    a queue of its own: the terminations heard (`terminations`), and the ports whose peer interface is terminating
    (`terminated`, a bit a port index), which the event loop concludes (terminations_turn) */
 static _Atomic uint32_t terminated,terminations;
-#ifndef MESH_LOOP_FABRIC
 /* the exit's window and every found port's held to `until` at least (a port found meanwhile takes `exit_at`'s as it is
    counted: ports_found) */
 static void quiet_all(uint64_t until){
@@ -1420,7 +1389,6 @@ static void terminations_watch(void){
   if(error){say("bridge: Thunderbolt RDMA peer interfaces' terminations not heard (%#x): a link's going off is its first sign\n",(unsigned)error);return;}
   peer_terminated(NULL,iterator);
 }
-#endif
 /* design/transport.md (EXIT-RECLAIM.md P4): the provider's doorbell fault absorbed.  A SIGSEGV or SIGBUS
    whose pc lies in the provider's text (`provider`, read at the start) on a thread that posts on a port's queue
    pairs (struct port `thread`) has one anonymous page mapped at the faulting page by hint, never MAP_FIXED, so nothing
@@ -1451,7 +1419,7 @@ static void fault_heard(int number,siginfo_t *info,void *context){
   struct sigaction fallback={.sa_handler=SIG_DFL};
   sigaction(number,&fallback,NULL);
 }
-/* the provider's text read and the faults' handler installed, by an agent before it opens its device */
+/* the provider's text read and the faults' handler installed, by a child before it opens its device */
 static void faults_install(void){
   for(uint32_t i=0;i<_dyld_image_count();i++){
     const char *image=_dyld_get_image_name(i);
@@ -1489,42 +1457,32 @@ static void terminations_turn(void){
   }
 }
 
-/* design/transport.md section 14, "A process a port": the parent's side of a port's agent.  The bridge is a parent
-   (the region, the map and records, the clients, discovery, hellos and the control sockets) and an agent a port (its
+/* design/transport.md section 14, "A process a port": the parent's side of a port's child.  The bridge is a parent
+   (the region, the map and records, the clients, discovery, hellos and the control sockets) and a child a port (its
    device, its link's queue pairs and completion queues, its progress threads): mesh-flow spawned again, the same image
-   (`self_path`, its LC_UUID `self_image`, which the agent checks: a binary replaced on disk since the parent's launch
-   is not its agent), in a process group of its own (a job's group signalled at its end reaches no verbs owner), with
-   the parent's socket at descriptor 3, the parent's stderr, and nothing else.  The agent's exit is the one release of
+   (`self_path`), told the contract's version it is spawned for (mesh-bridge.h MESH_CHILD_VERSION), in a process group of its own (a job's group signalled at its end reaches no verbs owner), with
+   the parent's socket at descriptor 3, the parent's stderr, and nothing else.  The child's exit is the one release of
    its port's verbs objects (the kernel's), and a link once connected and then lost pairs again with the port's next
-   agent */
-static char self_path[PATH_MAX],self_image[33];
-static const char *agent_fabric="-";
-static void image_uuid(char *out){
-  const struct mach_header_64 *image=(const void *)_dyld_get_image_header(0);
-  const struct load_command *command=(const void *)(image+1);
-  snprintf(out,33,"none");
-  for(uint32_t i=0;i<image->ncmds;i++,command=(const void *)((const char *)command+command->cmdsize))
-    if(command->cmd==LC_UUID)
-      for(int b=0;b<16;b++)snprintf(out+2*b,3,"%02x",((const struct uuid_command *)command)->uuid[b]);
-}
-/* a message to the port's agent, whole; one not taken (the agent gone) is dropped, its end reaped (agent_reaped) */
-static void agent_send(struct port *port,struct agent_message said){
+   child */
+static char self_path[PATH_MAX];
+/* a message to the port's child, whole; one not taken (the child gone) is dropped, its end reaped (child_reaped) */
+static void child_send(struct port *port,struct child_message said){
   const char *at=(const char *)&said;
   size_t left=sizeof said;
-  while(port->agent_fd>=0 && left){
-    const ssize_t sent=send(port->agent_fd,at,left,0);
+  while(port->child_fd>=0 && left){
+    const ssize_t sent=send(port->child_fd,at,left,0);
     if(sent<0 && errno==EINTR)continue;
     if(sent<=0)return;
     at+=sent;left-=(size_t)sent;
   }
 }
-static void agent_reaped(struct port *port);
-/* a process of this image, not this bridge nor one of its agents, that is an agent of the port's device (its argv
-   `--agent REGION FABRIC DEVICE ...`): an agent of a launch whose parent ended unbidden, which holds the device's queue
-   pairs until its exit (agent_leave, at most 2 MESH_PLATFORM_NS); its pid, or 0.  A device's queue pairs are one
-   agent's at a time: a link takes as many as its device holds for it, up to MESH_LINK_LANES (ten of a macOS 26
+static void child_reaped(struct port *port);
+/* a process, not this bridge nor one of its children, that is a child of the port's device of any version (its argv
+   `--child VERSION DEVICE ...`, the three words every version keeps): a child of a launch whose parent ended unbidden, which holds the device's queue
+   pairs until its exit (child_leave, at most 2 MESH_PLATFORM_NS); its pid, or 0.  A device's queue pairs are one
+   child's at a time: a link takes as many as its device holds for it, up to MESH_LINK_LANES (ten of a macOS 26
    device's ten, design/HETEROGENEOUS-LINKS.md) */
-static pid_t agent_elsewhere(const struct port *port){
+static pid_t child_elsewhere(const struct port *port){
   static pid_t pids[16384];
   static char *arguments;
   static size_t room;
@@ -1535,41 +1493,40 @@ static pid_t agent_elsewhere(const struct port *port){
   for(int i=0;i<count && i<(int)(sizeof pids/sizeof *pids);i++){
     const pid_t pid=pids[i];
     int own=pid==getpid();
-    for(uint32_t p=0;p<port_count;p++)own|=pid==ports[p].agent;
-    char path[PROC_PIDPATHINFO_MAXSIZE];
-    if(own || proc_pidpath(pid,path,sizeof path)<=0 || strcmp(path,self_path))continue;
+    for(uint32_t p=0;p<port_count;p++)own|=pid==ports[p].child;
+    if(own)continue;
     int mib[3]={CTL_KERN,KERN_PROCARGS2,pid},argc=0;
     size_t size=room;
     if(sysctl(mib,3,arguments,&size,NULL,0) || size<sizeof argc)continue;
     memcpy(&argc,arguments,sizeof argc);
-    const char *at=arguments+sizeof argc,*end=arguments+size,*argv[5]={0};
+    const char *at=arguments+sizeof argc,*end=arguments+size,*argv[4]={0};
     at+=strnlen(at,(size_t)(end-at));
     while(at<end && !*at)at++;
-    for(int a=0;a<argc && a<5 && at<end;a++){argv[a]=at;at+=strnlen(at,(size_t)(end-at))+1;}
-    if(argc==9 && argv[1] && argv[4] && !strcmp(argv[1],"--agent") && !strcmp(argv[4],port->device.name))return pid;
+    for(int a=0;a<argc && a<4 && at<end;a++){argv[a]=at;at+=strnlen(at,(size_t)(end-at))+1;}
+    if(argc>=4 && argv[1] && argv[3] && !strcmp(argv[1],"--child") && !strcmp(argv[3],port->device.name))return pid;
   }
   return 0;
 }
-/* the port's agent spawned (its socket's messages and its exit watched, tagged by the port); 0, or the error, the
+/* the port's child spawned (its socket's messages and its exit watched, tagged by the port); 0, or the error, the
    port's next spawn held MESH_PAUSE_NS */
-static int agent_spawn(struct port *port){
+static int child_spawn(struct port *port){
   int pair[2],on=1;
-  const pid_t elsewhere=agent_elsewhere(port);
+  const pid_t elsewhere=child_elsewhere(port);
   if(elsewhere){
-    if(elsewhere!=port->elsewhere)say("link %u (%s): process %d, an agent of its device from an earlier launch, holds its queue "
-                                      "pairs until its exit; its own agent spawned after it\n",port->index,port->name,(int)elsewhere);
+    if(elsewhere!=port->elsewhere)say("link %u (%s): process %d, a child of its device from an earlier launch, holds its queue "
+                                      "pairs until its exit; its own child spawned after it\n",port->index,port->name,(int)elsewhere);
     port->elsewhere=elsewhere;
     return EBUSY;
   }
-  /* design/transport.md section 2: the agent's entry among the region's holders, one no live agent holds; where every
-     one is held, the agent waits as for an earlier launch's (a holder of the region is never left unrecorded) */
-  struct mesh_holder *holders=mesh_bridge_pages(M)->agent;
+  /* design/transport.md section 2: the child's entry among the region's holders, one no live child holds; where every
+     one is held, the child waits as for an earlier launch's (a holder of the region is never left unrecorded) */
+  struct mesh_holder *holders=mesh_bridge_pages(M)->child;
   uint32_t entry=0;
   while(entry<2*MESH_PORTS && mesh_holds((pid_t)holders[entry].pid,holders[entry].start))entry++;
   if(entry==2*MESH_PORTS){port->hold_to=now+MESH_PAUSE_NS;return EBUSY;}
   if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)){
     const int error=errno?errno:EIO;
-    say("link %u (%s): its agent not spawned: %s\n",port->index,port->name,strerror(error));
+    say("link %u (%s): its child not spawned: %s\n",port->index,port->name,strerror(error));
     port->hold_to=now+MESH_PAUSE_NS;
     return error;
   }
@@ -1577,7 +1534,9 @@ static int agent_spawn(struct port *port){
   char index[16],page[16],alive[24];
   snprintf(index,sizeof index,"%u",port->index);snprintf(page,sizeof page,"%u",ones);
   snprintf(alive,sizeof alive,"%llu",(unsigned long long)keepalive_ns);
-  char *arguments[]={self_path,"--agent",(char *)shm,(char *)agent_fabric,port->device.name,index,page,alive,self_image,NULL};
+  char version[16];
+  snprintf(version,sizeof version,"%u",MESH_CHILD_VERSION);
+  char *arguments[]={self_path,"--child",version,port->device.name,index,page,alive,NULL};
   posix_spawn_file_actions_t actions;
   posix_spawnattr_t attributes;
   posix_spawn_file_actions_init(&actions);
@@ -1594,107 +1553,107 @@ static int agent_spawn(struct port *port){
   close(pair[1]);
   if(error){
     close(pair[0]);
-    say("link %u (%s): its agent not spawned: %s\n",port->index,port->name,strerror(error));
+    say("link %u (%s): its child not spawned: %s\n",port->index,port->name,strerror(error));
     port->hold_to=now+MESH_PAUSE_NS;
     return error;
   }
-  port->agent=pid;port->agent_fd=pair[0];port->agent_at=now;port->agent_held=0;port->ending=0;
+  port->child=pid;port->child_fd=pair[0];port->child_at=now;port->child_held=0;port->ending=0;
   holders[entry]=(struct mesh_holder){(uint32_t)pid,0,mesh_started(pid)};
   port->holder=entry;
-  say("link %u (%s): its agent %d spawned\n",port->index,port->name,(int)pid);
+  say("link %u (%s): its child %d spawned\n",port->index,port->name,(int)pid);
   struct kevent64_s watch;
   EV_SET64(&watch,(uint64_t)pair[0],EVFILT_READ,EV_ADD,0,0,TAG_AGENT|port->index,0,0);
-  if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){close(port->agent_fd);port->agent_fd=-1;}
+  if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){close(port->child_fd);port->child_fd=-1;}
   EV_SET64(&watch,(uint64_t)pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_AGENT|port->index,0,0);
-  if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){agent_reaped(port);return ECHILD;}
+  if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){child_reaped(port);return ECHILD;}
   return 0;
 }
-/* a link job asked of the port's agent: its lanes made (the link's keepalive page named) or connected to the peer's
+/* a link job asked of the port's child: its lanes made (the link's keepalive page named) or connected to the peer's
    (the peer's lanes as its LINK told them, its address as its hello did, its node and the link's bandwidth), under
-   the link's pairing as it is asked; its end the agent's answer (agent_heard), taken by link_turn */
-static void agent_job(struct port *port,int job){
+   the link's pairing as it is asked; its end the child's answer (child_heard), taken by link_turn */
+static void child_job(struct port *port,int job){
   struct link *l=&port->link;
   l->job=job;l->job_pairing=atomic_load_explicit(&l->pairing,memory_order_relaxed);l->job_at=now;
   atomic_store_explicit(&l->done,0,memory_order_relaxed);
-  struct agent_message said={.kind=job==LINK_JOB_MAKE?AGENT_MAKE:AGENT_CONNECT,.pairing=l->job_pairing,.page=l->page,.lanes=l->plan};
+  struct child_message said={.kind=job==LINK_JOB_MAKE?CHILD_MAKE:CHILD_CONNECT,.pairing=l->job_pairing,.page=l->page,.lanes=l->plan};
   if(job==LINK_JOB_CONNECT){
     memcpy(said.peer,l->peer,sizeof said.peer);said.lid=port->heard.lid;memcpy(said.gid,port->heard.gid,16);
     said.node=port->peer;said.bandwidth=port->bandwidth;
   }
-  agent_send(port,said);
+  child_send(port,said);
 }
-/* the agent's messages, each whole one taken: an open's, a make's or a connect's end for the job out (a connect of a
-   pairing since lost has its streams cancelled again: the agent may have opened them after the loss's cancel); the
+/* the child's messages, each whole one taken: an open's, a make's or a connect's end for the job out (a connect of a
+   pairing since lost has its streams cancelled again: the child may have opened them after the loss's cancel); the
    lanes a progress thread found failed, for the link's pairing while it is up; a fault absorbed, a guard not held, a
    termination heard, each its port's bit for the event loop's conclusion (terminations_turn, ports_stalled).  The
-   socket's end closes it; the agent's exit is reaped (agent_reaped) */
-static void agent_heard(struct port *port){
+   socket's end closes it; the child's exit is reaped (child_reaped) */
+static void child_heard(struct port *port){
   struct link *l=&port->link;
   const uint32_t bit=UINT32_C(1)<<port->index;
   for(;;){
-    const ssize_t got=recv(port->agent_fd,port->agent_in+port->agent_held,sizeof port->agent_in-port->agent_held,MSG_DONTWAIT);
+    const ssize_t got=recv(port->child_fd,port->child_in+port->child_held,sizeof port->child_in-port->child_held,MSG_DONTWAIT);
     if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-    if(got<=0){close(port->agent_fd);port->agent_fd=-1;return;}
-    if((port->agent_held+=(uint32_t)got)<sizeof port->agent_in)continue;
-    port->agent_held=0;
-    struct agent_message heard;
-    memcpy(&heard,port->agent_in,sizeof heard);
+    if(got<=0){close(port->child_fd);port->child_fd=-1;return;}
+    if((port->child_held+=(uint32_t)got)<sizeof port->child_in)continue;
+    port->child_held=0;
+    struct child_message heard;
+    memcpy(&heard,port->child_in,sizeof heard);
     const int current=heard.pairing==atomic_load_explicit(&l->pairing,memory_order_relaxed);
-    if(heard.kind==AGENT_OPENED && port->job){
+    if(heard.kind==CHILD_OPENED && port->job){
       port->result=heard.result;port->refused=heard.refused;
       if(!heard.result){port->lid=heard.lid;memcpy(port->gid,heard.gid,16);port->bandwidth=heard.bandwidth;port->budget=heard.lanes;}
       atomic_store_explicit(&port->done,1,memory_order_release);
     }
-    else if(heard.kind==AGENT_MADE || heard.kind==AGENT_CONNECTED){
-      if(heard.kind==AGENT_CONNECTED && !current)streams_cancel(port);
-      if(l->job!=(heard.kind==AGENT_MADE?LINK_JOB_MAKE:LINK_JOB_CONNECT) || heard.pairing!=l->job_pairing)continue;
+    else if(heard.kind==CHILD_MADE || heard.kind==CHILD_CONNECTED){
+      if(heard.kind==CHILD_CONNECTED && !current)streams_cancel(port);
+      if(l->job!=(heard.kind==CHILD_MADE?LINK_JOB_MAKE:LINK_JOB_CONNECT) || heard.pairing!=l->job_pairing)continue;
       l->result=heard.result;l->refused=heard.refused;
-      if(heard.kind==AGENT_MADE && !heard.result){
+      if(heard.kind==CHILD_MADE && !heard.result){
         memcpy(l->qpn,heard.qpn,sizeof l->qpn);l->psn=heard.psn;l->share=heard.share;
         port->lid=heard.lid;memcpy(port->gid,heard.gid,16);
       }
       atomic_store_explicit(&l->done,1,memory_order_release);
     }
-    else if(heard.kind==AGENT_BROKEN && current && l->state==LINK_UP)atomic_fetch_or(&l->broken,heard.broken);
-    else if(heard.kind==AGENT_FAULTED)atomic_fetch_or(&faulted,bit);
-    else if(heard.kind==AGENT_UNGUARDED)atomic_fetch_or(&unguarded,bit);
-    else if(heard.kind==AGENT_TERMINATED)atomic_fetch_or(&terminated,bit);
+    else if(heard.kind==CHILD_BROKEN && current && l->state==LINK_UP)atomic_fetch_or(&l->broken,heard.broken);
+    else if(heard.kind==CHILD_FAULTED)atomic_fetch_or(&faulted,bit);
+    else if(heard.kind==CHILD_UNGUARDED)atomic_fetch_or(&unguarded,bit);
+    else if(heard.kind==CHILD_TERMINATED)atomic_fetch_or(&terminated,bit);
   }
 }
-/* a port whose link was lost once its lanes were asked for (`recycle`) asks its agent to end once its quiet window and
+/* a port whose link was lost once its lanes were asked for (`recycle`) asks its child to end once its quiet window and
    the exit's have ended (B9, B9b: no release inside a termination), no port's call is stuck (B12) and no job of its own
    is out */
-static void agent_turn(struct port *port){
-  if(!port->recycle || !port->agent || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
+static void child_turn(struct port *port){
+  if(!port->recycle || !port->child || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
      now<atomic_load(&exit_at) || atomic_load_explicit(&stalled,memory_order_relaxed))return;
-  agent_send(port,(struct agent_message){.kind=AGENT_END});
+  child_send(port,(struct child_message){.kind=CHILD_END});
   port->ending=1;
-  say("link %u (%s): its agent %d asked to end, its lanes released at its exit (design/transport.md section 14)\n",
-      port->index,port->name,(int)port->agent);
+  say("link %u (%s): its child %d asked to end, its lanes released at its exit (design/transport.md section 14)\n",
+      port->index,port->name,(int)port->child);
 }
-/* the port's agent ended: its last messages taken, its exit reaped, a job of it out ended (ECHILD); one that ended
+/* the port's child ended: its last messages taken, its exit reaped, a job of it out ended (ECHILD); one that ended
    unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, and the
    k-th in a row within MESH_AGENT_SETTLE_NS of its spawn, k from 2, holds the port's next spawn 60 2^(k-2) s, at most an
    hour (the boot ledger's rule, a port's: restarted, "not crashing again of course", the operator 10-20).  Its streams cancelled again,
-   its link down with no lanes, and the port to be opened by its next agent */
-static void agent_reaped(struct port *port){
+   its link down with no lanes, and the port to be opened by its next child */
+static void child_reaped(struct port *port){
   struct link *l=&port->link;
-  const pid_t pid=port->agent;
+  const pid_t pid=port->child;
   int status=0;
-  if(port->agent_fd>=0)agent_heard(port);
-  if(port->agent_fd>=0){close(port->agent_fd);port->agent_fd=-1;}
+  if(port->child_fd>=0)child_heard(port);
+  if(port->child_fd>=0){close(port->child_fd);port->child_fd=-1;}
   while(waitpid(pid,&status,0)<0 && errno==EINTR){}
-  port->agent=0;
-  if(port->holder<2*MESH_PORTS && mesh_bridge_pages(M)->agent[port->holder].pid==(uint32_t)pid)
-    mesh_bridge_pages(M)->agent[port->holder]=(struct mesh_holder){0};
+  port->child=0;
+  if(port->holder<2*MESH_PORTS && mesh_bridge_pages(M)->child[port->holder].pid==(uint32_t)pid)
+    mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};
   const int asked=port->ending;
   port->ending=port->recycle=0;
-  if(asked){port->aborts=0;say("link %u (%s): its agent %d ended\n",port->index,port->name,(int)pid);}
+  if(asked){port->aborts=0;say("link %u (%s): its child %d ended\n",port->index,port->name,(int)pid);}
   else{
-    port->aborts=now-port->agent_at<MESH_AGENT_SETTLE_NS?port->aborts+1:0;
+    port->aborts=now-port->child_at<MESH_AGENT_SETTLE_NS?port->aborts+1:0;
     const uint64_t hold=port->aborts>1?MIN(UINT64_C(60)<<MIN(port->aborts-2,6u),UINT64_C(3600)):0;
     port->hold_to=now+hold*UINT64_C(1000000000);
-    say("link %u (%s): its agent %d ended unbidden (%s %d); its next spawned in %llu s\n",port->index,port->name,(int)pid,
+    say("link %u (%s): its child %d ended unbidden (%s %d); its next spawned in %llu s\n",port->index,port->name,(int)pid,
         WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status),(unsigned long long)hold);
     port->open=0;
     port_lost(port,ECHILD);
@@ -1722,39 +1681,6 @@ static void *control_watch(void *unused){
 /* design/transport.md: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
    the consumer's document (rdma/bridge_configuration.py): its name and its region in bytes (`region_bytes`), and its `keepalive` in
    nanoseconds where it states one (#keepalive); NULL, or why it is refused */
-#ifdef MESH_LOOP_FABRIC
-/* design/transport.md: a loop bridge's `loop` (a dictionary: `region`, `fabric`, `node` and
-   `ports`, each port a dictionary of `device`, `listen` and `peer`); NULL, or why it is refused */
-static int loop_number(CFDictionaryRef d,CFStringRef key,int64_t most,int64_t *value){
-  CFTypeRef v=CFDictionaryGetValue(d,key);
-  return v && CFGetTypeID(v)==CFNumberGetTypeID() && CFNumberGetValue(v,kCFNumberSInt64Type,value) && *value>0 && *value<=most;
-}
-static int loop_text(CFDictionaryRef d,CFStringRef key,char *out,size_t room){
-  CFTypeRef v=CFDictionaryGetValue(d,key);
-  return v && CFGetTypeID(v)==CFStringGetTypeID() && CFStringGetCString(v,out,(CFIndex)room,kCFStringEncodingUTF8) && out[0];
-}
-static const char *loop_read(CFPropertyListRef list){
-  CFTypeRef l=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("loop")):NULL;
-  if(!l || CFGetTypeID(l)!=CFDictionaryGetTypeID())return "a loop bridge's configuration states its `loop`";
-  int64_t node=0;
-  if(!loop_text(l,CFSTR("region"),loop_config.region,sizeof loop_config.region) || loop_config.region[0]!='/')return "its loop's region, a shared memory name";
-  if(!loop_text(l,CFSTR("fabric"),loop_config.fabric,sizeof loop_config.fabric) || loop_config.fabric[0]!='/')return "its loop's fabric, a shared memory name";
-  if(!loop_number(l,CFSTR("node"),0x7fffffff,&node))return "its loop's node, a positive 31-bit number";
-  loop_config.node=(uint32_t)node;
-  CFTypeRef ports=CFDictionaryGetValue(l,CFSTR("ports"));
-  if(!ports || CFGetTypeID(ports)!=CFArrayGetTypeID() || CFArrayGetCount(ports)>MESH_PORTS)return "its loop's ports, at most MESH_PORTS";
-  loop_config.ports=(uint32_t)CFArrayGetCount(ports);
-  for(uint32_t k=0;k<loop_config.ports;k++){
-    CFTypeRef p=CFArrayGetValueAtIndex(ports,k);
-    int64_t listen=0,peer=0;
-    if(!p || CFGetTypeID(p)!=CFDictionaryGetTypeID() || !loop_text(p,CFSTR("device"),loop_config.port[k].device,sizeof loop_config.port[k].device) ||
-       strncmp(loop_config.port[k].device,"rdma_",5) || !loop_number(p,CFSTR("listen"),65535,&listen) || !loop_number(p,CFSTR("peer"),65535,&peer) ||
-       listen==peer)return "a loop port: its device (rdma_...) and its cable's two ports, apart";
-    loop_config.port[k].listen=(uint16_t)listen;loop_config.port[k].peer=(uint16_t)peer;loop_config.port[k].fd=-1;
-  }
-  return NULL;
-}
-#endif
 static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *region_bytes){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
@@ -1778,9 +1704,6 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
     refused="its region_bytes, a positive number of bytes, is missing";
   else if(alive && (CFGetTypeID(alive)!=CFNumberGetTypeID() || !CFNumberGetValue(alive,kCFNumberSInt64Type,&interval) || interval<=0))
     refused="its keepalive, where stated, is not a positive number of nanoseconds";
-#ifdef MESH_LOOP_FABRIC
-  if(!refused)refused=loop_read(list);
-#endif
   keepalive_ns=refused?0:(uint64_t)interval;
   if(list)CFRelease(list);
   *region_bytes=(uint64_t)value;
@@ -1800,10 +1723,6 @@ static void host_name(char *name){
 static char host_heard[MESH_NAME_BYTES];
 static _Atomic int host_reading,host_read_done;
 static void host_read(void){
-#ifdef MESH_LOOP_FABRIC
-  /* design/transport.md: a loop bridge's name is its configuration's, never the host's */
-  return;
-#endif
   if(atomic_load(&host_read_done) || atomic_exchange(&host_reading,1))return;
   dispatch_async(finder,^{
     char name[MESH_NAME_BYTES]={0};
@@ -1824,8 +1743,8 @@ static void host_taken(void){
   atomic_store_explicit(&host_read_done,0,memory_order_release);
 }
 
-/* design/transport.md section 14, "A process a port": a port's agent, `mesh-flow --agent REGION FABRIC DEVICE INDEX
-   ONES KEEPALIVE IMAGE` as its parent spawned it (agent_spawn): the parent's region mapped (its magic, version and
+/* design/transport.md section 14, "A process a port": a port's child, `mesh-flow --child VERSION DEVICE INDEX ONES
+   KEEPALIVE` as its parent spawned it (child_spawn), VERSION the contract's (mesh-bridge.h MESH_CHILD_VERSION): the parent's region mapped (its magic, version and
    bridge the parent's), its port the parent's port INDEX on DEVICE (its streams' words the region's), the duds' block
    ONES and the keepalive the parent's, the provider's faults absorbed (fault_heard) and its peer interfaces'
    terminations heard (B9b: its lanes served no more at once, port_halt).  It takes the parent's messages on descriptor 3
@@ -1833,15 +1752,15 @@ static void host_taken(void){
    while a job is out, or while a halt of its own is not yet answered by the parent's, is refused), a halt (no lane
    served, a job out lapsed), an end; and tells each job's end, naming the pairing it was asked for.  A connect that
    ends while its pairing stands opens the link's streams (streams_open) and then serves every lane, its pairing read
-   again (port_halt's order).  The agent ends at its parent's word, once its own windows have ended (at most
+   again (port_halt's order).  The child ends at its parent's word, once its own windows have ended (at most
    MESH_PLATFORM_NS on), or at its parent's loss (the socket's end), its lanes served no more, MESH_PLATFORM_NS and its
    windows on (at most twice that): its exit, the kernel's release of its device's objects, no verbs call made */
-static uint32_t agent_asked;
-static uint64_t agent_bandwidth;
-static int agent_halted;
-static unsigned char agent_in[sizeof(struct agent_message)];
-static uint32_t agent_got;
-static void agent_tell(struct agent_message said){
+static uint32_t child_asked;
+static uint64_t child_bandwidth;
+static int child_halted;
+static unsigned char child_in[sizeof(struct child_message)];
+static uint32_t child_got;
+static void child_tell(struct child_message said){
   const char *at=(const char *)&said;
   size_t left=sizeof said;
   while(left){
@@ -1851,7 +1770,7 @@ static void agent_tell(struct agent_message said){
     at+=sent;left-=(size_t)sent;
   }
 }
-static __attribute__((noreturn)) void agent_leave(struct port *port,int asked){
+static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   atomic_fetch_add(&port->link.pairing,1);
   atomic_store(&port->link.served,0);
   atomic_store_explicit(&port->closing,1,memory_order_release);
@@ -1866,50 +1785,50 @@ static __attribute__((noreturn)) void agent_leave(struct port *port,int asked){
   }
   exit(0);
 }
-static void agent_command(struct port *port,const struct agent_message *heard){
+static void child_command(struct port *port,const struct child_message *heard){
   struct link *l=&port->link;
-  if(heard->kind==AGENT_OPEN){if(!port->job)device_open(port);return;}
-  if(heard->kind==AGENT_HALT){
+  if(heard->kind==CHILD_OPEN){if(!port->job)device_open(port);return;}
+  if(heard->kind==CHILD_HALT){
     atomic_fetch_add(&l->pairing,1);atomic_store(&l->served,0);guard_wake(port);
-    agent_halted=0;
+    child_halted=0;
     return;
   }
-  if(heard->kind==AGENT_END)agent_leave(port,1);
-  if(heard->kind!=AGENT_MAKE && heard->kind!=AGENT_CONNECT){
-    say("link %u (%s): its agent heard message kind %u from its parent: it ends\n",port->index,port->name,heard->kind);
-    agent_leave(port,0);
+  if(heard->kind==CHILD_END)child_leave(port,1);
+  if(heard->kind!=CHILD_MAKE && heard->kind!=CHILD_CONNECT){
+    say("link %u (%s): its child heard message kind %u from its parent: it ends\n",port->index,port->name,heard->kind);
+    child_leave(port,0);
   }
-  const int job=heard->kind==AGENT_MAKE?LINK_JOB_MAKE:LINK_JOB_CONNECT;
-  int refused=l->job?EBUSY:agent_halted || atomic_load(&faulted) || atomic_load(&unguarded) || atomic_load(&terminated)?ECANCELED:0;
+  const int job=heard->kind==CHILD_MAKE?LINK_JOB_MAKE:LINK_JOB_CONNECT;
+  int refused=l->job?EBUSY:child_halted || atomic_load(&faulted) || atomic_load(&unguarded) || atomic_load(&terminated)?ECANCELED:0;
   if(!refused && job==LINK_JOB_CONNECT){
     memcpy(l->peer,heard->peer,sizeof l->peer);port->heard.lid=heard->lid;memcpy(port->heard.gid,heard->gid,16);
-    port->peer=heard->node;agent_bandwidth=heard->bandwidth;
+    port->peer=heard->node;child_bandwidth=heard->bandwidth;
     refused=lanes_room(port);
   }
   if(refused){
-    agent_tell((struct agent_message){.kind=job==LINK_JOB_MAKE?AGENT_MADE:AGENT_CONNECTED,.pairing=heard->pairing,.result=refused});
+    child_tell((struct child_message){.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=heard->pairing,.result=refused});
     return;
   }
-  agent_asked=heard->pairing;
+  child_asked=heard->pairing;
   if(job==LINK_JOB_MAKE){l->page=heard->page;l->plan=heard->lanes;}
   link_job(port,job);
 }
-static void agent_jobs(struct port *port){
+static void child_jobs(struct port *port){
   struct link *l=&port->link;
   if(port->job && atomic_load_explicit(&port->done,memory_order_acquire)){
     port->job=0;
-    struct agent_message said={.kind=AGENT_OPENED,.result=port->result,.refused=port->refused};
+    struct child_message said={.kind=CHILD_OPENED,.result=port->result,.refused=port->refused};
     if(!port->result){
       port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
       said.lid=port->lid;memcpy(said.gid,port->gid,16);said.bandwidth=port_bandwidth(&port->device.port);
       said.lanes=port->device.max_pairs;
     }
-    agent_tell(said);
+    child_tell(said);
   }
   if(!l->job || !atomic_load_explicit(&l->done,memory_order_acquire))return;
   const int job=l->job;
   l->job=0;
-  struct agent_message said={.kind=job==LINK_JOB_MAKE?AGENT_MADE:AGENT_CONNECTED,.pairing=agent_asked,.result=l->result,
+  struct child_message said={.kind=job==LINK_JOB_MAKE?CHILD_MADE:CHILD_CONNECTED,.pairing=child_asked,.result=l->result,
                              .refused=l->refused};
   if(!said.result && l->job_pairing!=atomic_load(&l->pairing))said.result=ECANCELED;
   if(!said.result && job==LINK_JOB_MAKE){
@@ -1919,88 +1838,82 @@ static void agent_jobs(struct port *port){
     said.lid=port->lid;memcpy(said.gid,port->gid,16);
   }
   else if(!said.result){
-    streams_open(port,port->peer,agent_bandwidth);
+    streams_open(port,port->peer,child_bandwidth);
     atomic_store(&l->served,l->plan);
     if(atomic_load(&l->pairing)!=l->job_pairing){atomic_store(&l->served,0);said.result=ECANCELED;}
     guard_wake(port);
   }
-  agent_tell(said);
+  child_tell(said);
 }
-static void agent_reports(struct port *port){
+static void child_reports(struct port *port){
   const uint32_t broken=atomic_exchange_explicit(&port->link.broken,0,memory_order_acq_rel);
-  if(broken)agent_tell((struct agent_message){.kind=AGENT_BROKEN,.pairing=agent_asked,.broken=broken});
-  if(atomic_exchange(&faulted,0)){agent_halted=1;agent_tell((struct agent_message){.kind=AGENT_FAULTED});}
-  if(atomic_exchange(&unguarded,0)){agent_halted=1;agent_tell((struct agent_message){.kind=AGENT_UNGUARDED});}
-  if(atomic_exchange(&terminated,0)){agent_halted=1;agent_tell((struct agent_message){.kind=AGENT_TERMINATED});}
+  if(broken)child_tell((struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken});
+  if(atomic_exchange(&faulted,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_FAULTED});}
+  if(atomic_exchange(&unguarded,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_UNGUARDED});}
+  if(atomic_exchange(&terminated,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_TERMINATED});}
 }
-static void agent_read(struct port *port){
+static void child_read(struct port *port){
   for(;;){
-    const ssize_t got=recv(3,agent_in+agent_got,sizeof agent_in-agent_got,MSG_DONTWAIT);
+    const ssize_t got=recv(3,child_in+child_got,sizeof child_in-child_got,MSG_DONTWAIT);
     if(got<0 && (errno==EAGAIN || errno==EINTR))return;
-    if(got<=0)agent_leave(port,0);
-    if((agent_got+=(uint32_t)got)<sizeof agent_in)continue;
-    agent_got=0;
-    struct agent_message heard;
-    memcpy(&heard,agent_in,sizeof heard);
-    agent_command(port,&heard);
+    if(got<=0)child_leave(port,0);
+    if((child_got+=(uint32_t)got)<sizeof child_in)continue;
+    child_got=0;
+    struct child_message heard;
+    memcpy(&heard,child_in,sizeof heard);
+    child_command(port,&heard);
   }
 }
-static int agent_main(char **argv){
+static int child_main(int argc,char **argv){
   signal(SIGPIPE,SIG_IGN);
-  char image[33];
-  image_uuid(image);
-  const unsigned long index=strtoul(argv[5],NULL,10);
-  if(strcmp(image,argv[8]) || index>=MESH_PORTS){
-    say("agent of %s: this binary (%s) is not its bridge's (%s), or port %lu is past the bridge's: it ends (a binary replaced "
-        "since the bridge's launch takes the bridge's relaunch)\n",argv[4],image,argv[8],index);
+  const unsigned long version=strtoul(argv[2],NULL,10);
+  if(version!=MESH_CHILD_VERSION || argc!=7){
+    say("child of %s: spawned for the bridge's child contract %lu, and this child's is %u: it ends (a bridge and its children "
+        "install together)\n",argc>3?argv[3]:"?",version,MESH_CHILD_VERSION);
     return 1;
   }
+  const unsigned long index=strtoul(argv[4],NULL,10);
+  if(index>=MESH_PORTS){say("child of %s: port %lu is past the bridge's: it ends\n",argv[3],index);return 1;}
   faults_install();
-#ifdef MESH_LOOP_FABRIC
-  loop_fabric(argv[3]);
-#endif
-  const int fd=shm_open(argv[2],O_RDWR);
+  const int fd=shm_open(MESH_NAME,O_RDWR);
   struct stat shape;
-  if(fd<0 || fstat(fd,&shape))die("agent: its bridge's region");
+  if(fd<0 || fstat(fd,&shape))die("child: its bridge's region");
   M=mmap(NULL,(size_t)shape.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   if(M==MAP_FAILED || M->magic!=MESH_MAGIC || M->version!=MESH_LAYOUT || atomic_load(&M->bridge_pid)!=(uint64_t)getppid())
-    die("agent: its bridge's region is not its parent's");
-  if(wire_map(&wire,M,fd))die("agent: transport page aliases");
+    die("child: its bridge's region is not its parent's");
+  if(wire_map(&wire,M,fd))die("child: transport page aliases");
   close(fd);
   struct port *port=ports;
-  *port=(struct port){.index=(uint32_t)index,.control=-1,.agent_fd=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
+  *port=(struct port){.index=(uint32_t)index,.control=-1,.child_fd=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
   port->link.provider.device=&port->device;port->link.page=port->link.lists=MESH_ABSENT;
-  snprintf(port->device.name,sizeof port->device.name,"%s",argv[4]);snprintf(port->name,sizeof port->name,"%s",argv[4]+5);
-  ones=(uint32_t)strtoul(argv[6],NULL,10);keepalive_ns=strtoull(argv[7],NULL,10);
+  snprintf(port->device.name,sizeof port->device.name,"%s",argv[3]);snprintf(port->name,sizeof port->name,"%s",argv[3]+5);
+  ones=(uint32_t)strtoul(argv[5],NULL,10);keepalive_ns=strtoull(argv[6],NULL,10);
   __atomic_store_n(&port_count,1,__ATOMIC_SEQ_CST);
   struct kevent64_s event;
-  if((events=kqueue())<0)die("agent events");
+  if((events=kqueue())<0)die("child events");
   EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
-  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("agent events");
+  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
   EV_SET64(&event,3,EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
-  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("agent events");
-#ifndef MESH_LOOP_FABRIC
+  if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
   terminations_watch();
-#endif
   for(;;){
     now=clock_ns();
-    agent_jobs(port);
-    agent_reports(port);
+    child_jobs(port);
+    child_reports(port);
     struct kevent64_s ready[4];
     struct timespec tick={(time_t)(MESH_PAUSE_NS/1000000000u),(long)(MESH_PAUSE_NS%1000000000u)};
     const int count=kevent64(events,NULL,0,ready,4,0,&tick);
     now=clock_ns();
-    for(int i=0;i<count;i++)if(ready[i].filter==EVFILT_READ && ready[i].ident==3)agent_read(port);
+    for(int i=0;i<count;i++)if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
   }
 }
 
-/* design/transport.md section 2, the region and the heartbeat: the node's region opened by its name `name`.  The region a
+/* design/transport.md section 2, the region and the heartbeat: the node's region (MESH_NAME) opened.  The region a
    bridge before this one kept (a restart, SIGHUP; a crash) is adopted where its magic, layout version (MESH_LAYOUT) and
    layout (`geometry`, mesh_layout of this configuration's region) are this bridge's: the same memory, its clients'
-   slots, rows and leases standing and the GPU buffers over them valid, its pages registered again by the port agents
+   slots, rows and leases standing and the GPU buffers over them valid, its pages registered again by the port children
    (the same pages: nothing is wired twice, nothing reloaded).  A region a live bridge serves is never read: a second
-   bridge of the node ends at its port's bind, before region_open (the loop build binds any port and has no such
-   bound: its harness, mesh-loop, runs one bridge a region).  A region of another layout, or one a stop released (layout version
+   bridge of the node ends at its port's bind, before region_open.  A region of another layout, or one a stop released (layout version
    0), is made expired (its layout version 0: no client's mesh_open takes it, and each client's next lease or
    communicator returns the expiry, nccl-mesh.c attach_expired) and left named, and this bridge ends with EX_TEMPFAIL:
    its heartbeat unlinks it once no process holds it and opens a bridge again, so no second region is ever made beside
@@ -2013,28 +1926,28 @@ static int region_same(const struct hdr *a,const struct hdr *b){
          a->bridge_off==b->bridge_off && a->stream_off==b->stream_off && a->client_off==b->client_off && a->data_off==b->data_off &&
          a->length==b->length;
 }
-static int region_open(const char *name,const struct hdr *geometry,int *out){
-  int fd=shm_open(name,O_RDWR,0);
-  if(fd<0 && errno!=ENOENT){say("bridge: region %s not opened (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
+static int region_open(const struct hdr *geometry,int *out){
+  int fd=shm_open(MESH_NAME,O_RDWR,0);
+  if(fd<0 && errno!=ENOENT){say("bridge: region %s not opened (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
   if(fd>=0){
     struct stat shape;
-    if(fstat(fd,&shape)){say("bridge: region %s not read (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
+    if(fstat(fd,&shape)){say("bridge: region %s not read (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
     const size_t size=(size_t)shape.st_size;
     struct hdr *old=size>=sizeof(struct hdr)?mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0):NULL;
-    if(old==MAP_FAILED){say("bridge: region %s not mapped (%s): this bridge ends without touching it\n",name,strerror(errno));exit(1);}
+    if(old==MAP_FAILED){say("bridge: region %s not mapped (%s): this bridge ends without touching it\n",MESH_NAME,strerror(errno));exit(1);}
     if(old && old->magic==MESH_MAGIC){
       if(__atomic_load_n(&old->version,__ATOMIC_ACQUIRE)==MESH_LAYOUT && region_same(old,geometry)){M=old;*out=fd;return 1;}
       __atomic_store_n(&old->version,0,__ATOMIC_SEQ_CST);
       say("bridge: region %s is expired (another layout, or released): this bridge ends, and its heartbeat unlinks it once no "
-          "holder of it lives and opens a bridge again\n",name);
+          "holder of it lives and opens a bridge again\n",MESH_NAME);
       boots_clear();
       exit(EX_TEMPFAIL);
     }
     if(old)munmap(old,size);
     close(fd);
-    shm_unlink(name);
+    shm_unlink(MESH_NAME);
   }
-  if((fd=shm_open(name,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
+  if((fd=shm_open(MESH_NAME,O_CREAT|O_EXCL|O_RDWR,MESH_MODE))<0)die("shm");
   if(ftruncate(fd,(off_t)geometry->length))die("ftruncate");
   fchmod(fd,MESH_MODE);
   M=mmap(NULL,(size_t)geometry->length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
@@ -2085,9 +1998,9 @@ static void region_adopt(void){
 }
 
 /* design/transport.md: the node's resident bridge; its one operand the path of its configuration (no default); a port's
-   agent as its parent spawns it (agent_main) */
+   child as its parent spawns it (child_main) */
 int main(int argc,char **argv){
-  if(argc==9 && !strcmp(argv[1],"--agent"))return agent_main(argv);
+  if(argc>=3 && !strcmp(argv[1],"--child"))return child_main(argc,argv);
   if(argc!=2)die("usage: mesh-flow CONFIGURATION: the canonical property list bin/mesh-user.sh writes from the node's bridge configuration document (etc/bridge/README.md); the bridge has no default and does not start without one");
   char name[256];uint64_t region_bytes;
   const char *refused=configuration_read(argv[1],name,sizeof name,&region_bytes);
@@ -2096,7 +2009,6 @@ int main(int argc,char **argv){
   char resolved[PATH_MAX];
   if(_NSGetExecutablePath(self_path,&room) || !realpath(self_path,resolved))die("the bridge's own image");
   snprintf(self_path,sizeof self_path,"%s",resolved);
-  image_uuid(self_image);
   /* design/transport.md: every catchable signal whose default ends the process takes the stop, its filter
      added before its default is ignored, so none is lost (one arriving before takes its default action, before anything
      shared is made) */
@@ -2109,26 +2021,14 @@ int main(int argc,char **argv){
     signal(stopping[i],SIG_IGN);
   }
   signal(SIGPIPE,SIG_IGN);
-#ifndef MESH_LOOP_FABRIC
   boots_hold(argv[1]);
-#endif
   uuid_t uuid;struct timespec bound={5,0};
   if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
   uint32_t node=0;
   for(int i=0;i<16;i++)node=(node*0x01000193u)^uuid[i];
   node=(node&0x7fffffffu)?node&0x7fffffffu:1;
-  /* design/transport.md: a loop bridge's node and region its configuration's; its links are
-     dialed on its cables' own listeners, so its listener and hello socket take any port */
-#ifdef MESH_LOOP_FABRIC
-  node=loop_config.node;
-  const char *region=loop_config.region;
-  const uint16_t service=0;
-  loop_fabric(loop_config.fabric);
-  agent_fabric=loop_config.fabric;
-#else
-  const char *region=MESH_NAME;
+  /* design/transport.md: the node's hello port, the mesh's */
   const uint16_t service=(uint16_t)atoi(MESH_PORT);
-#endif
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/transport.md */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
@@ -2136,13 +2036,9 @@ int main(int argc,char **argv){
   struct hdr geometry={0};
   mesh_layout(&geometry,pg,1,(uint32_t)(region_bytes/pg));
   /* design/transport.md section 2: the bridge's port bound before its region is read, so a second bridge of the node
-     (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the region; a loop
-     bridge binds any port, so its harness alone keeps one bridge a region */
+     (one started beside the heartbeat's, or while the last one ends) ends at its bind, never touching the region */
   int on=1;
   struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
-#ifdef MESH_LOOP_FABRIC
-  any.sin6_addr=in6addr_loopback;
-#endif
   listener=socket(AF_INET6,SOCK_STREAM,0);hello=socket(AF_INET6,SOCK_DGRAM,0);network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
   struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
   unsigned loop=0;
@@ -2152,19 +2048,15 @@ int main(int argc,char **argv){
      fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
     die("bridge sockets");
   int fd=-1;
-  const int adopted=region_open(region,&geometry,&fd);
-  shm=region;
+  const int adopted=region_open(&geometry,&fd);
   if(adopted)region_adopt();
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
   M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
-  say("bridge node %u: region %s %s\n",node,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
+  say("bridge node %u: region %s %s\n",node,MESH_NAME,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;
   host_name(host);
-#ifdef MESH_LOOP_FABRIC
-  snprintf(host,sizeof host,"%s",name);
-#endif
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
   /* design/transport.md: the node's memory and hardware model, which its record carries with its region */
   size_t size=sizeof memory;
@@ -2183,19 +2075,6 @@ int main(int argc,char **argv){
   __sync_synchronize();M->magic=MESH_MAGIC;
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
-#ifdef MESH_LOOP_FABRIC
-  /* design/transport.md: each cable's listener on loopback, its events tagged by the port */
-  for(uint32_t k=0;k<loop_config.ports;k++){
-    struct sockaddr_in6 at={.sin6_len=sizeof at,.sin6_family=AF_INET6,.sin6_port=htons(loop_config.port[k].listen),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
-    int fd=socket(AF_INET6,SOCK_STREAM,0);
-    if(fd<0 || setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) || bind(fd,(struct sockaddr *)&at,sizeof at) || listen(fd,SOMAXCONN) ||
-       fcntl(fd,F_SETFL,O_NONBLOCK))die("a loop cable's listener");
-    loop_config.port[k].fd=fd;
-    EV_SET64(&event,(uint64_t)fd,EVFILT_READ,EV_ADD,0,0,TAG_LOOP|k,0,0);
-    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
-  }
-#endif
-#ifndef MESH_LOOP_FABRIC
   /* design/transport.md B9b, B9: the peer interfaces' terminations heard from here on; the devices first read
      once IOKit's registry is quiet (no termination in its course: XNU's waitForState, its deadline MESH_PLATFORM_NS),
      else as they stand at the bound */
@@ -2204,7 +2083,6 @@ int main(int argc,char **argv){
   const kern_return_t busy=IOKitWaitQuiet(kIOMainPortDefault,&quiet);
   if(busy)say("bridge node %u: IOKit's registry not quiet within %.1f s (%#x): its devices read as they stand\n",node,
               (double)MESH_PLATFORM_NS/1e9,(unsigned)busy);
-#endif
   ports_find();
   char alive[192]="";
   if(keepalive_ns)snprintf(alive,sizeof alive,", a keepalive frame every %llu ns on each link's keepalive lane while its port's stream is held "
@@ -2224,7 +2102,7 @@ int main(int argc,char **argv){
       port_open(port);
       port_hello(port);
       link_turn(port);
-      agent_turn(port);
+      child_turn(port);
     }
     health_turn();
     host_taken();
@@ -2243,11 +2121,11 @@ int main(int argc,char **argv){
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
       if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
-      /* design/transport.md section 14, "A process a port": a port's agent's message or exit */
+      /* design/transport.md section 14, "A process a port": a port's child's message or exit */
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_AGENT)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
-        if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->agent)agent_reaped(port);
-        else if(port && e->filter==EVFILT_READ && (int)e->ident==port->agent_fd)agent_heard(port);
+        if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->child)child_reaped(port);
+        else if(port && e->filter==EVFILT_READ && (int)e->ident==port->child_fd)child_heard(port);
       }
       else if(e->filter==EVFILT_PROC){
         for(uint32_t s=0;s<MESH_CLIENTS;s++){
@@ -2266,21 +2144,6 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)hello)hello_heard();
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard(0);
-#ifdef MESH_LOOP_FABRIC
-      /* design/transport.md: a cable's lower end dialed: its port's control socket, as a link's
-         listener takes the lower node's dial */
-      else if(e->udata!=UINT64_MAX && (e->udata&TAG_LOOP)){
-        const uint32_t k=(uint32_t)(e->udata&0xff);
-        int accepted;
-        while(k<loop_config.ports && (accepted=accept(loop_config.port[k].fd,NULL,NULL))>=0){
-          struct port *port=NULL;
-          for(uint32_t p=0;p<port_count;p++)if(!strcmp(ports[p].device.name,loop_config.port[k].device))port=ports+p;
-          if(!port || port->control>=0 || !port->open){close(accepted);continue;}
-          port->control=accepted;port->peer=0;
-          port_greet(port);
-        }
-      }
-#endif
       else if(e->udata<port_count && (int)e->ident==ports[e->udata].control){
         struct port *port=ports+e->udata;
         if(e->filter==EVFILT_WRITE && port->connecting){
@@ -2307,7 +2170,7 @@ int main(int argc,char **argv){
      MESH_PLATFORM_NS past the stop's start (`held_to`: every window set before the stop ends by then, so the hold is
      the one 5 s budget, well inside its heartbeat's bound of 3 MESH_PLATFORM_NS) */
   for(uint32_t p=0;p<port_count;p++){
-    agent_send(ports+p,(struct agent_message){.kind=AGENT_HALT});
+    child_send(ports+p,(struct child_message){.kind=CHILD_HALT});
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
     if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
   }
@@ -2326,15 +2189,15 @@ int main(int argc,char **argv){
     struct pollfd heard={.fd=network,.events=POLLIN};
     if(poll(&heard,1,(int)((latest-now+999999)/1000000))>0){now=clock_ns();network_heard(1);}
   }
-  /* design/transport.md section 14, "A process a port": each agent asked to end, and its exit awaited, at most
-     MESH_PLATFORM_NS (its own windows its own: agent_leave), so no agent of this launch holds its device's queue pairs
-     as the next launch's agents make theirs */
-  for(uint32_t p=0;p<port_count;p++)agent_send(ports+p,(struct agent_message){.kind=AGENT_END});
+  /* design/transport.md section 14, "A process a port": each child asked to end, and its exit awaited, at most
+     MESH_PLATFORM_NS (its own windows its own: child_leave), so no child of this launch holds its device's queue pairs
+     as the next launch's children make theirs */
+  for(uint32_t p=0;p<port_count;p++)child_send(ports+p,(struct child_message){.kind=CHILD_END});
   for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;;){
     uint32_t left=0;
-    for(uint32_t p=0;p<port_count;p++)if(ports[p].agent){
-      if(!waitpid(ports[p].agent,NULL,WNOHANG))left++;
-      else ports[p].agent=0;
+    for(uint32_t p=0;p<port_count;p++)if(ports[p].child){
+      if(!waitpid(ports[p].child,NULL,WNOHANG))left++;
+      else ports[p].child=0;
     }
     if(!left || clock_ns()>=until)break;
     poll(NULL,0,50);

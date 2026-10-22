@@ -42,8 +42,8 @@ struct mesh_device {
    interface holds (`gid_matched`), chosen from the whole table (up to 256 entries) against the interface's addresses:
    the entry equal to an IPv6 link-local address `interface` holds (getifaddrs, compared as bytes; BSD embeds the scope
    in bytes 2-3 of a link-local address it reports, which the comparison clears), the address mesh-fabric-init assigns
-   and the peer at the cable's other end reaches (README "Addressing").  Where no entry is one of those (a loop fabric's
-   device, which has no interface; an interface not yet addressed), the table's link-local entry (fe80::/10), else its
+   and the peer at the cable's other end reaches (README "Addressing").  Where no entry is one of those (an interface not
+   yet addressed), the table's link-local entry (fe80::/10), else its
    first nonzero entry, `gid_matched` 0 so its opening says so.  A Thunderbolt port's table does not always begin at
    index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed
    every queue pair's connection with EIO), and its first entry is not always its address: the M5 Ultra Studio's macOS
@@ -124,8 +124,8 @@ static __attribute__((unused)) int wire_map(struct wire_mapping *wire,struct hdr
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   return 0;
 }
-/* the region's name and the stop flag, defined once in mesh-link.c (design/transport.md) */
-extern const char *shm; extern _Atomic sig_atomic_t stop;
+/* the stop flag, defined once in mesh-link.c (design/transport.md) */
+extern _Atomic sig_atomic_t stop;
 /* design/transport.md: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
    the node's uptime in seconds, in one write so that no thread splits another's line */
 static __attribute__((unused)) void say(const char *format,...){
@@ -212,9 +212,9 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
   return 0;
 }
 /* a UC queue pair in INIT for each lane of `plan` (a bit a lane, design/HETEROGENEOUS-LINKS.md), queue q lane q, against
-   the device's usable queue pairs, on the provider's two completion queues: a link's, made once in its port agent's life
+   the device's usable queue pairs, on the provider's two completion queues: a link's, made once in its port child's life
    (design/transport.md section 14: no queue pair is moved to another state, destroyed or forgotten; the kernel releases
-   them at the agent's exit).  0, or the error (ENOSPC: the device holds no more queue pairs). */
+   them at the child's exit).  0, or the error (ENOSPC: the device holds no more queue pairs). */
 static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t plan){
   struct mesh_device *device=provider->device;
   const uint32_t count=(uint32_t)__builtin_popcount(plan),entries=plan?32-(uint32_t)__builtin_clz(plan):0;

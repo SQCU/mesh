@@ -177,14 +177,11 @@ class Top:
                 else: groups["failed"].append(f"{short}({status})")
                 if short in RESIDENT and not any(r.get("pid") for r in rows) and not all(r.get("disabled") for r in rows):
                     hints.append(("bad", f"{node.name}: resident service {label} is not running (last exit {status})"))
-            keeper = f.get("keeper") or {}
             if services:
                 add(("       up ", "dim"), (" ".join(groups["up"]), "ok"), ("   ran ok ", "dim"), " ".join(groups["ran"]) or "-",
-                    ("   exited " if groups["failed"] else "", "dim"), (" ".join(groups["failed"]), "warn"), (f"   off {len(groups['off'])}", "dim"),
-                    (f"   keeper: {keeper['last'][:48]}" if keeper.get("last") else "", "dim"))
+                    ("   exited " if groups["failed"] else "", "dim"), (" ".join(groups["failed"]), "warn"), (f"   off {len(groups['off'])}", "dim"))
             if node.error: hints.append(("bad", f"{node.name}: no telemetry ({node.error})"))
             if f.get("error"): hints.append(("warn", f"{node.name}: telemetry fabric section failed: {f['error']}"))
-            for alarm in keeper.get("alarms") or []: hints.append(("warn", f"{node.name}: keeper {alarm}"))
             for b in f.get("bridges") or []:
                 if str(b.get("state", "")).startswith("U"): hints.append(("bad", f"{node.name}: bridge pid {b['pid']} is in U (uninterruptible, blocked in a verbs call); never SIGKILL it and do not launch ibv_devinfo there (design/transport.md)"))
                 if b.get("log_error") and not b.get("exited_at"): hints.append(("warn", f"{node.name}: bridge log unreadable by telemetry ({b['log_error']}); no census"))

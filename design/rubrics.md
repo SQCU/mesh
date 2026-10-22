@@ -273,8 +273,8 @@ layers; see Inversions.
 - Ranked:
   - keyboard and monitor on the Mini ≺ "100% remote administrable" (10-15);
   - asking for administrative actions ≺ "services always respect shutdown isgnals no matter what state" (10-18);
-  - a link lost after it connected staying down until a person relaunches the bridge (version 129) ≺ the port's agent
-    ending once its quiet window has passed and the next agent pairing the link again (version 130, transport.md
+  - a link lost after it connected staying down until a person relaunches the bridge (version 129) ≺ the port's child
+    ending once its quiet window has passed and the next child pairing the link again (version 130, transport.md
     section 14): "this violates some of the first mandates ever written into this codebase's documentation, which
     cover reconnection of existing bridges or mesh applications as the first basic requirement for mesh networking
     code. bridges might die, collective clients might die, data procesing clients might die, but all of these and any
@@ -740,7 +740,7 @@ The positions, in every kind, as ranked pairs:
      which is on a different thread than mesh. mesh_heartbeat uses polite opens and polite closes on the actual mesh
      service."
 
-   So: a release stops the bridge (its agents' exits free every device object) and expires its region; no party signals
+   So: a release stops the bridge (its children's exits free every device object) and expires its region; no party signals
    a client for it; each client's next lease or communicator returns the expiry as a value (ncclRemoteError, and
    ncclMeshRegionExpired), and the client frees what it holds of that region or ends; the region is unlinked, and its
    memory the system's, once none of its holders lives. One supervisor (the heartbeat) opens and closes the bridge on kernel
@@ -906,7 +906,7 @@ a numeric constant or a typed operand; logging on a change found by comparing st
 - **M4:** a dud's all-ones bytes read by its consumer as a failure of its own group ≺ a dud landed as bytes (fcb79df2,
   the operator 10-20: "'duds' are not sentinel values").
 - **M4, M6:** a link lost after it connected staying down until a person relaunched the bridge (version 129) ≺ a
-  process a port (version 130, 1f9be1d5): the lost link's agent ends once its quiet window has passed, the next agent
+  process a port (version 130, 1f9be1d5): the lost link's child ends once its quiet window has passed, the next child
   pairs it again with nobody acting, and calls in flight fail as values: on the pair, 10-20, the M5 paired again 7.4 s
   after the Mini's bridge stopped.
 - **M3, M4:** a stream kept for a lost pairing's holder, bootstrap waits with no bound, and a member's stale leases
@@ -920,5 +920,5 @@ a numeric constant or a typed operand; logging on a change found by comparing st
   the pair the Mini's bridge restarted and the next call committed, wired memory 20.0 GB throughout) ≺ that, with a
   release that frees it: a heartbeat opens and closes the bridge on kernel events, a release expires the region, each
   client receives the expiry as a value and lets go or ends, and the heartbeat unlinks the region once none of its
-  holders (bridge, agents, clients, recorded by pid and start) lives, before any bridge makes another; a bridge that
+  holders (bridge, children, clients, recorded by pid and start) lives, before any bridge makes another; a bridge that
   ended unasked opens again a minute later.

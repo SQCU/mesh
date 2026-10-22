@@ -1666,7 +1666,7 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
 }
 
 /* design/transport.md, the checker of a communicator's table once it is compiled (comm_compile): its programs cut on
-   its pages, read by mesh_program_advise at mesh-advise.c's operands, each below its entry's bound, every warning
+   its pages, read by mesh_program_advise, each below its entry's bound, every warning
    logged as NCCL logs one, on a thread of its own over a copy: nothing joins it, and it refuses nothing */
 struct advice { const struct ncclComm *comm; uint32_t entry; struct mesh_operand operand; };
 static void advise_warn(void *argument, const char *line) {

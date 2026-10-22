@@ -31,11 +31,13 @@ mkdir -p "$MESH_ROOT"/{bin,etc,jobs,log,templates,viz} /usr/local/bin
 kick=
 launchctl print system/io.mesh.beacon >/dev/null 2>&1 && ! cmp -s "$REPO/bin/mesh-beacon.sh" "$MESH_ROOT/bin/mesh-beacon.sh" && kick=io.mesh.beacon
 launchctl print system/io.mesh.router >/dev/null 2>&1 && ! { cmp -s "$REPO/bin/mesh-router-init.sh" "$MESH_ROOT/bin/mesh-router-init.sh" && cmp -s "$REPO/vendor/babeld-arm64" "$MESH_ROOT/bin/babeld"; } && kick="$kick io.mesh.router"
+launchctl print system/io.mesh.telemetry >/dev/null 2>&1 && ! { cmp -s "$REPO/user/mesh-telemetry.py" "$MESH_ROOT/bin/mesh-telemetry.py" && cmp -s "$REPO/etc/mesh-capacity.json" "$MESH_ROOT/etc/mesh-capacity.json"; } && kick="$kick io.mesh.telemetry"
+launchctl print system/io.mesh.observer >/dev/null 2>&1 && ! { cmp -s "$REPO/viz/serve.py" "$MESH_ROOT/viz/serve.py" && cmp -s "$REPO/etc/mesh-capacity.json" "$MESH_ROOT/etc/mesh-capacity.json" && cmp -s "$REPO/etc/mesh-nodes.json" "$MESH_ROOT/etc/mesh-nodes.json"; } && kick="$kick io.mesh.observer"
 install -C -m 755 -o root -g wheel "$REPO"/bin/*.sh "$MESH_ROOT/bin/"
 try "UV runtime realized" "$MESH_ROOT/bin/mesh-runtime-install.sh" "$MESH_ROOT" "$REPO"
 install -m 755 -o root -g wheel "$REPO"/bin/mesh-observe.py "$MESH_ROOT/bin/mesh-observe.py"
 install -m 755 -o root -g wheel "$REPO"/bin/mesh-top.py "$MESH_ROOT/bin/mesh-top.py"
-install -C -m 644 -o root -g wheel "$REPO"/rdma/mesh_disk.py "$REPO"/rdma/mesh-disk.h "$REPO"/rdma/peers.py "$REPO"/bin/mesh_restart.py "$MESH_ROOT/bin/"
+install -C -m 644 -o root -g wheel "$REPO"/rdma/mesh_disk.py "$REPO"/rdma/mesh-disk.h "$REPO"/rdma/peers.py "$MESH_ROOT/bin/"
 install -S -m 755 -o root -g wheel "$REPO"/bin/mesh-stat "$MESH_ROOT/bin/mesh-stat" && rm -f "$MESH_ROOT/bin/libmesh.dylib" || bad "mesh-stat installed"
 install -d -m 755 -o "${ADMIN_USER:-root}" "$MESH_ROOT/log/user" && chown -R "${ADMIN_USER:-root}" "$MESH_ROOT/log/user"
 # the services' logs rotated by the system's newsyslog past 4 MB (etc/newsyslog-mesh.conf)
@@ -49,7 +51,8 @@ install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist "$MESH_ROOT/
 install -m 644 -o root -g wheel "$REPO"/keys/authorized_keys "$MESH_ROOT/etc/authorized_keys"
 install -C -m 755 -o root -g wheel "$REPO"/viz/serve.py "$MESH_ROOT/viz/serve.py"
 install -C -m 644 -o root -g wheel "$REPO"/viz/index.html "$MESH_ROOT/viz/index.html"
-rm -f /Library/LaunchDaemons/io.mesh.bridge.plist "$MESH_ROOT/bin/mesh-flow"; rm -rf "$MESH_ROOT/rdma"
+rm -f /Library/LaunchDaemons/io.mesh.{bridge,update,keeper,cartlane.learner,cartlane.viewer}.plist "$MESH_ROOT"/bin/{mesh-flow,mesh-update.sh,mesh-keeper.sh,mesh_restart.py} "$MESH_ROOT"/policy{,.default}; rm -rf "$MESH_ROOT/rdma"
+for L in io.mesh.keeper io.mesh.cartlane.learner io.mesh.cartlane.viewer; do launchctl bootout "system/$L" >/dev/null 2>&1; done
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$REPO/user/mesh-bandwidth.m" -o "$REPO/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 -o root -g wheel "$REPO/user/mesh-bandwidth" "$MESH_ROOT/bin/mesh-bandwidth"
 install -C -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/babeld"
@@ -60,9 +63,6 @@ ln -sf "$MESH_ROOT/bin/mesh-observe.py" /usr/local/bin/mesh-observe
 ln -sf "$MESH_ROOT/bin/mesh-top.py" /usr/local/bin/mesh-top
 ln -sf "$MESH_ROOT/bin/mesh-python" /usr/local/bin/mesh-python
 ok "$MESH_ROOT; mesh-status, mesh-peers, mesh-observe and mesh-top on PATH"
-printf 'sleep 0\ndisplaysleep 10\ndisksleep 0\nstandby 0\nautorestart 1\nwomp 1\npowermode 2\nfirewall off\n' > "$MESH_ROOT/policy.default"
-cp "$MESH_ROOT/policy.default" "$MESH_ROOT/policy"
-ok "policy: uniform fleet default"
 printf '%s\n' "${MESH_BRANCH:-main}" > "$MESH_ROOT/branch"
 printf '%s\n' "${MESH_REPO:-SQCU/mesh}" > "$MESH_ROOT/repo"
 printf '%s\n' "$ADMIN_USER" > "$MESH_ROOT/admin-user"
@@ -166,24 +166,21 @@ PL
   chmod 644 "$J/$1.plist.new"
 }
 launchctl bootout system/io.mesh.caffeinate >/dev/null 2>&1; rm -f /Library/LaunchDaemons/io.mesh.caffeinate.plist
-mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
-  "  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>"
-mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" "  <key>KeepAlive</key><false/>"
+mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>"
+mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>"
 sed -e "s|__MESH_USER__|$ADMIN_USER|g" -e "s|__MESH_HOME__|$H|g" "$REPO/etc/io.mesh.observer.plist" > "$J/io.mesh.observer.plist.new"
 chmod 644 "$J/io.mesh.observer.plist.new"
 mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>1</integer>"
-mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
-mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
-mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
+mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>"
 TSJ=io.mesh.tailscale; [ -d /Applications/Tailscale.app ] && TSJ=
 [ -n "$TSJ" ] && mkplist io.mesh.tailscale "<string>$MESH_ROOT/bin/tailscaled</string><string>--statedir=$MESH_ROOT/tailscale</string><string>--socket=/var/run/tailscaled.socket</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>1</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper $TSJ; do
+mkplist io.mesh.bridge-boot "<string>/bin/launchctl</string><string>bootstrap</string><string>user/$ADMIN_UID</string><string>$H/Library/LaunchAgents/io.mesh.bridge.plist</string>"
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.bridge-boot $TSJ; do
   port=
   case "$L" in io.mesh.telemetry) port=8788 ;; io.mesh.observer) port=8787 ;; esac
   upid=$(launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')
@@ -192,7 +189,7 @@ for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.
     retained=$((retained+1)); ok "$L listening on :$port (pid $upid); userspace provider retained"
     continue
   fi
-  if out=$("$REPO/bin/mesh-agent.sh" "$J/$L.plist.new" system "/Library/LaunchDaemons/$L.plist"); then
+  if out=$("$REPO/bin/mesh-launchd-agent.sh" "$J/$L.plist.new" system "/Library/LaunchDaemons/$L.plist"); then
     [ -n "$out" ] && { replaced=$((replaced+1)); ok "$out"; } || { retained=$((retained+1)); ok "$L loaded"; }
   else bad "$L NOT LOADED: $out"; fi
 done
@@ -201,13 +198,23 @@ for label in io.mesh.telemetry io.mesh.observer; do
     launchctl bootstrap "gui/$ADMIN_UID" "$H/Library/LaunchAgents/$label.plist" >/dev/null 2>&1 \
       && ok "$label userspace provider loaded" || bad "$label has no provider loaded"; }
 done
+for P in /Library/LaunchDaemons/io.mesh.*.plist; do
+  L=$(basename "$P" .plist)
+  launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
+  if out=$("$REPO/bin/mesh-launchd-agent.sh" "$P" system); then [ -z "$out" ] || ok "$out"; else bad "$L NOT LOADED: $out"; fi
+done
+for P in "$H/Library/LaunchAgents/"*.plist; do
+  [ "$(plutil -extract LimitLoadToSessionType raw "$P" 2>/dev/null)" = Background ] || continue
+  if out=$("$REPO/bin/mesh-launchd-agent.sh" "$P" "user/$ADMIN_UID"); then [ -z "$out" ] || ok "$out"; else bad "$out"; fi
+done
 for L in $kick; do launchctl kickstart -k "system/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
+for L in io.mesh.beacon io.mesh.telemetry io.mesh.observer; do launchctl kickstart "system/$L" >/dev/null 2>&1; done
 "$MESH_ROOT/bin/mesh-tailscale-init.sh"
 
-try "complete cartlane application realized" "$MESH_ROOT/bin/mesh-python" "$REPO/bin/mesh-application.py" deploy --source "$REPO" --target "$MESH_ROOT/applications/cartlane"
-
 sec "9. Status"
+try "health report written (/var/run/mesh-health)" "$MESH_ROOT/bin/mesh-health.sh"
 "$MESH_ROOT/bin/mesh-status.sh"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MESH_ROOT/revision"
 printf 'reported_failures=%s retained_jobs=%s replaced_jobs=%s\n' "$failures" "$retained" "$replaced" > "$MESH_ROOT/install-status"
 echo "installer completed: $failures reported failures; $retained loaded jobs current, $replaced loaded now or with a new definition for their next load"
+launchctl bootout system/io.mesh.update >/dev/null 2>&1 || :

@@ -18,8 +18,8 @@ reboots itself on an internal policy. Correcting that default is the only work
 that justifies a human being physically present. See [THREAT-MODEL.md](THREAT-MODEL.md)
 before changing settings that look wrong.
 
-A node stays awake by its power policy (`sleep 0`, `standby 0`, `autopoweroff 0`, `autorestart 1`, re-asserted by
-the keeper), never by a process holding assertions. Until 2026-10-13 `io.mesh.caffeinate` ran `caffeinate -dimsu`,
+A node stays awake by its power policy (`sleep 0`, `standby 0`, `autopoweroff 0`, `autorestart 1`, set by each run
+of `install.sh`), never by a process holding assertions. Until 2026-10-13 `io.mesh.caffeinate` ran `caffeinate -dimsu`,
 which kept the display on and declared the user active forever, so `dasd` never found the node idle and never ran
 the system's own idle maintenance: the Neural Engine daemon's compiled-model cache, which SIP lets only
 `aned`'s garbage collection delete (`com.apple.aned.danglingModelsGC`, `com.apple.aned.modelCacheGC`, refused 7,750
@@ -27,15 +27,14 @@ times in two weeks on "Device Activity Policy"), grew to about 390 GB of a 460 G
 negative this fleet exists to prevent; the display sleeps after 10 minutes so the node can be idle by macOS's
 definition while it keeps computing.
 
-Each keeper pass runs `bin/mesh-health.sh`, which writes `/var/run/mesh-health`: disk free, used and floor, and every
+`bin/mesh-health.sh`, run by `install.sh` (or by hand, as root), writes `/var/run/mesh-health`: disk free, used and floor, and every
 process holding a user-activity or display assertion now, with how long it has held it (what keeps `dasd` from finding
 the node idle). Below twice the floor those holders become a warning (an attended machine may keep its display on for
 good, and starved housekeeping only matters once space runs short), and the report also measures what `du` can read
 against what is used (the rest is space only the OS accounts for) and the largest directories under /Users, once each
-time the disk enters that state. Each condition worth attention is a `warn=` line; the keeper writes the warnings
-whenever they change to `keeper.log` and to the unified log (`log show --last 1d --predicate 'process == "logger"'`,
-which is written even when the disk is under the floor and the keeper's own log is not). `mesh-status` prints the
-report, and node-info carries its numbers and `health_warnings`.
+time the disk enters that state. Each condition worth attention is a `warn=` line. `mesh-status` prints the report, and
+node-info carries its numbers and `health_warnings`; the report is as of its `health_updated` line, since nothing
+writes it on a schedule.
 
 ## The one step that cannot be automated
 
@@ -78,8 +77,8 @@ pre-approved Tailscale auth key, not ephemeral), are not in the fetched tarball.
 for f in networks.conf tailscale.key; do ssh node.local "sudo sh -c 'umask 077; cat > /usr/local/mesh/$f'" < $f; done
 ```
 
-The keeper's next pass (within 60 s) adds the networks and joins the tailnet labeled with the node's hardware serial
-number (never a host name: AGENTS.md, "A node is its hardware; names are virtual"). Disable
+Then `ssh node.local 'sudo /usr/local/mesh/bin/mesh-networks.sh; sudo /usr/local/mesh/bin/mesh-tailscale-init.sh'` (or a
+rerun of `install.sh`) adds the networks and joins the tailnet labeled with the node's hardware serial number (never a host name: AGENTS.md, "A node is its hardware; names are virtual"). Disable
 the node's key expiry in the Tailscale admin console (or use a tagged key, whose nodes do not expire), or the node
 must log in again when its node key expires.
 
@@ -90,8 +89,9 @@ must log in again when its node key expires.
 curl -fsSL https://raw.githubusercontent.com/<you>/mesh/main/bootstrap.sh | sudo MESH_REPO=<you>/mesh bash
 ```
 
-A node remembers the repository it was bootstrapped from (`/usr/local/mesh/repo`) and converges from it
-(`mesh-update`), the bridge and the library with it (`rdma/NCCL.md` "Build and run").
+A node remembers the repository and branch it was bootstrapped from (`/usr/local/mesh/repo`, `/usr/local/mesh/branch`)
+and converges from them when someone reruns its bootstrap (below); the bridge and the library are built by hand
+(`rdma/NCCL.md` "Build and run").
 
 > The failure to guard against here is not "the wrong code ran" — that is answered by
 > replacing the machine. It is a bootstrap that half-completes and leaves the node
@@ -108,7 +108,7 @@ was actually asked for. Each of these is open to revisiting:
 - **FileVault stays off.** It demands a keyboard at every boot, so a node under it
   cannot reboot unattended. Encrypt payloads at the application layer instead,
   whenever that is wanted — nothing here argues data at rest is unimportant.
-- **The application firewall is off**, and the keeper re-asserts that. It can only
+- **The application firewall is off**, set by each run of `install.sh`. It can only
   subtract reachability. This is the weakest-supported item here and the first to
   revisit if a node ever lives somewhere with less physical control.
 - **Passwordless sudo** via `/etc/sudoers.d/mesh`, `visudo -c` validated before it is
@@ -138,7 +138,7 @@ bridge record and an announcement are the same node when their numbers are, and 
 node it does not list; a name is a label for people, never matched to find a node (AGENTS.md, "A node is its hardware;
 names are virtual"). The beacon announces the host UUID as its instance name and its number, UUID and serial in its
 TXT record; a node still running an older beacon (one that announced its LocalHostName) shows as
-`unidentified-<key>` until its next update installs this one. The SRV target `dns-sd -L` resolves is used only as
+`unidentified-<key>` until `install.sh` next runs there. The SRV target `dns-sd -L` resolves is used only as
 mDNS's pointer to the node's address records.
 
 The fabric's nodes are the bridge's map, so a node cabled to this one is known along its cable and never asked over
@@ -148,14 +148,20 @@ traffic needs no fabric), so it is not limited to one cable hop; a node on no sh
 cables. Every line arrives when its event does: a slow node delays only its own lines, and a node that is not there
 is simply absent. The consumer reads a stream and deals with out-of-order arrival.
 
-**`io.mesh.update` re-converges from the branch every 15 minutes**, as root. Before
-this existed, every fix required a human at a keyboard typing `sudo` on each node —
-which does not scale and is the same shape of problem as a node that cannot be
-reached. Now a push propagates to the fleet on its own. The node follows the branch
-recorded in `/usr/local/mesh/revision`, always at that branch's newest commit. Each pass
-installs the files that changed and loads each daemon that is not loaded; a loaded daemon is left running, and picks up
-what changed by restarting itself (launchd, below). The
-admin user is the one `/usr/local/mesh/admin-user` records (`MESH_USER` changes it).
+**A node converges when someone runs its installer, and at no other time.** Nothing fetches, installs, builds or
+restarts on a schedule: the operator, 2026-10-21, "this is a genre of code where automatically updating and building
+code can bootloop a system indefinitely". `io.mesh.update` (a fetch and rerun of `install.sh` every 15 minutes) and
+`io.mesh.keeper` (a pass every 60 s) are gone, and `install.sh` deletes their definitions where they remain. A push
+reaches a node when someone reaches the node and reruns its bootstrap, which takes the recorded branch's newest commit:
+
+```
+R=$(cat /usr/local/mesh/repo) B=$(cat /usr/local/mesh/branch); curl -fsSL https://raw.githubusercontent.com/$R/$B/bootstrap.sh | sudo MESH_REPO=$R MESH_BRANCH=$B bash
+```
+
+Each run installs the files that changed and loads each daemon that is not loaded; a loaded daemon is left running,
+and the resident ones take a changed program by `install.sh`'s restart of them (launchd, below). Drift (power policy,
+the firewall, sshd and screen sharing, the fabric's ports, the known networks, the tailnet, an unloaded job) is
+corrected by the next run. The admin user is the one `/usr/local/mesh/admin-user` records (`MESH_USER` changes it).
 
 ## Joining without root
 
@@ -245,17 +251,17 @@ LINKS
   redundant: 2 of 2
 ```
 
-The plane count is the keeper's: the LAN, and a fabric port whose cable link is up with an RDMA peer
-(`/var/run/mesh-fabric`, the fabric init's). The keeper logs `DEGRADED` every pass while only one remains, and
-`mesh-top` shows that line. Do not run anything that can disrupt the remaining link while degraded.
+The plane count is `mesh-status`'s: the LAN, and a fabric port whose cable link is up (each port's RDMA peer is in
+its RDMA section, from `/var/run/mesh-fabric`, the fabric init's). It prints `DEGRADED` while only one remains. Do not
+run anything that can disrupt the remaining link while degraded.
 
 ### The list has to have more than one entry
 
 macOS auto-joins any known network in range, so "find an available network" needs no
 code. It needs a list, and a list of one is a venue change away from needing a
 keyboard. `networks.conf` (gitignored — it holds live credentials) seeds every node,
-`install.sh` copies it to `/usr/local/mesh/networks.conf`, and the keeper re-asserts
-it. Entries are only added, never removed. Format is in `networks.conf.example`.
+`install.sh` copies it to `/usr/local/mesh/networks.conf` and seeds it
+(`mesh-networks.sh`) at each run. Entries are only added, never removed. Format is in `networks.conf.example`.
 
 ## Adding a machine to the fabric
 
@@ -302,7 +308,7 @@ and `bootstrap.sh` use. This is the hinge the whole remote-provisioning story tu
 ## The Thunderbolt bridge is torn down, not configured
 
 macOS bridges every Thunderbolt port into `bridge0` by default. `mesh-fabric-init`
-destroys it on every node, every boot, and every keeper pass. Two independent
+destroys it on every node, every boot, and every run of `install.sh`. Two independent
 reasons, both measured rather than assumed:
 
 **It has no loop protection.** `ifconfig bridge0` advertises `proto stp`, but the
@@ -365,8 +371,9 @@ ping6 -c3 -I en4 ff02::1
 
 None of this state persists on its own: configd rebuilds `bridge0` on Thunderbolt
 hotplug and `ifconfig` addresses are runtime-only. So it runs at boot as
-`io.mesh.fabric` and the keeper re-asserts it every pass. A silently re-bridged node
-is one that will storm the moment the fabric grows a ring.
+`io.mesh.fabric` and at each run of `install.sh`; configd's rebuild of `bridge0` after a
+hotplug stands until one of them runs again. A silently re-bridged node is one that
+will storm the moment the fabric grows a ring.
 
 The Thunderbolt bridge service is kept **last** in network service order for as long
 as it exists, so a peer can never advertise itself as the default route and blackhole
@@ -376,32 +383,31 @@ the node's uplink.
 
 | path | what |
 |---|---|
-| `install.sh` | provision/converge a node. Idempotent — re-running is the drift fix. It runs with root's home whether launchd or a person's `sudo` started it: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
+| `install.sh` | provision/converge a node, run by hand. Idempotent — re-running is the drift fix, and nothing reruns it. Each run sets the power policy, the firewall, sshd, screen sharing and NTP, runs the networks, fabric and tailnet inits and the health report, loads every unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and the admin user's LaunchAgents that declare the Background session type (into user/<uid>), and starts the beacon, telemetry and the observer where they are not running. It deletes `io.mesh.update`, `io.mesh.keeper`, `io.mesh.cartlane.learner` and `io.mesh.cartlane.viewer` where they remain, the update's bootout last since that job may be the run's own parent. It runs with root's home: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
 | `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
 | `AGENTS.md` | **the contract.** Accessibility is required; rejection filtering is banned. Read before changing anything. |
 | `THREAT-MODEL.md` | why several settings here look wrong under a normal hardening model. |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
-| `bin/mesh-tailscale-init.sh` | the node's own tailnet edge (design/ACCESS-TOPOLOGY-SPEC.md: a stationary node is not carried by a laptop's tailnet). Builds the open-source `tailscale` and `tailscaled` at a pinned version with a pinned Go toolchain (fetched, used and deleted with its caches; Tailscale ships no CLI-only macOS binary, and the App Store and standalone apps need a GUI approval), runs `tailscaled` as `io.mesh.tailscale` (state in `/usr/local/mesh/tailscale`), and brings it up from `/usr/local/mesh/tailscale.key` whenever it is not running; with no key it logs the login URL to `tailscale.log`. Run by `install.sh` and every keeper pass; it builds only when the pinned version changes and only with 4 GiB free above the disk floor. A Mac with `/Applications/Tailscale.app` already has its edge from the app, and a second client would contend for the tailnet's routes and DNS, so there it does nothing and `mesh-status` names the app. |
+| `bin/mesh-tailscale-init.sh` | the node's own tailnet edge (design/ACCESS-TOPOLOGY-SPEC.md: a stationary node is not carried by a laptop's tailnet). Builds the open-source `tailscale` and `tailscaled` at a pinned version with a pinned Go toolchain (fetched, used and deleted with its caches; Tailscale ships no CLI-only macOS binary, and the App Store and standalone apps need a GUI approval), runs `tailscaled` as `io.mesh.tailscale` (state in `/usr/local/mesh/tailscale`), and brings it up from `/usr/local/mesh/tailscale.key` where it is not running; with no key it logs the login URL to `tailscale.log`. Run by `install.sh`; it builds only when the pinned version changes and only with 4 GiB free above the disk floor. A Mac with `/Applications/Tailscale.app` already has its edge from the app, and a second client would contend for the tailnet's routes and DNS, so there it does nothing and `mesh-status` names the app. |
 | `bin/mesh-rdma.sh` | the node's RDMA devices, one line each: `<port> device=<rdma_port> rid=<RID> rdma_peer=present\|absent`. Every script that names fabric ports reads them here. It reads the IORegistry's archive form (`ioreg -a`, a property list, through `plutil`) and keys each device by its registry entry ID, because a tree walk lists an object once for each path to it: on macOS 27 (the M5 Ultra Studio, 2026-10-21) each `AppleThunderboltRDMAInterface` is listed twice, so the earlier text walk named every port twice and its RID lookup matched no `AppleThunderboltRDMAPeerInterface`, reporting `rdma_peer=absent` on a cabled port. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement, its instance name the host UUID and its TXT record the node's number, UUID, serial, model and RDMA state. Must never exit voluntarily. |
 | `etc/mesh-nodes.json` | the name table: each node's name for people, keyed by its host UUID (`rdma/peers.py` `table` and `label`; `node <number>` for a node it does not list). Read by `mesh-peers`, node-info, `mesh-top`, the observer and telemetry; never by anything that has to find a node. |
-| `bin/mesh-keeper.sh` | a pass every 60 s (drift has no event to wait on): re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, runs the fabric init (port recovery), writes health warnings when they change, loads each unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and background agent; loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
-| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** Every resident job is KeepAlive with `ThrottleInterval` 1 (launchd starts it again at once after an exit, at most once a second; its default is 10) and picks up a new program or configuration by exiting, but the bridge's: its job runs its heartbeat (`ThrottleInterval` 60,
+| `bin/mesh-launchd-agent.sh` | `mesh-launchd-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** No job runs on a schedule. The router and the tailnet's `tailscaled` are KeepAlive with `ThrottleInterval` 1 (launchd starts one again at once after an exit, at most once a second; its default is 10); the beacon, telemetry and the observer run from their load (`RunAtLoad`), once a boot, and launchd does not start one again after an exit (`install.sh` starts one that is not running); the bridge's is its own: its job runs its heartbeat (`ThrottleInterval` 60,
 KeepAlive {SuccessfulExit: false}), which restarts the bridge, and itself, on a deploy's SIGHUP (design/transport.md
-section 2); telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the update) read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL; the heartbeat
+section 2). The beacon, the router, telemetry and the observer take a new program by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs, or the documents telemetry and the observer read at their start, changed (`install-user.sh`'s for a userspace provider); an edit to a node's `observer.json` takes effect at the observer's next start (`sudo launchctl kickstart -k system/io.mesh.observer`). The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL; the heartbeat
 ends within 15 s of its SIGTERM. |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION. It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
-| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`; a port whose cable link is up with no RDMA peer is logged and held, never brought down (design/rubrics.md M3). Idempotent; run at boot and every keeper pass. |
+| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`; a port whose cable link is up with no RDMA peer is logged and held, never brought down (design/rubrics.md M3). Idempotent; run at boot (`io.mesh.fabric`) and by each run of `install.sh`. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric record: RDMA enablement and each device's link, as boot found them. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
-| `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
+| `templates/` | LaunchDaemon template for workloads. Boot-time (`RunAtLoad`), once a boot, no login needed. |
 | `viz/` | the whole-fabric observer (`io.mesh.observer`, :8787) and its page: the nodes in its bridge's records, each sampled every `period_s` of its configuration document (`etc/observer.json`, installed as the node's where it has none; no default in code). |
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-verbs.h`, `mesh-link.c`, `mesh-program.c` and `mesh-bridge.h` (the bridge), `mesh-call.c`/`.h`, `mesh-dataflow.c`/`.h`, `mesh-metal.m`/`.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
@@ -529,12 +535,12 @@ A node that has not converged since a push is the thing worth noticing, and you 
 
 ## A new bridge on a node
 
-Nothing stops a bridge but the bridge. Its agent's definition names its program and its configuration's path alone, so
+Nothing stops a bridge but the bridge. Its launchd agent's definition names its program and its configuration's path alone, so
 it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (`make all
 install` by hand, which installs the binary anew whenever libmesh changed) or a new configuration (`mesh-user.sh`
 renames it into place and then gives the binary a new file), and `mesh-user.sh` sends the bridge's heartbeat SIGHUP,
 which restarts the bridge keeping its region and runs its own new image (design/transport.md section 2); a process
-already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`). What each layer
+already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-launchd-agent.sh`). What each layer
 installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two versions
 until every node runs the new one, and a consumer's process holding the older library fails its calls as values until
 it is started again on the new one.
@@ -556,7 +562,7 @@ Copy `templates/io.mesh.job-EXAMPLE.plist` to
 sudo launchctl bootstrap system /Library/LaunchDaemons/io.mesh.job-<name>.plist
 ```
 
-Runs as root at boot with no login session. `KeepAlive` restarts it forever.
+Runs as root at boot with no login session, once a boot: launchd does not start it again after it exits.
 
 ## Collectives
 
@@ -566,7 +572,7 @@ A program that uses the mesh, step by step, with what the bridge, the collective
 The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL.md) (libnccl-mesh, the C
 library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
-different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's agent
+different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's launchd agent
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes
 (`bin/mesh-user.sh CONFIGURATION [CHECKOUT]`; etc/bridge/README.md, with the two didactic examples; no default; design/transport.md; A new bridge on a node, above). What it owns and does:
 design/transport.md. It forwards nothing, runs no command and carries no request.

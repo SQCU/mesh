@@ -9,7 +9,7 @@ how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md
 
 The node's user keeps the library in the user's mesh checkout (`~/mesh`): `bin/mesh-user.sh` builds the bridge, the
 libraries and the Python bindings there, keeps the user's torch environment with torch-mesh and the checkout's library on
-its path (`~/.venv-mesh-uv`), and runs the bridge as the user's agent (`io.mesh.bridge`, design/transport.md) with
+its path (`~/.venv-mesh-uv`), and runs the bridge as the user's launchd agent (`io.mesh.bridge`, design/transport.md) with
 the node's bridge configuration, its one operand (`bin/mesh-user.sh CONFIGURATION`, etc/bridge/README.md; there is no
 default); no part of it needs root. A program links or imports the checkout's library:
 
@@ -119,7 +119,7 @@ lost elsewhere or a node joining; a route between two nodes the higher-marked on
 No node outside the communicator is on it: the bridges forward nothing. Two ranks are linked where a link joins them; a
 communicator has a channel of each class toward each member it is joined to, and none toward another ([Routes between
 unlinked ranks](#routes-between-unlinked-ranks)). A later communicator reads the reports again, so a node that joins,
-a node gone or a link lost (down until its ports' next agents pair it again, with nobody acting: design/transport.md
+a node gone or a link lost (down until its ports' next children pair it again, with nobody acting: design/transport.md
 section 14) reaches the next communicator with no edit and no restart. libmesh's whole map of every node's record (`mesh_map` over no members, Python `mesh.current()`) joins two
 nodes by the same rule.
 
@@ -165,9 +165,7 @@ MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements
 known to both ends, no count crosses, and each pair's elements move as one entry of their own size, one call a group,
 each segment starting on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with every count `count`, and `ncclGather` and
 `ncclScatter` its rooted forms (every count 0 but toward or from the root), where they were each rank's sends and
-receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). On the loopback fabric (a line of 4, on the
-rings, before mesh fba2af36) every rank's elements landed, host path and walk, the all-to-all, every root's gather and
-scatter and an uneven all-to-all with zero counts among its pairs.
+receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`).
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -183,8 +181,7 @@ planner's `partials` lowering of a split-KV attention (metal-microbench docs/pla
 lay their partials as these rows and call `ncclAllReduce`, or `ncclReduce` to the one member reading them, with it.
 Reproduction target: never measured; the planner's pricing of the three-group form it replaces at 3, 4 and 6 members
 of a full mesh was 331, 331 and 226 us against the gather's 534 a chunk's layer (metal-microbench
-output_data/planner-20261015/pass2 engine2-after.json); on the loopback fabric (a line of 4) every rank's merge exact
-to 1e-5 against double arithmetic, host path and walk, 3 to 2,100 rows of 64 (on the rings, before mesh fba2af36).
+output_data/planner-20261015/pass2 engine2-after.json).
 
 **Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
 list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, compiled ahead of the
@@ -548,10 +545,6 @@ True])` its row, `grid.Shift(0, 1)` the neighbours, as mpi4py spells them.
 
 metal-microbench `tools/mesh/numpy_power.py` is a ported power iteration, and `tools/mesh/numpy_summa.py` SUMMA on a
 2-D grid (row and column broadcasts).
-
-## On one host
-
-`tools/nccl_demo.py plans` (metal-microbench): every compiled program on data, over rings and stars of n = 3..8.
 
 ## Not implemented
 

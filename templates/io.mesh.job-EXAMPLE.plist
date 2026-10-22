@@ -7,8 +7,6 @@
     <string>/usr/local/mesh/jobs/EXAMPLE.sh</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>
   <key>ProcessType</key><string>Standard</string>
   <key>StandardOutPath</key><string>/usr/local/mesh/log/job-EXAMPLE.out.log</string>
   <key>StandardErrorPath</key><string>/usr/local/mesh/log/job-EXAMPLE.err.log</string>

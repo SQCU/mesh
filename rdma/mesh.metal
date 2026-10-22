@@ -2,7 +2,7 @@
 // one small float format (FP8, nccl.h ncclFloat8e4m3 and ncclFloat8e5m2), defined once: a kernel that waits on a count,
 // reads landed bytes, publishes a count or decodes FP8 includes this file and calls these from its own source, and no
 // source splices them into another kernel's text (metal-microbench docs/acceptance-20261014.md A40, A54).
-// libnccl-mesh's kernels include it, and so does every kernel that hands words to another agent (the host, a Neural
+// libnccl-mesh's kernels include it, and so does every kernel that hands words to another party (the host, a Neural
 // Engine partner's thread) or reads FP8 (metal-microbench dsv41.swift). It is read from the library
 // (the user's checkout, ~/mesh/rdma/mesh.metal).
 #ifndef MESH_METAL

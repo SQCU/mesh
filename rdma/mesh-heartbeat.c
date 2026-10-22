@@ -2,14 +2,14 @@
    keeps alive (bin/mesh-user.sh).  It holds no device, no region and no socket of the mesh: it opens the bridge (spawned
    in a process group of its own, so a heartbeat that ends leaves it serving), closes it when asked (a signal, its exit
    then heard as a kernel event, never inferred from time passing), and is the one process that unlinks an expired
-   region, once none of the region's holders lives (the bridge, its agents and its clients, each recorded in the region
+   region, once none of the region's holders lives (the bridge, its children and its clients, each recorded in the region
    by its pid and start: mesh_holds), before it opens a bridge again: a bridge is never opened while another is ending,
    and no second region is ever made beside a holder of the first.
 
    Its operator's signals (`launchctl kill SIG user/$(id -u)/io.mesh.bridge`):
    - SIGHUP: open, or restart: the bridge closed by SIGHUP (its region kept for the next to adopt), this heartbeat's own
      image run again (a deploy's new binaries both), and the bridge opened again (once an expired region is unlinked);
-   - SIGUSR1: release: the bridge closed by SIGTERM (its agents end, so the kernel frees their devices' objects; its
+   - SIGUSR1: release: the bridge closed by SIGTERM (its children end, so the kernel frees their devices' objects; its
      region expired, so every client's next lease or communicator returns the expiry), the region unlinked once no
      holder lives (its memory then the system's), and no bridge opened until SIGHUP;
    - SIGTERM, SIGINT (launchd's stop of the job, the system's shutdown): release, then this heartbeat ends (0, which
@@ -123,7 +123,7 @@ static void reopen_later(void){
 }
 
 /* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its holders lives:
-   its bridge (`bridge_pid`, `bridge_start`), each agent its bridges recorded, and each client slot's process (its
+   its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process (its
    owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder).  Until then
    they are watched (their exits as events, the slots read every REPLACE_TICK_MS for a client that lets go and lives on)
    and named as they change.  A region that is live, or none, ends the replacement */
@@ -142,7 +142,7 @@ static void replace_turn(void){
   const pid_t serving=bridge_of(m,size,&start);
   if(serving)holders[count++]=serving;
   for(uint32_t a=0;a<2*MESH_PORTS;a++)
-    if(own->agent[a].pid && mesh_holds((pid_t)own->agent[a].pid,own->agent[a].start))holders[count++]=(pid_t)own->agent[a].pid;
+    if(own->child[a].pid && mesh_holds((pid_t)own->child[a].pid,own->child[a].start))holders[count++]=(pid_t)own->child[a].pid;
   for(uint32_t c=0;c<m->clients && c<MESH_CLIENTS && m->client_off+(uint64_t)(c+1)*sizeof(struct mesh_client)<=size;c++){
     const struct mesh_client *slot=(const struct mesh_client *)((const char *)m+m->client_off)+c;
     const pid_t pid=(pid_t)(uint32_t)atomic_load(&slot->owner);

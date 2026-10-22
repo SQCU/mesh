@@ -54,40 +54,6 @@ clean-kernels: .build/libnccl-mesh.sha256
 	@h=$$(cat .build/libnccl-mesh.sha256); for f in $(KERNEL_FILES:%=libnccl-mesh.*.%); do \
 	  [ -e "$$f" ] || continue; case $$f in libnccl-mesh.$$h.*) ;; *) rm -f "$$f" && echo "rdma/$$f removed";; esac; \
 	done
-# design/transport.md: the compiled collectives' advisories (mesh_program_advise) over the loopback
-# fabric's maps, at .build/mesh-advise with libmesh's sources compiled in (the installed libmesh.dylib untouched); not in `all`
-mesh-advise: .build/mesh-advise
-.build/mesh-advise: mesh-advise.c mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h \
-  nccl.h Makefile
-	mkdir -p .build
-	cc -fblocks -O2 -Wall -Wextra -Werror -o $@ mesh-advise.c mesh-dataflow.c mesh-call.c mesh-collective.c
-.PHONY: mesh-advise
-# design/transport.md: N bridges on one host over loopverbs.c (shared memory in place of RDMA),
-# each its configuration's node, region and loopback ports: never a production bridge (no RDMA, ad-hoc signed); the
-# deployed mesh-flow is built from the same source without MESH_LOOP_FABRIC and stays as it is
-LOOP = .build/loop
-mesh-flow-loop: $(LOOP)/mesh-flow-loop
-$(LOOP)/mesh-flow-loop: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-dataflow.c mesh-call.h mesh-call.c mesh-collective.h \
-  mesh-collective.c loopverbs.c Makefile
-	mkdir -p $(LOOP)
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -DMESH_LOOP_FABRIC -o $@ mesh-link.c mesh-records.c mesh-dataflow.c mesh-call.c mesh-collective.c loopverbs.c \
-	  -framework SystemConfiguration -framework CoreFoundation -framework IOKit
-	codesign --force --sign - --identifier io.mesh.bridge.loop $@
-# host: the loop's clients: libmesh bound to a loop bridge (mesh_loop_bind), libnccl-mesh with the walk's kernels on the
-# CPU (nccl-mesh-host.c), both at .build/host under the libraries' install names, and the loop's driver (mesh-loop.c)
-HOST = .build/host
-host: $(HOST)/libmesh.dylib $(HOST)/libnccl-mesh.dylib $(HOST)/mesh-loop $(LOOP)/mesh-flow-loop
-$(HOST)/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
-	mkdir -p $(HOST)
-	cc -fblocks -O2 $(WARN) -DMESH_LOOP_FABRIC -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
-$(HOST)/libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-host.c nccl-mesh-metal.h nccl.h mesh-collective.h mesh-call.h mesh-dataflow.h \
-  mesh.h mesh-plan.h $(HOST)/libmesh.dylib Makefile
-	cc -fblocks -O2 $(WARN) -DMESH_HOST_EXECUTOR -DMESH_LOOP_FABRIC -dynamiclib -Wl,-install_name,@rpath/libnccl-mesh.dylib \
-	  -Wl,-rpath,@loader_path $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-host.c -L$(HOST) -lmesh
-$(HOST)/mesh-loop: mesh-loop.c nccl.h mesh-collective.h mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h $(HOST)/libmesh.dylib \
-  $(HOST)/libnccl-mesh.dylib Makefile
-	cc -fblocks -O2 $(WARN) -DMESH_LOOP_FABRIC -o $@ mesh-loop.c -L$(HOST) -lmesh -lnccl-mesh -Wl,-rpath,@loader_path
-.PHONY: mesh-flow-loop host
 # NCCL's API (nccl.h) on the prepared transfers and the collective planner of libmesh.dylib; every function also
 # under its pncclX profiling name, as NCCL exports both
 NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitRankConfig ncclCommInitRank \

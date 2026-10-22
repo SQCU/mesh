@@ -3,7 +3,7 @@
 A node's bridge (`rdma/mesh-flow`) starts from one operand, its configuration: a document its consumer writes and
 passes, in JSON, TOML or YAML. `bin/mesh-user.sh CONFIGURATION [CHECKOUT]` reads it with the mesh library's one
 loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and region
-in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's agent
+in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's launchd agent
 definition, so the keeper's load at boot keeps it, and records the document's path beside it. A
 changed configuration is renamed into place and takes effect when the bridge stops itself, between calls (README.md,
 A new bridge on a node): its running calls are never ended for it. There
@@ -38,16 +38,6 @@ extents the device holds, and the port turns again 60 s later, doubling to 30 mi
 (design/transport.md). The bridge starts and serves the node either way; the region is never clamped. Clients lease
 from it; a lease that does not fit fails at its start with an error naming the execution, and the region never grows.
 How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
-
-## The loopback fabric's configurations
-
-A loop bridge (`rdma/.build/loop/mesh-flow-loop`, mesh design/transport.md), one of N on one
-host for running relays, forwarding and the library on 3 to 8 nodes before the hardware has them, reads the same
-canonical form with one key more, `loop`: its region's name, its node, the loopverbs fabric it shares with the host's
-other loop bridges, and its ports, each a loopverbs device and its cable's
-two loopback ports. The loop's driver writes them (`rdma/.build/host/mesh-loop up`, one a node, from the map it is
-given), not `bridge_configuration.py`, which refuses the key; the deployed bridge reads no `loop` (it is built without
-the loop fabric) and a loop bridge refuses a configuration without one.
 
 ## The examples
 

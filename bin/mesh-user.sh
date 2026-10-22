@@ -1,11 +1,11 @@
 #!/bin/bash
 # The substrate as its user's (design/transport.md): the user's mesh checkout built and installed (make all install:
 # the bridge and the libraries, each image that changed renamed into rdma/) with its Python bindings, ~/.venv-mesh-uv
-# with torch-mesh and the checkout's library on its path, and the bridge as the user's agent io.mesh.bridge, run from
+# with torch-mesh and the checkout's library on its path, and the bridge as the user's launchd agent io.mesh.bridge, run from
 # the checkout with the node's bridge configuration, the operand CONFIGURATION (a JSON, TOML or YAML document,
-# etc/bridge/README.md): rdma/bridge_configuration.py writes its canonical form, which the agent's
+# etc/bridge/README.md): rdma/bridge_configuration.py writes its canonical form, which the launchd agent's
 # definition names, so the keeper's load at boot keeps it.  There is no default configuration.
-# A definition this script writes never changes with what it runs: a loaded agent is left running (bin/mesh-agent.sh).  The document's path is recorded
+# A definition this script writes never changes with what it runs: a loaded launchd agent is left running (bin/mesh-launchd-agent.sh).  The document's path is recorded
 # beside its canonical form.  The bridge's definition names its
 # program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename, and the
 # bridge's heartbeat, sent SIGHUP, restarts the bridge on them, its region kept (design/transport.md section 2).  The install records what it installed
@@ -40,11 +40,11 @@ configuration="$support/io.mesh.bridge/configuration.plist"; renew=
 if cmp -s "$configuration.new" "$configuration"; then rm -f "$configuration.new"
 else [ ! -f "$configuration" ] || renew=1; mv -f "$configuration.new" "$configuration" || exit 1; fi
 printf '%s\n' "$document" > "$support/io.mesh.bridge/document"
-agents=$HOME/Library/LaunchAgents; mkdir -p "$agents" "$HOME/Library/Logs" "$state/facts"
+launchd_agents=$HOME/Library/LaunchAgents; mkdir -p "$launchd_agents" "$HOME/Library/Logs" "$state/facts"
 images=$(cat "$source/rdma/mesh-heartbeat" "$source/rdma/mesh-flow" "$source/rdma/libmesh.dylib" | shasum -a 256 | cut -d' ' -f1)
 before=$(sed -n 's/^images=//p' "$state/facts/io.mesh.bridge" 2>/dev/null)
 [ -z "$renew" ] || { cp "$source/rdma/mesh-flow" "$source/rdma/mesh-flow.renew" && mv -f "$source/rdma/mesh-flow.renew" "$source/rdma/mesh-flow"; } || exit 1
-cat > "$agents/io.mesh.bridge.plist.new" <<PL
+cat > "$launchd_agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- the node's bridge (bin/mesh-user.sh): its heartbeat (rdma/mesh-heartbeat), which opens and closes the bridge; a new binary or configuration is installed by rename and the heartbeat's SIGHUP restarts both on them, the region kept; SIGUSR1 releases the bridge and its region, SIGTERM releases them and ends the heartbeat (design/transport.md section 2) -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
@@ -53,7 +53,7 @@ cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>60</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
 PL
-out=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
+out=$("$source/bin/mesh-launchd-agent.sh" "$launchd_agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$out"; exit 1; }
 [ -z "$out" ] || printf '%s\n' "$out"
 { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
   || { launchctl kill SIGHUP "user/$(id -u)/io.mesh.bridge" 2>/dev/null; \
