@@ -4,6 +4,22 @@ Read `THREAT-MODEL.md` first. This file is the operational rule that follows fro
 
 **Recovery is critical priority.** The transport, how it fails and how it recovers: `design/transport.md`.
 
+## The hardware and the discipline it requires (read first)
+
+The operator, 2026-10-22; each point explained, with its measurements, in `design/hardware-and-discipline.md`:
+1. The hardware is unusual: not like arm64 CPUs or older Apple silicon. It has one cache level fewer than sm90/sm100,
+   very low FLOPs and bandwidth against a large memory, and one memory shared by CPU, GPU and the RDMA engine.
+2. DMA is fundamental. Useful collectives from weak silicon need exceptional practice: zero copy, movement compiled from
+   declared extents, completions as the only signal.
+3. Weak silicon is programmed at the level of a streaming multiprocessor, not through abstractions wrapping whole GPUs
+   or nodes. Collective ops and kernels write their own guards.
+4. We economize on different trade-offs from NCCL: a more constrained, still universally expressive memory model (the
+   page table) for strictly fewer waits, copies and protocol dependency depth. This is baseline performance, not a
+   nice-to-have.
+5. Bridges and collectives never prevent what might be a data bug under some semantics of data. A client may be a
+   real-time guitar pedal or a deferred cron job. Programmers write their own syncs and guards, or get the fastest
+   results possible.
+
 ## Contiguous and non-contiguous tensors (final)
 
 <table><tr><td>
