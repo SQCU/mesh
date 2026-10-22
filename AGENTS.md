@@ -170,6 +170,11 @@ node access). They do not govern the RDMA collective or TP code.
 
 ## Review checklist
 
+- Run `make -C rdma lint` (bin/mesh-lint; design/lint.md) before committing to rdma/, examples/ or torch-mesh, and
+  read every finding on the lines you changed. A review that finds a new class of defect adds its rule to design/lint.md
+  and bin/mesh-lint in the same commit as the fix (the operator, 2026-10-22: no fix may leave "no guidance or
+  corrective or example in the repo").
+
 - [ ] No new exit, return, or continue that leaves a node less reachable.
 - [ ] No capability gated on type, model, location, or network.
 - [ ] No new branch that can skip a capability.

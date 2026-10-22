@@ -95,6 +95,10 @@ METAL = xcrun metal -std=metal4.0 -fmetal-math-mode=safe -mmacosx-version-min=26
 XCODE = DEVELOPER_DIR=$(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer))) \
   SDKROOT=macosx
 VENDOR = ../vendor
+# design/lint.md: the rules a review found, kept as checks
+lint:
+	@../bin/mesh-lint
+
 kernels: .build/libnccl-mesh.metallib
 	@a=$$(shasum -a 256 < $<) && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 || { \
 	  cp $< $(VENDOR)/libnccl-mesh.metallib && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } > $(VENDOR)/libnccl-mesh.sha256 && \
@@ -115,7 +119,7 @@ kernels: .build/libnccl-mesh.metallib
 # person or agent who runs it; a process looks each pipeline up in it and compiles none
 .build/libnccl-mesh.binarchive: .build/nccl-mesh-kernels .build/libnccl-mesh.metallib
 	rm -f $@ && .build/nccl-mesh-kernels .build/libnccl-mesh.metallib $@
-.PHONY: .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
+.PHONY: lint .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
 .build/libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h \
   mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
 	cc -fblocks -O2 $(WARN) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \

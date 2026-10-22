@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""mesh-lint: deductive checks of the bridge, the collective and their clients for waits, syncs, guards, races and
+coined terms (design/lint.md: each rule, the operator's ruling or the literature behind it, and its wrong and right
+forms).  A rule that a pattern decides runs always; one that needs reading a function (--semantic) asks a language model
+about that one function, given the rule cards and the vocabulary (design/lint.md "Vocabulary").
+
+  bin/mesh-lint [--semantic] [--strict] [paths...]    findings as path:line: RULE: message [source]
+"""
+import argparse
+import ast
+import concurrent.futures
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+RDMA = ROOT / 'rdma'
+
+# design/lint.md "Data path": functions a step's critical path runs through, per file
+DATA_PATH = {
+    'rdma/mesh-link.c': r'lane_send|lane_post|link_receive|link_send|stream_turn_one|stream_send|stream_post|'
+                        r'stream_receive_turn|walk_\w+|unit_told|holding_kept|port_pass|page_span|row_at|stream_time',
+    'rdma/nccl-mesh.c': r'present_group|room_wait|gpu_wait|gpu_finished|run|consume|publish|launch_metal|launch|retire|'
+                        r'issue_group|walk|schedule|place_group|gate_of|fusable',
+    'rdma/torch-mesh/torch_mesh/_stream.mm': r'encode|fused_exchange|fused_published|published|signalled',
+}
+PER_UNIT = r'lane_send|lane_post|unit_told|link_receive|link_send|stream_send|stream_post|walk_\w+'
+CLOCK = r'\b(mach_absolute_time|clock_gettime_nsec_np|clock_gettime|CFAbsoluteTimeGetCurrent)\s*\('
+TIMED_WAIT = r'\b(nanosleep|usleep|sleep|os_sync_wait_on_address_with_timeout|dispatch_semaphore_wait|' \
+             r'pthread_cond_timedwait)\s*\('
+# rdma/mesh.metal and nccl-mesh-kernels.h STEPS: the landing wait the operator kept (10-21)
+SANCTIONED_WAITS = {'mesh_wait_bounded', 'mesh_wait', 'mesh_remote_wait', 'mesh_step_wait', 'mesh_step_counts',
+                    'mesh_step_await', 'mesh_step_sent'}
+# design/lint.md "Lines": shared words, the one writer each, checked against the cache line (hw.cachelinesize)
+WRITERS = {
+    'mesh_stream': {'owner': 'client', 'sends': 'client', 'lands': 'client', 'ready': 'gpu', 'sent': 'send',
+                    'taken[0]': 'send', 'landed': 'receive', 'taken[1]': 'receive', 'posts[0]': 'send',
+                    'posts[1]': 'receive'},
+    'lane_state': {'sent': 'send', 'done': 'send', 'posted': 'receive', 'got': 'receive'},
+}
+
+findings = []
+
+
+def find(path, line, rule, message, source):
+    findings.append((str(path), line, rule, message, source))
+
+
+def strip_c(text):
+    """Comments and string literals blanked, newlines kept, so line numbers hold."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            j = n if j < 0 else j + 2
+            out.append(re.sub(r'[^\n]', ' ', text[i:j]))
+            i = j
+        elif text.startswith('//', i):
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            out.append(' ' * (j - i))
+            i = j
+        elif text[i] == '"' and (i == 0 or text[i - 1] != "'"):
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == '\\' else 1
+            out.append('"' + re.sub(r'[^\n]', ' ', text[i + 1:j]) + '"')
+            i = j + 1
+        else:
+            out.append(text[i])
+            i += 1
+    return ''.join(out)
+
+
+FUNCTION = re.compile(r'(?m)^[^\S\n]*(?:[\w:\[\]<>\*&,\s()]*?)\b([A-Za-z_]\w*)\s*\(([^;{}()]*(?:\([^;{}()]*\)[^;{}()]*)*)\)'
+                      r'\s*(?:const\s*)?(?:thread\s*)?\{')
+CONTROL = {'if', 'for', 'while', 'switch', 'return', 'sizeof', 'do', 'else', 'catch'}
+
+
+def functions(clean):
+    """(name, start line, body text, body start offset) of each function definition in C-like text."""
+    for m in FUNCTION.finditer(clean):
+        name = m.group(1)
+        if name in CONTROL:
+            continue
+        start = m.end() - 1
+        depth, j = 0, start
+        while j < len(clean):
+            if clean[j] == '{':
+                depth += 1
+            elif clean[j] == '}':
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        yield name, clean.count('\n', 0, m.start()) + 1, clean[start:j + 1], start
+
+
+def line_of(clean, offset):
+    return clean.count('\n', 0, offset) + 1
+
+
+def check_c(path, text):
+    clean = strip_c(text)
+    rel = path.relative_to(ROOT).as_posix()
+    path_re = DATA_PATH.get(rel)
+    for m in re.finditer(r'IBV_QPS_RESET|IBV_QPS_ERR|ibv_destroy_qp|\bdestroy_qp\b', clean):
+        find(path, line_of(clean, m.start()), 'M3-QP', 'a queue pair moved to RESET or ERR, or destroyed, inside the '
+             'running process', 'design/rubrics.md M3; operator 2026-10-22: the documented flush only, unused')
+    for name, _, body, at in functions(clean):
+        on_path = path_re and re.fullmatch(path_re, name)
+        per_unit = re.fullmatch(PER_UNIT, name)
+        if not on_path:
+            continue
+        lines = body.split('\n')
+        deadlines = set()
+        for k, ln in enumerate(lines):
+            if re.search(r'meshlint:\s*measure', text.split('\n')[line_of(clean, at) + k - 1]):
+                continue
+            if re.search(CLOCK, ln) or re.search(r'\b\w+_NS\b', ln):
+                assigned = re.match(r'\s*(?:const\s+)?(?:uint64_t|uint32_t|int64_t|double|auto)?\s*(\w+)\s*=', ln)
+                if re.search(r'[^<>\-]([<>]=?)[^<>]', ln) and not re.search(r'#include|->', ln.split('?')[0] if '?' in ln else ''):
+                    find(path, line_of(clean, at) + k, 'T1-CLOCK', f'{name}: a clock or *_NS bound in a condition on the '
+                         'data path', 'operator 2026-10-22: "we don\'t introduce race conditions or use timing anywhere"')
+                elif assigned:
+                    deadlines.add(assigned.group(1))
+            for d in deadlines:
+                if re.search(rf'\b(if|while|for)\b.*\b{d}\b', ln):
+                    find(path, line_of(clean, at) + k, 'T1-CLOCK', f'{name}: `{d}`, a clock reading, decides a branch',
+                         'operator 2026-10-22: no timing in a transaction')
+            if re.search(TIMED_WAIT, ln):
+                find(path, line_of(clean, at) + k, 'T2-SLEEP', f'{name}: a sleep or a timed wait on the data path',
+                     'operator 2026-10-22: "using timing is always slower than not using timing"')
+            if per_unit and re.search(r'memory_order_seq_cst|__ATOMIC_SEQ_CST', ln):
+                find(path, line_of(clean, at) + k, 'S1-SEQCST', f'{name}: a sequentially consistent atomic on the per-unit '
+                     'path (a store then a load: the core waits for the store to be seen)', 'bridge audit 2026-10-22, item 4')
+            if name in ('lane_send', 'lane_post', 'page_span') and 'page_bytes()' in ln:
+                find(path, line_of(clean, at) + k, 'U1-PAGE', f'{name}: a unit\'s length is the whole page, not the '
+                     'plan\'s bytes (TN3205 matches frames, 4 KiB)', 'bridge audit 2026-10-22, item 1')
+
+
+def metal_functions(clean):
+    return list(functions(clean))
+
+
+def check_metal(path, text):
+    clean = strip_c(text)
+    publishing = 'mesh_step_release' in clean
+    threadgroup_names = set(re.findall(r'threadgroup\s+[\w:<>\s]+?\b(\w+)\s*\[', clean))
+    for name, _, body, at in metal_functions(clean):
+        lines = body.split('\n')
+        spin_at = next((i for i, ln in enumerate(lines) if re.search(r'\bfor\s*\([^;]*;\s*;|\bwhile\s*\(', ln)), None)
+        if spin_at is not None and re.search(r'atomic_load_explicit|coherent\(system\)', body) and name not in SANCTIONED_WAITS:
+            k = spin_at
+            find(path, line_of(clean, at) + k, 'K1-SPIN', f'{name}: a spin inside a kernel other than the landing wait',
+                 'operator 2026-10-21: "keep only the landing wait, one acquire fence, a poll bound for the node"')
+        for k, ln in enumerate(lines):
+            if re.search(r'\bPATIENCE\b|atomic_fetch_or_explicit\(\s*err\b|\b(stop|err)\s*,\s*1u\b', ln):
+                find(path, line_of(clean, at) + k, 'K2-ERR', f'{name}: an error word or patience bound inside a kernel',
+                     'operator 2026-10-22: error states are made unreachable, not handled in the callgraph')
+            m = re.search(r'simdgroup_store\(\s*\w+\s*,\s*(\w+)', ln)
+            if publishing and m and m.group(1) not in threadgroup_names:
+                find(path, line_of(clean, at) + k, 'K3-STORE', f'{name}: a plain store to device memory in a publishing '
+                     'kernel (the NIC reads only system-coherent stores)', 'docs/measurement.md 2026-09-29 (metal-microbench)')
+            if re.search(r'\.d\s*\+', ln) and 'mesh_step_read' not in ln:
+                find(path, line_of(clean, at) + k, 'K4-LAND', f'{name}: a landed buffer read without mesh_step_read',
+                     'nccl-mesh-kernels.h STEPS: landed bytes are read system-coherent')
+
+
+def check_python(path, text):
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return
+    defs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+    def calls(node):
+        return [c for c in ast.walk(node) if isinstance(c, ast.Call)]
+
+    def callee(c):
+        f = c.func
+        return f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ''
+
+    def is_step_loop(loop):
+        return any(callee(c) in ('exchange', 'encode', 'step', 'tick', 'chain_stream', 'lstm_stream') for c in calls(loop)) or \
+            any(isinstance(c.func, ast.Name) and c.func.id in ('step', 'tick') for c in calls(loop))
+
+    def syncs(node, seen):
+        for c in calls(node):
+            name = callee(c)
+            blocking_copy = name == 'copy_' and not any(k.arg == 'non_blocking' for k in c.keywords)
+            if name in ('synchronize', 'item', 'cpu', 'tolist', 'barrier') or blocking_copy:
+                yield c, name
+            if name in defs and name not in seen:
+                seen.add(name)
+                yield from syncs(defs[name], seen)
+
+    for loop in [n for n in ast.walk(tree) if isinstance(n, (ast.For, ast.While))]:
+        if not is_step_loop(loop):
+            continue
+        for c in calls(loop):
+            if callee(c) in ('perf_counter', 'monotonic', 'time') and not re.search(r'meshlint:\s*measure', text.split('\n')[c.lineno - 1]):
+                find(path, c.lineno, 'P5-CLOCK', 'a clock read in the step loop', 'operator 2026-10-22: no timing')
+        for c, name in syncs(loop, set()):
+            if re.search(r'meshlint:\s*ring', text.split('\n')[c.lineno - 1]):
+                continue
+            find(path, c.lineno, 'P1-SYNC', f'`{name}` on the step loop\'s path: the host waits for the GPU',
+                 'operator 2026-10-22: "algorithmically unjustified halts, waits"')
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in ('__call__', 'step', 'tick')]:
+        for c in calls(fn):
+            if callee(c) == 'exchange':
+                find(path, c.lineno, 'P3-REPLAN', 'a crossing planned again every step (the library plans, places and '
+                     'records it each call): present it once and start it each step, as MPI_Allreduce_init',
+                     'host audit 2026-10-22, A.1; design/extents-and-liveness.md a')
+    if '/examples/' in str(path) or path.name in ('chain.py', 'lstm.py'):
+        for node in ast.walk(tree):
+            hit = (isinstance(node, ast.Attribute) and node.attr in ('getpagesize', 'PAGE', 'paged')) or \
+                  (isinstance(node, ast.Name) and node.id in ('PAGE', 'paged'))
+            if hit:
+                find(path, node.lineno, 'D1-PAGE', 'data code reads a collective backend\'s page facts (page size, page '
+                     'rounding): only collective code may, so it can choose placement and movement for performance and '
+                     'keep backend complexity out of the linear algebra; ask the collective for the buffer',
+                     'operator 2026-10-22: "data processing code may never discover these abstracted features"; '
+                     '"for performance reasons and for decoupling backend complexity from linear algebraic function '
+                     'complexity rather than for \'security\'"')
+    for c in calls(tree):
+        if callee(c) == 'exchange' and len(c.args) > 1 and isinstance(c.args[1], ast.Attribute):
+            find(path, c.lineno, 'P2-LAND1', 'one landing buffer reused every crossing: the landing is gated on this '
+                 'rank\'s own release, so each step waits a receive post and a credit; give it a ring of two or more',
+                 'bridge audit 2026-10-22, item 2')
+
+
+def check_lines():
+    """Shared words with different writers on one cache line (design/lint.md "Lines"), from a compiled offsetof probe."""
+    line = int(subprocess.run(['sysctl', '-n', 'hw.cachelinesize'], capture_output=True, text=True).stdout or 128)
+    probe = ['#include <stdio.h>', '#include <stddef.h>', '#include "mesh-bridge.h"', 'int main(void){']
+    for struct, fields in WRITERS.items():
+        for f in fields:
+            probe.append(f'printf("{struct} {f} %zu\\n",offsetof(struct {struct},{f}));')
+    probe.append('return 0;}')
+    with tempfile.TemporaryDirectory() as d:
+        src, exe = Path(d) / 'probe.c', Path(d) / 'probe'
+        src.write_text('\n'.join(probe))
+        made = subprocess.run(['cc', '-I', str(RDMA), '-o', str(exe), str(src)], capture_output=True, text=True)
+        if made.returncode:
+            find(RDMA / 'mesh-bridge.h', 1, 'L1-LINE', 'the offsetof probe did not compile: ' + made.stderr.strip()[:200], 'bin/mesh-lint')
+            return
+        out = subprocess.run([str(exe)], capture_output=True, text=True).stdout.split('\n')
+    at = {}
+    for row in filter(None, out):
+        struct, field, offset = row.split()
+        at[(struct, field)] = int(offset)
+    for struct, fields in WRITERS.items():
+        header = RDMA / ('mesh.h' if struct == 'mesh_stream' else 'mesh-bridge.h')
+        number = next((i + 1 for i, s in enumerate(header.read_text().split('\n')) if f'struct {struct} {{' in s), 1)
+        names = list(fields)
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                if fields[a] != fields[b] and at[(struct, a)] // line == at[(struct, b)] // line:
+                    find(header, number, 'L1-LINE', f'struct {struct}: `{a}` ({fields[a]}) and `{b}` ({fields[b]}) share a '
+                         f'{line}-byte line', 'bridge audit 2026-10-22, item 3: one writer a line')
+
+
+CARDS = (ROOT / 'design' / 'lint.md')
+
+
+def semantic(units):
+    """Each unit read by a model against the rule cards and the vocabulary: findings of rules a pattern cannot decide."""
+    claude = shutil.which('claude')
+    if not claude:
+        find(ROOT / 'bin' / 'mesh-lint', 1, 'SEM', 'no `claude` command: the semantic rules did not run', 'bin/mesh-lint')
+        return
+    cards = CARDS.read_text()
+    cache_path = RDMA / '.build' / 'mesh-lint-cache.json'
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    schema = json.dumps({'type': 'object', 'properties': {'findings': {'type': 'array', 'items': {
+        'type': 'object', 'properties': {'line': {'type': 'integer'}, 'rule': {'type': 'string'},
+                                         'message': {'type': 'string'}}, 'required': ['line', 'rule', 'message']}}},
+        'required': ['findings']})
+
+    def ask(unit):
+        path, first, name, code = unit
+        key = hashlib.sha256((cards + code).encode()).hexdigest()
+        if key in cache:
+            return unit, cache[key]
+        numbered = '\n'.join(f'{first + i}: {ln}' for i, ln in enumerate(code.split('\n')))
+        prompt = (f'{cards}\n\nApply only the rules marked "semantic" above to this one function, `{name}` from {path}. '
+                  f'Each line is prefixed with its line number in the file; report that number. Report only deductive '
+                  f'violations you can point to by line; report nothing you are unsure of. `rule` is the rule\'s id '
+                  f'without the SEM- prefix.\n\n```\n{numbered}\n```')
+        run = subprocess.run([claude, '-p', '--model', 'haiku', '--output-format', 'json', '--json-schema', schema, prompt],
+                             capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
+        try:
+            out = json.loads(run.stdout)
+            result = out.get('structured_output') or json.loads(out.get('result') or '{}')
+        except (ValueError, TypeError):
+            result = {'findings': [{'line': first, 'rule': 'UNREAD', 'message': 'the model call failed: ' + run.stderr[:200]}]}
+        return unit, result
+
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        for unit, result in pool.map(ask, units):
+            path, first, name, code = unit
+            cache[hashlib.sha256((cards + code).encode()).hexdigest()] = result
+            for f in result.get('findings', []):
+                find(path, int(f['line']), 'SEM-' + f['rule'], f'{name}: ' + f['message'], 'design/lint.md (semantic)')
+    cache_path.parent.mkdir(exist_ok=True)
+    cache_path.write_text(json.dumps(cache))
+
+
+def units_of(paths):
+    for path in paths:
+        if path.suffix in ('.c', '.m', '.mm', '.metal', '.h'):
+            text = path.read_text(errors='replace')
+            clean = strip_c(text)
+            rel = path.relative_to(ROOT).as_posix()
+            pattern = DATA_PATH.get(rel)
+            for name, first, body, at in functions(clean):
+                if path.suffix == '.metal' or (pattern and re.fullmatch(pattern, name)):
+                    start = line_of(clean, at)
+                    yield path, first, name, '\n'.join(text.split('\n')[first - 1:start + body.count('\n')])
+
+
+def sources(given):
+    if given:
+        return [Path(p).resolve() for p in given]
+    found = []
+    for pattern in ('rdma/*.c', 'rdma/*.m', 'rdma/*.h', 'rdma/*.metal', 'rdma/torch-mesh/torch_mesh/*.mm',
+                    'rdma/torch-mesh/torch_mesh/*.metal', 'rdma/torch-mesh/torch_mesh/*.py', 'examples/*.metal',
+                    'examples/*.py'):
+        found.extend(sorted(ROOT.glob(pattern)))
+    return found
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('paths', nargs='*')
+    parser.add_argument('--semantic', action='store_true', help='also ask a model about each data-path function')
+    parser.add_argument('--strict', action='store_true', help='exit 1 on any finding')
+    args = parser.parse_args()
+    paths = sources(args.paths)
+    for path in paths:
+        text = path.read_text(errors='replace')
+        if path.suffix in ('.c', '.m', '.mm', '.h'):
+            check_c(path, text)
+        elif path.suffix == '.metal':
+            check_metal(path, text)
+        elif path.suffix == '.py':
+            check_python(path, text)
+    if not args.paths:
+        check_lines()
+    if args.semantic:
+        semantic(list(units_of(paths)))
+    for path, line, rule, message, source in sorted(set(findings)):
+        rel = os.path.relpath(path, Path.cwd())
+        print(f'{rel}:{line}: {rule}: {message} [{source}]')
+    print(f'mesh-lint: {len(set(findings))} findings', file=sys.stderr)
+    sys.exit(1 if args.strict and findings else 0)
+
+
+if __name__ == '__main__':
+    main()
