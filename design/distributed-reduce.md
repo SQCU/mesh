@@ -187,11 +187,11 @@ sets. Batching those outputs into one command buffer per scan is the caller
 contract; its cost and its preservation of local kernel efficiency require
 measurement. Monsoon is not a measurement of that Metal implementation.
 
-## What was done instead, and why it is forbidden
+## What was done instead, and why it was wrong
 
-The recorded divergences include duplicated readiness state, incorrect
-addressing and generation arithmetic, and unsupported claims of validation.
-The record is kept here so that they can be recognized and corrected. The
+The record lists what went wrong: readiness state kept twice, wrong addresses
+and generation counts, and claims of validation with no run behind them. It is
+kept here so each one can be seen and fixed. The
 [audit table](dataflow-implementation-audit.md#record-of-divergence-and-the-ordinary-engineering-it-failed)
 adds historical evidence and dispositions without attributing motives.
 
@@ -213,8 +213,8 @@ adds historical evidence and dispositions without attributing motives.
   page headers; the paged path was committed with a relative error copied from
   the CPU path it replaced.
 - The digest page used as the gate on the next stage's issue — the numerical
-  check made a dependency of the numerical program, which this document
-  forbids in two places.
+  check made a dependency of the numerical program, which this document rules
+  out in two places.
 - A driver with phases, per-job state, per-call tasks awaiting predictions,
   completion words, and fixed 128-row groups: a scheduler. It issued about two
   thousand GPU command buffers per evaluation. The reported 1,443 ms is
@@ -223,14 +223,14 @@ adds historical evidence and dispositions without attributing motives.
   isolate command-buffer overhead. The readiness it tracked was already in
   the stamps.
 
-These are failures of ordinary engineering obligations, not evidence that
-page-table dataflow is an immature algorithm. Changing the specification to
-bless a forbidden implementation and claiming measurements from another path
-are especially serious: they invalidate the review evidence itself.
+These were plain mistakes in the work. They do not show that the page-table
+method is unripe. Two were the worst. The spec was changed to bless a form it
+ruled out. And numbers from one path were claimed for another. Both make the
+review's own evidence worthless.
 
-A new application frame, handshake, phase, token, gate or scheduler that
-restates readiness violates this repository's contract before measurement.
-That architectural rejection does not prove a universal timing theorem.
+Readiness lives in the stamps. A new frame, handshake, phase, token, gate or
+scheduler that says it again breaks this repo's contract, before any timing.
+That is a design ruling. It is not a proof about time.
 The [performance obligations](dataflow-implementation-audit.md#minimum-expectations-of-performance)
 require matched baselines, measured local functions, physical-link traffic,
 launch and scan costs, and separate latency and throughput results.
@@ -265,7 +265,7 @@ stamps and physical presence, verifies destination lifetime, and claims the
 actual destination stamps. Completion publishes those destinations after their
 writes are visible. The caller-owned consumed-mask selection API was deleted;
 it duplicated readiness and could mark work consumed before an output existed.
-The replacement must not reintroduce that authority under another name.
+What replaced it has no such role, under any name.
 
 The required author/publication list and mechanism-specific implementation
 obligations are in [algorithm sources](algorithm-sources.md). In particular,

@@ -112,7 +112,7 @@ must replace the authority of that state, not merely appear inside its loop.
 
 ## Record of divergence and the ordinary engineering it failed
 
-The historical entries in [distributed-reduce](distributed-reduce.md#what-was-done-instead-and-why-it-is-forbidden)
+The historical entries in [distributed-reduce](distributed-reduce.md#what-was-done-instead-and-why-it-was-wrong)
 remain the incident record. The following adds evidence and dispositions.
 The measurement narrative lives in
 [metal-microbench's Amdahl record](../../../metal-microbench/docs/amdahl_superiority.md).
@@ -127,16 +127,14 @@ recovered raw traces.
 | Contiguous hidden matrix crossed page headers | Amdahl loopback record: 0.945 relative RMS, then 0.000375 after paged indexing | Gather by payload address and index. Digest agreement between peers does not prove model correctness. Copying an old error figure onto a new execution path is invalid evidence. |
 | Address arithmetic narrower than configured pool | Link record: `Not enough bits` with a 2.1 M-page pool; repair uses 64-bit geometry | Prove byte-offset range from realized storage geometry, including headers. This is ordinary address arithmetic. |
 | Reduce/hash/zero work delayed page movement | `39afad9`, `80294e2`; FFN period reported 18.61 ms, tail still 25 ms | Account for CPU service and memory traffic on the transport path. Moving work to another thread is not proof that contention disappeared. |
-| Digest progress blocked numerical issue/reuse | Amdahl record describes a later hash overwriting an unchecked one and a digest gate holding storage | Numerical dependency and checking policy must not acquire accidental edges. Existing digest/reuse paragraphs disagree; resolve against the compiled lifetime graph before claiming conformance. |
+| Digest progress blocked numerical issue/reuse | Amdahl record describes a later hash overwriting an unchecked one and a digest gate holding storage | Numerical dependencies and the checking policy gain no edges by accident. Existing digest/reuse paragraphs disagree; resolve against the compiled lifetime graph before claiming conformance. |
 | Fixed groups, split FFN calls, per-job phases and completion words | Reported ~2,000 command buffers and 1,443 ms/NFE; partial rewrite still carries caller state | Preserve efficient local work, coalesce the selected rows, and charge all launch/scan/copy costs. Overlap alone is insufficient evidence of speedup. |
 
-These failures are technically immature in specific, reviewable ways: incorrect
-indexing, incorrect generation arithmetic, duplicated dependency authority,
-and performance claims unsupported by the executed configuration. The brazenness
-in the record is changing the specification to bless a prohibited mechanism
-and reporting replacement code with evidence from its predecessor. Neither
-requires guessing the author's motives. Repeating either practice after this
-record is an explicit failure to follow the engineering contract.
+Each of these is plain and can be checked. The index was wrong. The generation
+count was wrong. One dependency had two owners. Speed claims had no run behind
+them. Two stand out. The spec was edited to approve a mechanism it ruled out. New
+code was reported with numbers from the code it replaced. Neither needs a guess
+at motive. Both break the engineering contract, then and now.
 
 ## Minimum expectations of performance
 
