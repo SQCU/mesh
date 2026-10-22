@@ -429,18 +429,31 @@ every cable carrying load).
   posted or pads. Once its lanes are there (drained), the group opens from those bases, its words new and its identity
   new. Its steps are freeze, tell, drain, open (`group_make`, `group_advance`, `group_open`), each a word the parent
   writes and both progress threads tell back as they act on it (`sending`, `receiving`). Each step ends with the
-  peer's STREAM, its own threads' passes or a link's loss.
+  peer's STREAM, its own threads' passes or a link's loss, and within MESH_PLATFORM_NS of its start (the operator's
+  deadline, as B12 bounds a job: `group_step`). The lanes are UC: a SEND that meets no posted receive is dropped, and
+  only its sender counts it, so a drain whose peer sent past this end's receives (a holding's last duds, sent at once
+  through the gate) never reaches its count. A step still out at the bound concludes the link of each member holding
+  it back (in the tell, the members whose cable holds no STREAM, or, where each holds one, those whose STREAM names
+  other cables; frozen or draining, the members whose threads have not told the binding): that cable pairs again with
+  its next agent, from 0 at both ends, and the group is made anew over the others. Ranked: a make that waits on the
+  two ends' counts agreeing, with nothing to end the wait where a SEND was dropped ≺ each step ending within the
+  operator's deadline (M3: "every wait ending in finite time"; M6: the cable back without a person).
 - A cable lost fails the calls in flight on it (their units are gone: design/rubrics.md C6), the group cancelled at once
   (`groups_lost`: landed words ~0). The group is made anew over the other cables, with no re-pairing (M3) and no
   person (M6), and the next call takes it. A slot whose stream was cancelled while a client held it opens again no
   sooner than MESH_PLATFORM_NS later (`slot_quiet`), the bound within which the holder's groups end at a landed word
   ~0, as a re-pairing's connect always came that long after a loss. Where the leader moves (its own cable lost), the
   stream opens in the new leader's slot at once.
-- A cable that joins is taken at the stream's next holding: a group held at this end is made anew only once its holder
-  lets go, so no running call fails because a cable was plugged in. A group whose cables are each fresh (connected and
-  in no group since) opens at once from bases 0 at both ends, with no exchange: one cable per peer pairs and serves
-  exactly as before groups, its log and its wire unchanged. One end that opened that way and finds the peer making the
-  group over the same cables (its STREAM) makes it anew too.
+- A cable that joins is taken at this end's next holding: a group held at this end is made anew by this end only once
+  its holder lets go. A STREAM heard on a member's cable makes an open group anew at once, held or not, whatever cables
+  it names: the peer has frozen its lanes, so this end's end of the stream is served no more, and a holding here fails
+  now, as a value (design/rubrics.md C6), where it would otherwise wait on frozen lanes until its own deadline, and
+  this end's stream toward that node stay down for as long as the peer's holder kept it (M4: "userse of a lower level
+  driver may never by action or inaction cause a resource to be unrecoverable"). A STREAM taken into a drain has its
+  mark cleared there, so only a new make sets one. A group whose cables are each fresh (connected and in no group
+  since) opens at once from bases 0 at both ends, with no exchange: one cable per peer pairs and serves exactly as
+  before groups, its log and its wire unchanged. One end that opened that way and hears the peer's STREAM makes it
+  anew too.
 - Concurrency between two nodes is their streams: the most any one cable's plan holds, not the sum (two one-stream
   cables, the M5 Ultra's, carry one stream at both cables' bandwidth, and a second concurrent communicator is refused at
   its init with EBUSY, as with one such cable).

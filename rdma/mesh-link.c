@@ -1047,9 +1047,10 @@ void streams_let_go(void){
    a port; its stream in slot `slot`, its leader's, the least member's), or as it is being made (`target`), and its
    phase: GROUP_OPEN, or the three steps of its making under binding `told` (GROUP_FREEZE: each member's lanes of the
    stream frozen; GROUP_TELL: each member's counts told the peer on its cable, STREAM; GROUP_DRAIN: each member's lanes
-   padded and absorbed to the counts both ends compute alike, `out` and `in` by port: group_advance) */
+   padded and absorbed to the counts both ends compute alike, `out` and `in` by port: group_advance), and when its
+   making last moved (`since`: its make, and each step's start; the operator's deadline bounds each step, group_step) */
 enum { GROUP_VACANT, GROUP_OPEN, GROUP_FREEZE, GROUP_TELL, GROUP_DRAIN };
-struct group { uint32_t node,s,phase,slot,members,target; uint64_t told,out[MESH_PORTS][2],in[MESH_PORTS][2]; };
+struct group { uint32_t node,s,phase,slot,members,target; uint64_t told,since,out[MESH_PORTS][2],in[MESH_PORTS][2]; };
 static struct group groups[MESH_STREAMS];
 /* the bindings' generations, from this bridge's boot (main): no binding told is one an agent of an earlier launch told */
 static uint64_t generation;
@@ -1112,7 +1113,7 @@ static void group_open(struct group *g);
 static void group_make(struct group *g,uint32_t target){
   if(g->phase==GROUP_OPEN)slot_cancel(g->slot);
   if(!target){*g=(struct group){.slot=MESH_ABSENT};return;}
-  g->members=0;g->target=target;g->slot=MESH_ABSENT;
+  g->members=0;g->target=target;g->slot=MESH_ABSENT;g->since=now;
   memset(g->out,0,sizeof g->out);memset(g->in,0,sizeof g->in);
   generation++;
   uint32_t fresh=1,leader=0;
@@ -1140,7 +1141,9 @@ static void group_make(struct group *g,uint32_t target){
      member's bases, alike at both ends: out = max(this end's SENDs, the peer's receives), the count to which this end
      pads with duds, filling every receive the peer posted; in = max(the peer's SENDs, this end's receives), the count to
      which it absorbs into the link's sink, taking every SEND the peer posted or pads (a SEND fills the oldest receive of
-     its queue pair, so a cable's two ends count its lanes alike); each member drained to them;
+     its queue pair, so a cable's two ends count its lanes alike wherever every SEND met a posted receive; one that met
+     none on the UC queue pair was dropped and counted by its sender alone, and that lane's drain never completes: the
+     step's bound concludes its cable, group_step); each member drained to them;
    - drained: once each member's threads tell the drained binding (every earlier unit has landed, none is posted beyond
      the bases) and its slot is quiet (`slot_quiet`), opened (group_open) */
 static void group_advance(struct group *g){
@@ -1161,7 +1164,7 @@ static void group_advance(struct group *g){
       for(uint32_t c=0;c<2;c++){told.sent[c]=atomic_load_explicit(&own->sent[c],memory_order_relaxed);told.posted[c]=atomic_load_explicit(&own->posted[c],memory_order_relaxed);}
       port_say(ports+p,(struct message){.kind=STREAM},&told,sizeof told);
     }
-    g->phase=GROUP_TELL;
+    g->phase=GROUP_TELL;g->since=now;
   }
   if(g->phase==GROUP_TELL){
     for(uint32_t p=0;p<port_count;p++)if(target>>p&1 && !group_heard(g,p,target))return;
@@ -1177,7 +1180,7 @@ static void group_advance(struct group *g){
       ports[p].streams_heard&=~(UINT32_C(1)<<s);
       atomic_store_explicit(&own->told,g->told,memory_order_release);
     }
-    g->phase=GROUP_DRAIN;
+    g->phase=GROUP_DRAIN;g->since=now;
     return;
   }
   uint32_t leader=0;
@@ -1260,30 +1263,58 @@ static int slot_held(uint32_t slot){
 /* design/transport.md section 14, "A stream over several cables": a group's turn, its cables now `target` (the ports
    whose link is up toward its node with its stream in their plan):
    - open, it is made anew (group_make) where a member's cable is lost (its calls fail now: the units on that cable are
-     gone, and the stream goes on over the others once made), where the peer's STREAM names its members (the peer makes
-     it anew: its end of the stream is no longer served), or where a cable joined and this end's stream is not held
-     (a cable that joins is taken at the next holding: no running call fails for it);
-   - being made, it is made anew where its cables changed, else advanced (group_advance) */
-static void group_step(struct group *g,uint32_t target){
+     gone, and the stream goes on over the others once made), where a STREAM of the stream is heard on a member's cable
+     (the peer has frozen its lanes, whatever cables it names: its end of the stream is no longer served, so a holding
+     here fails now, as a value, design/rubrics.md C6, and both ends make it over the cables each sees up; a STREAM
+     already taken into a drain had its bit cleared there, group_advance, so only a new make sets it), or where a cable
+     joined and this end's stream is not held (a cable that joins is taken at this end's next holding);
+   - being made, it is made anew where its cables changed, else advanced (group_advance).  Each step of a making ends
+     within MESH_PLATFORM_NS of its start (`since`; the operator's deadline, as B12 bounds a job): a step still out then
+     (the peer's STREAM never came, a member's threads never told the binding, or a lane's drain never completes, a SEND
+     the peer counted having met no posted receive on its UC queue pair) concludes the link of each member holding it
+     back, which pairs again with its next agent from its connect's counts, 0, at both ends, and the group is made anew
+     over the others: in the tell, the members on whose cable no STREAM of the stream is heard, or, where each holds
+     one, those whose STREAM names other cables; frozen or draining, those whose threads have not told the binding.  The
+     ports to conclude (groups_turn), a bit a port */
+static uint32_t group_step(struct group *g,uint32_t target){
   if(g->phase==GROUP_VACANT){
     if(target)group_make(g,target);
     else *g=(struct group){.slot=MESH_ABSENT};
-    return;
+    return 0;
   }
   if(g->phase==GROUP_OPEN){
     int asked=0;
-    for(uint32_t p=0;p<port_count;p++)if(g->members>>p&1)asked|=group_heard(g,p,g->members);
-    if(target==g->members && !asked)return;
-    if(!asked && !(g->members&~target) && slot_held(g->slot))return;
+    for(uint32_t p=0;p<port_count;p++)if(g->members>>p&1)asked|=(int)(ports[p].streams_heard>>g->s&1);
+    if(target==g->members && !asked)return 0;
+    if(!asked && !(g->members&~target) && slot_held(g->slot))return 0;
     group_make(g,target);
-    return;
+    return 0;
   }
-  if(target!=g->target)group_make(g,target);
-  else group_advance(g);
+  if(target!=g->target){group_make(g,target);return 0;}
+  group_advance(g);
+  if(g->phase==GROUP_OPEN || now-g->since<MESH_PLATFORM_NS)return 0;
+  uint32_t silent=0,behind=0;
+  for(uint32_t p=0;p<port_count;p++){
+    if(!(target>>p&1))continue;
+    const struct stream_lanes *own=lanes_at(slot_of(ports+p,g->s));
+    if(g->phase!=GROUP_TELL)
+      behind|=(uint32_t)(atomic_load_explicit(&own->sending,memory_order_acquire)!=g->told ||
+                         atomic_load_explicit(&own->receiving,memory_order_acquire)!=g->told)<<p;
+    else if(!(ports[p].streams_heard>>g->s&1))silent|=UINT32_C(1)<<p;
+    else behind|=(uint32_t)!group_heard(g,p,target)<<p;
+  }
+  if(silent)behind=silent;
+  for(uint32_t p=0;p<port_count;p++)
+    if(behind>>p&1)
+      say("link %u (%s): node %u stream %u not made anew within %.1f s (%s): the link concluded, paired again from its "
+          "connect\n",p,ports[p].name,g->node,g->s,(double)MESH_PLATFORM_NS/1e9,g->phase==GROUP_FREEZE?"its lanes not frozen":
+          g->phase==GROUP_DRAIN?"its lanes not drained":silent?"no STREAM of the peer's on it":"the peer's STREAM names other cables");
+  return behind;
 }
 /* design/transport.md section 14, "A stream over several cables": the groups' turn, on the event loop: each stream of
    each port whose link is up (LINK_UP: connected and served) a cable of the group of its index toward its peer node,
-   and each group stepped (group_step) */
+   each group stepped (group_step), and then the links of the members a making's bound concluded lost (port_lost,
+   ETIMEDOUT: after every group's step, each of which read the cables as this turn began) */
 static void groups_turn(void){
   uint32_t node[MESH_STREAMS],stream[MESH_STREAMS],want[MESH_STREAMS],wants=0;
   for(uint32_t p=0;p<port_count;p++){
@@ -1297,13 +1328,15 @@ static void groups_turn(void){
     }
   }
   for(uint32_t w=0;w<wants;w++)group_of(node[w],stream[w]);
+  uint32_t concluded=0;
   for(uint32_t i=0;i<MESH_STREAMS;i++){
     struct group *g=groups+i;
     if(!g->node)continue;
     uint32_t target=0;
     for(uint32_t w=0;w<wants;w++)if(node[w]==g->node && stream[w]==g->s)target=want[w];
-    group_step(g,target);
+    concluded|=group_step(g,target);
   }
+  for(uint32_t p=0;p<port_count;p++)if(concluded>>p&1)port_lost(ports+p,ETIMEDOUT);
 }
 /* design/transport.md section 14: this node's reach as its record tells it (mesh-records.c record_changed), a node an
    entry in the order of its first port: of each node, every cable whose link is up toward it with a stream in its plan,
@@ -2656,7 +2689,8 @@ static void region_adopt(void){
 /* design/transport.md: when the event loop's next turn is due if no event comes first: the earliest of the times its turn
    waits for that are still ahead (the next liveness turn, `liveness`; the next health sample; the boot ledger's settle;
    where the devices are to be read, the windows' end; each port's quiet window, spawn hold and next hello, and the bound
-   of its open's or link's job out; each slot's quiet), and no later than MESH_PAUSE_NS on (design/rubrics.md M3: the
+   of its open's or link's job out; each slot's quiet; the bound of each group's making step, group_step), and no later
+   than MESH_PAUSE_NS on (design/rubrics.md M3: the
    wait ends in finite time).  Every other change a turn takes wakes the loop where it happens: the finder's read, a
    job's end, a termination and an arrival (wake); a client's retire, a binding told, and a holding's start, end and
    freeing (`control`: control_watch); a socket, a signal and an exit on the queue.  So a turn comes at the change or at
@@ -2677,6 +2711,7 @@ static uint64_t turn_due(uint64_t liveness){
     if(port->link.job)due_at(&due,port->link.job_at+MESH_PLATFORM_NS);
   }
   for(uint32_t s=0;s<MESH_STREAMS;s++)due_at(&due,slot_quiet[s]);
+  for(uint32_t i=0;i<MESH_STREAMS;i++)if(groups[i].node && groups[i].phase>GROUP_OPEN)due_at(&due,groups[i].since+MESH_PLATFORM_NS);
   return due;
 }
 

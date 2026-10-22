@@ -405,7 +405,11 @@ each stream over the cables (design/transport.md section 14, "A stream over seve
   posted and the receiver's receives posted together, which neither end holds alone. Each end pads with duds and
   absorbs into the link's sink to the bases both compute, then opens the group anew. A cable lost fails the calls in
   flight on it; the group goes on over the others, with no re-pairing. A held slot cancelled waits MESH_PLATFORM_NS
-  before it opens again. A cable that joins is taken at the next holding. Cables all fresh (one per peer, or several
+  before it opens again. A cable that joins is taken at this end's next holding; a STREAM heard on a member's cable
+  makes the group anew at once, held or not (the peer froze its lanes: a holding here fails now, as a value). Each
+  step of a making ends within MESH_PLATFORM_NS: one still out concludes the link of each member holding it back,
+  which pairs again from 0 at both ends (a SEND that met no posted receive on a UC lane is dropped and counted by its
+  sender alone, so that lane's drain cannot complete). Cables all fresh (one per peer, or several
   pairing together) open at once from bases 0, so one cable per peer pairs and serves as before, its wire unchanged.
 - **Waking.** A port's progress threads waited on the guard word while its link served no lane, so a link that came up
   between a thread's read of its lanes and its wait slept MESH_PAUSE_NS before its first pass. They now wait on the
