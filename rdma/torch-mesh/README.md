@@ -11,7 +11,11 @@ segments as its equal program). `all_to_all`, `all_to_all_single`, `gather` and 
 MPI_Alltoallv with its counts on the host (a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
 `Scatterv`: every count 0 but toward or from the root, as NCCL's gather and scatter are its forms); a list that is not
 the pieces of one tensor goes through one flat tensor. `send` and `recv` are the library's point to point. The counted
-all-to-all is the library's call of its own; the partials merge is a reduction by the library's partials operator.
+all-to-all is the library's call of its own; the partials merge is a reduction by the library's partials operator. The
+V and the counted all-to-all move each pair's block in one hop, so they run where the group's map links every two
+members, and on any other map (a line of three or more, a star, a ring of four or more) every rank's call fails alike
+with `ncclInvalidUsage` ([NCCL.md](../NCCL.md), All-to-all with host counts); the library's `ncclAlltoAll`,
+`ncclGather` and `ncclScatter`, whose counts every rank holds, forward each block through the members between.
 
 ## Install
 
@@ -73,8 +77,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | broadcast, reduce | |
 | all_gather (list and into a tensor) | a list of unequal sizes: one MPI_Allgatherv (Uneven nodes) |
 | reduce_scatter (list and tensor) | a list of unequal sizes: one MPI_Reduce_scatter (Uneven nodes) |
-| gather, scatter | any per-rank sizes: the rooted V (`ncclMeshAlltoAllV`) |
-| all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
+| gather, scatter | any per-rank sizes: the rooted V (`ncclMeshAlltoAllV`), where every two members are linked |
+| all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`), where every two members are linked |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
 | functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, under the one commit rule (Performance) |
