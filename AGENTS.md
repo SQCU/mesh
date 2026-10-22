@@ -32,8 +32,8 @@ Do not write code that declines to act. Specifically banned:
 - **Silent skips.** A branch that quietly does less is worse than one that fails
   loudly, because it produces a node that looks provisioned and is not.
 
-If you catch yourself writing a reason a node should not get something, you have
-found a bug in your reasoning, not a safety feature.
+A reason a node should not get something is a bug in the reasoning, not a
+safety feature.
 
 ## No node types
 
@@ -208,7 +208,7 @@ specification". The complete instruction is preserved in
 Repository-owned tests and verification harnesses have been removed. Review the complete data and execution flow
 against the user instructions and explicit algebra.
 
-Runtime testing of any code is prohibited until every item of metal-microbench `docs/acceptance-20261014.md` is attained in source; its `docs/principles.md` section 5 quotes the operator's prohibition (T9).
+On 2026-10-14 the operator stopped all runtime tests of code (T9). The stop holds until each item of metal-microbench `docs/acceptance-20261014.md` is met in source. Its `docs/principles.md` section 5 has the quote.
 
 ## Source workflow
 
