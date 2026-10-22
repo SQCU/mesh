@@ -75,6 +75,34 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   tensor and writes its experts' outputs into another (its two send buffers, made once at their fixed shapes), and
   `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
+Dtypes follow ProcessGroupNCCL's: a collective that moves data moves any dtype (one NCCL lacks as its bytes); a
+reduction reduces a complex tensor as its real view (sum and average alone) and a bool tensor's sum and product as max
+and min (its average the library's uint8 average). An operand is contiguous; a non-contiguous one fails as a value,
+since nothing is copied to make it one. A functional collective (`_c10d_functional`, what DTensor and a compiled graph
+call) on MPS tensors is a kernel for the MPS dispatch key in `_stream.mm` that issues its group directly, its
+communicator found by the group with no Python between; a group the backend does not hold takes torch's own kernel. Its
+result is a region tensor, issued and not completed where it is its own operand (torch's `wait_tensor` waits for it).
+
+## Persistent exchanges and kernels on torch's stream
+
+`torch_mesh.fused` is the device side of the library on torch's stream:
+
+| call | what it is |
+|---|---|
+| `fused.header()` | the Metal text a kernel source is compiled after (`ncclMeshMetalPrelude`): `mesh.metal` as the loaded library was built with it, then the device header ([NCCL.md](../NCCL.md#persistent-exchanges)) |
+| `fused.pipeline(source, name)`, `fused.facts(handle)`, `fused.device()` | a kernel compiled from its source at Metal 4.0; its pipeline's `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth` and static threadgroup memory; the device's Apple GPU family (the newest `MTLGPUFamilyApple<n>` it supports, asked from Apple1 up), its threads a threadgroup and its threadgroup memory |
+| `fused.dispatch(handle, buffers, constants, at, gx, gy, threads)` | one dispatch in torch's open compute encoder on its queue, ordered with torch's work: buffers by index (a tensor's storage at its offset), 32-bit constants at index `at`, the grid in threadgroups |
+| `fused.Exchange(sizes, dtype, group=None)` | a persistent exchange ([NCCL.md](../NCCL.md#persistent-exchanges)) among the group's ranks: rank q's part is `sizes[q]` elements of `dtype`, each rank's part goes to every other rank, and the library allocates every start's send part and landing areas |
+| `exchange.start(sizes=None)` | the next start on torch's stream (`ncclMeshStart`), its number; `sizes` fewer elements than declared |
+| `exchange.encode(handle, buffers, constants, at, gx, gy, threads, start, lands=False, publishes=False, crossing=14)` | `dispatch` with the crossing record bound at buffer `crossing` (`ncclMeshBind`): with `lands` the kernel lands start − 1, with `publishes` it publishes `start`, under the stream's one commit rule (Performance) |
+| `exchange.free()` | the request freed (`ncclMeshRequestFree`): each slot's pages returned once no kernel or SEND holds them |
+
+The kernel calls `mesh_enter` and `mesh_leave` and reads and writes the views the header gives; it is shown no page,
+record, word or bound. examples/chain.py and lstm.py are the callers ([docs/writing-a-service.md](../../docs/writing-a-service.md)).
+`_stream.timed` and `_stream.sequence` time one kernel's dispatches in command buffers of their own on torch's queue
+(the GPU's start and end times, the measure the engine's kernel harness and tools/native_bench take), after the caller
+has synchronized torch's stream.
+
 ## What works
 
 | works | notes |
@@ -411,11 +439,10 @@ w = s["lm_head"].to("cpu")                        # decoded
     ([NCCL.md](../NCCL.md#bounded-waits)).
   - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
     host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
-    but the host's touches torch's stream. A group's workspace is held until the library retires the group
-    (`ncclMeshRetired`), never by the commit. The workspace is allocated on torch's queue, so under memory pressure
-    torch's allocator, freeing its cached buffers, enters that queue again (`MPSAllocator.mm`
-    `release_cached_buffers`): a deadlock, not an exception. A fix needs the library to report a group's scratch bytes
-    before encoding, or a pool grown off the queue: an `nccl.h` change.
+    but the host's touches torch's stream. A group allocates nothing on torch's queue: its extra pages are its plan's,
+    rows of the region the library takes when the plan is made ([NCCL.md](../NCCL.md#plans)), so no allocation of
+    torch's runs inside its queue (where torch's allocator, freeing its cached buffers, would enter that queue again:
+    `MPSAllocator.mm` `release_cached_buffers`).
 - `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
   point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
   targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`

@@ -1,29 +1,25 @@
 import collections
 import json
-import math
 from pathlib import Path
-
-import resource
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch_mesh
-from torch_mesh import _stream, argmax, fused
+from torch_mesh import fused
 from torch_mesh.streamed import instance, node
 
 # docs/writing-a-service.md#the-step-kernel
-SOURCE = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_name('chain.metal').read_text()
+SOURCE = fused.header() + Path(__file__).with_name('chain.metal').read_text()
 ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PEERS')
 STAGES = 3
-PAGE = resource.getpagesize()
 RING_BLOCKS = 2
 _PIPELINES = {}
 
 
 # docs/writing-a-service.md#the-capability
 def capability(directory):
-    family, threads, memory = _stream.device_facts()
+    family, threads, memory = fused.device()
     held = json.loads((Path(directory) / f'apple{family}.json').read_text())
     held['max_threads_per_threadgroup'], held['threadgroup_memory_bytes'] = threads, memory
     return held
@@ -32,21 +28,9 @@ def capability(directory):
 # docs/writing-a-service.md#the-capability
 def _width():
     if 'width' not in _PIPELINES:
-        probe = _stream.pipeline('kernel void width_probe(device uint* x [[buffer(0)]]) { x[0] = 0; }', 'width_probe')
-        _PIPELINES['width'] = _stream.pipeline_facts(probe)[1]
+        probe = fused.pipeline('kernel void width_probe(device uint* x [[buffer(0)]]) { x[0] = 0; }', 'width_probe')
+        _PIPELINES['width'] = fused.facts(probe)[1]
     return _PIPELINES['width']
-
-
-# docs/writing-a-service.md#the-crossing
-def paged(count, dtype=torch.half):
-    size = torch.tensor([], dtype=dtype).element_size()
-    return -(-count * size // PAGE) * PAGE // size
-
-
-# docs/writing-a-service.md#the-step-kernel
-def publications(crossing, peers):
-    records = crossing.publish if crossing else ()
-    return [w for k in range(peers) for w in fused._words(records[k] if k < len(records) else (0,) * 6)]
 
 
 # docs/writing-a-service.md#the-step-kernel
@@ -94,7 +78,7 @@ def form(K, S, rows, peers, held):
                              f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory')
         args = dict(TILE=tile, K=K, S=S, G=G, RG=RG, RB=RB, THREADS=SG * simd, SIMD=simd, PEERS=peers)
         handles = [_pipeline(stage, args) for stage in range(STAGES)]
-        threads = min(_stream.pipeline_facts(handle)[0] for handle in handles)
+        threads = min(fused.facts(handle)[0] for handle in handles)
         if threads >= args['THREADS']:
             break
         if RG == 1:
@@ -108,7 +92,7 @@ def form(K, S, rows, peers, held):
 def _pipeline(stage, args):
     name, line = instance('chain_step', stage, *(args[a] for a in ARGS))
     if name not in _PIPELINES:
-        _PIPELINES[name] = _stream.pipeline(SOURCE + '\n' + line + '\n', name)
+        _PIPELINES[name] = fused.pipeline(SOURCE + '\n' + line + '\n', name)
     return _PIPELINES[name]
 
 
@@ -122,13 +106,10 @@ class Step:
         self.K, self.S, self.held, self.capacity, self.peers = K, S, held, capacity, peers
         self.X = torch.empty(capacity, K, dtype=torch.half, device='mps')
         self.Y = torch.empty(capacity, S, dtype=torch.half, device='mps')
-        self.slot = paged(capacity * K)
-        self.landing = torch_mesh.empty(peers * self.slot, dtype=torch.half)
-        self.sent = None
-        self.forms, self.landings, self.published = {}, {}, {}
+        self.exchange = fused.Exchange([capacity * K] * (peers + 1), torch.half)
+        self.forms, self.start = {}, 0
         self.plan(rows)
         self.args = self.forms[rows][1]
-        self.arrivals = torch.zeros(1, dtype=torch.int32, device='mps')
 
     # docs/writing-a-service.md#the-step-kernel
     def plan(self, rows):
@@ -136,30 +117,27 @@ class Step:
             raise ValueError(f'chain step: {rows} rows, past the capacity {self.capacity}')
         if rows not in self.forms:
             self.forms[rows] = form(self.K, self.S, rows, self.peers, self.held)
-            self.landings[rows] = [self.landing[q * self.slot:q * self.slot + rows * self.K].view(rows, self.K)
-                                   for q in range(self.peers)]
 
     # docs/writing-a-service.md#the-step-kernel
-    def __call__(self, e, p, out, previous):
-        crossing = fused.exchange(p, self.landings[e.shape[0]], _stream.polls)
-        self._encode(e, p, out, previous, crossing, self.published.get(p.data_ptr()))
-        self.published[p.data_ptr()], self.sent = crossing, p
-        return crossing
+    def __call__(self, e, out):
+        first = not self.start
+        self.start = self.exchange.start([e.shape[0] * self.K] * (self.peers + 1))
+        self._encode(e, out, self.start, first, True)
 
     # docs/writing-a-service.md#the-step-kernel
-    def land(self, e, out, previous):
-        self._encode(e, None, out, previous, None, None)
+    def land(self, e, out):
+        self._encode(e, out, self.start + 1, False, False)
 
     # docs/writing-a-service.md#the-step-kernel
-    def _encode(self, e, p, out, previous, crossing, earlier):
+    def _encode(self, e, out, start, first, publishes):
         handles, args, words = self.forms[e.shape[0]]
-        buffers = [self.At, self.Bt, e, out, self.X, self.Y, p, self.arrivals, self.sent if self.sent is not None else self.X]
-        constants = [int(previous is None), int(out is not None), *words, 0, *publications(earlier, self.peers)]
+        buffers = [self.At, self.Bt, e, out, self.X, self.Y]
+        constants = [int(first), int(out is not None), *words, 0]
         G, threads = args['G'], args['THREADS']
-        fused.encode(handles[0], buffers, constants, 15, G, 1, threads, self.peers, land=previous)
-        if crossing:
-            fused.encode(handles[1], buffers, constants, 15, G, 1, threads, self.peers)
-            fused.encode(handles[2], buffers, constants, 15, G, 1, threads, self.peers, publish=crossing)
+        self.exchange.encode(handles[0], buffers, constants, 15, G, 1, threads, start, lands=not first)
+        if publishes:
+            self.exchange.encode(handles[1], buffers, constants, 15, G, 1, threads, start)
+            self.exchange.encode(handles[2], buffers, constants, 15, G, 1, threads, start, publishes=True)
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
@@ -180,20 +158,13 @@ def operand(path, rank, width):
 def ring(ring_bytes, steps, slot):
     slots = ring_bytes // slot
     if slots >= 2 * steps:
-        return steps, steps, steps
-    whole = PAGE // math.gcd(slot, PAGE)
-    block = slots // (RING_BLOCKS + 1) // whole * whole
+        return steps, 1, steps
+    block = slots // (RING_BLOCKS + 1)
     if block < 1:
         raise ValueError(f'ring_bytes {ring_bytes} holds {slots} slots of {slot} bytes; the input ring of '
                          f'{RING_BLOCKS} blocks and the crossing ring of one take {RING_BLOCKS + 1} slots at least, '
                          f'{(RING_BLOCKS + 1) * slot} bytes')
-    return block, min(steps, RING_BLOCKS * block), block
-
-
-# docs/writing-a-service.md#the-rings
-def span(first, steps, block, depth):
-    last = min(steps, first + block)
-    return slice(first, last), slice(first % depth, first % depth + last - first)
+    return block, RING_BLOCKS, block
 
 
 class Pace:
@@ -216,14 +187,14 @@ class Pace:
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def fill(E, rank, inputs, first, steps, block):
-    held, slots = span(first, steps, block, len(E))
+    held = E[first // block % len(E)][:min(steps, first + block) - first]
     if rank == 0:
-        E[slots].copy_(torch.from_numpy(inputs[held]))
-    return dist.broadcast(E[slots], src=0, async_op=True)
+        held.copy_(torch.from_numpy(inputs[first:first + len(held)]))
+    return dist.broadcast(held, src=0, async_op=True)
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def drain(first, steps, block, O, outputs):
     if O is not None:
-        held = span(first, steps, block, len(O))[0]
-        torch.from_numpy(outputs[held]).copy_(O[:held.stop - held.start], non_blocking=True)
+        last = min(steps, first + block)
+        torch.from_numpy(outputs[first:last]).copy_(O[:last - first], non_blocking=True)

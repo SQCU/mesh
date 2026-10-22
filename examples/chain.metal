@@ -73,26 +73,6 @@ inline void stage(thread A& src, device const half* Wt, uint2 tiles, uint groups
 }
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint PEERS>
-inline void rewrites(constant mesh_step_binding* sent, uint tid) {
-    for (uint q = 0; q < PEERS; q++)
-        if (sent[q].p) mesh_step_sent(*sent[q].p, sent[q].a, sent[q].v, tid);
-}
-
-// docs/writing-a-service.md#the-step-kernel
-template <uint PEERS>
-inline void release(device atomic_uint* arrivals, uint G, uint tid, threadgroup uint* last,
-                    constant mesh_step_binding* publish) {
-    mesh_arrival_fence<true>();
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    if (tid == 0) *last = atomic_fetch_add_explicit(arrivals, 1u, memory_order_relaxed) == G - 1 ? 1u : 0u;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (*last == 0u) return;
-    mesh_step_release(publish, PEERS, tid);
-    mesh_arrival_reset(arrivals, 0, tid);
-}
-
-// docs/writing-a-service.md#the-step-kernel
 struct Activated {
     device half* Y; uint col0, ld, at;
     void operator()(thread simdgroup_float8x8& acc, uint ct, uint rt) thread {
@@ -103,24 +83,21 @@ struct Activated {
 
 // docs/writing-a-service.md#the-step-kernel
 struct Summand {
-    device half* P; uint col0, ld, at;
+    mesh_view<half2> P; uint col0, ld, at;
     void operator()(thread simdgroup_float8x8& acc, uint ct, uint rt) thread {
-        mesh_step_write<half2>((device uchar*)P, ((rt * 8 + at / 8) * ld + col0 + ct * 8 + at % 8) / 2,
-                               half2(acc.thread_elements()[0], acc.thread_elements()[1]));
+        P.store(((rt * 8 + at / 8) * ld + col0 + ct * 8 + at % 8) / 2, half2(acc.thread_elements()[0], acc.thread_elements()[1]));
     }
 };
 
 // docs/writing-a-service.md#the-step-kernel
-template <uint PEERS>
-struct chain_words { uint first, drains, rows, ks0, ks1, pad; mesh_step_binding sent[PEERS], land[PEERS], publish[PEERS]; };
+struct chain_words { uint first, drains, rows, ks0, ks1, pad; };
 
 // docs/writing-a-service.md#the-step-kernel
 template <uint STAGE, uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint PEERS>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
                        device half* out [[buffer(3)]], device half* X [[buffer(4)]], device half* Y [[buffer(5)]],
-                       device half* P [[buffer(6)]], device atomic_uint* arrivals [[buffer(7)]],
-                       device const half* Pprev [[buffer(8)]], constant chain_words<PEERS>& words [[buffer(15)]],
+                       constant mesh_crossing& crossing [[buffer(14)]], constant chain_words& words [[buffer(15)]],
                        uint tid [[thread_index_in_threadgroup]], uint sgid [[simdgroup_index_in_threadgroup]],
                        uint lane [[thread_index_in_simdgroup]], uint w [[threadgroup_position_in_grid]]) {
     static_assert(TILE == 8, "simdgroup matrices are 8 x 8");
@@ -132,23 +109,19 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     if constexpr (STAGE == 0) {
         const bool first = words.first != 0;
         const uint x0 = xs.x * TILE, xw = xs.y * TILE;
-        if (!first)
-            for (uint q = 0; q < PEERS; q++) {
-                constant mesh_step_binding& l = words.land[q];
-                mesh_step_enter(*l.p, l.v, l.progress, w == 0 && tid == 0);
-                mesh_step_await(*l.p, l.a, l.v, tid);
-            }
+        mesh_enter(crossing, tid);
         for (uint q = tid; q < R * xw; q += THREADS) {
             uint i = (q / xw) * K + x0 + q % xw;
             float z = 0.0f;
             if (!first) {
-                float sum = float(Pprev[i]);
-                for (uint q = 0; q < PEERS; q++) sum += float(mesh_step_read<half>(words.land[q].d + words.land[q].p->dst, i));
+                float sum = float(mesh_own<half>(crossing)[i]);
+                for (uint q = 0; q < PEERS; q++) sum += float(mesh_landing<half>(crossing, q)[i]);
                 z = tanh(float(half(sum)));
                 if (words.drains) out[i] = half(z);
             }
-            X[i] = half(float(mesh_step_read<half>((device const uchar *)E, i)) + z);
+            X[i] = half(float(mesh_view<half>{(device uchar*)E}[i]) + z);
         }
+        mesh_leave(crossing, tid);
     } else if constexpr (STAGE == 1) {
         threadgroup float red[SG * RB * 64];
         Activated activated{Y, ys.x * TILE, S, lane_element(lane)};
@@ -156,12 +129,10 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
         stage<RG, RB, K, SG>(xs_rows, At, ys, groups, words.ks0, sgid, red, activated);
     } else {
         threadgroup float red[SG * RB * 64];
-        threadgroup uint last;
-        Summand summand{P, xs.x * TILE, K, lane_element(lane)};
+        mesh_enter(crossing, tid);
+        Summand summand{mesh_send<half2>(crossing), xs.x * TILE, K, lane_element(lane)};
         Rows ys_rows{Y, S};
-        rewrites<PEERS>(words.sent, tid);
         stage<RG, RB, S, SG>(ys_rows, Bt, xs, groups, words.ks1, sgid, red, summand);
-        for (uint q = 0; q < PEERS; q++) mesh_step_enter(*words.publish[q].p, words.publish[q].v, words.publish[q].progress, w == 0 && tid == 0);
-        release<PEERS>(arrivals, G, tid, &last, words.publish);
+        mesh_leave(crossing, tid);
     }
 }

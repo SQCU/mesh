@@ -55,33 +55,33 @@ def shares(config, rank, size, folds):
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
-    e, p, pace = E.unbind(0), P.unbind(0), chain.Pace()
+def chain_stream(step, rank, steps, block, E, O, inputs, outputs):
+    e, pace = [s for b in E for s in b.unbind(0)], chain.Pace()
     o = (None,) * block if O is None else O.unbind(0)
-    deep, sums = len(e), len(p)
-    landing, crossing = chain.fill(E, rank, inputs, 0, steps, block), None
+    deep = len(e)
+    landing = chain.fill(E, rank, inputs, 0, steps, block)
     for t in range(steps):
         if t % block == 0:
             pace.wait()
             ahead = chain.fill(E, rank, inputs, t + block, steps, block) if t + block < steps else None
             landing.wait()
             landing = ahead
-        crossing = step(e[t % deep], p[t % sums], o[(t - 1) % block], crossing)
+        step(e[t % deep], o[(t - 1) % block])
         if t % block == 0 and t:
             chain.drain(t - block, steps, block, O, outputs)
             pace.mark()
-    step.land(e[(steps - 1) % deep], o[(steps - 1) % block], crossing)
+    step.land(e[(steps - 1) % deep], o[(steps - 1) % block])
     chain.drain((steps - 1) // block * block, steps, block, O, outputs)
     return pace.first
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def crossings(steps, block, P):
-    p, pace = P.unbind(0), chain.Pace()
+    pace = chain.Pace()
     for t in range(steps):
         if t % block == 0:
             pace.wait()
-        dist.all_reduce(p[t % len(p)])
+        dist.all_reduce(P[t % len(P)])
         if (t + 1) % block == 0 and t + 1 < steps:
             pace.mark()
 
@@ -96,13 +96,13 @@ def main():
         raise ValueError('The configuration gives one part a rank')
     width = config['width']
     steps, rows, inputs = chain.operand(config['input'], rank, width)
-    block, deep, sums = chain.ring(config['ring_bytes'], steps, rows * width * torch.half.itemsize)
+    block, blocks, sums = chain.ring(config['ring_bytes'], steps, rows * width * torch.half.itemsize)
     a, b = shares(config, rank, size, folds)
     del folds
     step = chain.Step(a, b, rows, config['row_capacity'], size - 1, chain.capability(config['capabilities']))
     del a, b
-    E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
-    P = torch_mesh.empty(sums, chain.paged(rows * width), dtype=torch.half)[:, :rows * width].unflatten(1, (rows, width))
+    E = [torch_mesh.empty(block, rows, width, dtype=torch.half) for _ in range(blocks)]
+    P = [torch_mesh.empty(rows, width, dtype=torch.half) for _ in range(sums)]
     O = torch.empty(block, rows, width, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width)) if rank == 0 else None
     start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
@@ -110,7 +110,7 @@ def main():
     dist.barrier()
     began = time.perf_counter()
     start.record()
-    first = chain_stream(step, rank, steps, block, E, P, O, inputs, outputs)
+    first = chain_stream(step, rank, steps, block, E, O, inputs, outputs)
     end.record()
     hosted = time.perf_counter() - began
     torch.mps.synchronize()
@@ -125,7 +125,7 @@ def main():
     crossing = time.perf_counter() - began
     moved = 2 * (size - 1) * rows * width * torch.half.itemsize
     summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, block=block,
-                   input_ring=deep, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
+                   input_ring=blocks * block, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, step_microseconds=seconds / steps * 1e6,
                    host_microseconds=hosted / steps * 1e6,
                    first_block_milliseconds=opened * 1e3 if first is not None else None,

@@ -72,7 +72,7 @@ def shares(config, rank, size, held):
 
 # docs/writing-a-service.md#the-lstm
 def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
-    e, pace, L = E.unbind(0), chain.Pace(), tick.L
+    e, pace, L = [s for b in E for s in b.unbind(0)], chain.Pace(), tick.L
     o = (None,) * block if O is None else O.unbind(0)
     landing = chain.fill(E, rank, inputs, 0, steps, block)
     for s in range(steps + L - 1):
@@ -102,12 +102,12 @@ def main():
         raise ValueError('The configuration gives each rank a share')
     KIN, H, L = config['input_width'], sum(config['shares']), config['layers']
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
-    block, deep, _ = chain.ring(config['ring_bytes'], steps, rows * KIN * torch.half.itemsize)
+    block, blocks, _ = chain.ring(config['ring_bytes'], steps, rows * KIN * torch.half.itemsize)
     W, bias = shares(config, rank, size, held)
     del held
     tick = lstm.Tick(W, bias, rows, config['shares'], rank, L, KIN, chain.capability(config['capabilities']))
     del W, bias
-    E = torch_mesh.empty(deep, rows, KIN, dtype=torch.half)
+    E = [torch_mesh.empty(block, rows, KIN, dtype=torch.half) for _ in range(blocks)]
     O = torch.empty(block, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H)) if rank == 0 else None
     start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
