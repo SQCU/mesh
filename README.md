@@ -201,6 +201,12 @@ only (`IBV_WR_SEND`, `IBV_ACCESS_LOCAL_WRITE`), 10 UC queue pairs per device, ~1
 maximum message, sender and receiver must post the **same frame count**, no hardware
 ACK, and a per-controller IOMMU so a buffer is registered separately per device.
 
+The queue pairs are not the same everywhere: the M5 Ultra on macOS 27 reports `max_qp` 3
+on every device, not 11, and its driver keeps a queue pair of each device for itself. A
+link's two bridges state what their devices hold and make the lanes both can, ten where
+both hold ten and one stream's two where either holds two
+([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
+
 RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of
 this depends on the routing layer.
