@@ -6,6 +6,7 @@ KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources
 FW=/usr/libexec/ApplicationFirewall/socketfilterfw
 
 [ "$(id -u)" -eq 0 ] || exec sudo "$0" "$@"
+export HOME=~root
 launchctl enable system/com.openssh.sshd 2>/dev/null
 launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
 RECORDED=$(cat "$MESH_ROOT/admin-user" 2>/dev/null)
@@ -78,7 +79,7 @@ try "no startup delay"    systemsetup -setwaitforstartupafterpowerfailure 0
 try "computer sleep off"  systemsetup -setcomputersleep Never
 try "network time"        systemsetup -setusingnetworktime on
 try "auto-boot"           nvram auto-boot=true
-try "screensaver off"     sudo -u "$ADMIN_USER" defaults -currentHost write com.apple.screensaver idleTime -int 0
+try "screensaver off"     sudo -H -u "$ADMIN_USER" defaults -currentHost write com.apple.screensaver idleTime -int 0
 try "no auto updates"     defaults write /Library/Preferences/com.apple.SoftwareUpdate AutomaticallyInstallMacOSUpdates -bool false
 try "no update restart"   defaults write /Library/Preferences/com.apple.commerce AutoUpdateRestartRequired -bool false
 try "firewall off"        "$FW" --setglobalstate off
@@ -134,12 +135,18 @@ networksetup -ordernetworkservices "${svcs[@]}" "$TB_SERVICE" >/dev/null 2>&1
 last=$(networksetup -listallnetworkservices | sed '1d;s/^\*//' | grep -v '^$' | tail -1)
 [ "$last" = "$TB_SERVICE" ] && ok "service order: $TB_SERVICE last of $((${#svcs[@]}+1))" \
                             || bad "service order: last is '$last', a peer could steal the default route"
-ok "identity: $(scutil --get LocalHostName).local"
+ok "identity: host UUID $(ioreg -a -rd1 -c IOPlatformExpertDevice | plutil -extract 0.IOPlatformUUID raw -o - -)"
 
 sec "7. RDMA"
 st=$(rdma_ctl status 2>&1)
 [ "$st" = enabled ] && ok "enabled, nvram $(nvram rdma-enable 2>/dev/null | awk '{print $2}')" \
                     || bad "rdma is '$st', physical Recovery OS visit required"
+
+sec "7a. Tailnet"
+[ -f "$REPO/tailscale.key" ] && install -m 600 -o root -g wheel "$REPO/tailscale.key" "$MESH_ROOT/tailscale.key"
+"$MESH_ROOT/bin/mesh-tailscale-init.sh"
+[ -d /Applications/Tailscale.app ] && ok "tailnet: Tailscale.app" || {
+  [ -x "$MESH_ROOT/bin/tailscaled" ] && ok "tailscaled $(cat "$MESH_ROOT/tailscale/version" 2>/dev/null)" || bad "tailscaled not built ($MESH_ROOT/log/tailscale.log)"; }
 
 sec "8. Daemons"
 J=$MESH_ROOT/jobs
@@ -171,8 +178,12 @@ mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
 mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
+TSJ=io.mesh.tailscale; [ -d /Applications/Tailscale.app ] && TSJ=
+[ -n "$TSJ" ] && mkplist io.mesh.tailscale "<string>$MESH_ROOT/bin/tailscaled</string><string>--statedir=$MESH_ROOT/tailscale</string><string>--socket=/var/run/tailscaled.socket</string>" \
+  "  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>1</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper $TSJ; do
   port=
   case "$L" in io.mesh.telemetry) port=8788 ;; io.mesh.observer) port=8787 ;; esac
   upid=$(launchctl print "gui/$ADMIN_UID/$L" 2>/dev/null | awk '/^[[:space:]]*pid = /{print $3; exit}')
@@ -191,6 +202,7 @@ for label in io.mesh.telemetry io.mesh.observer; do
       && ok "$label userspace provider loaded" || bad "$label has no provider loaded"; }
 done
 for L in $kick; do launchctl kickstart -k "system/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
+"$MESH_ROOT/bin/mesh-tailscale-init.sh"
 
 try "complete cartlane application realized" "$MESH_ROOT/bin/mesh-python" "$REPO/bin/mesh-application.py" deploy --source "$REPO" --target "$MESH_ROOT/applications/cartlane"
 

@@ -67,12 +67,47 @@ The rank service in metal-microbench is a service of this kind for a language mo
 
 ## How the example moves its data
 
-Rank 0 holds the files, and at the start it sends each rank that rank's rows of A and B. Before each chunk of steps, it
-broadcasts that chunk's inputs to every rank. Each step then makes one all-reduce, and nothing else crosses. Rank 0
-copies one chunk of outputs to the host at the end of the chunk, not once a step.
+Rank 0 holds the files. At the start it reads the input's shape and broadcasts two numbers, the steps and the rows, so
+every rank knows them. Then it sends each rank that rank's rows of A and B.
+
+The inputs are one operand: a block of rows for each step. They move through a ring of slots in the region, one slot a
+step. Each rank has two rings, one for the inputs and one for the sums.
+
+The inputs cross a block at a time, a block early. They depend on nothing in the chain, so nothing makes them wait.
+Before the first step of each block, rank 0 copies the next block's inputs from its file into its ring, and broadcasts
+them into every rank's ring. Both go on the GPU's own queue, and the host does not wait for them. The host waits for
+that broadcast just before the next block's first step, the first thing that reads it. A step then has two host calls:
+its kernel and one all-reduce of its part of z. Nothing else crosses during a block.
+
+The library lands each block's broadcast sooner than that wait, though. A call finishes every call issued before it, so
+the block's first all-reduce lands the next block's inputs too. That all-reduce waits for the whole block's bytes to
+arrive, once a block.
+
+At the end of each block, rank 0 puts tanh of that block's sums, and a copy of them, on the GPU's queue as well. The
+copy writes straight into the output file's memory. No step waits for the host, and the next section says when the
+host waits for the GPU.
 
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
 place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
+
+## The rings
+
+The input ring is two blocks deep. While the GPU works through one block, the next block's inputs arrive in the
+other. The sum ring is one block deep: a block's sums are copied out at the block's end, before the next block writes
+over them.
+
+How long is a block? The configuration gives `ring_bytes`, the bytes of the region the two rings may hold on each node.
+If each ring can hold the whole stream, a block is the whole stream, and no slot is used twice. If not, a block is a third
+of the slots that fit: two blocks for the inputs and one for the sums. If `ring_bytes` cannot hold three slots, the
+service stops with an error. It never picks a depth of its own.
+
+The host may run ahead of the GPU, but never by more than the input ring. At the end of each block it puts a mark on
+the GPU's queue. At the start of a block, it waits for the mark two blocks back, so one block is still queued.
+
+There is a second bound, and today it is the tighter one. Metal's queue holds at most 64 command buffers not yet done,
+and torch makes the host wait when it is full. Today each publication and each copy ends a command buffer, so the host
+gets about 32 steps ahead and the ring's mark never waits. The host's time a step then includes that wait. Once the
+library ends a command buffer only when the GPU needs one, the ring's mark is the bound.
 
 ## The step kernel
 
@@ -80,28 +115,47 @@ Each step on a rank is one kernel, run through torch-mesh's own calls. `streamed
 template in [examples/chain.metal](../examples/chain.metal), `_stream.pipeline` compiles it, and `_stream.encode` puts
 it on torch's stream, so no host waits for it ([examples/chain.py](../examples/chain.py)). The rank's GPU cores run it
 as G workers that are all on the GPU at once. They hand work to each other through stamp words in memory. Every wait
-has a limit, the patience, so a stuck kernel ends instead of hanging the GPU.
+has a limit, so a stuck kernel ends instead of hanging the GPU. Once a wait has failed, each later step's kernel
+reads that at its start and ends at once, so queued steps never spin again. The limit is the library's own, `NCCL_MESH_POLLS` loads
+(`_stream.polls`), which holds a GPU at most the platform's 5 seconds. It is not a setting.
 
 The kernel does three things. First, each worker writes its slice of x = e_t + tanh(z), where z is the last step's sum.
 Second, the workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the
 rank's part of z from y and its rows of B. The all-reduce then adds the parts on the same stream, and the next step's
-kernel starts once that sum has landed. A chunk's steps run inside `_stream.batch`, the region torch-mesh's compiler
-puts around a compiled graph. There, a step's all-reduce joins the open command buffer instead of paying for a commit
-of its own. The host waits for nothing until the chunk ends, which is that region's one rule.
+kernel starts once that sum has landed. A step's all-reduce follows torch-mesh's one commit rule, the same for every
+caller (torch-mesh README, Performance). While the GPU still holds enough of the stream's buffers, the all-reduce joins
+the open command buffer instead of paying for a commit of its own. The next step's all-reduce, or the host's next wait,
+commits that buffer.
 
-The number of workers is the largest power of two that fits the GPU's cores and divides the widths. A product is split
-along K where a worker has fewer items than simdgroups. How many rows a simdgroup takes at once is chosen by timing each
-choice on the rank itself, at the start. Each run prints two times a step: the whole step, and the all-reduce alone. The
-gap between them is what the kernel and its hand-offs cost.
+G is the number of the GPU's cores, so the whole GPU works: one worker a core. The columns come in tiles of 8, and
+each worker takes a fair share of them. If there are n tiles, each worker takes n/G of them, rounded down, and the first
+few workers take one more, so the shares differ by one tile at most. y's columns over the share are split this way, and
+so are z's columns over the width. The width and the rank's share must be multiples of 8, with at least one tile for
+every core. If one is not, the service stops with an error that names the nearest values that would run.
+
+The rows are not built into the kernel. The row count is a word the host passes with each step. The kernel's work
+items are pairs: a group of rows and a tile of columns. Only the size of a row group, RG, is built in, since it sets
+how many registers a simdgroup uses. So one compiled kernel serves any row count that is a multiple of 8 times RG, up
+to the capacity the configuration gives. A product is split along K where a worker has fewer items than simdgroups.
+That split is a word too, worked out once for each row count.
+
+Each rank builds one instance of the kernel. Its RG is 1, so a work item is one tile of 8 rows by one tile of 8
+columns. Its threads are the most the GPU builds this kernel for. The rank compiles the kernel at 32 threads, one
+simdgroup, and doubles the count until the GPU refuses to build the pipeline. It keeps the last count that built. That
+compile reads what the GPU can run. Nothing is timed, and no choice is made by speed.
 
 ## The configuration
 
-The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the rows,
-the width, the steps, the chunk and the parts. It also says how many first steps to check, and gives the kernel's
-threads, its patience and how many steps each timing takes. A part is how many rows of A and B a rank holds, in rank order. The service never
-guesses a part. A balancer that measures the calls writes the parts. Both Macs are always loaded fully.
+The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
+width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
+two rings. It also says how many first steps to check. The kernel's threads are the most the GPU builds, its row
+group is one tile, and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and rows there are, so the configuration does not. Every value
+must be there. The service has no defaults, and a missing value is an error.
+
+A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
+measures the calls writes the parts. Both Macs are always loaded fully.
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
-sample.
+sample. Its `ring_bytes` holds three blocks of 512 steps, so the sample's rings wrap many times.
 
 These lines make sample inputs and weights for it:
 
@@ -117,17 +171,26 @@ np.savez('chain-weights.npz', a=(g.standard_normal((1024, 1024)) / 32).astype(np
 
 Start one rank on each node from that node's own checkout, and launch it as torchrun would, with `RANK`, `WORLD_SIZE`,
 `MASTER_ADDR` and `MASTER_PORT`. `MASTER_ADDR` is rank 0's address on the cable. Nothing starts a process on another
-node.
+node. A person or an agent starts each run, and nothing keeps the service resident.
 
 ```
 RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
   ~/.venv-mesh-uv/bin/python examples/chain-service.py examples/chain-service.json
 ```
 
-Each rank prints one line at the end. It gives the rows, the steps and the seconds. It gives the throughput of all
-streams together and of each stream, and the time per step. Rank 0 also prints how far its first steps are from a
-plain float64 run of the same rule. To keep the service up, make it a launchd job from
-[templates/](../templates/), as the README's "Adding a workload" says.
+Each rank prints one line at the end. It gives the parts, the rows, the steps, the block, the two rings' depths and
+the seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four
+times a step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and
+the all-reduce alone. It gives the bytes a step's two collectives move, and those bytes a second. Rank 0 also checks
+two windows of steps against a plain float64 run of the same rule: the first steps, and the first steps of the last
+block, which start from rank 0's own output. The second window reads slots the ring has used before.
+
+The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling
+its kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the
+first block's time. It then gives the time a step of the later blocks takes, and the rows a second they reach. A block's
+end is the moment the host's wait on its mark returns: the host issues ahead of the GPU, so it is already waiting
+when the block ends, and no wait is added to take the time. The whole-run times include the first block; these do
+not.
 
 ## What to read next
 

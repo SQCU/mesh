@@ -1,2 +1,0 @@
-purpose = "A headless node of the mesh (the Mac mini, the Mac Studios) that follows its checkouts' upstreams without hands: a pass every 5 minutes, so a push reaches the node within one pass and its build; each layer's images are installed by rename, and the bridge restarts itself on them between calls."
-period_s = 300

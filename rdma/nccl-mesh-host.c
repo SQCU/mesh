@@ -2,14 +2,14 @@
    (nccl-mesh-metal.h) on the CPU, so libnccl-mesh's Metal path runs on host threads: N ranks on one host over
    mesh-flow-loop's bridges, with no GPU kernel anywhere (several ranks' spinning kernels on one GPU have no
    forward-progress guarantee: the no-cross-queue-spin rule).  Each kernel runs as the walk encodes it, in the walk's
-   order, its body transcribed from nccl-mesh-metal.m's: copies and combines in host memory (the host path's arithmetic,
+   order, its body transcribed from nccl-mesh-kernels.h's: copies and combines in host memory (the host path's arithmetic,
    nccl-mesh.c combine_into, premultiply and truncdiv, which nccl-mesh.c exports hidden to this file where
    MESH_HOST_EXECUTOR is defined), a run's ready words release-stored, a wait for a landing a poll of its run's last
    unit's landed word (mesh.metal mesh_wait_bounded: until it reaches 1 + the cycle or the bridge stores ~0, for at most
-   the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, at most MESH_PLATFORM_NS, and until
-   the communicator's stop word [6] is set, design/transport.md), its failure (the bound reached, the link lost, a
-   revoke) recorded in the failure words [0], [3], [4] and the gate [2], and every later step gated on them doing
-   nothing; a step naming no words is gated on the program's (metal_gate), as nccl-mesh-metal.m dispatch_as binds them.
+   the program's polls looks, 0 or more than NCCL_MESH_POLLS being NCCL_MESH_POLLS, and at most MESH_PLATFORM_NS,
+   design/transport.md), its failure (the bound reached, the link lost; a revoke named where the stop word [6] is set)
+   recorded in the failure words [0], [3], [4] and [2], which the library reads after the program, every later step
+   running as made; a step naming no words records in the program's (metal_gate), as nccl-mesh-metal.m dispatch_as binds them.
    A buffer is a host address (metal_wrap returns its address; metal_contents it); what metal_scratch, metal_shared and
    metal_event made is counted and freed with its last release.  A step run by a caller's kernel (metal_send_deferred,
    metal_land_deferred: a fused crossing's, on either form) is refused, since no kernel of a caller's runs here.  Built as
@@ -141,18 +141,13 @@ static _Atomic uint64_t *words_of(struct metal_program *program, void *given, ui
   *polls = v ? program->polls : 0;
   return v;
 }
-/* mesh_step_enter: a step whose failure words' gate [2] holds a failure does nothing; nor does one that writes a lane
-   once the stop word [6] is set (nccl-mesh-metal.m STOP) */
-static int halted(_Atomic uint64_t *v, uint32_t polls) { return polls && v && atomic_load_explicit(v + 2, memory_order_acquire); }
-static int stopped(_Atomic uint64_t *v, uint32_t polls) { return halted(v, polls) || (polls && v && atomic_load_explicit(v + 6, memory_order_acquire)); }
-
-/* mesh_step_wait: the word until it reaches 1 + cycle (or ~0), at most `polls` looks (0: one), at most MESH_PLATFORM_NS
-   (a host look being far slower than a GPU load, design/transport.md) and while the stop word [6] is clear */
-static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls, _Atomic uint64_t *v) {
+/* mesh_step_wait: the word until it reaches 1 + cycle (or ~0), at most `polls` looks (0: one) and at most
+   MESH_PLATFORM_NS (a host look being far slower than a GPU load, design/transport.md), reading no other word */
+static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls) {
   const uint64_t target = 1 + cycle, deadline = now_ns() + MESH_PLATFORM_NS;
   uint64_t seen = atomic_load_explicit(word, memory_order_acquire);
   for (uint64_t k = 1; seen < target && k < polls; k++) {
-    if (!(k & 63) && (now_ns() > deadline || (v && atomic_load_explicit(v + 6, memory_order_acquire)))) break;
+    if (!(k & 63) && now_ns() > deadline) break;
     /* N ranks share the host's cores with N bridges: a wait that runs long yields them */
     if (k > 4096) usleep(20);
     else if (k > 256) sched_yield();
@@ -161,7 +156,7 @@ static uint64_t step_wait(_Atomic uint64_t *word, uint64_t cycle, uint32_t polls
   return seen;
 }
 
-/* mesh_step_check: a wait's failure recorded where the gate is clear: a revoke, the link lost (~0) or the bound reached;
+/* mesh_step_check: a wait's failure recorded where none is yet ([2] clear): a revoke, the link lost (~0) or the bound reached;
    a landing is none, whatever its bytes */
 static void step_check(const struct metal_wait *w, _Atomic uint64_t *v, uint32_t polls, uint64_t status) {
   if (!v || !polls || atomic_load_explicit(v + 2, memory_order_acquire)) return;
@@ -174,11 +169,10 @@ static void step_check(const struct metal_wait *w, _Atomic uint64_t *v, uint32_t
   atomic_store_explicit(v + 2, w->at + 1, memory_order_release);
 }
 
-/* a step's wait (step_wait) and its check (step_check): whether its landing came and nothing failed */
-static int step_await(const struct metal_wait *w, _Atomic uint64_t *v, uint32_t polls) {
-  step_check(w, v, polls, step_wait((_Atomic uint64_t *)at(w->buffer, w->word), w->cycle, polls, v));
+/* a step's wait (step_wait) and its check (step_check) */
+static void step_await(const struct metal_wait *w, _Atomic uint64_t *v, uint32_t polls) {
+  step_check(w, v, polls, step_wait((_Atomic uint64_t *)at(w->buffer, w->word), w->cycle, polls));
   atomic_thread_fence(memory_order_acquire);
-  return !halted(v, polls);
 }
 
 /* mesh_step_release: the run's ready words stored, each after every store before it */
@@ -203,7 +197,7 @@ struct op {
   uint32_t polls;
 };
 
-/* nccl-mesh-metal.m's counted kernels (counted_start .. counted_own), one step each */
+/* nccl-mesh-kernels.h's counted kernels (counted_start .. counted_own), one step each */
 static uint64_t counted_rows(const int64_t *c, uint64_t first, uint64_t count) {
   uint64_t rows = 0;
   for (uint64_t k = 0; k < count; k++) rows += c[first + k] > 0 ? (uint64_t)c[first + k] : 0;
@@ -227,8 +221,9 @@ static void run_counted(int kind, const struct metal_counted *k) {
     const uint64_t *tail = (const uint64_t *)(s + k->src) + k->first;
     const int over = counted_rows((const int64_t *)(s + k->src), 0, k->bytes) > k->aux || tail[1] > k->scalar || tail[2] != 0;
     _Atomic uint64_t *word = (_Atomic uint64_t *)(d + k->dst);
+    const int failed = a && atomic_load_explicit((_Atomic uint64_t *)a + 2, memory_order_acquire);
     if (over && a) atomic_store_explicit((_Atomic uint64_t *)a + 5, 1, memory_order_release);
-    if (!atomic_load_explicit(word, memory_order_acquire)) atomic_store_explicit(word, over ? 2 : 1, memory_order_release);
+    if (!atomic_load_explicit(word, memory_order_acquire)) atomic_store_explicit(word, over || failed ? 2 : 1, memory_order_release);
   } else if (kind == METAL_COUNTED_OWN) {
     const int64_t *c = (const int64_t *)(a + k->aux);
     const uint64_t to = counted_rows(c, 0, k->first) * k->row, from = ((const uint64_t *)(a + k->aux))[k->scalar] * k->row;
@@ -247,14 +242,10 @@ static void run_counted(int kind, const struct metal_counted *k) {
   }
 }
 
-/* a step's body, nccl-mesh-metal.m's kernel of its kind: a step gated on failure words that hold a failure does
-   nothing, nor does one writing a lane once the stop word is set */
+/* a step's body, nccl-mesh-kernels.h's kernel of its kind, run as made */
 static void run_op(const struct op *o) {
   _Atomic uint64_t *v = o->v;
   const uint32_t polls = o->polls;
-  const int writes = o->kind == OP_PUBLISH || o->kind == OP_SEND_SMALL || (o->kind == OP_COPY && o->mode == METAL_SEND) ||
-                     (o->kind == OP_COUNTED && o->mode == METAL_COUNTED_SEND);
-  if (writes ? stopped(v, polls) : halted(v, polls)) return;
   switch (o->kind) {
   case OP_COPY:
     if (!o->n) return;
@@ -286,7 +277,8 @@ static void run_op(const struct op *o) {
     step_release(&o->release);
     return;
   case OP_LAND:
-    if (!step_await(&o->wait, v, polls) || !o->n) return;
+    step_await(&o->wait, v, polls);
+    if (!o->n) return;
     if (o->type < 0) memmove(at(o->dst, o->dst_offset), at(o->wait.buffer, o->wait.slot), o->n);
     else nccl_mesh_combine(o->type, o->op, at(o->dst, o->dst_offset), at(o->wait.buffer, o->wait.slot), o->n);
     return;
@@ -434,16 +426,16 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
   return METAL_DONE;
 }
 
-/* whether an item may run: its failure words hold a failure (it then does nothing), or its track has consumed its
-   credit, every dependency holds and, a consumption, its landing came (its word at 1 + the cycle, ~0, or the stop
-   word set) */
-static int item_ready(const struct item *it, int cursor, const uint64_t *count, uint32_t self) {
-  if (halted(it->v, it->polls)) return 1;
-  if (count[self] < it->need) return 0;
+/* whether track tr's next item of `cursor` may run: its own `need` holds (a publication's, its track has consumed
+   `need` positions; a consumption's, its track's publications have passed position `need` - 1), every dependency holds
+   and, a consumption, its landing came (its word at 1 + the cycle, or ~0) */
+static int item_ready(const struct track *tr, int cursor, const uint64_t *count, uint32_t self) {
+  const struct cursor *k = tr->cursor + cursor, *out = tr->cursor + METAL_PUBLISH;
+  const struct item *it = k->item + k->next;
+  if (cursor == METAL_PUBLISH ? count[self] < it->need : out->next < out->count && out->item[out->next].position < it->need) return 0;
   for (uint32_t d = 0; d < it->ndeps; d++)
     if (count[it->deps[d].other] < it->deps[d].count) return 0;
   if (cursor != METAL_CONSUME || !it->awaits) return 1;
-  if (it->v && atomic_load_explicit(it->v + 6, memory_order_acquire)) return 1;
   return atomic_load_explicit((_Atomic uint64_t *)at(it->wait.buffer, it->wait.word), memory_order_acquire) >= 1 + it->wait.cycle;
 }
 
@@ -470,7 +462,7 @@ static void tracks_free(struct recording *r) {
 /* the tracks run (nccl-mesh-metal.h metal_tracks) as one cooperative loop: each pass advances every cursor of every
    track while its next item may run; a pass that advances none is one look, the looks bounded as a wait's are
    (step_wait: the program's polls, MESH_PLATFORM_NS since the last advance, with its backoff), after which each cursor
-   that cannot run has its failure recorded, and every item gated on those words then runs as nothing */
+   that cannot run has its failure recorded and the loop ends once nothing more can run */
 struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
   struct recording *r = program->recording;
   if (r) r->on = 0;
@@ -487,7 +479,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
         struct cursor *k = r->track[t].cursor + c;
         while (k->next < k->count) {
           const struct item *it = k->item + k->next;
-          if (!item_ready(it, c, count, t)) { left = 1; break; }
+          if (!item_ready(r->track + t, c, count, t)) { left = 1; break; }
           for (size_t s = 0; s < it->nops; s++) run_op(it->ops + s);
           if (c == METAL_CONSUME) count[t] = it->position + 1;
           k->next++; moved = 1;

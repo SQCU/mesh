@@ -1,218 +1,12 @@
 #import <Metal/Metal.h>
 #include "nccl-mesh-metal.h"
+#include "nccl-mesh-kernels.h"
 #include "nccl.h"
-#pragma GCC visibility push(hidden)
-#include "mesh_metal.h"
-#pragma GCC visibility pop
+#include <dlfcn.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#define STR(...) #__VA_ARGS__
-#define XSTR(...) STR(__VA_ARGS__)
-/* a kernel's arguments, one layout for the host (struct args) and the kernels (struct mesh_args) */
-#define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 first, slot, at, sequence; U32 count, mask, channel; }
-/* the loads a wait makes between its reads of its communicator's stop word (failure word [6], a revoke's) and its gate
-   ([2], a failure's) */
-#define STEP_LOOK 4096u
-
-/* a step of a compiled program, the library's one implementation of it (metal-microbench docs/acceptance-20261014.md
-   A39), after rdma/mesh.metal: libnccl-mesh's kernels call these, and so does a caller's kernel that runs a step its
-   group handed it (ncclMeshFused: a product's finish that publishes its piece, the kernel after the call that lands its
-   peer's), its six bindings one mesh_step_binding where its encoder is classic (setBytes) and its argument table's
-   six where it is Metal 4.  mesh_step_enter: a kernel whose record is the argument ring's (every Metal 4 dispatch's,
-   and a deferred step's on either form) first stores the record's sequence in `progress` (`first` in one thread of the
-   dispatch; every dispatch before it has finished: a barrier stands between each two, or a classic encoder's serial
-   order), whether or not its program has failure words (a classic dispatch's record is its setBytes, its sequence 0,
-   and it stores none), and, where it has them (p.polls, set wherever they are), goes on only while failure word [2],
-   the gate, holds none.  The gate is the calling thread's reading: a wait's failure
-   closes it once, and may close it while the thread's threadgroup runs (another threadgroup's wait, in its dispatch or
-   another), so a threadgroup that decides alike has one thread read it and share it (ENTER_G, GROUP_STOP).
-   mesh_step_wait: a wait on its run's last unit's landed word at p.aux for 1 + p.scalar, at most p.polls loads
-   (mesh_wait_bounded, STEP_LOOK at a time with the stop word [6] and the gate [2] read between them; the program's
-   bound, at most NCCL_MESH_POLLS: metal_begin), ended sooner by the landing, the link's loss (~0), a revoke or another
-   wait's failure.  mesh_step_claim: failure word [1]'s low half exchanged for 1, true in the one caller that found it 0,
-   so of every wait that fails (a dispatch's threadgroups', the tracks') one records.  mesh_step_check: the wait's failure
-   recorded by its claimant in failure words [0] (its cause, nccl-mesh-metal.h METAL_*), [3] and [4] and then the gate
-   [2], stored last by the claimant; a loser awaits the claimant's gate through a coherent load (at most p.polls loads)
-   and re-stores the value it read, so its own threadgroup reads the gate closed after mesh_step_await's barrier, as the
-   claimant's does: a revoke, the link lost or the bound reached; a landing is no failure, whatever its bytes (a dud's among them:
-   placed where a send must happen and its producer is gone, never a value a consumer reads as a signal,
-   design/rubrics.md M4), and it reads the failure words, claims and fences only where it failed.  mesh_step_await: a
-   landing awaited by thread 0 and checked, then the threadgroup past a device barrier and a system-scope fence (its
-   payload then read with mesh_payload), whether its gate holds none; every threadgroup of a dispatch may await one
-   landing, each its own bounded wait, calling it from every thread alike and skipping by its result only stores, never
-   a barrier.  mesh_step_release: a piece the threadgroup stored into its run's slots, then its units' ready words
-   (p.count from p.aux, each p.scalar) released by thread 0 after a device barrier: a publication is one threadgroup's.
-   A caller's kernel stores its piece's element k of type T with mesh_step_store and reads its peer's with
-   mesh_step_read<T> (half4 where it names none: float16 fourths), so it names no transport qualifier of its own (they
-   are compiled here, under mesh.metal's pragma: a header after it, MetalPerformancePrimitives', may end that pragma).
-   The library's own kernels that write a stream class's out ring or ready words (a send, a release) do nothing once the
-   stop word is set (STOP, GROUP_STOP: read by thread 0 alone where the threadgroup meets a barrier), so none writes them
-   after a revoke. */
-static NSString *const STEPS =
-  @"\nusing namespace metal;\n"
-  XSTR(ARGS(mesh_args, ulong, uint)) ";\n"
-  "struct mesh_step_binding { device uchar *d; device uchar *s; constant mesh_args *p; device uchar *a; device uchar *v; device ulong *progress; };\n"
-  "static inline bool mesh_step_enter(constant mesh_args &p, device uchar *vb, device ulong *progress, bool first) { "
-  "if (p.sequence && first) *progress = p.sequence; return !(p.polls && ((volatile device const ulong *)vb)[2]); }\n"
-  "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, device uchar *vb) { "
-  "volatile coherent(system) device const ulong *w = (volatile coherent(system) device const ulong *)word, *v = (volatile coherent(system) device const ulong *)vb; "
-  "ulong seen = mesh_wait_bounded(w, 1 + p.scalar, min(p.polls, " XSTR(STEP_LOOK) ")); "
-  "for (uint k = " XSTR(STEP_LOOK) "; seen < 1 + p.scalar && k < p.polls && !v[6] && !v[2]; k += " XSTR(STEP_LOOK) ") "
-  "seen = mesh_wait_bounded(w, 1 + p.scalar, min(p.polls - k, " XSTR(STEP_LOOK) ")); return seen; }\n"
-  "static inline bool mesh_step_claim(device uchar *vb) { "
-  "return atomic_exchange_explicit((device atomic_uint *)(vb + 8), 1u, memory_order_relaxed) == 0u; }\n"
-  "static inline void mesh_step_check(constant mesh_args &p, ulong status, device uchar *ring, device uchar *vb) { "
-  "if (!p.polls) return; "
-  "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
-  "ulong cause; "
-  "(void)ring; if (status != ~0UL && status >= 1 + p.scalar) return; "
-  "cause = status == ~0UL ? " XSTR(METAL_LOST) "UL : v[6] ? " XSTR(METAL_REVOKED) "UL : " XSTR(METAL_BOUND) "UL; "
-  "if (!mesh_step_claim(vb)) { const ulong g = mesh_wait_bounded((volatile coherent(system) device const ulong *)(v + 2), 1, p.polls); "
-  "if (g) mesh_publish(v + 2, g); return; } "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
-  "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *ring, device uchar *vb, uint i) { "
-  "if (i == 0) mesh_step_check(p, mesh_step_wait(p, words + p.aux, vb), ring, vb); "
-  "threadgroup_barrier(mem_flags::mem_device); "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "return !(p.polls && ((volatile device const ulong *)vb)[2]); }\n"
-  "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
-  "threadgroup_barrier(mem_flags::mem_device); "
-  "if (i == 0) for (uint u = 0; u < p.count; u++) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux) + u, p.scalar); }\n"
-  "template <typename T> static inline void mesh_step_store(constant mesh_args &p, device uchar *slot, ulong k, T value) { "
-  "((volatile coherent(system) device T *)(slot + p.dst))[k] = value; }\n"
-  "template <typename T = half4> static inline T mesh_step_read(constant mesh_args &p, device uchar *slot, ulong k) { "
-  "return mesh_payload((volatile coherent(system) device const T *)(slot + p.src) + k); }\n";
-
-/* the kernels, after STEPS: each operator's arithmetic is written once (op_int, op_float, op_f8, merge_row: the partials
-   merge, a thread a row), a landing being the wait and then the combine's body; it is the host's (nccl-mesh.c
-   combine_into, merge_rows, premultiply, truncdiv): the small floating types in float32 rounded to
-   nearest even, float8 decoded and encoded by mesh.metal's f8_to and f8_from, integers wrapping */
-static NSString *const KERNELS =
-  @"\n"
-  "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, device ulong *progress, uint i, uint g, threadgroup ulong *tg\n"
-  "#define ENTER(first) if (!mesh_step_enter(p, vb, progress, first)) return;\n"
-  "#define ENTER_G if (i == 0) tg[3] = mesh_step_enter(p, vb, progress, true) ? 0UL : 1UL; threadgroup_barrier(mem_flags::mem_threadgroup); if (tg[3]) return;\n"
-  "#define STOPPED (p.polls && ((volatile coherent(system) device const ulong *)vb)[6] != 0UL)\n"
-  "#define STOP if (STOPPED) return;\n"
-  "#define GROUP_STOP if (i == 0) tg[2] = STOPPED ? 1UL : 0UL; threadgroup_barrier(mem_flags::mem_threadgroup); if (tg[2]) return;\n"
-  "#define HEAD(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]]) { body_##name(d, s, p, d, vb, progress, i, g, nullptr); } static void body_##name(PARAMS)\n"
-  "#define HEAD_A(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]]) { body_##name(d, s, p, a, vb, progress, i, g, nullptr); } static void body_##name(PARAMS)\n"
-  "#define GROUP(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, tg); } static void body_##name(PARAMS)\n"
-  "#define LOOP for (ulong k = i; k < p.n; k += g)\n"
-  "#define AWAIT if (!mesh_step_await(p, a, s, vb, i)) return;\n"
-  "#define COPY(Z, W) "
-  "HEAD(copy_plain_##Z) { ENTER(i == 0) device W *x = (device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; } "
-  "HEAD(copy_land_##Z) { ENTER(i == 0) device W *x = (device W *)(d + p.dst); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); LOOP x[k] = mesh_payload(y + k); } "
-  "HEAD(copy_send_##Z) { ENTER(i == 0) STOP volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; }\n"
-  "COPY(4, uint)\n"
-  "COPY(1, uchar)\n"
-  "template <typename T> T op_int(T a, T b, uint op) { return op == 0 ? T(ulong(a) + ulong(b)) : op == 1 ? T(ulong(a) * ulong(b)) : (op == 2 ? b > a : b < a) ? b : a; }\n"
-  "template <typename T> T op_float(T a, T b, uint op) { float x = float(a), y = float(b); return op == 0 ? T(x + y) : op == 1 ? T(x * y) : (op == 2 ? y > x : y < x) ? b : a; }\n"
-  "template <bool E5> uchar op_f8(uchar a, uchar b, uint op) { float x = f8_to(a, E5), y = f8_to(b, E5); "
-  "return op == 0 ? f8_from(x + y, E5) : op == 1 ? f8_from(x * y, E5) : (op == 2 ? y > x : y < x) ? b : a; }\n"
-  "#define BODY(T, OP) device T *x = (device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
-  "LOOP x[k] = OP(x[k], mesh_payload(y + k), p.op);\n"
-  "#define COMBINE(name, T, OP) HEAD(combine_##name) { ENTER(i == 0) BODY(T, OP) } GROUP(land_##name) { ENTER_G AWAIT BODY(T, OP) } "
-  "HEAD_A(combine3_##name) { "
-  "ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *z = (device const T *)(a + p.aux); "
-  "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP x[k] = OP(z[k], mesh_payload(y + k), p.op); }\n"
-  "#define INTEGER(name, T, SIGNED) COMBINE(name, T, op_int<T>) "
-  "HEAD(premul_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
-  "HEAD(truncdiv_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); LOOP { T v = y[k]; bool negative = SIGNED && v < T(0); "
-  "ulong m = negative ? 0UL - ulong(v) : ulong(v), q = m / p.scalar; x[k] = negative ? T(0UL - q) : T(q); } }\n"
-  "#define FLOATING(name, T) COMBINE(name, T, op_float<T>) "
-  "HEAD(premul_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = T(float(y[k]) * c); }\n"
-  "#define FLOAT8(name, E5) COMBINE(name, uchar, op_f8<E5>) "
-  "HEAD(premul_##name) { ENTER(i == 0) device uchar *x = (device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
-  "INTEGER(i8, char, true)\n"
-  "INTEGER(u8, uchar, false)\n"
-  "INTEGER(i32, int, true)\n"
-  "INTEGER(u32, uint, false)\n"
-  "INTEGER(i64, long, true)\n"
-  "INTEGER(u64, ulong, false)\n"
-  "FLOATING(f16, half)\n"
-  "FLOATING(f32, float)\n"
-  "FLOATING(bf16, bfloat)\n"
-  "FLOAT8(e4m3, false)\n"
-  "FLOAT8(e5m2, true)\n"
-  "GROUP(publish) { ENTER_G GROUP_STOP mesh_step_release(p, d, i); }\n"
-  "GROUP(send_small) { ENTER_G GROUP_STOP volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); "
-  "LOOP x[k] = y[k]; "
-  "mesh_step_release(p, a, i); }\n"
-  "GROUP(land_copy) { ENTER_G AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
-  "GROUP(spin) { ENTER_G if (i == 0) mesh_step_check(p, mesh_step_wait(p, d + p.aux, vb), s, vb); }\n"
-  "static inline ulong counted_rows(device const long *c, ulong first, ulong count) { ulong rows = 0; for (ulong k = 0; k < count; ++k) rows += c[first + k] > 0 ? ulong(c[first + k]) : 0UL; return rows; }\n"
-  "HEAD(counted_start) { ENTER(i == 0) device long *got = (device long *)(d + p.dst); device const long *c = (device const long *)(s + p.src); "
-  "LOOP got[k] = c[p.first + k]; "
-  "if (i == 0) { device ulong *tail = (device ulong *)(d + p.aux); tail[0] = counted_rows(c, 0, p.first); tail[1] = counted_rows(c, 0, p.scalar); tail[2] = 0; } }\n"
-  "HEAD(counted_check) { ENTER(i == 0) if (i == 0 && counted_rows((device const long *)d, p.first, p.count) > p.scalar) ((device ulong *)(d + p.dst))[2] = 1; }\n"
-  "HEAD(counted_arrived) { ENTER(i == 0) if (i == 0) { device const ulong *tail = (device const ulong *)(s + p.src) + p.first; "
-  "bool over = counted_rows((device const long *)(s + p.src), 0, p.n) > p.aux || tail[1] > p.scalar || tail[2] != 0; "
-  "volatile coherent(system) device ulong *word = (volatile coherent(system) device ulong *)(d + p.dst); "
-  "if (over && p.mask) mesh_publish((volatile coherent(system) device ulong *)vb + 5, 1UL); "
-  "if (*word == 0) mesh_publish(word, over ? 2UL : 1UL); } }\n"
-  "#define PLACE(BEFORE, ROWS, LIMIT) threadgroup ulong *place = tg; if (i == 0) { ulong at = (BEFORE) * p.slot + p.scalar, rows = (ROWS) * p.slot; "
-  "ulong bytes = rows > p.scalar ? min(rows - p.scalar, p.n) : 0UL; place[0] = at; place[1] = at >= (LIMIT) ? 0UL : min(bytes, (LIMIT) - at); } "
-  "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-  "#define COUNTED(Z, W) "
-  "GROUP(counted_send_##Z) { ENTER_G GROUP_STOP device const long *c = (device const long *)(a + p.aux); PLACE(counted_rows(c, 0, p.first), counted_rows(c, p.first, p.count), p.at) "
-  "volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src + place[0]); "
-  "for (ulong k = i; k < place[1] / sizeof(W); k += g) x[k] = y[k]; } "
-  "GROUP(counted_land_##Z) { ENTER_G device const long *c = (device const long *)(a + p.aux); PLACE(counted_rows(c, 0, p.first), counted_rows(c, p.first, p.count), p.at) "
-  "device W *x = (device W *)(d + p.dst + place[0]); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); "
-  "for (ulong k = i; k < place[1] / sizeof(W); k += g) x[k] = mesh_payload(y + k); } "
-  "GROUP(counted_own_##Z) { ENTER_G device const long *c = (device const long *)(a + p.aux); threadgroup ulong *place = tg; "
-  "if (i == 0) { ulong to = counted_rows(c, 0, p.first) * p.slot, from = ((device const ulong *)(a + p.aux))[p.scalar] * p.slot, bytes = counted_rows(c, p.first, p.count) * p.slot; "
-  "bytes = to >= p.at || from >= p.n ? 0UL : min(bytes, min(p.at - to, p.n - from)); place[0] = to; place[1] = from; place[2] = bytes; } "
-  "threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "device W *x = (device W *)(d + p.dst + place[0]); device const W *y = (device const W *)(s + p.src + place[1]); "
-  "for (ulong k = i; k < place[2] / sizeof(W); k += g) x[k] = y[k]; }\n"
-  "COUNTED(4, uint)\n"
-  "COUNTED(1, uchar)\n"
-  "constant float PARTIAL_NONE = -3.4028234663852886e38f;\n"
-  "static inline void merge_row(device float *x, volatile coherent(system) device const float *y, uint u) { "
-  "const float m = mesh_payload(y), l = mesh_payload(y + 1); const bool mine = x[1] > 0.0f, theirs = l > 0.0f; "
-  "if (mine && !theirs) return; "
-  "if (!mine || !theirs) { for (uint j = 0; j < u; j++) x[j] = theirs ? mesh_payload(y + j) : j ? 0.0f : PARTIAL_NONE; return; } "
-  "const float top = max(x[0], m), a = exp(x[0] - top), b = exp(m - top); x[0] = top; "
-  "for (uint j = 1; j < u; j++) x[j] = (a > 0.0f ? x[j] * a : 0.0f) + (b > 0.0f ? mesh_payload(y + j) * b : 0.0f); }\n"
-  "#define MERGE device float *x = (device float *)(d + p.dst); volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
-  "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
-  "HEAD(combine_merge) { ENTER(i == 0) MERGE } GROUP(land_merge) { ENTER_G AWAIT MERGE }\n";
-
-/* every kernel a track may record, by its kind: one list, the one numbering of the host's steps (struct host_op kind,
-   a device's pipelines' index: pipeline) and of the track kernel's switch (TRACKS' enum and TRACK_KERNEL's cases, made
-   from this list by the preprocessor, so neither names a kind the other lacks); each kernel's name, which the Metal
-   library's lookup takes (newFunctionWithName, an interface the library does not implement: design/rubrics.md,
-   Strings are messages) and whose body the switch calls, and the word a consumption's item awaits in it (record_step:
-   WORD_D a spin's, in its d; WORD_A a landing's, in its a; 0 none) */
-enum { WORD_D = 1, WORD_A };
-#define KINDS_OF(X) \
-  X(copy_plain_4, 0) X(copy_land_4, 0) X(copy_send_4, 0) X(copy_plain_1, 0) X(copy_land_1, 0) X(copy_send_1, 0) \
-  X(combine_i8, 0) X(land_i8, WORD_A) X(combine3_i8, 0) X(premul_i8, 0) X(truncdiv_i8, 0) \
-  X(combine_u8, 0) X(land_u8, WORD_A) X(combine3_u8, 0) X(premul_u8, 0) X(truncdiv_u8, 0) \
-  X(combine_i32, 0) X(land_i32, WORD_A) X(combine3_i32, 0) X(premul_i32, 0) X(truncdiv_i32, 0) \
-  X(combine_u32, 0) X(land_u32, WORD_A) X(combine3_u32, 0) X(premul_u32, 0) X(truncdiv_u32, 0) \
-  X(combine_i64, 0) X(land_i64, WORD_A) X(combine3_i64, 0) X(premul_i64, 0) X(truncdiv_i64, 0) \
-  X(combine_u64, 0) X(land_u64, WORD_A) X(combine3_u64, 0) X(premul_u64, 0) X(truncdiv_u64, 0) \
-  X(combine_f16, 0) X(land_f16, WORD_A) X(combine3_f16, 0) X(premul_f16, 0) X(combine_f32, 0) X(land_f32, WORD_A) X(combine3_f32, 0) X(premul_f32, 0) \
-  X(combine_bf16, 0) X(land_bf16, WORD_A) X(combine3_bf16, 0) X(premul_bf16, 0) X(combine_e4m3, 0) X(land_e4m3, WORD_A) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
-  X(combine_e5m2, 0) X(land_e5m2, WORD_A) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
-  X(publish, 0) X(send_small, 0) X(land_copy, WORD_A) X(spin, WORD_D) \
-  X(counted_start, 0) X(counted_check, 0) X(counted_arrived, 0) X(counted_send_4, 0) X(counted_land_4, 0) X(counted_own_4, 0) \
-  X(counted_send_1, 0) X(counted_land_1, 0) X(counted_own_1, 0) X(combine_merge, 0) X(land_merge, WORD_A)
-#define KIND_ENUM(name, word) KIND_##name,
-#define KIND_NAME(name, word) #name,
-#define KIND_WORD(name, word) word,
-#define KIND_CASE(name, word) case KIND_##name: body_##name(o.d, o.s, o.p, o.a, o.v, progress, i, g, tg); break;
-/* the kinds, then the track kernel's own pipeline (KIND_tracks: no track records it) */
-enum { KINDS_OF(KIND_ENUM) KINDS, KIND_tracks = KINDS, PIPELINES };
-static const char *const NAME[PIPELINES] = {KINDS_OF(KIND_NAME) "tracks"};
-static const uint8_t WORD[KINDS] = {KINDS_OF(KIND_WORD)};
 
 /* a typed kernel's kind by its operation and its ncclDataType_t (int8 uint8 int32 uint32 int64 uint64 float16 float32
    float64 bfloat16 e4m3 e5m2, then the partials merge's rows, METAL_MERGE), KINDS where none is compiled: float64's,
@@ -232,77 +26,12 @@ static const uint8_t COUNTED[2][METAL_COUNTED_OWN + 1] = {
   {KIND_counted_start, KIND_counted_check, KIND_counted_arrived, KIND_counted_send_4, KIND_counted_land_4, KIND_counted_own_4},
   {KIND_counted_start, KIND_counted_check, KIND_counted_arrived, KIND_counted_send_1, KIND_counted_land_1, KIND_counted_own_1}};
 
-/* the track kernel (nccl-mesh-metal.h metal_tracks; rdma/NCCL.md "Per-channel progress"), after KERNELS: one thread
-   group a track, its thread 0 choosing the next item of either cursor whose credit, dependencies and (a consumption)
-   landing hold (a consumption first), every thread running the item's steps by their bodies, and a consumption's end
-   raising the track's count (system scope, release); an item whose failure words hold a failure runs as its bodies do
-   (nothing); a group that chooses nothing for the program's polls of passes records its blocked items' failures
-   (mesh_step_check for a landing, else the bound at its position, by its claimant: mesh_step_claim) and ends once
-   nothing more can run.  The records'
-   layouts are struct track_head, track, track_item, track_op and track_dep below, the host's alike; struct track_op's
-   kind one of KINDS_OF's, the enum the host's */
-static NSString *const TRACKS =
-  @"\n"
-  "enum { " XSTR(KINDS_OF(KIND_ENUM)) " };\n"
-  "struct track_op { device uchar *d; device uchar *s; device uchar *a; device uchar *v; mesh_args p; uint kind; uint pad; };\n"
-  "struct track_item { ulong position, need, target; device ulong *word; device uchar *v; uint first_op, ops, first_dep, deps, wait_op, cursor; };\n"
-  "struct track_dep { ulong count; uint other, pad; };\n"
-  "struct track { uint first[2], count[2]; };\n"
-  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint tracks, polls; };\n"
-  "static inline bool track_ready(constant track_item &it, constant track_dep *deps, volatile coherent(system) device ulong *count, uint t) { "
-  "volatile coherent(system) device const ulong *v = (volatile coherent(system) device const ulong *)it.v; "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "if (v && v[2]) return true; "
-  "if (count[t] < it.need) return false; "
-  "for (uint k = 0; k < it.deps; k++) if (count[deps[it.first_dep + k].other] < deps[it.first_dep + k].count) return false; "
-  "if (it.cursor != 1 || it.wait_op == ~0u) return true; "
-  "if (v && v[6]) return true; "
-  "return *(volatile coherent(system) device const ulong *)it.word >= it.target; }\n"
-  "static inline void track_expired(constant track_item &it, constant track_op *ops, uint polls) { "
-  "if (it.wait_op != ~0u) { constant track_op &w = ops[it.wait_op]; mesh_step_check(w.p, *(volatile coherent(system) device const ulong *)it.word, w.s, w.v); return; } "
-  "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)it.v; "
-  "if (!v || !mesh_step_claim(it.v)) return; "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
-  "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n";
-static NSString *const TRACK_KERNEL =
-  @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
-  "uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { "
-  "constant track_head &h = *(constant track_head *)base; "
-  "if (t >= h.tracks) return; "
-  "constant track &tr = ((constant track *)(base + h.tracks_off))[t]; "
-  "constant track_item *items = (constant track_item *)(base + h.items_off); "
-  "constant track_op *ops = (constant track_op *)(base + h.ops_off); "
-  "constant track_dep *deps = (constant track_dep *)(base + h.deps_off); "
-  "volatile coherent(system) device ulong *count = (volatile coherent(system) device ulong *)(ring + h.count_off); "
-  "threadgroup ulong tg[4]; threadgroup uint pick[2]; "
-  "uint next0 = 0, next1 = 0; ulong looks = 0; bool expired = false; "
-  "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(ring + h.progress_off), h.sequence); "
-  "for (;;) { "
-  "if (i == 0) { uint chosen = ~0u, left = 0; "
-  "if (next1 < tr.count[1]) { left = 1; if (track_ready(items[tr.first[1] + next1], deps, count, t)) { chosen = tr.first[1] + next1; next1++; } } "
-  "if (chosen == ~0u && next0 < tr.count[0]) { left = 1; if (track_ready(items[tr.first[0] + next0], deps, count, t)) { chosen = tr.first[0] + next0; next0++; } } "
-  "if (chosen != ~0u) { looks = 0; expired = false; } "
-  "else if (left && expired) left = 0; "
-  "else if (left && ++looks >= h.polls) { "
-  "if (next1 < tr.count[1]) track_expired(items[tr.first[1] + next1], ops, h.polls); "
-  "if (next0 < tr.count[0]) track_expired(items[tr.first[0] + next0], ops, h.polls); expired = true; } "
-  "pick[0] = chosen; pick[1] = left; } "
-  "threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "const uint chosen = pick[0]; "
-  "if (!pick[1]) return; "
-  "if (chosen != ~0u) { constant track_item &it = items[chosen]; "
-  "for (uint k = 0; k < it.ops; k++) { constant track_op &o = ops[it.first_op + k]; device ulong *progress = (device ulong *)o.d; "
-  "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } "
-  "threadgroup_barrier(mem_flags::mem_device); } "
-  "if (it.cursor == 1 && i == 0) mesh_publish(count + t, it.position + 1); } "
-  "threadgroup_barrier(mem_flags::mem_threadgroup); } }\n";
-
 ARGS(args, uint64_t, uint32_t);
 /* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
    keeps until the program's end; or the Metal 4 form's caller's encoder and argument table; the caller's residency set
    and the device's argument ring (the Metal 4 form's, and a fused classic program's: metal_begin's residency), and
    whether a buffer was made resident since the set's last commit; and either form's
-   failure words, those of the communicator whose group it encodes (metal_gate; none: nothing recorded or halted), and
+   failure words, those of the communicator whose group it encodes (metal_gate; none: nothing recorded), and
    its waits' bound (`polls`, never 0); its device's kernels (`kernels`, found at its first step: program_kernels) */
 struct ring;
 struct recording;
@@ -312,9 +41,8 @@ struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder>
                        id<MTLBuffer> violation; struct ring *ring; int added; uint32_t polls; struct recording *recording;
                        struct kernels *kernels; };
 
-/* a device's kernels: the device, its library and its pipelines by kind (each made at its first use: pipeline); and its
-   argument ring (the Metal 4 form's arguments: RECORDS records of RECORD bytes in `records`, the `next` one written,
-   which the GPU's dispatch of sequence q reads from record (q - 1) mod RECORDS, `progress` the sequence of the last
+/* a device's kernels: the device and its pipelines by kind (kernels_of); and its argument ring (the Metal 4 form's
+   arguments, and either form's deferred steps': RECORDS records of RECORD bytes in `records`, the `next` one written, which the GPU's dispatch of sequence q reads from record (q - 1) mod RECORDS, `progress` the sequence of the last
    dispatch the GPU began, every one before it finished) */
 #define RECORDS 65536u
 #define RECORD 128u
@@ -325,7 +53,7 @@ struct ring { id<MTLBuffer> records, progress; uint64_t next; };
 #define TRACK_RING (64u << 20)
 struct span { uint64_t sequence, first, end; };
 struct track_ring { id<MTLBuffer> buffer; uint64_t sequence, head; struct span *held; size_t helds, room; };
-struct kernels { id<MTLDevice> device; id<MTLLibrary> library; id<MTLComputePipelineState> pipelines[PIPELINES]; struct ring ring;
+struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; struct ring ring;
                  struct track_ring tracks; };
 _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
 
@@ -351,24 +79,51 @@ void *metal_device(void) {
   return device_;
 }
 
-/* `device`'s kernels, compiled at its first use; NULL, *message what failed, where they cannot be */
+/* `device`'s kernels at its first use, none compiled here: the library from the AIR its text was compiled to when this
+   library was built, and every kind's pipeline (NAME) from this node's binary archive of them, made by its install,
+   each looked up with MTLPipelineOptionFailOnBinaryArchiveMiss.  Both files sit beside this library's image, named by
+   the kernels' SHA-256 this image was compiled with (KERNELS_SHA256: of the text and its compile line, the
+   Makefile's): libnccl-mesh.<SHA-256>.metallib and libnccl-mesh.<SHA-256>.binarchive.  NULL, *message the rebuild
+   that makes them and what failed, where a file is absent (an install of other kernels, or none) or the archive lacks
+   a kind (its GPU compiler not the system's: an OS update since the install); the caller's collective fails as a
+   value, and nothing is kept, so a later call reads the files again (rdma/NCCL.md "The library's kernels") */
 static struct kernels *kernels_of(id<MTLDevice> device, const char **message) {
   @autoreleasepool {
     if (!kernels_) { kernels_ = [NSMutableDictionary new]; retiring_ = [NSMutableArray new]; }
     NSValue *key = [NSValue valueWithPointer:(__bridge const void *)device];
     NSValue *held = kernels_[key];
     if (held) return held.pointerValue;
-    MTLCompileOptions *options = [[MTLCompileOptions new] autorelease];
-    options.mathMode = MTLMathModeSafe;
+    Dl_info image;
+    if (!dladdr((const void *)kernels_of, &image)) { *message = "dladdr: no image holds libnccl-mesh's code"; return NULL; }
+    NSString *stem = [[@(image.dli_fname) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"libnccl-mesh." KERNELS_SHA256];
+    NSString *air = [stem stringByAppendingString:@".metallib"], *binaries = [stem stringByAppendingString:@".binarchive"];
     NSError *error = nil;
-    NSString *primitives = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
-    NSString *source = [[[[primitives stringByAppendingString:STEPS] stringByAppendingString:KERNELS] stringByAppendingString:TRACKS]
-                        stringByAppendingString:TRACK_KERNEL];
-    id<MTLLibrary> library = [device newLibraryWithSource:source options:options error:&error];
-    if (!library) { *message = say("the kernels: %s", error.localizedDescription.UTF8String); return NULL; }
+    id<MTLLibrary> library = [[device newLibraryWithURL:[NSURL fileURLWithPath:air] error:&error] autorelease];
+    MTLBinaryArchiveDescriptor *archived = [[MTLBinaryArchiveDescriptor new] autorelease];
+    archived.url = [NSURL fileURLWithPath:binaries];
+    id<MTLBinaryArchive> archive = library ? [[device newBinaryArchiveWithDescriptor:archived error:&error] autorelease] : nil;
+    if (!archive) {
+      *message = say("make -C rdma install, on this node, installs %s: %s", (library ? binaries : air).UTF8String,
+                     error ? error.localizedDescription.UTF8String : "absent");
+      return NULL;
+    }
     struct kernels *made = calloc(1, sizeof *made);
-    if (!made) { [library release]; *message = "out of memory"; return NULL; }
-    made->library = library;
+    if (!made) { *message = "out of memory"; return NULL; }
+    MTLComputePipelineDescriptor *described = [[MTLComputePipelineDescriptor new] autorelease];
+    described.binaryArchives = @[archive];
+    for (uint32_t kind = 0; kind < PIPELINES; kind++) {
+      described.computeFunction = [[library newFunctionWithName:@(NAME[kind])] autorelease];
+      error = nil;
+      made->pipelines[kind] = described.computeFunction ? [device newComputePipelineStateWithDescriptor:described
+                                                                                            options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                                         reflection:nil error:&error] : nil;
+      if (made->pipelines[kind]) continue;
+      *message = say("make -C rdma install, on this node, makes %s anew: kernel %s: %s", binaries.UTF8String, NAME[kind],
+                     error ? error.localizedDescription.UTF8String : "absent from the library");
+      for (uint32_t k = 0; k < kind; k++) [made->pipelines[k] release];
+      free(made);
+      return NULL;
+    }
     made->device = [device retain];
     kernels_[key] = [NSValue valueWithPointer:made];
     return made;
@@ -382,20 +137,8 @@ static struct kernels *program_kernels(struct metal_program *program, const char
   return program->kernels;
 }
 
-/* kernel `kind`'s pipeline, made at its first use from the library's function of its name (NAME: the one place a
-   kernel is named) and kept by kind; nil, *message what failed, where it cannot be */
-static id<MTLComputePipelineState> pipeline(struct kernels *k, uint32_t kind, const char **message) {
-  if (k->pipelines[kind]) return k->pipelines[kind];
-  @autoreleasepool {
-    id<MTLFunction> function = [[k->library newFunctionWithName:@(NAME[kind])] autorelease];
-    NSError *error = nil;
-    id<MTLComputePipelineState> made = function ? [k->device newComputePipelineStateWithFunction:function error:&error] : nil;
-    if (!made) { *message = say("kernel %s: %s", NAME[kind], error ? error.localizedDescription.UTF8String : "absent"); return nil; }
-    return k->pipelines[kind] = made;
-  }
-}
-
-/* `device`'s argument ring, made at its first Metal 4 program; NULL, *message what failed, where it cannot be */
+/* `device`'s argument ring, made at its first Metal 4 or fused classic program; NULL, *message what failed, where it
+   cannot be */
 static struct ring *ring_of(id<MTLDevice> device, const char **message) {
   struct kernels *k = kernels_of(device, message);
   if (!k) return NULL;
@@ -570,8 +313,8 @@ static struct metal_result dispatch_as(struct metal_program *program, uint32_t k
   if (recording_on(program)) return record_step(program, kind, d, s, a, v, p);
   const char *message = NULL;
   struct kernels *k = program_kernels(program, &message);
-  id<MTLComputePipelineState> state = k ? pipeline(k, kind, &message) : nil;
-  if (!state) return (struct metal_result){EINVAL, message};
+  if (!k) return (struct metal_result){EINVAL, message};
+  id<MTLComputePipelineState> state = k->pipelines[kind];
   @autoreleasepool {
     if (program->encoder4) return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, group);
     if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
@@ -810,8 +553,8 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
   @autoreleasepool {
     const char *message = NULL;
     struct kernels *k = program_kernels(program, &message);
-    id<MTLComputePipelineState> state = k ? pipeline(k, KIND_tracks, &message) : nil;
-    if (!state) { recording_free(r); return (struct metal_result){EINVAL, message}; }
+    if (!k) { recording_free(r); return (struct metal_result){EINVAL, message}; }
+    id<MTLComputePipelineState> state = k->pipelines[KIND_tracks];
     id<MTLDevice> device = k->device;
     struct track_ring *ring = &k->tracks;
     if (!ring->buffer) {
@@ -890,8 +633,8 @@ void metal_keep(struct metal_program *program, void *object) { [program->kept ad
 /* the program's end signals `event` to `value`; what it kept is released once the event has passed it
    (metal_collect); one with no event (a failed group's, nccl-mesh.c program_end) signals nothing, and what its own
    encoder's commands kept is held by its command buffer (a completion handler's capture) until that buffer completes
-   or is freed; a program in a borrowed encoder keeps nothing; the Metal 4 form's residency set committed where the
-   program made a buffer resident */
+   or is freed; a program in a borrowed encoder keeps nothing; the residency set (the Metal 4 form's, a fused classic
+   program's) committed where the program made a buffer resident */
 void metal_end(struct metal_program *program, void *event, uint64_t value) {
   recording_free(program->recording);
   program->recording = NULL;

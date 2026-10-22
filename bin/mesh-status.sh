@@ -8,12 +8,15 @@ b "HEALTH"; [ -f /var/run/mesh-health ] && sed -e 's/^warn=/WARN /' -e 's/^/  /'
 b "REMOTE"; for p in 22:ssh 5900:screensharing; do
   nc -z 127.0.0.1 "${p%%:*}" >/dev/null 2>&1 && echo "  ${p##*:} (${p%%:*}): OPEN" || echo "  ${p##*:} (${p%%:*}): CLOSED"
 done
+T="/usr/local/mesh/bin/tailscale --socket=/var/run/tailscaled.socket"; [ -d /Applications/Tailscale.app ] && T=/Applications/Tailscale.app/Contents/MacOS/tailscale
+echo "  tailnet: $($T status --json 2>/dev/null | plutil -extract BackendState raw -o - - 2>/dev/null || echo 'not answering') $($T ip -4 2>/dev/null)$([ -d /Applications/Tailscale.app ] && echo ' (Tailscale.app)')"
 b "NETWORK"; for i in en0 en1 bridge0; do echo "  $i: $(ipconfig getifaddr $i 2>/dev/null || echo '<none>')"; done
 b "LINKS"
 _lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
 _lanok=0; [ -n "$_lan" ] && [ -n "$(ipconfig getifaddr "$_lan" 2>/dev/null)" ] && _lanok=1
 _fab=0
-for _d in $(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print $2}'); do
+rdma=$("$HERE/mesh-rdma.sh")
+for _d in $(printf '%s\n' "$rdma" | awk 'NF{sub(/^device=/,"",$2); print $2}'); do
   [ "$(ifconfig "${_d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" = active ] && _fab=1
 done
 printf "  wifi/lan     : %s\n" "$([ $_lanok = 1 ] && echo "up via $_lan" || echo DOWN)"
@@ -24,7 +27,7 @@ if [ $((_lanok+_fab)) -lt 2 ]; then
 else printf "  redundant: 2 of 2\n"; fi
 
 b "RDMA"; echo "  rdma_ctl: $(/usr/bin/rdma_ctl status 2>&1)   nvram: $(nvram rdma-enable 2>/dev/null | awk '{print $2}')"
-for d in $(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print $2}'); do
+for d in $(printf '%s\n' "$rdma" | awk 'NF{sub(/^device=/,"",$2); print $2}'); do
   printf '  %-10s link=%s rdma_peer=%s%s\n' "$d" \
     "$(ifconfig "${d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" \
     "$(awk -v p="port=${d#rdma_}" '$1==p{sub(/rdma_peer=/,"",$3); print $3}' /var/run/mesh-fabric 2>/dev/null)" \

@@ -46,13 +46,14 @@ _announced=$(ps -o args= -p "$(pgrep -f 'dns-sd -R .*_meshnode\._tcp' | head -1)
 _lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
 _lanok=0; [ -n "$_lan" ] && [ -n "$(ipconfig getifaddr "$_lan" 2>/dev/null)" ] && _lanok=1
 _fab=0 _rdma=0
-for _d in $(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print $2}'); do
+for _d in $(/usr/local/mesh/bin/mesh-rdma.sh | awk '{sub(/^device=/,"",$2); print $2}'); do
   [ "$(ifconfig "${_d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" = active ] || continue
   _fab=1; grep -q "^port=${_d#rdma_} .* rdma_peer=present" /var/run/mesh-fabric 2>/dev/null && _rdma=1
 done
 [ $((_lanok+_rdma)) -lt 2 ] && { echo "[$(ts)] DEGRADED planes=$((_lanok+_rdma)) lan=$_lanok fabric_link=$_fab rdma_peer=$_rdma"; drift=1; }
 [ -x /usr/local/mesh/bin/mesh-networks.sh ] && /usr/local/mesh/bin/mesh-networks.sh
 [ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
+[ -x /usr/local/mesh/bin/mesh-tailscale-init.sh ] && /usr/local/mesh/bin/mesh-tailscale-init.sh
 _user=$(cat /usr/local/mesh/admin-user 2>/dev/null); _uid=$(id -u "$_user" 2>/dev/null)
 if ! pgrep -qf '/install\.sh'; then
   if [ -n "$_uid" ]; then

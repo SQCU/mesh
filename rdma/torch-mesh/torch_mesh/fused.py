@@ -19,16 +19,15 @@ The kernel's constant block at `at` is its own words padded to an even count, th
 then the publication's (all zero where encode is given none), each address two words, its low word first:
 struct { uint words[2k]; mesh_step_binding land, publish; }.  Each all_reduce call is one crossing, encoded before its
 publishing kernel: a step kernel that lands crossing t - 1 and publishes crossing t is encoded after crossing t's
-call, with crossing t - 1's Crossing as `land` and crossing t's as `publish`.  The operand never holds the sum: the
+call, with crossing t - 1's Crossing as `land` and crossing t's as `publish`.  The library never writes the sum: the
 landing kernel reads its own part (the landing's d + dst) and the peer's (mesh_step_read at its s) and keeps the sum
-where it needs it.  polls bounds each landing's wait in loads (0: NCCL_MESH_POLLS), the caller's from its plan
-(rdma/NCCL.md "Bounded waits").
+where it needs it (in place of its own part, say).  polls bounds each landing's wait in loads (0: NCCL_MESH_POLLS; _stream.polls is that bound, which
+holds a GPU at most the platform's 5 seconds: rdma/NCCL.md "Bounded waits").
 
-A publishing kernel is a publication like a group that publishes, under the stream's one commit rule (_stream.mm
-publishing; branch commit-rule's MeshStream::published, whose work is throughput: the GPU fed with the fewest command
-buffers).  The kernels are the data function's, and the steps they call are the library's under NCCL's contract: every
-rank issues the same collectives in the same order and leaves in-flight buffers alone, and the library delivers the
-bytes."""
+A publishing kernel is a publication like a group that publishes, under the stream's one commit rule
+(_stream.mm MeshStream::published, whose work is throughput: the GPU fed with the fewest command buffers).  The
+kernels are the data function's, and the steps they call are the library's under NCCL's contract: every rank issues the
+same collectives in the same order and leaves in-flight buffers alone, and the library delivers the bytes."""
 from collections import namedtuple
 from pathlib import Path
 

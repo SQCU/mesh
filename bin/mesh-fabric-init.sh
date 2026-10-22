@@ -4,7 +4,8 @@ LOG=/usr/local/mesh/log/fabric.log
 [ -d /usr/local/mesh/log ] && exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
 drift=0
-ports=$(ioreg -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null | awk '/^\+-o rdma_/{print substr($2,6)}')
+rdma=$("$(dirname "$0")/mesh-rdma.sh")
+ports=$(printf '%s\n' "$rdma" | awk 'NF{print $1}')
 [ -n "$ports" ] && networksetup -listallnetworkservices 2>/dev/null | grep -q '^Thunderbolt Bridge$' && {
   echo "[$(ts)] DRIFT tb bridge service enabled"
   networksetup -setnetworkserviceenabled "Thunderbolt Bridge" off >/dev/null 2>&1; drift=1; }
@@ -17,14 +18,11 @@ for br in $(ifconfig -l | tr ' ' '\n' | grep '^bridge'); do
   ifconfig "$br" destroy >/dev/null 2>&1; drift=1
 done
 now=$(date +%s)
-rids=$(ioreg -l -w0 -r -c AppleThunderboltRDMAInterface 2>/dev/null | awk '/\+-o rdma_/{n=substr($2,6)} /"RID" =/{print n, $NF}')
-peers=" $(ioreg -l -w0 -r -c AppleThunderboltRDMAPeerInterface 2>/dev/null | awk '/"RID" =/{printf "%s ", $NF}')"
 : > /var/run/mesh-fabric.$$
 for p in $ports; do
   f=/var/run/mesh-link.$p
   link=$(ifconfig "$p" 2>/dev/null | awk '/status:/{print $2}')
-  rid=$(echo "$rids" | awk -v p="$p" '$1==p{print $2}')
-  case "$peers" in *" ${rid:-none} "*) peer=present ;; *) peer=absent ;; esac
+  peer=$(printf '%s\n' "$rdma" | awk -v p="$p" '$1==p{sub(/^rdma_peer=/,"",$4); print $4}')
   echo "port=$p link=${link:-unknown} rdma_peer=$peer" >> /var/run/mesh-fabric.$$
   t0=
   [ -f "$f" ] && read -r t0 _ < "$f"

@@ -160,7 +160,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return ProcessGroupMesh._of(made[0]), bytes(ffi.buffer(held))
 
     def revoke(self):
-        """This group's work in flight ends with an error and none is issued after it (ncclCommRevoke)."""
+        """This group's work in flight is revoked and none is issued after it (ncclCommRevoke): its peers land its
+        unsupplied positions as duds, and its own GPU waits end at their landings or their bounds."""
         check(LIB.ncclCommRevoke(self.comm, 0))
 
     def size(self):
@@ -373,7 +374,9 @@ def _(partials, root, group_name):
 def counted(host, group):
     """A counted all-to-all's received counts once they have landed (host[0] set), read on the host with no wait on
     the GPU: the wait ends at their arrival or at the call's failure (host[0] 2, or the communicator's asynchronous
-    error: a lost, silent or revoked link's cancellation, nccl.h), never at a time."""
+    error: a lost, silent or revoked link's cancellation, nccl.h), never at a time.  It is a host wait, so a
+    publication waiting in torch's open buffer is committed first (_stream.mm commit)."""
+    _stream.commit()
     word, error = ffi.cast('uint64_t *', host.data_ptr()), ffi.new('ncclResult_t *')
     while not word[0]:
         check(LIB.ncclCommGetAsyncError(group.comm, error))

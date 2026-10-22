@@ -33,8 +33,7 @@ provide_http(){
 mkdir -p "$D/bin" "$D/etc" "$D/log" "$D/viz" "$A" "$HOME/.local/bin"
 install -C -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
 install -C -m 755 "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py"
-install -C -m 755 "$R/user/mesh-update-user.sh" "$D/bin/mesh-update-user.sh"
-install -C -m 755 "$R/bin/mesh-peers.sh" "$D/bin/mesh-peers.sh"
+install -C -m 755 "$R/bin/mesh-peers.sh" "$R/bin/mesh-rdma.sh" "$D/bin/"
 install -C -m 755 "$R/bin/mesh-observe.py" "$D/bin/mesh-observe.py"
 install -C -m 755 "$R/bin/mesh-top.py" "$D/bin/mesh-top.py"
 install -C -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$R/bin/mesh_restart.py" "$D/bin/"
@@ -87,19 +86,8 @@ cat > "$A/io.mesh.observer.plist.new" <<PL
 PL
 provide_http io.mesh.telemetry 8788
 provide_http io.mesh.observer 8787
-cat > "$A/io.mesh.update.user.plist.new" <<PL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>io.mesh.update.user</string>
-  <key>ProgramArguments</key><array><string>$D/bin/mesh-update-user.sh</string></array>
-  <key>StartInterval</key><integer>900</integer>
-</dict></plist>
-PL
-load io.mesh.update.user
 try "complete cartlane application realized" "$PY" "$R/bin/mesh-application.py" deploy --source "$R" --target "$D/applications/cartlane"
 ok "mesh-peers: $D/bin/mesh-peers.sh"
-printf '%s\n' "${MESH_BRANCH:-main}" > "$D/branch"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$D/revision"
 printf 'reported_failures=%s retained_jobs=%s replaced_jobs=%s\n' "$failures" "$retained" "$replaced" > "$D/install-status"
 echo "installer completed: $failures reported failures; $retained loaded jobs current, $replaced loaded now or with a new definition for their next load"

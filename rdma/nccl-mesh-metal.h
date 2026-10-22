@@ -4,8 +4,7 @@
    the bridge took for it.  A wait for a landing is rdma/mesh.metal's mesh_wait_bounded (nccl-mesh-metal.m
    mesh_step_wait) on the landed word of its run's last unit at that unit's cycle (the bridge releases a stream's units
    in order), ended by the landing, by the link's loss (the
-   bridge's ~0), by its communicator's gate (failure word [2]: another wait's failure, a revoke) or by its program's
-   bound (metal_begin's polls). */
+   bridge's ~0) or by its program's bound (metal_begin's polls), reading no other word. */
 #ifndef NCCL_MESH_METAL_H
 #define NCCL_MESH_METAL_H
 #include <stddef.h>
@@ -40,20 +39,20 @@ void *metal_retain(void *object);
 
 /* A program's waits bounded by `polls` wherever a dispatch has failure words to record in (the program's, `violation`
    or metal_gate's, or those a wait names): at most `polls` loads of a landed word (rdma/mesh.metal mesh_wait_bounded),
-   past which the dispatch records a failure, and every later dispatch gated on those words reads it and does nothing,
-   so the host finds the failure there after the command buffer (nccl-mesh.c comm_failure) and the call fails as a
-   value.  The failure words: [0] the cause (METAL_BOUND the bound reached, METAL_LOST the link's ~0, METAL_REVOKED a
-   revoke; a landing is none, whatever its bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that
-   fails, the one that found 0 recording [0], [3], [4] and [2]: nccl-mesh-metal.m mesh_step_claim), [2] 1 + the position
-   (the gate, stored last by the claimant, by the GPU alone; a loser re-stores the value it read; it may close while a
-   threadgroup runs, so each thread's reading is its own), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow, and [6] the host's stop (a revoke's), which
-   every wait reads and records.  The bound is the caller's, carried per crossing (nccl.h
+   past which the dispatch records a failure, which the host finds there after the command buffer (nccl-mesh.c
+   comm_failure) and the call fails as a value; no kernel halts on the record (a counted all-to-all's end reads it to report its outcome), every later dispatch running as encoded,
+   a later wait ending at its own landing or bound.  The failure words: [0] the cause (METAL_BOUND the bound reached,
+   METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6]; a landing is none, whatever its
+   bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording [0],
+   [3], [4] and [2]: nccl-mesh-kernels.h mesh_step_claim), [2] 1 + the position (stored last by the claimant, by the GPU
+   alone, which the host reads, as METAL_COUNTED_ARRIVED does), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow,
+   and [6] the host's stop (a revoke's), which a failed wait reads to name its cause.  The bound is the caller's, carried per crossing (nccl.h
    ncclMeshStream polls); 0, or more than nccl.h NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md;
    nccl-mesh-metal.m bound_of).  A load's period, the time a bound stands for, is the node's GPU's: on the M4 Pro (the
    Mini) 251 to 265 ns once the GPU's clock has risen, about 1.0 to 1.1 us while it rises (an idle GPU's first ~4 ms of
    work), in either of the library's wait shapes (rdma/NCCL.md "Bounded waits"; metal-microbench
    output_data/library-20261015/round3, 2026-10-16); the M5 Max's is not yet read.  A dispatch with no failure words
-   halts on nothing, and its wait makes one load. */
+   records nothing, and its wait makes one load. */
 #define METAL_BOUND 1
 #define METAL_LOST 2
 #define METAL_REVOKED 4
@@ -79,8 +78,8 @@ int metal_metal4(const struct metal_program *);
    one; a classic program without one needs none, its dispatches binding their buffers). */
 void metal_resident(struct metal_program *, void *buffer);
 /* The program's failure words from here on, `violation` (made resident): those of the communicator whose group is
-   encoded next, which gate every dispatch naming none of its own (nccl-mesh.c complete, issue_group, retire), so
-   one communicator's failure halts its dispatches and no other's. */
+   encoded next, in which every dispatch naming none of its own records a failed wait (nccl-mesh.c complete,
+   issue_group, retire), so one communicator's failure is recorded as its own and no other's. */
 void metal_gate(struct metal_program *, void *violation);
 struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
 /* dst = dst op src, n elements of an ncclDataType_t (op as nccl-mesh.c combine_into: 0 sum, 1 product, 2 max, 3 min), or,
@@ -130,7 +129,9 @@ struct metal_result metal_land_deferred(struct metal_program *, int op, void *ds
      ARRIVED (d the host's word, s the landed counts, a the communicator's failure words or NULL) the word at d + dst,
              where it still holds 0, released (system scope) to 1 once the landed counts at s + src (`bytes` entries,
              its tail at entry `first`) hold at most `aux` rows, its own at most `scalar` and no overflow, else 2, and
-             then failure word [5] set (nccl-mesh.c comm_failure: the communicator fails as a value);
+             then failure word [5] set (nccl-mesh.c comm_failure: the communicator fails as a value); 2 also where
+             the failure words already record a failure ([2]: a wait of the call reached its bound, its counts not
+             landed), the call's outcome a value its caller reads, since no kernel halts after a failure;
      SEND    (d a slot, s the rows, a the counts at aux) bytes [scalar, scalar + bytes) of the rows the counts' entries
              [first, first + entries) send, after the rows of the entries before them, stored system-coherent at
              d + dst, within `limit` bytes of s + src;
@@ -146,13 +147,15 @@ struct metal_counted { void *d, *s, *a; size_t dst, src, aux; uint64_t bytes, sc
 struct metal_result metal_counted(struct metal_program *, int kind, const struct metal_counted *);
 void *metal_contents(void *buffer);
 /* Tracks (rdma/NCCL.md "Per-channel progress"): a
-   completion's work on each channel, recorded and then run with every channel progressing on its own, one thread group
-   a track on the GPU and one cooperative loop on the host.  metal_record(program, track, cursor, position, need): the
+   completion's work on two or more channels, recorded and then run with every channel progressing on its own, one
+   thread group a track on the GPU and one cooperative loop on the host.  metal_record(program, track, cursor, position, need): the
    steps encoded after it (metal_copy .. metal_counted) become item `position` of cursor `cursor` (METAL_PUBLISH or
    METAL_CONSUME) of track `track`, in place of their dispatches, until the next metal_record; track METAL_NONE ends the
-   recording, and the steps after it are dispatched as ever.  An item runs once its track has consumed `need`
-   positions, every metal_depend of it holds (track `other` has consumed `count`), and, a consumption, the landing its
-   steps await came (or failed: the link's ~0, a revoke, its bound); a consumption's end raises its track's count to
+   recording, and the steps after it are dispatched as ever.  An item runs once every metal_depend of it holds (track
+   `other` has consumed `count`) and its own `need` does: a publication's, its track has consumed `need` positions (the
+   credit); a consumption's, its track's publications have passed position `need` - 1 (0: none; a position whose
+   publication reads in place what the consumption writes, nccl-mesh.c sends_what_lands), and the landing its steps
+   await came (or its bound passed: the link's ~0 is a landing word too); a consumption's end raises its track's count to
    `position` + 1.  Each cursor runs its items in order, and neither waits on the other but by `need`.  metal_tracks:
    the tracks recorded since the last, track t's count from consumed[t], encoded (one dispatch) or run; its result
    (struct metal_result).  The deferred steps (metal_send_deferred, metal_land_deferred) are never recorded. */

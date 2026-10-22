@@ -250,10 +250,12 @@ static int mutate(const struct mesh_wire *wire) {
   PROGRAM("M2 rank 1's first receive a round later", small, 1);
   for (uint32_t r = 0; r < 2; r++) { struct mesh_move *a = move + first[r]; const struct mesh_move s = a[0]; a[0] = a[1]; a[1] = s; }
   PROGRAM("M3 each rank's round-0 receive before its SEND", big, 3);
-  uint32_t sent = 0;
-  for (uint32_t i = first[0]; i < first[1]; i++) if (move[i].op == MESH_STEP_SEND && !move[i].round) sent = move[i].part;
-  for (uint32_t i = first[0]; i < first[2]; i++) if (!move[i].round && (i < first[1]) != (move[i].op == MESH_STEP_SEND)) move[i].part = sent;
-  PROGRAM("M4 rank 0's round-0 receive into the part it sends", small, 4);
+  /* a receive into the part a SEND reads at the SEND's own positions is the executors' in-place order (one position
+     published before it is consumed: mesh_compile's two-node direct exchange), no hazard; the receive here covers
+     the whole operand, so its pieces meeting the SEND's lie at later positions, with no order from the SEND's */
+  for (uint32_t i = first[0]; i < first[2]; i++)
+    if (!move[i].round && (i < first[1]) != (move[i].op == MESH_STEP_SEND)) { move[i].part = 0; move[i].parts = p.parts; }
+  PROGRAM("M4 rank 0's round-0 receive into the whole operand, the part it sends among it, past that SEND's positions", big, 4);
   PROGRAM("M5 an element wider than a slot", wide, 2);
 #undef PROGRAM
   struct rows rows[3];

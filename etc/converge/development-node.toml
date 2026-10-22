@@ -1,2 +1,0 @@
-purpose = "A node of the mesh that is also where its checkouts are edited (the M5 of the E2B pair): a pass every 5 minutes, so a push from here or from anywhere is built and installed without hands once the checkout is clean and level with its upstream; while it carries local work it is held, and nothing is fetched or installed."
-period_s = 300

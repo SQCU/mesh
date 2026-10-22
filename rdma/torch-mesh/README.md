@@ -39,8 +39,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
   communicators hold one stream, and a link has four, so the world group and three subgroups use a node pair at once;
   one more is refused (EBUSY) until a group is destroyed ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
-- The group's `timeout` is not the library's to read: a collective's waits end at a landing, a lost link, a dud or a
-  revoke.
+- The group's `timeout` is not the library's to read: a collective's waits end at a landing (a dud's too) or a lost
+  link; a GPU wait also at its bound, and a host-path wait at a revoke.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
   next one's node: the bridges forward nothing, and a group whose ranks no such path joins fails at its first
   collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
@@ -76,7 +76,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
-| functional collectives under torch.compile | one graph; `backend="mesh"` batches its collectives (Performance) |
+| functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, under the one commit rule (Performance) |
 | DDP | |
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
@@ -124,11 +124,15 @@ rows' attention. Its reproduction target is `cp.py`'s (Uneven nodes, below).
 `torch_mesh.record(step)` and `torch_mesh.replay(recording, steps)` are a step recorded once and replayed (the CUDA
 graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
 (`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
-each issued on torch's stream and batched into torch's command buffers: Performance), every rank's compilation met at
-the default group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise
-fail its peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). Each replay is waited for; `replay` returns the last one's seconds
-on the GPU (MPS timing events). Its caller is metal-microbench `tools/torch_parallel/tp.py` with `CAPTURE=K`: a
-training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
+each issued on torch's stream under the one commit rule: Performance), every rank's compilation met at the default
+group's store before any of its collectives runs (a rank compiling past a GPU wait's bound would otherwise fail its
+peers' first crossings: [NCCL.md](../NCCL.md#bounded-waits)). `replay` issues its steps back to back on torch's stream,
+with no wait between them: the steps are an operand's leading dimension, each reading what the last wrote in the
+stream's order. It waits once, where its time is read: it returns the last step's interval in the stream, the span
+between MPS timing events recorded before and after it. With the steps back to back that span runs from the end of the
+step before it to its own end: the GPU's time or the host's issue, whichever is slower. The steps' outputs are read where the caller reads them (`.item()`, `.cpu()`,
+`torch.mps.synchronize()` commit and wait). Its caller is metal-microbench `tools/torch_parallel/tp.py` with
+`CAPTURE=K`: a training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
 traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target
 (metal-microbench docs/measurement.md 2026-09-30, parts C and D, the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
 call past the wire against 186-216 eager.
@@ -143,7 +147,7 @@ ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the 
 Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a stream's
 receives into its in ring ahead of the data: [design/transport.md](../../design/transport.md) section 14), and
 the planning once is the communicator's compiled programs'. A training step's backward, run by autograd, is compiled
-but not batched.
+and committed by the same rule.
 
 ## What does not
 
@@ -371,10 +375,31 @@ w = s["lm_head"].to("cpu")                        # decoded
 
 - The MPS path is the measured path; async ops hide the crossing behind compute.
 - On two ranks every all-reduce is the direct exchange: one crossing.
+- One commit rule for every caller (`_stream.mm`, "The commit rule"): eager calls and compiled graphs, the library's
+  own callers and user programs alike. Nothing is entered, wrapped or opted into, and how a program is written does
+  not decide how fast its collectives are. The rule's work is throughput, the GPU fed with the fewest command buffers
+  while the host keeps issuing: the GPU starts a command buffer at most every 13-19 us whatever it holds
+  (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication is a floor of its own.
+  - Each buffer the library commits signals its count on a shared event as the GPU reaches its end. A shared event's
+    value is the GPU's progress at once, while a completion handler runs 7-9 us later (20-60 at the 99th percentile).
+  - A publication (work a peer waits on) is committed at once, with every publication waiting in the open buffer,
+    while at most one of those buffers is in flight, read from the event's value then: double buffering, one committed
+    buffer queued behind the one the GPU runs, so a commit overlaps the GPU's work (the 10-02 rule, mesh 3c00d37).
+    Otherwise it joins torch's open command buffer. In flight counts the library's buffers, not torch's own. The depth
+    is the rule's structure, not a setting: nothing is read from a file or the environment, and no node is configured.
+  - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
+    library's: the host path, `counted`, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
+    `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
+    (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
+  - A host that blocks outside torch while a publication waits in the open buffer stalls its peer. Avoiding that is
+    the program's responsibility; the peer's bounded wait ends the call as a value
+    ([NCCL.md](../NCCL.md#bounded-waits)).
+  - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
+    host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
+    but the host's touches torch's stream. A group's workspace is held until the library retires the group
+    (`ncclMeshRetired`), never by the commit.
 - `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
-  point) is Inductor's compilation with each run of a compiled graph a batch (`_stream.mm` `batch`): a collective's
-  publication joins torch's open command buffer while two of the graph's buffers are in flight (a shared event counts
-  them), and the graph's end commits what it left open, so a compiled collective does not pay the command-buffer floor
-  of its own commit. Reproduction target: metal-microbench `crossing.py` with `COMPILE=1 COMPILER=mesh`, 12.7 us
-  a crossing (mesh 3c00d37; 17.4 us eager). A graph's backward, run from autograd, is not batched.
+  point) is Inductor's compilation with the library's collectives, with nothing wrapped around its run. Reproduction
+  targets: metal-microbench `crossing.py`, 17.4 us a crossing eager and 12.7 compiled with `COMPILE=1 COMPILER=mesh`
+  (mesh 3c00d37). No reading of this rule has been taken yet.
 - Readings and their records: metal-microbench `docs/measurement.md`.

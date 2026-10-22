@@ -71,6 +71,18 @@ Hands-on, once, ~5 minutes:
 
 Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
 
+The two gitignored credential files, `networks.conf` (every known Wi-Fi network) and `tailscale.key` (a reusable,
+pre-approved Tailscale auth key, not ephemeral), are not in the fetched tarball. From a machine that holds them, once:
+
+```
+for f in networks.conf tailscale.key; do ssh node.local "sudo sh -c 'umask 077; cat > /usr/local/mesh/$f'" < $f; done
+```
+
+The keeper's next pass (within 60 s) adds the networks and joins the tailnet labeled with the node's hardware serial
+number (never a host name: AGENTS.md, "A node is its hardware; names are virtual"). Disable
+the node's key expiry in the Tailscale admin console (or use a tagged key, whose nodes do not expire), or the node
+must log in again when its node key expires.
+
 **Nodes of your own.** The roster every node trusts is `keys/authorized_keys` (public keys, each labeled
 `owner:machine`). Fork this repository, append your public key to it, and bootstrap from the fork:
 
@@ -302,8 +314,11 @@ else. The bridge interface itself has to be destroyed.
 
 No static IPs. Identity travels with the machine:
 
-- Bonjour `<LocalHostName>.local`
+- the host UUID (`IOPlatformUUID`), from which the bridge's node id and the fabric identity address below are drawn
 - IPv6 link-local on each fabric port, EUI-64 from that port's own MAC
+
+A Bonjour `<LocalHostName>.local` name is not identity: macOS renames a running machine when another claims its name
+(AGENTS.md, "A node is its hardware; names are virtual").
 
 That link-local is *exactly* the value the paired RDMA device reports as `GID[0]`,
 so a port's IP address and its RDMA identity are the same number. Nothing depends on
@@ -345,13 +360,15 @@ the node's uplink.
 
 | path | what |
 |---|---|
-| `install.sh` | provision/converge a node. Idempotent — re-running is the drift fix. |
+| `install.sh` | provision/converge a node. Idempotent — re-running is the drift fix. It runs with root's home whether launchd or a person's `sudo` started it: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
 | `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
 | `AGENTS.md` | **the contract.** Accessibility is required; rejection filtering is banned. Read before changing anything. |
 | `THREAT-MODEL.md` | why several settings here look wrong under a normal hardening model. |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
+| `bin/mesh-tailscale-init.sh` | the node's own tailnet edge (design/ACCESS-TOPOLOGY-SPEC.md: a stationary node is not carried by a laptop's tailnet). Builds the open-source `tailscale` and `tailscaled` at a pinned version with a pinned Go toolchain (fetched, used and deleted with its caches; Tailscale ships no CLI-only macOS binary, and the App Store and standalone apps need a GUI approval), runs `tailscaled` as `io.mesh.tailscale` (state in `/usr/local/mesh/tailscale`), and brings it up from `/usr/local/mesh/tailscale.key` whenever it is not running; with no key it logs the login URL to `tailscale.log`. Run by `install.sh` and every keeper pass; it builds only when the pinned version changes and only with 4 GiB free above the disk floor. A Mac with `/Applications/Tailscale.app` already has its edge from the app, and a second client would contend for the tailnet's routes and DNS, so there it does nothing and `mesh-status` names the app. |
+| `bin/mesh-rdma.sh` | the node's RDMA devices, one line each: `<port> device=<rdma_port> rid=<RID> rdma_peer=present\|absent`. Every script that names fabric ports reads them here. It reads the IORegistry's archive form (`ioreg -a`, a property list, through `plutil`) and keys each device by its registry entry ID, because a tree walk lists an object once for each path to it: on macOS 27 (the M5 Ultra Studio, 2026-10-21) each `AppleThunderboltRDMAInterface` is listed twice, so the earlier text walk named every port twice and its RID lookup matched no `AppleThunderboltRDMAPeerInterface`, reporting `rdma_peer=absent` on a cabled port. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
 | `bin/mesh-keeper.sh` | a pass every 60 s (drift has no event to wait on): re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, runs the fabric init (port recovery), writes health warnings when they change, loads each unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and background agent; loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
@@ -361,9 +378,8 @@ the node's uplink.
 | `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, run by the node's resident rank for a `{"facts"}` request (metal-microbench docs/elastic.md#call-delivery). |
 | `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` puts a launchd job's definition NEW in place as PLIST (default NEW without `.new`) and loads the job in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) where it is not loaded (`launchctl print`, else `launchctl list` where print refuses a user domain); a definition that does not parse is refused. A loaded job is left running: launchd removes a booted-out service only some time after its process exits, with no event, so replacing a loaded definition races by construction, and nothing does it. A definition never changes with what its job runs (no digest, nothing derived from binaries or configuration), so a changed one is the repo's own edit, in place for the job's next load (login or boot), and said so. **launchd.** Every resident job is KeepAlive with `ThrottleInterval` 1 (launchd starts it again at once after an exit, at most once a second; its default is 10) and picks up a new program or configuration by exiting, but the bridge's: its job runs its heartbeat (`ThrottleInterval` 60,
 KeepAlive {SuccessfulExit: false}), which restarts the bridge, and itself, on a deploy's SIGHUP (design/transport.md
-section 2); telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the updates) and the convergence's passes read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL; the heartbeat
-ends within 15 s of its SIGTERM. Nothing boots a job out but the operator's `mesh-converge.sh off`, which removes definitions and lets each loop end. |
-| `bin/mesh-converge.sh` | the node's convergence (Convergence, below): with no argument the mesh checkout's pass (`io.mesh.converge`); `held` and `stamp` are the node's convergence for any consumer's layer, `off` takes the node out. |
+section 2); telemetry and the observer on a kqueue watch of their own files and the documents they read at their start (`bin/mesh_restart.py`); the beacon and the router, scripts that exec `dns-sd` and `babeld`, by `install.sh`'s `launchctl kickstart -k` (launchd's own restart of an unchanged definition) where their programs changed; periodic jobs (the keeper, the update) read their programs at each run. The bridge's `ExitTimeOut` is 60, the longest launchd gives a stop at logout or shutdown before its SIGKILL; the heartbeat
+ends within 15 s of its SIGTERM. |
 | `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION. It runs the reader as the admin user, root's call through `sudo -n -u` that user, never as root; any other caller is refused (`"errno":1`), as is a node with no bridge of that user's (`"errno":3`) or a reader that user does not own (`"errno":2`). |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`; a port whose cable link is up with no RDMA peer is logged and held, never brought down (design/rubrics.md M3). Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric record: RDMA enablement and each device's link, as boot found them. Verify-only by necessity. |
@@ -454,8 +470,7 @@ the maker of its instance evidence (`instances`, `<chip>/<cores>`, written `inco
 lacks its fit (coefficients and bandwidth), its served and attention readings (a fit before torch-mesh 771ae16) or an
 attention line of either plan: torch-mesh refuses the first two and cannot price a layer's plan without the third), what each of its
 layers installed as that layer's install last recorded it (`revisions` and `images`, `<label>:<revision>` and
-`<label>:<digest>`, from `~/.cache/mesh/facts/<label>`, whose other lines it publishes as they are), each layer's last
-convergence outcome (`converge`, `<label>:held|staging|failed|converging|converged|off`), the model files it holds
+`<label>:<digest>`, from `~/.cache/mesh/facts/<label>`, whose other lines it publishes as they are), the model files it holds
 (`models`, `<dir>/<file>:<bytes>` under `~/models`, links followed), its health report's numbers, each fabric
 port's line as the fabric init last wrote it (`port=<port> link=<status> rdma_peer=present|absent`), and its routes.
 `rdma_peer` is whether the IORegistry holds an `AppleThunderboltRDMAPeerInterface` for the port's RDMA interface (its
@@ -495,45 +510,17 @@ node-info           branch=main converged=2026-08-28T00:56:27Z, every node's thr
 
 A node that has not converged since a push is the thing worth noticing, and you can see it from any machine.
 
-## Convergence
-
-The root layer above is `io.mesh.update`'s. The user layer (the admin user's mesh checkout, its bridge and
-library, and any consumer's layer on top, such as metal-microbench's resident rank) follows its upstreams by itself on
-a node given a convergence document (`bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE`, etc/converge/README.md):
-the user's agent `io.mesh.converge` runs `bin/mesh-converge.sh follow`, a pass every `period_s`, the upstream's own copy of the script continuing the loop by `exec` wherever it differs from the running one, and a consumer's own agent does the
-same for its layer with that script's subcommands. A layer changes only to images built and checked beforehand:
-
-1. **Held.** A checkout with local work (changes to tracked files, commits its upstream lacks, no upstream) is left as
-   it is, nothing fetched.
-2. **Fetched**, and the upstream's own copy of the script run, so a broken script is mended by the next push. A layer
-   whose upstream and documents are what its install last recorded (`~/.cache/mesh/converge/<label>`) is done.
-3. **Staged.** The upstream revision is built in a worktree of its own (`~/.cache/mesh/stage/<repository>`) at
-   background priority: for the mesh, `make -C rdma all install`, the bindings and torch-mesh's extension. A failed
-   build changes nothing on the node (`failed`, with its log beside the state), and the next pass builds again. A staged
-   bridge signed ad hoc where the running one carries the signing identity is not installed, since the Local Network
-   grant keyed on that identity would not carry over to it.
-4. **Installed.** The checkout is fast-forwarded, each staged image whose bytes differ is installed by rename (the
-   libraries first, the bridge's own binary last, and the binary anew wherever libmesh changed, since the bridge
-   watches its binary alone), `bin/mesh-user.sh` runs on them (`MESH_USER_BUILT`: the bindings, torch-mesh, the
-   configuration and the bridge's agent), and what it installed is recorded.
+## A new bridge on a node
 
 Nothing stops a bridge but the bridge. Its agent's definition names its program and its configuration's path alone, so
-it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (the
-installation above, or `make all install` by hand, which installs the binary anew whenever libmesh changed) or a new
-configuration (`mesh-user.sh` renames it into place and then gives the binary a new file), and `mesh-user.sh` sends the
-bridge's heartbeat SIGHUP, which restarts the bridge keeping its region and runs its own new image (design/transport.md
-section 2); a process already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`).
-
-Each pass's outcome, where it changed, is a line of `~/Library/Logs/io.mesh.converge.log` and node-info's `converge`; what
-each layer installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two
-versions until every node has converged, and a consumer's process holding the older library fails its calls as values
-until its own layer converges, a pass later. Whether a node converges is the operator's choice, one
-command each way: `bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE` (then each consumer's own setup, which writes
-its agent where the document is recorded) puts it in; `bin/mesh-converge.sh off` takes it out, removing the recorded
-document and every layer's agent definition (`<label>.converge`; each layer's follow ends at its next pass) and
-marking each layer's outcome `off`, so neither a later `mesh-user.sh` without CONVERGENCE nor a consumer's setup writes
-them again. A `launchctl disable` alone is undone by the next `mesh-user.sh` or setup, whose agent install enables the
-label.
+it changes only where the checkout moves; what the bridge runs changes by rename: a new binary or libmesh (`make all
+install` by hand, which installs the binary anew whenever libmesh changed) or a new configuration (`mesh-user.sh`
+renames it into place and then gives the binary a new file), and `mesh-user.sh` sends the bridge's heartbeat SIGHUP,
+which restarts the bridge keeping its region and runs its own new image (design/transport.md section 2); a process
+already running keeps the files it mapped. No loaded definition is replaced (`bin/mesh-agent.sh`). What each layer
+installed is node-info's `revisions` and `images`. A MESH_VERSION bump parts the map into bridges of the two versions
+until every node runs the new one, and a consumer's process holding the older library fails its calls as values until
+it is started again on the new one.
 
 ## Reading the docs
 
@@ -564,7 +551,7 @@ library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-m
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
 different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's agent
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes
-(`bin/mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]`; etc/bridge/README.md, with the two didactic examples; no default; design/transport.md; Convergence above). What it owns and does:
+(`bin/mesh-user.sh CONFIGURATION [CHECKOUT]`; etc/bridge/README.md, with the two didactic examples; no default; design/transport.md; A new bridge on a node, above). What it owns and does:
 design/transport.md. It forwards nothing, runs no command and carries no request.
 
 The transport, every page and word with its writer: [design/transport.md](design/transport.md).

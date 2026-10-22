@@ -20,6 +20,42 @@ cc app.c -I ~/mesh/rdma -L ~/mesh/rdma -lnccl-mesh -Wl,-rpath,$HOME/mesh/rdma
 A rank is a process on a node, a client of that node's bridge; it starts no bridge and names no device, address, port
 or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`).
 
+### The library's kernels
+
+libnccl-mesh's own Metal kernels (`nccl-mesh-kernels.h`, after `mesh.metal`'s primitives) are compiled when the
+library is built, never in a process that runs it. They are named by the kernels' SHA-256: the hash of their text and
+of the line that compiles it. That hash is compiled into `libnccl-mesh.dylib`, and `make -C rdma install` puts two
+files beside the dylib:
+
+- `libnccl-mesh.<SHA-256>.metallib`: the kernels as AIR, which every Apple GPU's driver takes. It is the committed
+  `vendor/libnccl-mesh.metallib` (vendor/PROVENANCE.md).
+- `libnccl-mesh.<SHA-256>.binarchive`: this node's binary archive, the GPU code of every kernel's pipeline for this
+  node's GPU. The build tool (`nccl-mesh-kernels.m`) makes it from the metallib at every install, in about 0.9 s, so
+  an archive is never copied between nodes.
+
+A process loads both at its first Metal collective and looks up every pipeline in the archive with
+`MTLPipelineOptionFailOnBinaryArchiveMiss`, so it compiles no kernel. On the M5 this takes about 3 ms (the library
+0.2 ms, the archive 1 ms, 72 pipelines 1.7 ms), where compiling took about 100 ms, and about 250 ms after any change to
+the text. Where a file is missing, or the archive lacks a kernel (the system's GPU compiler changed: an OS update since
+the install), the collective fails as a value. Its message starts with `make -C rdma install`, which makes both anew,
+and names the file. Run that install after every OS update. A failed load keeps nothing, so the same process's next
+collective loads the files the install made.
+
+`install` installs every other image first, then the kernels' files and `libnccl-mesh.dylib` (`install-nccl`). So a
+failure of the kernels leaves the bridge's images installed and the node's earlier libnccl-mesh in place. Earlier
+kernels' files stay, for a process that mapped an earlier library but has not loaded its kernels yet; `make -C rdma
+clean-kernels` removes them, run by hand where no such process runs.
+
+Only a machine with the Metal toolchain compiles the AIR: an Xcode with its Metal toolchain component, named by
+`DEVELOPER_DIR` (on this mesh, the M5 alone). `make -C rdma kernels` (which `install` runs) checks the committed record,
+`vendor/libnccl-mesh.sha256`: the kernels' SHA-256 the AIR was compiled from, then the AIR's own. Where both match, the
+committed AIR is used. Where either does not, the kernels are compiled into `vendor/`, and the two files are committed
+with the change to the kernels (`nccl-mesh-kernels.h`, `mesh.metal`, or the compile line). On a machine without the
+toolchain that compile fails, and `make` names the build to run: it never installs AIR of other kernels.
+
+`ncclMeshMetalSteps()` is unchanged: a caller that compiles its own kernels after the steps (metal-microbench,
+torch-mesh's `_stream`) compiles them in its own process, as before. Only the library's own kernels moved to build time.
+
 ## Communicators
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
@@ -216,26 +252,68 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one `mesh_step_binding`
     record, and its stream names a `residencySet`, which the library fills with the buffers the bindings name and the
     caller makes resident for its queue (torch-mesh's `torch_mesh/fused.py` on torch's stream).
-  - A wait polls the landed word of its run's last unit, which the bridge sets `~0` where the link is lost, and its
-    communicator's stop word, which a revoke sets ([Failures](#failures)); the stream's `polls` bounds it ([Bounded
-    waits](#bounded-waits)).
+  - A wait polls the landed word of its run's last unit and nothing else: each poll one `volatile coherent(system)`
+    load, no fence between polls. The bridge sets the word `~0` where the link is lost; the stream's `polls` bounds the
+    wait ([Bounded waits](#bounded-waits)). No kernel stops at a stop word or at another wait's failure
+    ([Failures](#failures)).
+
+### What each program owns
+
+The crossing path's mechanisms, each judged by the contract of the program that owns it (rdma/REVIEW-crossing-rewrite.md
+ranks the changes of 2026-10-21):
+
+- **The bridge** (design/transport.md): its devices, queue pairs, rings, page table and the region's registration. Nothing on
+  the GPU's crossing path is the bridge's; it reads a ready word and writes a landed word.
+- **The library**, by NCCL's contract: the caller touches no buffer of a collective in flight and issues the same
+  collectives in the same order on every rank; the library delivers correct bytes. So the order of every read and
+  write of a group is known from the programs both ranks compiled, and the library encodes it in the stream's order.
+  It keeps its own slot ring by its credit (a position published once the peer's position LAG back is consumed,
+  encoded on the host), releases each publication with one fence (`mesh.metal` `mesh_publish`), and bounds each wait by
+  a count of polls, since a GPU spin with no end halts the node.
+- **The data function**: its own buffers and their order.
+
+### One track
+
+A completion whose groups all lie on one channel of one communicator (a two-rank collective of one size class, as each
+crossing of a two-rank decode is) is plain dispatches in the GPU command stream, and the stream's own order is the
+dependency (`nccl-mesh.c` `complete_track`). Whether a group lies on one channel is read from its schedule where the
+group is planned (`struct inflight` `lone`), the positions both ends lay alike; nothing at run time chooses the form.
+
+- Each position's publication (`send_small`, or a copy and a release: what `issue_group` encodes at issue) is
+  encoded as soon as the host's order allows: the consumption LAG back encoded before it, and a SEND's first piece
+  after the receive before it.
+- Each consumption is its own small dispatch after it: the bounded landing wait (thread 0's polls of the landed word),
+  a barrier, then the combine or the take by every thread (`land_*`), in a pipeline sized to that op. On the large
+  class it is two: the wait (`spin`), then the combine or copy over every thread the piece needs.
+- The credit holds by the order alone: this rank publishes position p after consuming its peer's p − LAG, which the
+  peer published after consuming this rank's p − 2·LAG, so at most 2·LAG of its positions are unread at the peer. A
+  stream class's ring holds 2·LAG + 1 runs of a position's most units (`mesh-plan.h` `mesh_wire`: 15 small units a run
+  in 256, 30 blocks in 512).
+- A position is published before it is consumed. The two-rank all-reduce's SEND reads the operand its REDUCE combines
+  into, at the same position of the same channel (`mesh-plan.h` `mesh_compile`), so the SEND reads it first and no
+  scratch copy is made.
+- No track is recorded, no thread picks and no `tracks` dispatch runs: on one track the stream's order is the one
+  serial order every rank builds alike, and a wait on it holds no other channel.
 
 ### Per-channel progress
 
-A group's completion runs every channel on its own (`nccl-mesh-metal.h` `metal_record`, `metal_tracks`). This is
-NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place of one serial order of the whole group.
+A completion on two or more tracks runs every channel on its own (`nccl-mesh-metal.h` `metal_record`, `metal_tracks`).
+This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place of one serial order of the whole group,
+for groups such as the counted all-to-all among three or more ranks.
 
 - **Tracks.** Each channel's remaining positions are a track with two cursors: its publications and its consumptions,
   each in position order.
   - A publication runs once its track has consumed the position LAG back (the ring's credit).
-  - A consumption runs once its landing came, and it is combined or copied where it belongs.
+  - A consumption runs once its landing came, and it is combined or copied where it belongs; where its position's
+    publication reads in place what it writes (`sends_what_lands`: the two-rank all-reduce's), once that publication
+    has run.
   - A step's first piece that has a receive before it (`mesh_group_before`) waits on that receive's channel having
     consumed it.
-  - Neither cursor waits on the other beyond the credit.
+  - Neither cursor waits on the other beyond these.
 - **On the GPU.** The tracks are one dispatch, one thread group per track. Thread 0 picks the next item whose
   conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a consumption
   raises its track's count. A group that can pick nothing for `polls` passes records its blocked items' failures, as
-  a wait does.
+  a wait does, and ends; a track reads no other track's failure.
 - **On the host executor.** The same tracks run in one cooperative loop.
 - **What ranks share.** No rank orders anything another rank must share. Each channel's two ends agree on its
   positions (`mesh_group_lay`) and nothing else, so groups of any calls, including counted all-to-alls of per-rank
@@ -252,8 +330,11 @@ kernel like a dma or networking send/rcv channel for more than 5 seconds without
 `mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
 `NCCL_MESH_POLLS` (nccl.h), is `NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings
 pass 0. A wait that reaches its bound records its position, its channel and the bound in its communicator's failure
-words, every later dispatch of the communicator does nothing, and the group fails as a value after its command buffer
-(`ncclCommGetAsyncError`, or the communicator's next group: "landed nothing within N polls").
+words, and the group fails as a value after its command buffer (`ncclCommGetAsyncError`, or the communicator's next
+group: "landed nothing within N polls"). No kernel halts on the record: every later dispatch runs as encoded, and a later
+wait on a peer that publishes nothing more ends at its own bound, so a command buffer of k such waits holds the GPU
+up to k bounds. The bound is a count of polls and nothing else: it exists because a GPU spin with no end halts the
+node (the Mini's watchdog reset, 2026-10-21), not to guard any buffer.
 `ncclMeshComplete` bounds the completion's waits by the stream it is given.
 
 The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
@@ -343,7 +424,8 @@ Porting:
   piece (`combine3_*`), the result's ranges no step writes are copied from it after the publications, and no staging
   or scratch copy of the operand is made (a scratch buffer no step writes is never made). The two-rank all-reduce out of
   place, for one, makes no copy of its operand where it made two (the stage into the result and the scratch its SEND
-  read). Every such read is in the group's own command buffer or encoder (an issued group stages its operand as
+  read). The two-rank all-reduce in place makes none either: its program sends the operand from the operand itself
+  ([One track](#one-track)). Every such read is in the group's own command buffer or encoder (an issued group stages its operand as
   before), and the bridges read only the streams' rings, so once that command buffer completes nothing reads the
   lease and `ncclMemFree` may return its pages. The bytes on the wire still pass through the streams' rings, the
   bridge's; in-place, an operand's own copies go, not the ring's.
@@ -379,8 +461,8 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
 ## Failures
 
 The library keeps no clock that fails a group. A host-path group's waits end at their landings, at a landed word's
-`~0` (its bridge's, where the link is lost or the bridge stops), or at a revoke; a GPU wait also ends at its bound
-([Bounded waits](#bounded-waits)). A group declares its units to its bridge as it is issued, with no deadline while its
+`~0` (its bridge's, where the link is lost or the bridge stops), or at a revoke; a GPU wait at its landing, at a
+landed word's `~0` or at its bound ([Bounded waits](#bounded-waits)). A group declares its units to its bridge as it is issued, with no deadline while its
 member lives. A member that fails, is revoked or ends has the units it declared and did not supply sent at once as
 duds: all ones, placed where a send must happen and its producer is gone (design/transport.md section 10). Its peers
 land them as bytes like any other. A dud is no signal and fails nothing at the consumer; the failure is the
@@ -403,9 +485,13 @@ that leaves its links working (a link lost elsewhere, a node that joins) reaches
 and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding streams of its own as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and the units its groups
 declared and supplied nothing go at once as duds, so its peers' groups fail rather than wait); an init
-still running (a non-blocking one's) ends as a value, its host-path groups return at their next look and its GPU waits
-end at their next look at its stop word, and every later group on it is refused (`ncclInvalidUsage`, "revoked") until
-`ncclCommDestroy` gives its streams back.
+still running (a non-blocking one's) ends as a value, its host-path groups return at their next look, its GPU waits
+end at their landings or their bounds (no kernel stops at the revoke; a wait that reaches its bound after it names it as
+its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
+streams back. `ncclCommDestroy` awaits the command buffers the library committed for the communicator, at most
+`MESH_PLATFORM_NS`; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
+contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
+may take.
 
 A communicator takes no bytes of its node's region: its rings are its streams', the bridge's (`mesh.h`
 `struct mesh_stream`). The process holds one of its bridge's client slots (`mesh.h` `MESH_CLIENTS`) whatever its

@@ -185,7 +185,11 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts
                            dependent crossings twice the trees' heights) [Patarasuk & Yuan 2009; Blink];
                            whole 1: the whole operand reduced toward every node at once, up that node's heaviest tree,
                            a node forwarding its partial for another from a scratch buffer of its own and its own
-                           operand from a copy (its dependent crossings the trees' height: the graph's eccentricity
+                           operand from a copy, or, where it sends that to one node only and forwards nothing (two
+                           nodes, the direct exchange), from the operand itself: its one SEND and its one REDUCE of
+                           each chunk then lie at the same positions of one channel, and the executors publish a
+                           position before they combine into it (libnccl-mesh), so the SEND reads the operand before
+                           the sum is made in it (its dependent crossings the trees' height: the graph's eccentricity
                            along shortest-path trees, 1 where every pair is linked, the direct exchange; each node
                            sends the whole operand once for every other) [single-phase all-reduce: Trivance 2026].
    Each tree's part is cut into `chunks` parts (at least 1), chunk j of every move at its round + j, so a node forwards
@@ -251,9 +255,10 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
    each a line "check: ..." handed to warn(arg, line), the check one of projection (each pair's SENDs against its
    receives, and both ends' positions on each channel), priorities (each rank's steps by round, a round's SENDs first;
    a SEND and its receive in one round), depth (an element wider than its slot; a step that waits on its own channel at
-   or past its first position), causality (the program's publications and consumptions under the wire's rule, without
+   or past its first position), causality (the program's publications and consumptions under the wire's rule and the
+   executors' order, a position whose publication reads in place what its consumption writes consumed after it, without
    timing: a cycle among them is a deadlock) and hazard (a receive that may write what a SEND of the same rank still
-   reads, or a SEND not ordered after a receive of what it reads).  It refuses nothing and changes nothing; the count
+   reads, piece by piece, or a SEND not ordered after a receive of what it reads).  It refuses nothing and changes nothing; the count
    of warnings, UINT32_MAX where its room could not be had.  It is mesh_group_advise of a group of the one call. */
 uint32_t mesh_program_advise(const struct mesh_program *,const struct mesh_wire *,struct mesh_operand,void (*warn)(void *,const char *),void *arg);
 /* design/transport.md, a group's calls on one communicator's wire, as libnccl-mesh issues them between
@@ -295,8 +300,9 @@ uint32_t mesh_group_advise(const struct mesh_group *,const struct mesh_wire *,vo
 /* The planner's rules' version: the trees, routes, compiles and wire above, and libnccl-mesh's table of programs made
    of them (nccl-mesh.c comm_routes: the caller's, or the communicator's configured forms, nccl.h ncclMeshCommForms,
    and then every collective along the caller's paths or the shortest-path trees, uncut).  6: a position is a run of
-   its class's units (mesh_wire_units). */
-#define MESH_PLAN_VERSION 6u
+   its class's units (mesh_wire_units).  7: the single-phase all-reduce's node that sends its operand to one node only
+   and forwards nothing sends it from the operand itself (the two-node direct exchange: no scratch). */
+#define MESH_PLAN_VERSION 7u
 
 /* design/transport.md: what a node's record carries of its health to every bridge: `booted`, the wall
    clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes
