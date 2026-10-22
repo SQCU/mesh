@@ -1765,14 +1765,8 @@ static void child_read(struct port *port){
 }
 static int child_main(int argc,char **argv){
   signal(SIGPIPE,SIG_IGN);
-  const unsigned long version=strtoul(argv[2],NULL,10);
-  if(version!=MESH_CHILD_VERSION || argc!=7){
-    say("child of %s: spawned for the bridge's child contract %lu, and this child's is %u: it ends (a bridge and its children "
-        "install together)\n",argc>3?argv[3]:"?",version,MESH_CHILD_VERSION);
-    return 1;
-  }
-  const unsigned long index=strtoul(argv[4],NULL,10);
-  if(index>=MESH_PORTS){say("child of %s: port %lu is past the bridge's: it ends\n",argv[3],index);return 1;}
+  const unsigned long index=argc>=7?strtoul(argv[4],NULL,10):MESH_PORTS;
+  if(index>=MESH_PORTS){say("child of %s: port %lu is past the bridge's, or its command line short: it ends\n",argc>3?argv[3]:"?",index);return 1;}
   faults_install();
   const int fd=shm_open(MESH_NAME,O_RDWR);
   struct stat shape;
