@@ -2,7 +2,8 @@
 #define MESH_CALL_H
 #include "mesh-dataflow.h"
 /* design/algorithm-sources.md#programtensor: a lease of `count` slots of `bytes`, its rows and arena pages claimed by
-   compare-exchange (mesh-dataflow.c mesh_claim); 0, or the refusal as a value (ENOMEM, ENOSPC) */
+   compare-exchange (mesh-dataflow.c mesh_claim): a slot `pages` arena pages on `stride` rows from row `first`; 0, or the
+   refusal as a value (ENOMEM, ENOSPC) */
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
@@ -19,7 +20,7 @@ uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t r
    bootstrap hands its peer: 0, EINVAL, ENOLINK where no live stream has the identity (or its link is lost meanwhile),
    EBUSY where another client holds it or its last holding is still ending, ETIMEDOUT where its bridge has not begun it
    (the stream let go).  The peer's start words told (mesh_stream_tell), its bridge serves the holding.  Let go by its
-   index (its owner word back to 0), after which its bridge sends every presented byte not yet ready as a dud */
+   index (its owner word back to 0), after which its bridge sends every presented page not yet ready as a dud */
 int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream,uint64_t start[MESH_STREAM_START]);
 int mesh_stream_tell(struct mesh_ctx *,uint32_t stream,const uint64_t peer_start[MESH_STREAM_START]);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
@@ -28,7 +29,7 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
    stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
 /* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): its two
-   lists (0 the send list, 1 the landing list) and their counts presented and taken, its three byte counts, its
+   lists (0 the send list, 1 the landing list) and their counts presented and taken, its three page counts, its
    deadline, and its time rings; 0, EINVAL, EPERM where the client does not hold it, or ENOLINK */
 struct mesh_stream_view {
   struct mesh_entry *list[2];

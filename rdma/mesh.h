@@ -18,8 +18,8 @@
    bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units, a SEND filling a receive of a whole unit.  It
    changes only where that contract does (the operator, 2026-10-21: "commits which do not change an interface 'contract'
    in any way are not interface-version changes regardless of their hashes").  132: every unit on a stream's lanes is
-   a whole page, sent from and landing in the page its row names; a holding's unit u goes on its stream's lane
-   u mod 2 */
+   a whole page, sent from and landing in the page its row names; a holding's page p goes on its stream's lane
+   p mod 2 */
 #define MESH_VERSION 132u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
@@ -47,7 +47,8 @@ _Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)) && !(MESH_STREAM_T
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
-/* design/algorithm-sources.md#programtensor; design/transport.md, #M02 */
+/* design/algorithm-sources.md#programtensor; design/transport.md, #M02: `pages`, on a lease's first row, its arena
+   pages (not the transport's pages, which are rows) */
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
@@ -66,9 +67,29 @@ _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_e
    each row's page wherever the holder's plan put it, fixed before its first call), and the count that governs them,
    in pages: a send entry's page k is ready once the word at region offset `word` (0: the holding's `ready`) reads at
    least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at least `base` (its
-   rows released by their reader: a page is written again only after release).  Every count of a holding is in pages:
-   nothing in the transport is a byte offset, so nothing in it can lie off a page */
+   rows released by their reader: a page is written again only after release).  A page is a row's block (`block` arena
+   pages).  Every count of a holding is in pages and no page is named by a byte offset (`word` is a word's region
+   offset), so nothing in the transport can lie off a page */
 struct mesh_entry { uint64_t row,pages,word,base; };
+/* a count or index of pages (a holding's counts, an entry's `pages` and `base`, a page's place in a holding or an
+   entry) and a page-table row, each a type of its own so the compiler keeps them apart from each other, from bytes and
+   from a lane's units; one row is one page (mesh_row_after).  The region's words keep their storage: they are typed
+   where read and written (mesh_entry_row, mesh_pages_load) */
+struct mesh_pages { uint64_t n; };
+struct mesh_row { uint64_t r; };
+static inline struct mesh_pages mesh_pages_add(struct mesh_pages a,struct mesh_pages b){ return (struct mesh_pages){a.n+b.n}; }
+static inline struct mesh_pages mesh_pages_sub(struct mesh_pages a,struct mesh_pages b){ return (struct mesh_pages){a.n-b.n}; }
+static inline struct mesh_pages mesh_pages_min(struct mesh_pages a,struct mesh_pages b){ return a.n<b.n?a:b; }
+static inline int mesh_pages_lt(struct mesh_pages a,struct mesh_pages b){ return a.n<b.n; }
+/* the row of page `i` of a range of rows from `row` */
+static inline struct mesh_row mesh_row_after(struct mesh_row row,struct mesh_pages i){ return (struct mesh_row){row.r+i.n}; }
+static inline struct mesh_row mesh_entry_row(const struct mesh_entry *e){ return (struct mesh_row){e->row}; }
+static inline struct mesh_pages mesh_entry_pages(const struct mesh_entry *e){ return (struct mesh_pages){e->pages}; }
+static inline struct mesh_pages mesh_entry_base(const struct mesh_entry *e){ return (struct mesh_pages){e->base}; }
+static inline struct mesh_pages mesh_pages_load(const _Atomic uint64_t *word){ return (struct mesh_pages){atomic_load_explicit(word,memory_order_acquire)}; }
+static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){ atomic_store_explicit(word,p.n,memory_order_release); }
+/* a holding's `sent` and `landed` once its link is lost */
+#define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
 /* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, its share of the
    link's bandwidth and `wire`, its identity, the same at both its ends and no other stream's between the two nodes (0
    until it is live): the bridge's.  A holder takes `owner` from 0 to its own while `free`; the bridge then makes the
@@ -84,7 +105,7 @@ struct mesh_entry { uint64_t row,pages,word,base; };
    (uptime ns), the holder's: UINT64_MAX while it supplies, now where it can supply no more, after which every presented
    page not ready goes as a dud (all ones), as at the holding's end (its owner word let go to 0).  The two time rings
    (`posted_at`, `landed_at`, region offsets) of MESH_STREAM_TIMES entries of two words: entry e's, slot e mod
-   MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last byte
+   MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last page
    landed; its first word 0 while its second is stored.  `touching`, the bridge's: the owner word of a holding into whose
    rows the bridge may still map a landed page (0 none), whose rows are reclaimed only once it no longer reads it.
    Nothing in it names a lane, a unit, a frame or a queue pair */
@@ -153,6 +174,10 @@ static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){r
 static inline struct mesh_stream *mesh_stream_at(struct hdr *m,uint32_t p){return (struct mesh_stream *)((char *)m+m->stream_off)+p;}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
+/* whether `pages` pages from `row` lie in the page table: as many rows from it */
+static inline int mesh_rows_hold(const struct hdr *m,struct mesh_row row,struct mesh_pages pages){
+  return row.r<mesh_rows(m) && pages.n<=mesh_rows(m)-row.r;
+}
 /* design/transport.md; design/transport.md */
 static inline uint32_t mesh_arena_pages(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz))*m->block; }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
