@@ -29,12 +29,13 @@ A publishing kernel is a publication like a group that publishes, under the stre
 kernels are the data function's, and the steps they call are the library's under NCCL's contract: every rank issues the
 same collectives in the same order and leaves in-flight buffers alone, and the library delivers the bytes."""
 from collections import namedtuple
+import importlib.util
 from pathlib import Path
 
 from . import _stream
 
 # the checkout this package is installed from (its editable install: README "Install"), whose library it links
-STEPS = (Path(__file__).resolve().parents[2] / 'mesh.metal').read_text() + '\n' + _stream.fused_steps() + '\n'
+STEPS = (Path(importlib.util.find_spec('mesh').origin).with_name('mesh.metal')).read_text() + '\n' + _stream.fused_steps() + '\n'
 Crossing = namedtuple('Crossing', 'publish land')
 _NONE = (0,) * 6
 
