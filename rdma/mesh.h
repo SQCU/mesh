@@ -95,9 +95,14 @@ _Static_assert(sizeof(struct mesh_stream)==192,"mesh_stream");
    host UUID (`uuid`: gethostuuid, the identity its node number is drawn from, AGENTS.md "A node is its hardware"; a
    loop bridge's, its host's mixed with its region's name), by which two hosts that share a number are told apart and
    logged (mesh-records.c number_shared).  No host name: a name a person reads is a label the readers take from the name
-   table by node number (etc/mesh-nodes.json, rdma/peers.py label) */
-struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
+   table by node number (etc/mesh-nodes.json, rdma/peers.py label).  The 64 bytes after `sequence` (`unnamed`) are
+   layout 133's, where its name was, written 0 and read by none: every field stays at its offset and the record at 680
+   bytes, so a client of layout 133 still attached across the bridge's adoption reads every record whole (its name "")
+   and a bridge of the same wire takes this one's RECORDs (records are only appended to: design/HETEROGENEOUS-LINKS.md
+   section 6, rule 3) */
+struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; uint8_t unnamed[64]; uint64_t region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; uint8_t uuid[16]; };
+_Static_assert(sizeof(struct mesh_record)==680 && offsetof(struct mesh_record,region)==88,"mesh_record: layout 133's size and offsets");
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
    that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The
    slot's fields, as the header's, are only ever appended to, so any later bridge or heartbeat reads a region's holders

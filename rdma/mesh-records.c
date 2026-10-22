@@ -192,12 +192,14 @@ void number_shared(uint32_t node,const uint8_t *held,const uint8_t *heard,uint8_
 /* design/transport.md, RFC 2328 s13: a record heard, taken into the database where it is newer than the newest heard of
    its node (a node's later boot is always newer), held or not, and sent on to every other paired peer; one no newer is
    dropped and not sent on (so a record no path reaches never circulates).  A record of this node's own number is this
-   node's own come back, or another host's (number_shared), and is not taken */
+   node's own come back, or another host's (number_shared), and is not taken.  Its `unnamed` bytes are taken as 0 (a
+   bridge before 54a6064b wrote its host name there), so no name is held, published or sent on (mesh.h struct
+   mesh_record) */
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes){
   struct mesh_record heard;
   if(bytes!=sizeof heard)return;
   memcpy(&heard,payload,sizeof heard);
-  heard.model[sizeof heard.model-1]=0;
+  memset(heard.unnamed,0,sizeof heard.unnamed);heard.model[sizeof heard.model-1]=0;
   if(!heard.node || heard.reached>MESH_STREAMS)return;
   if(heard.node==M->node){number_shared(heard.node,node_uuid,heard.uuid,own_told,from,"a record");return;}
   struct known *k=known_at(heard.node);
