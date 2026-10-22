@@ -1,8 +1,8 @@
 # E2B latency: the structure actually executed
 
 This is an analysis of engine `fb3bab4` and Mesh runtime `e69761b` (documentation
-revision `1766c7e` does not change that runtime). The controlling requirements are
-[I25/E1d/E8 and H1–H8](deliverables.md). It follows the actual resident decode
+revision `1766c7e` does not change that runtime), against the
+[I25/E1d/E8 and H1–H8](deliverables.md) rows of the time. It follows the actual resident decode
 producer/consumer chain, not the deleted executor or a hypothetical CPU consumer.
 It adds no benchmark, runtime instrumentation, or new acceptance requirement.
 
@@ -10,7 +10,7 @@ The baseline account below remains tied to those revisions. The
 [implementation follow-up](#follow-up-independent-native-queue-progress)
 records the subsequent queue separation and the changed native paths.
 
-**Verdict:** complete native recording removes the per-layer host encoding walk.
+**Reading:** complete native recording removes the per-layer host encoding walk.
 It does not establish the transport's dependency-depth/line budgets, eliminate
 rearm allocation, or establish the E2B latency floor. Several remaining failures
 are identifiable from source and generated machine code without execution. The
@@ -20,20 +20,19 @@ five-Metal-call count is one component, not the runtime cost of the whole step.
 
 Latency follows the longest causally dependent path. Total FLOPs, bytes, source
 lines, function names and the number of small structs do not measure that path.
-For every measurement, name both its trigger and first externally useful effect.
+Each measurement below names its trigger and its first externally useful effect.
 
-| Structural measurement | What it establishes | What must be included |
+| Structural measurement | What it establishes | What this account counts |
 | --- | --- | --- |
 | Dependent-load depth | How many address-dependent memory accesses cannot start together | Ring selection, record lookup, closure context, operand resolution and spills that supply an address |
-| Metadata footprint | Which memory locations must become available before the effect | Both reads and writes; hot-field extent and alignment; no relabeling tags or addresses as payload |
+| Metadata footprint | Which memory locations become available before the effect | Both reads and writes; hot-field extent and alignment; tags and addresses as metadata, not payload |
 | Executed instructions and call boundaries | Work on the selected path, including empty wrappers | Optimized native code, taken branches, ARC/Objective-C calls, stack spills and restores |
-| Branches and loop bounds | Work that can postpone the first effect | Distinguish numerical dependencies, native refusal, queue scanning, optional diagnostics and lifecycle predicates |
+| Branches and loop bounds | Work that can postpone the first effect | Numerical dependencies, native refusal, queue scanning, optional diagnostics and lifecycle predicates, each apart |
 | Serialization edges | Which events are prerequisites rather than concurrent work | Device barriers, host wakeups, queue order, collective hops and rearm before reuse |
 | Runtime allocation and materialization | Work placed between invocations or before consumption | Command/encoder objects, blocks, arrays, payload copies and address reconstruction |
 | Scaling with layers, peers, tiles and streams | Whether a fixed-looking helper hides growing work | CPU and GPU costs separately; a bulk API may still walk its resources |
 
-A pass requires satisfying the relevant budget on the complete named path, not
-just removing one load in a helper. Structural evidence can establish that work
+Structural evidence can establish that work
 is absent, or disprove a budget. It cannot convert an unspecified cache miss,
 provider call or device fence into a nanosecond guarantee.
 
@@ -83,8 +82,11 @@ next hidden_j = finish_j(sum of local term_j and arriving remote terms)
 
 The next layer depends on that completed numerical sum. Sending attention or
 normalization results to avoid cheap repeated arithmetic would add another
-serial communication edge; I25 says not to do that when recomputation is cheaper.
-Removing host encoding affects rearm between steps. Removing a TX/RX dependent
+serial communication edge. The operator, 2026-09-17: "i also don't know why
+yo'ure talking about having four 'crossings' per layer when there's no need to have
+more than 1 serial push per layer? unless you thought the point of mesh code was to
+'prevent any duplicate computation', which, no, that's not the specification and
+shouldn't be treated as a spec anywhere." Removing host encoding affects rearm between steps. Removing a TX/RX dependent
 load affects a layer's communication edge. These are different contributions;
 one cannot stand in for the other.
 
@@ -134,8 +136,8 @@ recording has not magically removed all metadata from the invocation.
 The [before/after count](../../../metal-microbench/docs/async_collectives.md#whole-step-native-recording)
 remains useful: for the stated B=1 native E2B configuration, 251/250 compute
 encoders become one per rank, and the 35-entry layer walk disappears. It is a
-structural reduction in rearm. The count does not justify declaring rearm free,
-the entire runtime constant-work, or H7/E8 passed.
+structural reduction in rearm. It leaves rearm's own cost, the rest of the
+runtime's work, and H7/E8 unmeasured.
 
 ## TX: successful post versus finding the event
 
@@ -173,7 +175,7 @@ There are **three serial load stages starting at the selected input descriptor**
 The input descriptor, slot, SEND header, written tag and spill are separate
 address regions. The reader also probes up to P streams. P is a realized-plan
 quantity; this analysis does not invent P=1 from the fact there is one TX thread.
-The whole TX path therefore has not met H1/H7's one-record/one-line requirement.
+The whole TX path therefore has not reached H1/H7's one record and one line.
 
 Before scanning new publications, the TX thread calls `mesh_send_progress`.
 That polls each QP and drains pending native-refusal retries. Reference-count
@@ -198,7 +200,7 @@ wc.wr_id → posted-buffer tag → records[tag] → logical page-entry stores
 ```
 
 After `wr_id` is in a register, there are **two successive metadata-load stages**
-before the logical entry is known; H7 allows one. The cached physical receive
+before the logical entry is known; H7's target was one. The cached physical receive
 values beside the tag remove affine reconstruction, but do not remove the
 second logical-record lookup. Before the presence store, RX writes three fields:
 `mapping`, host `address`, and `device` address. The path also reloads its page
@@ -211,20 +213,20 @@ The resident shader loads its source-page addresses before polling, checks each
 incoming presence word and selects an unused available peer. After selection,
 `mesh::contiguous` still loads `pages[k].address` before reading the payload.
 Thus there is **at least one remaining page-address load before the consumer's
-first payload load**, including when the whole FFN partial fits one page. This
-fails H6's zero-runtime-page-table-read target. That load is a memory-resolution
+first payload load**, including when the whole FFN partial fits one page. H6's
+target was zero runtime page-table reads. That load is a memory-resolution
 cost, not numerical work. Recording commands does not change it.
 
 The full GPU consumer also retains visibility fences, peer selection and the
 summation. The E1d resident presence dependency is explicit. It is not a host
-barrier added by the library. Nor does that permission make every
+barrier added by the library. Nor does it make every
 lookup around it free. The shader is unchanged by `fb3bab4`.
 
 RX posts available replacement receives after processing a completion. It drains
 `receive.pages[head]` through `requests[page]`, and availability is supplied by
 retirement. It does not re-post the completed logical record directly. That is a
 second unresolved H3/H6 difference. The post loop can precede polling the next
-QP; preposting and queue-drain order must be counted as well as the presence store.
+QP; the next section counts preposting and queue-drain order as well as the presence store.
 
 ## GPU publication and numerical serialization
 
@@ -246,13 +248,12 @@ before normalization/use, KV write before attention, FFN down projection before
 publication/sum, sum before finishing, and layer output before the next layer's
 input. They replace boundaries between prior separate compute encoders. The
 source still contains device barriers and resident polling; it does not have
-“zero synchronization instructions.” A serial edge should be retained only for
-a real data/visibility dependency or explicitly requested instrumentation.
+“zero synchronization instructions.”
 
 ## Queue work before the counted path
 
-The short TX/RX instruction counts start after discovery. The user's latency
-requirement starts when work becomes available. These boundaries differ in the
+The short TX/RX instruction counts start after discovery. The latency counted
+here starts when work becomes available. These boundaries differ in the
 current implementation. The following loops are in
 [`mesh-flow.c`](../rdma/mesh-flow.c); the stream reader is in
 [`mesh.h`](../rdma/mesh.h).
@@ -277,15 +278,14 @@ chunk of earlier pending ranges before inspecting a newly published value.
 This is observable control flow without a timer: availability of event B does
 not cause its inspection until the current loop over A finishes. A
 `wait`/`synchronize` name search misses this serialization completely. Native
-refusal handling is necessary; choosing to finish an entire software batch before
+refusal handling answers the provider; finishing an entire software batch before
 looking at independent work is a separate scheduling decision.
 
 Dedicated threads remove competition with numerical work on those threads. They
 do not remove competition among the thread's own queues. Moving retirement off
 TX/RX removed its instructions there. It did not remove these loops. Conversely,
 simply swapping the publication and completion sweeps would change who is delayed
-without eliminating the batch-dependent delay. A replacement must account for
-every queue's next useful operation, including receive replenishment.
+without eliminating the batch-dependent delay.
 
 ## How the paths compose across 35 layers
 
@@ -309,7 +309,7 @@ U[l,s]
   -> V[l,s,r]
 ```
 
-Each arrow must include work already ahead of the event, as well as the event's
+Each arrow includes work already ahead of the event, as well as the event's
 own instructions. The first-byte endpoint also does not imply that the whole
 term has been consumed. For the current B=1 FFN term, the 3072-byte term fits the
 configured transport block, so this example needs one native chunk.
@@ -350,16 +350,15 @@ each layer, it adds **35 delta** to the step. An illustrative 1 microsecond per
 layer is 35 microseconds; 10 microseconds is 350 microseconds. These are arithmetic
 consequences, not measured costs assigned to a load or a function call. A change
 on an input that still arrives before its consumer needs it may have no effect
-on that particular step's completion time; it still has to meet H's per-event
-budget.
+on that particular step's completion time.
 
 Using only [I25/E8's stated assumptions](deliverables.md), 35 crossings at
 12 microseconds consume 420 microseconds of the 500-microsecond allowance.
 That leaves 80 microseconds in that favorable accounting, about 2.29 microseconds
 per layer if nothing else used it. Step entry, vocabulary, acquisition and rearm
-cannot each spend that same remainder. This arithmetic is why a new per-layer
-host callback or communication round cannot be dismissed as small. It does not
-establish the actual link floor or a timing pass.
+cannot each spend that same remainder, and a new per-layer host callback or
+communication round of more than 2.29 microseconds exceeds it. This arithmetic
+does not establish the actual link floor.
 
 The whole-step endpoint also includes two paths absent from an FFN-only count:
 
@@ -376,56 +375,34 @@ The whole-step endpoint also includes two paths absent from an FFN-only count:
 
 The supplied numerical algorithms determine the sum and sampling dependencies.
 Mesh's representation and scheduling determine the extra work on their edges.
-I25's instruction to repeat cheap computation avoids introducing another edge;
-it does not justify interpreting all collective verbs as the same operation.
+Repeating cheap computation avoids introducing another edge; the collective
+verbs remain distinct operations.
 
-## What a subsequent reduction has to demonstrate
+## Moved work and source spelling
 
-Use the same endpoints, caller configuration and native compilation settings
-before and after a change. Follow each load's address in generated code: loads
-whose addresses depend on an earlier result form serial stages; independent
-fields in one known record do not. Include stack traffic and call targets. An
-inlined helper can retain every dependent access; an uninlined wrapper can add
-an actual call and frame. Neither source spelling establishes the result.
+Loads whose addresses depend on an earlier result form serial stages; independent
+fields in one known record do not. An inlined helper can retain every dependent
+access; an uninlined wrapper can add an actual call and frame. A lookup removed
+from RX but still read before the consumer's first payload read remains on the
+arrival-to-use path. An allocation removed from launch but still made before frame
+reuse remains on the step recurrence. A lookup resolved only at setup, with its
+terminal operand used directly thereafter, is a runtime deletion. Native
+provider/Metal method costs and GPU execution times remain unspecified where their
+bodies have not been examined; this account enters none of them as zero.
 
-For a moved operation, record its new reader and when it executes. A lookup
-removed from RX but required before the consumer's first payload read remains
-on the arrival-to-use path. An allocation removed from launch but required
-before frame reuse remains on the step recurrence. A lookup resolved only at
-setup, with its terminal operand used directly thereafter, is a runtime deletion.
-Runtime metadata bytes, payload traffic and serialization depth must be reported
-separately, so a smaller allocation cannot substitute for deleting a stage.
+## What the source showed at `fb3bab4`
 
-The required evidence for this caller is therefore: actual load chains through
-first payload use; native instructions and callee boundaries; preceding queue
-work and its bounds; numerical versus added serialization edges; allocation and
-resource lifetimes through reuse; and their multiplicities over the whole step.
-Native provider/Metal method costs and GPU execution times remain unspecified
-where their bodies have not been examined. An unspecified cost stays in the
-account; it is never entered as zero. Source already establishes the failures
-above, so resolving those failures does not depend on a runtime experiment.
-
-## What is established and what remains to implement
-
-| Requirement/property | Current structural verdict |
+| Property | Reading |
 | --- | --- |
 | Per-layer host command/descriptor walk in ordinary native E2B replay | Removed; zero traversal, one recorded-range execution |
 | No backend numerical reimplementation for Mesh | Existing engine command descriptions are shared by ordinary and Mesh bindings |
-| Prepared native post target and stackless resident launch thunk | Present; narrow properties, not full H passes |
-| H1/H7 complete TX path | Unmet: stream selection/probing, extra metadata regions, pre-scan progress work |
-| H3/H7 RX path | Unmet: tag → logical-record lookup and metadata writes before presence |
-| H6 consumer operand access and receive placement | Unmet: runtime page-address reads and return-order reposting |
-| H8 rearm allocation | Unmet: native command-buffer/encoder lifecycle and handler bridging remain |
-| E1d communication and policy | Incomplete: rank-0 vocabulary consumption and non-replicated sampler policy |
+| Prepared native post target and stackless resident launch thunk | Present; narrow properties of the H paths |
+| H1/H7 complete TX path | Stream selection/probing, extra metadata regions and pre-scan progress work remain |
+| H3/H7 RX path | The tag → logical-record lookup and metadata writes precede presence |
+| H6 consumer operand access and receive placement | Runtime page-address reads and return-order reposting remain |
+| H8 rearm allocation | Native command-buffer/encoder lifecycle and handler bridging remain |
+| E1d communication and policy | Rank-0 vocabulary consumption and a non-replicated sampler policy |
 | E8 nanosecond/step-latency thresholds | Not established by instruction counts or source structure |
-
-The next implementation work is constrained by these findings: remove complete
-resolution stages through prepared terminal targets and addresses; remove work
-that precedes publication/CQ drainage without a data dependency; account for the
-whole rearm lifecycle rather than only its encoder body; and finish E1d's actual
-policy/dataflow. Moving a lookup behind a new descriptor or bulk function does
-not satisfy any of those items. Any subsequent reduction must recount the same
-trigger-to-effect path, including what moved into a callee.
 
 ## Follow-up: independent native queue progress
 
