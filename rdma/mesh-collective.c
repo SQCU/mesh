@@ -1165,17 +1165,6 @@ uint32_t mesh_group_advise(const struct mesh_group *g,void (*warn)(void *,const 
                       text[0]);
     }
   }
-  /* alignment: a SEND's piece is read from its buffer and a COPY's lands in it, each an entry that starts on a page
-     (design/transport.md section 14); one off a page fails its call as a value (a combine lands in pages of the
-     library's own) */
-  for(uint32_t r=0;g->page>1 && r<n;r++)for(uint32_t k=0;k<count[r];k++){
-    const struct mesh_step *s=steps[r]+k;
-    const uint64_t at=s->first*s->piece.element_bytes;
-    if(s->op!=MESH_STEP_REDUCE && mesh_step_bytes(s) && at%g->page)
-      mesh_advise_say(&advice,MESH_ADVISE_ALIGNMENT,"rank %u's %s (%s, round %u, rank %u) starts at byte %llu of buffer %u, not on a page of %llu "
-                      "bytes: the call fails as a value",r,mesh_move(&grouped,r,k,text[0],sizeof *text),mesh_step_name(s->op),s->round,s->peer,
-                      (unsigned long long)at,s->buffer,(unsigned long long)g->page);
-  }
   /* projection on the lists: rank a's send list toward b against b's landing list from a (mesh_group_lay), entry for
      entry, each of the same bytes */
   scratch=malloc((size_t)widest*sizeof *scratch);ma=malloc((size_t)most*sizeof *ma);mb=malloc((size_t)most*sizeof *mb);

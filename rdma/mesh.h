@@ -18,12 +18,12 @@
    bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units, a SEND filling a receive of a whole unit.  It
    changes only where that contract does (the operator, 2026-10-21: "commits which do not change an interface 'contract'
    in any way are not interface-version changes regardless of their hashes").  132: every unit on a stream's lanes is
-   a whole page, landing in the page the receiver's plan put it in; a holding's unit u goes on its stream's lane
+   a whole page, sent from and landing in the page its row names; a holding's unit u goes on its stream's lane
    u mod 2 */
 #define MESH_VERSION 132u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 134u
+#define MESH_LAYOUT 135u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -61,16 +61,14 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
-/* design/transport.md section 14: an entry of a holding's send list or landing list: a run of the holder's own pages,
-   `bytes` of them from region offset `at` (a page's first byte: a lease's), and the count that governs them: a send
-   entry's byte k is ready once the word at region offset `word` (0: the holding's `ready`) reads at least `base` + k + 1;
-   a landing entry is received into once the word at `word` (0: none) reads at least `base` (its pages released by
-   their reader: design/pages-and-functions.md, a page is written again only after release).  `at` is the literal page
-   the holder's plan put the run in, compiled once from its page table before the holding's first call, so the bridge
-   reads no table on the data path (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
-   compiled plans which do not change dynamically during a chain of function calls"); scattered pages are several
-   entries */
-struct mesh_entry { uint64_t at,bytes,word,base; };
+/* design/pages-and-functions.md; design/transport.md section 14: an entry of a holding's send list or landing list: a
+   range of the holder's rows, `pages` of them from row `row` (each row a page: the range is the entry's block table,
+   each row's page wherever the holder's plan put it, fixed before its first call), and the count that governs them,
+   in pages: a send entry's page k is ready once the word at region offset `word` (0: the holding's `ready`) reads at
+   least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at least `base` (its
+   rows released by their reader: a page is written again only after release).  Every count of a holding is in pages:
+   nothing in the transport is a byte offset, so nothing in it can lie off a page */
+struct mesh_entry { uint64_t row,pages,word,base; };
 /* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, its share of the
    link's bandwidth and `wire`, its identity, the same at both its ends and no other stream's between the two nodes (0
    until it is live): the bridge's.  A holder takes `owner` from 0 to its own while `free`; the bridge then makes the
@@ -80,11 +78,11 @@ struct mesh_entry { uint64_t at,bytes,word,base; };
    bridge serves the holding.  The holder presents its
    entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
    then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
-   bridge's, per list) is past it.  Three byte counts over the holding, each in its list's order and all of it before:
+   bridge's, per list) is past it.  Three page counts over the holding, each in its list's order and all of it before:
    `ready`, the holder's, of the send list produced; `sent`, the bridge's, of the send list whose SENDs have completed;
    `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  `deadline`
    (uptime ns), the holder's: UINT64_MAX while it supplies, now where it can supply no more, after which every presented
-   byte not ready goes as a dud (all ones), as at the holding's end (its owner word let go to 0).  The two time rings
+   page not ready goes as a dud (all ones), as at the holding's end (its owner word let go to 0).  The two time rings
    (`posted_at`, `landed_at`, region offsets) of MESH_STREAM_TIMES entries of two words: entry e's, slot e mod
    MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last byte
    landed; its first word 0 while its second is stored.  `touching`, the bridge's: the owner word of a holding into whose

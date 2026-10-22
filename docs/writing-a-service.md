@@ -181,10 +181,10 @@ polls)`): the step's part of z goes from the rank's send tensor to each of the n
 lands in its own slot of the rank's landing tensor; the next step's kernel reads the n - 1 slots and adds them to its
 own part. This is the one-shot all-reduce (each rank reads every peer's whole part and sums locally: one crossing a step,
 (n - 1) parts each way, over n - 1 links at once). It is the form for a part this small; the two-shot form
-(reduce-scatter, then all-gather: two crossings, each 1/n of a part) is the form for large parts. The bridge sends from the send tensor's pages and posts its receives into the landing tensor's pages, so
-both are region tensors (`torch_mesh.empty`) that start on a page: the bridge cuts a crossing into whole pages and the
-last page's frames, alike at both ends, and a range across a registration's extent could not be posted (design/
-transport.md section 14). The service lays its ring of sums on pages (`chain.paged`: each slot whole pages, its rows
+(reduce-scatter, then all-gather: two crossings, each 1/n of a part) is the form for large parts. Every tensor that crosses is a region tensor (`torch_mesh.empty`): a range of rows of the node's page table, each
+row a page. The bridge sends each page from the page its row names and lands each page in the page the receiver's row
+names, one page a SEND (design/pages-and-functions.md; design/transport.md section 14). The weights rank 0 sends each
+rank are region tensors too. The service lays its ring of sums on pages (`chain.paged`: each slot whole pages, its rows
 first), and its input ring's blocks start on pages. One landing tensor serves every step: the library posts a step's
 receive only once the rank's own publication of that step has stored `ready`, after the kernel that read the landing
 before. A crossing of any size fuses; the 61,440-byte limit is gone with the bridge's rings.

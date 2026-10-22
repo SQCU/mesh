@@ -69,11 +69,10 @@ def shares(config, rank, size):
     for r in range(size):
         begin = sum(parts[:r])
         for held, w in zip((a, b), folded):
-            part = torch.from_numpy(np.ascontiguousarray(w[begin:begin + parts[r]])).to('mps', torch.half)
+            part = held if r == 0 else torch_mesh.empty(parts[r], width, dtype=torch.half)
+            part.copy_(torch.from_numpy(np.ascontiguousarray(w[begin:begin + parts[r]])))
             if r:
                 dist.send(part, dst=r)
-            else:
-                held.copy_(part)
     return a, b, full
 
 
