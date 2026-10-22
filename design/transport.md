@@ -415,9 +415,19 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 - A link lost once its agent was asked for lanes (a farewell, the control socket's end, a failed completion, the link
   going off, a termination, an absorbed fault, a protocol error, the agent's own end): its streams cancelled (landed
   words ~0), its lanes served no more (the agent halted, before the control socket closes), the port closed. Once the
-  port's quiet window and any termination's have ended and no call is stuck (B9, B9b, B12), the parent asks the agent
+  port's quiet window has ended and no call of its own is stuck (B9, B9b, B12), the parent asks the agent
   to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
   Other ports' agents and links, the clients and their leases are untouched.
+- Each port waits on its own state alone. A call stuck past MESH_PLATFORM_NS in one port's agent holds that port (its
+  jobs and its agent's end) until the call returns, and no other port: each device's calls are its own agent's, and
+  the deadlock a window keeps out is a release of the terminating device's own objects (section 5). A peer interface's
+  termination holds the window of the port whose interface carries its RID; one whose interface cannot be told (its RID,
+  or the interface, gone with it) holds every port's, and one of a device that is no port holds the exit's, which a port
+  found later takes. Only the devices' read, the parent's for every port, waits for every stuck call and every window.
+  The rule held until 2026-10-21 was node-wide: one stuck call or one termination held every port of the node, so a
+  call stuck as long as October 18's (17 hours) on one port would have kept every other cable of the node unpaired as
+  long, and one flapping cable held them all (on the loop fabric, a 3-node line: the middle node's other link stayed
+  down 41 s behind a held open, and paired again 8 s after its peer's restart once the hold was the port's own).
 - An agent that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
   passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
   most an hour (section 9's rule, a port's: "restarted, not crashing again of course"). An agent whose parent is gone halts its

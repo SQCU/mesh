@@ -22,14 +22,17 @@ static dispatch_queue_t finder;
 /* design/transport.md B11: the devices to be read again (an en<N> that no port is attached or its link came
    on), read on the event loop's turn once no window stands and no call is stuck (ports_find) */
 static int find_wanted;
-/* design/transport.md B12: a port's job out past MESH_PLATFORM_NS, during which no port dispatches a driver
-   call and the devices are not read (ports_stalled's, each event-loop turn); and the ports whose progress threads did
-   not hold for a settle or a guarded change within MESH_PLATFORM_NS (`unguarded`, a bit a port: port_wait), concluded
+/* design/transport.md B12: a port's job out past MESH_PLATFORM_NS, during which the devices are not read, the read
+   being the parent's for every port (ports_stalled's, each event-loop turn); the port whose job it is holds its own
+   jobs and its agent's end (its `job`, its link's `job` and `stuck`), and no other port's (design/transport.md
+   section 14, "A process a port": each device in a process of its own); and the ports whose progress threads did not
+   hold for a settle or a guarded change within MESH_PLATFORM_NS (`unguarded`, a bit a port: port_wait), concluded
    alike */
 static _Atomic int stalled;
 static _Atomic uint32_t unguarded;
-/* design/transport.md B9b: the window of a peer interface's termination (`exit_at`), as every port's quiet
-   window holds, before which the bridge does not exit nor read the devices */
+/* design/transport.md B9b: the window of a peer interface's termination that names no port of this process
+   (`exit_at`: peer_terminated), before which the bridge does not exit nor read the devices, and which a port found
+   meanwhile takes as its own (ports_found) */
 static _Atomic uint64_t exit_at;
 /* a window's end moved to `until` where it is earlier, by any thread (the event loop's conclusions, a termination's
    queue, B9b), never earlier */
@@ -44,7 +47,7 @@ static uint64_t windows_end(void){
   return latest;
 }
 _Atomic int found;
-static char devices[MESH_PORTS][32];
+static char (*devices)[32];
 static uint32_t device_count;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 
@@ -848,8 +851,8 @@ void streams_let_go(void){
 /* design/transport.md section 14: the link's turn, on the event loop: a job's end taken (made: LINK told the peer every
    lane; connected: up, every lane served, the stream live); a job that failed loses the link (port_lost; a port whose
    make's registration was refused down until its link next comes on); while it is up, a lane a progress thread found
-   failed (`broken`) loses it; then, while no port's job is out past MESH_PLATFORM_NS (B12) and once the port's last
-   quiet window has ended (B9), the lanes made once the port is paired (`lanes`: its agent asked for them), and connected
+   failed (`broken`) loses it; then, while no job of the port is out (B12: another port's stuck call holds none of this
+   one's) and once the port's last quiet window has ended (B9), the lanes made once the port is paired (`lanes`: its agent asked for them), and connected
    once both ends' are made, each by the port's agent and once in its life: a link lost once its lanes were asked for
    pairs again with the port's next agent (design/transport.md section 14, "A process a port": port_lost, agent_turn,
    agent_reaped) */
@@ -878,7 +881,7 @@ static void link_turn(struct port *port){
       record_changed();
     }
   }
-  const int held=atomic_load_explicit(&stalled,memory_order_relaxed) || now<port->quiet_at;
+  const int held=now<atomic_load(&port->quiet_at);
   if(!port->greeted)return;
   if(l->state==LINK_UP){
     const uint32_t broken=atomic_exchange_explicit(&l->broken,0,memory_order_acq_rel);
@@ -908,8 +911,10 @@ static void link_turn(struct port *port){
    is still out MESH_PLATFORM_NS after it began is concluded around
    it, once: open 0 and port_lost (ETIMEDOUT: its socket closed, the map's phase STOPPED, its stream's words ~0), no
    verbs call.  The call itself cannot
-   be ended.  While any port's job is so out, no port dispatches a driver call and the devices are not read (`stalled`:
-   port_open, link_turn, ports_find).  A port whose progress threads did not hold for a settle or a
+   be ended.  While it is so out, its own port takes no job and its agent is not asked to end (its jobs and `stuck`:
+   port_open, link_turn, agent_turn), and the devices are not read (`stalled`: ports_find, the parent's read for every
+   port); every other port opens, pairs, connects and ends its agent as ever, each device's calls being its own agent's
+   (design/transport.md section 14).  A port whose progress threads did not hold for a settle or a
    guarded change within MESH_PLATFORM_NS (`unguarded`, port_wait: the change not made) is concluded alike, once, unless
    already concluded around a call.  Each conclusion moves the port's epoch and wakes its threads; the port stays
    `stuck` until the call returns and each progress thread has told the conclusion's epoch (a thread tells it on its
@@ -1052,8 +1057,8 @@ static struct port *port_at(uint32_t interface){
 }
 /* design/transport.md: a port's device opened, on its own queue (guarded), where it is to be (at the start,
    at its link's coming on or its interface's attaching, at a hello heard while it is not open, while it has no peer,
-   and as the call its port was concluded around returns, ports_stalled), once its quiet window has ended and no port's
-   job is out past MESH_PLATFORM_NS (design/transport.md B9, B12): the hellos' group joined on its
+   and as the call its port was concluded around returns, ports_stalled), once its quiet window has ended and no job of
+   its own is out (design/transport.md B9, B12; another port's stuck call holds none of this one's): the hellos' group joined on its
    interface, so the port hears them open or not (hello_heard, B16); its port read (none where the guard was not held
    within MESH_PLATFORM_NS: ETIMEDOUT, port_wait); a context that fails stays as it is, and the port with it, until its
    agent ends (design/transport.md section 14: nothing made is forgotten or made again in a process).  The device is
@@ -1062,8 +1067,8 @@ static struct port *port_at(uint32_t interface){
    job's end (agent_heard) */
 static int agent_spawn(struct port *port);
 static void port_open(struct port *port){
-  if(port->job || port->stuck || !port->opening || port->control>=0 || now<port->quiet_at || port->recycle || now<port->hold_to ||
-     atomic_load_explicit(&stalled,memory_order_relaxed))return;
+  if(port->job || port->stuck || !port->opening || port->control>=0 || now<atomic_load(&port->quiet_at) || port->recycle ||
+     now<port->hold_to)return;
   if(!port->agent && agent_spawn(port))return;
   port->opening=0;
   port->interface=if_nametoindex(port->name);
@@ -1208,44 +1213,99 @@ static void link_reserve(void){
 /* design/transport.md: every RDMA device of the node a port, in the order found, read on the finder's queue
    (at the start, behind IOKit's quiet registry, and where an interface attached or its link came on that no port has,
    on the event loop's turn once the windows have ended and no call is stuck: find_wanted, design/transport.md
-   B9, B9b, B12) and added on the event loop */
+   B9, B9b, B12) and added on the event loop; the read holds every device the system lists (`devices`, however many),
+   and is whole (`device_read`) where the list was read and held */
+static int device_read;
 static void ports_find(void){
   if(finding)return;
   finding=1;
   dispatch_async(finder,^{
     struct ibv_device **list=ibv_get_device_list(NULL);
-    uint32_t n=0;
+    int read=list!=NULL;
+    uint32_t n=0,room=0;
 #ifdef MESH_LOOP_FABRIC
     /* design/transport.md: the configuration's devices alone, in its order */
-    for(uint32_t k=0;k<loop_config.ports && n<MESH_PORTS;k++)snprintf(devices[n++],sizeof devices[0],"%s",loop_config.port[k].device);
     if(list)ibv_free_device_list(list);
-    list=NULL;
+    list=NULL;read=1;room=loop_config.ports;
 #endif
-    for(int i=0;list && list[i] && n<MESH_PORTS;i++)if(!strncmp(ibv_get_device_name(list[i]),"rdma_",5))
+    if(!read)say("bridge: the node's RDMA devices not read (%s): the ports stay as they are\n",strerror(errno));
+    while(list && list[room])room++;
+    char (*listed)[32]=realloc(devices,(room+1)*sizeof *devices);
+    if(listed)devices=listed;
+    else{read=0;say("bridge: no memory to hold the node's %u RDMA devices: the ports stay as they are\n",room);}
+#ifdef MESH_LOOP_FABRIC
+    for(uint32_t k=0;listed && k<room;k++)snprintf(devices[n++],sizeof devices[0],"%s",loop_config.port[k].device);
+#endif
+    for(uint32_t i=0;listed && list && i<room;i++)if(!strncmp(ibv_get_device_name(list[i]),"rdma_",5))
       snprintf(devices[n++],sizeof devices[0],"%s",ibv_get_device_name(list[i]));
     if(list)ibv_free_device_list(list);
-    device_count=n;
+    device_count=n;device_read=read;
     atomic_store_explicit(&found,1,memory_order_release);
     wake();
   });
 }
+/* a port whose slot a device that is no port may take: its device not listed by the last whole read, and nothing of
+   it out (no agent, job, socket, stuck call or end awaited) */
+static int port_free(const struct port *port){
+  return port->unlisted && !port->agent && !port->job && !port->link.job && !port->stuck && port->control<0 && !port->recycle &&
+         !port->ending;
+}
+/* the read taken.  Where it is whole, a port whose device it no longer lists is marked (`unlisted`, said once), and one
+   listed again is unmarked and opened again (`yielding` cleared).  Each listed device that is no port takes a slot: a
+   new one while the region holds MESH_PORTS (mesh-observe.h: its layout's), else the slot of a port that is free
+   (port_free), whose page and rings, its index's, it keeps.  A device that finds none is said, and each unlisted port
+   with an agent and no link yields: its agent ended as a lost link's (`recycle`: agent_turn), whose reaping opens it
+   no more and reads the devices again (agent_reaped), so its slot goes to the device the system lists rather than
+   stay with one it does not.  An unlisted port no device waits for is left as it is (its device may come back) */
 static void ports_found(void){
   finding=0;atomic_store_explicit(&found,0,memory_order_relaxed);
-  for(uint32_t i=0;i<device_count && port_count<MESH_PORTS;i++){
+  for(uint32_t p=0;device_read && p<port_count;p++){
+    struct port *port=ports+p;
+    int listed=0;
+    for(uint32_t i=0;i<device_count;i++)listed|=!strcmp(port->device.name,devices[i]);
+    if(!listed && !port->unlisted)say("link %u (%s): its device %s is no longer listed by the system\n",port->index,port->name,port->device.name);
+    if(listed && port->unlisted){
+      say("link %u (%s): its device %s is listed again\n",port->index,port->name,port->device.name);
+      port->opening=1;port->yielding=0;
+    }
+    port->unlisted=!listed;
+  }
+  for(uint32_t i=0;i<device_count;i++){
     uint32_t known=0;
     for(uint32_t p=0;p<port_count;p++)known|=!strcmp(ports[p].device.name,devices[i]);
     if(known)continue;
-    struct port *port=ports+port_count;
-    *port=(struct port){.index=port_count,.control=-1,.agent_fd=-1,.opening=1};
+    struct port *port=port_count<MESH_PORTS?ports+port_count:NULL;
+    for(uint32_t p=0;!port && p<port_count;p++)if(port_free(ports+p))port=ports+p;
+    if(!port){
+      uint32_t yielding=0;
+      for(uint32_t p=0;p<port_count;p++)if(ports[p].unlisted && (ports[p].agent || ports[p].yielding) && ports[p].control<0){
+        yielding++;
+        if(!ports[p].yielding){
+          say("link %u (%s): yields its slot to device %s: its agent ends\n",ports[p].index,ports[p].name,devices[i]);
+          link_set(ports+p,0,MESH_STOPPED,ENODEV);
+        }
+        ports[p].yielding=1;ports[p].open=ports[p].opening=0;ports[p].recycle|=ports[p].agent!=0;
+      }
+      say("bridge: device %s not served yet: the region's %u ports each hold a device (MESH_PORTS)%s\n",devices[i],MESH_PORTS,
+          yielding?"; it takes the slot of one whose device is no longer listed once its agent has ended":"");
+      continue;
+    }
+    const int fresh=port==ports+port_count;
+    const uint32_t index=fresh?port_count:port->index,page=fresh?link_page[index]:port->link.page,rings=fresh?MESH_ABSENT:port->link.rings;
+    if(!fresh){
+      say("link %u (%s): its slot given to device %s\n",port->index,port->name,devices[i]);
+      free(port->in);free(port->out);
+    }
+    *port=(struct port){.index=index,.control=-1,.agent_fd=-1,.opening=1};
     /* design/transport.md: the link's block, the pages leased for the port's index */
     port->link.pages=link_pages();
-    port->link.page=link_page[port_count];
-    port->link.rings=MESH_ABSENT;
+    port->link.page=page;
+    port->link.rings=rings;
     port->link.provider.device=&port->device;
     snprintf(port->device.name,sizeof port->device.name,"%s",devices[i]);snprintf(port->name,sizeof port->name,"%s",devices[i]+5);
     /* design/transport.md B9b: counted for a termination's queue (quiet_all, peer_port) once whole, then
-       held to the window a termination heard meanwhile set (`exit_at`) */
-    __atomic_store_n(&port_count,port_count+1,__ATOMIC_SEQ_CST);
+       held to the window a termination that named no port set meanwhile (`exit_at`: its own may be among them) */
+    if(fresh)__atomic_store_n(&port_count,port_count+1,__ATOMIC_SEQ_CST);
     quiet_until(&port->quiet_at,atomic_load(&exit_at));
     link_set(port,0,MESH_STOPPED,0);
   }
@@ -1280,9 +1340,10 @@ static void network_heard(int stopping){
 
 /* design/transport.md B9b (EXIT-RECLAIM.md P2, and P3 as a window in place of IOServiceWaitQuiet): a
    Thunderbolt RDMA peer interface's termination, which IOKit tells in its first phase (kIOTerminatedNotification), on
-   a queue of its own: the terminations heard (`terminations`), and the ports whose peer interface is terminating
-   (`terminated`, a bit a port index), which the event loop concludes (terminations_turn) */
-static _Atomic uint32_t terminated,terminations;
+   a queue of its own: the terminations heard (`terminations`) and those of them told for no port (`untold`), and the
+   ports whose peer interface is terminating (`terminated`, a bit a port index), which the event loop concludes
+   (terminations_turn) */
+static _Atomic uint32_t terminated,terminations,untold;
 #ifndef MESH_LOOP_FABRIC
 /* the exit's window and every found port's held to `until` at least (a port found meanwhile takes `exit_at`'s as it is
    counted: ports_found) */
@@ -1292,17 +1353,20 @@ static void quiet_all(uint64_t until){
   for(uint32_t p=0;p<count;p++)quiet_until(&ports[p].quiet_at,until);
 }
 /* the port whose interface is the terminating peer interface's, by mesh-fabric-init.sh's rule (an
-   AppleThunderboltRDMAInterface rdma_<port> and its peer interface carry the same "RID"); NULL where none is found
-   (the property gone with the terminating service, or no port of that interface yet) */
-static struct port *peer_port(io_service_t peer){
+   AppleThunderboltRDMAInterface rdma_<port> and its peer interface carry the same "RID"); NULL where none is.
+   `named` set where an interface of that RID was found (one that is no port of this process: another port's, in an
+   agent, or one not found yet), left clear where none was (the property gone with the terminating service, or its
+   interface gone with it) */
+static struct port *peer_port(io_service_t peer,int *named){
   CFTypeRef rid=IORegistryEntryCreateCFProperty(peer,CFSTR("RID"),kCFAllocatorDefault,0);
   io_iterator_t interfaces=IO_OBJECT_NULL;
   struct port *found=NULL;
   if(rid && IOServiceGetMatchingServices(kIOMainPortDefault,IOServiceMatching("AppleThunderboltRDMAInterface"),&interfaces)==KERN_SUCCESS){
     for(io_service_t interface;(interface=IOIteratorNext(interfaces));IOObjectRelease(interface)){
-      CFTypeRef its=found?NULL:IORegistryEntryCreateCFProperty(interface,CFSTR("RID"),kCFAllocatorDefault,0);
+      CFTypeRef its=*named?NULL:IORegistryEntryCreateCFProperty(interface,CFSTR("RID"),kCFAllocatorDefault,0);
       io_name_t name;
       if(its && CFEqual(its,rid) && IORegistryEntryGetName(interface,name)==KERN_SUCCESS){
+        *named=1;
         const uint32_t count=__atomic_load_n(&port_count,__ATOMIC_SEQ_CST);
         for(uint32_t p=0;p<count;p++)if(!strcmp(ports[p].device.name,name))found=ports+p;
       }
@@ -1313,27 +1377,25 @@ static struct port *peer_port(io_service_t peer){
   if(rid)CFRelease(rid);
   return found;
 }
-/* the iterator drained first, which arms the notification again: for each terminated service the exit's window and
-   every port's held to MESH_PLATFORM_NS from now (no port job and no exit inside the termination, whichever port's it
-   is) and the event loop woken, before any property is read; then the port each maps to halted (port_halt: its
-   pairing lost, served no more, marked for the event loop's conclusion); a service that maps to no port holds the
-   windows alone; each released */
+/* the iterator drained, which arms the notification again, every service taken as it is drained (no bound on how
+   many a drain holds) and released: the port its interface is (peer_port) has its window held to MESH_PLATFORM_NS from
+   now (no job of that port and no end of its agent inside its termination) and is halted (port_halt: its pairing lost,
+   served no more, marked for the event loop's conclusion); a service whose interface is no port of this process holds
+   the exit's window alone (`exit_at`, which a port found meanwhile takes: ports_found); one whose interface cannot be
+   told holds every port's window and the exit's (quiet_all), as it may be any port's, and is counted (`untold`).  A
+   termination told to be another port's holds none of this one's: each device is its own agent's (design/transport.md
+   section 14, "A process a port"), and the deadlock a window keeps out is a release of the terminating device's own
+   objects (section 5) */
 static void peer_terminated(void *unused,io_iterator_t iterator){
   (void)unused;
-  io_service_t services[MESH_PORTS];
-  uint32_t count=0;
-  for(io_service_t service;(service=IOIteratorNext(iterator));){
-    quiet_all(clock_ns()+MESH_PLATFORM_NS);
+  for(io_service_t service;(service=IOIteratorNext(iterator));IOObjectRelease(service)){
+    int named=0;
+    struct port *port=peer_port(service,&named);
+    const uint64_t until=clock_ns()+MESH_PLATFORM_NS;
+    if(port){quiet_until(&port->quiet_at,until);port_halt(port,&terminated);}
+    else if(named)quiet_until(&exit_at,until);
+    else{quiet_all(until);atomic_fetch_add(&untold,1);}
     atomic_fetch_add(&terminations,1);
-    wake();
-    if(count<MESH_PORTS)services[count++]=service;
-    else IOObjectRelease(service);
-  }
-  for(uint32_t k=0;k<count;k++){
-    struct port *port=peer_port(services[k]);
-    IOObjectRelease(services[k]);
-    if(!port)continue;
-    port_halt(port,&terminated);
     wake();
   }
 }
@@ -1395,19 +1457,25 @@ static void faults_install(void){
   sigemptyset(&faults.sa_mask);
   if(sigaction(SIGSEGV,&faults,NULL) || sigaction(SIGBUS,&faults,NULL))die("bridge faults");
 }
-/* the terminations and the absorbed faults taken on the event loop: each termination logged, and each port whose peer
-   interface is terminating lost (port_lost, ETIMEDOUT: its socket closed, its stream's words ~0), its lanes left as they
-   are, no verbs call; each port a fault was absorbed on lost as at its link's going off (open 0, ENETDOWN:
-   network_heard) */
-static uint32_t terminations_told;
+/* the terminations and the absorbed faults taken on the event loop: each termination logged (those told for no port
+   apart, which held every port's window: peer_terminated), and each port whose peer interface is terminating lost
+   (port_lost, ETIMEDOUT: its socket closed, its stream's words ~0), its lanes left as they are, no verbs call; each port
+   a fault was absorbed on lost as at its link's going off (open 0, ENETDOWN: network_heard) */
+static uint32_t terminations_told,untold_told;
 static void terminations_turn(void){
   const uint32_t heard=atomic_load(&terminations),lost=atomic_exchange(&terminated,0),fresh=heard-terminations_told;
+  const uint32_t blind=atomic_load(&untold),unplaced=blind-untold_told;
   const uint32_t faults=atomic_exchange(&faulted,0);
   if(fresh){
-    const uint64_t until=atomic_load(&exit_at);
-    say("bridge node %u: %u Thunderbolt RDMA peer interface%s terminating: no port job and no exit for %.1f s "
-        "(design/transport.md)\n",M->node,fresh,fresh==1?"":"s",(double)(until>now?until-now:0)/1e9);
+    say("bridge node %u: %u Thunderbolt RDMA peer interface%s terminating: no job of its port and no end of its agent for "
+        "%.1f s (design/transport.md B9b)\n",M->node,fresh,fresh==1?"":"s",(double)MESH_PLATFORM_NS/1e9);
     terminations_told=heard;
+  }
+  if(unplaced){
+    const uint64_t until=atomic_load(&exit_at);
+    say("bridge node %u: %u of them told for no port (the interface's RID, or the interface, gone with it): every port's "
+        "jobs, its agent's end and the exit held %.1f s\n",M->node,unplaced,(double)(until>now?until-now:0)/1e9);
+    untold_told=blind;
   }
   for(uint32_t p=0;p<port_count;p++)if(lost>>p&1){
     say("link %u (%s): its peer interface terminating: its link lost\n",ports[p].index,ports[p].name);
@@ -1497,7 +1565,11 @@ static int agent_spawn(struct port *port){
   struct mesh_holder *holders=mesh_bridge_pages(M)->agent;
   uint32_t entry=0;
   while(entry<2*MESH_PORTS && mesh_holds((pid_t)holders[entry].pid,holders[entry].start))entry++;
-  if(entry==2*MESH_PORTS){port->hold_to=now+MESH_PAUSE_NS;return EBUSY;}
+  if(entry==2*MESH_PORTS){
+    say("link %u (%s): its agent waits %.1f s: each of the region's %u agent entries holds a live agent\n",port->index,port->name,
+        (double)MESH_PAUSE_NS/1e9,2*MESH_PORTS);
+    port->hold_to=now+MESH_PAUSE_NS;return EBUSY;
+  }
   if(socketpair(AF_UNIX,SOCK_STREAM,0,pair)){
     const int error=errno?errno:EIO;
     say("link %u (%s): its agent not spawned: %s\n",port->index,port->name,strerror(error));
@@ -1592,12 +1664,13 @@ static void agent_heard(struct port *port){
     else if(heard.kind==AGENT_TERMINATED)atomic_fetch_or(&terminated,bit);
   }
 }
-/* a port whose link was lost once its lanes were asked for (`recycle`) asks its agent to end once its quiet window and
-   the exit's have ended (B9, B9b: no release inside a termination), no port's call is stuck (B12) and no job of its own
-   is out */
+/* a port whose link was lost once its lanes were asked for (`recycle`) asks its agent to end once its quiet window has
+   ended (B9, B9b: no release inside its own peer interface's termination, nor inside one no port could be told for,
+   which holds every port's window: peer_terminated) and no job of its own is out (B12: a call of its own that is stuck
+   holds its agent's end; another port's holds none of this one's) */
 static void agent_turn(struct port *port){
-  if(!port->recycle || !port->agent || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
-     now<atomic_load(&exit_at) || atomic_load_explicit(&stalled,memory_order_relaxed))return;
+  if(!port->recycle || !port->agent || port->ending || port->job || port->link.job || port->stuck ||
+     now<atomic_load(&port->quiet_at))return;
   agent_send(port,(struct agent_message){.kind=AGENT_END});
   port->ending=1;
   say("link %u (%s): its agent %d asked to end, its lanes released at its exit (design/transport.md section 14)\n",
@@ -1607,7 +1680,8 @@ static void agent_turn(struct port *port){
    unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, and the
    k-th in a row within MESH_AGENT_SETTLE_NS of its spawn, k from 2, holds the port's next spawn 60 2^(k-2) s, at most an
    hour (the boot ledger's rule, a port's: restarted, "not crashing again of course", the operator 10-20).  Its streams cancelled again,
-   its link down with no lanes, and the port to be opened by its next agent */
+   its link down with no lanes, and the port to be opened by its next agent; a port yielding its slot (ports_found) is
+   opened no more, and the devices are read again for the device waiting on it */
 static void agent_reaped(struct port *port){
   struct link *l=&port->link;
   const pid_t pid=port->agent;
@@ -1636,7 +1710,7 @@ static void agent_reaped(struct port *port){
   l->state=LINK_DOWN;l->lanes=l->heard=0;l->share=0;l->plan=0;
   memset(l->qpn,0,sizeof l->qpn);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
-  port->opening=1;
+  port->opening=!port->yielding;find_wanted|=port->yielding;
 }
 
 /* design/transport.md: the clients' control word, watched for the event loop */
@@ -1764,9 +1838,10 @@ static void host_taken(void){
    while a job is out, or while a halt of its own is not yet answered by the parent's, is refused), a halt (no lane
    served, a job out lapsed), an end; and tells each job's end, naming the pairing it was asked for.  A connect that
    ends while its pairing stands opens the link's streams (streams_open) and then serves every lane, its pairing read
-   again (port_halt's order).  The agent ends at its parent's word, once its own windows have ended (at most
-   MESH_PLATFORM_NS on), or at its parent's loss (the socket's end), its lanes served no more, MESH_PLATFORM_NS and its
-   windows on (at most twice that): its exit, the kernel's release of its device's objects, no verbs call made */
+   again (port_halt's order).  The agent ends at its parent's word, once its port's window has ended (at most
+   MESH_PLATFORM_NS on; a termination of another port's peer interface holds none of it, peer_terminated), or at its
+   parent's loss (the socket's end), its lanes served no more, MESH_PLATFORM_NS and its window on (at most twice that):
+   its exit, the kernel's release of its device's objects, no verbs call made */
 static uint32_t agent_asked;
 static uint64_t agent_bandwidth;
 static int agent_halted;
@@ -1789,7 +1864,7 @@ static __attribute__((noreturn)) void agent_leave(struct port *port,int asked){
   guard_wake(port);
   const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
   for(;;){
-    const uint64_t at=clock_ns(),windows=MAX(atomic_load(&exit_at),atomic_load(&port->quiet_at));
+    const uint64_t at=clock_ns(),windows=atomic_load(&port->quiet_at);
     const uint64_t until=MIN(bound,MAX(asked?start:start+MESH_PLATFORM_NS,windows));
     if(at>=until)break;
     struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
@@ -2236,8 +2311,9 @@ int main(int argc,char **argv){
      bridge gone; no queue, thread or verbs call waited on, and every object the kernel's to release at the exit
      (design/RDMA-KERNEL-RECOVERY.md "October 18"), the exit no sooner than every port's quiet window ends
      (design/transport.md B9: its reclaim never inside the termination a conclusion may follow) and a peer
-     interface's termination's (`exit_at`, B9b), the kernel's link events read meanwhile, so a link going off then
-     extends its port's (network_heard), as a termination then extends them all (peer_terminated), each no later than
+     interface's termination's that named no port (`exit_at`, B9b), the kernel's link events read meanwhile, so a link
+     going off then extends its port's (network_heard), as a termination then extends its port's, or the exit's or every
+     port's where it names none (peer_terminated), each no later than
      MESH_PLATFORM_NS past the stop's start (`held_to`: every window set before the stop ends by then, so the hold is
      the one 5 s budget, well inside its heartbeat's bound of 3 MESH_PLATFORM_NS) */
   for(uint32_t p=0;p<port_count;p++){
