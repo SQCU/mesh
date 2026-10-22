@@ -379,8 +379,10 @@ static void stream_receive_turn(struct port *port,uint32_t t){
    thread each pass: while a holding is served, first spares up to its first index (`reach`: the peer's SENDs before the
    holding, its duds or its earlier holding's), then each unit of its class in its landing walk's order, into the
    holder's own pages once its entry's word allows (an entry not the holder's to name into the spare page); while the
-   stream turns to spares (a holding ended), the spare page; at a fresh pairing, one spare on the small lane, which the
-   peer's keepalive fills (link_alive).  Every receive is a whole unit (a page; a frame, which lies
+   stream turns to spares (a holding ended), one spare a lane into the spare page, posted again as it lands (the peer's
+   SENDs to the ended holding wait in the hardware's credit for each: TN3205), so the next holding's first index is at
+   most one unit past this end's receives and its peer sends at most one dud a lane to reach it; at a fresh pairing,
+   one spare on the small lane, which the peer's keepalive fills (link_alive).  Every receive is a whole unit (a page; a frame, which lies
    in its entry's last page, since an entry starts on a page): a peer's SEND is never longer than the receive it fills,
    so ends whose entries differ garble their own pages and never fail the link, and the frames match (TN3205).  0, or the
    post's error */
@@ -391,7 +393,7 @@ static int lane_post(struct port *port,uint32_t k){
   if(state==RECV_NONE && (l->rnumber[t] || !c))return 0;
   struct walk *w=l->landing+t;
   const struct mesh_queue *q=l->provider.queues+k;
-  const uint64_t unit=c?MESH_FRAME:page_bytes(),window=state==RECV_NONE?1:s->window;
+  const uint64_t unit=c?MESH_FRAME:page_bytes(),window=state==RECV_SERVE?s->window:1;
   while(s->posted<s->got+window){
     uint64_t at=link_spare(port),bytes=unit;
     if(state==RECV_SERVE && s->posted>=l->reach[t][c]){

@@ -405,7 +405,11 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 - When the owner word changes (the holder let go, or the event loop let go a holder gone), the send thread ends the
   holding: every presented unit goes, the unready as duds; then the stream is free. The receive thread turns the
   stream to spares (the spare page, the second page of the port's link block), which receive the peer's SENDs to the
-  ended holding.
+  ended holding. It keeps one spare posted a lane, and posts the next as each lands; the peer's SENDs wait in the
+  hardware's credit meanwhile (TN3205). A whole window of spares would put the next holding's first index a window
+  past the peer's SENDs, and the peer would send that window as duds (512 pages and 2,048 frames on a two-lane link,
+  16 MiB, about 1.6 ms) before the holding's first byte (the operator, 2026-10-21: "get rid of megabyte / millisecond
+  pointless overheads").
 - Receives already posted into the ended holding's pages cannot be taken back: `touching` names its owner until all of
   them have landed (the peer's SENDs to it, or its duds as the next holding aligns), and a gone owner's rows are
   released only once no stream touches them. A live holder that lets go before its landing entries landed keeps those
