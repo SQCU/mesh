@@ -279,6 +279,23 @@ port's 2, its 10; plan 0xc, 2 lanes, 1 stream)" and "2 lanes up".
 
 ## 10. The keepalive on every link
 
+**Since version 133 (2026-10-22) there is no keepalive.** The operator: "we don't introduce race conditions or use
+timing anywhere. why? because using timing is always slower than not using timing, and we require the lowest
+attainble overhead on all transactions in bridge/collective". A stream's lanes carry its holders' entries' pages and
+nothing else (design/transport.md section 14), so no frame on a timer can fill a receive a holding's unit is owed,
+and no spare receive waits between holdings for one. `link_alive`, `MESH_KEEPALIVE_NS` and the link block's
+keepalive page are deleted; the link block is the spare page alone.
+- On a link of three or more queue pairs, lane 0 now carries nothing, as lane 1 never did. `link_plan` is unchanged:
+  it still makes lane 0 where both ends hold three or more, so two bridges plan alike, and a later change may give
+  the queue pair to a stream.
+- The cost: a Thunderbolt controller that has been quiet is slow on its next frame (the Mac mini's SEND completed in
+  6.2 us after 40-50 us of nothing, 1.9 us with a frame every 5 us, below), now at a holding's first SEND and after
+  every quiet stretch inside a holding (a layer's 40-50 us between crossings), on every plan.
+- The operator's 5 s deadline (below, 2026-10-18) bounds the bridge's lifecycle, not a link's traffic: since
+  2026-10-22 no clock decides a transaction (design/transport.md section 5).
+
+The rest of this section is the history of the keepalive as versions 128 to 132 had it.
+
 The operator, 2026-10-21: "if the keepalive service is a performance requirement why is there a context dependent
 control flow which can turn it off?" On the three nodes cabled all to all (the Mac mini and the two Studios), every
 link logged "plan 0xc: 1 stream, keepalive off". `link_plan` dropped the keepalive lane where the budget was small, and

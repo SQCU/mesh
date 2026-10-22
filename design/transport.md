@@ -22,7 +22,7 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
   either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
   [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)),
-  its streams' lane pairs and, where the plan has them, lane 0 (the keepalive's frames) and lane 1 (nothing posted)
+  its streams' lane pairs and, where the plan has them, lanes 0 and 1 (nothing posted on either)
   ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 10);
   created, moved through INIT, RTR and RTS, on two
   completion queues of the port's device context.
@@ -163,13 +163,19 @@ Every loop the transport needs polls memory without blocking:
 - the bridge's receive thread (`ibv_poll_cq`, which returns at once) and send thread (reads supplied words);
 - a host wait and a GPU wait on a landed word.
 
-Any of them stops when a flag says so: the bridge's stop, a watchdog or heartbeat process's semaphore, the deadline
-below, a link-off event. A stopped receive loop leaves its receives posted, which harms nothing: the rows stay the
-bridge's, and what lands later is recorded as late.
+Any of them stops when a flag says so: the bridge's stop, a watchdog or heartbeat process's semaphore, a revoke (a
+host wait), its poll bound (a GPU wait), a link-off event. A stopped receive loop leaves its receives posted, which
+harms nothing: the rows stay the bridge's, and what lands later is recorded as late.
 
 The operator's deadline (2026-10-18, verbatim): "the platform deadline is 5 seconds. i'm telling this to you right now.
 block quote me. you cannot be using a low level kernel like a dma or networking send/rcv channel for more than 5
 seconds without something happening/concluding."
+
+Since 2026-10-22 no wait of the bridge or the collective on a peer's data is bounded by a clock, and the bridge decides
+nothing by one (section 14: "we don't introduce race conditions or use timing anywhere"). The deadline bounds the
+bridge's own lifecycle (a driver call's job, a quiet window, a child's end), the bootstrap's phases, a group's
+presentation where its bridge's lists have no room, and a host-path group's wait for its own GPU work; a GPU wait keeps
+its poll bound; a link carries no keepalive.
 
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A
 process in that state (STAT `U`) ignores every signal, SIGKILL included. Observed:
@@ -272,18 +278,20 @@ written at each boot, and the node stays reachable by ssh in between.
 
 ## 10. Duds
 
-If a holder has not made a presented page ready by its holding's `deadline` (the holder's, set where it can supply
-no more: section 14), the bridge sends a dud: the whole page of all-ones. The bridge chooses which page every SEND
-names, so a dud is a SEND whose SGE names a page of the bridge's own all-ones block (written once at its start):
-nothing is copied into the client's rows or anywhere else. The receiving bridge's receive fills as for any SEND, so
-every posted receive is consumed in order and nothing is left posted.
+A dud is the whole page of all-ones. The bridge chooses which page every SEND names, so a dud is a SEND whose SGE
+names a page of the bridge's own all-ones block (written once at its start): nothing is copied into the client's rows
+or anywhere else. The receiving bridge's receive fills as for any SEND.
+
+The bridge sends a dud only for a page of an entry that names none of the holder's rows (`MESH_NO_ROW`: the filler a
+communicator presents at its init, section 14; or rows outside the page table, a holder's error). It sends none of
+its own: none at a deadline (a holding has none) and none for a holding that ended (the operator, 2026-10-22: "the
+bridge has as little code as possible and does as little as possible").
 
 All-ones reads as failed wherever it lands: it is NaN in fp16 (0xFFFF) and fp32 (0xFFFFFFFF), and ~0 in a landed
 word. A dud is a client error, recorded against the client and its call, never a transport error.
 
-The pages of a holding whose client failed, was revoked or exited are sent as duds at once (its owner word let go),
-without waiting for a deadline. Pages received for a holder that is gone land in its rows, and those rows are released
-once no stream touches them (`touching`, section 14).
+Pages received for a holder that is gone land in its rows, and those rows are released once no stream touches them
+(`touching`, section 14).
 
 ## 11. Reliability: three nines
 
@@ -344,9 +352,9 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | What a client names | a port and a lane pair (`bind[port][pair]`, 127) ≺ a node | M5, D7 |
 | Who takes a queue pair | a client's compare-and-swap on `hdr->lanes` (HEAD before 127) ≺ the bridge binds it at the client's asking (127) ≺ no client takes one: the bridge stripes a node's stream over the link's lane pairs | M5, M2, M9 |
 | How a client holds the stream | a request and an answer in its slot (127) ≺ its owner word taken while the stream is free, as rows are | M2 |
-| Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life, which clients copy out of (127-131) ≺ into the holder's own landing pages as it presents them, the bridge's spare page between holdings (132) | M4, M9, M8 |
-| How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more | M4, M10 |
-| Where the next holding starts | the bridge's answer in the client's slot (127) ≺ the stream's `start` words, frozen as a holding begins, exchanged at init through NCCL's bootstrap | M2, C7 |
+| Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life, which clients copy out of (127-131) ≺ into the holder's own landing pages as it presents them, the bridge's spare page between holdings (132) ≺ into the holder's own landing pages, nothing posted between holdings (133) | M4, M9, M8 |
+| How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more (132) ≺ at once at its give: nothing more of it posted, the stream free (133) | M4, M10 |
+| Where the next holding starts | the bridge's answer in the client's slot (127) ≺ each lane's counts sampled as a holding begins, exchanged as `start` words and MAXed, spares and duds between (129-132) ≺ where the last one ended at each end, the stream's pages posted told as facts, the filler presented by the collective (133) | M2, C7 |
 | A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life, a lost link down until a person relaunched it (129) ≺ none in a process: made and connected once in a port child's life, released by its exit, the link paired again by the port's next child (130) | M3, M4, M6 |
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
@@ -363,7 +371,8 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 **The stream.**
 - Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own (as
   many streams as the link's plan has lane pairs for: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)). Every unit on
-  a stream's lanes is a whole page: page p of a holding goes on the stream's lane p mod 2.
+  a stream's lanes is a whole page: page p of the stream's sequence over its pairing goes on its lane p mod 2, as unit
+  p div 2 there, and each end posts the sequence in order.
 - Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
   GID and queue pair number) and which no other stream between the two nodes has.
 - A holding has two lists of entries the holder presents in order: a send list and a landing list. An entry is a
@@ -380,48 +389,75 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   `ready`) reads at least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at
   least `base`. The holder never sees a lane, a unit, a frame or a queue pair.
 - Every SEND and every receive is one whole page, the page its row names (the bridge reads the row's page as it posts
-  it: one read a page). A send entry whose rows lie outside the page table goes as duds, and a landing entry's pages
-  land in the spare page. So a SEND always fills its receive exactly (TN3205), ends whose lists differ garble their
-  own pages and never fail the link, and neither end knows the other's addresses.
+  it: one read a page). A send entry that names none of the holder's rows (`MESH_NO_ROW`, or rows outside the page
+  table) goes as duds, and such a landing entry's pages land in the spare page (the port's link page). So a SEND
+  always fills its receive exactly (TN3205), ends whose lists differ garble their own pages and never fail the link,
+  and neither end knows the other's addresses.
 - The send thread posts a unit from its page once the entry's word says the page is ready; the receive thread posts
   each receive straight into its page (at most a window ahead) once the entry's word says the page's reader released
   it (a page is written again only after release), and raises `landed` once every page before has landed, whichever
   lane carried it. A SEND whose receive is not yet posted waits in the hardware's credit (TN3205): posting a receive is
-  the credit, and nothing else paces a holding (no lag, no fillers).
-- The words only the bridge writes: `live`, `free`, `begun`, `sent`, `landed`, `taken`, `touching`, `start` and the two
-  time rings (`posted_at`: an entry's first SEND posted; `landed_at`: its last page landed; mach_absolute_time ticks
-  read once at the end of the pass).
+  the credit, and nothing else paces a holding (no lag).
+- The words only the bridge writes: `live`, `sent`, `landed`, `taken`, `touching`, `posts` (the stream's pages over its
+  pairing each way, posted and completed) and the two time rings (`posted_at`: an entry's first SEND posted;
+  `landed_at`: its last page landed; mach_absolute_time ticks read once at the end of the pass). The time rings are
+  measurement and decide nothing.
 
-**Holding it.**
-- A process holds a stream as it holds rows: it takes the owner word from 0 to its own while `free` reads 1
-  (`mesh_stream_take`). The bridge then makes the holding's words new, freezes `start` (per lane, its SENDs and receives
-  posted so far) and stores `begun`. The holder hands `start` to its peer through its communicator's bootstrap (NCCL's
-  init exchanges each connection's endpoint the same way: C1) and stores the peer's in `peer_start`, then `told`.
-- Each lane's first index for the holding is the greater of its own and its peer's: the end behind sends duds into the
-  peer's posted receives, or posts spares for the peer's SENDs. A holding's units therefore fill each other's whatever
-  either end's earlier holding left (version 129's analysis, metal-microbench output_data/bridge-20261019/FLOWS.md
-  section 7.2: the start must be told, and it is told once a communicator, by collective code, not by the bridge).
+**Holding it** (version 133; the operator, 2026-10-22, on the holding's start of 129-132: "something is sampled
+diachronically four times then we do a funny little guess ... this entire code path needs to be remove and rewritten
+from first principles ... we never do tensor transports for dynamic or jit programs which cannot compile their data
+dependencies or functional behavior. another is that we don't introduce race conditions or use timing anywhere. why?
+because using timing is always slower than not using timing, and we require the lowest attainble overhead on all
+transactions in bridge/collective"; "why is this a derived value instead of explicitly presented configuration which
+is transduced simply from a configuration operand and several invariants?"; "this should be something that never
+fails"; and "the collective layer gets to optimize data placement and movement, and finally the bridge has as little
+code as possible and does as little as possible", which may tell consumers facts, "an error channel return kind of
+statistic, not a data dependent control flow for a collective verb or a bridge transaction").
+- Two invariants. (1) A stream's lanes carry its holders' entries' pages and nothing else: no keepalive, no spare
+  receive between holdings, no dud of the bridge's own. (2) Both ends' lanes count from 0 when the port's child makes
+  its queue pairs, and each end posts the stream's pages in the sequence's order. So a SEND's n-th unit on a lane
+  fills the peer's n-th receive there (TN3205), and a page's place is a function of the two ends' entries alone.
+  Posting in order keeps both lanes' counts a function of one number, the stream's pages posted: two lanes posted
+  apart could leave a holding that ended at counts that no sequence of pages fills.
+- A process holds a stream as it holds rows: it takes the owner word from 0 to its own by one compare-and-swap
+  (`mesh_stream_take`), nothing awaited. The send thread then begins the holding, its walk at the stream's pages sent
+  so far, and the receive thread its landing walk at the stream's pages posted so far, once no receive of an earlier
+  holding is outstanding (`touching` clear).
+- The facts. The bridge tells each stream's pages over its pairing, each way, posted and completed (`posts`). By (1)
+  nothing is posted on a stream between holdings, so `posted` is a constant while no holder presents: the taker reads
+  it as it takes the stream, and nothing is read while it moves.
+- The filler. Each rank puts its streams' pages posted in the report its communicator's init already gathers (NCCL's
+  own init exchanges each connection's endpoint the same way: C1). Where the peer has posted more receives than this
+  end SENDs, this end presents that many dud SENDs first; where the peer has posted more SENDs than this end receives,
+  that many receives into the spare page. Each is one ordinary entry of `MESH_NO_ROW`, its list's first, and both ends'
+  next pages are then the same page of the stream. It is arithmetic on constants, not a sample; its counts are a
+  statistic the communicator reports (`ncclMeshFiller`), on which nothing branches. Once every channel's filler is
+  presented, the init waits, on data, until the receives its streams had posted when it took them have landed (the
+  stream's `posts`: an earlier holding's receives into this process's pages, which the peer's filler duds fill), so
+  the process uses no such page again before; the wait ends at the landing, a revoke or the link's loss.
 - One communicator holds a stream at a time; communicators that share a node pair hold different streams of its link,
   each end taking the stream of the least `wire` free at both. An init is refused (EBUSY) only where none is.
-- `deadline` (uptime ns), the holder's: UINT64_MAX while it supplies; now where it can supply no more, after which
-  every presented page not ready goes as a dud. No unit of a producer still at work is ever sent as a dud (rubrics C5
-  and Quantities, the operator 10-20).
+- A SEND is posted when its row's word (`ready`) passes it; a receive when its row's word says its reader released it.
+  Both are data, and neither has a deadline.
 
-**Duds, and a holding's end.**
-- A presented page not ready by the deadline, or at the holding's end, goes as a dud: a SEND of the whole page from
-  the bridge's all-ones block. A failed client's pages go out as duds (rubric M4's upper pole).
-- When the owner word changes (the holder let go, or the event loop let go a holder gone), the send thread ends the
-  holding: every presented unit goes, the unready as duds; then the stream is free. The receive thread turns the
-  stream to spares (the spare page, the second page of the port's link block), which receive the peer's SENDs to the
-  ended holding and its keepalive. It keeps one spare posted a lane, and posts the next as each lands; the peer's SENDs wait in the
-  hardware's credit meanwhile (TN3205). A whole window of spares would put the next holding's first index a window
-  past the peer's SENDs, and the peer would send that window as duds (megabytes, about a millisecond) before the
-  holding's first byte (the operator, 2026-10-21: "get rid of megabyte / millisecond
-  pointless overheads").
+**A holding's end.**
+- The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`), and the event loop does so for
+  a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The send thread ends the
+  holding at once: nothing more of it is posted, its entries taken and not posted are dropped, and the receive thread
+  is told. Once that thread has stopped too, the holding's words are made new and the owner word goes to 0: the stream
+  is free. Nothing in the bridge closes a holding with its peer: no message, no totals, no clock.
+- Units an ended holding posted and its peer did not match stay posted. The next communicator's filler takes them up:
+  its duds fill the peer's receives, its spare receives the peer's SENDs.
 - Receives already posted into the ended holding's pages cannot be taken back: `touching` names its owner until all of
-  them have landed (the peer's SENDs to it, or its duds as the next holding aligns), and a gone owner's rows are
+  them have landed (the peer's SENDs to it, or the next communicator's filler duds), and a gone owner's rows are
   released only once no stream touches them. A live holder that lets go before its landing entries landed keeps those
   pages out of use itself.
+- The cost: a link's controller that has been quiet is slow on its next frame (6.2 us against 1.9 on the Mac mini,
+  metal-microbench docs/measurement.md, 2026-10-17). Without the keepalive that is paid at a holding's first SEND and
+  after every quiet stretch inside a holding (a layer's 40-50 us between crossings); on a plan with lane 0 the
+  keepalive had kept the controller warm inside a holding too.
+- A dead holder's rows stay out of use while a receive posted into them is outstanding (`touching`): until the next
+  communicator on that stream presents its filler. Until then they count against the region.
 
 **A process a port** (version 130, its streams new at every pairing from 131; the operator's choice of 10-20).
 - The bridge is a parent and a child a port. The parent, its heartbeat's child, holds the region, the map and records, the
@@ -454,8 +490,8 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
 - Streams across children. A port's streams' lists, time rings and words are the parent's, leased once. A new child
-  opens every stream new as its link connects: owner word 0, its counts 0 (`ready`, `sent`, `landed`, its lists'), free
-  and live. A holding of the lost pairing
+  opens every stream new as its link connects: owner word 0, its counts 0 (`ready`, `sent`, `landed`, its lists',
+  `posts`), and live. A holding of the lost pairing
   ended with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator
   reads its holding gone (mesh-call.h `mesh_stream_held`: live, its owner word its client's, its identity the one it
   took) and starts no group on it (libnccl-mesh `comm_failure`, `ncclCommGetAsyncError`). No holder keeps a stream from

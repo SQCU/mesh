@@ -185,10 +185,10 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
 }
 /* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first
-   seen (its exit retires every slot it holds, the event loop's EVFILT_PROC), one already gone retired at once, and on a
-   liveness turn any client whose process exited retired; the rows of a retired client released (no DMA lands in a
-   client's rows: a stream's rings are the bridge's), a stream a gone client held let go (mesh-link.c streams_let_go:
-   its port's send thread ends the holding), and the streams held told (busy_tell) */
+   seen (its exit, the event loop's EVFILT_PROC, retires every slot it holds: a holder's death is that event, not a
+   poll), one already gone retired at once; the rows of a retired client released but those a stream's receives may
+   still land in (mesh-dataflow.c mesh_retired_release, mesh_touched), a stream a gone client held let go (mesh-link.c
+   streams_let_go: its port's send thread ends the holding), and the streams held told (busy_tell) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0;
@@ -196,7 +196,6 @@ void clients_turn(int liveness){
     struct mesh_client *client=(struct mesh_client *)((char *)M+M->client_off)+s;
     uint64_t owner=atomic_load(&client->owner);
     if(owner && (pid_t)(uint32_t)owner==self)continue;
-    if(liveness && owner && !(owner&MESH_RETIRING) && mesh_gone((pid_t)(uint32_t)owner)){mesh_retire(M,owner);owner=atomic_load(&client->owner);}
     if(owner && owner!=owners[s] && !(owner&MESH_RETIRING)){
       struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
       if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH){mesh_retire(M,owner);owner=atomic_load(&client->owner);}

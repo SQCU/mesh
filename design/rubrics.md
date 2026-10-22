@@ -47,7 +47,7 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 - Reads which nodes its bridge reaches.
 - Meets its peers through NCCL's bootstrap, on its own sockets.
 - Compiles the same schedule as every member.
-- Holds a stream toward each member's node, the one whose identity is free at both ends, by taking its owner word while the stream is free, and tells its peers where its units start.
+- Holds a stream toward each member's node, the one whose identity is free at both ends, by taking its owner word from 0, and hands its peers the stream's pages posted (the bridge's facts), from which each end presents its filler first.
 - Lays positions as runs of stream units and declares them.
 - Writes units and their ready words, and reads landed words and the in ring.
 - Combines on the host or the GPU, and paces itself by NCCL's head credit.
@@ -58,7 +58,7 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 - No verbs call: libnccl-mesh and libmesh do not link the RDMA library, and mesh.h does not include its header.
 - A request to the bridge, or a way to wake its threads.
 - Another client's rows or slot.
-- The words only the bridge writes: landed, `live`, `free`, `next`.
+- The words only the bridge writes: landed, `live`, `posts`.
 - Its library's internals: libnccl-mesh exports NCCL's functions, their pnccl twins and its `ncclMesh` extensions, and
   nothing else.
 

@@ -408,11 +408,17 @@ static void mesh_reclaim(struct hdr *m){
   }
 }
 
-/* design/transport.md section 14: whether a stream's receives still land in pages of `owner` (struct mesh_stream
-   `touching`) */
+/* design/transport.md section 14: whether a stream's receives may still land in pages of `owner`: a stream it holds,
+   or whose holding by it the bridge is still ending (its owner word, MESH_STREAM_GIVEN aside), or one whose receives
+   into its pages have not all landed (struct mesh_stream `touching`).  The owner word is read first: it goes to 0 only
+   once the receive thread has stopped the holding, which follows its store of `touching`, so a holding the receive
+   thread begins serving as its holder gives or dies is never missed */
 static int mesh_touched(struct hdr *m,uint64_t owner){
-  for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++)
-    if(atomic_load_explicit(&mesh_stream_at(m,s)->touching,memory_order_acquire)==owner)return 1;
+  for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
+    const struct mesh_stream *x=mesh_stream_at(m,s);
+    if((atomic_load_explicit(&x->owner,memory_order_acquire)&~MESH_STREAM_GIVEN)==owner ||
+       atomic_load_explicit(&x->touching,memory_order_acquire)==owner)return 1;
+  }
   return 0;
 }
 /* design/algorithm-sources.md#programtensor; design/transport.md section 14: a retired client's closed rows released,

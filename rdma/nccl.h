@@ -27,10 +27,16 @@
    ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (a holding's
    lists and counts are its holder's alone; a link has several, so communicators sharing a node pair hold their own;
    EBUSY where none toward a member's node is free at both ends); the second gather, bounded by mesh.h MESH_PLATFORM_NS
-   a send or receive, carries each rank's holding's status and its holdings' start words (the bridge's, opaque), which
-   each rank tells its own holding (mesh_stream_tell).  A communicator names nodes and its own pages, never a link,
-   port, lane, frame, queue pair or SEND size.  An init fails as a value where two ranks are on one node (its holdings
-   and the start words they exchange are kept a node), a stream is held by another process or gone, or a peer is
+   a send or receive, carries each rank's holding's status and the pages each of its streams has posted each way, as
+   it took it (the bridge's facts: nothing is posted on a stream but its holders' pages, so they are constants until
+   the holder presents), from which each end presents first the filler that brings both ends to the same page of the
+   stream: dud SENDs toward receives the peer posted and no SEND filled, receives into the bridge's spare page for
+   SENDs the peer posted and no receive took (ncclMeshFiller reports the counts); it then waits, on data, until the
+   receives its streams had posted have landed, so no page of the process an earlier holding's receive names is used
+   again before (that wait ends at the landing, a revoke or the link's loss).  A communicator names nodes and its
+   own pages, never a link, port, lane, frame, queue pair or SEND size.  An init fails as a value where two ranks are
+   on one node (its holdings and the pages posted they exchange are kept a node), a stream is held by another process,
+   or its bridge is still ending its last holding, or gone, or a peer is
    silent past that bound; what it held is then let go and the next init reads the streams as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the
    next (one that sends nothing holds the root's read until the phase ends).  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
@@ -43,8 +49,8 @@
    (a rank among those excluded gets NULL, as NCCL_SPLIT_NOCOLOR's).  Inside a group, Split and Grow run their own
    collectives at once, the group's calls set aside, and Shrink makes none.  ncclCommGrow meets at the bootstrap of the
    id that ncclCommGetUniqueId gives comm's root, which the root broadcasts on comm.  ncclCommRevoke is NCCL's: comm's
-   operations in flight are revoked and its resources kept (its streams stay held; the bytes its groups presented and
-   published nothing for go at once as duds, so its peers' groups fail rather than wait), an init still
+   operations in flight are revoked and its resources kept (its streams stay held, and its bridge sends what its
+   groups published and nothing else), an init still
    running (a non-blocking one's) ends as a value, its host-path groups return at their next look and its GPU waits end
    at their landings or their bounds (no kernel stops at the revoke), every later group on comm is refused (ncclInvalidUsage), ncclCommFinalize after
    it returns ncclSuccess (it flushes nothing), and ncclCommGetAsyncError reads ncclSuccess once it is done; its
@@ -73,10 +79,10 @@
    list (the pages its bytes lie in) or its landing list (the pages they land in), each direction one list both ends
    lay alike (mesh-plan.h mesh_group_lay: a rank's k-th send to a peer is the peer's k-th receive from it, the
    point-to-point calls in call order, as NCCL pairs them), presented to the bridge as the group is issued (mesh-call.h
-   mesh_stream_present; the holding's deadline none while its member lives: no dud reaches the peer of a producer still
-   at work), so a member that fails, is revoked or ends mid-group is replaced at its peers by duds, at once, all ones:
-   what is placed where a send must happen and its producer is gone, which its peers land as bytes like any other and
-   never read as a signal (design/transport.md section 10, design/rubrics.md M4: nothing else changes).  A publication
+   mesh_stream_present).  A member that fails, is revoked or ends mid-group sends nothing more: no clock of the
+   library or the bridge decides anything, its peers' host-path waits end at a revoke or the link's loss and their GPU
+   waits at their bounds, and the next communicator on its streams presents the filler its end left
+   (design/transport.md section 14).  A publication
    raises the holding's `ready` past the entry; a landing is awaited on its `landed`; a write over bytes a SEND reads
    waits for its `sent`.  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
    payload is checked, so calls that do not pair (unequal counts, different collectives or orders) are the caller's
@@ -104,8 +110,8 @@
    it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
    once, with every group before it; a host-path group fails while its own communicator's groups are issued and not
    complete, and waits only for its own communicator's GPU work, at most MESH_PLATFORM_NS.  A host-path group spins on
-   its landings, never parks, and holds no lock another communicator's groups take; it fails as a value where nothing
-   lands and nothing can be published for MESH_PLATFORM_NS.  A group whose entries lie on one channel completes as
+   its landings, never parks, and holds no lock another communicator's groups take; its waits end at their counts, a
+   count's ~0, its holding's end or a revoke, and no clock ends them.  A group whose entries lie on one channel completes as
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
    (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
    reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
@@ -182,7 +188,7 @@
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
    communicator whose group failed fails its later groups, made again on the map current then (ncclCommDestroy, then an
    init).  No timer of the library's declares a peer lost: a landing that reads ~0 (the bridge's, at its link's loss or
-   its stop), a GPU wait's bound or a host wait's MESH_PLATFORM_NS ends the group, and a group on a lost link or whose
+   its stop), a GPU wait's bound, its holding's end or a revoke ends the group, and a group on a lost link or whose
    peer's entry never landed fails with ncclRemoteError; a failure the Metal path finds after its group returned is
    the communicator's asynchronous error (ncclCommGetAsyncError) and the next group's result.  A
    Metal-path group that returns a failure signals nothing the library waits for: the commands it left in the stream's
@@ -1092,6 +1098,14 @@ ncclResult_t ncclMeshPosition(ncclComm_t comm, uint64_t* group);
    call, no request, no file.  ncclSuccess (ncclInvalidArgument where comm is NULL, or issued or ended is NULL and count
    is not 0). */
 ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint64_t* issued, uint64_t* ended);
+/* The filler comm's init presented toward rank `peer` before its first group (design/transport.md section 14): *duds,
+   the dud SENDs (pages of all ones) toward the peer's receives that its stream's earlier holdings posted and no SEND
+   filled, and *spares, the receives into its bridge's spare page of the SENDs those holdings posted toward this node
+   and no receive took; both 0 where every earlier holding on the stream ended with both ends' lists alike, or where
+   comm has no channel toward peer.  A statistic, read from the counts the two bridges reported as each end took the
+   stream: nothing in the library branches on it.  ncclInvalidArgument where comm, duds or spares is NULL or peer is not
+   a rank of comm. */
+ncclResult_t ncclMeshFiller(ncclComm_t comm, int peer, uint64_t* duds, uint64_t* spares);
 /* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
    in it: the library's, made at the lease's first such call and released by ncclMemFree, the buffer a tensor allocator
    or the caller's kernels bind over the lease (mesh 3981ca80^'s).  A Metal-path collective's buffers are leases, which

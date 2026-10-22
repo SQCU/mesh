@@ -75,13 +75,20 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
     and `ncclCommInitRankConfig` the same with its config.
 - Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
   nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
-  it holds rows (the stream's owner word taken while the stream is free). The second carries each rank's holding's
-  status and its holdings' start words (the bridge's, opaque), which each rank tells its own holding
-  (`mesh_stream_tell`). A communicator names nodes and its own pages alone. An init fails as a value where two ranks
-  are on one node (`ncclInvalidUsage`: its holdings and the start words they exchange are kept a node, so two ranks of
-  one node would share one slot), where no stream
-  toward a member's node is free at both ends (EBUSY: a link has up to four, each held by one communicator) or the
-  link is gone (ENOLINK)
+  it holds rows (the stream's owner word taken from 0 by one compare-and-swap). The second carries each rank's
+  holding's status and the pages each of its streams has posted each way as it took it: the bridge's facts
+  (`mesh.h` `struct mesh_stream` `posts`), constant while no holder presents, since nothing is posted on a stream but
+  its holders' pages. Each end then presents first the filler that brings both ends to the same page of the stream:
+  dud SENDs toward receives its peer posted and no SEND filled, and receives into the bridge's spare page for SENDs its
+  peer posted and no receive took (`ncclMeshFiller` reports the counts; design/transport.md section 14). The init
+  then waits, on data, until the receives its streams had posted when it took them have landed (an earlier holding's
+  receives into this process's pages, which the peer's filler duds fill), so no page of the process is used again
+  before; that wait ends at the landing, a revoke or the link's loss. A communicator names nodes and its own pages
+  alone. An init fails as a value where two ranks are on one node
+  (`ncclInvalidUsage`: its holdings and the pages posted they exchange are kept a node, so two ranks of one node would
+  share one slot), where no stream toward a member's node is free at both ends (EBUSY: a link has up to four, each
+  held by one communicator, and one whose last holding its bridge is still ending is not free) or the link is gone
+  (ENOLINK)
   (`ncclSystemError`), or where its bootstrap's phase passes its bound (`ncclRemoteError`, ETIMEDOUT); what it held is
   let go, and the next init reads the streams as they then stand.
 - A connection to the root whose report fails (its peer closed it), or names no rank still to meet (a rank out of
@@ -528,18 +535,19 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
 
 ## Failures
 
-The library's one clock that fails a group is the platform deadline of a host-path wait. A host-path group's waits
-end at their counts, at a count's `~0` (its bridge's, where the link is lost or the bridge stops), at its holding's
-end (its stream no longer the communicator's own: a pairing lost and made again, a bridge restarted), at a revoke, or
-once `MESH_PLATFORM_NS` passes with no entry finished on any of its channels (`ncclRemoteError`; each entry consumed,
-published, landed whole or sent sets the deadline again, and a page landing alone does not: a dud page drip, a
-keepalive into the holding of a producer that is gone, keeps no call waiting); a GPU wait at its count, at a count's `~0` or at its bound ([Bounded
-waits](#bounded-waits)). A group presents its entries to its bridge as it is issued, its
-holding's deadline none while its member lives. A member that fails, is revoked or ends has the pages it presented and
-did not publish sent at once as duds: all ones, placed where a send must happen and its producer is gone (design/transport.md section 10). Its peers
-land them as bytes like any other. A dud is no signal and fails nothing at the consumer; the failure is the
-producer's own (design/rubrics.md M4: "nothing else changes"; M10). A peer that has not yet issued its group is waited
-for, a host-path group's wait on it until a landing, a revoke or the platform deadline. The failure is returned:
+No clock ends a group's wait on its peers' data (the operator, 2026-10-22: "we don't introduce race conditions or use
+timing anywhere ... because using timing is always slower than not using timing"). Two bounds of `MESH_PLATFORM_NS`
+remain on a group's own path, neither a wait on a peer's data: a group whose entries do not find room in its bridge's
+lists (`MESH_STREAM_ENTRIES` presented and not taken) fails unpresented, and a host-path group waits that long for its
+own communicator's GPU work. A host-path group's waits end at their counts, at a count's `~0` (its bridge's, where the link is lost or the bridge stops), at its holding's end (its stream
+no longer the communicator's own: a pairing lost and made again, a bridge restarted), or at a revoke; a GPU wait at its
+count, at a count's `~0` or at its bound ([Bounded waits](#bounded-waits)), the operator's "poll bound for the node"
+(10-21). A group presents its entries to its bridge as it is issued. A member that fails, is revoked or ends sends
+nothing more: its bridge posts no page of a holding that ended, and nothing of its own. A peer that has not yet issued
+its group, or that failed, is waited for, a host-path group's wait on it until a landing or a revoke: the caller decides
+whether to revoke and run again (design/pages-and-functions.md: "The caller decides whether to rerun the complete
+feed-forward NFE"). The next communicator on the streams presents the filler the ended holdings left
+(design/transport.md section 14). The failure is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
@@ -547,16 +555,16 @@ for, a host-path group's wait on it until a landing, a revoke or the platform de
   before any group runs on it,
 
 and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
-fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, which they
-land and complete with: the failure stays with the member that failed. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
+fails the group (nothing resumes it), and a member whose group failed sends nothing more: the failure stays with the
+member that failed, and its peers' groups end at their caller's revoke. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
 init) on the map as it is then (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of
 returning if the link topo changed mid function execution"). A communicator keeps the map its init made, so a change
 that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator
 (metal-microbench makes each call's communicators at the call's start). A rank that departed is left out with
 `ncclCommShrink` ([Communicators](#communicators)), and a joining one taken in with `ncclCommGetUniqueId`
 and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding streams of its own as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
-alone: its operations in flight are revoked and its resources kept (its streams stay held, and the pages its groups
-presented and did not publish go at once as duds, so its peers' groups fail rather than wait); an init
+alone: its operations in flight are revoked and its resources kept (its streams stay held, and its bridge sends what
+its groups published and nothing else); an init
 still running (a non-blocking one's) ends as a value, its host-path groups return at their next look, its GPU waits
 end at their landings or their bounds, or once another wait on the communicator's failure words has failed (no kernel
 stops at the revoke; a wait that reaches its bound after it names it as its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its

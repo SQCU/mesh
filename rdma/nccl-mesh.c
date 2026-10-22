@@ -1,8 +1,9 @@
 /* libnccl-mesh (nccl.h): NCCL's API on the streams of its node's bridge (design/transport.md section 14).  The process
    is one client of its node's bridge (an attach, whose slot owns the process's leases of the region, ncclMemAlloc, and
    which holds the bridge's stream toward each node its communicators reach, as it holds rows: mesh-call.h
-   mesh_stream_take).  A communicator's init holds the stream toward each other member's node and hands each holding's
-   start words to its peer through NCCL's bootstrap; its channels are those holdings, one communicator a stream
+   mesh_stream_take).  A communicator's init holds the stream toward each other member's node, hands each holding's
+   pages posted so far (the bridge's facts) to its peer through NCCL's bootstrap, and presents first the filler the
+   two ends' facts call for; its channels are those holdings, one communicator a stream
    (comm_hold), and its map the nodes its members' bridges reach.  It names nodes and its own pages, never a link, port,
    lane, frame, queue pair or SEND size.  A group's calls are planned by the one collective planner, each step one entry
    of its holding's send list (the pages it reads) or landing list (the pages it lands in), presented to the bridge,
@@ -240,7 +241,9 @@ struct entry { uint64_t below; struct mesh_program program; };
    offset of `ready`, a landing's gate).  Its entries, each list in its own order: `sends` and `lands` laid by the
    groups scheduled, `out` and `in` their pages (the value each count reaches once they are whole), `published` send
    entries published, `consumed` landing entries consumed, `waited` landing entries awaited by the GPU work encoded,
-   and `sent_waited` the most of `sent` a wait encoded has awaited */
+   and `sent_waited` the most of `sent` a wait encoded has awaited; the filler its init presented first (`filled`: the
+   dud SENDs of its send list's first entry, and the receives into the bridge's spare page of its landing list's,
+   comm_join), a statistic the communicator reports (ncclMeshFiller) and reads nowhere else */
 struct channel {
   int peer;
   uint32_t node, stream;
@@ -249,7 +252,7 @@ struct channel {
   void *buffer;
   size_t ready, sent, landed;
   uint64_t ready_at, sends, lands, published, consumed, waited;
-  mesh_pages out, in, sent_waited;
+  mesh_pages out, in, sent_waited, filled[2];
 };
 /* a lease of a communicator's pool (struct ncclComm `spares`): its address and bytes, and the group holding it (its
    number + 1: group_numbered; 0 free) */
@@ -748,8 +751,7 @@ static ncclResult_t comm_refused(int status, const char *name) {
 }
 
 /* a communicator no longer a user of its attach's holds (`held`); a hold none uses let go (mesh-call.h mesh_stream_give:
-   the bridge sends every byte presented on it, those no group published as duds, and frees the stream); under
-   attach_lock */
+   the bridge posts nothing more of the holding and frees the stream); under attach_lock */
 static void comm_let_go(struct ncclComm *comm) {
   if (!comm->binding) return;
   comm->binding = 0;
@@ -780,13 +782,14 @@ static void comm_leave(struct ncclComm *comm) {
 /* a rank's report at a communicator's init (NCCL's bootstrap, below): its status (0, else why it cannot go on, so every
    rank fails alike), its bridge's node and the nodes that bridge reaches with each one's bandwidth, and the streams free
    to take, each one's node and identity (`frees` of them: reach_read, mesh-call.h mesh_streams_free), and, at the
-   second gather, the start words of its holding of the stream toward each of them (start[k], the bridge's, opaque:
-   mesh-call.h mesh_stream_take, which the peer tells its own holding, comm_join) */
+   second gather, the pages its stream toward each of them has posted over its pairing as this rank took it
+   (posted[k][0] its SENDs, posted[k][1] its receives: the bridge's facts, mesh.h struct mesh_stream `posts`, constant
+   until this rank presents, from which the peer presents its filler, comm_join) */
 struct report {
   int32_t rank, status;
   uint32_t node, count, frees, padding;
   struct mesh_reach reach[MESH_STREAMS];
-  uint64_t start[MESH_STREAMS][MESH_STREAM_START], free_wire[MESH_STREAMS];
+  uint64_t posted[MESH_STREAMS][2], free_wire[MESH_STREAMS];
   uint32_t free_node[MESH_STREAMS];
 };
 
@@ -1085,10 +1088,10 @@ static uint64_t wire_between(const struct report *mine, const struct report *the
   return least;
 }
 
-/* 0, or EINVAL where two of the `n` gathered reports are of one node: a communicator keeps its holdings and the start
-   words its ranks exchange a node (start[k] by the node's index in a report's reach, comm_hold_toward by node), so two
-   ranks of one node would share one slot, a peer telling one rank's holding the other's start words and laying both
-   ranks' bytes on one stream; and no stream joins two ranks of one node (a bridge reaches other nodes) */
+/* 0, or EINVAL where two of the `n` gathered reports are of one node: a communicator keeps its holdings and the pages
+   posted its ranks exchange a node (posted[k] by the node's index in a report's reach, comm_hold_toward by node), so
+   two ranks of one node would share one slot, a peer filling toward one rank's stream by the other's counts and laying
+   both ranks' bytes on one stream; and no stream joins two ranks of one node (a bridge reaches other nodes) */
 static int comm_apart(const struct report *reports, uint32_t n) {
   for (uint32_t a = 0; a < n; a++)
     for (uint32_t b = a + 1; b < n; b++)
@@ -1096,11 +1099,11 @@ static int comm_apart(const struct report *reports, uint32_t n) {
   return 0;
 }
 static ncclResult_t apart_fail(const char *name) {
-  return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings and their start words are kept a node)", name);
+  return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings and their pages posted are kept a node)", name);
 }
 static ncclResult_t hold_fail(const char *name, int rank, int status) {
   return fail(ncclSystemError, "communicator %s: rank %d could not hold its streams at its bridge (%s: EBUSY, a stream another communicator holds, "
-              "or whose last holder's bytes are still going; ENOLINK, no stream toward a member's node); a communicator made next "
+              "or whose last holding its bridge is still ending; ENOLINK, no stream toward a member's node); a communicator made next "
               "reads the streams as they then stand", name, rank, strerror(status));
 }
 
@@ -1126,8 +1129,8 @@ static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node) {
 /* design/transport.md section 14: a stream toward each member's node this rank is joined to (joined) held for comm, the
    one of the identity both ranks' reports give free (wire_between: the two ends of a communicator hold the two ends of
    one stream), taken from the bridge as rows are (mesh-call.h mesh_stream_take), comm its one user (`held`, comm_let_go
-   lets it go), its start words into this rank's report (`start`, by the index of the node in its reach), which the
-   second gather hands its peer.  One communicator a stream: a holding's lists and counts are one order each, its
+   lets it go), its pages posted each way as taken into this rank's report (`posted`, by the index of the node in its
+   reach), which the second gather hands its peer.  One communicator a stream: a holding's lists and counts are one order each, its
    holder's alone; a link has several streams, so communicators that share a node pair each hold their own.  0, or
    EBUSY (no stream toward a member's node free at both ends), ENOSPC (no hold vacant), or mesh_stream_take's refusal;
    what it took is let go with comm (comm_leave) */
@@ -1143,12 +1146,11 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     const uint64_t wire = wire_between(reports + me, reports + q);
     struct hold *h = NULL;
     uint32_t stream = 0;
-    uint64_t start[MESH_STREAM_START];
     for (uint32_t s = 0; !h && s < MESH_STREAMS; s++)
       if (!a->holds[s].users) h = a->holds + s;
     if (!wire) status = EBUSY;
     else if (!h) status = ENOSPC;
-    else if (!(status = mesh_stream_take(&a->context, wire, &stream, start))) {
+    else if (!(status = mesh_stream_take(&a->context, wire, &stream))) {
       for (uint32_t j = 0; j < MESH_STREAMS; j++)
         if (a->holds + j != h && a->holds[j].users && a->holds[j].stream == stream) a->holds[j].wire = 0;
       *h = (struct hold){.node = node, .stream = stream, .wire = wire};
@@ -1156,8 +1158,8 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     if (status) break;
     const uint32_t index = (uint32_t)(h - a->holds);
     h->users++; comm->held |= UINT32_C(1) << index; comm->binding = 1;
-    status = mesh_stream_view(&a->context, stream, &h->view);
-    memcpy(mine->start[k], start, sizeof start);
+    if (!(status = mesh_stream_view(&a->context, stream, &h->view)))
+      for (int way = 0; way < 2; way++) mine->posted[k][way] = atomic_load_explicit(&h->view.posts[way].posted, memory_order_acquire);
   }
   pthread_mutex_unlock(&attach_lock);
   return status;
@@ -1178,12 +1180,52 @@ static int channel_buffer(struct channel *ch, const struct hdr *m) {
 }
 
 static int lease_buffer(const void *ptr, void **buffer, size_t *offset);
+/* design/transport.md section 14: a channel's filler, presented before its first group's entries.  Its stream's two
+   ends post in its sequence's order, and nothing is posted on a stream but its holders' pages, so each end's pages
+   posted (`own`, the peer's `theirs`: [0] SENDs, [1] receives, as each end took the stream) are constants, and a
+   unit's place is a function of the two ends' entries alone.  Where the peer has posted more receives than this end
+   SENDs, this end presents as many dud SENDs first; where the peer has posted more SENDs than this end receives, as
+   many receives into the bridge's spare page: one entry of MESH_NO_ROW each, its own list's first, which neither its
+   groups publish nor consume (`published`, `consumed` and `waited` past it).  After it both ends' next pages are the
+   same page of the stream, by arithmetic on the facts the two bridges report (the operator, 2026-10-22: the bridge may
+   tell consumers facts, "an error channel return kind of statistic, not a data dependent control flow for a collective
+   verb or a bridge transaction"); the counts are kept as that statistic (`filled`, ncclMeshFiller).  0, or
+   mesh_stream_present's refusal */
+static int comm_fill(struct mesh_ctx *context, struct channel *ch, const uint64_t own[2], const uint64_t theirs[2]) {
+  const mesh_pages sends = pages_from_word(own[0]), receives = pages_from_word(own[1]);
+  const mesh_pages their_sends = pages_from_word(theirs[0]), their_receives = pages_from_word(theirs[1]), none = {0};
+  const mesh_pages duds = pages_below(sends, their_receives) ? pages_sub(their_receives, sends) : none;
+  const mesh_pages spares = pages_below(receives, their_sends) ? pages_sub(their_sends, receives) : none;
+  int status = 0;
+  ch->filled[0] = duds; ch->filled[1] = spares;
+  if (pages_to_word(duds) && !(status = mesh_stream_present(context, ch->stream, 0, (struct mesh_entry){MESH_NO_ROW, pages_to_word(duds), 0, 0}))) {
+    ch->sends = ch->published = 1;
+    ch->out = duds;
+  }
+  if (!status && pages_to_word(spares) && !(status = mesh_stream_present(context, ch->stream, 1, (struct mesh_entry){MESH_NO_ROW, pages_to_word(spares), 0, 0}))) {
+    ch->lands = ch->consumed = ch->waited = 1;
+    ch->in = spares;
+  }
+  return status;
+}
+/* design/transport.md section 14: a channel's stream's receives posted before this communicator took it (`posted`, as
+   its report has them), landed before its first group.  A receive an earlier holding posted and no SEND filled lands
+   in that holder's page once the peer's filler duds come (comm_fill, at the peer's init), so this process's pages are
+   used again only after it; the wait ends at that landing (the stream's receives landed, `posts`), at a revoke
+   (ECANCELED) or at the holding's end (ENOLINK: its link lost and paired again), never at a clock.  Every look spins */
+static int comm_drain(struct ncclComm *comm, const struct channel *ch, uint64_t posted) {
+  while (pages_below(pages_from_word(atomic_load_explicit(&ch->view.posts[1].done, memory_order_acquire)), pages_from_word(posted))) {
+    if (revoked(comm)) return ECANCELED;
+    if (!mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire)) return ENOLINK;
+  }
+  return 0;
+}
 /* design/transport.md section 14: the communicator's channels on the holdings its init took (comm_hold), from every
    rank's report as the second gather gave them: toward each rank it is joined to, a channel on the holding toward the
-   rank's node, told the peer's start words (mesh-call.h mesh_stream_tell: the bridge then serves the holding) and its
-   deadline none (UINT64_MAX: a live holder's bytes are never duds); its map (map_of), its page (its bridge's region's),
-   its gate (a lease of one page), its failure words and its record of its groups' entries (`timed`).  0, or ENOMEM; the
-   tell's refusal; EPROTO where no hold is of a joined node */
+   rank's node, its filler presented first (comm_fill), and once every channel's is, each one's earlier receives landed
+   (comm_drain); its map (map_of), its page (its bridge's region's), its gate (a lease of one page), its failure words
+   and its record of its groups' entries (`timed`).  0, or ENOMEM; the filler's refusal (mesh-call.h
+   mesh_stream_present); comm_drain's; EPROTO where no hold is of a joined node */
 static int comm_join(struct ncclComm *comm, const struct report *reports) {
   struct mesh_ctx *context = &comm->attach->context;
   const struct hdr *m = context->M;
@@ -1204,14 +1246,14 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
     struct hold *h = comm_hold_toward(comm, reports[q].node);
     pthread_mutex_unlock(&attach_lock);
     if (!h) { status = EPROTO; break; }
-    const uint32_t j = reach_of(reports + q, node);
-    if ((status = mesh_stream_tell(context, h->stream, reports[q].start[j])) || (status = mesh_stream_deadline(context, h->stream, UINT64_MAX)))
-      break;
     comm->toward[q] = (int)comm->count;
     struct channel *ch = comm->channels + comm->count++;
     *ch = (struct channel){.peer = (int)q, .node = reports[q].node, .stream = h->stream, .wire = &h->wire, .view = h->view};
     if (!(status = channel_buffer(ch, m))) atomic_store(&comm->attach->wrapped, 1);
+    if (!status) status = comm_fill(context, ch, reports[me].posted[reach_of(reports + me, reports[q].node)], reports[q].posted[reach_of(reports + q, node)]);
   }
+  for (uint32_t h = 0; !status && h < comm->count; h++)
+    status = comm_drain(comm, comm->channels + h, reports[me].posted[reach_of(reports + me, comm->channels[h].node)][1]);
   if (!status && !(comm->timed = calloc((size_t)GROUP_TIMES * comm->count + 1, sizeof *comm->timed))) status = ENOMEM;
   return status;
 }
@@ -1220,9 +1262,9 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
    (ncclMeshCommInitRank, blocking or not): its bootstrap's sockets opened (bootstrap_open), then made attached
    (comm_attach) and the nodes its bridge reaches read (reach_read), then every rank's report gathered (two ranks on one
    node fail every rank alike: comm_apart, a bound); each rank holding the stream toward each member's node it is
-   joined to (comm_hold); a second gather carrying each rank's holding's status and its holdings' start words
-   (NCCL's own init exchanges each peer's connection through its bootstrap: ncclTransportP2pSetup), which each rank tells its own
-   holdings as it makes its channels (comm_join).  A rank that cannot go on, a stream held by another (EBUSY) or gone (ENOLINK), a peer silent past
+   joined to (comm_hold); a second gather carrying each rank's holding's status and its holdings' pages posted
+   (NCCL's own init exchanges each peer's connection through its bootstrap: ncclTransportP2pSetup), from which each rank
+   presents its filler as it makes its channels (comm_join, comm_fill).  A rank that cannot go on, a stream held by another (EBUSY) or gone (ENOLINK), a peer silent past
    its phase's end (bootstrap_open, gather: MESH_PLATFORM_NS) or a revoke fails the init as a value, made holding nothing of its
    bridge's (comm_leave) and its sockets closed; the next init reads the streams as they then stand.  Made, it keeps its
    sockets (closed at comm_free) */
@@ -1330,11 +1372,9 @@ static ncclResult_t comm_failure(struct ncclComm *comm);
    revoke at their next look (bootstrap_open), fails as a value; and its failure words' stop (word [6]) set, which a
    GPU wait of its that reaches its bound records as its cause (METAL_REVOKED); no kernel stops at it, so its GPU work
    already encoded runs as encoded, each wait ending at its landing or its bound; under its guard */
-static void nil_send(struct ncclComm *comm);
 static void comm_stop(struct ncclComm *comm) {
   pthread_mutex_lock(&comm->guard);
   __atomic_store_n(&comm->revoked, 1, __ATOMIC_SEQ_CST);
-  nil_send(comm);
   for (int r = 0; comm->peers && r < comm->nranks; r++)
     if (comm->peers[r] >= 0) shutdown(comm->peers[r], SHUT_RDWR);
   if (comm->words) atomic_store_explicit(comm->words + 6, 1, memory_order_release);
@@ -1342,8 +1382,8 @@ static void comm_stop(struct ncclComm *comm) {
 }
 
 /* ncclCommRevoke, NCCL's: comm's operations in flight revoked and its resources kept (comm_stop alone: its streams stay
-   held, the bytes its groups presented and published nothing for going at once as duds, nil_send, so its peers'
-   landings land rather than wait), a host-path group of its returning at its next look and each of its GPU waits ending at its landing or its bound, every later
+   held, and its bridge sends what its groups published and nothing else), a host-path group of its returning at its
+   next look and each of its GPU waits ending at its landing or its bound, every later
    group refused (ncclInvalidUsage), ncclCommGetAsyncError reading ncclSuccess once the revoke is done; from any thread,
    under comm's own lock alone, never one a group holds while it waits.  ncclCommDestroy then gives its streams back
    (comm_free) and frees it */
@@ -1357,7 +1397,7 @@ ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
 /* ncclCommDestroy: comm stopped (comm_stop), its init's thread joined (a non-blocking init's, which the stop ends), its
    host-path groups returned (each at its next look) and the GPU work the library committed for it awaited, at most
    MESH_PLATFORM_NS (each of its waits ends at its landing or its bound), its groups in flight lost; then its streams
-   given back (the bridge sends what was presented on them), its pool's leases returned, and comm freed.  Work encoded in a caller's encoder is the
+   given back (its bridge posts nothing more of their holdings), its pool's leases returned, and comm freed.  Work encoded in a caller's encoder is the
    caller's to finish first (NCCL's: no communicator is destroyed under its own operations in flight): a kernel of it
    still queued would write the stream given back (rdma/NCCL.md "Failures") */
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
@@ -1590,8 +1630,8 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
    holds a SEND until its receive is posted (design/transport.md).  A write over bytes an earlier SEND reads waits
    for `sent` (the same channel's combine, meeting; the group's end, retire); a Metal-path landing entry is gated on its
    group's start in the stream (gate_of), so no receive lands in pages the stream's earlier work still reads.  A group
-   presents its entries before it publishes any (schedule), so a member that fails mid-group is replaced at its peers by
-   duds. ---------- */
+   presents its entries before it publishes any (schedule); a member that fails mid-group sends nothing more, and the
+   next communicator on its streams presents the filler that leaves (comm_fill). ---------- */
 
 static double now_s(void) {
   struct timespec now;
@@ -1618,7 +1658,6 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
     va_end(arguments);
     comm->failure.id = keep();
     comm->failed = result;
-    nil_send(comm);
   }
   return comm_told(comm);
 }
@@ -2123,23 +2162,6 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
   }
 }
 
-/* design/transport.md section 14: a communicator that can no longer supply what it presented (its group failed, or it
-   was revoked or destroyed): each holding's deadline now, so the bridge sends at once, as duds, every presented byte no
-   group published, and its peers' landings land rather than wait (a dud is what is placed where a send must happen and
-   its producer is gone: not a value any consumer reads as a signal, design/rubrics.md M4); a live holder's deadline is
-   none (UINT64_MAX, comm_join), so no dud reaches a peer of a producer still at work (design/rubrics.md C5,
-   Quantities, the operator 10-20).  Only a holding still the communicator's own is written (mesh_stream_held): a
-   stream opened new since (a restart or a pairing made again) may be another communicator's, which this one must not
-   touch (design/rubrics.md M4); a give likewise (comm_let_go) */
-static void nil_send(struct ncclComm *comm) {
-  if (!comm->attach || !comm->channels) return;
-  const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  for (uint32_t h = 0; h < comm->count; h++) {
-    const struct channel *ch = comm->channels + h;
-    if (mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire)) mesh_stream_deadline(&comm->attach->context, ch->stream, now);
-  }
-}
-
 /* the group's schedule (schedule_group), its bytes placed and checked (place_group), its landings gated where the group
    is the Metal path's (`program` not NULL: gate_of, *gate whether its first dispatch stores the communicator's gate),
    presented (present_group) and counted (commit_group); a failure before any entry is presented is the call's alone,
@@ -2171,40 +2193,28 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
    its step's receive before it consumed), a combine's landing combined into its buffer (its first one, a call reading
    its send buffer in place, writing send op landed), a COPY's consumed once landed (it landed in place); a combine
    into bytes an earlier SEND of its call on its channel reads waits for `sent` past that SEND (struct message `sent`);
-   then every send entry's bytes sent, so the caller may write its send buffer again.  A count that reads the link's
-   loss on a channel with work left fails the group, and so does a revoke, and so does the end of a holding with work
-   left (its stream no longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge
-   restarted), at its next look: a peer's process gone or its communicator revoked ends its holdings, whose duds land
-   here; and so does MESH_PLATFORM_NS with no entry finished on any of its channels (design/rubrics.md C5's upper pole:
-   "within a call, the only thing that ends a wait is the data or the platform deadline", and M3, every wait ends in
-   finite time; the operator: "why do you want to get rid of a timeout that fixes infinite hangs anyways?"), the
-   deadline moved on only by an entry that finishes (one consumed or published, a landing entry landed whole, and in
-   the second loop pages sent), never by a page landing alone: a keepalive SEND of a peer whose holding ended lands
-   in this holding's next receive as a dud page (design/HETEROGENEOUS-LINKS.md section 10), and such a drip moved the
-   deadline a page at a time, so a P-page landing waited about P seconds; a peer that computes for long and keeps
-   landing whole entries is waited for.  Every look spins: nothing parks */
-static ncclResult_t quiet_fail(const struct ncclComm *comm, const char *what) {
-  return fail(ncclRemoteError, "communicator %s: %s on any channel for %.0f s, the platform's deadline (design/rubrics.md C5)",
-              comm->name, what, (double)MESH_PLATFORM_NS / 1e9);
-}
+   then every send entry's bytes sent, so the caller may write its send buffer again.  Every wait ends at an event: its
+   count, a count's ~0 (the link lost, the bridge stopped), the end of its holding with work left (its stream no
+   longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge restarted), or a revoke,
+   each read at every look.  No clock ends it (the operator, 2026-10-22: "we don't introduce race conditions or use
+   timing anywhere ... because using timing is always slower than not using timing"): a peer that has not yet
+   presented is waited for, and the caller decides whether to revoke and run again
+   (design/pages-and-functions.md).  Every look spins: nothing parks */
 static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel *ch) {
   return fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended with the group's entries there not done (the "
               "stream is no longer its own: its link lost and paired again, or its bridge restarted; design/transport.md section 14)",
               comm->name, ch->node);
 }
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
-  uint64_t until = 0, before = UINT64_MAX, came_before = UINT64_MAX;
   const mesh_pages none = {0};
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
     int open = 0;
-    uint64_t moved = 0, came = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
       struct schedule *p = plans + h;
       const uint64_t lands = p->first[1] + p->ins;
-      const mesh_pages now = count_of(ch->view.landed);
-      if (ch->consumed < lands && pages_lost(now))
+      if (ch->consumed < lands && pages_lost(count_of(ch->view.landed)))
         return fail(ncclRemoteError, "the link to node %u was lost at landing entry %llu (its holding's counts ~0)", ch->node,
                     (unsigned long long)ch->consumed);
       if ((ch->consumed < lands || ch->published < p->first[0] + p->outs) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
@@ -2235,21 +2245,12 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
         ch->published++;
       }
       open |= ch->published < p->first[0] + p->outs || ch->consumed < lands;
-      moved += ch->published + ch->consumed;
-      uint64_t whole = ch->consumed;
-      while (whole < lands && !pages_below(now, p->in[whole - p->first[1]].end)) whole++;
-      came += whole;
     }
     if (!open) break;
-    const uint64_t at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (moved != before || came != came_before) { before = moved; came_before = came; until = at + MESH_PLATFORM_NS; }
-    else if (at >= until) return quiet_fail(comm, "no entry landed whole, consumed or published");
   }
-  before = UINT64_MAX;
   for (int all = 0; !all;) {
     if (revoked(comm)) return revoked_fail(comm);
     all = 1;
-    uint64_t moved = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       const struct channel *ch = comm->channels + h;
       const mesh_pages sent = plans[h].outs ? count_of(ch->view.sent) : none;
@@ -2257,12 +2258,7 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
       if (plans[h].outs && pages_below(sent, ch->out) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
         return held_fail(comm, ch);
       all &= !plans[h].outs || !pages_below(sent, ch->out);
-      moved += pages_to_word(sent);
     }
-    if (all) break;
-    const uint64_t at = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    if (moved != before) { before = moved; until = at + MESH_PLATFORM_NS; }
-    else if (at >= until) return quiet_fail(comm, "no SEND completed");
   }
   for (uint32_t h = 0; h < comm->count; h++) {
     comm->channels[h].waited = comm->channels[h].consumed;
@@ -3377,6 +3373,14 @@ ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint
   return ncclSuccess;
 }
 
+ncclResult_t ncclMeshFiller(ncclComm_t comm, int peer, uint64_t *duds, uint64_t *spares) {
+  if (!comm || !duds || !spares || peer < 0 || peer >= comm->nranks) return fail(ncclInvalidArgument, "ncclMeshFiller's arguments");
+  const struct channel *ch = comm->toward[peer] < 0 ? NULL : comm->channels + comm->toward[peer];
+  *duds = ch ? pages_to_word(ch->filled[0]) : 0;
+  *spares = ch ? pages_to_word(ch->filled[1]) : 0;
+  return ncclSuccess;
+}
+
 /* whether a rank's moves of a program are at most one SEND and one receive toward each peer, each of every part of what
    it moves: the whole operand in one piece, or (`gather`, an all-gather's) one segment's every part, its own sent and
    another's received; a rank that forwards (a chain's middle, a broadcast tree's inner rank: it sends a part it also
@@ -3828,8 +3832,8 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
 /* ncclCommSplit: every rank's (color, key) and its report (reach_read; none for NCCL_SPLIT_NOCOLOR) all-gathered on comm
    (in a lease, each rank's row from a page), the ranks of this color ordered by key, then rank (two of a color on one
    node refused alike: comm_apart), each rank's streams toward its color's nodes held (comm_hold: the streams its parent holds are not free, EBUSY where none is), and a
-   second all-gather on comm carrying each rank's holding's status and its holdings' start words, which each
-   rank tells its own as the child's channels are made (comm_join): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
+   second all-gather on comm carrying each rank's holding's status and its holdings' pages posted, from which each
+   rank presents its filler as the child's channels are made (comm_join, comm_fill): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
    two gathers.  A failure at any rank of a color fails that color's split on each of its ranks as a value, what it held
    let go (comm_free).  Inside a group, its all-gathers run at once, the group's calls set aside until it returns
    (aside) */
@@ -3837,7 +3841,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   const int n = comm->nranks;
   const uint32_t split = comm->splits++;
   struct row { int64_t color, key; struct report report; } mine = {color, key, {.rank = comm->rank}}, *every = calloc((size_t)n, sizeof *every);
-  struct binding { int32_t status, padding; uint64_t start[MESH_STREAMS][MESH_STREAM_START]; } bound = {0, 0, {{0}}}, *binds = calloc((size_t)n, sizeof *binds);
+  struct binding { int32_t status, padding; uint64_t posted[MESH_STREAMS][2]; } bound = {0, 0, {{0}}}, *binds = calloc((size_t)n, sizeof *binds);
   int *ranks = calloc((size_t)n, sizeof *ranks), count = 0;
   struct report *reports = calloc((size_t)n, sizeof *reports);
   /* the all-gathers' rows: a lease, each rank's row from a page of it (an entry starts on a page), in place */
@@ -3863,7 +3867,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   if (!result && count > 1) {
     struct report *own = reports + (*newcomm)->rank;
     bound.status = comm_hold(*newcomm, reports, own);
-    memcpy(bound.start, own->start, sizeof bound.start);
+    memcpy(bound.posted, own->posted, sizeof bound.posted);
   }
   else if (result && count) bound.status = ECANCELED;
   if (gathered) {
@@ -3874,7 +3878,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   }
   for (int i = 0; !result && i < count; i++)
     if (binds[ranks[i]].status) result = hold_fail((*newcomm)->name, i, binds[ranks[i]].status);
-  for (int i = 0; !result && i < count; i++) memcpy(reports[i].start, binds[ranks[i]].start, sizeof reports[i].start);
+  for (int i = 0; !result && i < count; i++) memcpy(reports[i].posted, binds[ranks[i]].posted, sizeof reports[i].posted);
   int status = 0;
   if (!result && count > 1 && (status = comm_join(*newcomm, reports)))
     result = fail(ncclSystemError, "communicator %s: its channels on the streams it held: %s", (*newcomm)->name, strerror(status));
