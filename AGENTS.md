@@ -53,18 +53,16 @@ of machine. Removing them made the codebase smaller, flatter, and easier to audi
 That is the expected result of deleting a rejection filter, and it is the reason to
 look for the next one.
 
-## The one guard that is allowed
+## A check before an irreversible write
 
-A check may **prevent a demotion**. It may never **be** one.
+This section comes from commit facb7cf9 (2026-08-27). No operator quote stands behind it, and it used to be titled
+"The one guard that is allowed", which no operator said. It describes one script: `enable-autologin.sh` checks an
+auto-login password with `dscl -authonly` before it writes `/etc/kcpassword`. A wrong password written there leaves a
+node that boots to a login it cannot pass.
 
-The test: if the check passes, does the node end up more accessible than if the code
-had run blindly? If yes, keep it. If its only effect is to withhold, delete it.
-
-Legitimate: validating an auto-login password with `dscl -authonly` before writing
-`/etc/kcpassword`. An unvalidated write produces a node that boots to a login it
-cannot pass — strictly less accessible.
-
-Illegitimate: refusing to configure auto-login because the node might travel.
+A check whose only effect is to withhold is a rejection filter, and those go (the operator, 2026-10-21: "rejection
+filter removal. categorical. all of them without sanction in rubric"). The rubric (design/rubrics.md) is where a check
+is sanctioned; this file sanctions none.
 
 ## Never index version control by commit
 
