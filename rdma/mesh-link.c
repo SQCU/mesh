@@ -12,7 +12,9 @@ static int64_t stop_reason;
 static struct mesh_ctx bridge={.fd=-1};
 static dispatch_queue_t finder;
 static _Atomic int stalled,found,arrived_elsewhere;
-static _Atomic uint32_t terminated,terminations,arrived;
+static _Atomic uint32_t terminated,terminations,arrived,faulted;
+static uintptr_t provider[2];
+static _Atomic uintptr_t retried;
 static _Atomic uint64_t exit_at;
 static char devices[MESH_PORTS][32],self_path[PATH_MAX],model[MESH_MODEL_BYTES];
 static struct known known[MESH_KNOWN];
@@ -290,8 +292,11 @@ static void *port_progress(void *argument){
   struct port *port=((struct progress *)argument)->port;
   const int way=((struct progress *)argument)->way;
   pthread_setname_np(way?"mesh.rdma.receive":"mesh.rdma.send");
+  stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
+  if(alternate.ss_sp)sigaltstack(&alternate,NULL);
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
     if(atomic_load_explicit(&port->link.served,memory_order_acquire)){port_pass(port,way);continue;}
+    if(atomic_load_explicit(&faulted,memory_order_relaxed))wake();
     os_sync_wait_on_address_with_timeout(&port->link.served,0,sizeof port->link.served,OS_SYNC_WAIT_ON_ADDRESS_NONE,
                                          OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
   }
@@ -1040,7 +1045,7 @@ static void addresses_heard(void){
     }
   }
 }
-/* design/transport.md sections 7 and 8; section 15, "Terminations" */
+/* design/transport.md sections 7 and 8; section 15, "Terminations and faults" */
 static struct port *peer_port(io_service_t peer){
   CFTypeRef rid=IORegistryEntryCreateCFProperty(peer,CFSTR("RID"),kCFAllocatorDefault,0);
   io_iterator_t interfaces=IO_OBJECT_NULL;
@@ -1191,6 +1196,7 @@ static void child_heard(struct port *port){
       if(!heard.result && job==CHILD_MAKE){memcpy(l->qpn,heard.qpn,sizeof l->qpn);l->psn=heard.psn;l->share=(struct frames){heard.share};}
       atomic_store_explicit(&port->done,1,memory_order_release);
     }
+    else if(heard.kind==CHILD_FAULTED){port_log(port,"a fault of its provider's doorbell absorbed: its link lost\n");port->open=0;port_lost(port,ENETDOWN);}
     else if(heard.kind==CHILD_BROKEN && current && l->state==LINK_UP){
       if(heard.result)atomic_store_explicit(&l->lost,heard.result,memory_order_relaxed);
       atomic_fetch_or(&l->broken,heard.broken);
@@ -1275,6 +1281,17 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
 }
 
 /* design/transport.md section 14, "A process a port"; section 15, "The children" */
+static void fault_heard(int number,siginfo_t *info,void *context){
+  const uintptr_t pc=__darwin_arm_thread_state64_get_pc(((ucontext_t *)context)->uc_mcontext->__ss),page=trunc_page((uintptr_t)info->si_addr);
+  if(pc>=provider[0] && pc<provider[1]){
+    void *got=mmap((void *)page,vm_page_size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
+    if(got!=MAP_FAILED && got!=(void *)page)munmap(got,vm_page_size);
+    if(got==(void *)page || atomic_load(&faulted)){port_halt(ports,&faulted);return;}
+    if(atomic_exchange(&retried,page)!=page)return;
+  }
+  struct sigaction fallback={.sa_handler=SIG_DFL};
+  sigaction(number,&fallback,NULL);
+}
 static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   port_halt(port,NULL);
   atomic_store_explicit(&port->closing,1,memory_order_release);
@@ -1295,7 +1312,7 @@ static void child_command(struct port *port,const struct child_message *heard){
   if(job==CHILD_HALT){port_halt(port,NULL);child_halted=0;return;}
   if(job==CHILD_END)child_leave(port,1);
   if(job<CHILD_OPEN || job>CHILD_CONNECT)return;
-  int refused=port->job?EBUSY:job!=CHILD_OPEN && (child_halted || atomic_load(&terminated))?ECANCELED:0;
+  int refused=port->job?EBUSY:job!=CHILD_OPEN && (child_halted || atomic_load(&terminated) || atomic_load(&faulted))?ECANCELED:0;
   if(!refused && job==CHILD_CONNECT){
     memcpy(l->peer,heard->peer,sizeof l->peer);port->heard.lid=heard->lid;memcpy(port->heard.gid,heard->gid,16);
     port->peer=heard->node;
@@ -1339,6 +1356,15 @@ static int child_main(int argc,char **argv){
   signal(SIGPIPE,SIG_IGN);
   const unsigned long index=argc>=6?strtoul(argv[4],NULL,10):MESH_PORTS;
   if(index>=MESH_PORTS){say("child of %s: port %lu is past the bridge's, or its command line short: it ends\n",argc>3?argv[3]:"?",index);return 1;}
+  for(uint32_t i=0;i<_dyld_image_count();i++){
+    const char *image=_dyld_get_image_name(i);
+    unsigned long size=0;
+    const uint8_t *text=image && strstr(image,"/libthunderboltrdma.")?getsegmentdata((const void *)_dyld_get_image_header(i),"__TEXT",&size):NULL;
+    if(text){provider[0]=(uintptr_t)text;provider[1]=(uintptr_t)text+size;}
+  }
+  struct sigaction faults={.sa_sigaction=fault_heard,.sa_flags=SA_SIGINFO|SA_ONSTACK};
+  sigemptyset(&faults.sa_mask);
+  if(sigaction(SIGSEGV,&faults,NULL) || sigaction(SIGBUS,&faults,NULL))die("child faults");
   const int fd=shm_open(MESH_NAME,O_RDWR);
   struct stat shape;
   if(fd<0 || fstat(fd,&shape))die("child: its bridge's region");
@@ -1354,6 +1380,7 @@ static int child_main(int argc,char **argv){
   __atomic_store_n(&port_count,1,__ATOMIC_SEQ_CST);
   if((events=kqueue())<0 || watch(0,EVFILT_USER,EV_ADD|EV_CLEAR,0,UINT64_MAX) || watch(3,EVFILT_READ,EV_ADD,0,UINT64_MAX))die("child events");
   terminations_watch(0);
+  int told=0;
   for(;;){
     now=clock_ns();
     child_jobs(port);
@@ -1361,6 +1388,7 @@ static int child_main(int argc,char **argv){
     if(broken)message_send(3,(struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken,
                                                    .result=atomic_exchange_explicit(&port->link.lost,0,memory_order_relaxed)});
     if(atomic_exchange(&terminated,0))child_halted=1;
+    if(!told && atomic_load(&faulted)){told=1;message_send(3,(struct child_message){.kind=CHILD_FAULTED});}
     struct kevent64_s ready[4];
     struct timespec tick={(time_t)(MESH_PAUSE_NS/1000000000u),(long)(MESH_PAUSE_NS%1000000000u)};
     const int count=kevent64(events,NULL,0,ready,4,0,&tick);

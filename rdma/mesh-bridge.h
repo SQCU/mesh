@@ -12,6 +12,7 @@
 #include <ifaddrs.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <net/if.h>
@@ -124,10 +125,10 @@ struct link {
 };
 _Static_assert(offsetof(struct link,stopped)%MESH_LINE==0,"the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port"; section 15, "The children" */
-#define MESH_CHILD_VERSION 4u
+#define MESH_CHILD_VERSION 5u
 #define LINK_STREAMS_ENDED ECONNABORTED
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
-       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN };
+       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED };
 struct child_message {
   uint32_t kind,pairing;
   int32_t result,refused;

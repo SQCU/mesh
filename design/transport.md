@@ -260,9 +260,10 @@ No warning at all: the hardware is gone before any event says so. This is tenabl
   the next calls plan over the remaining cables (two thirds, five sixths).
 - **A post racing the loss.** A post issued in the instant the hardware went may touch a doorbell mapping that no
   longer exists. Recorded only with a queue pair being destroyed by our own call at the same time (October 16-17);
-  with no destroy calls it has not been seen. Where it happens, the post's thread faults, the port's child ends with it,
-  and the parent loses the port as it loses any child that ended unbidden, as the cable is. The child's exit then falls
-  inside the termination's window: the exposure section 5 names.
+  with no destroy calls it has not been seen. Where it happens, the port's child absorbs the post's fault and lives on
+  (section 15, "Terminations and faults"), and the parent loses the port as at its link's going off, as the cable is.
+  The child is asked to end only once the port's quiet window and the termination's have passed, so its exit, and the
+  kernel's release of its device's objects with it, does not fall inside the termination (section 5).
 
 Positions in flight on the crushed link are transport errors (section 11). Nothing needs administration.
 
@@ -548,7 +549,8 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the region,
   makes and connects the link's queue pairs (its plan's, from the queue pairs both ends' devices hold, each end's told
   in its HELLO: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)) and runs the port's progress threads. The parent asks it to open,
-  make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes. Queue pairs exist only in a child, and a child is the bridge
+  make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes and absorbed
+  faults. Queue pairs exist only in a child, and a child is the bridge
   ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
 - A link's queue pairs are made once and connected once in a child's life. None is moved to another state,
   destroyed or forgotten; the kernel releases them at the child's exit. A link takes every queue pair its device holds
@@ -556,7 +558,7 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   cannot exist beside the old ones, and the old child's exit is their one release (RESET panicked the M5 on 10-19;
   destroy is ruled out by its history, M3).
 - A link lost once its child was asked for lanes (the control socket's end, a failed completion, no stream of the link
-  live, the link going off, a termination, a protocol error, the child's own end): its
+  live, the link going off, a termination, an absorbed fault, a protocol error, the child's own end): its
   streams cancelled (landed
   words ~0), its lanes served no more (the child halted, before the control socket closes), the port closed. Once the
   port's quiet window and any termination's have ended and no call of a port is out past MESH_PLATFORM_NS (mesh-link.c
@@ -724,10 +726,12 @@ plan); connect (the peer's lanes, address and node); halt; end. From the child: 
 plus CHILD_OPENED − CHILD_OPEN, naming the pairing it was asked for (opened: its address, bandwidth and the queue pairs
 its device holds for a link; made: its address, each lane's queue pair number, the first sequence number and the
 lanes' share; connected); the lanes found failed (`CHILD_BROKEN`, its `result` LINK_STREAMS_ENDED where no stream is
-live). After a termination it hears itself, the child answers make and connect with ECANCELED until the parent's
-halt; the parent hears the same termination from IOKit itself.
-- `MESH_CHILD_VERSION` 4 has no `CHILD_FAULTED` or `CHILD_TERMINATED`, its open names its pairing and its connect no
-  bandwidth (the child keeps its own from its open). Version 3 had no `CHILD_UNGUARDED`. Version 118's guard (542d0bc7) held a port's progress threads
+live); a fault absorbed (`CHILD_FAULTED`). After a termination it hears itself, the child answers make and connect
+with ECANCELED until the parent's halt (the parent hears the same termination from IOKit itself), and after a fault
+for the rest of its life.
+- `MESH_CHILD_VERSION` 5 tells an absorbed fault (`CHILD_FAULTED`, after `CHILD_BROKEN`) and has no `CHILD_TERMINATED`;
+  its open names its pairing and its connect no bandwidth (the child keeps its own from its open). Version 4 (ad55cbf4)
+  had no `CHILD_FAULTED`. Version 3 had no `CHILD_UNGUARDED`. Version 118's guard (542d0bc7) held a port's progress threads
   around every verbs change, for stripe flows whose queue pairs were made and destroyed while other queue pairs of the
   same device were posted on. Since version 130 a child makes and connects its queue pairs before it starts its
   progress threads, and no later open, make or connect reaches a child whose threads run: the parent marks the lanes
@@ -781,15 +785,26 @@ stream in its plan, their bandwidths summed, so two nodes several cables join ar
 the node's boot time and its available memory (`kern.memorystatus_level` percent of `hw.memsize`), sampled at most
 MESH_HEALTH_NS (10 s) apart.
 
-**Terminations.** IOKit tells a Thunderbolt RDMA peer interface's termination in its first phase
+**Terminations and faults.** IOKit tells a Thunderbolt RDMA peer interface's termination in its first phase
 (kIOTerminatedNotification), on a queue of its own: every window is held MESH_PLATFORM_NS from then before any property
 is read, and the port whose interface carries the same "RID" (bin/mesh-fabric-init.sh) is halted. The parent also hears
 arrivals (kIOFirstMatchNotification) and opens a port whose device's far end has come, which the en interface's link
-can precede. A fault in a child's post ends that child, and its parent reaps it as any child that ended unbidden
-(section 14). The handler that absorbed the provider's doorbell fault in place (2f4c511f, "the bridge does not exit")
-was deleted (2026-10-22): the fault is recorded only with a destroy call in flight (section 8), and none is made. A
-child that faults during a peer interface's termination now exits inside that termination's window, the exposure
-section 5 names, where the handler had kept it alive until its windows ended.
+can precede. The provider's doorbell fault (2f4c511f, "the bridge does not exit"), in a port's child: at its start the
+child reads the provider's text range (the __TEXT segment of the loaded libthunderboltrdma) and installs `fault_heard`
+for SIGSEGV and SIGBUS, which runs on a progress thread's alternate stack, or on a job's own. A fault whose pc lies in
+that text maps one anonymous page at the faulting page by hint, not MAP_FIXED, so nothing mapped is replaced. Where it
+got that page, or the port is already halted for a fault (its other thread got the page first), the store lands
+there, no doorbell rings, and the port is halted; a fault at a page it could not map with no fault before is made once
+more (`retried`, b11621e6), since the other thread may be mapping it. Any other fault restores the default action, and
+the process ends. The handler calls only mmap, munmap and sigaction. In a child every thread that enters the
+provider's text is its one port's, so no thread table is kept, and an open's job is covered as a make's and a
+connect's are. The child tells its parent once (`CHILD_FAULTED`), which loses the port as at its link's going off
+(open 0, ENETDOWN), and refuses every make and connect for the rest of its life, so a fault during an open still ends
+the child at the port's next make. Its reason is
+rubrics.md "Failure across interfaces" 4 ("inducing a system halt or kernel halt causes the entire node to fail. that
+is not permittable for obvious reasons"): a child that ended at the fault would exit, and its kernel release its
+device's objects, inside the termination's window (section 5), where the handler keeps it alive until its parent asks
+it to end once that window has passed. ad55cbf4 deleted it, and it was restored the same day.
 
 **The region** (`region_open`, `region_adopt`). A region is adopted where its magic, layout version and geometry (page
 size, block, rows, stream and client counts, every offset and its length) are this bridge's. Adopting it sets every
