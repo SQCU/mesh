@@ -186,7 +186,7 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
 
 ## The crossing
 
-A crossing is one send to each peer and one landing from each (torch-mesh's `fused.all_reduce(send, landings,
+A crossing is one send to each peer and one landing from each (torch-mesh's `fused.exchange(send, landings,
 polls)`): the step's part of z goes from the rank's send tensor to each of the n - 1 other ranks, and each peer's part
 lands in its own slot of the rank's landing tensor; the next step's kernel reads the n - 1 slots and adds them to its
 own part. This is the one-shot all-reduce (each rank reads every peer's whole part and sums locally: one crossing a step,
@@ -266,6 +266,38 @@ block's time. It then gives the time a step of the later blocks takes, and the r
 block's end is the moment the host's wait on its mark returns, and that mark comes one step into the next block, so the
 later steps counted are the ones after it: the host issues ahead of the GPU, so it is already waiting when the block
 ends, and no wait is added to take the time. The whole-run times include the first block; these do not.
+
+## The LSTM
+
+The same template runs an L-layer LSTM (examples/lstm.metal, lstm.py, lstm-service.py). Each step, layer l takes
+u = [v, h_l(t - 1)], where v is the step's input for layer 0 and h_{l-1}(t) above it. It makes the gates z = u W_l + b_l,
+split as (i, f, g, o), then c_l = σ(f) c_l + σ(i) tanh(g) and h_l = σ(o) tanh(c_l). The output is the top layer's h.
+
+**Wavefront.** At tick s, layer l works on step s - l. Everything it reads was made at tick s - 1: h_{l-1}(s - l) by
+the layer below and h_l(s - l - 1) by itself. So one crossing a tick carries every layer, a tick depends only on the
+tick before, and the kernel needs no barrier between its workers. An output leaves L ticks after its input.
+
+**Split.** Each rank owns a share of every layer's hidden units: their 4 gate columns of W_l, their bias, and their
+cell state, which never leaves the rank. The shares are configuration (`shares`) and may be ragged. A tick's crossing
+sends the rank's new h slices, every layer's, to each peer, and lands each peer's slices: an all-gather, through the
+same `fused.exchange` the chain sums over. This is Megatron's split of a cell by hidden unit. Splitting by input rows
+instead, with an all-reduce of gate partials, would send about 4n times as many bytes and repeat the cell update on
+every rank.
+
+**Reads in place.** A layer's u is never assembled. Its columns are segments read where they are: the input slot, this
+rank's previous send slot, and each peer's landing slot. They are in rank order, each a whole number of 8-column tiles.
+The matmul's loader (`Segments`) finds a tile's segment and loads each lane's two fragment elements system-coherent
+(the NIC wrote the landings). The weights are tiled once at load, and their gate columns are laid out unit-major, so an
+8-column tile holds two units' (i, f, g, o).
+
+**Epilogue.** A lane holds (i, f) or (g, o) of one unit and row. One `simd_shuffle_xor` pairs them, and the (i, f) lane
+updates c and stores h through `mesh_step_write` into the tick's send slot. A layer that has not started (s < l) stores
+zeros there, its h(-1). Rank 0 writes the top layer's landed h to the output staging ring, as the chain does.
+
+**Configuration.** `input`, `weights`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
+`shares` (one count of hidden units a rank, multiples of 8, their sum the width) and `capabilities`. The weights file
+holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order. Rank 0 slices each rank's
+columns before the communicator exists, and each rank tiles its own.
 
 ## What to read next
 
