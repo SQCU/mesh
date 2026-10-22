@@ -3,8 +3,8 @@ import concurrent.futures, http.server, json, math, os, socketserver, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path[:0] = [os.path.join(ROOT, "bin")]
-import mesh_restart
+sys.path[:0] = [os.path.join(ROOT, "bin"), os.path.join(ROOT, "rdma")]
+import mesh_restart, peers
 STAT = os.path.join(ROOT, "bin", "mesh-stat")
 CONFIGURATION = sys.argv[1] if len(sys.argv) > 1 else None
 try:
@@ -17,8 +17,9 @@ KEEP = int(os.environ.get("MESH_KEEP", "600"))
 ESTIMATE = int(os.environ.get("MESH_ESTIMATE_WINDOW", "60"))
 
 with open(os.path.join(ROOT, "etc", "mesh-capacity.json")) as f: CAPACITY = json.load(f)
-with open(os.environ.get("MESH_NODES", os.path.join(ROOT, "etc", "mesh-nodes.json"))) as f: ROSTER = json.load(f)
-nodes = {name:dict(node) for name, node in ROSTER.get("nodes", {}).items()}
+TABLE = peers.table(os.environ.get("MESH_NODES", os.path.join(ROOT, "etc", "mesh-nodes.json")))
+OWN = peers.host()["node"]
+nodes = {peers.label(number, TABLE):dict(entry, number=number) for number, entry in TABLE.items()}
 hist = {name:[] for name in nodes}
 previous = {}
 stream_sequences = {}
@@ -28,8 +29,8 @@ lock = threading.Lock()
 def output(command):
     return subprocess.run(command, capture_output=True, text=True).stdout.strip()
 
-_self = output(["/usr/sbin/scutil", "--get", "LocalHostName"]) or "self"
-nodes.setdefault(_self, {}).update({"self":True})
+_self = peers.label(OWN, TABLE)
+nodes.setdefault(_self, {"number":OWN}).update({"self":True})
 hist.setdefault(_self, [])
 
 def members():
@@ -37,17 +38,16 @@ def members():
     bridge number and its record, this node's own marked; the roster's other nodes stay its inventory."""
     try: stat = json.loads(output([STAT]).splitlines()[-1])
     except (OSError, ValueError, IndexError) as error: stat = {"up": False, "error": f"{type(error).__name__}: {error}"}
-    held = {record["name"]: record for record in stat.get("nodes") or [] if record.get("name")}
+    held = {record["node"]: record for record in stat.get("nodes") or [] if record.get("node")}
     with lock:
         for name, node in nodes.items():
-            record = held.get(name)
-            node.update({"member": record is not None, "number": (record or {}).get("node"), "record": record})
-        for name, record in held.items():
+            record = held.get(node.get("number"))
+            node.update({"member": record is not None, "record": record})
+        for number, record in held.items():
+            name = peers.label(number, TABLE)
             if name not in nodes:
-                nodes[name] = {"member": True, "number": record.get("node"), "record": record}
+                nodes[name] = {"member": True, "number": number, "record": record}
                 hist.setdefault(name, [])
-            if record.get("node") == stat.get("node") and name != _self:
-                nodes[name]["self"] = True
         nodes[_self]["bridge"] = {key: stat.get(key) for key in ("up", "errno", "error", "node") if key in stat}
 
 def membership(node):

@@ -19,6 +19,39 @@ def node_number(node_id: str) -> int:
         number = (number * 0x01000193 & 0xffffffff) ^ byte
     return number & 0x7fffffff or 1
 
+def host() -> dict:
+    """This machine's identity: its host UUID (IOPlatformUUID, the one gethostuuid gives the bridge), its bridge node
+    number, and its serial number, read from the IORegistry's archive form (AGENTS.md: a node is its hardware)."""
+    import plistlib, subprocess
+    entry = plistlib.loads(subprocess.run(["/usr/sbin/ioreg", "-a", "-rd1", "-c", "IOPlatformExpertDevice"],
+                                          capture_output=True, check=True).stdout)[0]
+    return {"node_id": entry["IOPlatformUUID"], "node": node_number(entry["IOPlatformUUID"]),
+            "serial": entry["IOPlatformSerialNumber"]}
+
+def table(*paths: str) -> dict[int, dict]:
+    """The name table (etc/mesh-nodes.json: entries keyed by host UUID), from the first of `paths` that reads, keyed by
+    bridge node number, each entry with its node_id; {} where none reads. A name is a label for people, resolved from
+    identity, never matched to find a node (AGENTS.md: names are virtual)."""
+    import json
+    for path in paths:
+        try:
+            with open(path) as f:
+                entries = json.load(f).get("nodes") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        found = {}
+        for node_id, entry in entries.items():
+            try:
+                found[node_number(node_id)] = dict(entry, node_id=node_id)
+            except ValueError:
+                continue
+        return found
+    return {}
+
+def label(number, names: dict[int, dict]) -> str:
+    """Node `number`'s name for people: the name table's, else `node <number>`."""
+    return (names.get(number) or {}).get("name") or f"node {number}"
+
 def identity(body: str) -> int | None:
     """The bridge node number a node-info sample's node_id names, None where it names none."""
     try:

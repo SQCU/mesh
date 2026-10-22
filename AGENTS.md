@@ -117,12 +117,13 @@ M5 Ultra Studio came up as `mdots-Mac-Studio`, macOS renamed the first, an hour 
 service, to `mdots-Mac-Studio-2`, and `mdots-Mac-Studio.local`, its beacon and
 `mesh-peers` all pointed at the other machine.
 
-Reliance that predates this rule is debt to remove, not precedent: the beacon's
-instance name (`bin/mesh-beacon.sh`) and the keeper's check of it, `mesh-peers`' self
-test and its merge of bridge records with announcements by name, node-info's `name`,
-self detection in `mesh-top.py`, `viz/serve.py` and `user/mesh-telemetry.py`, the
-bridge map's `name` (`rdma/mesh-link.c`), and the bootstrap's `gethostname()`
-(`rdma/nccl-mesh.c`).
+The name table is `etc/mesh-nodes.json`, entries keyed by host UUID, read through
+`rdma/peers.py` (`host`, `table`, `label`): a node it does not list is `node <number>`.
+The beacon announces the host UUID; `mesh-peers`, node-info, `mesh-top`, the observer
+and telemetry key on the node number and take names from the table. Reliance that
+predates this rule and remains is debt to remove, not precedent: the bridge map's
+`name` (`rdma/mesh-link.c`, which also reaches metal-microbench's `tools/mesh/grid.py`
+name selection), and the bootstrap's `gethostname()` (`rdma/nccl-mesh.c`).
 
 ## Fail toward access
 

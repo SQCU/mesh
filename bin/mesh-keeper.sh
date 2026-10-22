@@ -34,13 +34,6 @@ pgrep -qf "dns-sd -R" || {
   echo "[$(ts)] DRIFT beacon down"
   launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1
   drift=1; }
-_named=$(scutil --get LocalHostName 2>/dev/null)
-_announced=$(ps -o args= -p "$(pgrep -f 'dns-sd -R .*_meshnode\._tcp' | head -1)" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "-R") {print $(i + 1); exit}}')
-[ -z "$_named" ] || [ -z "$_announced" ] || [ "$_named" = "$_announced" ] || [ "$(cat /var/run/mesh-beacon.renamed 2>/dev/null)" = "$_named" ] || {
-  echo "[$(ts)] DRIFT beacon announces $_announced, the node is named $_named"
-  printf '%s\n' "$_named" > /var/run/mesh-beacon.renamed
-  launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1
-  drift=1; }
 [ "$(systemsetup -getusingnetworktime 2>/dev/null | awk '{print $NF}')" = On ] || {
   echo "[$(ts)] DRIFT ntp off"; systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1; }
 _lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')

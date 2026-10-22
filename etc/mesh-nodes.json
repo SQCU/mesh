@@ -1,14 +1,20 @@
 {
-  "schema": 1,
+  "schema": 2,
   "nodes": {
-    "Ms-MacBook-Pro": {
+    "D7377D82-2E96-5084-A5D3-3139FDF3D6CE": {
+      "name": "Ms-MacBook-Pro",
       "model": "Mac17,6",
-      "via": "Ms-MacBook-Pro.local"
+      "serial": "KHQ5KXR9XG"
     },
-    "Ms-Mac-mini": {
+    "06594A7A-3279-5A27-9099-11169DE0D270": {
+      "name": "Ms-Mac-mini",
       "model": "Mac16,11",
-      "via": "Ms-Mac-mini.local",
-      "aliases": ["mesh-mini"]
+      "serial": "C9XKWJYXWP"
+    },
+    "E8F9C574-257D-5425-8501-E5BF6981BEA6": {
+      "name": "m5ult1",
+      "model": "Mac17,15",
+      "serial": "WP6Q97X9Y3"
     }
   }
 }
