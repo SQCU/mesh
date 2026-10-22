@@ -125,15 +125,6 @@ static void port_halt(struct port *port,_Atomic uint32_t *which){
    pass between frames on its keepalive lane while its port's stream is held; 0 where it states none (the idle beat
    alone: link_alive) */
 uint64_t keepalive_ns;
-#ifdef MESH_LOOP_FABRIC
-/* design/transport.md (mesh 800fe6bc^ mesh-flow-loop, on the resident bridge): a loop
-   bridge's configuration's `loop`: its region's name, its node, the loopverbs fabric it shares with the host's other
-   loop bridges (loopverbs.c loop_fabric), and its ports, each a loopverbs device and a cable: the loopback port this
-   end listens on for it and the peer end's, the lower of the two dialing the higher (in place of a link's hello) */
-void loop_fabric(const char *name);
-struct loop_port { char device[32]; uint16_t listen,peer; int fd; };
-static struct { char region[32],fabric[64]; uint32_t node,ports; struct loop_port port[MESH_PORTS]; } loop_config;
-#endif
 
 /* design/transport.md: a port's link pages: lane MESH_LANE_KEEPALIVE's block (its frames' source and sink),
    leased for every port the region has, at the bridge's start beside the map's (link_reserve), else as its link first
@@ -1083,20 +1074,6 @@ static void port_opened(struct port *port){
 static void port_hello(struct port *port){
   if(!port->open || port->control>=0 || port->job || now<port->next)return;
   port->next=now+MESH_PAUSE_NS;
-#ifdef MESH_LOOP_FABRIC
-  /* design/transport.md: the cable's lower end dials the higher's listener on loopback, as a
-     link's lower node dials the higher's on the address it heard; the higher accepts (main, TAG_LOOP) */
-  for(uint32_t k=0;k<loop_config.ports;k++)if(!strcmp(loop_config.port[k].device,port->device.name) && loop_config.port[k].listen<loop_config.port[k].peer){
-    struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons(loop_config.port[k].peer),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
-    port->control=socket(AF_INET6,SOCK_STREAM,0);
-    if(port->control<0 || fcntl(port->control,F_SETFL,O_NONBLOCK) || (connect(port->control,(struct sockaddr *)&to,sizeof to) && errno!=EINPROGRESS)){
-      port_lost(port,errno);return;
-    }
-    port->peer=0;port->connecting=1;
-    port_watch(port,EVFILT_WRITE);
-  }
-  return;
-#endif
   setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_IF,&port->interface,sizeof port->interface);
   struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=everyone,.sin6_scope_id=port->interface};
   struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
@@ -1183,12 +1160,6 @@ static void ports_find(void){
   dispatch_async(finder,^{
     struct ibv_device **list=ibv_get_device_list(NULL);
     uint32_t n=0;
-#ifdef MESH_LOOP_FABRIC
-    /* design/transport.md: the configuration's devices alone, in its order */
-    for(uint32_t k=0;k<loop_config.ports && n<MESH_PORTS;k++)snprintf(devices[n++],sizeof devices[0],"%s",loop_config.port[k].device);
-    if(list)ibv_free_device_list(list);
-    list=NULL;
-#endif
     for(int i=0;list && list[i] && n<MESH_PORTS;i++)if(!strncmp(ibv_get_device_name(list[i]),"rdma_",5))
       snprintf(devices[n++],sizeof devices[0],"%s",ibv_get_device_name(list[i]));
     if(list)ibv_free_device_list(list);
@@ -1251,7 +1222,6 @@ static void network_heard(int stopping){
    a queue of its own: the terminations heard (`terminations`), and the ports whose peer interface is terminating
    (`terminated`, a bit a port index), which the event loop concludes (terminations_turn) */
 static _Atomic uint32_t terminated,terminations;
-#ifndef MESH_LOOP_FABRIC
 /* the exit's window and every found port's held to `until` at least (a port found meanwhile takes `exit_at`'s as it is
    counted: ports_found) */
 static void quiet_all(uint64_t until){
@@ -1319,7 +1289,6 @@ static void terminations_watch(void){
   if(error){say("bridge: Thunderbolt RDMA peer interfaces' terminations not heard (%#x): a link's going off is its first sign\n",(unsigned)error);return;}
   peer_terminated(NULL,iterator);
 }
-#endif
 /* design/transport.md (EXIT-RECLAIM.md P4): the provider's doorbell fault absorbed.  A SIGSEGV or SIGBUS
    whose pc lies in the provider's text (`provider`, read at the start) on a thread that posts on a port's queue
    pairs (struct port `thread`) has one anonymous page mapped at the faulting page by hint, never MAP_FIXED, so nothing
@@ -1621,39 +1590,6 @@ static void *control_watch(void *unused){
 /* design/transport.md: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
    the consumer's document (rdma/bridge_configuration.py): its name and its region in bytes (`region_bytes`), and its `keepalive` in
    nanoseconds where it states one (#keepalive); NULL, or why it is refused */
-#ifdef MESH_LOOP_FABRIC
-/* design/transport.md: a loop bridge's `loop` (a dictionary: `region`, `fabric`, `node` and
-   `ports`, each port a dictionary of `device`, `listen` and `peer`); NULL, or why it is refused */
-static int loop_number(CFDictionaryRef d,CFStringRef key,int64_t most,int64_t *value){
-  CFTypeRef v=CFDictionaryGetValue(d,key);
-  return v && CFGetTypeID(v)==CFNumberGetTypeID() && CFNumberGetValue(v,kCFNumberSInt64Type,value) && *value>0 && *value<=most;
-}
-static int loop_text(CFDictionaryRef d,CFStringRef key,char *out,size_t room){
-  CFTypeRef v=CFDictionaryGetValue(d,key);
-  return v && CFGetTypeID(v)==CFStringGetTypeID() && CFStringGetCString(v,out,(CFIndex)room,kCFStringEncodingUTF8) && out[0];
-}
-static const char *loop_read(CFPropertyListRef list){
-  CFTypeRef l=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("loop")):NULL;
-  if(!l || CFGetTypeID(l)!=CFDictionaryGetTypeID())return "a loop bridge's configuration states its `loop`";
-  int64_t node=0;
-  if(!loop_text(l,CFSTR("region"),loop_config.region,sizeof loop_config.region) || loop_config.region[0]!='/')return "its loop's region, a shared memory name";
-  if(!loop_text(l,CFSTR("fabric"),loop_config.fabric,sizeof loop_config.fabric) || loop_config.fabric[0]!='/')return "its loop's fabric, a shared memory name";
-  if(!loop_number(l,CFSTR("node"),0x7fffffff,&node))return "its loop's node, a positive 31-bit number";
-  loop_config.node=(uint32_t)node;
-  CFTypeRef ports=CFDictionaryGetValue(l,CFSTR("ports"));
-  if(!ports || CFGetTypeID(ports)!=CFArrayGetTypeID() || CFArrayGetCount(ports)>MESH_PORTS)return "its loop's ports, at most MESH_PORTS";
-  loop_config.ports=(uint32_t)CFArrayGetCount(ports);
-  for(uint32_t k=0;k<loop_config.ports;k++){
-    CFTypeRef p=CFArrayGetValueAtIndex(ports,k);
-    int64_t listen=0,peer=0;
-    if(!p || CFGetTypeID(p)!=CFDictionaryGetTypeID() || !loop_text(p,CFSTR("device"),loop_config.port[k].device,sizeof loop_config.port[k].device) ||
-       strncmp(loop_config.port[k].device,"rdma_",5) || !loop_number(p,CFSTR("listen"),65535,&listen) || !loop_number(p,CFSTR("peer"),65535,&peer) ||
-       listen==peer)return "a loop port: its device (rdma_...) and its cable's two ports, apart";
-    loop_config.port[k].listen=(uint16_t)listen;loop_config.port[k].peer=(uint16_t)peer;loop_config.port[k].fd=-1;
-  }
-  return NULL;
-}
-#endif
 static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *region_bytes){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
@@ -1677,9 +1613,6 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
     refused="its region_bytes, a positive number of bytes, is missing";
   else if(alive && (CFGetTypeID(alive)!=CFNumberGetTypeID() || !CFNumberGetValue(alive,kCFNumberSInt64Type,&interval) || interval<=0))
     refused="its keepalive, where stated, is not a positive number of nanoseconds";
-#ifdef MESH_LOOP_FABRIC
-  if(!refused)refused=loop_read(list);
-#endif
   keepalive_ns=refused?0:(uint64_t)interval;
   if(list)CFRelease(list);
   *region_bytes=(uint64_t)value;
@@ -1699,10 +1632,6 @@ static void host_name(char *name){
 static char host_heard[MESH_NAME_BYTES];
 static _Atomic int host_reading,host_read_done;
 static void host_read(void){
-#ifdef MESH_LOOP_FABRIC
-  /* design/transport.md: a loop bridge's name is its configuration's, never the host's */
-  return;
-#endif
   if(atomic_load(&host_read_done) || atomic_exchange(&host_reading,1))return;
   dispatch_async(finder,^{
     char name[MESH_NAME_BYTES]={0};
@@ -1855,9 +1784,6 @@ static int agent_main(char **argv){
     return 1;
   }
   faults_install();
-#ifdef MESH_LOOP_FABRIC
-  loop_fabric(argv[3]);
-#endif
   const int fd=shm_open(argv[2],O_RDWR);
   struct stat shape;
   if(fd<0 || fstat(fd,&shape))die("agent: its bridge's region");
@@ -1878,9 +1804,7 @@ static int agent_main(char **argv){
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("agent events");
   EV_SET64(&event,3,EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("agent events");
-#ifndef MESH_LOOP_FABRIC
   terminations_watch();
-#endif
   for(;;){
     now=clock_ns();
     agent_jobs(port);
@@ -1898,8 +1822,7 @@ static int agent_main(char **argv){
    layout (`geometry`, mesh_layout of this configuration's region) are this bridge's: the same memory, its clients'
    slots, rows and leases standing and the GPU buffers over them valid, its pages registered again by the port agents
    (the same pages: nothing is wired twice, nothing reloaded).  A region a live bridge serves is never read: a second
-   bridge of the node ends at its port's bind, before region_open (the loop build binds any port and has no such
-   bound: its harness, mesh-loop, runs one bridge a region).  A region of another layout, or one a stop released (layout version
+   bridge of the node ends at its port's bind, before region_open.  A region of another layout, or one a stop released (layout version
    0), is made expired (its layout version 0: no client's mesh_open takes it, and each client's next lease or
    communicator returns the expiry, nccl-mesh.c attach_expired) and left named, and this bridge ends with EX_TEMPFAIL:
    its heartbeat unlinks it once no process holds it and opens a bridge again, so no second region is ever made beside
@@ -2009,26 +1932,15 @@ int main(int argc,char **argv){
     signal(stopping[i],SIG_IGN);
   }
   signal(SIGPIPE,SIG_IGN);
-#ifndef MESH_LOOP_FABRIC
   boots_hold(argv[1]);
-#endif
   uuid_t uuid;struct timespec bound={5,0};
   if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
   uint32_t node=0;
   for(int i=0;i<16;i++)node=(node*0x01000193u)^uuid[i];
   node=(node&0x7fffffffu)?node&0x7fffffffu:1;
-  /* design/transport.md: a loop bridge's node and region its configuration's; its links are
-     dialed on its cables' own listeners, so its listener and hello socket take any port */
-#ifdef MESH_LOOP_FABRIC
-  node=loop_config.node;
-  const char *region=loop_config.region;
-  const uint16_t service=0;
-  loop_fabric(loop_config.fabric);
-  agent_fabric=loop_config.fabric;
-#else
+  /* design/transport.md: the node's region and its hello port, the mesh's */
   const char *region=MESH_NAME;
   const uint16_t service=(uint16_t)atoi(MESH_PORT);
-#endif
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/transport.md */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
@@ -2040,9 +1952,6 @@ int main(int argc,char **argv){
      bridge binds any port, so its harness alone keeps one bridge a region */
   int on=1;
   struct sockaddr_in6 any={.sin6_len=sizeof any,.sin6_family=AF_INET6,.sin6_port=htons(service),.sin6_addr=IN6ADDR_ANY_INIT};
-#ifdef MESH_LOOP_FABRIC
-  any.sin6_addr=in6addr_loopback;
-#endif
   listener=socket(AF_INET6,SOCK_STREAM,0);hello=socket(AF_INET6,SOCK_DGRAM,0);network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
   struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
   unsigned loop=0;
@@ -2062,9 +1971,6 @@ int main(int argc,char **argv){
   close(fd);
   bridge.M=M;
   host_name(host);
-#ifdef MESH_LOOP_FABRIC
-  snprintf(host,sizeof host,"%s",name);
-#endif
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
   /* design/transport.md: the node's memory and hardware model, which its record carries with its region */
   size_t size=sizeof memory;
@@ -2083,19 +1989,6 @@ int main(int argc,char **argv){
   __sync_synchronize();M->magic=MESH_MAGIC;
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
-#ifdef MESH_LOOP_FABRIC
-  /* design/transport.md: each cable's listener on loopback, its events tagged by the port */
-  for(uint32_t k=0;k<loop_config.ports;k++){
-    struct sockaddr_in6 at={.sin6_len=sizeof at,.sin6_family=AF_INET6,.sin6_port=htons(loop_config.port[k].listen),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
-    int fd=socket(AF_INET6,SOCK_STREAM,0);
-    if(fd<0 || setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) || bind(fd,(struct sockaddr *)&at,sizeof at) || listen(fd,SOMAXCONN) ||
-       fcntl(fd,F_SETFL,O_NONBLOCK))die("a loop cable's listener");
-    loop_config.port[k].fd=fd;
-    EV_SET64(&event,(uint64_t)fd,EVFILT_READ,EV_ADD,0,0,TAG_LOOP|k,0,0);
-    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
-  }
-#endif
-#ifndef MESH_LOOP_FABRIC
   /* design/transport.md B9b, B9: the peer interfaces' terminations heard from here on; the devices first read
      once IOKit's registry is quiet (no termination in its course: XNU's waitForState, its deadline MESH_PLATFORM_NS),
      else as they stand at the bound */
@@ -2104,7 +1997,6 @@ int main(int argc,char **argv){
   const kern_return_t busy=IOKitWaitQuiet(kIOMainPortDefault,&quiet);
   if(busy)say("bridge node %u: IOKit's registry not quiet within %.1f s (%#x): its devices read as they stand\n",node,
               (double)MESH_PLATFORM_NS/1e9,(unsigned)busy);
-#endif
   ports_find();
   char alive[192]="";
   if(keepalive_ns)snprintf(alive,sizeof alive,", a keepalive frame every %llu ns on each link's keepalive lane while its port's stream is held "
@@ -2166,21 +2058,6 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)hello)hello_heard();
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard(0);
-#ifdef MESH_LOOP_FABRIC
-      /* design/transport.md: a cable's lower end dialed: its port's control socket, as a link's
-         listener takes the lower node's dial */
-      else if(e->udata!=UINT64_MAX && (e->udata&TAG_LOOP)){
-        const uint32_t k=(uint32_t)(e->udata&0xff);
-        int accepted;
-        while(k<loop_config.ports && (accepted=accept(loop_config.port[k].fd,NULL,NULL))>=0){
-          struct port *port=NULL;
-          for(uint32_t p=0;p<port_count;p++)if(!strcmp(ports[p].device.name,loop_config.port[k].device))port=ports+p;
-          if(!port || port->control>=0 || !port->open){close(accepted);continue;}
-          port->control=accepted;port->peer=0;
-          port_greet(port);
-        }
-      }
-#endif
       else if(e->udata<port_count && (int)e->ident==ports[e->udata].control){
         struct port *port=ports+e->udata;
         if(e->filter==EVFILT_WRITE && port->connecting){

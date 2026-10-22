@@ -223,22 +223,6 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
   }
 }
 
-#ifdef MESH_HOST_EXECUTOR
-/* the host's arithmetic, for nccl-mesh-host.c's executor of the walk's kernels on the CPU (a premultiplier as the
-   kernels take it: a floating type's value as float32 bits, an integer's bits) */
-__attribute__((visibility("hidden"))) void nccl_mesh_combine(int t, int combine, void *dst, const void *src, size_t n) {
-  combine_into((ncclDataType_t)t, combine, dst, src, n);
-}
-__attribute__((visibility("hidden"))) void nccl_mesh_premultiply(int t, void *dst, const void *src, uint64_t bits, size_t n) {
-  unsigned char scalar[8] = {0};
-  if (floating((ncclDataType_t)t)) { uint32_t u = (uint32_t)bits; float f; memcpy(&f, &u, 4); store((ncclDataType_t)t, scalar, f); }
-  else memcpy(scalar, &bits, SIZE[t]);
-  premultiply((ncclDataType_t)t, dst, src, scalar, n);
-}
-__attribute__((visibility("hidden"))) void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t divisor) {
-  truncdiv((ncclDataType_t)t, dst, src, n, divisor);
-}
-#endif
 
 
 /* -- communicators -------------------------------------------------------------------------------- */
@@ -1686,7 +1670,7 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
 }
 
 /* design/transport.md, the checker of a communicator's table once it is compiled (comm_compile): its programs on its
-   wire, read by mesh_program_advise at mesh-advise.c's operands, each below its entry's bound, every warning logged as
+   wire, read by mesh_program_advise, each below its entry's bound, every warning logged as
    NCCL logs one, on a thread of its own over a copy: nothing joins it, and it refuses nothing */
 struct advice { const struct ncclComm *comm; uint32_t entry; struct mesh_operand operand; };
 static void advise_warn(void *argument, const char *line) {

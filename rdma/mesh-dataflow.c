@@ -10,19 +10,7 @@
 #include <errno.h>
 /* design/transport.md */
 static void mesh_reclaim(struct hdr *);
-#ifdef MESH_LOOP_FABRIC
-/* design/transport.md: a loop client's bridge, its region (the host build of libmesh alone:
-   make host); MESH_NAME until bound */
-static char mesh_loop_region[32]=MESH_NAME;
-int mesh_loop_bind(const char *region){
-  if(!region || region[0]!='/' || strlen(region)>=sizeof mesh_loop_region)return EINVAL;
-  strcpy(mesh_loop_region,region);
-  return 0;
-}
-#define MESH_REGION_NAME mesh_loop_region
-#else
 #define MESH_REGION_NAME MESH_NAME
-#endif
 
 /* design/transport.md: the node's region mapped, `writable` (a client's) or read-only (a reader's, which attaches no
    client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for, whether or not a bridge

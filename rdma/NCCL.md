@@ -162,8 +162,7 @@ that layout fail as a value with `*arrived` 2. Reproduction target (metal-microb
 part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
 473-480 us, the host idle 7.4-7.9 ms. A crossing counted call had failed since its restoration (mesh 598cb6cf: a NULL
 program read where the uneven collectives check their segments) and, on a reused region, could read a pair's position
-with no rows as a filler; with both fixed, on the loopback fabric (a line of 4) every rank's counts and rows land,
-host path and walk.
+with no rows as a filler; both are fixed.
 
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, sendcounts, recv, recvcounts, type, comm, stream)` is
 MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
@@ -171,9 +170,7 @@ MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements
 counted all-to-all's call with its counts known to both ends: no count crosses, each pair's elements move as one
 message of their own size, one call a group. NCCL's `ncclAlltoAll` is it with every count `count`, and `ncclGather` and
 `ncclScatter` its rooted forms (every count 0 but toward or from the root), where they were each rank's sends and
-receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). On the loopback fabric (a line of 4) every rank's
-elements land, host path and walk, the all-to-all, every root's gather and scatter and an uneven all-to-all with
-zero counts among its pairs.
+receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`).
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -189,9 +186,7 @@ planner's `partials` lowering of a split-KV attention (metal-microbench docs/pla
 lay their partials as these rows and call `ncclAllReduce`, or `ncclReduce` to the one member reading them, with it.
 Reproduction target: never measured; the planner's pricing of the three-group form it replaces at 3, 4 and 6 members
 of a full mesh was 331, 331 and 226 us against the gather's 534 a chunk's layer (metal-microbench
-output_data/planner-20261015/pass2 engine2-after.json); on the loopback fabric (a line of 4) every rank's merge exact
-to 1e-5 against double arithmetic, host path and walk, 3 to 2,100 rows of 64, one and two positions a message on
-either channel.
+output_data/planner-20261015/pass2 engine2-after.json).
 
 **Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
 list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, compiled ahead of the
@@ -316,7 +311,6 @@ for groups such as the counted all-to-all among three or more ranks.
   conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a consumption
   raises its track's count. A group that can pick nothing for `polls` passes records its blocked items' failures, as
   a wait does, and ends; a track reads no other track's failure.
-- **On the host executor.** The same tracks run in one cooperative loop.
 - **What ranks share.** No rank orders anything another rank must share. Each channel's two ends agree on its
   positions (`mesh_group_lay`) and nothing else, so groups of any calls, including counted all-to-alls of per-rank
   shapes, among any number of ranks, complete wherever their steps' dependencies do.
@@ -527,10 +521,6 @@ True])` its row, `grid.Shift(0, 1)` the neighbours, as mpi4py spells them.
 
 metal-microbench `tools/mesh/numpy_power.py` is a ported power iteration, and `tools/mesh/numpy_summa.py` SUMMA on a
 2-D grid (row and column broadcasts).
-
-## On one host
-
-`tools/nccl_demo.py plans` (metal-microbench): every compiled program on data, over rings and stars of n = 3..8.
 
 ## Not implemented
 

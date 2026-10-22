@@ -48,9 +48,4 @@ int mesh_lease_return(struct mesh_ctx *,uint32_t row);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_retired_release(struct hdr *);
-#ifdef MESH_LOOP_FABRIC
-/* design/transport.md: the loop bridge this process is a client of, before its first attach
-   (the host build of libmesh alone, make host): its region (a loop bridge's configuration's `region`); 0, or EINVAL */
-int mesh_loop_bind(const char *region);
-#endif
 #endif
