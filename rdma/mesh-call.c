@@ -80,7 +80,7 @@ int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct
   struct mesh_stream *x=stream_owned(context,stream,&error);
   if(!x)return error;
   const struct hdr *m=context->M;
-  if(land<0 || land>1 || (entry.row!=MESH_NO_ROW && !mesh_rows_hold(m,mesh_entry_row(&entry),mesh_entry_pages(&entry))))return EINVAL;
+  if(land<0 || land>1 || !mesh_rows_hold(m,mesh_entry_row(&entry),mesh_entry_pages(&entry)))return EINVAL;
   _Atomic uint64_t *presented=land?&x->lands:&x->sends;
   const uint64_t e=atomic_load_explicit(presented,memory_order_relaxed);
   if(e-atomic_load_explicit(&x->taken[land],memory_order_acquire)>=MESH_STREAM_ENTRIES)return EAGAIN;

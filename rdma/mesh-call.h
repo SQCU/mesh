@@ -16,9 +16,11 @@ uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
 uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t room);
 /* design/transport.md section 14: the live stream of identity `wire`, held by this client as its rows are: its owner
    word taken from 0 to the client's own by one compare-and-swap, `*stream` its index: 0, EINVAL, ENOLINK where no live
-   stream has the identity, EBUSY where another client holds it or the bridge is still ending its last holding.  Its
-   `posts` (mesh_stream_view) then read what its earlier holdings left, constant until this holder presents.  Given by
-   its index (MESH_STREAM_GIVEN set in its owner word), after which its bridge posts nothing more of the holding */
+   stream has the identity (one whose last holding ended with units outstanding is not live), EBUSY where another
+   client holds it or the bridge is still ending its last holding.  Its `posts` (mesh_stream_view) then read what its
+   earlier holdings left, constant until this holder presents.  Given by its index (MESH_STREAM_GIVEN set in its owner
+   word), after which its bridge posts nothing more of the holding: a lease the client returns after it is held only
+   by units posted before (mesh-dataflow.c mesh_pinned) */
 int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
 /* design/transport.md section 14, "A process a port": whether stream `stream` is still this client's holding of identity
@@ -26,9 +28,9 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
    stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
 /* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): its two
-   lists (0 the send list, 1 the landing list) and their counts presented and taken, its three page counts, its pages
-   posted and completed each way over its pairing (`posts`), and its time rings; 0, EINVAL, EPERM where the client does
-   not hold it, or ENOLINK */
+   lists (0 the send list, 1 the landing list) and their counts presented and taken, its three page counts, its lanes'
+   units posted and completed each way over its pairing (`posts`), and its time rings; 0, EINVAL, EPERM where the
+   client does not hold it, or ENOLINK */
 struct mesh_stream_view {
   struct mesh_entry *list[2];
   _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed,*posted_at,*landed_at;
@@ -37,7 +39,7 @@ struct mesh_stream_view {
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
 /* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list
    (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL where its rows leave the
-   page table (MESH_NO_ROW names none, the filler's), EAGAIN where the list's slot is not yet taken
+   page table, EAGAIN where the list's slot is not yet taken
    (MESH_STREAM_ENTRIES presented and not taken: present it again), EPERM, or ENOLINK */
 int mesh_stream_present(struct mesh_ctx *,uint32_t stream,int land,struct mesh_entry entry);
 #endif

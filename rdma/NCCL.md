@@ -77,14 +77,11 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
   nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
   it holds rows (the stream's owner word taken from 0 by one compare-and-swap). The second carries each rank's
   holding's status and the pages each of its streams has posted each way as it took it: the bridge's facts
-  (`mesh.h` `struct mesh_stream` `posts`), constant while no holder presents, since nothing is posted on a stream but
-  its holders' pages. Each end then presents first the filler that brings both ends to the same page of the stream:
-  dud SENDs toward receives its peer posted and no SEND filled, and receives into the bridge's spare page for SENDs its
-  peer posted and no receive took (`ncclMeshFiller` reports the counts; design/transport.md section 14). The init
-  then waits, on data, until the receives its streams had posted when it took them have landed (an earlier holding's
-  receives into this process's pages, which the peer's filler duds fill), so no page of the process is used again
-  before; that wait ends at the landing, a revoke or the link's loss. A communicator names nodes and its own pages
-  alone. An init fails as a value where two ranks are on one node
+  (`mesh.h` `struct mesh_stream` `posts`, each lane's units), constant while no holder presents, since nothing is
+  posted on a stream but its holders' pages. Each channel keeps the two ends' difference as a statistic, which nothing
+  reads to decide anything: on a live stream it is 0, since a holding ends with nothing of it outstanding or takes its
+  stream out of its link's pairing (design/transport.md section 14, "A holding's end"). A communicator names nodes and
+  its own pages alone. An init fails as a value where two ranks are on one node
   (`ncclInvalidUsage`: its holdings and the pages posted they exchange are kept a node, so two ranks of one node would
   share one slot), where no stream toward a member's node is free at both ends (EBUSY: a link has up to four, each
   held by one communicator, and one whose last holding its bridge is still ending is not free) or the link is gone
@@ -535,19 +532,23 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
 
 ## Failures
 
-No clock ends a group's wait on its peers' data (the operator, 2026-10-22: "we don't introduce race conditions or use
-timing anywhere ... because using timing is always slower than not using timing"). Two bounds of `MESH_PLATFORM_NS`
-remain on a group's own path, neither a wait on a peer's data: a group whose entries do not find room in its bridge's
-lists (`MESH_STREAM_ENTRIES` presented and not taken) fails unpresented, and a host-path group waits that long for its
-own communicator's GPU work. A host-path group's waits end at their counts, at a count's `~0` (its bridge's, where the link is lost or the bridge stops), at its holding's end (its stream
+No clock ends a group's wait (the operator, 2026-10-22: "we don't introduce race conditions or use timing anywhere ...
+because using timing is always slower than not using timing"). A group whose entries do not find room in its bridge's
+lists (`MESH_STREAM_ENTRIES` presented and not taken) waits for the bridge's `taken` to advance; a host-path group
+waits for its own communicator's GPU work until its command buffer completes, an error status (which the platform's
+watchdog gives a command buffer that overruns) failing the group, and one not yet committed failing it at once
+(`ncclInvalidUsage`). Each wait reads the revoke and its holding between
+looks, so a revoke or the holding's end ends it (design/rubrics.md M3, 10-18). A host-path group's waits end at
+their counts, at a count's `~0` (its bridge's, where the link is lost or the bridge stops), at its holding's end (its stream
 no longer the communicator's own: a pairing lost and made again, a bridge restarted), or at a revoke; a GPU wait at its
 count, at a count's `~0` or at its bound ([Bounded waits](#bounded-waits)), the operator's "poll bound for the node"
 (10-21). A group presents its entries to its bridge as it is issued. A member that fails, is revoked or ends sends
 nothing more: its bridge posts no page of a holding that ended, and nothing of its own. A peer that has not yet issued
 its group, or that failed, is waited for, a host-path group's wait on it until a landing or a revoke: the caller decides
 whether to revoke and run again (design/pages-and-functions.md: "The caller decides whether to rerun the complete
-feed-forward NFE"). The next communicator on the streams presents the filler the ended holdings left
-(design/transport.md section 14). The failure is returned:
+feed-forward NFE"). A holding given with units still outstanding takes its stream out of its link's pairing, and a
+link none of whose streams is live is lost and paired again from 0 (design/transport.md section 14). The failure is
+returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
@@ -571,7 +572,9 @@ stops at the revoke; a wait that reaches its bound after it names it as its caus
 streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. `ncclCommDestroy` awaits the command buffers the library committed for the communicator, at most
 `MESH_PLATFORM_NS`; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
-may take.
+may take. Likewise a lease a group of a revoked or failed communicator named is the caller's to keep until
+`ncclCommDestroy`: the communicator still holds its streams, its bridge may still post receives into that lease for
+entries already presented, and only the give ends that (design/transport.md section 14, "A holding's end").
 
 A communicator's bytes of its node's region are its gate's page and its pool's leases ([Memory](#memory)). The process
 holds one of its bridge's client slots (`mesh.h` `MESH_CLIENTS`) whatever its communicators; each communicator of two

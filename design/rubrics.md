@@ -47,7 +47,7 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 - Reads which nodes its bridge reaches.
 - Meets its peers through NCCL's bootstrap, on its own sockets.
 - Compiles the same schedule as every member.
-- Holds a stream toward each member's node, the one whose identity is free at both ends, by taking its owner word from 0, and hands its peers the stream's pages posted (the bridge's facts), from which each end presents its filler first.
+- Holds a stream toward each member's node, the one whose identity is free at both ends, by taking its owner word from 0, and hands its peers the stream's pages posted (the bridge's facts), whose difference it keeps as a statistic (0 on a live stream).
 - Lays positions as runs of stream units and declares them.
 - Writes units and their ready words, and reads landed words and the in ring.
 - Combines on the host or the GPU, and paces itself by NCCL's head credit.
@@ -225,7 +225,17 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
     and released only by the process's exit (10-20): "why do you think you're 'allowed' to do 'teardowns' in the
     operation of any code we are discussing?"; "every single time a claudemade code artifact has tried to introduce
     'revocation' or 'destruction' it has resulted in a null pointer access and an unscheduled reboot, or an infinite
-    loop and a watchdog OS restart" (10-20);
+    loop and a watchdog OS restart" (10-20). One narrow exception is permitted, the documented flush (the operator,
+    2026-10-22): "'The standard way to complete outstanding requests without the peer is to move the queue pair to the
+    Error state. Every pending request is then flushed with IBV_WC_WR_FLUSH_ERR, and buffers are reused only after
+    those flush completions are polled.' you can do this and nothing else with error states and if and only if it is
+    exactly what is supported by the literature. you'll notice the user rejects the notion of error states over and
+    over and over again where claudes suggest hem on vague grounds ... claudes were using the possibility of
+    error-handling code to justify writing collective operations that *always* errored". It is not used: a holder's
+    halt frees every row outside W(t), the plan's in-flight window, at once, and W(t) ends as each unit completes or as
+    its port's child exits with its queue pairs, so the flush would only end W(t) early (design/extents-and-liveness.md,
+    d and "What follows for the mesh" 3; design/transport.md section 14, "A holding's end"). This ranking stands
+    unchanged;
   - a wait whose end depends on an event that may never come (a poll or socket read with no timeout, a refusal only
     another party's action lifts) ≺ every wait ending in finite time: "it is your own responsibility to write code which
     doesn't stallblock unboundedly. semaphores allow all waits in all programs to termiante in finite time, e.g. 0.1ms

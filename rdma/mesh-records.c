@@ -1,10 +1,12 @@
 #include "mesh-bridge.h"
 
-/* design/transport.md section 14: the streams held, told in the region (`busy`), and the wall clock at which none
-   last came to be (`idle_since`, 0 while any is) */
+/* design/transport.md section 14: the streams held, an owner word naming a client (a stream whose holding ended with
+   units outstanding names none: MESH_STREAM_GIVEN alone), told in the region (`busy`), and the wall clock at which
+   none last came to be (`idle_since`, 0 while any is) */
 static void busy_tell(void){
   uint64_t busy=0;
-  for(uint32_t p=0;p<port_count*MESH_LINK_STREAMS;p++)busy+=atomic_load_explicit(&mesh_stream_at(M,p)->owner,memory_order_relaxed)!=0;
+  for(uint32_t p=0;p<port_count*MESH_LINK_STREAMS;p++)
+    busy+=(atomic_load_explicit(&mesh_stream_at(M,p)->owner,memory_order_relaxed)&~MESH_STREAM_GIVEN)!=0;
   if(busy)atomic_store_explicit(&M->idle_since,0,memory_order_relaxed);
   else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
   atomic_store_explicit(&M->busy,busy,memory_order_release);
@@ -186,9 +188,10 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
 }
 /* design/transport.md: every client slot read: a slot's process watched from the turn its slot is first
    seen (its exit, the event loop's EVFILT_PROC, retires every slot it holds: a holder's death is that event, not a
-   poll), one already gone retired at once; the rows of a retired client released but those a stream's receives may
-   still land in (mesh-dataflow.c mesh_retired_release, mesh_touched), a stream a gone client held let go (mesh-link.c
-   streams_let_go: its port's send thread ends the holding), and the streams held told (busy_tell) */
+   poll), one already gone retired at once; the rows of a retired client released but those a request outstanding on a
+   lane names (mesh-dataflow.c mesh_retired_release, mesh_pinned), a stream a gone client held let go (mesh-link.c
+   streams_let_go: its port's send thread, which posts nothing of it once the client retired, ends the holding), and
+   the streams held told (busy_tell) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0;

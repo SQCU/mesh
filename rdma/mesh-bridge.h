@@ -115,7 +115,9 @@ static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retire
 /* design/transport.md section 14: a data lane's progress over its pairing, the bridge's alone, in the lane's units: the
    SENDs it has posted (`sent`) and those completed (`done`), the send thread's; the receives posted (`posted`) and
    landed (`got`), the receive thread's, at most `window` receives ahead (the fewer frames of the lane's share and its
-   receive queue, over a unit's frames: mesh-link.c lane_reset) */
+   receive queue, over a unit's frames: mesh-link.c lane_reset).  A lane's units outstanding one way are at most a
+   ring of MESH_LANE_UNITS rows (the window, and the SEND gate's capacity, bounded by it: mesh-link.c lane_reset,
+   link_connect), so the ring holds every one's row (mesh.h struct mesh_posts) */
 struct lane_state {
   uint64_t sent,done;
   _Alignas(64) uint64_t posted,got;
@@ -124,8 +126,8 @@ struct lane_state {
 /* design/transport.md section 14: an entry a progress thread has taken from a holding's list, its own copy, typed: its
    rows (`row`, `pages`), its `base`, its word (`word`: a send entry's naming none the holding's `ready`; NULL for a
    landing entry naming none, or one not whole), and the index of its first page over the holding (`page`); `whole` 0
-   where it is not the holder's to name (MESH_NO_ROW, rows past the page table, or its word not one of the region): its
-   pages go as duds, or land in the spare page */
+   where it is not the holder's to name (rows past the page table, or its word not one of the region): its pages go as
+   duds, or land in the spare page */
 struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _Atomic uint64_t *word; uint32_t whole; };
 /* design/transport.md section 14: a holding's walk of one of its lists, one progress thread's: a ring of
    MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `timed` given a time, `at` the
@@ -134,9 +136,10 @@ struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _At
    `landed`, in pages) */
 struct walk { struct taken *ring; uint64_t taken,done,timed,at; struct mesh_pages pages,base,count; };
 /* design/transport.md section 14: a holding's state on its stream at the send thread: none (`HOLD_NONE`); served
-   (`HOLD_SERVE`); ended, its owner word given, until the receive thread has stopped it too (`HOLD_END`).  The receive
-   thread serves holding `rnumber` (0 none) */
-enum { HOLD_NONE, HOLD_SERVE, HOLD_END };
+   (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the receive thread has stopped it too
+   (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served on it again
+   in the pairing (`HOLD_GONE`).  The receive thread serves holding `rnumber` (0 none) of owner `rheld` */
+enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
    a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
@@ -164,7 +167,8 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    makes no call and is dropped as it ends, B10, B9b), the peer's lanes (`peer`, heard in its LINK: `heard`); the lanes
    the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to clear where
    it found its lane failed, every lane at a failed completion, mesh-link.c link_failed, and the termination's queue's,
-   B9b), and the lanes a progress thread found failed (`broken`: the event loop loses the link on reading it).  The
+   B9b), and the lanes a progress thread found failed, or every lane of a link none of whose streams is live
+   (`broken`: the event loop loses the link on reading it).  The
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends hold, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
@@ -174,8 +178,9 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    thread: the owner it serves (`held`), its number over the pairing (`number`), its state (`hold`), its send walk
    (`sending`), its time ring (`posted_at`), and the holding begun and ended it tells the receive thread (`begun`,
    `ended`, numbers).  At the receive thread, on lines of their own: the last holding it stopped serving, or passed
-   over (`stopped`, which the send thread awaits before the stream is free), the holding it serves (`rnumber`), its
-   landing walk (`landing`) and its time ring (`landed_at`) */
+   over (`stopped`, which the send thread awaits before the stream is free), the holding it serves (`rnumber`) and that
+   holding's owner (`rheld`, the send thread's `held` as the holding began), its landing walk (`landing`) and its time
+   ring (`landed_at`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
@@ -195,7 +200,7 @@ struct link {
   _Atomic uint64_t begun[MESH_LINK_STREAMS],ended[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
   _Alignas(128) _Atomic uint64_t stopped[MESH_LINK_STREAMS];
-  uint64_t rnumber[MESH_LINK_STREAMS];
+  uint64_t rnumber[MESH_LINK_STREAMS],rheld[MESH_LINK_STREAMS];
   struct walk landing[MESH_LINK_STREAMS];
   _Atomic uint64_t *landed_at[MESH_LINK_STREAMS];
 };
@@ -208,7 +213,8 @@ _Static_assert(offsetof(struct link,stopped)%128==0,"the receive thread's words 
    was asked for: the device opened or not (CHILD_OPENED: its address and bandwidth, and in `lanes` the queue pairs the
    device holds for a link), the lanes made or not (CHILD_MAKE names the lanes of the plan in `lanes`; CHILD_MADE:
    each lane's queue pair number, the first sequence number and each lane's share), connected or not (CHILD_CONNECTED),
-   and the lanes a progress thread found failed (CHILD_BROKEN, naming its connect's pairing), a fault absorbed on the
+   and the lanes a progress thread found failed, or every lane of a link none of whose streams is live (CHILD_BROKEN,
+   naming its connect's pairing), a fault absorbed on the
    provider's doorbell (CHILD_FAULTED), a guard not held within MESH_PLATFORM_NS (CHILD_UNGUARDED), its port's peer
    interface terminating (CHILD_TERMINATED, as the child heard it: B9b) */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,

@@ -52,6 +52,12 @@ uint64_t metal_signaled(void *event);
 /* 1 once `event` reaches `value`, 0 where `ns` pass first */
 int metal_wait(void *event, uint64_t value, uint64_t ns);
 void metal_release(void *object);
+void *metal_retain(void *object);
+/* the command buffer a program is encoded into, retained (NULL where it has none: a Metal 4 encoder's) */
+void *metal_command(const struct metal_program *);
+/* a command buffer's end as its status tells it: 1 completed, -1 ended in an error (the platform's watchdog ends one
+   that overruns so), 0 committed and not ended, 2 not committed (nothing runs it until its committer commits it) */
+int metal_ended(void *command);
 
 /* A program's waits bounded by `polls` wherever a dispatch has failure words to record in (the program's, `violation`
    or metal_gate's, or those a wait names): at most `polls` loads of a count (rdma/mesh.metal mesh_wait_bounded), past

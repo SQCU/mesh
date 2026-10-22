@@ -221,52 +221,118 @@ static void walk_count(struct walk *w,struct mesh_pages through,_Atomic uint64_t
 }
 /* the stream's pages `count` past a holding's first (`base`), 0 before it: the holding's own */
 static inline struct mesh_pages past(struct mesh_pages count,struct mesh_pages base){ return (struct mesh_pages){count.n>base.n?count.n-base.n:0}; }
-/* design/transport.md section 14: a holding's words made new for the stream's next holder (its lists' counts, `ready`,
-   `sent`, `landed`), then the stream free (its owner word 0), by the send thread once both progress threads post
-   nothing more of the holding */
-static void stream_free(struct mesh_stream *x){
+/* design/transport.md section 14: a holding's words made new (its lists' counts, `ready`, `sent`, `landed`), then its
+   owner word `owner`, by the send thread once both progress threads post nothing more of the holding: 0, the stream
+   free, where nothing of the holding is outstanding; MESH_STREAM_GIVEN alone, naming no client, so none takes it,
+   where units are (stream_gone) */
+static void stream_free(struct mesh_stream *x,uint64_t owner){
   _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->taken[0],&x->taken[1],&x->ready,&x->sent,&x->landed};
   for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
-  atomic_store_explicit(&x->owner,0,memory_order_release);
+  atomic_store_explicit(&x->owner,owner,memory_order_release);
+}
+/* design/transport.md section 14: whether a holding is still its holder's, `owner`: the stream's owner word unchanged
+   (not given) and the client's slot still its own (not retired) */
+static int holding_kept(const struct mesh_stream *x,uint64_t owner){
+  return atomic_load_explicit(&x->owner,memory_order_seq_cst)==owner && owned(owner);
+}
+/* design/transport.md section 14: unit u of stream x's lane c one way (`way`: 0 a SEND, 1 a receive) told before it is
+   posted: the row it names (MESH_ABSENT none) in its lane's ring, then the lane's units posted past it (sequentially
+   consistent, so a reader of the count reads the row), then whether its holding is still `owner`'s (holding_kept, its
+   reads sequentially consistent).  A client that gives its stream or retires and then reads the lanes' units
+   (mesh-dataflow.c mesh_pinned) so sees the unit, or the unit is not posted: where the holding is no longer kept the
+   count goes back and 0 is returned.  1: post it */
+static int unit_told(struct mesh_stream *x,int way,uint32_t c,uint64_t u,uint32_t row,uint64_t owner){
+  atomic_store_explicit(mesh_unit_row(M,x->rows,way,(int)c,u),row,memory_order_relaxed);
+  atomic_store_explicit(&x->posts[way].posted[c],u+1,memory_order_seq_cst);
+  if(holding_kept(x,owner))return 1;
+  atomic_store_explicit(&x->posts[way].posted[c],u,memory_order_release);
+  return 0;
+}
+/* design/transport.md section 14: whether nothing stream t's lanes posted is outstanding: on each lane every SEND posted
+   has completed (the send thread's own counts) and every receive posted has landed (the receive thread's, as it told
+   them in `posts`) */
+static int stream_settled(const struct port *port,uint32_t t){
+  const struct link *l=&port->link;
+  const struct mesh_stream *x=stream_of(port,t);
+  const uint32_t k=MESH_LANE_FIRST+2*t;
+  int settled=1;
+  for(uint32_t c=0;c<2;c++)
+    settled&=l->lane[k+c].done==l->lane[k+c].sent &&
+             atomic_load_explicit(&x->posts[1].done[c],memory_order_acquire)==atomic_load_explicit(&x->posts[1].posted[c],memory_order_acquire);
+  return settled;
+}
+/* design/transport.md section 14: a holding that ended with units outstanding on its stream's lanes (the plan's window
+   in flight: no queue pair moved to another state, nothing awaited).  Its words made new and its owner word
+   MESH_STREAM_GIVEN alone (stream_free), the stream not live for the rest of its pairing, so no communicator takes it;
+   each outstanding unit's row stays held until the unit completes or the port's child exits (mesh.h struct
+   mesh_posts).  A link none of whose streams is then live is lost as at a failed lane (`broken`: the child tells its
+   parent, which loses the link; the child's exit releases its queue pairs and with them the window's rows, and the
+   port's next child pairs from 0) */
+static void stream_gone(struct port *port,uint32_t t){
+  struct link *l=&port->link;
+  struct mesh_stream *x=stream_of(port,t);
+  const uint32_t k=MESH_LANE_FIRST+2*t;
+  uint64_t sends=0,receives=0;
+  for(uint32_t c=0;c<2;c++){
+    sends+=l->lane[k+c].sent-l->lane[k+c].done;
+    receives+=atomic_load_explicit(&x->posts[1].posted[c],memory_order_acquire)-atomic_load_explicit(&x->posts[1].done[c],memory_order_acquire);
+  }
+  l->hold[t]=HOLD_GONE;
+  atomic_store_explicit(&x->live,0,memory_order_release);
+  stream_free(x,MESH_STREAM_GIVEN);
+  say("link %u (%s): stream %u toward node %u: its holding ended with %llu SENDs and %llu receives outstanding: the stream "
+      "not live\n",port->index,port->name,t,port->peer,(unsigned long long)sends,(unsigned long long)receives);
+  uint32_t live=0;
+  for(uint32_t s=0;s<plan_streams(l->plan);s++)live|=atomic_load_explicit(&stream_of(port,s)->live,memory_order_acquire);
+  if(live)return;
+  say("link %u (%s): no stream toward node %u live: the link lost\n",port->index,port->name,port->peer);
+  atomic_fetch_or_explicit(&l->broken,l->plan>>MESH_LANE_FIRST<<MESH_LANE_FIRST,memory_order_release);
+  wake();
 }
 /* design/transport.md section 14: stream t's holding at its port's send thread, each pass.  An owner word holding a
    client's while none is served begins a holding (its number one more, its walk's base the stream's pages sent so
    far), told the receive thread (`begun`); its entries then taken as presented.  The owner word given
-   (MESH_STREAM_GIVEN: by its holder, or by the event loop for a holder gone, streams_let_go) ends it at once: nothing
-   more of it is posted, its entries taken and not posted are dropped, and the receive thread is told (`ended`); once
-   that thread has stopped it too (`stopped`), the holding's words are made new and the stream is free (stream_free).
-   A holding given before it began is freed at once.  The bridge posts nothing of its own on a stream: no unit between
-   holdings and none for a holding that ended (the operator, 2026-10-22: "the bridge has as little code as possible
-   and does as little as possible") */
+   (MESH_STREAM_GIVEN: by its holder, or by the event loop for a holder gone, streams_let_go), or its client retired,
+   ends it at once: nothing more of it is posted (unit_told), its entries taken and not posted are dropped, and the
+   receive thread is told (`ended`); once that thread has stopped it too (`stopped`), a holding that left nothing
+   outstanding has its words made new and the stream free (stream_free), and one that left units outstanding ends the
+   stream (stream_gone).  A holding given before it began is freed at once.  The bridge posts nothing of its own on a
+   stream: no unit between holdings and none for a holding that ended (the operator, 2026-10-22: "the bridge has as
+   little code as possible and does as little as possible") */
 static void stream_turn_one(struct port *port,uint32_t t){
   struct link *l=&port->link;
   struct mesh_stream *x=stream_of(port,t);
   const uint32_t k=MESH_LANE_FIRST+2*t;
+  if(l->hold[t]==HOLD_GONE)return;
   const uint64_t owner=atomic_load_explicit(&x->owner,memory_order_acquire);
   if(l->hold[t]==HOLD_NONE){
     if(!owner)return;
-    if(owner&MESH_STREAM_GIVEN){stream_free(x);return;}
+    if(owner&MESH_STREAM_GIVEN){stream_free(x,0);return;}
     l->held[t]=owner;l->number[t]++;l->hold[t]=HOLD_SERVE;
     l->sending[t]=(struct walk){.ring=l->sending[t].ring,.base=stream_pages(l->lane[k].sent,l->lane[k+1].sent)};
     atomic_store_explicit(&l->begun[t],l->number[t],memory_order_release);
   }
-  if(l->hold[t]==HOLD_SERVE && owner==l->held[t]){walk_take(l->sending+t,x,0);return;}
+  if(l->hold[t]==HOLD_SERVE && owner==l->held[t] && owned(owner)){walk_take(l->sending+t,x,0);return;}
   if(l->hold[t]==HOLD_SERVE){l->hold[t]=HOLD_END;atomic_store_explicit(&l->ended[t],l->number[t],memory_order_release);}
   if(atomic_load_explicit(&l->stopped[t],memory_order_acquire)!=l->number[t])return;
-  l->held[t]=0;l->hold[t]=HOLD_NONE;
-  stream_free(x);
+  l->held[t]=0;
+  if(!stream_settled(port,t)){stream_gone(port,t);return;}
+  l->hold[t]=HOLD_NONE;
+  stream_free(x,0);
 }
 /* design/transport.md section 14: stream t's SENDs, one pass of its port's send thread, while its holding is served and
    both its lanes are: each page of the holding in order (the stream's page p on its lane p mod 2), the whole page,
    from the page its row names once its entry's word says the page is ready, and an entry not the holder's to name
-   (the filler, MESH_NO_ROW) at once as duds from the all-ones block; each while its lane's gate holds its frames
-   (ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's); the stream's pages
-   posted told (`posts`); the completions are the link's (link_send); a failed post is the lane's (lane_lost).  The
+   (rows outside the page table, a holder's error) at once as duds from the all-ones block; each while its lane's gate
+   holds its frames (ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's);
+   each unit told before it is posted and posted only while its holding is its holder's (unit_told); the completions
+   are the link's (link_send); a failed post is the lane's (lane_lost: its child's exit unpins it, streams_unpin).  The
    lanes it posted on, a bit a lane */
 static uint32_t stream_send(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
   if(l->hold[t]!=HOLD_SERVE || (served>>k&3)!=3)return 0;
+  struct mesh_stream *x=stream_of(port,t);
   struct walk *w=l->sending+t;
   const struct frames each=frames_of(page_bytes());
   uint32_t posted=0;
@@ -276,13 +342,15 @@ static uint32_t stream_send(struct port *port,uint32_t t,uint32_t served){
     if(!e)break;
     const struct mesh_pages i=mesh_pages_sub(q,e->page);
     struct ibv_sge span=ones_span(port,page_bytes()),page;
+    uint32_t row=MESH_ABSENT;
     if(e->whole){
       if(!mesh_pages_lt(mesh_pages_add(e->base,i),mesh_pages_load(e->word)))break;
-      if(page_span(port,mesh_row_after(e->row,i),&page))span=page;
+      const struct mesh_row r=mesh_row_after(e->row,i);
+      if(page_span(port,r,&page)){span=page;row=(uint32_t)r.r;}
     }
     const uint32_t lane=k+page_lane(p);
     struct send_gate *gate=l->gate+lane;
-    if(!gate_holds(gate,each))break;
+    if(!gate_holds(gate,each) || !unit_told(x,0,page_lane(p),l->lane[lane].sent,row,l->held[t]))break;
     struct ibv_send_wr posting={.wr_id=gate_post(gate,lane,each),.sg_list=&span,.num_sge=1,
                                 .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
     const struct mesh_queue *queue=l->provider.queues+lane;
@@ -291,16 +359,15 @@ static uint32_t stream_send(struct port *port,uint32_t t,uint32_t served){
     __atomic_store_n(&l->lane[lane].sent,l->lane[lane].sent+1,__ATOMIC_RELEASE);gate->requests++;
     posted|=UINT32_C(1)<<lane;
   }
-  if(posted)mesh_pages_store(&stream_of(port,t)->posts[0].posted,stream_pages(l->lane[k].sent,l->lane[k+1].sent));
   return posted;
 }
 /* design/transport.md section 14: stream t's holding at its port's receive thread, each pass.  A holding the send
-   thread ended (`ended`) is served no more: nothing more of it is posted, and the stop is told (`stopped`).  A holding
-   the send thread began (`begun`) and this thread has not stopped is passed over where it has already ended (told
-   stopped), else served once no receive of an earlier holding is outstanding (`touching` clear), its landing walk's
-   base the stream's pages posted so far, `touching` its owner, its entries taken as presented.  `touching` is cleared
-   once every receive posted has landed while no holding is served: by the stream's order those are the earlier
-   holdings' alone */
+   thread ended (`ended`) is served no more: nothing more of it is posted, and the stop is told (`stopped`), after
+   every receive it posted was told (`posts`, unit_told).  A holding the send thread began (`begun`) and this thread
+   has not stopped is passed over where it has already ended (told stopped), else served, its owner the send thread's
+   (`held`, which it changes only once this thread has stopped), its landing walk's base the stream's pages posted so
+   far, its entries taken as presented.  No receive of an earlier holding is outstanding then: each ended with none, or
+   its stream serves no holding again in the pairing (stream_gone) */
 static void stream_receive_turn(struct port *port,uint32_t t){
   struct link *l=&port->link;
   struct mesh_stream *x=stream_of(port,t);
@@ -309,27 +376,24 @@ static void stream_receive_turn(struct port *port,uint32_t t){
   const uint64_t begun=atomic_load_explicit(&l->begun[t],memory_order_acquire),ended=atomic_load_explicit(&l->ended[t],memory_order_acquire);
   if(l->rnumber[t] && ended==l->rnumber[t]){l->rnumber[t]=0;atomic_store_explicit(&l->stopped[t],ended,memory_order_release);}
   if(l->rnumber[t]){walk_take(l->landing+t,x,1);return;}
-  if(atomic_load_explicit(&x->touching,memory_order_relaxed) && s[0].got==s[0].posted && s[1].got==s[1].posted)
-    atomic_store_explicit(&x->touching,0,memory_order_release);
   if(begun==atomic_load_explicit(&l->stopped[t],memory_order_relaxed))return;
   if(ended==begun){atomic_store_explicit(&l->stopped[t],begun,memory_order_release);return;}
-  if(atomic_load_explicit(&x->touching,memory_order_relaxed))return;
-  l->rnumber[t]=begun;
+  l->rnumber[t]=begun;l->rheld[t]=__atomic_load_n(&l->held[t],__ATOMIC_RELAXED);
   l->landing[t]=(struct walk){.ring=l->landing[t].ring,.base=stream_pages(s[0].posted,s[1].posted)};
-  atomic_store_explicit(&x->touching,atomic_load_explicit(&x->owner,memory_order_relaxed)&~MESH_STREAM_GIVEN,memory_order_release);
   walk_take(l->landing+t,x,1);
 }
 /* design/pages-and-functions.md "The NFE" step 2: stream t's receives, one pass of its port's receive thread, while
    its holding is served and both its lanes are: each page of the holding in order (the stream's page p on its lane
    p mod 2), each lane at most its window ahead of its landings, into the page its row names once its entry's word
-   allows (the row released by its reader), and an entry not the holder's to name (the filler, MESH_NO_ROW) into the
-   spare page; the stream's pages posted told (`posts`); a failed post is the lane's (lane_lost) */
+   allows (the row released by its reader), and an entry not the holder's to name (rows outside the page table, a
+   holder's error) into the spare page; each unit told before it is posted and posted only while its holding is its
+   holder's (unit_told); a failed post is the lane's (lane_lost: its child's exit unpins it, streams_unpin) */
 static void stream_post(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
   if(!l->rnumber[t] || (served>>k&3)!=3)return;
+  struct mesh_stream *x=stream_of(port,t);
   struct walk *w=l->landing+t;
-  int posted=0;
   for(;;){
     const struct mesh_pages p=stream_pages(l->lane[k].posted,l->lane[k+1].posted),q=mesh_pages_sub(p,w->base);
     const uint32_t lane=k+page_lane(p);
@@ -339,15 +403,18 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
     if(!e)break;
     if(e->word && mesh_pages_lt(mesh_pages_load(e->word),e->base))break;
     struct ibv_sge span=spare_span(port),page;
-    if(e->whole && page_span(port,mesh_row_after(e->row,mesh_pages_sub(q,e->page)),&page))span=page;
+    uint32_t row=MESH_ABSENT;
+    if(e->whole){
+      const struct mesh_row r=mesh_row_after(e->row,mesh_pages_sub(q,e->page));
+      if(page_span(port,r,&page)){span=page;row=(uint32_t)r.r;}
+    }
+    if(!unit_told(x,1,page_lane(p),s->posted,row,l->rheld[t]))break;
     struct ibv_recv_wr request={.wr_id=lane,.sg_list=&span,.num_sge=1},*bad;
     const struct mesh_queue *queue=l->provider.queues+lane;
     const int error=queue->receive(queue->pair,&request,&bad);
     if(error){lane_lost(port,lane,error<0?-error:error);break;}
     s->posted++;
-    posted=1;
   }
-  if(posted)mesh_pages_store(&stream_of(port,t)->posts[1].posted,stream_pages(l->lane[k].posted,l->lane[k+1].posted));
 }
 /* design/transport.md: a lane's next unit landed (receives complete in the order posted) */
 static void lane_landed(struct port *port,uint32_t k){ port->link.lane[k].got++; }
@@ -372,8 +439,8 @@ static void link_failed(struct port *port,int64_t code,uint32_t domain){
 /* design/transport.md: the link's SENDs, one pass of the port's send thread: its SEND completions taken (a lane no
    longer served drops its own; a failed one fails the link, link_failed): a lane's frames retired through its gate
    (each request names its lane and the frames posted through it) and its SENDs completed counted; then each stream
-   whose lanes posted or completed: its pages completed told (`posts`), and while its holding is served, each entry
-   whose first page the pass posted given its posting time (one read of the ticks after every post of the pass,
+   whose lanes posted or completed: each lane's units completed told (`posts`), and while its holding is served, each
+   entry whose first page the pass posted given its posting time (one read of the ticks after every post of the pass,
    design/transport.md section 14, mesh.h `posted_at`), and its `sent` stored where its completions moved it
    (walk_count) */
 static void link_send(struct port *port,uint32_t posted){
@@ -396,7 +463,7 @@ static void link_send(struct port *port,uint32_t posted){
     if(!((posted|completed)&lanes))continue;
     struct mesh_stream *x=stream_of(port,t);
     const struct lane_state *s=l->lane+k;
-    if(completed&lanes)mesh_pages_store(&x->posts[0].done,stream_pages(s[0].done,s[1].done));
+    for(uint32_t c=0;c<2;c++)if(completed>>(k+c)&1)atomic_store_explicit(&x->posts[0].done[c],s[c].done,memory_order_release);
     if(l->hold[t]!=HOLD_SERVE)continue;
     struct walk *w=l->sending+t;
     const struct mesh_pages sent=mesh_pages_sub(stream_pages(s[0].sent,s[1].sent),w->base);
@@ -409,10 +476,11 @@ static void link_send(struct port *port,uint32_t posted){
   }
 }
 /* the link's receive completions, one pass of the port's receive thread: a lane's unit landed (lane_landed), a failed
-   one failing the link (link_failed); then each stream a unit of which landed: its pages landed told (`posts`), and
-   while its holding is served, its `landed` stored where its landings moved it (the stamp of every row it covers), and
-   each entry landed whole given its landing time (one read of the ticks after the pass's landings, design/transport.md
-   section 14, mesh.h `landed_at`) */
+   one failing the link (link_failed); then each stream a unit of which landed: each lane's units landed told (`posts`,
+   before `landed`, so the send thread that ends a holding its holder gave once it read its landings reads them too),
+   and while its holding is served, its `landed` stored where its landings moved it (the stamp of every row it covers),
+   and each entry landed whole given its landing time (one read of the ticks after the pass's landings,
+   design/transport.md section 14, mesh.h `landed_at`) */
 static void link_receive(struct port *port){
   struct link *l=&port->link;
   const uint32_t served=atomic_load_explicit(&l->served,memory_order_acquire);
@@ -436,7 +504,7 @@ static void link_receive(struct port *port){
     if(!(landed&(UINT32_C(3)<<k)))continue;
     struct mesh_stream *x=stream_of(port,t);
     const struct lane_state *s=l->lane+k;
-    mesh_pages_store(&x->posts[1].done,stream_pages(s[0].got,s[1].got));
+    for(uint32_t c=0;c<2;c++)if(landed>>(k+c)&1)atomic_store_explicit(&x->posts[1].done[c],s[c].got,memory_order_release);
     if(!l->rnumber[t])continue;
     struct walk *w=l->landing+t;
     walk_count(w,past(stream_through(s[0].got,s[1].got),w->base),&x->landed,l->landed_at[t],at);
@@ -702,10 +770,10 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)error=queue_receive(p,(int)k,numbers->peer[k],numbers->lid,numbers->gid);
   if(!error)error=link_lapsed(l,numbers);
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)error=queue_send(p,(int)k);
-  const struct frames share={MAX(l->share.n,1)};
+  const struct frames share={MAX(l->share.n,1)},ring={(uint64_t)MESH_LANE_UNITS*frames_of(page_bytes()).n};
   for(uint32_t k=0;k<MESH_LINK_LANES && !error;k++){
     l->qpn[k]=plan>>k&1?p->queues[k].pair->qp_num:UINT32_MAX;
-    l->gate[k]=(struct send_gate){.capacity=plan>>k&1?frames_min((struct frames){p->queues[k].send_capacity},share):(struct frames){0}};
+    l->gate[k]=(struct send_gate){.capacity=plan>>k&1?frames_min(frames_min((struct frames){p->queues[k].send_capacity},share),ring):(struct frames){0}};
   }
   if(!error)error=link_lapsed(l,numbers);
   for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)lane_reset(port,k);
@@ -715,7 +783,7 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
 /* design/transport.md section 14, "A process a port": the link's streams opened as its lanes connect, by the child
    before any lane is served, every one new: a holding of a lost pairing ended with it (its owner word 0: its holder's
    give, a compare-and-swap from its own client, then matches nothing, and its communicator reads its holding gone,
-   mesh-call.h mesh_stream_held), its words 0 (its lists' counts, `ready`, `sent`, `landed`, `touching`) and its pages
+   mesh-call.h mesh_stream_held), its words 0 (its lists' counts, `ready`, `sent`, `landed`) and its lanes' units
    posted and completed each way 0 (`posts`: its lanes' units are 0 as their queue pairs are made, lane_reset), its peer
    node, its share of the link's bandwidth and its identity told, then live; and its time rings' addresses the link's
    own (`posted_at`, `landed_at`: the progress threads read no line of the region a client writes for them).  None is
@@ -732,8 +800,9 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
     struct mesh_stream *x=stream_of(port,s);
     atomic_store_explicit(&x->owner,0,memory_order_release);
-    _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->ready,&x->sent,&x->landed,&x->taken[0],&x->taken[1],&x->touching,
-                               &x->posts[0].posted,&x->posts[0].done,&x->posts[1].posted,&x->posts[1].done};
+    _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->ready,&x->sent,&x->landed,&x->taken[0],&x->taken[1],
+                               &x->posts[0].posted[0],&x->posts[0].posted[1],&x->posts[0].done[0],&x->posts[0].done[1],
+                               &x->posts[1].posted[0],&x->posts[1].posted[1],&x->posts[1].done[0],&x->posts[1].done[1]};
     for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
     l->posted_at[s]=stream_words(x->posted_at);l->landed_at[s]=stream_words(x->landed_at);
     for(uint32_t e=0;e<2*MESH_STREAM_TIMES;e++){atomic_store_explicit(l->posted_at[s]+e,0,memory_order_relaxed);atomic_store_explicit(l->landed_at[s]+e,0,memory_order_relaxed);}
@@ -785,27 +854,31 @@ static void link_lost(struct port *port){
 }
 /* design/transport.md section 14: a stream's lane k's progress made new at its link's connect, its sequences 0 and
    its receive window the receives the fewer frames of its share of the completion queue and its receive queue hold, a
-   receive a page's frames; on the port's queue in the connect's job, before any progress thread serves it.  Its
-   stream's words are the stream's opening's (streams_open) */
+   receive a page's frames, at most a ring of rows' (MESH_LANE_UNITS: mesh.h struct mesh_posts); on the port's queue in
+   the connect's job, before any progress thread serves it.  Its stream's words are the stream's opening's
+   (streams_open) */
 static void lane_reset(struct port *port,uint32_t k){
   struct link *l=&port->link;
   const struct frames unit=frames_of(page_bytes());
   const struct frames room=frames_min(l->share,(struct frames){l->provider.queues[k].receive_capacity});
-  l->lane[k]=(struct lane_state){.window=(uint32_t)MAX(1,room.n/unit.n)};
+  l->lane[k]=(struct lane_state){.window=(uint32_t)MIN(MESH_LANE_UNITS,MAX(1,room.n/unit.n))};
   atomic_thread_fence(memory_order_release);
 }
-/* design/transport.md section 14: the arena pages of a port's streams' lists and time rings: each stream's two lists of
-   MESH_STREAM_ENTRIES entries, then its two time rings of MESH_STREAM_TIMES entries of two words, each part's bytes
-   rounded up to whole pages (page_round) */
+/* design/transport.md section 14: the arena pages of a port's streams' lists and rings: each stream's two lists of
+   MESH_STREAM_ENTRIES entries, its two time rings of MESH_STREAM_TIMES entries of two words, and its rings of rows,
+   MESH_LANE_UNITS rows of 4 bytes a lane each way (mesh.h mesh_unit_row), each part's bytes rounded up to whole pages
+   (page_round) */
 static uint64_t page_round(uint64_t bytes){ return (bytes+page_bytes()-1)/page_bytes()*page_bytes(); }
+static uint64_t rows_bytes(void){ return page_round(4*(uint64_t)MESH_LANE_UNITS*sizeof(uint32_t)); }
 static uint32_t lists_pages(void){
-  const uint64_t each=page_round(2*(uint64_t)MESH_STREAM_ENTRIES*sizeof(struct mesh_entry))+2*page_round((uint64_t)MESH_STREAM_TIMES*16);
+  const uint64_t each=page_round(2*(uint64_t)MESH_STREAM_ENTRIES*sizeof(struct mesh_entry))+2*page_round((uint64_t)MESH_STREAM_TIMES*16)+
+                      rows_bytes();
   return (uint32_t)(MESH_LINK_STREAMS*each/M->pgsz);
 }
-/* design/transport.md section 14: the port's streams' lists and time rings, leased from the arena by the parent as the
+/* design/transport.md section 14: the port's streams' lists and rings, leased from the arena by the parent as the
    port first pairs (recorded in the region, so a bridge adopting the region takes the same pages: section 2) and held
    for the region's life, every child and bridge of the port's, told in the region (mesh.h struct mesh_stream `lists`,
-   `posted_at`, `landed_at`).  0, or ENOMEM where the region holds no room for them */
+   `posted_at`, `landed_at`, `rows`).  0, or ENOMEM where the region holds no room for them */
 static int stream_lists(struct port *port){
   struct link *l=&port->link;
   struct mesh_bridge_pages *own=mesh_bridge_pages(M);
@@ -820,6 +893,7 @@ static int stream_lists(struct port *port){
     x->lists=at;at+=page_round(2*(uint64_t)MESH_STREAM_ENTRIES*sizeof(struct mesh_entry));
     x->posted_at=at;at+=page_round((uint64_t)MESH_STREAM_TIMES*16);
     x->landed_at=at;at+=page_round((uint64_t)MESH_STREAM_TIMES*16);
+    x->rows=at;at+=rows_bytes();
   }
   l->lists=page;
   return 0;
@@ -858,6 +932,19 @@ void streams_let_go(void){
       if(owner && !(owner&MESH_STREAM_GIVEN) && !owned(owner))atomic_compare_exchange_strong(&x->owner,&owner,owner|MESH_STREAM_GIVEN);
     }
 }
+/* design/transport.md section 14: a port's streams once its child is reaped: the queue pairs it held are gone with
+   it, so no request is outstanding on their lanes and each lane's units posted count completed (no row held:
+   mesh-dataflow.c mesh_pinned, design/extents-and-liveness.md d), and the region's closed leases are looked at again
+   (`unreleased`).  The port's next child opens the streams (streams_open) */
+static void streams_unpin(const struct port *port){
+  for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
+    struct mesh_stream *x=stream_of(port,s);
+    for(int way=0;way<2;way++)
+      for(int c=0;c<2;c++)
+        atomic_store_explicit(&x->posts[way].done[c],atomic_load_explicit(&x->posts[way].posted[c],memory_order_relaxed),memory_order_release);
+  }
+  unreleased=1;
+}
 /* design/transport.md section 14: the link's turn, on the event loop: a job's end taken (made: LINK told the peer every
    lane; connected: up, every lane served, the stream live); a job that failed loses the link (port_lost); while it is
    up, a lane a progress thread found failed (`broken`) loses it; then, while no port's job is out past MESH_PLATFORM_NS (B12) and once the port's last
@@ -893,7 +980,8 @@ static void link_turn(struct port *port){
   if(l->state==LINK_UP){
     const uint32_t broken=atomic_exchange_explicit(&l->broken,0,memory_order_acq_rel);
     if(broken){
-      say("link %u (%s): lanes %#x toward node %u failed: the link lost\n",port->index,port->name,broken,port->peer);
+      say("link %u (%s): lanes %#x toward node %u failed, or no stream of the link live: the link lost\n",port->index,port->name,
+          broken,port->peer);
       port_lost(port,EIO);
       return;
     }
@@ -1681,6 +1769,7 @@ static void child_reaped(struct port *port){
   if(port->job){port->result=ECHILD;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
   if(l->job){l->result=ECHILD;atomic_store_explicit(&l->done,1,memory_order_release);}
   streams_cancel(port);
+  streams_unpin(port);
   l->state=LINK_DOWN;l->lanes=l->heard=0;l->share=(struct frames){0};l->plan=0;
   memset(l->qpn,0,sizeof l->qpn);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
@@ -1944,7 +2033,6 @@ static void region_adopt(void){
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_stream *x=mesh_stream_at(M,s);
     atomic_store(&x->live,0);atomic_store(&x->owner,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
-    atomic_store(&x->touching,0);
     mesh_pages_store(&x->sent,MESH_PAGES_LOST);mesh_pages_store(&x->landed,MESH_PAGES_LOST);
   }
   struct mesh_link_info *links=mesh_links(M);
