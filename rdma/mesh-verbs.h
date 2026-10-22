@@ -1,6 +1,8 @@
 #pragma once
 #include "mesh.h"
 #include <infiniband/verbs.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <signal.h>
@@ -34,29 +36,48 @@ struct mesh_device {
   char *wire;
   struct ibv_port_attr port;
   union ibv_gid gid;
-  uint8_t gid_index;
+  uint8_t gid_index,gid_matched;
 };
-/* the port's own address (its GID) and its index in the port's GID table: the entry that is the port's link-local
-   address (fe80::/64, the EUI-64 of its interface's MAC, README "Addressing"), which the peer at the cable's other end
-   reaches; else the first entry the table holds.  A Thunderbolt port's table does not always begin at index 0 (the
-   Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed every queue
-   pair's connection with EIO), and its first entry is not always the link-local: the M5 Ultra Studio's macOS 27
-   rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its fe80:: link-local, [2] its fd6d ULA, and
-   the Mini (macOS 26) failed every lane's connection toward [0] with EIO */
-static __attribute__((unused)) int device_gid(struct mesh_device *device){
-  int first=-1;
-  union ibv_gid found;
-  for(int i=0;i<device->port.gid_tbl_len && i<256;i++){
-    union ibv_gid g;
-    int nonzero=0;
-    if(ibv_query_gid(device->context,1,i,&g))continue;
-    for(int b=0;b<16;b++)nonzero|=g.raw[b];
-    if(!nonzero)continue;
-    if(g.raw[0]==0xfe && (g.raw[1]&0xc0)==0x80){device->gid=g;device->gid_index=(uint8_t)i;return 0;}
-    if(first<0){first=i;found=g;}
+/* the port's own address (its GID), its index in the port's GID table, and whether it is an address the port's
+   interface holds (`gid_matched`), chosen from the whole table (up to 256 entries) against the interface's addresses:
+   the entry equal to an IPv6 link-local address `interface` holds (getifaddrs, compared as bytes; BSD embeds the scope
+   in bytes 2-3 of a link-local address it reports, which the comparison clears), the address mesh-fabric-init assigns
+   and the peer at the cable's other end reaches (README "Addressing").  Where no entry is one of those (a loop fabric's
+   device, which has no interface; an interface not yet addressed), the table's link-local entry (fe80::/10), else its
+   first nonzero entry, `gid_matched` 0 so its opening says so.  A Thunderbolt port's table does not always begin at
+   index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed
+   every queue pair's connection with EIO), and its first entry is not always its address: the M5 Ultra Studio's macOS
+   27 rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its interface's fe80:: link-local, [2]
+   its fd6d ULA, and the Mini (macOS 26) failed every lane's connection toward [0] with EIO */
+static __attribute__((unused)) int device_gid(struct mesh_device *device,const char *interface){
+  enum { HELD=16, ENTRIES=256 };
+  struct in6_addr held[HELD];
+  union ibv_gid table[ENTRIES];
+  int helds=0,chosen=-1,matched=0,linklocal=-1,first=-1;
+  struct ifaddrs *all=NULL;
+  if(!getifaddrs(&all)){
+    for(const struct ifaddrs *a=all;a && helds<HELD;a=a->ifa_next){
+      if(!a->ifa_addr || a->ifa_addr->sa_family!=AF_INET6 || strcmp(a->ifa_name,interface))continue;
+      struct in6_addr x=((const struct sockaddr_in6 *)(const void *)a->ifa_addr)->sin6_addr;
+      if(!IN6_IS_ADDR_LINKLOCAL(&x))continue;
+      x.s6_addr[2]=x.s6_addr[3]=0;
+      held[helds++]=x;
+    }
+    freeifaddrs(all);
   }
-  if(first<0)return ENXIO;
-  device->gid=found;device->gid_index=(uint8_t)first;
+  const int entries=device->port.gid_tbl_len<ENTRIES?device->port.gid_tbl_len:ENTRIES;
+  for(int i=0;i<entries;i++){
+    int nonzero=0;
+    if(ibv_query_gid(device->context,1,i,table+i))continue;
+    for(int b=0;b<16;b++)nonzero|=table[i].raw[b];
+    if(!nonzero)continue;
+    if(first<0)first=i;
+    if(linklocal<0 && table[i].raw[0]==0xfe && (table[i].raw[1]&0xc0)==0x80)linklocal=i;
+    for(int h=0;h<helds && chosen<0;h++)if(!memcmp(table[i].raw,held[h].s6_addr,16)){chosen=i;matched=1;}
+  }
+  if(chosen<0)chosen=linklocal>=0?linklocal:first;
+  if(chosen<0)return ENXIO;
+  device->gid=table[chosen];device->gid_index=(uint8_t)chosen;device->gid_matched=(uint8_t)matched;
   return 0;
 }
 /* design/transport.md */

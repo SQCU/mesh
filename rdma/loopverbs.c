@@ -305,7 +305,7 @@ int ibv_query_port(struct ibv_context *context, uint8_t port, struct _compat_ibv
   return 0;
 }
 
-/* the port's one address, link-local and nonzero (mesh-verbs.h device_gid takes the link-local entry, else the first nonzero) */
+/* the port's one address, link-local and nonzero (mesh-verbs.h device_gid takes the entry its interface holds, else the link-local entry, else the first nonzero: a loop device has no interface) */
 int ibv_query_gid(struct ibv_context *context, uint8_t port, int index, union ibv_gid *gid) {
   (void)port;
   memset(gid, 0, sizeof *gid);

@@ -599,7 +599,7 @@ static int link_make(struct port *port,const struct link_numbers *numbers){
      lane's connection at the peer with EIO (2026-10-19, after the Mini's power loss) */
   if(ibv_query_port(port->device.context,1,&attributes))return errno?errno:EIO;
   port->device.port=attributes;
-  if((error=device_gid(&port->device)) || (error=link_lapsed(l,numbers)) || (error=pair_up(p,l->plan)))return error;
+  if((error=device_gid(&port->device,port->name)) || (error=link_lapsed(l,numbers)) || (error=pair_up(p,l->plan)))return error;
   l->share=(uint32_t)MIN(p->completion->cqe,p->sent->cqe)/MAX(plan_lanes(l->plan),1u);
   return 0;
 }
@@ -1046,7 +1046,13 @@ static void device_open(struct port *port){
   dispatch_async(port->work,^{
     const int raised=guard_raise(port);
     int refused=0,result=raised<0?ETIMEDOUT:device_up(&port->device,&wire,&refused);
-    if(!result)result=device_gid(&port->device);
+    if(!result)result=device_gid(&port->device,port->name);
+    if(!result && !port->device.gid_matched){
+      const uint8_t *g=port->device.gid.raw;
+      say("link %u (%s): no GID of %s is a link-local address %s holds; GID[%u] %02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+          "%02x%02x:%02x%02x:%02x%02x:%02x%02x used\n",port->index,port->name,port->device.name,port->name,port->device.gid_index,
+          g[0],g[1],g[2],g[3],g[4],g[5],g[6],g[7],g[8],g[9],g[10],g[11],g[12],g[13],g[14],g[15]);
+    }
     guard_lower(port,raised);
     port->result=result;port->refused=refused;
     atomic_store_explicit(&port->done,1,memory_order_release);
