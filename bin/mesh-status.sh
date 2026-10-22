@@ -44,9 +44,14 @@ b "DAEMONS"; for spec in io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh
   printf '  %-22s %-9s %s\n' "$L" "$kind" "${pid:+pid $pid}"
 done
 b "FABRIC PEERS"; st=$("$HERE/mesh-stat" 2>/dev/null | tail -1); own=$(printf '%s' "$st" | plutil -extract node raw -o - - 2>/dev/null); i=0
-while name=$(printf '%s' "$st" | plutil -extract "nodes.$i.name" raw -o - - 2>/dev/null); do
-  n=$(printf '%s' "$st" | plutil -extract "nodes.$i.node" raw -o - - 2>/dev/null); i=$((i+1))
-  printf '  %-24s node %-10s %s%s\n' "$name" "$n" "$(printf '%s' "$st" | plutil -extract "nodes.$((i-1)).model" raw -o - - 2>/dev/null)" "$([ "$n" = "$own" ] && echo '  (this node)')"
+fnv(){ local h=${1//-/} n=0 k; for ((k = 0; k < 32; k += 2)); do n=$(( (n * 0x01000193 & 0xffffffff) ^ 0x${h:k:2} )); done
+       n=$((n & 0x7fffffff)); echo $(( n ? n : 1 )); }
+names=$(jq -r '.nodes // {} | to_entries[] | select((.key | test("^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$")) and .value.name) | "\(.key) \(.value.name)"' \
+  "$HERE/../etc/mesh-nodes.json" 2>/dev/null | while read -r id nm; do printf '%s %s\n' "$(fnv "$id")" "$nm"; done)
+while n=$(printf '%s' "$st" | plutil -extract "nodes.$i.node" raw -o - - 2>/dev/null); do
+  nm=$(printf '%s\n' "$names" | awk -v n="$n" '$1 == n {$1 = ""; sub(/^ /, ""); print; exit}')
+  printf '  %-24s node %-10s %s%s\n' "${nm:-node $n}" "$n" "$(printf '%s' "$st" | plutil -extract "nodes.$i.model" raw -o - - 2>/dev/null)" "$([ "$n" = "$own" ] && echo '  (this node)')"
+  i=$((i+1))
 done
 [ "$i" -gt 0 ] || echo "  this node's bridge holds no record (mesh-stat errno $(printf '%s' "$st" | plutil -extract errno raw -o - - 2>/dev/null || echo unread))"
 echo
