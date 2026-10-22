@@ -82,6 +82,17 @@ rerun of `install.sh`) adds the networks and joins the tailnet labeled with the 
 the node's key expiry in the Tailscale admin console (or use a tagged key, whose nodes do not expire), or the node
 must log in again when its node key expires.
 
+**Gitignored documents go to peers directly.** Git carries everything a node converges to. A document a node needs
+that must stay out of git goes to it over ssh from a peer that holds it, never through git. There are two kinds:
+- credentials (`networks.conf`, `tailscale.key`), because the repository is public;
+- `NODE-STANDUPS.md` at the checkout's root, the record of which macOS and toolchains each node had and what went
+  wrong at its standup. It stays out of git so that one day's versions are never read as requirements or as a version
+  of this repository.
+
+Copy them to a node when it joins the mesh, as above. Copy them to every node again whenever one changes: a network
+added, a key replaced, a standup recorded (`ssh <node> 'cat > mesh/NODE-STANDUPS.md' < NODE-STANDUPS.md`). Build
+products are gitignored too and never copied: each node builds its own.
+
 **Nodes of your own.** The roster every node trusts is `keys/authorized_keys` (public keys, each labeled
 `owner:machine`). Fork this repository, append your public key to it, and bootstrap from the fork:
 
@@ -425,8 +436,8 @@ with no toolchain opens the GUI installer. The explicit path never does:
 
 ```
 sudo touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-softwareupdate -l          # now lists "Command Line Tools for Xcode 26.6-26.6"
-sudo softwareupdate -i "Command Line Tools for Xcode 26.6-26.6" --verbose
+softwareupdate -l          # now lists "Command Line Tools for Xcode <version>"
+sudo softwareupdate -i "Command Line Tools for Xcode <version>" --verbose
 sudo rm /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
 ```
 
@@ -440,14 +451,15 @@ library's kernels itself (`rdma/Makefile`, `kernels`). Copy an Xcode from a mach
 that has one, once per node, over the tailnet:
 
 ```
-ditto -c --keepParent /Applications/Xcode-26.4.1.app - | ssh <node> 'sudo ditto -x - /Applications'
+ditto -c --keepParent /Applications/Xcode-<version>.app - | ssh <node> 'sudo ditto -x - /Applications'
 ```
 
 `mesh-devtools-init` then readies every `/Applications/Xcode*.app` headlessly
 (`xcodebuild -license accept`, `-runFirstLaunch`, `-downloadComponent MetalToolchain`,
 `xcrun --kill-cache` for root and the admin user), without changing the active
-developer directory, which stays the Command Line Tools. Xcode 26.4.1 runs on macOS 26
-and 27.
+developer directory, which stays the Command Line Tools. Which Xcode, Metal toolchain
+and macOS each node has, and what broke while setting them up, is in `NODE-STANDUPS.md`
+(gitignored; "Gitignored documents go to peers directly", above).
 
 Nothing else in the stack needs a toolchain either. `uv` is a prebuilt binary linking
 only system frameworks, and `uv python list` offers prebuilt CPython, so Python is
