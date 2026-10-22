@@ -7,6 +7,22 @@ directory, and the chain kernel's six instances (32 to 1,024 threads) compiled i
 (metal-microbench output_data/chain-service-20261021/fused-stream). Nothing ran on two ranks. The design is in
 [DESIGN-fused-stream.md](DESIGN-fused-stream.md).
 
+This review is history: it judged the branch as it stood on 2026-10-21. Since main's merge db7326b3 the fused crossing
+differs in these ways, and the rows below that say otherwise describe the branch, not main:
+- It runs on n ranks, not two. `ncclMeshFused` holds lists of records, with room the caller gives and counts the group
+  writes (`publish`, `land`, `publishes`, `lands`), one publication and one landing for each peer.
+  `fused.all_reduce(send, landings, polls, group=None)` and `fused.encode(..., peers, land=None, publish=None)` take
+  them (C2's two-rank, one-slot, float16 lower pole is gone).
+- There is no slot and no `mesh_step_store`. The kernel writes its part into its own send tensor, a region tensor, and
+  the bridge sends that tensor's pages. Each landing lands in a landing tensor of the caller's and is read with
+  `mesh_step_read(l.d + l.p->dst, k)` (C4's two publication forms, C7's slots and M's slot addresses describe the
+  branch).
+- Any size and any dtype fuse. The caller's kernel makes the sum, and the library combines nothing, so the Open item on
+  a float32 sum is closed.
+- A fused group encodes no dispatch on any number of channels: the groups before it complete first, then each of its
+  channels in the stream's order (nccl-mesh.c `complete`). C4's Open item on the tracks path is closed.
+- The steps' text comes from the library alone (`ncclMeshMetalPrelude`, `fused.steps()`), so C9's Open item is closed.
+
 ## The files and their kinds
 
 | File | Kind | Change |

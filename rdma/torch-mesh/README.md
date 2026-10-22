@@ -31,16 +31,18 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - One rank a node, launched as torchrun launches one (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); each node's
   bridge is its resident service, so a launch starts no bridge.
 - A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
-  exchange their nodes, the nodes their bridges reach and where their streams' units start, and the group keeps the
+  exchange their nodes, the nodes their bridges reach and their holdings' start words, and the group keeps the
   map its init made of them.
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
-  communicators hold one stream, and a link has four, so the world group and three subgroups use a node pair at once;
-  one more is refused (EBUSY) until a group is destroyed ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
+  communicators hold one stream, and a link has up to four (one for each lane pair its plan holds), so the world group
+  and three subgroups use a node pair at once; one more is refused (EBUSY) until a group is destroyed
+  ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing (a dud's too) or a lost
-  link; a GPU wait also at its bound, and a host-path wait at a revoke.
+  link; a GPU wait also at its bound, and a host-path wait at a revoke or once `MESH_PLATFORM_NS` passes with nothing
+  landed, consumed or published on any of its channels.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
   next one's node: the bridges forward nothing, and a group whose ranks no such path joins fails at its first
   collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
@@ -57,11 +59,14 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the region (0: outside it).
   Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on region
   tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
-  allocator's, copied into the region's rings: torch's MPS factories take their allocator from a fixed instance
-  (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a tensor in the
-  region by making it with `empty`, never by default. metal-microbench's callers: `tools/torch_parallel/ep.py`
-  `COUNTED=1` gathers its dispatched rows into one region tensor and writes its experts' outputs into another (its two
-  send buffers, made once at their fixed shapes), and `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
+  allocator's, and a collective that sends from one, or lands in one, across a link fails as a value
+  (`ncclInvalidUsage`: the library copies nothing into the region). torch's MPS factories take their allocator from a
+  fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
+  tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a staged
+  copy of a non-contiguous operand, a functional collective's result, `backend.blank`) are region tensors.
+  metal-microbench's callers: `tools/torch_parallel/ep.py` `COUNTED=1` gathers its dispatched rows into one region
+  tensor and writes its experts' outputs into another (its two send buffers, made once at their fixed shapes), and
+  `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
 ## What works
 
@@ -144,10 +149,10 @@ replay's command buffers on the calls' landings (`MetalRecordGate`); and made ea
 ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
 (`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
 (no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
-Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a stream's
-receives into its in ring ahead of the data: [design/transport.md](../../design/transport.md) section 14), and
-the planning once is the communicator's compiled programs'. A training step's backward, run by autograd, is compiled
-and committed by the same rule.
+Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a holding's
+receives into the holder's own landing pages, a window ahead of the data: [design/transport.md](../../design/transport.md)
+section 14), and the planning once is the communicator's compiled programs'. A training step's backward, run by
+autograd, is compiled and committed by the same rule.
 
 ## What does not
 

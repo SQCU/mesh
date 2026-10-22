@@ -303,7 +303,8 @@ struct Operand {
 };
 
 // A group's operands: one device's tensors (MPS: the Metal path; CPU: the host path), a non-contiguous one through a
-// contiguous copy (a CPU one in the region) written back after the group where a call writes it.
+// contiguous copy in the region (a crossing call's send buffer is a lease's, and the library copies none into the
+// region: nccl.h Memory) written back after the group where a call writes it.
 struct Group {
   bool metal = false;
   std::deque<ncclMeshBuffer> buffers;
@@ -322,7 +323,7 @@ struct Group {
         writes |= written;
         return copy;
       }
-    at::Tensor copy = metal ? t.contiguous() : region_empty(t.sizes().vec(), t, false).copy_(t);
+    at::Tensor copy = region_empty(t.sizes().vec(), t, metal).copy_(t);
     staged.emplace_back(t, copy, written);
     return copy;
   }
@@ -529,7 +530,8 @@ static int group_argument(const std::string &name) {
 }
 
 // Issued and not completed (split) where the result is its own operand: torch's wait_tensor (its work registry) waits
-// for it; a non-contiguous result, written back from a contiguous copy, completes at once.
+// for it; a non-contiguous result, written back from a contiguous copy, completes at once.  A result made here is a
+// region tensor (region_empty): the library sends from and lands in leases alone (nccl.h Memory).
 static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
   const std::string name = op.schema().name().substr(sizeof "_c10d_functional::" - 1) +
                            (op.schema().overload_name().empty() || op.schema().overload_name() == "default" ? "" : "." + op.schema().overload_name());
@@ -546,14 +548,14 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
   at::Tensor result;
   Call call;
   if (name.rfind("all_reduce", 0) == 0 || name.rfind("broadcast", 0) == 0) {
-    result = name.back() == '_' ? input : input.clone(at::MemoryFormat::Contiguous);
+    result = name.back() == '_' ? input : region_empty(input.sizes().vec(), input, true).copy_(input);
     call = name[0] == 'a' ? Call{ALLREDUCE, {result}, {}, {}, reduction(arguments[1].toStringRef()), 0}
                           : Call{BROADCAST, {result}, {}, {}, 0, arguments[1].toInt()};
   } else if (name.rfind("all_gather_into_tensor", 0) == 0) {
     std::vector<int64_t> shape = input.sizes().vec();
     TORCH_CHECK(!shape.empty(), "all_gather_into_tensor of a 0-dim tensor");
     shape[0] *= ranks;
-    result = name == "all_gather_into_tensor_out" ? arguments[3].toTensor() : at::empty(shape, input.options());
+    result = name == "all_gather_into_tensor_out" ? arguments[3].toTensor() : region_empty(shape, input, true);
     TORCH_CHECK(result.numel() == input.numel() * ranks, "all_gather_into_tensor_out: out holds ", result.numel(), " elements, not ",
                 input.numel() * ranks);
     call = {ALLGATHER, {input}, {result}, std::vector<int64_t>(ranks, input.numel()), 0, 0};
@@ -561,7 +563,7 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
     std::vector<int64_t> shape = input.sizes().vec();
     TORCH_CHECK(!shape.empty() && shape[0] % ranks == 0, "reduce_scatter_tensor: dim 0 of ", input.sizes(), " is not divisible by ", ranks);
     shape[0] /= ranks;
-    result = at::empty(shape, input.options());
+    result = region_empty(shape, input, true);
     call = {REDUCE_SCATTER, {input}, {result}, std::vector<int64_t>(ranks, result.numel()), reduction(arguments[1].toStringRef()), 0};
   } else {
     std::vector<int64_t> outs, ins, counts;
@@ -579,7 +581,7 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
       counts.push_back(r * width);
       shape[0] += r;
     }
-    result = at::empty(shape, input.options());
+    result = region_empty(shape, input, true);
     call = {ALLTOALL, {input}, {result}, counts, 0, 0};
   }
   const uint64_t ticket = issue({call}, comm, true, false);
@@ -824,11 +826,12 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
 // tensor and publishes it to every peer (one store of each holding's `ready`), and the kernel after the call awaits
 // every landing and reads each peer's part from its landing tensor, adding them to its own (an all-reduce's sum, which
 // the caller makes); the call dispatches no step (a fused group's channels complete in the stream's order with no
-// dispatch: nccl-mesh.c complete_track).  Both tensors are region
-// tensors (torch_mesh.empty: a lease's, from its first byte, a page), which the bridge sends from and lands in, zero
-// copy.  The call is the library's classic form on torch's command buffer and open encoder with a residency set: the
-// library writes the two steps' argument records and returns their bindings, GPU addresses the caller's kernels reach
-// by address, and adds every buffer they name to the set, which is resident for every command buffer of each queue it
+// dispatch: nccl-mesh.c complete, complete_track).  The send tensor and every landing tensor lie in region tensors
+// (torch_mesh.empty: a lease), each starting on a page, which the bridge sends from and lands in, zero copy.  The call
+// is the library's classic form on torch's command buffer and open encoder with a residency set: the library writes
+// each publication's and each landing's argument record into the lists this call gives it room in (n - 1 of each:
+// ncclMeshFusableRooted's all-reduce counts) and returns their bindings, GPU addresses the caller's kernels reach by
+// address, and adds every buffer they name to the set, which is resident for every command buffer of each queue it
 // was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a buffer from
 // it.  A call the library does not fuse (a tensor that is no region tensor or does not start on a page) fails as a
 // value, the library's refusal; nothing falls back to a slower form.  The peers are every other rank, in rank order.
@@ -857,7 +860,6 @@ static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
 // steps; the text a kernel that runs them is compiled after.
 static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 
-// The fused exchange of `send` (this rank's part, which its publishing kernel writes) and `landing` (where the peer's
 // The fused exchange of `send` (this rank's part) and `landings` (where each other rank's part lands, in rank order),
 // contiguous MPS region tensors of one dtype and size, on communicator `comm`, each landing's wait bounded by `polls`
 // (nccl.h ncclMeshStream polls; _stream.polls the library's most): one group of ncclSend(send) and ncclRecv(landing)

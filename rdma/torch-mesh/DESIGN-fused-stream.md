@@ -5,9 +5,11 @@ On this M5 it was built and installed in the branch's worktree, `mesh-advise` an
 torch-mesh extension was built, and the chain kernel's instances were compiled in one process. Nothing has run on two
 ranks. The ranked pairs are in [REVIEW-fused-stream.md](REVIEW-fused-stream.md).
 
-A fused crossing is libnccl-mesh's fastest all-reduce on two ranks. The kernel that makes a rank's part publishes it
-into the crossing's slot. The kernel after the call waits for the peer's part to land, then adds it to its own. The
-library runs no kernel of its own for either step.
+A fused crossing is libnccl-mesh's one-shot all-reduce on n ranks, run by the caller's kernels. The kernel that makes
+a rank's part writes it into the rank's send tensor and releases it to every peer. The kernel after the call waits for
+each peer's part to land in its own landing tensor, then adds them to its own part. The library runs no kernel of its
+own for either step. (Until main's merge db7326b3 it was a two-rank in-place float16 sum through a slot of 61,440
+bytes; the sections below on the branch keep that history.)
 
 ## Could torch's stream run it, as nccl.h stood at 2e2a2718?
 
@@ -43,11 +45,12 @@ No.
 - The library's AIR is byte-identical to main's, since the struct is unused by its own kernels. Only the kernels' text
   SHA-256 in vendor/libnccl-mesh.sha256 changes.
 
-On main, a group on one channel runs as plain dispatches (`complete_track`), so a fused two-rank all-reduce encodes no
-dispatch at all. The tracks dispatch runs only when another channel has a group in flight, such as the chain's next
-input broadcast at a block's start.
+On main, a fused group encodes no dispatch on any number of ranks. The groups in flight before it are completed first,
+and then each of its channels is completed in the stream's order, one after another (nccl-mesh.c `complete`,
+`complete_track`). The tracks dispatch never runs for a fused group.
 
-**torch-mesh.** `torch_mesh/fused.py`, and a section of `_stream.mm` of its own (lines 801-877):
+**torch-mesh.** `torch_mesh/fused.py`, and a section of `_stream.mm` of its own (`fused_residency`, `metal_prelude`,
+`fused_all_reduce`, `fused_published`):
 
 | Call | Takes | Returns |
 |---|---|---|
@@ -66,27 +69,30 @@ input broadcast at a block's start.
 The host makes two calls a step: `fused.all_reduce` of the step's part, which only writes the records (a publication
 and a landing for each peer), and the kernel's encode. One more dispatch after the last step lands the last crossing.
 
-**Landing crossing t − 1, at the start of step t's prologue.**
+**Landing crossing t − 1, at the start of step t's prologue.** For each peer's landing in turn:
 1. Every thread of every worker calls `mesh_step_enter`, which stores the record's sequence in the ring's progress word
-   (one thread). Every thread calls `mesh_step_await`. In each worker, thread 0 polls the landed word. Each poll is one
-   `volatile coherent(system)` load after a fence, at most `polls` of them. Then the worker passes a barrier and one
-   system-scope fence. Nothing reads a gate.
-2. Each worker's threads then read the worker's slice of the peer's part from the slot (`mesh_step_read<half>`) and
-   their own part from `p[t − 1]` (the landing's `d + dst`). They add the two in float32 and round to float16, as the
-   library's own landing does, and use z for x = e + tanh(z). On rank 0 they also write tanh(z), step t − 1's output,
-   into its staging buffer.
+   (one thread). Every thread calls `mesh_step_await`. In each worker, thread 0 polls the holding's `landed` word, and
+   its `sent` past this rank's send. Each poll is one `volatile coherent(system)` load after a fence, at most `polls`
+   of them. Then the worker passes a barrier and one system-scope fence. Nothing reads a gate.
+2. Each worker's threads then read their own part from `p[t − 1]` and the worker's slice of each peer's part from that
+   peer's landing tensor (`mesh_step_read<half>(l.d + l.p->dst, i)`). They add them in float32, own part first and the
+   peers in rank order, round to float16 once, and use z for x = e + tanh(z). On rank 0 they also write tanh(z), step
+   t − 1's output, into its staging buffer.
 
 **Publishing crossing t, at the end of stage 1.**
-1. The `Summand` epilogue writes the part into `P` (`p[t]`), each worker its own columns.
-2. `mesh_step_enter` stores the publication's sequence (one thread).
-3. After a device barrier, each worker's threads store the worker's columns of `P` into the slot (`mesh_step_store`).
-4. Each worker counts its arrival (`mesh_last_arrival<true>`: a system-scope fence, then one atomic add by thread 0).
-5. The last worker to arrive fences again and calls `mesh_step_release`: a barrier, then thread 0's one system-scope
-   fence (`mesh_publish`) and the slot's ready words.
-6. That worker resets the count. A run's first step resets it too, in worker 0's prologue, before any worker counts.
+1. The `Summand` epilogue writes the part into `P` (`p[t]`, the send tensor), each worker its own columns. Nothing is
+   copied: the bridge sends `p[t]`'s own pages.
+2. `mesh_step_enter` on each publication's bindings stores its sequence (one thread).
+3. After a device barrier, each worker counts its arrival (`mesh_last_arrival<true>`: a system-scope fence, then one
+   atomic add by thread 0).
+4. The last worker to arrive calls `mesh_step_release` on each publication: a barrier, then thread 0's one
+   system-scope fence (`mesh_publish`) and one store of that holding's `ready`.
+5. That worker resets the count. A run's first step resets it too, in worker 0's prologue, before any worker counts.
 
-No worker waits for another to publish. The slot ring stays safe by the host's encode order: step t's kernel consumes
-crossing t − 1 before it publishes crossing t.
+No worker waits for another to publish. One landing tensor serves every step: the library posts a step's receives only
+once this rank's publication of that step has stored `ready`, after the kernel that read the landing before. The sum
+ring stays safe by the host's encode order: step t's kernel lands crossing t − 1, its wait covering `sent` past this
+rank's send, before it publishes crossing t.
 
 **What moved in chain-service.py.** Step t − 1's output is written by step t's kernel. So a block's outputs are copied
 one step after the block ends, and the pace mark moves with that copy. The host still waits for the mark two blocks

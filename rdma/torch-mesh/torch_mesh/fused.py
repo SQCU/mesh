@@ -13,11 +13,11 @@ source is compiled after steps() and calls them on the bindings all_reduce retur
   all_reduce(send, landings, polls, group=None)
                                              the fused exchange of `send` (this rank's part) and `landings` (where each
                                              other rank's part lands, in rank order, n - 1 of them): contiguous MPS
-                                             tensors of one dtype and size, each a region tensor from its first byte
-                                             (torch_mesh.empty: a lease, which the bridge sends from and lands in, each
-                                             starting on a page); a Crossing, its publications' bindings and its
-                                             landings', in rank order; one the library does not fuse raises (no slower
-                                             form runs in its place), any size and dtype fusing
+                                             tensors of one dtype and size, each in a region tensor and starting on a
+                                             page (torch_mesh.empty: a lease, which the bridge sends from and lands
+                                             in); a Crossing, its publications' bindings and its landings', in rank
+                                             order; one the library does not fuse raises (no slower form runs in its
+                                             place), any size and dtype fusing
   encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)
                                              _stream.encode's dispatch with `land`'s landing bindings and `publish`'s
                                              publication bindings after the constants, `peers` of each; a dispatch that

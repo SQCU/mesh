@@ -5,7 +5,7 @@ of calls, each a kind, its tensors, counts, operator and root.  MPS tensors take
 encoded on torch's MPS stream, each tensor passed as its storage's MTLBuffer and byte offset (ncclMeshBuffer), so the
 work is ordered with torch's own and the call returns at once (an async op issued and not completed: a Work whose wait
 completes it on torch's stream).  CPU tensors take the host path, complete where the call returns.  A non-contiguous
-tensor is staged through a contiguous copy.
+tensor is staged through a contiguous copy in the region.
 
 One form a collective, the library's V call where it has one (the library takes equal segments as its equal
 program): an all-gather and a reduce-scatter are ncclMeshAllGatherV and ncclMeshReduceScatterV; all_to_all,
@@ -53,10 +53,13 @@ def op(reduce_op):
 
 
 def blank(shape, dtype, device):
-    """An uninitialized contiguous tensor the backend hands a collective: a CPU one in this node's bridge's region (a
-    lease, mesh.lease: rdma/NCCL.md "Memory"); an MPS one is torch's (the Metal path copies it into the region's
-    rings)."""
-    if torch.device(device).type != 'cpu':
+    """An uninitialized contiguous tensor the backend hands a collective, in this node's bridge's region (a lease:
+    rdma/NCCL.md "Memory"): a CPU one over mesh.lease, an MPS one a region tensor (_stream.region_empty).  The library
+    sends from and lands in leases alone, and copies nothing into the region."""
+    kind = torch.device(device).type
+    if kind == 'mps':
+        return _stream.region_empty(list(shape), torch.empty(0, dtype=dtype), True)
+    if kind != 'cpu':
         return torch.empty(shape, dtype=dtype, device=device)
     count, element = math.prod(shape), torch.empty(0, dtype=dtype).element_size()
     return torch.frombuffer(mesh.lease(max(count, 1) * element), dtype=dtype, count=max(count, 1))[:count].view(shape)
@@ -362,8 +365,8 @@ def _(input, counts, send_segments, recv_segments, capacity, host, group_name):
 def merge_partials(partials: torch.Tensor, root: int, group_name: str) -> torch.Tensor:
     """The partials merge on the mesh group named `group_name` as a torch operator (torch_mesh.merge_partials):
     float32 rows of [m, l, O] (partial) merged by their log-sum-exp, on every member (`root` -1) or at `root`."""
-    out = torch.empty_like(partials, memory_format=torch.contiguous_format)
-    _mesh(group_name, 'merge_partials').merge_partials(out, partials.contiguous(), root=root)
+    out = blank(partials.shape, partials.dtype, partials.device)
+    _mesh(group_name, 'merge_partials').merge_partials(out, partials, root=root)
     return out
 
 
