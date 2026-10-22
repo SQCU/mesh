@@ -3,6 +3,14 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 LOG=/usr/local/mesh/log/devtools.log
 [ -d /usr/local/mesh/log ] && exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
+for X in /Applications/Xcode*.app/Contents/Developer; do
+  export DEVELOPER_DIR="$X"
+  xcodebuild -license accept
+  xcodebuild -runFirstLaunch
+  xcodebuild -downloadComponent MetalToolchain
+  echo "[$(ts)] $X: $(xcrun metal --version 2>&1 | head -1)"
+done
+unset DEVELOPER_DIR
 SDK=$(xcrun --show-sdk-path 2>/dev/null)
 [ -n "$SDK" ] && [ -f "$SDK/usr/include/infiniband/verbs.h" ] && exit 0
 echo "[$(ts)] no usable SDK, installing Command Line Tools headlessly"

@@ -121,6 +121,8 @@ sudo -n -u "$ADMIN_USER" true 2>/dev/null && ok "verified: sudo needs no tty" ||
 
 sec "5b. Developer tools"
 try "SDK present (verbs.h, librdma)" "$MESH_ROOT/bin/mesh-devtools-init.sh"
+XCODE=$(ls -d /Applications/Xcode*.app/Contents/Developer 2>/dev/null | tail -1)
+try "Metal compiler under ${XCODE:-no Xcode: copy one into /Applications (README)}" env DEVELOPER_DIR="$XCODE" xcrun metal --version
 
 sec "5c. Known Wi-Fi networks"
 [ -f "$REPO/networks.conf" ] && install -m 600 -o root -g wheel "$REPO/networks.conf" "$MESH_ROOT/networks.conf"
