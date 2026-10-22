@@ -127,16 +127,21 @@ struct metal_wait { void *words, *violation, *data; size_t word, sent_word, data
    deferred publication's record, read by mesh_step_sent; 0 none). */
 struct metal_release { void *words; size_t word; mesh_pages value; size_t sent_word; mesh_pages sent_target; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
-/* Buffers a dispatch reaches through no binding of its own (a publication's operands, a landing's or a gate's landing
-   buffers), declared on the classic form's encoder before it, with write use where `write`: Metal orders a pass after
-   the passes that write (or, for a write, read) a tracked buffer only where both name it, and the library's counts
+/* Buffers a dispatch reaches through no binding of its own (a publication's operands, a landing's buffers), declared on
+   the classic form's encoder before it, with write use where `write`: Metal orders a pass after the passes that write
+   (or, for a write, read) a tracked buffer only where both name it, and the library's counts
    dispatches otherwise name the counts page alone (a publish could run before its operand's bytes were written, or a
    caller's kernel that stores `ready` by address after a later publish).  The Metal 4 form orders its passes by its
    barriers; a recorded program by its replay. */
 void metal_uses(struct metal_program *, void *const *buffers, size_t n, int write);
-/* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
-   number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
-struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
+/* The stamp of a communicator's pool (nccl-mesh.c spare_take): word METAL_STAMP of its failure words' page, on a cache
+   line of its own, the greatest group whose readers of the pool's leases have ended, written by metal_stamp alone and
+   read by the host.  metal_stamp: `value` stored at `word` in `words` once every dispatch the program encoded before it
+   has ended, the greater value kept: on the classic form by its command buffer's completed handler (the GPU's end of
+   the buffer; nothing waits, and a buffer never committed stamps nothing), on the Metal 4 form by one dispatch after
+   the program's barrier, one system fence and one store, as metal_publish stores.  A release, never a wait. */
+#define METAL_STAMP 16
+struct metal_result metal_stamp(struct metal_program *, void *words, size_t word, uint64_t value);
 /* the wait alone (a COPY's landing in place, a group's end on `sent`), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
 /* the wait, then every threadgroup's piece of the landed bytes combined into dst (an ncclDataType_t or METAL_MERGE, op as

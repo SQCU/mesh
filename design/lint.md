@@ -49,6 +49,16 @@ backend complexity out of linear algebra.
   - Source: the operator, 2026-10-22: "error states can be made unreachable and proven to be unreachable".
   - Wrong: `if (polls > PATIENCE) { stop = 1; err |= cause; }`
   - Right: no such state. Waits are the library's landing wait, whose poll bound is the node's.
+- **G1-GATE.** A landing entry presented with a word: the transport would hold the receive until the word says a
+  reader released the pages.
+  - Source: the operator, 2026-10-22: "data procesisng code gets to write their own guards in their own source. if
+    source says to write continuously into ab uffer, the nic must write continuously into that buffer even if this
+    means that dat aprocessing code can race or lose parts of a stream." The 10-21 rule says the same: programs own
+    their buffers' order, and the transport keeps the landing wait, one acquire fence and a poll bound.
+  - Wrong: `mesh_stream_present(ctx, s, 1, (struct mesh_entry){row, pages, gate_at, gates + 1})`.
+  - Right: `(struct mesh_entry){row, pages, 0, 0}`. A program that names pages again guards them in its own source.
+    The library's own pool is guarded by a stamp the reading program stores at its end (nccl-mesh.c `spare_take`).
+    A send entry's word stays: `ready` is the producer's own declaration that its pages are written.
 - **semantic SEM-META.** Error metadata consumed inside a call path, to branch, refuse or wait.
   - Source: design/pages-and-functions.md "Asynchronous error metadata".
 - **semantic SEM-GUARD.** A check or refusal that guards a state the plan excludes, with no rubric citation.

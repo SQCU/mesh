@@ -106,6 +106,18 @@ def line_of(clean, offset):
     return clean.count('\n', 0, offset) + 1
 
 
+def top_level(text):
+    """Comma-separated fields at depth 0 of an initializer's text, stripped."""
+    fields, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        depth += ch in '([{'
+        depth -= ch in ')]}'
+        if ch == ',' and not depth:
+            fields.append(text[start:i].strip())
+            start = i + 1
+    return fields + [text[start:].strip()]
+
+
 def check_c(path, text):
     clean = strip_c(text)
     rel = path.relative_to(ROOT).as_posix()
@@ -117,6 +129,12 @@ def check_c(path, text):
             find(path, line_of(clean, m.start()), 'L2-ALIGNAS', 'an alignment specifier on a declaration of several '
                  'members aligns each of them (C11 6.7.5), so words meant to share a line start lines of their own: '
                  'one declarator an aligned declaration', 'bridge audit 2026-10-22, item 3 (struct lane_state)')
+    for m in re.finditer(r'mesh_stream_present\s*\([^;]*?,\s*1\s*,\s*\(struct mesh_entry\)\{([^;]*?)\}\s*\)', clean):
+        fields = top_level(m.group(1))
+        if len(fields) > 2 and fields[2] != '0':
+            find(path, line_of(clean, m.start()), 'G1-GATE', 'a landing entry presented with a word: the transport would '
+                 'hold its receives until a reader released the pages; a program guards the pages it names again in its '
+                 'own source', 'operator 2026-10-22: "data procesisng code gets to write their own guards in their own source"')
     for m in re.finditer(r'IBV_QPS_RESET|IBV_QPS_ERR|ibv_destroy_qp|\bdestroy_qp\b', clean):
         find(path, line_of(clean, m.start()), 'M3-QP', 'a queue pair moved to RESET or ERR, or destroyed, inside the '
              'running process', 'design/rubrics.md M3; operator 2026-10-22: the documented flush only, unused')

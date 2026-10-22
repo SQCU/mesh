@@ -116,10 +116,12 @@
    its landings, never parks, and holds no lock another communicator's groups take; its waits end at their counts, a
    count's ~0, its holding's end or a revoke, and no clock ends them.  A group whose entries lie on one channel completes as
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
-   (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
-   reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
-   in pages the stream's earlier work still reads; its end waits until its SENDs are done (`sent`), so the caller may
-   write its send buffer again.  A wait is a kernel polling its holding's `landed` count, and `sent` where a write meets
+   (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings are posted as it presents them, with no gate:
+   a peer's bytes may land in a receive buffer as soon as the peer sends them, before the stream reaches the group, so a
+   caller that names a buffer again orders its own reads and writes of it (the operator, 2026-10-22: "data procesisng
+   code gets to write their own guards in their own source"); the library orders its own pool's (Memory, below).  A
+   group's end waits until its SENDs are done (`sent`), so the caller may write its send buffer again.
+   A wait is a kernel polling its holding's `landed` count, and `sent` where a write meets
    bytes a SEND reads, and nothing else (rdma/mesh.metal mesh_wait_bounded), which the bridge sets ~0 where the link is
    lost; every wait is bounded: the stream's `polls` is the most loads of a count a wait makes,
    the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
@@ -145,9 +147,11 @@
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
-   communicator leases a page for its gate and a pool of leases for the pages its groups send from and land in that are
-   not the caller's (a reduce-scatter's operand, a tree's scratch, a combine's landing area), held by a group until it
-   completes and returned at ncclCommDestroy.  ncclMemAlloc is the lease,
+   communicator leases a pool of leases for the pages its groups send from and land in that are not the caller's (a
+   reduce-scatter's operand, a tree's scratch, a combine's landing area), held by a group until it completes, taken
+   again once the GPU has ended every command that read them (a stamp the program that gave them back stores at its
+   end: its command buffer's completion, or the Metal 4 form's last dispatch), and returned at ncclCommDestroy.
+   ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
@@ -1013,26 +1017,30 @@ uint64_t ncclMeshRetired(void);
    residencySet, Metal path above; metal-microbench docs/kernels.md#collectives, Q5P's in-stream form and its one-sided
    fused crossings, and torch-mesh's torch_mesh/fused.py on torch's stream, the steps still this library's:
    docs/acceptance-20261014.md A39, A40).  A fused group, on a stream whose `fused` is set, is completed at once (issue
-   or not: issue->ticket 0), the groups in flight before it completed first, so it completes alone, each of its channels
-   in the stream's order, and its steps that cross are at most one SEND and one landing in place toward each peer
+   or not: issue->ticket 0), the groups in flight before it that it meets completed first (one whose entries name a row
+   its entries name, or with a send not yet published on a channel where it publishes), the others left in flight to
+   their own completion, each of its channels in turn,
+   and its steps that cross are at most one SEND and one landing in place toward each peer
    (ncclMeshFused's records), each of a whole buffer, no combine: ncclSend(send, n, type, q) and ncclRecv(landing_q, n,
    type, q) toward each peer q in one group (an all-reduce's or a reduce's one-shot form: each rank sends its part to
    every peer and receives every peer's; the library cannot see when the caller's kernels read a landing area of its
    own, so the caller sums its own part with what lands in its landing buffers), any of them alone, an in-place
    ncclBroadcast, or an in-place ncclAllGather (sendbuff recvbuff + rank x sendcount, NCCL's), any type and any size,
-   each buffer a lease's and starting on a page (Memory, above).  The call presents its entries, encodes every other step of the
-   group as ever (its gate store, where its landing has no publication of its own to wait on) and the fused steps in no
-   dispatch: their records are written and their bindings returned in *fused (each six GPU addresses, ncclMeshFused's
+   each buffer a lease's and starting on a page (Memory, above).  The call presents its entries and encodes the fused
+   steps in no dispatch:
+   their records are written and their bindings returned in *fused (each six GPU addresses, ncclMeshFused's
    order; none where the group has no such step, a group that crosses no link among them).  A publication: the caller's
    kernel that writes the operand (d + record.dst: its send buffer) calls mesh_step_enter on each publication's
    bindings, writes it, and from its last threadgroup to arrive (the one that knows every other threadgroup's stores are
    done: the caller's own count of arrivals) calls mesh_step_release on each publication's a, one system fence and one
    store of that holding's `ready`; it is encoded after the call returns.  The landing: the
    kernel after it calls mesh_step_enter and mesh_step_await on a (every threadgroup may: each its own bounded wait for
-   the holding's `landed` past the landing, and its `sent` past the group's send, so that once it returns the send
-   buffer may be written again; each ends at once after any wait on its failure words has failed), then reads the landed bytes from d + record.dst (its landing buffer) with
-   mesh_step_read and combines them with its own part where it reduces.  A kernel that writes the send buffer again
-   with no landing after the publication calls mesh_step_sent on the publication's bindings first.  The call encodes no
+   the holding's `landed` past the landing alone; each ends at once after any wait on its failure words has failed),
+   then reads the landed bytes from d + record.dst (its landing buffer) with mesh_step_read and combines them with its
+   own part where it reduces.  The NIC reads the send buffer until the publication's `sent` passes it, which no
+   landing wait covers: a kernel that writes a send buffer again calls mesh_step_sent first on the bindings of the
+   publication that last sent from it (a later publication's on the same channel covers it too: `sent` is a count).
+   The call encodes no
    dispatch of either fused step, so the caller's kernels are ordered by its stream alone: on the classic form, its
    queue's order (a serial compute encoder's dispatches, its command buffers in commit order).  A group on such a stream
    that is not a fused crossing (one that crosses no link; more than one SEND or landing toward a peer, a combine or a
@@ -1041,14 +1049,8 @@ uint64_t ncclMeshRetired(void);
    completed), writes no record and sets both counts to 0, so the caller's kernels publish and await nothing; as an
    ordinary call it reads its send buffer at its place in the stream, so the kernel that writes it is encoded before
    the call.  A group on a classic stream without its residencySet fails (ncclInvalidArgument).  The landing's receive
-   is posted only once its gate opens.  On a channel where the group also publishes, the gate is that publication's
-   `ready`, which the caller's publishing kernel stores from its last threadgroup, so the landing buffer may be the one
-   the previous crossing's landing kernel read where that kernel is the publishing kernel itself (fused.py's step
-   kernel, which lands crossing t - 1 and publishes crossing t) or one encoded before it.  On a channel where the group only lands (a reduce's
-   root, a broadcast's receiver: no publication of its own to wait on) the gate is the communicator's gate word, which
-   the call stores in the stream: its receive is posted once the stream reaches the call, so where its landing buffer
-   is the one the previous crossing's landing kernel read, that kernel is encoded before the call (as for any buffer
-   an ordinary call writes); the library sees no kernel of the caller's, so it can order nothing after one.
+   is posted as the call presents it (the Metal path, above): a landing buffer the caller's kernel still reads may be
+   landed in at once, so a caller names other pages for the next crossing's landing until it has read them.
    *publishes and *lands are this rank's fused steps where a fused group of `kind` rooted at `root` (an all-reduce's and
    an all-gather's root 0) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount) runs on comm
    of n ranks (one rank, or no elements, crosses nothing and has no fused step): an all-reduce's one-shot form n - 1 of

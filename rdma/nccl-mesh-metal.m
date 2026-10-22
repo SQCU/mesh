@@ -385,8 +385,15 @@ struct metal_result metal_publish(struct metal_program *program, const struct me
   return dispatch(program, KIND_publish, r->words, NULL, NULL, NULL, release_args(r, 0), 1, 1);
 }
 
-struct metal_result metal_open_gate(struct metal_program *program, void *words, size_t word, uint64_t value) {
-  return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
+struct metal_result metal_stamp(struct metal_program *program, void *words, size_t word, uint64_t value) {
+  if (program->encoder4) return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
+  if (!program->buffer) return (struct metal_result){EINVAL, "a stamp on a classic program with no command buffer"};
+  id<MTLBuffer> held = (id<MTLBuffer>)words;
+  [program->buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
+    (void)done;
+    __atomic_fetch_max((uint64_t *)((char *)held.contents + word), value, __ATOMIC_RELEASE);
+  }];
+  return METAL_DONE;
 }
 
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
