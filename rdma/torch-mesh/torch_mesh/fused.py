@@ -1,29 +1,46 @@
 """Fused crossings on torch's MPS stream (rdma/nccl.h ncclMeshFusableRooted, ncclMeshFused; ../DESIGN-fused-stream.md):
-a two-rank in-place all-reduce (the library fuses a float16 sum) whose two steps the caller's own kernels run, the
-kernel that makes a rank's part publishing it into the crossing's slot and the kernel after the call landing the peer's
-part and adding it to its own; the call dispatches neither step.  The steps are the library's: a kernel source is
-compiled after steps() and calls them (mesh_step_enter, mesh_step_store and mesh_step_release to publish;
-mesh_step_enter, mesh_step_await and mesh_step_read to land) on the bindings all_reduce returns, which encode passes it.
+the one-shot exchange among n ranks, whose steps the caller's own kernels run, zero copy.  The kernel that makes a
+rank's part writes it into the rank's send tensor and publishes it to every peer, and the kernel after the call reads
+each peer's part from its landing tensor and adds them to its own (the sum is the caller's to make: the library cannot
+see when a kernel reads a landing buffer of its own, so it never combines a fused crossing).  The call is ncclSend of
+the send tensor to each other rank and ncclRecv from each into its own landing tensor, in one group; it dispatches no
+step.  The steps are the library's: a kernel
+source is compiled after steps() and calls them on the bindings all_reduce returns, which encode passes it.
 
   steps()                                    the Metal text a kernel source is compiled after, from the library the
                                              process loaded (ncclMeshMetalPrelude): rdma/mesh.metal as it was built
                                              with, then its steps, struct mesh_step_binding among them
-  all_reduce(tensor, polls, group=None)      the fused all-reduce of tensor (contiguous, on MPS) in place: a
-                                             Crossing, its publication's bindings and its landing's; one the library
-                                             does not fuse raises, and nothing runs a slower form in its place
-  encode(handle, buffers, constants, at, gx, gy, threads, land=None, publish=None)
+  all_reduce(send, landings, polls, group=None)
+                                             the fused exchange of `send` (this rank's part) and `landings` (where each
+                                             other rank's part lands, in rank order, n - 1 of them): contiguous MPS
+                                             tensors of one dtype and size, each a region tensor from its first byte
+                                             (torch_mesh.empty: a lease, which the bridge sends from and lands in, each
+                                             starting on a page); a Crossing, its publications' bindings and its
+                                             landings', in rank order; one the library does not fuse raises (no slower
+                                             form runs in its place), any size and dtype fusing
+  encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)
                                              _stream.encode's dispatch with `land`'s landing bindings and `publish`'s
-                                             publication bindings after the constants; a dispatch that publishes is a
-                                             publication under the stream's one commit rule
+                                             publication bindings after the constants, `peers` of each; a dispatch that
+                                             publishes is a publication under the stream's one commit rule
 
-The kernel's constant block at `at` is its own words padded to an even count, then the landing's mesh_step_binding,
-then the publication's (all zero where encode is given none), each address two words, its low word first:
-struct { uint words[2k]; mesh_step_binding land, publish; }.  Each all_reduce call is one crossing, encoded before its
-publishing kernel: a step kernel that lands crossing t - 1 and publishes crossing t is encoded after crossing t's
-call, with crossing t - 1's Crossing as `land` and crossing t's as `publish`.  The library never writes the sum: the
-landing kernel reads its own part (the landing's d + dst) and the peer's (mesh_step_read at its s) and keeps the sum
-where it needs it (in place of its own part, say).  polls bounds each landing's wait in loads (0: NCCL_MESH_POLLS; _stream.polls is that bound, which
-holds a GPU at most the platform's 5 seconds: rdma/NCCL.md "Bounded waits").
+The kernel's constant block at `at` is its own words padded to an even count, then the landings' mesh_step_bindings,
+then the publications' (all zero where encode is given none), each address two words, its low word first:
+struct { uint words[2k]; mesh_step_binding land[PEERS], publish[PEERS]; }.  Each all_reduce call is one crossing, encoded before its
+publishing kernel: a step kernel that lands crossing t - 1 and publishes crossing t is encoded after crossing t's call,
+with crossing t - 1's Crossing as `land` and crossing t's as `publish`.
+
+The publishing kernel: mesh_step_enter(*b.p, b.v, b.progress, first) in one thread for each publication b, then its
+threadgroups write the part into the send tensor, then the last threadgroup to arrive (the kernel's own count of
+arrivals, after every other threadgroup's stores) calls mesh_step_release(*b.p, b.a, tid) for each: one system fence and
+one store of that holding's `ready`.  The landing kernel: mesh_step_enter, then mesh_step_await(*l.p, l.a, l.v, tid) for
+each landing l in every threadgroup that reads (each its own wait, bounded by polls: the landed bytes, and this rank's
+send done, so the send tensor may be written again once it returns), then element k of that peer's part is
+mesh_step_read<T>(l.d + l.p->dst, k), loaded system-coherent (the NIC wrote it).  The landing tensor may be the same
+every crossing: its receive is posted only once this rank's publication has stored `ready`, after the kernel that read
+it before.  A kernel that writes the send tensor again with no landing kernel between calls
+mesh_step_sent(*b.p, b.a, b.v, tid) on the publication's bindings first.  polls bounds each wait in loads (0:
+NCCL_MESH_POLLS; _stream.polls is that bound, which holds a GPU at most the platform's 5 seconds: rdma/NCCL.md "Bounded
+waits").
 
 A publishing kernel is a publication like a group that publishes, under the stream's one commit rule
 (_stream.mm MeshStream::published, whose work is throughput: the GPU fed with the fewest command buffers).  The
@@ -44,25 +61,30 @@ def steps():
     return STEPS
 
 
-def all_reduce(tensor, polls, group=None):
-    """The fused in-place sum of `tensor` (contiguous, on MPS) over a two-rank mesh group: a Crossing, its
-    publication's and its landing's six addresses each (nccl.h ncclMeshFused).  One the library does not fuse raises
-    RuntimeError with the library's reason (ncclInvalidUsage)."""
+def all_reduce(send, landings, polls, group=None):
+    """The fused exchange over a mesh group of `send` (this rank's part, which its publishing kernel writes to every
+    peer) and `landings` (where each other rank's part lands, in rank order, which its landing kernel reads and adds to
+    its own): a Crossing, each publication's and each landing's six addresses (nccl.h ncclMeshFused).  One the library
+    does not fuse raises RuntimeError with the library's reason (ncclInvalidUsage: a tensor that is no region tensor, or
+    does not start on a page)."""
     import torch.distributed as dist
     group = group or dist.distributed_c10d._get_default_group()
-    publish, land = _stream.fused_all_reduce(tensor, group.handle, int(polls))
-    return Crossing(tuple(publish), tuple(land))
+    publish, land = _stream.fused_all_reduce(send, list(landings), group.handle, int(polls))
+    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 
 def _words(addresses):
     return [w for a in addresses for w in (a & 0xFFFFFFFF, a >> 32)]
 
 
-def encode(handle, buffers, constants, at, gx, gy, threads, land=None, publish=None):
-    """_stream.encode of kernel `handle`, its constants followed by `land`'s landing bindings and `publish`'s
-    publication bindings (module docstring); one that publishes is committed by the stream's rule for a publication."""
+def encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None):
+    """_stream.encode of kernel `handle`, its constants followed by `land`'s `peers` landing bindings and `publish`'s
+    `peers` publication bindings (module docstring); one that publishes is committed by the stream's rule for a
+    publication."""
     words = list(constants) + [0] * (len(constants) % 2)
-    words += _words(land.land if land else _NONE) + _words(publish.publish if publish else _NONE)
+    for crossing, bindings in ((land, 'land'), (publish, 'publish')):
+        records = getattr(crossing, bindings) if crossing else ()
+        words += [w for k in range(peers) for w in _words(records[k] if k < len(records) else _NONE)]
     _stream.encode(handle, buffers, words, at, gx, gy, threads)
     if publish:
         _stream.fused_published()

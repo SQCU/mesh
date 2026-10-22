@@ -25,6 +25,7 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <array>
 #include <vector>
 #include "nccl.h"
 
@@ -292,7 +293,8 @@ using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t
 
 // A tensor as the library reads it, with ProcessGroupNCCL's dtype semantics: a collective that moves data moves any
 // dtype (one NCCL lacks as its bytes); a reduction reduces a complex tensor as its real view (sum and average) and a bool
-// tensor's sum and product as max and min.  `at` is an ncclMeshBuffer (its storage's MTLBuffer and byte offset) on the
+// tensor's sum and product as max and min (its average the library's uint8 average: the sum truncated by the ranks, 1
+// only where every rank holds 1).  `at` is an ncclMeshBuffer (its storage's MTLBuffer and byte offset) on the
 // Metal path and a host pointer on the host path (NULL: none).
 struct Operand {
   const void *at = nullptr;
@@ -331,10 +333,7 @@ struct Group {
   }
   Operand reducing(const at::Tensor &tensor, int64_t &op, bool written) {
     const at::Tensor t = contiguous(tensor, written);
-    if (t.scalar_type() == at::kBool) {
-      TORCH_CHECK(op != ncclAvg, "a bool tensor has no average");
-      op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
-    }
+    if (t.scalar_type() == at::kBool) op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
     if (t.is_complex()) {
       TORCH_CHECK(op == ncclSum || op == ncclAvg, "a complex tensor reduces by sum and average alone");
       return {where(t), (size_t)t.numel() * 2, kind(at::toRealValueType(t.scalar_type()))};
@@ -819,16 +818,20 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
   return out;
 }
 
-// Fused crossings (torch_mesh/fused.py; nccl.h ncclMeshFusableRooted, ncclMeshFused): a two-rank in-place all-reduce
-// (the library fuses a float16 sum) whose two steps the caller's kernels run on torch's stream, the kernel that makes a
-// rank's part publishing it and the kernel after the call landing the peer's part and adding it to its own; the call
-// dispatches neither step (a group on one track is plain dispatches, and a fused one has none: nccl-mesh.c
-// complete_track).  The call is the library's classic form on torch's command buffer and open encoder with a residency
-// set: the library writes the two steps' argument records and returns their bindings, GPU addresses the caller's kernels
-// reach by address, and adds every buffer they name to the set, which is resident for every command buffer of each
-// queue it was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a
-// buffer from it.  A call the library does not fuse (not two ranks, past one small slot, a form that cuts the operand)
-// fails as a value, the library's refusal; nothing falls back to a slower form.
+// Fused crossings (torch_mesh/fused.py; nccl.h ncclMeshFusableRooted, ncclMeshFused): the one-shot exchange, ncclSend
+// of a rank's part to every other rank and ncclRecv of each one's part into a landing tensor of its own, in one group,
+// whose steps the caller's kernels run on torch's stream: the kernel that makes the rank's part writes it into its send
+// tensor and publishes it to every peer (one store of each holding's `ready`), and the kernel after the call awaits
+// every landing and reads each peer's part from its landing tensor, adding them to its own (an all-reduce's sum, which
+// the caller makes); the call dispatches no step (a fused group's channels complete in the stream's order with no
+// dispatch: nccl-mesh.c complete_track).  Both tensors are region
+// tensors (torch_mesh.empty: a lease's, from its first byte, a page), which the bridge sends from and lands in, zero
+// copy.  The call is the library's classic form on torch's command buffer and open encoder with a residency set: the
+// library writes the two steps' argument records and returns their bindings, GPU addresses the caller's kernels reach
+// by address, and adds every buffer they name to the set, which is resident for every command buffer of each queue it
+// was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a buffer from
+// it.  A call the library does not fuse (a tensor that is no region tensor or does not start on a page) fails as a
+// value, the library's refusal; nothing falls back to a slower form.  The peers are every other rank, in rank order.
 static id<MTLResidencySet> fused_residency_;
 static std::vector<void *> fused_queues_;
 
@@ -854,37 +857,63 @@ static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
 // steps; the text a kernel that runs them is compiled after.
 static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 
-// The fused all-reduce of `operand` (a contiguous MPS tensor, the call's send and receive buffer; its dtype the
-// library's to fuse or refuse) on communicator `comm`, its landing's wait bounded by `polls` (nccl.h ncclMeshStream
-// polls; _stream.polls the library's most): its publication's bindings and its landing's (ncclMeshFused, six GPU
-// addresses each), the rest of its group encoded on torch's stream as ever, with the stream's workspace allocator (a
-// fused two-rank all-reduce asks it for nothing).  The landing's binding names the operand's buffer, which the residency
-// set then holds.  Nothing is committed here: the publication is the caller's kernel, encoded after this returns
-// (fused_published).
-static std::pair<std::vector<uint64_t>, std::vector<uint64_t>> fused_all_reduce(const at::Tensor &operand, int64_t comm, int64_t polls) {
-  TORCH_CHECK(operand.is_mps() && operand.is_contiguous(),
-              "fused all_reduce: the operand is a contiguous MPS tensor, the call's send and receive buffer");
+// The fused exchange of `send` (this rank's part, which its publishing kernel writes) and `landing` (where the peer's
+// The fused exchange of `send` (this rank's part) and `landings` (where each other rank's part lands, in rank order),
+// contiguous MPS region tensors of one dtype and size, on communicator `comm`, each landing's wait bounded by `polls`
+// (nccl.h ncclMeshStream polls; _stream.polls the library's most): one group of ncclSend(send) and ncclRecv(landing)
+// toward each other rank, on torch's stream, the stream's `fused` set; each publication's bindings and each landing's,
+// in rank order (ncclMeshFused, six GPU addresses each).  A dtype NCCL lacks moves as its bytes.  Nothing is committed
+// here: the publication is the caller's kernel, encoded after this returns (fused_published).
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_all_reduce(
+    const at::Tensor &send, const std::vector<at::Tensor> &landings, int64_t comm, int64_t polls) {
+  int rank = 0, ranks = 0;
+  checked(ncclCommUserRank(communicator(comm), &rank));
+  checked(ncclCommCount(communicator(comm), &ranks));
+  TORCH_CHECK(landings.size() == (size_t)(ranks - 1), "fused all_reduce: a landing tensor for each of the ", ranks - 1,
+              " other ranks, not ", landings.size());
+  for (const at::Tensor &landing : landings)
+    TORCH_CHECK(send.is_mps() && send.is_contiguous() && landing.is_mps() && landing.is_contiguous() &&
+                    send.scalar_type() == landing.scalar_type() && send.numel() == landing.numel(),
+                "fused all_reduce: send and landings are contiguous MPS tensors of one dtype and size (region tensors: torch_mesh.empty)");
   TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused all_reduce: polls ", polls, " is not a 32-bit count of loads");
-  const size_t count = (size_t)operand.numel();
-  const ncclDataType_t type = kind(operand.scalar_type());
-  __block ncclMeshBuffer place = {(__bridge void *)at::native::mps::getMTLBufferStorage(operand),
-                                  (size_t)(operand.storage_offset() * operand.element_size())};
-  __block ncclMeshFused steps = {{0}, {0}};
+  const ncclDataType_t type = kind(send.scalar_type()) == ncclNumTypes ? ncclUint8 : kind(send.scalar_type());
+  const size_t count = type == ncclUint8 && kind(send.scalar_type()) == ncclNumTypes ? (size_t)send.nbytes() : (size_t)send.numel();
+  const ncclMeshBuffer out = {(__bridge void *)at::native::mps::getMTLBufferStorage(send), (size_t)(send.storage_offset() * send.element_size())};
+  std::vector<ncclMeshBuffer> in;
+  for (const at::Tensor &landing : landings)
+    in.push_back({(__bridge void *)at::native::mps::getMTLBufferStorage(landing), (size_t)(landing.storage_offset() * landing.element_size())});
+  std::vector<std::array<uint64_t, 6>> publish(landings.size()), land(landings.size());
+  ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
+                         (uint32_t)landings.size(), (uint32_t)landings.size()};
+  ncclMeshFused *const records = &steps;
+  ncclMeshBuffer *const ins = in.data();
   __block ncclResult_t result = ncclSuccess;
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
   id<MTLResidencySet> residency = fused_residency(stream);
+  const ncclComm_t c = communicator(comm);
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
       ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
-                           nullptr, (__bridge void *)residency, (uint32_t)polls, &steps};
-      result = ncclAllReduce(&place, &place, count, type, ncclSum, communicator(comm), &on);
+                           nullptr, (__bridge void *)residency, (uint32_t)polls, records};
+      ncclMeshBuffer sent = out;
+      ncclResult_t made = ncclGroupStart();
+      for (int q = 0, i = 0; q < ranks && !made; q++) {
+        if (q == rank) continue;
+        made = ncclSend(&sent, count, type, q, c, &on);
+        if (!made) made = ncclRecv(ins + i++, count, type, q, c, &on);
+      }
+      const ncclResult_t ended = ncclGroupEnd();
+      result = made ? made : ended;
     }
   });
   s->streamed = true;
   s->retire(0, std::exchange(s->scratch, {}));
   checked(result);
-  return {std::vector<uint64_t>(steps.publish, steps.publish + 6), std::vector<uint64_t>(steps.land, steps.land + 6)};
+  std::vector<std::vector<uint64_t>> published, landed;
+  for (uint32_t k = 0; k < steps.publishes; k++) published.emplace_back(publish[k].begin(), publish[k].end());
+  for (uint32_t k = 0; k < steps.lands; k++) landed.emplace_back(land[k].begin(), land[k].end());
+  return {published, landed};
 }
 
 // A fused crossing's publishing kernel just encoded on torch's stream (fused.encode): a publication under the stream's

@@ -149,7 +149,7 @@ static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w
 /* design/algorithm-sources.md#meshobserve: mesh-plan.h mesh_map over a copy of the records: the whole map's
    mesh_map_members over the members' records (count: a member no record holds) */
 static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t *members,uint32_t n,uint32_t *node,
-                            char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map){
+                            struct mesh_link_map *map){
   struct mesh_whole w;
   int error=mesh_whole_make(r,count,&w);
   uint32_t *index=malloc(((size_t)n+1)*sizeof *index),*whole=malloc(((size_t)map->nodes+1)*sizeof *whole);
@@ -159,15 +159,13 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
     for(uint32_t k=0;k<count;k++)if(r[k].node==members[i])index[i]=k;
   }
   int made=error?-error:mesh_map_members(&w.map,n?index:NULL,n,whole,map);
-  for(uint32_t i=0;made>=0 && i<(uint32_t)made+map->relays;i++){
-    if(node)node[i]=i<(uint32_t)made && n?members[i]:r[whole[i]].node;
-    if(name && whole[i]<count)memcpy(name[i],r[whole[i]].name,MESH_NAME_BYTES);
-    else if(name)name[i][0]=0;
-  }
+  for(uint32_t i=0;node && made>=0 && i<(uint32_t)made+map->relays;i++)node[i]=i<(uint32_t)made && n?members[i]:r[whole[i]].node;
   free(index);free(whole);mesh_whole_free(&w);
   return made;
 }
 
+/* mesh-plan.h's `name`, "" for every node: a record carries no host name (mesh.h struct mesh_record; AGENTS.md "A node is
+   its hardware; names are virtual"), and a name a person reads is the name table's by node number (rdma/peers.py) */
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
@@ -175,7 +173,8 @@ int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH
   int count=mesh_records_read(m,length,&r);
   munmap(m,length);
   if(count<0)return count;
-  int result=mesh_records_map(r,(uint32_t)count,members,n,node,name,map);
+  int result=mesh_records_map(r,(uint32_t)count,members,n,node,map);
+  for(uint32_t i=0;name && result>=0 && i<(uint32_t)result+map->relays;i++)name[i][0]=0;
   free(r);
   return result;
 }
@@ -186,19 +185,26 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
   /* the records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
-     (mesh-program.c health_put); a read that a health write overlapped is read again, at most 1024 times */
-  int count=-EAGAIN;
-  for(int tries=0;tries<1024;tries++){
+     (mesh-records.c health_put); a read that a health write overlapped is read again, and an odd serial (a write open)
+     waited on as mesh_records_read waits on the map's, ESRCH where the bridge went while it was open */
+  int count;
+  for(;;){
     const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
-    if(before&1)continue;
+    if(before&1){
+      if(os_sync_wait_on_address_with_timeout(&m->health,before,sizeof m->health,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid))){
+        count=-ESRCH;break;
+      }
+      continue;
+    }
     count=mesh_records_read(m,length,&r);
     if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
-    free(r);r=NULL;count=-EAGAIN;
+    free(r);r=NULL;
   }
   munmap(m,length);
   if(count<0)return count;
   for(int i=0;i<count && (uint32_t)i<capacity;i++){
-    out[i].node=r[i].node;memcpy(out[i].name,r[i].name,MESH_NAME_BYTES);out[i].name[MESH_NAME_BYTES-1]=0;
+    out[i].node=r[i].node;out[i].name[0]=0;
     out[i].region=r[i].region;out[i].memory=r[i].memory;
     memcpy(out[i].model,r[i].model,MESH_MODEL_BYTES);out[i].model[MESH_MODEL_BYTES-1]=0;
     out[i].health=r[i].health;
@@ -403,11 +409,21 @@ static void mesh_reclaim(struct hdr *m){
   }
 }
 
-/* design/algorithm-sources.md#programtensor */
-void mesh_retired_release(struct hdr *m){
+/* design/transport.md section 14: whether a stream's receives still land in pages of `owner` (struct mesh_stream
+   `touching`) */
+static int mesh_touched(struct hdr *m,uint64_t owner){
+  for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++)
+    if(atomic_load_explicit(&mesh_stream_at(m,s)->touching,memory_order_acquire)==owner)return 1;
+  return 0;
+}
+/* design/algorithm-sources.md#programtensor; design/transport.md section 14: a retired client's closed rows released,
+   but those of an owner whose pages a stream's receives still land in; their count */
+uint32_t mesh_retired_release(struct hdr *m){
+  uint32_t kept=0;
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
+    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) && mesh_touched(m,owner)){kept++;continue;}
     if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
        atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
       atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
@@ -416,11 +432,14 @@ void mesh_retired_release(struct hdr *m){
     }
   }
   mesh_reclaim(m);
+  return kept;
 }
 
 /* design/transport.md: the lease's rows other than its head disowned and every one of its rows released
    while they stay hot, then the head reclaimed (mesh_buffer_reclaim: its pages' arena bits, then its rows' hot bits),
-   so no client claims a row or page of it before it is whole again */
+   so no client claims a row or page of it before it is whole again; while a stream's receives may still land in the
+   client's pages (struct mesh_stream `touching`), the head closed instead, which the bridge releases once none does
+   (mesh_retired_release, each liveness turn) */
 int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   struct hdr *m=c->M;
   struct mesh_buffer *buffer=row<mesh_rows(m)?&mesh_buffers(m)[row]:NULL;
@@ -429,6 +448,7 @@ int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
      atomic_load_explicit(&buffer->closed,memory_order_acquire))return EINVAL;
   for(uint32_t r=row+1;r<row+rows;r++)atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_relaxed);
   mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,rows);
+  if(mesh_touched(m,c->client)){atomic_store_explicit(&buffer->closed,1,memory_order_release);return 0;}
   mesh_buffer_reclaim(m,row);
   return 0;
 }

@@ -136,13 +136,14 @@ reads that at its start and ends at once, so queued steps never spin again. The 
 (`_stream.polls`), which holds a GPU at most the platform's 5 seconds. It is not a setting.
 
 The kernel does three things, and it runs the step's crossing itself (torch-mesh's `fused`: rdma/nccl.h
-`ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for the peer's part of z
-to land, adds its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
+`ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for every peer's part of
+z to land, adds them to its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
 workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the rank's part
-of z from y and its rows of B, and publish it. Each worker stores its slice of the part into the crossing's slot. The
-last worker to finish releases the slot, so the bridge sends it. Within a block, no kernel of the library's runs between
-two steps. The wait and the release are the library's own steps (`ncclMeshMetalSteps`), which the kernel calls. Each
-wait is bounded, and the release is one fence and the slot's ready words. A step's publication follows torch-mesh's one
+of z from y and its rows of B, and publish it. Each worker writes its slice of the part straight into the step's send
+tensor, and the last worker to finish releases it to every peer: one fence and one store of each holding's `ready`,
+after which the bridge sends the tensor's own pages down each link. Nothing is copied. Within a block, no kernel of the library's runs between two
+steps. The wait and the release are the library's own steps (`ncclMeshMetalPrelude`), which the kernel calls. Each wait
+is bounded. A step's publication follows torch-mesh's one
 commit rule, the same for every caller (torch-mesh README, Performance). While the GPU still holds enough of the
 stream's buffers, it joins the open command buffer instead of paying for a commit of its own. The next step's
 publication, or the host's next wait, commits that buffer.
@@ -173,6 +174,21 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
   RB row tiles' partials a round, RB as many as the threadgroup memory holds. The split is a word the host passes,
   worked out once for each row count.
 
+## The crossing
+
+A crossing is one send to each peer and one landing from each (torch-mesh's `fused.all_reduce(send, landings,
+polls)`): the step's part of z goes from the rank's send tensor to each of the n - 1 other ranks, and each peer's part
+lands in its own slot of the rank's landing tensor; the next step's kernel reads the n - 1 slots and adds them to its
+own part. This is the one-shot all-reduce (each rank reads every peer's whole part and sums locally: one crossing a step,
+(n - 1) parts each way, over n - 1 links at once). It is the form for a part this small; the two-shot form
+(reduce-scatter, then all-gather: two crossings, each 1/n of a part) is the form for large parts. Every tensor that crosses is a region tensor (`torch_mesh.empty`): a range of rows of the node's page table, each
+row a page. The bridge sends each page from the page its row names and lands each page in the page the receiver's row
+names, one page a SEND (design/pages-and-functions.md; design/transport.md section 14). The weights rank 0 sends each
+rank are region tensors too. The service lays its ring of sums on pages (`chain.paged`: each slot whole pages, its rows
+first), and its input ring's blocks start on pages. One landing tensor serves every step: the library posts a step's
+receive only once the rank's own publication of that step has stored `ready`, after the kernel that read the landing
+before. A crossing of any size fuses; the 61,440-byte limit is gone with the bridge's rings.
+
 ## The capability
 
 A capability file states what Apple documents about a GPU family: its threads and threadgroup memory a threadgroup,
@@ -186,10 +202,9 @@ The configuration names the directory that holds the files, and each rank takes 
 `apple<n>.json`, where n is the newest Apple family its Metal device supports (`chain.capability`). torch-mesh's
 `_stream.device_facts` finds n by asking Metal for each family from Apple1 up, since a GPU of a family supports every
 earlier one's. So every node runs the same configuration, and the ranks of one run may hold different GPUs, each with
-its own file. The rank checks the file against what Metal reports of the device, its family, threads and threadgroup
-memory, and stops where they differ. A GPU whose family has no file stops at load, naming the file it lacks; that
-family's file, written from Apple's tables, is the remedy, and no other family's file is taken in its place. What no
-document states, the SIMD width and how many threads a compiled kernel holds, is read from the compiled pipeline.
+its own file. Where Metal reports a limit of the device (its threads and threadgroup memory a threadgroup), the rank
+takes the device's figure. What no document states, the SIMD width and how many threads a compiled kernel holds, is
+read from the compiled pipeline.
 
 ## The configuration
 

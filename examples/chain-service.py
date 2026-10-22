@@ -1,5 +1,6 @@
 import collections
 import json
+import math
 import sys
 import time
 
@@ -68,11 +69,10 @@ def shares(config, rank, size):
     for r in range(size):
         begin = sum(parts[:r])
         for held, w in zip((a, b), folded):
-            part = torch.from_numpy(np.ascontiguousarray(w[begin:begin + parts[r]])).to('mps', torch.half)
+            part = held if r == 0 else torch_mesh.empty(parts[r], width, dtype=torch.half)
+            part.copy_(torch.from_numpy(np.ascontiguousarray(w[begin:begin + parts[r]])))
             if r:
                 dist.send(part, dst=r)
-            else:
-                held.copy_(part)
     return a, b, full
 
 
@@ -82,7 +82,8 @@ def ring(config, steps, rows):
     slots = config['ring_bytes'] // slot
     if slots >= 2 * steps:
         return steps, steps, steps
-    block = slots // (RING_BLOCKS + 1)
+    whole = chain.PAGE // math.gcd(slot, chain.PAGE)
+    block = slots // (RING_BLOCKS + 1) // whole * whole
     if block < 1:
         raise ValueError(f'ring_bytes {config["ring_bytes"]} holds {slots} slots of {slot} bytes; the input ring of '
                          f'{RING_BLOCKS} blocks and the sum ring of one take {RING_BLOCKS + 1} slots at least, '
@@ -187,10 +188,10 @@ def main():
     steps, rows, inputs = operand(config, rank)
     block, deep, sums = ring(config, steps, rows)
     a, b, full = shares(config, rank, size)
-    step = chain.Step(a, b, rows, config['row_capacity'], chain.capability(config['capabilities']))
+    step = chain.Step(a, b, rows, config['row_capacity'], size - 1, chain.capability(config['capabilities']))
     del a, b
     E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
-    P = torch_mesh.empty(sums, rows, width, dtype=torch.half)
+    P = torch_mesh.empty(sums, chain.paged(rows * width), dtype=torch.half)[:, :rows * width].unflatten(1, (rows, width))
     O = torch.empty(block, rows, width, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width)) if rank == 0 else None
     torch.mps.synchronize()
@@ -209,7 +210,7 @@ def main():
     crossings(steps, block, P)
     torch.mps.synchronize()
     crossing = time.perf_counter() - began
-    moved = 2 * rows * width * torch.half.itemsize
+    moved = 2 * (size - 1) * rows * width * torch.half.itemsize
     summary = dict(rank=rank, size=size, parts=config['parts'], rows=rows, width=width, steps=steps, block=block,
                    input_ring=deep, sum_ring=sums, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, step_microseconds=seconds / steps * 1e6,

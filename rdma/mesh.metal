@@ -1,6 +1,6 @@
 // The GPU side of the words mesh-metal.m prepares (design/transport.md, M07, M10, M12, M30), and of the wire's
-// one small float format (FP8, nccl.h ncclFloat8e4m3 and ncclFloat8e5m2), defined once: a kernel that waits on a word,
-// reads a landed slot, releases a cell or decodes FP8 includes this file and calls these from its own source, and no
+// one small float format (FP8, nccl.h ncclFloat8e4m3 and ncclFloat8e5m2), defined once: a kernel that waits on a count,
+// reads landed bytes, publishes a count or decodes FP8 includes this file and calls these from its own source, and no
 // source splices them into another kernel's text (metal-microbench docs/acceptance-20261014.md A40, A54).
 // libnccl-mesh's kernels include it, and so does every kernel that hands words to another party (the host, a Neural
 // Engine partner's thread) or reads FP8 (metal-microbench dsv41.swift). It is read from the library
@@ -57,7 +57,8 @@ __attribute__((always_inline)) static inline ulong mesh_remote_wait_bounded(vola
     return mesh_wait_bounded(completion, 1 + cycle, polls);
 }
 
-// A landed slot's value, loaded through volatile coherent(system) (the NIC wrote it) in the widest words that divide it.
+// A landed value (bytes the NIC wrote into a landing buffer), loaded through volatile coherent(system) in the widest words
+// that divide it.
 template <typename T>
 __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(system) device const T *at) {
     T value;
@@ -74,9 +75,8 @@ __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(sy
     return value;
 }
 
-// Releases a cell: a system-scope fence orders every store before it (the payload, a SEND's slot) before `value` is
-// stored into `cell`. A SEND cell's ready word takes its prepared argument plus the invocation's cycle (M04, M10, M30;
-// mesh-collective.c mesh_host_publish is the host's release).
+// Publishes a count: a system-scope fence orders every store before it (the bytes a SEND reads from the client's own
+// pages) before `value` is stored into `cell` (a holding's `ready`, design/transport.md section 14; a failure word).
 template <typename W>
 __attribute__((always_inline)) static inline void mesh_publish(volatile coherent(system) device W *cell, ulong value) {
     metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));

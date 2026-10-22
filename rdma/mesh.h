@@ -14,12 +14,16 @@
 #define MESH_MODE 0666
 /* 129: a link's streams toward its peer node (struct mesh_stream), each held by one client at a time by its owner word
    (as rows are), so as many communicators as a link has streams use a node pair at once, the client naming the node
-   alone (design/transport.md section 14; the versions before it, this file's history).  The wire is HELLO, FAREWELL,
-   RECORD and LINK */
-#define MESH_VERSION 131u
+   alone (design/transport.md section 14; the versions before it, this file's history).  The wire's contract between
+   bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units, a SEND filling a receive of a whole unit.  It
+   changes only where that contract does (the operator, 2026-10-21: "commits which do not change an interface 'contract'
+   in any way are not interface-version changes regardless of their hashes").  132: every unit on a stream's lanes is
+   a whole page, sent from and landing in the page its row names; a holding's unit u goes on its stream's lane
+   u mod 2 */
+#define MESH_VERSION 132u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 133u
+#define MESH_LAYOUT 135u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -28,17 +32,14 @@
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
-/* design/transport.md section 14: a stream's two classes, its large units (the region's block) and its small units
-   (one frame), each a ring of MESH_STREAM_LARGE_UNITS or MESH_STREAM_SMALL_UNITS units; an owner word leaves bit 63 clear
-   (its generation is 25 bits, mesh-dataflow.c mesh_slot_take) */
-#define MESH_FRAME 4096u
-#define MESH_STREAM_LARGE_UNITS 512u
-#define MESH_STREAM_SMALL_UNITS 256u
-/* design/transport.md section 14: the entries of each of a stream class's two time rings (struct mesh_stream) */
+/* design/transport.md section 14: the entries each of a stream's two lists holds, the words of a holding's start
+   (struct mesh_stream `start`), and the entries of each of its two time rings; an owner word leaves bit 63 clear (its
+   generation is 25 bits, mesh-dataflow.c mesh_slot_take) */
+#define MESH_STREAM_ENTRIES 4096u
+#define MESH_STREAM_START 8u
 #define MESH_STREAM_TIMES 16384u
 _Static_assert(38+25<=63,"an owner word");
-_Static_assert(!(MESH_STREAM_LARGE_UNITS&(MESH_STREAM_LARGE_UNITS-1)) && !(MESH_STREAM_SMALL_UNITS&(MESH_STREAM_SMALL_UNITS-1)) &&
-  !(MESH_STREAM_TIMES&(MESH_STREAM_TIMES-1)),"a ring's units a power of two");
+_Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)) && !(MESH_STREAM_TIMES&(MESH_STREAM_TIMES-1)),"a ring a power of two");
 /* design/transport.md: the pause between a port's hellos and between the bridge's liveness turns */
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 /* design/transport.md, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
@@ -60,37 +61,54 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
-/* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, the bridge's to
-   write; per class c (0 large, 1 small) its rings, the in ring the bridge's receives land in and the out ring its holder
-   supplies (`in`, `out`, region offsets), of `units[c]` units of `unit[c]` bytes, a word a unit its holder stores to
-   supply it (`ready`: 1 plus the unit's cycle, its sequence over the ring) and a word a unit the bridge stores as it
-   lands (`landed`: 1 plus its cycle; ~0 once the link is lost: a landing only raises a word, so ~0 stands); its share of
-   the link's bandwidth; `wire`, the stream's identity, the same at both its ends and no other stream's between the two
-   nodes, by which the two ends of a communicator hold the two ends of one stream (0 until it is live); `free` while no
-   client holds it and every unit its last holder declared has gone, the first unit a holder then supplies of each class
-   (`next`); and its holder's: its owner word (`owner`, taken 0 to its own while `free`, as rows are, and let go to 0),
-   and the units of each class it will supply, up to `declared` (an absolute sequence), by the uptime `deadline` (ns): a
-   declared unit not supplied by then, or by the holding's end, goes as a dud.  Per class, two time rings the bridge alone
-   writes (`posted_at`, `landed_at`, region offsets, each on lines of its own) of MESH_STREAM_TIMES entries of two words:
-   unit u's, entry u mod MESH_STREAM_TIMES, 1 + u and the ticks (mach_absolute_time, unconverted) read once at the end of
-   the send thread's pass that posted u, or of the receive thread's pass that released it, after every post or landed
-   word of the pass; its first word 0 while its second is stored, so an entry whose first word does not read 1 + u
-   around its second has no time for u (lapped, or not yet stored) */
+/* design/pages-and-functions.md; design/transport.md section 14: an entry of a holding's send list or landing list: a
+   range of the holder's rows, `pages` of them from row `row` (each row a page: the range is the entry's block table,
+   each row's page wherever the holder's plan put it, fixed before its first call), and the count that governs them,
+   in pages: a send entry's page k is ready once the word at region offset `word` (0: the holding's `ready`) reads at
+   least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at least `base` (its
+   rows released by their reader: a page is written again only after release).  Every count of a holding is in pages:
+   nothing in the transport is a byte offset, so nothing in it can lie off a page */
+struct mesh_entry { uint64_t row,pages,word,base; };
+/* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, its share of the
+   link's bandwidth and `wire`, its identity, the same at both its ends and no other stream's between the two nodes (0
+   until it is live): the bridge's.  A holder takes `owner` from 0 to its own while `free`; the bridge then makes the
+   holding's words new (every count 0) and freezes `start`, its own ends' places on the link (per lane: its SENDs and
+   its receives posted so far), which it stores before `begun` (the owner it serves); the holder hands `start` to its
+   peer through its communicator's bootstrap and stores the peer's in `peer_start`, then `told` (the owner), and the
+   bridge serves the holding.  The holder presents its
+   entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
+   then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
+   bridge's, per list) is past it.  Three page counts over the holding, each in its list's order and all of it before:
+   `ready`, the holder's, of the send list produced; `sent`, the bridge's, of the send list whose SENDs have completed;
+   `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  `deadline`
+   (uptime ns), the holder's: UINT64_MAX while it supplies, now where it can supply no more, after which every presented
+   page not ready goes as a dud (all ones), as at the holding's end (its owner word let go to 0).  The two time rings
+   (`posted_at`, `landed_at`, region offsets) of MESH_STREAM_TIMES entries of two words: entry e's, slot e mod
+   MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last byte
+   landed; its first word 0 while its second is stored.  `touching`, the bridge's: the owner word of a holding into whose
+   rows the bridge may still map a landed page (0 none), whose rows are reclaimed only once it no longer reads it.
+   Nothing in it names a lane, a unit, a frame or a queue pair */
 struct mesh_stream {
-  _Atomic uint32_t peer,live;
-  uint32_t unit[2],units[2];
-  uint64_t in[2],out[2],ready[2],landed[2];
-  _Atomic uint64_t bandwidth,wire,free,next[2];
-  _Atomic uint64_t owner,declared[2],deadline;
-  uint64_t posted_at[2],landed_at[2];
+  _Alignas(64) _Atomic uint32_t peer;
+  _Atomic uint32_t live;
+  uint64_t lists,posted_at,landed_at;
+  _Atomic uint64_t bandwidth,wire,free,begun;
+  _Alignas(64) _Atomic uint64_t owner;
+  _Atomic uint64_t deadline,sends,lands,told;
+  _Alignas(64) _Atomic uint64_t ready;
+  _Alignas(64) _Atomic uint64_t sent;
+  _Atomic uint64_t landed,taken[2],touching;
+  _Alignas(64) _Atomic uint64_t start[MESH_STREAM_START];
+  _Alignas(64) _Atomic uint64_t peer_start[MESH_STREAM_START];
 };
-_Static_assert(sizeof(struct mesh_stream)==192,"mesh_stream");
-/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
-   the record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
+_Static_assert(sizeof(struct mesh_stream)==384,"mesh_stream");
+/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
+   record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
    model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), and the `reached` nodes its bridge reaches (mesh-plan.h
-   struct mesh_reach) */
-struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t region,memory;
+   struct mesh_reach).  No host name: a name a person reads is a label the readers take from the name table by node
+   number (etc/mesh-nodes.json, rdma/peers.py label; AGENTS.md "A node is its hardware; names are virtual") */
+struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
    that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The

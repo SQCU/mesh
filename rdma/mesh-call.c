@@ -34,8 +34,8 @@ uint32_t mesh_streams_free(struct hdr *m,uint32_t *node,uint64_t *wire,uint32_t 
   }
   return count;
 }
-int mesh_stream_take(struct mesh_ctx *context,uint64_t wire,uint32_t *stream,uint64_t next[2]){
-  if(!context || !context->client || !next || !stream || !wire)return EINVAL;
+int mesh_stream_take(struct mesh_ctx *context,uint64_t wire,uint32_t *stream,uint64_t start[MESH_STREAM_START]){
+  if(!context || !context->client || !start || !stream || !wire)return EINVAL;
   struct hdr *m=context->M;
   for(uint32_t p=0;p<m->streams && p<MESH_STREAMS;p++){
     struct mesh_stream *x=mesh_stream_at(m,p);
@@ -43,12 +43,25 @@ int mesh_stream_take(struct mesh_ctx *context,uint64_t wire,uint32_t *stream,uin
     uint64_t vacant=0;
     if(!atomic_load_explicit(&x->free,memory_order_acquire) ||
        !atomic_compare_exchange_strong_explicit(&x->owner,&vacant,context->client,memory_order_acq_rel,memory_order_acquire))return EBUSY;
-    next[0]=atomic_load_explicit(&x->next[0],memory_order_relaxed);next[1]=atomic_load_explicit(&x->next[1],memory_order_relaxed);
-    atomic_store_explicit(&x->declared[0],next[0],memory_order_relaxed);atomic_store_explicit(&x->declared[1],next[1],memory_order_release);
+    const uint64_t until=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+MESH_PLATFORM_NS;
+    while(atomic_load_explicit(&x->begun,memory_order_acquire)!=context->client){
+      const int lost=!atomic_load_explicit(&x->live,memory_order_acquire);
+      if(lost || clock_gettime_nsec_np(CLOCK_UPTIME_RAW)>until){mesh_stream_give(context,p);return lost?ENOLINK:ETIMEDOUT;}
+    }
+    for(uint32_t k=0;k<MESH_STREAM_START;k++)start[k]=atomic_load_explicit(&x->start[k],memory_order_relaxed);
     *stream=p;
     return 0;
   }
   return ENOLINK;
+}
+int mesh_stream_tell(struct mesh_ctx *context,uint32_t stream,const uint64_t peer_start[MESH_STREAM_START]){
+  if(!context || !context->client || !peer_start)return EINVAL;
+  struct mesh_stream *x=stream_held(context->M,stream);
+  if(!x || !atomic_load_explicit(&x->live,memory_order_acquire))return ENOLINK;
+  if(atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client)return EPERM;
+  for(uint32_t k=0;k<MESH_STREAM_START;k++)atomic_store_explicit(&x->peer_start[k],peer_start[k],memory_order_relaxed);
+  atomic_store_explicit(&x->told,context->client,memory_order_release);
+  return 0;
 }
 void mesh_stream_give(struct mesh_ctx *context,uint32_t stream){
   if(!context || !context->client)return;
@@ -61,24 +74,43 @@ int mesh_stream_held(struct mesh_ctx *context,uint32_t stream,uint64_t wire){
   return x && context->client && atomic_load_explicit(&x->live,memory_order_acquire) &&
          atomic_load_explicit(&x->owner,memory_order_acquire)==context->client && atomic_load_explicit(&x->wire,memory_order_relaxed)==wire;
 }
-int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,int large,struct mesh_stream_view *view){
-  if(!context || !context->client || !view)return EINVAL;
-  struct hdr *m=context->M;
-  const struct mesh_stream *x=stream_held(m,stream);
-  if(!x || !atomic_load_explicit(&x->live,memory_order_acquire))return ENOLINK;
-  if(atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client)return EPERM;
-  const uint32_t c=!large;
-  *view=(struct mesh_stream_view){.in=(unsigned char *)m+x->in[c],.out=(unsigned char *)m+x->out[c],.ready=(_Atomic uint64_t *)((char *)m+x->ready[c]),
-    .landed=(_Atomic uint64_t *)((char *)m+x->landed[c]),.posted_at=(_Atomic uint64_t *)((char *)m+x->posted_at[c]),
-    .landed_at=(_Atomic uint64_t *)((char *)m+x->landed_at[c]),.unit=x->unit[c],.units=x->units[c]};
+/* the stream `stream` this client holds, live; NULL with *error set where not */
+static struct mesh_stream *stream_owned(struct mesh_ctx *context,uint32_t stream,int *error){
+  struct mesh_stream *x=context && context->client?stream_held(context->M,stream):NULL;
+  *error=!context || !context->client?EINVAL:!x || !atomic_load_explicit(&x->live,memory_order_acquire)?ENOLINK:
+         atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client?EPERM:0;
+  return *error?NULL:x;
+}
+int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,struct mesh_stream_view *view){
+  int error;
+  struct mesh_stream *x=view?stream_owned(context,stream,&error):NULL;
+  if(!view)return EINVAL;
+  if(!x)return error;
+  char *m=(char *)context->M;
+  struct mesh_entry *lists=(struct mesh_entry *)(m+x->lists);
+  *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},.taken={&x->taken[0],&x->taken[1]},
+    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,.deadline=&x->deadline,
+    .posted_at=(_Atomic uint64_t *)(m+x->posted_at),.landed_at=(_Atomic uint64_t *)(m+x->landed_at)};
   return 0;
 }
-int mesh_stream_declare(struct mesh_ctx *context,uint32_t stream,int large,uint64_t declared,uint64_t deadline){
-  if(!context || !context->client)return EINVAL;
-  struct mesh_stream *x=stream_held(context->M,stream);
-  if(!x || !atomic_load_explicit(&x->live,memory_order_acquire))return ENOLINK;
-  atomic_store_explicit(&x->deadline,deadline,memory_order_relaxed);
-  atomic_store_explicit(&x->declared[!large],declared,memory_order_release);
+int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct mesh_entry entry){
+  int error;
+  struct mesh_stream *x=stream_owned(context,stream,&error);
+  if(!x)return error;
+  const struct hdr *m=context->M;
+  if(land<0 || land>1 || entry.row>=mesh_rows(m) || entry.pages>mesh_rows(m)-entry.row)return EINVAL;
+  _Atomic uint64_t *presented=land?&x->lands:&x->sends;
+  const uint64_t e=atomic_load_explicit(presented,memory_order_relaxed);
+  if(e-atomic_load_explicit(&x->taken[land],memory_order_acquire)>=MESH_STREAM_ENTRIES)return EAGAIN;
+  ((struct mesh_entry *)((char *)m+x->lists))[(uint64_t)land*MESH_STREAM_ENTRIES+e%MESH_STREAM_ENTRIES]=entry;
+  atomic_store_explicit(presented,e+1,memory_order_release);
+  return 0;
+}
+int mesh_stream_deadline(struct mesh_ctx *context,uint32_t stream,uint64_t deadline){
+  int error;
+  struct mesh_stream *x=stream_owned(context,stream,&error);
+  if(!x)return error;
+  atomic_store_explicit(&x->deadline,deadline,memory_order_release);
   return 0;
 }
 

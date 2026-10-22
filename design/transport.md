@@ -21,7 +21,9 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
   either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
   [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)),
-  index 0, where the plan has it, carrying the keepalive frame; created, moved through INIT, RTR and RTS, on two
+  its streams' lane pairs and, where the plan has them, lane 0 (the keepalive's frames) and lane 1 (nothing posted)
+  ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 10);
+  created, moved through INIT, RTR and RTS, on two
   completion queues of the port's device context.
 - **A posted receive.** An `ibv_recv_wr` with one SGE: an address in the region, a length, a key. The queue pair's
   next arriving SEND fills the oldest posted receive. Its completion is an entry in the receive completion queue.
@@ -339,56 +341,81 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | What a client names | a port and a lane pair (`bind[port][pair]`, 127) ≺ a node | M5, D7 |
 | Who takes a queue pair | a client's compare-and-swap on `hdr->lanes` (HEAD before 127) ≺ the bridge binds it at the client's asking (127) ≺ no client takes one: the bridge stripes a node's stream over the link's lane pairs | M5, M2, M9 |
 | How a client holds the stream | a request and an answer in its slot (127) ≺ its owner word taken while the stream is free, as rows are | M2 |
-| Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life | M4, M9 |
+| Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life, which clients copy out of (127-131) ≺ into the holder's own landing pages as it presents them, the bridge's spare page between holdings (132) | M4, M9, M8 |
 | How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more | M4, M10 |
 | Where the next holding starts | the bridge's answer in the client's slot (127) ≺ the stream's `next`, published once free, exchanged at init through NCCL's bootstrap | M2, C7 |
 | A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life, a lost link down until a person relaunched it (129) ≺ none in a process: made and connected once in a port child's life, released by its exit, the link paired again by the port's next child (130) | M3, M4, M6 |
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
 
+**The boundary (version 132; the operator, 10-21).** "the bridge, which is an api for controlling DMA, and the collective
+clients and data processing code, which present buffers for transmission and accept whatever packet or frame size the
+bridge chooses to use. the bridge chooses, and it chooses based upoin the actual driver and api the rdma firmware
+supplies. only the bridge is allowed to know these configuration details." And: "zero copy methods must always be used
+over access by copy because memory bandwidth and flops are too scarce on this hardware api." Versions 127 to 131 had
+clients copy into the bridge's rings and count positions against them (a lag credit), so clients knew frames and units;
+the fix of version 125's real defect (clients holding work requests and queue pairs) had moved the data itself into the
+bridge. A client naming its own pages holds no DMA state, and needs no ring.
+
 **The stream.**
-- Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own, since a
-  queue pair carries one ring (a SEND fills the oldest receive posted on it): as many as its plan has lane pairs for
-  (four of ten queue pairs, one of two: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)); the rest are never live. Each stream has two classes: large units
-  (the region's block) and small units (one frame). Each class is a ring of units in the bridge's arena, with a ready
-  word and a landed word per unit (`struct mesh_stream`).
-- A stream's units of a class ride its lane of that class in order, alike at both ends (`MESH_STREAM_PAIRS`, the pairs
-  a stream stripes over, is one).
+- Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own (as
+  many streams as the link's plan has lane pairs for: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)). Every unit on
+  a stream's lanes is a whole page: page p of a holding goes on the stream's lane p mod 2.
 - Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
   GID and queue pair number) and which no other stream between the two nodes has.
-- The receive thread posts receives into the in ring for the link's life, and raises a unit's landed word only once it
-  and every unit before it have landed. A run has landed once its last unit's word says so, whichever lanes it rode.
-- Clients see the stream's rings and words, its `peer` node, `wire`, `live`, `free` and `next`. They never see a port,
-  lane, queue pair, request or completion.
-- The words only the bridge writes: landed, `live`, `free`, `next`, and each class's two time rings (`posted_at`,
-  `landed_at`, mesh.h struct mesh_stream): unit u's entry, u mod MESH_STREAM_TIMES, holds 1 + u and the ticks
-  (mach_absolute_time, unconverted) read once at the end of the send thread's pass that posted u, or of the receive
-  thread's pass that released it, after every post or landed word of the pass, never between two and never before a
-  landed word. The library reads them as it reads landed words and converts the ticks to ns (nccl.h ncclMeshTimes): no
-  request, wake or file.
+- A holding has two lists of entries the holder presents in order, each a run of its own pages (`struct mesh_entry`:
+  the run's first page, as its literal region offset, any number of bytes, the count that governs them): a send list
+  and a landing list. Each list is a sequence of pages, and page i of a send list lands as page i of the peer's
+  landing list. Each end lays its own pages where its plan put them, a scattered buffer being several entries:
+  scattered pages in one client may land as one run in another, and one buffer may go to several runs in several
+  clients, with nothing copied. An entry's offset is compiled once from its holder's page table, so the bridge reads
+  no table on the data path. Every placement is the holder's plan, fixed
+  before the holding's first call (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
+  compiled plans which do not change dynamically during a chain of function calls"). Three byte counts over the holding, each in its
+  list's order with every byte before: `ready` (the holder's: produced), `sent` and `landed` (the bridge's: SENDs
+  completed; landed). The holder never sees a lane, a unit, a frame or a queue pair.
+- Every SEND and every receive is one whole page (an entry's last page too), at its entry's offset plus the page's
+  place in it. So a SEND always fills its receive exactly (TN3205), ends whose lists differ garble their own pages and
+  never fail the link, and neither end knows the other's addresses.
+- The send thread posts a unit from its page once the entry's count covers its bytes; the receive thread posts each
+  receive straight into its page (at most a window ahead) once the entry's word says the page's reader released it (a
+  page is written again only after release), and raises `landed` once every byte before has landed, whichever lane
+  carried it: the stamp of every page it covers. A SEND whose receive is not yet posted waits in the hardware's
+  credit (TN3205): posting a receive is the credit, and nothing else paces a holding (no lag, no fillers).
+- The words only the bridge writes: `live`, `free`, `begun`, `sent`, `landed`, `taken`, `touching`, `start` and the two
+  time rings (`posted_at`: an entry's first SEND posted; `landed_at`: its last byte landed; mach_absolute_time ticks
+  read once at the end of the pass).
 
 **Holding it.**
 - A process holds a stream as it holds rows: it takes the owner word from 0 to its own while `free` reads 1
-  (`mesh_stream_take`), and gives it back to 0 when its last communicator on it ends (`mesh_stream_give`). The bridge
-  answers nothing; it lets go the word of a client whose process is gone (`streams_let_go`).
-- The holder's first units are the stream's `next`, which its communicator's init tells its peers through NCCL's
-  bootstrap. One communicator holds a stream at a time. Each channel's head credit (a position published once the
-  peer's position LAG back is consumed) sizes the ring for that channel alone, so two communicators on one ring could
-  write a slot before it is read. Communicators that share a node pair hold different streams of its link: an init's
-  first gather carries each rank's free streams (`mesh_streams_free`), and both ends of each pair of members take the
-  stream of the least `wire` free at both (`mesh_stream_take`), so the two ends of a communicator hold the two ends of
-  one stream. An init is refused (EBUSY) only where no stream toward a member's node is free at both ends.
-- The holder declares how far it will supply each class (`declared`), with a `deadline` (uptime ns) that a live holder
-  leaves at UINT64_MAX: no unit of a producer still at work is ever sent as a dud (design/rubrics.md C5 and Quantities,
-  the operator 10-20). A holder that can supply no more, its group failed or revoked, sets the deadline to now, and
-  the bridge sends its unsupplied declared units as duds at once. A consumer's own wait stays bounded where it waits.
+  (`mesh_stream_take`). The bridge then makes the holding's words new, freezes `start` (per lane, its SENDs and receives
+  posted so far) and stores `begun`. The holder hands `start` to its peer through its communicator's bootstrap (NCCL's
+  init exchanges each connection's endpoint the same way: C1) and stores the peer's in `peer_start`, then `told`.
+- Each lane's first index for the holding is the greater of its own and its peer's: the end behind sends duds into the
+  peer's posted receives, or posts spares for the peer's SENDs. A holding's units therefore fill each other's whatever
+  either end's earlier holding left (version 129's analysis, metal-microbench output_data/bridge-20261019/FLOWS.md
+  section 7.2: the start must be told, and it is told once a communicator, by collective code, not by the bridge).
+- One communicator holds a stream at a time; communicators that share a node pair hold different streams of its link,
+  each end taking the stream of the least `wire` free at both. An init is refused (EBUSY) only where none is.
+- `deadline` (uptime ns), the holder's: UINT64_MAX while it supplies; now where it can supply no more, after which
+  every presented byte not ready goes as a dud. No unit of a producer still at work is ever sent as a dud (rubrics C5
+  and Quantities, the operator 10-20).
 
 **Duds, and a holding's end.**
-- The send thread posts unit u when its ready word reads `1 + u / units`. Where u is declared, not supplied, and the
-  deadline has passed, it posts a dud: a SEND from the bridge's all-ones block.
-- When the owner word changes, the send thread ends the holding: every unit up to the most declared or supplied goes,
-  the unsupplied ones as duds, and one unit more. Once every lane has sent them, the stream is free again, its `next`
-  the first unit after them.
+- A presented byte not ready by the deadline, or at the holding's end, goes as a dud: a SEND of the same length from
+  the bridge's all-ones block. A failed client's positions go out as duds (rubric M4's upper pole).
+- When the owner word changes (the holder let go, or the event loop let go a holder gone), the send thread ends the
+  holding: every presented unit goes, the unready as duds; then the stream is free. The receive thread turns the
+  stream to spares (the spare page, the second page of the port's link block), which receive the peer's SENDs to the
+  ended holding and its keepalive. It keeps one spare posted a lane, and posts the next as each lands; the peer's SENDs wait in the
+  hardware's credit meanwhile (TN3205). A whole window of spares would put the next holding's first index a window
+  past the peer's SENDs, and the peer would send that window as duds (megabytes, about a millisecond) before the
+  holding's first byte (the operator, 2026-10-21: "get rid of megabyte / millisecond
+  pointless overheads").
+- Receives already posted into the ended holding's pages cannot be taken back: `touching` names its owner until all of
+  them have landed (the peer's SENDs to it, or its duds as the next holding aligns), and a gone owner's rows are
+  released only once no stream touches them. A live holder that lets go before its landing entries landed keeps those
+  pages out of use itself.
 
 **A process a port** (version 130, its streams new at every pairing from 131; the operator's choice of 10-20).
 - The bridge is a parent and a child a port. The parent, its heartbeat's child, holds the region, the map and records, the
@@ -431,11 +458,27 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   at both (`wire`, a digest of this pairing's queue pair numbers and addresses).
 - A LINK names the address its lanes were made on (a make reads the port's address again, as a peer's restart can move
   its GID table); the connect and each stream's identity take the peer's address from its LINK.
+- Plug to link, at the hardware's pace. A port is opened when its interface's link comes on, when its RDMA peer
+  interface arrives (IOKit's first match of an `AppleThunderboltRDMAPeerInterface` whose RID is its interface's: the
+  en link can come on before the RDMA peer, and an open then finds the device's port not yet active), at a hello heard on
+  it, and when its last child has ended; an open port with no peer says its hello at once, again whenever an IPv6
+  address of its interface is added or changed (the kernel's `KEV_INET6_SUBCLASS` events: a hello that left before the
+  address could carry it), and every MESH_PAUSE_NS otherwise. The parent's event loop sleeps until the next event or
+  the next time its turn waits for (a quiet window's end, the exit window, a hold, an open's retry, a hello, a job's
+  bound, the liveness turn), at most MESH_PAUSE_NS; every other change it takes wakes it where the change is made (a
+  child of an earlier launch is awaited by its exit, EVFILT_PROC). Between a cable's loss and its next pairing stand the
+  quiet window (MESH_PLATFORM_NS), the old child's exit (the kernel's release of its device's objects), the new child's
+  open and the make and connect: the
+  operator's deadline and the hardware's calls, and no timer of the bridge's.
 - Calls in flight on a lost link fail as values (ncclRemoteError) and the next call takes a stream of the new pairing:
   "a bridge crashing on a computer two hops down should result in the bridge being restarted, not crashing again of
   course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
   calls-in-flight failed and ought to be retried" (the operator, 10-20).
-- XMAGIC carries MESH_VERSION, so bridges of different versions never pair (129, 130, 131), and a client refuses a region of another version: both ends of a link, and every client, run the rule.
+- XMAGIC marks a message as the mesh's, at the value version 131 sends, fixed: no version enters it, so bridges of any
+  version pair (the operator, 2026-10-21: "rejection filter removal. categorical. all of them without sanction in
+  rubric"). A message states its sender's MESH_VERSION in `version`, which no reader tests. A client reads a region
+  only at the layout it was built for (MESH_LAYOUT): every field of another layout lies at other offsets, so a client
+  writing it would write the bridge's words at random; that is a bound on memory, not a version check.
   A change that keeps every exchange of a version's meaning and adds information only in a field that version sends
   as 0 keeps the version: the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) ride a HELLO's `count`, a
   peer's 0 there meaning a bridge before them, which makes every lane, and two ends that both hold ten pair as before.

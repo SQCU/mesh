@@ -674,14 +674,29 @@ static uint32_t mesh_program_segments(const struct mesh_program *program){
   return segments;
 }
 
+/* The elements a cut of the program's own lies on: the least multiple of `page` bytes and of an element's bytes, in
+   elements (1: any element) */
+static uint64_t mesh_quantum(uint64_t page,uint32_t element){
+  uint64_t a=page,b=element?element:1;
+  if(page<=1)return 1;
+  while(b){const uint64_t t=a%b;a=b;b=t;}
+  return page/a;
+}
+
 /* The operand's segments: `sizes` where given (segment g the sizes[g] elements after the segments before it: mesh
-   430cf7b2^ mesh_cut's rule, MPI_Reduce_scatter's and MPI_Allgatherv's counts), else elements / segments each, the first
-   elements % segments one element longer; 0 where the sizes do not sum to the operand's elements */
-static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t *base,uint64_t *length){
+   430cf7b2^ mesh_cut's rule, MPI_Reduce_scatter's and MPI_Allgatherv's counts), else its quanta of `q` elements cut
+   units / segments each, the first units % segments one quantum longer, the last segment ending at the operand's end
+   (q 1: elements / segments each, the first elements % segments one element longer); 0 where the sizes do not sum to
+   the operand's elements */
+static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *base,uint64_t *length){
+  const uint64_t units=(elements+q-1)/q;
   uint64_t sum=0;
   for(uint32_t g=0;g<segments;g++){
-    base[g]=sizes?sum:g*(elements/segments)+(g<elements%segments?g:elements%segments);
-    length[g]=sizes?sizes[g]:elements/segments+(g<elements%segments);
+    if(sizes){base[g]=sum;length[g]=sizes[g];sum+=sizes[g];continue;}
+    const uint64_t from=q*(g*(units/segments)+(g<units%segments?g:units%segments));
+    const uint64_t to=q*((g+1)*(units/segments)+(g+1<units%segments?g+1:units%segments));
+    base[g]=from<elements?from:elements;
+    length[g]=(to<elements?to:elements)-base[g];
     sum+=length[g];
   }
   return sum==elements;
@@ -689,25 +704,30 @@ static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,ui
 
 /* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]), a segment's parts by the program's
    weights (its trees': the caller's, a configured form's shares, or equal; libnccl-mesh never compiles the packing's
-   flows into them); 0 where the cut is none */
-static int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t *lo,uint64_t *count){
+   flows into them), each a whole number of quanta of `q` elements from the segment's start but the segment's last,
+   the remainder's quanta one each to the first parts of weight above 0 (a part of weight 0, a tree of share 0, takes
+   none); 0 where the cut is none */
+static int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *lo,
+                               uint64_t *count){
   const uint32_t segments=mesh_program_segments(program);
   uint64_t *bases=malloc(2*(size_t)segments*sizeof *bases);
   if(!bases)return 0;
-  if(!mesh_cut(segments,elements,sizes,bases,bases+segments)){free(bases);return 0;}
+  if(!mesh_cut(segments,elements,sizes,q,bases,bases+segments)){free(bases);return 0;}
   for(uint32_t g=0;g<segments;g++){
-    const uint64_t base=bases[g],length=bases[segments+g];
+    const uint64_t base=bases[g],length=bases[segments+g],units=(length+q-1)/q;
     double most=-INFINITY,total=0;
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g && program->log_weight[p]>most)most=program->log_weight[p];
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_exp(program->log_weight[p]-most);
     uint64_t floors=0;
     for(uint32_t p=0;p<program->parts;p++)
-      if(program->segment[p]==g)floors+=(uint64_t)floor((double)length*mesh_exp(program->log_weight[p]-most)/total);
-    uint64_t remainder=floors<length?length-floors:0,at=base;
+      if(program->segment[p]==g)floors+=(uint64_t)floor((double)units*mesh_exp(program->log_weight[p]-most)/total);
+    uint64_t remainder=floors<units?units-floors:0,at=base;
     for(uint32_t p=0;p<program->parts;p++){
       if(program->segment[p]!=g)continue;
-      uint64_t share=(uint64_t)floor((double)length*mesh_exp(program->log_weight[p]-most)/total);
-      if(remainder && at+share<base+length){share++;remainder--;}
+      const double weight=mesh_exp(program->log_weight[p]-most);
+      uint64_t share=(uint64_t)floor((double)units*weight/total);
+      if(remainder && weight>0 && at+share*q<base+length){share++;remainder--;}
+      share*=q;
       if(at+share>base+length)share=base+length-at;
       lo[p]=at;count[p]=share;at+=share;
     }
@@ -717,15 +737,15 @@ static int mesh_program_ranges(const struct mesh_program *program,uint64_t eleme
 }
 
 uint32_t mesh_program_steps(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,struct mesh_step *steps){
-  return mesh_program_steps_cut(program,rank,operand,NULL,steps);
+  return mesh_program_steps_cut(program,rank,operand,NULL,0,steps);
 }
 
 uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,const uint64_t *segments,
-                                struct mesh_step *steps){
+                                uint64_t page,struct mesh_step *steps){
   if(rank>=program->nodes || !program->parts)return 0;
   uint64_t *lo=malloc(program->parts*sizeof *lo),*count=malloc(program->parts*sizeof *count);
   uint32_t k=0;
-  if(lo && count && mesh_program_ranges(program,operand.elements,segments,lo,count)){
+  if(lo && count && mesh_program_ranges(program,operand.elements,segments,mesh_quantum(page,operand.element_bytes),lo,count)){
     for(uint32_t i=program->first[rank];i<program->first[rank+1];i++){
       const struct mesh_move *m=program->move+i;
       const uint32_t last=m->part+m->parts-1;
@@ -902,23 +922,8 @@ done:
   return written;
 }
 
-/* -- the wire: libnccl-mesh's rings and the positions a program takes on them ------------------------------------- */
+/* -- the lists: the entries a program's steps take on a holding's send list and landing list --------------------------- */
 
-void mesh_wire_of(uint64_t block,struct mesh_wire *wire){
-  const uint64_t b=block?block:MESH_FRAME,runs=2*MESH_LAG+1;
-  *wire=(struct mesh_wire){(MESH_STREAM_LARGE_UNITS-1)/runs*b,(MESH_STREAM_SMALL_UNITS-1)/runs*MESH_FRAME,b,MESH_LAG,0};
-}
-uint64_t mesh_wire_units(const struct mesh_wire *wire,int large,uint64_t bytes){
-  const uint64_t unit=large?wire->block:MESH_FRAME;
-  return bytes>unit?(bytes+unit-1)/unit:1;
-}
-int mesh_wire_large(const struct mesh_wire *wire,uint64_t bytes,uint64_t element){
-  return bytes>wire->small || element>wire->small;
-}
-uint64_t mesh_wire_pieces(const struct mesh_wire *wire,uint64_t bytes,uint64_t element){
-  const uint64_t slot=mesh_wire_large(wire,bytes,element)?wire->slot:wire->small,carried=element && element<=slot?slot-slot%element:slot;
-  return (bytes+carried-1)/carried;
-}
 static uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
 
 /* whether steps are in round order (mesh_program_steps' order: a compiled program's are) */
@@ -927,31 +932,16 @@ static int mesh_rounds_sorted(const struct mesh_step *steps,uint32_t count){
   return 1;
 }
 
-uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int large,const struct mesh_wire *wire,uint64_t at,
-                  struct mesh_place *made,uint32_t *placed){
+uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int send,uint64_t at,struct mesh_place *made,uint32_t *placed){
   const int sorted=mesh_rounds_sorted(steps,count);
-  uint32_t rounds=0,round=UINT32_MAX;
-  uint64_t out=at,in=at;
-#define MESH_LAID(k) (steps[k].peer==peer && mesh_step_bytes(steps+(k)) && \
-                      mesh_wire_large(wire,mesh_step_bytes(steps+(k)),steps[k].piece.element_bytes)==large)
-#define MESH_PLACE(k) do { \
-    uint64_t *cursor=steps[k].op==MESH_STEP_SEND?&out:&in; \
-    const uint64_t pieces=mesh_wire_pieces(wire,mesh_step_bytes(steps+(k)),steps[k].piece.element_bytes); \
-    made[(*placed)++]=(struct mesh_place){(k),steps[k].op==MESH_STEP_SEND,*cursor,pieces}; \
-    *cursor+=pieces; } while(0)
+  uint32_t rounds=0;
+#define MESH_LAID(k) (steps[k].peer==peer && mesh_step_bytes(steps+(k)) && (steps[k].op==MESH_STEP_SEND)==(send!=0))
+  for(uint32_t k=0;sorted && k<count;k++)if(MESH_LAID(k))made[(*placed)++]=(struct mesh_place){k,send!=0,at++};
   for(uint32_t k=0;!sorted && k<count;k++)if(MESH_LAID(k) && steps[k].round+1>rounds)rounds=steps[k].round+1;
-  for(uint32_t k=0;sorted && k<count;k++){
-    if(!MESH_LAID(k))continue;
-    if(steps[k].round!=round){at=out>in?out:in;out=in=at;round=steps[k].round;}
-    MESH_PLACE(k);
-  }
-  for(uint32_t r=0;!sorted && r<rounds;r++){
-    at=out>in?out:in;out=in=at;
-    for(uint32_t k=0;k<count;k++)if(MESH_LAID(k) && steps[k].round==r)MESH_PLACE(k);
-  }
-#undef MESH_PLACE
+  for(uint32_t r=0;!sorted && r<rounds;r++)
+    for(uint32_t k=0;k<count;k++)if(MESH_LAID(k) && steps[k].round==r)made[(*placed)++]=(struct mesh_place){k,send!=0,at++};
 #undef MESH_LAID
-  return out>in?out:in;
+  return at;
 }
 
 /* steps by round, then index */
@@ -981,13 +971,14 @@ int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count
   return 0;
 }
 
-/* design/transport.md: a group's calls laid together (libnccl-mesh lay), a counted all-to-all's
-   steps (libnccl-mesh counted_steps), and the advisories.  The wire's rule, as libnccl-mesh runs it (nccl-mesh.c run):
-   on a channel each end publishes its positions in order, position t once it has consumed the peer's t - lag, and
-   consumes the peer's in order, each once it has landed; a step's first position, published or consumed, waits until
-   the receive before it in its call (mesh_steps_before) is consumed to its last.  Events: an end's publication or
-   consumption of one position of one channel; a channel's events from `base`, end 0 its rank a < b, its positions on
-   both ends alike where the group is balanced. */
+/* design/transport.md section 14: a group's calls laid together (libnccl-mesh schedule_group), a counted all-to-all's
+   steps (libnccl-mesh counted_steps), and the advisories.  The lists' rule, as libnccl-mesh runs it (nccl-mesh.c run,
+   complete): each direction between two ranks is one list, the sender's send list and the receiver's landing list,
+   entry for entry; the sender publishes its entries in order (its holding's `ready`, one count), the receiver consumes
+   them in order, each once it has landed (`landed`, one count); a step's first event, published or consumed, waits until
+   the receive before it in its call (mesh_steps_before) is consumed; a combine into bytes a SEND of the same rank on the
+   same channel reads waits until that SEND's bytes are sent (`sent`), after its publication.  Nothing else orders them:
+   no credit, no fillers (the hardware's credit holds a SEND until its receive is posted, design/transport.md). */
 static uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){
   uint64_t at=0;
   for(uint32_t r=0;r<q;r++)at+=segment[r];
@@ -1013,44 +1004,30 @@ uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segment
     if(q!=rank && got[q])steps[k++]=(struct mesh_step){MESH_STEP_COPY,q,0,3,0,element};
   return k;
 }
-/* whether call i is a point-to-point call of `rank`'s, its SEND (send) or its receive, toward `peer` on the class */
-static int mesh_point_at(const struct mesh_group *g,uint32_t i,uint32_t rank,uint32_t peer,int large,const struct mesh_wire *wire,int send){
-  const struct mesh_group_call *c=g->call+i;
-  if(c->kind!=MESH_GROUP_POINT || !c->count[rank])return 0;
-  const struct mesh_step *s=c->steps[rank];
-  return (s->op==MESH_STEP_SEND)==send && s->peer==peer && mesh_wire_large(wire,mesh_step_bytes(s),s->piece.element_bytes)==large;
-}
-uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,int large,const struct mesh_wire *wire,uint64_t at,
-                        struct mesh_place *scratch,struct mesh_group_place *made,uint32_t *placed){
+uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
+                        struct mesh_group_place *made,uint32_t *placed){
   *placed=0;
   for(uint32_t pass=0;pass<2;pass++)for(uint32_t i=0;i<g->calls;i++){
     const struct mesh_group_call *c=g->call+i;
     if(c->kind==MESH_GROUP_POINT || (c->kind==MESH_GROUP_COUNTED || c->kind==MESH_GROUP_HOSTED)!=pass)continue;
     uint32_t laid=0;
-    at=mesh_lay(c->steps[rank],c->count[rank],peer,large,wire,at,scratch,&laid);
+    at=mesh_lay(c->steps[rank],c->count[rank],peer,send,at,scratch,&laid);
     for(uint32_t k=0;k<laid;k++)made[(*placed)++]=(struct mesh_group_place){i,0,scratch[k]};
   }
-  for(uint32_t s=0,r=0;;s++,r++){
-    while(s<g->calls && !mesh_point_at(g,s,rank,peer,large,wire,1))s++;
-    while(r<g->calls && !mesh_point_at(g,r,rank,peer,large,wire,0))r++;
-    if(s>=g->calls && r>=g->calls)break;
-    uint64_t end[2]={at,at};
-    for(uint32_t way=0;way<2;way++){
-      const uint32_t i=way?r:s;
-      const struct mesh_step *step=i<g->calls?g->call[i].steps[rank]:NULL;
-      if(!step || !mesh_step_bytes(step))continue;
-      const uint64_t pieces=mesh_wire_pieces(wire,mesh_step_bytes(step),step->piece.element_bytes);
-      made[(*placed)++]=(struct mesh_group_place){i,0,{0,!way,at,pieces}};
-      end[way]+=pieces;
-    }
-    at=end[0]>end[1]?end[0]:end[1];
+  for(uint32_t i=0;i<g->calls;i++){
+    const struct mesh_group_call *c=g->call+i;
+    if(c->kind!=MESH_GROUP_POINT || !c->count[rank])continue;
+    const struct mesh_step *step=c->steps[rank];
+    if(step->peer==peer && mesh_step_bytes(step) && (step->op==MESH_STEP_SEND)==(send!=0))
+      made[(*placed)++]=(struct mesh_group_place){i,0,{0,send!=0,at++}};
   }
   return at;
 }
 
-enum { MESH_ADVISE_PROJECTION, MESH_ADVISE_PRIORITIES, MESH_ADVISE_DEPTH, MESH_ADVISE_CAUSALITY, MESH_ADVISE_HAZARD, MESH_ADVISE_INVOCATION,
+
+enum { MESH_ADVISE_PROJECTION, MESH_ADVISE_PRIORITIES, MESH_ADVISE_ALIGNMENT, MESH_ADVISE_CAUSALITY, MESH_ADVISE_HAZARD, MESH_ADVISE_INVOCATION,
        MESH_ADVISE_BOUND, MESH_ADVISE_CHECKS };
-static const char *const mesh_advise_names[MESH_ADVISE_CHECKS]={"projection","priorities","depth","causality","hazard","invocation","bound"};
+static const char *const mesh_advise_names[MESH_ADVISE_CHECKS]={"projection","priorities","alignment","causality","hazard","invocation","bound"};
 struct mesh_advice { void (*warn)(void *,const char *); void *arg; uint32_t count; };
 static void mesh_advise_say(struct mesh_advice *a,uint32_t check,const char *format,...) __attribute__((format(printf,3,4)));
 static void mesh_advise_say(struct mesh_advice *a,uint32_t check,const char *format,...){
@@ -1065,40 +1042,22 @@ static void mesh_advise_say(struct mesh_advice *a,uint32_t check,const char *for
   a->warn(a->arg,line);
 }
 static const char *mesh_step_name(uint32_t op){ return op==MESH_STEP_SEND?"SEND":op==MESH_STEP_REDUCE?"REDUCE":"COPY"; }
-/* a step's place: its channel (UINT32_MAX: none, no bytes), its rank's end of it, its first position and its pieces */
-struct mesh_spot { uint32_t lane,end; uint64_t first,pieces; };
-struct mesh_track { uint32_t a,b,large; uint64_t positions,base; };
-static uint64_t mesh_event(const struct mesh_track *lane,uint32_t end,uint32_t consume,uint64_t t){
-  return lane->base+(uint64_t)(2*end+consume)*lane->positions+t;
-}
-static void mesh_event_text(const struct mesh_track *lanes,uint32_t count,uint64_t e,char *text,size_t room){
+/* a step's entry: its list (UINT32_MAX: none, no bytes) and its index there */
+struct mesh_spot { uint32_t lane; uint64_t entry; };
+/* a list: rank a's sends to rank b, b's receives from a, its entries, its events from `base` (publications, then
+   consumptions) */
+struct mesh_list { uint32_t a,b; uint64_t entries,base; };
+static uint64_t mesh_event(const struct mesh_list *l,uint32_t consume,uint64_t e){ return l->base+(consume?l->entries:0)+e; }
+static void mesh_event_text(const struct mesh_list *lists,uint32_t count,uint64_t v,char *text,size_t room){
   uint32_t h=0;
-  while(h+1<count && lanes[h+1].base<=e)h++;
-  const struct mesh_track *l=lanes+h;
-  const uint64_t x=e-l->base,t=x%l->positions;
-  const uint32_t which=(uint32_t)(x/l->positions),end=which/2,me=end?l->b:l->a,peer=end?l->a:l->b;
-  if(which%2)snprintf(text,room,"rank %u consumes rank %u's position %llu (%s)",me,peer,(unsigned long long)t,l->large?"large":"small");
-  else snprintf(text,room,"rank %u publishes position %llu to rank %u (%s)",me,(unsigned long long)t,peer,l->large?"large":"small");
+  while(h+1<count && lists[h+1].base<=v)h++;
+  const struct mesh_list *l=lists+h;
+  const uint64_t x=v-l->base,e=x%l->entries;
+  if(x>=l->entries)snprintf(text,room,"rank %u consumes rank %u's entry %llu",l->b,l->a,(unsigned long long)e);
+  else snprintf(text,room,"rank %u publishes entry %llu to rank %u",l->a,(unsigned long long)e,l->b);
 }
 static int mesh_overlap(const struct mesh_step *x,const struct mesh_step *y){
   return x->buffer==y->buffer && x->first<y->first+y->piece.elements && y->first<x->first+x->piece.elements;
-}
-/* a step's piece at position t of its place x on a channel of class `large`: its elements [*lo, *hi), the wire's cut of
-   a step into the whole elements a position carries (mesh_wire_pieces) */
-static void mesh_piece(const struct mesh_wire *wire,int large,const struct mesh_step *s,const struct mesh_spot *x,uint64_t t,uint64_t *lo,
-                       uint64_t *hi){
-  const uint64_t slot=large?wire->slot:wire->small,e=s->piece.element_bytes?s->piece.element_bytes:1,per=(e<=slot?slot-slot%e:slot)/e;
-  const uint64_t end=s->first+s->piece.elements,at=s->first+(t-x->first)*per;
-  *lo=at<end?at:end;
-  *hi=*lo+per<end?*lo+per:end;
-}
-/* whether step s's piece at position t of its place x and step v's at position u of its place y meet in one buffer */
-static int mesh_pieces_meet(const struct mesh_wire *wire,const struct mesh_track *lanes,const struct mesh_step *s,const struct mesh_spot *x,
-                            uint64_t t,const struct mesh_step *v,const struct mesh_spot *y,uint64_t u){
-  uint64_t a,b,c,d;
-  mesh_piece(wire,(int)lanes[x->lane].large,s,x,t,&a,&b);
-  mesh_piece(wire,(int)lanes[y->lane].large,v,y,u,&c,&d);
-  return s->buffer==v->buffer && a<d && c<b;
 }
 /* the events reachable from `from` along `start`/`list` (forward or reverse), marked `generation` */
 static void mesh_reach(uint64_t from,const uint64_t *start,const uint64_t *list,uint32_t *mark,uint32_t generation,uint64_t *queue){
@@ -1117,10 +1076,15 @@ static const char *mesh_move(const struct mesh_grouped *x,uint32_t r,uint32_t k,
   else snprintf(text,room,"move %u",k);
   return text;
 }
+/* the event at which receive v's bytes are written into its buffer: a combine's at its consumption; a COPY lands in
+   place, so at the earliest when its peer publishes it */
+static uint64_t mesh_written(const struct mesh_list *lists,const struct mesh_step *v,const struct mesh_spot *y){
+  return mesh_event(lists+y->lane,v->op==MESH_STEP_REDUCE,y->entry);
+}
 
-uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wire,void (*warn)(void *,const char *),void *arg){
+uint32_t mesh_group_advise(const struct mesh_group *g,void (*warn)(void *,const char *),void *arg){
   struct mesh_advice advice={warn,arg,0};
-  const uint32_t n=g->nodes,lag=wire->lag,calls=g->calls;
+  const uint32_t n=g->nodes,calls=g->calls;
   /* bound: a GPU wait's loads past the platform's deadline (design/transport.md) */
   if(g->bound && !g->polls)
     mesh_advise_say(&advice,MESH_ADVISE_BOUND,"the group's GPU waits are unbounded (polls 0): a wait whose landing never comes holds its "
@@ -1133,14 +1097,14 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
   struct mesh_spot **spot=calloc((size_t)n+1,sizeof *spot);
   uint32_t **owner=calloc((size_t)n+1,sizeof *owner),*first=calloc((size_t)calls*n+1,sizeof *first);
   uint32_t *count=calloc((size_t)n+1,sizeof *count),most=1,widest=1,result=UINT32_MAX;
-  struct mesh_track *lanes=malloc(((size_t)n*n+1)*sizeof *lanes);
+  struct mesh_list *lists=malloc(((size_t)n*n+1)*sizeof *lists);
   struct mesh_place *scratch=NULL;
   struct mesh_group_place *ma=NULL,*mb=NULL;
   uint64_t *from=NULL,*to=NULL,*start=NULL,*list=NULL,*back=NULL,*rlist=NULL,*queue=NULL,*remaining=NULL;
   uint32_t *mark=NULL;
   const struct mesh_grouped grouped={g,owner,first};
   char text[2][64];
-  if(!steps || !before || !spot || !owner || !first || !count || !lanes)goto done;
+  if(!steps || !before || !spot || !owner || !first || !count || !lists)goto done;
   int points=0;
   for(uint32_t i=0;i<calls;i++)points|=g->call[i].kind==MESH_GROUP_POINT;
   for(uint32_t r=0;r<n;r++){
@@ -1156,7 +1120,7 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
       if(mesh_group_before(g->call[i].kind,steps[r]+k,c,before[r]+k))goto done;
       for(uint32_t j=k;j<k+c;j++){owner[r][j]=i;if(before[r][j]>=0)before[r][j]+=(int32_t)k;}
     }
-    for(uint32_t k=0;k<count[r];k++)spot[r][k]=(struct mesh_spot){UINT32_MAX,0,0,0};
+    for(uint32_t k=0;k<count[r];k++)spot[r][k]=(struct mesh_spot){UINT32_MAX,0};
     if(count[r]+1>most)most=count[r]+1;
   }
   /* priorities: each rank's steps of a call by round, a round's SENDs before its receives (Dardha & Gay's priorities) */
@@ -1201,102 +1165,57 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
                       text[0]);
     }
   }
-  /* depth: an element wider than its channel's slot is split across positions */
-  for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
-    const struct mesh_step *s=steps[r]+k;
-    const uint64_t bytes=s->piece.elements*s->piece.element_bytes;
-    if(!bytes)continue;
-    const int large=mesh_wire_large(wire,bytes,s->piece.element_bytes);
-    if(s->piece.element_bytes>(large?wire->slot:wire->small))
-      mesh_advise_say(&advice,MESH_ADVISE_DEPTH,"rank %u's %s (%s, round %u): an element of %u bytes is wider than its %s channel's slot "
-                      "of %llu bytes, so a position splits it",r,mesh_move(&grouped,r,k,text[0],sizeof *text),mesh_step_name(s->op),s->round,
-                      s->piece.element_bytes,large?"large":"small",(unsigned long long)(large?wire->slot:wire->small));
-  }
-  /* projection on the wire: both ends' layout of each channel for the group (mesh_group_lay), position for position */
+  /* projection on the lists: rank a's send list toward b against b's landing list from a (mesh_group_lay), entry for
+     entry, each of the same bytes */
   scratch=malloc((size_t)widest*sizeof *scratch);ma=malloc((size_t)most*sizeof *ma);mb=malloc((size_t)most*sizeof *mb);
   if(!scratch || !ma || !mb)goto done;
-  uint32_t lane_count=0;
+  uint32_t list_count=0;
   uint64_t events=0;
   int balanced=1;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)for(int large=0;large<2;large++){
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++){
+    if(a==b)continue;
     uint32_t na=0,nb=0;
-    const uint64_t ea=mesh_group_lay(g,a,b,large,wire,0,scratch,ma,&na),eb=mesh_group_lay(g,b,a,large,wire,0,scratch,mb,&nb);
+    const uint64_t ea=mesh_group_lay(g,a,b,1,0,scratch,ma,&na),eb=mesh_group_lay(g,b,a,0,0,scratch,mb,&nb);
     if(!ea && !eb)continue;
-    const char *class=large?"large":"small";
+#define MESH_AT(who,m) (first[(size_t)(m).call*n+(who)]+(m).place.step)
     if(ea!=eb){
       balanced=0;
-      mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"channel %u-%u (%s): rank %u lays %llu positions, rank %u %llu",a,b,class,a,
-                      (unsigned long long)ea,b,(unsigned long long)eb);
+      mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"rank %u lays %llu entries on its send list to rank %u, which lays %llu on its landing list "
+                      "from it",a,(unsigned long long)ea,b,(unsigned long long)eb);
     }
-    for(int way=0;way<2;way++){
-      const struct mesh_group_place *x=way?mb:ma,*y=way?ma:mb;
-      const uint32_t nx=way?nb:na,ny=way?na:nb,sender=way?b:a,receiver=way?a:b;
-#define MESH_AT(who,m) (first[(size_t)(m).call*n+(who)]+(m).place.step)
-      uint32_t i=0,j=0;
-      for(;;){
-        while(i<nx && !x[i].place.send)i++;
-        while(j<ny && y[j].place.send)j++;
-        if(i>=nx || j>=ny)break;
-        if(x[i].place.first!=y[j].place.first || x[i].place.pieces!=y[j].place.pieces){
-          balanced=0;
-          mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"channel %u-%u (%s): rank %u's SEND (%s) takes positions [%llu, +%llu), rank %u's "
-                          "receive (%s) [%llu, +%llu)",a,b,class,sender,mesh_move(&grouped,sender,MESH_AT(sender,x[i]),text[0],sizeof *text),
-                          (unsigned long long)x[i].place.first,(unsigned long long)x[i].place.pieces,receiver,
-                          mesh_move(&grouped,receiver,MESH_AT(receiver,y[j]),text[1],sizeof *text),(unsigned long long)y[j].place.first,
-                          (unsigned long long)y[j].place.pieces);
-        }
-        i++;j++;
-      }
-      for(;i<nx;i++)if(x[i].place.send){
+    for(uint32_t k=0;k<na && k<nb;k++){
+      const struct mesh_step *s=steps[a]+MESH_AT(a,ma[k]),*v=steps[b]+MESH_AT(b,mb[k]);
+      if(mesh_step_bytes(s)!=mesh_step_bytes(v)){
         balanced=0;
-        mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"channel %u-%u (%s): rank %u's SEND (%s) has no receive at rank %u",a,b,class,sender,
-                        mesh_move(&grouped,sender,MESH_AT(sender,x[i]),text[0],sizeof *text),receiver);
-      }
-      for(;j<ny;j++)if(!y[j].place.send){
-        balanced=0;
-        mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"channel %u-%u (%s): rank %u's receive (%s) has no SEND at rank %u",a,b,class,
-                        receiver,mesh_move(&grouped,receiver,MESH_AT(receiver,y[j]),text[0],sizeof *text),sender);
+        mesh_advise_say(&advice,MESH_ADVISE_PROJECTION,"entry %u from rank %u to rank %u: its SEND (%s) carries %llu bytes, its %s (%s) %llu",k,a,b,
+                        mesh_move(&grouped,a,MESH_AT(a,ma[k]),text[0],sizeof *text),(unsigned long long)mesh_step_bytes(s),mesh_step_name(v->op),
+                        mesh_move(&grouped,b,MESH_AT(b,mb[k]),text[1],sizeof *text),(unsigned long long)mesh_step_bytes(v));
       }
     }
-    const uint32_t h=lane_count++;
-    lanes[h]=(struct mesh_track){a,b,(uint32_t)large,ea>eb?ea:eb,events};
-    events+=4*lanes[h].positions;
-    for(uint32_t k=0;k<na;k++)spot[a][MESH_AT(a,ma[k])]=(struct mesh_spot){h,0,ma[k].place.first,ma[k].place.pieces};
-    for(uint32_t k=0;k<nb;k++)spot[b][MESH_AT(b,mb[k])]=(struct mesh_spot){h,1,mb[k].place.first,mb[k].place.pieces};
+    const uint32_t h=list_count++;
+    lists[h]=(struct mesh_list){a,b,ea>eb?ea:eb,events};
+    events+=2*lists[h].entries;
+    for(uint32_t k=0;k<na;k++)spot[a][MESH_AT(a,ma[k])]=(struct mesh_spot){h,ma[k].place.entry};
+    for(uint32_t k=0;k<nb;k++)spot[b][MESH_AT(b,mb[k])]=(struct mesh_spot){h,mb[k].place.entry};
 #undef MESH_AT
   }
-  /* depth: a step whose first position waits on its own channel's receive ending at or past it (the rule leaves lag
-     positions of slack; at lag or more the causality check finds the cycle) */
-  uint64_t edges=1;
-  for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
-    const struct mesh_spot *s=spot[r]+k;
-    if(s->lane==UINT32_MAX || before[r][k]<0)continue;
-    const struct mesh_spot *w=spot[r]+before[r][k];
-    if(w->lane==UINT32_MAX)continue;
-    edges++;
-    if(w->lane==s->lane && w->first+w->pieces-1>=s->first)
-      mesh_advise_say(&advice,MESH_ADVISE_DEPTH,"rank %u's %s (%s, round %u) begins at position %llu of its channel to rank %u and waits for "
-                      "its %s (round %u) to be consumed to position %llu, at or past its own (the rule's slack is %u positions)",r,
-                      mesh_move(&grouped,r,k,text[0],sizeof *text),mesh_step_name(steps[r][k].op),steps[r][k].round,(unsigned long long)s->first,
-                      steps[r][k].peer,mesh_move(&grouped,r,(uint32_t)before[r][k],text[1],sizeof *text),steps[r][before[r][k]].round,
-                      (unsigned long long)(w->first+w->pieces-1),lag);
-  }
   if(!balanced || !events){result=advice.count;goto done;}
-  /* causality: the events under the rule, a marked graph, whose every event occurs (in some order, no timing) where
-     it has no cycle (Lee & Messerschmitt's admissible schedule; Lustre's instantaneous dependency check) */
-  edges+=2*events+events/2;
+  /* causality: the events under the lists' rule, a marked graph, whose every event occurs (in some order, no timing)
+     where it has no cycle (Lee & Messerschmitt's admissible schedule; Lustre's instantaneous dependency check) */
+  uint64_t edges=1;
+  for(uint32_t r=0;r<n;r++)edges+=2*(uint64_t)count[r]*count[r]+count[r];
+  edges+=3*events;
   from=malloc(edges*sizeof *from);to=malloc(edges*sizeof *to);
   start=calloc(events+1,sizeof *start);back=calloc(events+1,sizeof *back);remaining=calloc(events+1,sizeof *remaining);
   queue=malloc((events+1)*sizeof *queue);mark=calloc(events+1,sizeof *mark);
   if(!from || !to || !start || !back || !remaining || !queue || !mark)goto done;
   uint64_t E=0;
 #define MESH_EDGE(x,y) do { from[E]=(x);to[E]=(y);E++; } while(0)
-  for(uint32_t h=0;h<lane_count;h++){
-    const struct mesh_track *l=lanes+h;
-    for(uint32_t end=0;end<2;end++)for(uint64_t t=0;t<l->positions;t++){
-      if(t){MESH_EDGE(mesh_event(l,end,0,t-1),mesh_event(l,end,0,t));MESH_EDGE(mesh_event(l,end,1,t-1),mesh_event(l,end,1,t));}
-      if(t>=lag)MESH_EDGE(mesh_event(l,end,1,t-lag),mesh_event(l,end,0,t));
-      MESH_EDGE(mesh_event(l,1-end,0,t),mesh_event(l,end,1,t));
+  for(uint32_t h=0;h<list_count;h++){
+    const struct mesh_list *l=lists+h;
+    for(uint64_t e=0;e<l->entries;e++){
+      if(e){MESH_EDGE(mesh_event(l,0,e-1),mesh_event(l,0,e));MESH_EDGE(mesh_event(l,1,e-1),mesh_event(l,1,e));}
+      MESH_EDGE(mesh_event(l,0,e),mesh_event(l,1,e));
     }
   }
   for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
@@ -1304,23 +1223,19 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
     if(s->lane==UINT32_MAX || before[r][k]<0)continue;
     const struct mesh_spot *w=spot[r]+before[r][k];
     if(w->lane==UINT32_MAX)continue;
-    MESH_EDGE(mesh_event(lanes+w->lane,w->end,1,w->first+w->pieces-1),mesh_event(lanes+s->lane,s->end,steps[r][k].op!=MESH_STEP_SEND,s->first));
+    MESH_EDGE(mesh_event(lists+w->lane,1,w->entry),mesh_event(lists+s->lane,steps[r][k].op!=MESH_STEP_SEND,s->entry));
   }
-  /* a position whose publication reads in place what its own consumption writes (one call's SEND and receive at one end
-     of one channel, their pieces there meeting in one buffer: mesh_compile's two-node direct exchange) is consumed after
-     it is published, the executors' order (libnccl-mesh complete_track by the stream's order, the tracks and the host
-     path by sends_what_lands): at most one such edge an end's position */
+  /* a combine into bytes that an earlier SEND of the same rank, call and channel reads (mesh_compile's two-node direct
+     exchange) waits until those bytes are sent, after the SEND's publication (libnccl-mesh consume) */
   for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
     const struct mesh_step *s=steps[r]+k;
     const struct mesh_spot *x=spot[r]+k;
     if(s->op!=MESH_STEP_SEND || x->lane==UINT32_MAX)continue;
-    for(uint32_t w=0;w<count[r];w++){
+    for(uint32_t w=k+1;w<count[r];w++){
       const struct mesh_step *v=steps[r]+w;
       const struct mesh_spot *y=spot[r]+w;
-      if(v->op==MESH_STEP_SEND || owner[r][w]!=owner[r][k] || y->lane!=x->lane || y->end!=x->end || !mesh_overlap(s,v))continue;
-      const uint64_t lo=x->first>y->first?x->first:y->first,hi=x->first+x->pieces<y->first+y->pieces?x->first+x->pieces:y->first+y->pieces;
-      for(uint64_t t=lo;t<hi;t++)
-        if(mesh_pieces_meet(wire,lanes,s,x,t,v,y,t))MESH_EDGE(mesh_event(lanes+x->lane,x->end,0,t),mesh_event(lanes+x->lane,x->end,1,t));
+      if(v->op==MESH_STEP_REDUCE && owner[r][w]==owner[r][k] && y->lane!=UINT32_MAX && v->peer==s->peer && mesh_overlap(s,v))
+        MESH_EDGE(mesh_event(lists+x->lane,0,x->entry),mesh_event(lists+y->lane,1,y->entry));
     }
   }
 #undef MESH_EDGE
@@ -1360,55 +1275,44 @@ uint32_t mesh_group_advise(const struct mesh_group *g,const struct mesh_wire *wi
     size_t used=0;
     const uint32_t first_on=mark[v]-1,length=steps_back-first_on;
     for(uint32_t i=0;i<length && i<6 && used<sizeof cycle;i++){
-      mesh_event_text(lanes,lane_count,queue[first_on+i],event,sizeof event);
+      mesh_event_text(lists,list_count,queue[first_on+i],event,sizeof event);
       used+=(size_t)snprintf(cycle+used,sizeof cycle-used,"%s%s",i?" <- ":"",event);
     }
-    mesh_advise_say(&advice,MESH_ADVISE_CAUSALITY,"%llu of the group's %llu events on the wire (lag %u) can never occur: a cycle of %u, "
-                    "%s%s",(unsigned long long)(events-tail),(unsigned long long)events,lag,length,cycle,length>6?" <- ...":"");
+    mesh_advise_say(&advice,MESH_ADVISE_CAUSALITY,"%llu of the group's %llu events on its lists can never occur: a cycle of %u, %s%s",
+                    (unsigned long long)(events-tail),(unsigned long long)events,length,cycle,length>6?" <- ...":"");
     result=advice.count;
     goto done;
   }
-  /* hazard: within a call, a receive after a SEND of the same rank into elements the SEND reads, with no order from the
-     position of a SEND piece to that of a receive piece meeting it (write after read: a piece is read at its
-     publication and written at its consumption); a receive before a SEND of what it writes, with none from the
-     receive's last position to the SEND's first (read after write) */
+  /* hazard: within a call, a SEND's bytes are read by the NIC from its publication until its peer has them (that
+     peer's consumption of it), so a receive after it that writes them (a combine at its consumption, a COPY where its
+     peer publishes it, landing in place) must follow that consumption, but for a combine on the SEND's own channel,
+     which waits for the bytes sent (write after read); and a receive before a SEND of what it writes must be consumed
+     before the SEND's publication (read after write) */
   uint32_t generation=0;
   for(uint32_t r=0;r<n;r++)for(uint32_t k=0;k<count[r];k++){
     const struct mesh_step *s=steps[r]+k;
     const struct mesh_spot *x=spot[r]+k;
     if(s->op!=MESH_STEP_SEND || x->lane==UINT32_MAX)continue;
-    int meets=0;
-    for(uint32_t w=k+1;w<count[r] && !meets;w++)
-      meets=owner[r][w]==owner[r][k] && steps[r][w].op!=MESH_STEP_SEND && spot[r][w].lane!=UINT32_MAX && mesh_overlap(s,steps[r]+w);
-    unsigned char *unordered=calloc((size_t)count[r]+1,1);
-    if(!unordered)goto done;
-    for(uint64_t t=x->first;meets && t<x->first+x->pieces;t++){
-      mesh_reach(mesh_event(lanes+x->lane,x->end,0,t),start,list,mark,++generation,queue);
-      for(uint32_t w=k+1;w<count[r];w++){
-        const struct mesh_step *v=steps[r]+w;
-        const struct mesh_spot *y=spot[r]+w;
-        if(unordered[w] || owner[r][w]!=owner[r][k] || v->op==MESH_STEP_SEND || y->lane==UINT32_MAX || !mesh_overlap(s,v))continue;
-        for(uint64_t u=y->first;u<y->first+y->pieces && !unordered[w];u++)
-          unordered[w]=mesh_pieces_meet(wire,lanes,s,x,t,v,y,u) && mark[mesh_event(lanes+y->lane,y->end,1,u)]!=generation;
-      }
-    }
+    mesh_reach(mesh_event(lists+x->lane,1,x->entry),start,list,mark,++generation,queue);
     for(uint32_t w=k+1;w<count[r];w++){
       const struct mesh_step *v=steps[r]+w;
-      if(unordered[w])
-        mesh_advise_say(&advice,MESH_ADVISE_HAZARD,"rank %u's %s %s (round %u, from rank %u) writes buffer %u's elements [%llu, +%llu) that its "
-                        "SEND %s (round %u, to rank %u) reads, a piece of it with no order from the SEND piece's position it meets",r,
-                        mesh_step_name(v->op),mesh_move(&grouped,r,w,text[0],sizeof *text),v->round,v->peer,v->buffer,(unsigned long long)v->first,
-                        (unsigned long long)v->piece.elements,mesh_move(&grouped,r,k,text[1],sizeof *text),s->round,s->peer);
+      const struct mesh_spot *y=spot[r]+w;
+      if(owner[r][w]!=owner[r][k] || v->op==MESH_STEP_SEND || y->lane==UINT32_MAX || !mesh_overlap(s,v) ||
+         (v->op==MESH_STEP_REDUCE && v->peer==s->peer) || mark[mesh_written(lists,v,y)]==generation)
+        continue;
+      mesh_advise_say(&advice,MESH_ADVISE_HAZARD,"rank %u's %s %s (round %u, from rank %u) writes buffer %u's elements [%llu, +%llu) that its "
+                      "SEND %s (round %u, to rank %u) reads, with no order from the SEND's landing at rank %u to that write",r,mesh_step_name(v->op),
+                      mesh_move(&grouped,r,w,text[0],sizeof *text),v->round,v->peer,v->buffer,(unsigned long long)v->first,
+                      (unsigned long long)v->piece.elements,mesh_move(&grouped,r,k,text[1],sizeof *text),s->round,s->peer,s->peer);
     }
-    free(unordered);
-    mesh_reach(mesh_event(lanes+x->lane,x->end,0,x->first),back,rlist,mark,++generation,queue);
+    mesh_reach(mesh_event(lists+x->lane,0,x->entry),back,rlist,mark,++generation,queue);
     for(uint32_t w=0;w<k;w++){
       const struct mesh_step *v=steps[r]+w;
       const struct mesh_spot *y=spot[r]+w;
       if(owner[r][w]!=owner[r][k] || v->op==MESH_STEP_SEND || y->lane==UINT32_MAX || !mesh_overlap(s,v))continue;
-      if(mark[mesh_event(lanes+y->lane,y->end,1,y->first+y->pieces-1)]!=generation)
+      if(mark[mesh_event(lists+y->lane,1,y->entry)]!=generation)
         mesh_advise_say(&advice,MESH_ADVISE_HAZARD,"rank %u's SEND %s (round %u, to rank %u) reads buffer %u's elements [%llu, +%llu) that its %s "
-                        "%s (round %u, from rank %u) writes, with no order from the receive's last position to the SEND's first",r,
+                        "%s (round %u, from rank %u) writes, with no order from the receive's consumption to the SEND's publication",r,
                         mesh_move(&grouped,r,k,text[0],sizeof *text),s->round,s->peer,s->buffer,(unsigned long long)s->first,
                         (unsigned long long)s->piece.elements,mesh_step_name(v->op),mesh_move(&grouped,r,w,text[1],sizeof *text),v->round,v->peer);
     }
@@ -1421,27 +1325,30 @@ done:
     if(spot)free(spot[r]);
     if(owner)free(owner[r]);
   }
-  free(steps);free(before);free(spot);free(owner);free(first);free(count);free(lanes);free(scratch);free(ma);free(mb);free(from);free(to);
+  free(steps);free(before);free(spot);free(owner);free(first);free(count);free(lists);free(scratch);free(ma);free(mb);free(from);free(to);
   free(start);free(list);free(back);free(rlist);free(queue);free(remaining);free(mark);
   return result;
 }
 
-uint32_t mesh_program_advise(const struct mesh_program *program,const struct mesh_wire *wire,struct mesh_operand operand,
-                             void (*warn)(void *,const char *),void *arg){
-  const uint32_t n=program->nodes;
+uint32_t mesh_program_advise(const struct mesh_program *program,struct mesh_operand operand,uint64_t page,void (*warn)(void *,const char *),
+                             void *arg){
+  const uint32_t n=program->nodes,segments=mesh_program_segments(program);
+  const int nccl=program->what==MESH_REDUCE_SCATTER || program->what==MESH_ALLGATHER;
   struct mesh_step **steps=calloc((size_t)n+1,sizeof *steps);
   uint32_t *count=calloc((size_t)n+1,sizeof *count),result=UINT32_MAX;
-  for(uint32_t r=0;steps && count && r<n;r++){
+  uint64_t *sizes=malloc(((size_t)segments+1)*sizeof *sizes);
+  for(uint32_t s=0;sizes && s<segments;s++)sizes[s]=operand.elements/segments+(s<operand.elements%segments);
+  for(uint32_t r=0;steps && count && sizes && r<n;r++){
     if(!(steps[r]=malloc((program->first[r+1]-program->first[r]+1)*sizeof **steps)))goto done;
-    count[r]=mesh_program_steps(program,r,operand,steps[r]);
+    count[r]=mesh_program_steps_cut(program,r,operand,nccl?sizes:NULL,page,steps[r]);
   }
-  if(steps && count){
+  if(steps && count && sizes){
     const struct mesh_group_call call={MESH_GROUP_COLLECTIVE,0,count,(const struct mesh_step *const *)steps};
-    const struct mesh_group group={n,1,0,0,&call};
-    result=mesh_group_advise(&group,wire,warn,arg);
+    const struct mesh_group group={n,1,0,0,&call,page};
+    result=mesh_group_advise(&group,warn,arg);
   }
 done:
   for(uint32_t r=0;steps && r<n;r++)free(steps[r]);
-  free(steps);free(count);
+  free(steps);free(count);free(sizes);
   return result;
 }

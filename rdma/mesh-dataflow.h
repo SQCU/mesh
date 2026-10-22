@@ -47,5 +47,5 @@ uint32_t mesh_arena_free(struct hdr *);
 int mesh_lease_return(struct mesh_ctx *,uint32_t row);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
-void mesh_retired_release(struct hdr *);
+uint32_t mesh_retired_release(struct hdr *);
 #endif

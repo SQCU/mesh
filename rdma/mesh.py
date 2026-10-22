@@ -2,7 +2,7 @@
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
 node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
 the header's own: link maps, the trees every collective and message take, operands, collectives (compile: a program,
-the operand libnccl-mesh's ncclMeshCommInitRank takes), steps and the wire libnccl-mesh's channels run (wire()).
+the operand libnccl-mesh's ncclMeshCommInitRank takes) and steps, each one entry of a holding's send or landing list.
 Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the
 memory they move taken from the node's bridge's region (rdma/NCCL.md "Memory")."""
 import errno
@@ -81,14 +81,6 @@ def joined(lmap):
     return None
 
 
-def _apart(lmap, named, nodes):
-    """ValueError naming the first two of `nodes` (map node v's name nodes[v]) lmap does not join, where it does not:
-    the map a communicator of them reads, which no collective runs on."""
-    pair = joined(lmap)
-    if pair is not None:
-        raise ValueError(f'{named}: no route of the map joins {nodes[pair[0]]} and {nodes[pair[1]]}')
-
-
 def routes(lmap):
     """mesh_routes: the routing table of lmap's links by its marks (each node's in-tree of shortest routes, a parent
     among equals the one of the least hash of its mark, the parent's and the root's: a route moves only where the
@@ -127,11 +119,11 @@ def _members(whole, members, current):
             break
         room = made
     if count < 0:
-        return count, None, None, None
+        return count, None, None
     N = count + made.relays
     lmap = LinkMap(KINDS[made.kind], count, link[0:made.links], bandwidth[0:made.links], made.relays, table[0:N * N],
                    mark[0:N])
-    return count, lmap, list(node[0:N]), [ffi.string(n).decode() for n in name[0:N]]
+    return count, lmap, list(node[0:N])
 
 
 def members(whole, among, marks=None):
@@ -140,14 +132,14 @@ def members(whole, among, marks=None):
     none), so two members are linked where their route crosses no other member: the rule mesh_map reads the bridges'
     records by.  `marks` (None: the whole map's own) each whole-map node's mark, as the bridges mark each node by its
     node number, so the table is the bridges' (a whole map given links and bandwidths alone, link_map('graph', N, links,
-    bandwidths), takes them here; its table, made by other marks, is made again by these)."""
+    bandwidths), takes them here; its table, made by other marks, is made again by these).  The map as it is, whether
+    or not it joins its members (joined() names two it leaves apart)."""
     if marks is not None:
         whole = LinkMap(whole.kind, whole.nodes, whole.pairs, whole.bandwidth, whole.relays, None, marks)
     among = None if among is None else list(among)
-    count, lmap, nodes, _ = _members(whole, among, False)
+    count, lmap, _ = _members(whole, among, False)
     if count < 0:
         raise ValueError(f'mesh_map_members over {among}: {os.strerror(-count)}')
-    _apart(lmap, f'mesh_map_members over {among}', [f'whole-map node {v}' for v in nodes])
     return lmap
 
 
@@ -168,24 +160,21 @@ def current(members=None):
     node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
     `map` the members' map as libnccl-mesh reads it (its relays, a link where two nodes' bridges reach each other, at its bandwidth, `mark` each node's
     bridge node number, `next` the routing table; members(map, ...) of the whole map is the
-    map over any of them), `nodes` and `names` each map node's (then each relay's) bridge
-    node and name, `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
-    a node no bridge reaches among its nodes (joined() names two it leaves apart).  OSError naming the bridge where it is
-    unreachable; ValueError naming two members no route joins, where `members` are given and the map leaves them apart
-    (no session runs on it: nccl-mesh.c comm_read)."""
+    map over any of them), `nodes` each map node's (then each relay's) bridge node (a node is its number;
+    a name a person reads is peers.label's, from the name table), `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
+    a node no bridge reaches among its nodes, and the members' map as it is, joined or not (joined() names two it leaves
+    apart).  OSError naming the bridge where it is unreachable."""
     serial, own = wait(), ffi.new('uint32_t *')
     lib.mesh_reached(ffi.NULL, 0, own)
-    count, lmap, nodes, names = _members(None, members, True)
+    count, lmap, nodes = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    if members:
-        _apart(lmap, f"the bridges' map over {list(members)}", [f'node {v} ({names[i] or "no record"})' for i, v in enumerate(nodes)])
-    return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
+    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0], serial=serial)
 
 
 def nodes():
-    """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node and
-    name, its bridge's region and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
+    """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node (a
+    name a person reads is peers.label's), its bridge's region and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
     `available` memory as its bridge last sampled it (what the kernel can give without pressure, its reclaimable cache
     counted).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
     bridges, never probed over another network.  OSError naming the bridge where it is unreachable."""
@@ -195,7 +184,7 @@ def nodes():
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
     lib.mesh_reached(ffi.NULL, 0, own)
     text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
-    return [{'node': r.node, 'name': text(r.name), 'region': r.region, 'memory': r.memory, 'model': text(r.model),
+    return [{'node': r.node, 'region': r.region, 'memory': r.memory, 'model': text(r.model),
              'booted': r.health.booted, 'available': r.health.available, 'own': r.node == own[0]} for r in held[0:count]]
 
 
@@ -208,14 +197,6 @@ def footprint(pid=0):
     if proc.proc_pid_rusage(pid or os.getpid(), 0, ctypes.byref(info)):
         raise OSError(ctypes.get_errno(), f'proc_pid_rusage({pid or os.getpid()})')
     return info[2 + 7]
-
-
-def wire(block=None):
-    """mesh_wire_of: the layout of libnccl-mesh's positions on a bound lane pair's rings (mesh-plan.h struct mesh_wire:
-    `slot`, `small`, `block`, `lag`) for `block` (None: this machine's page, the block every bridge's region takes)."""
-    made = ffi.new('struct mesh_wire *')
-    lib.mesh_wire_of(block if block is not None else os.sysconf('SC_PAGE_SIZE'), made)
-    return made
 
 
 def lease(nbytes):
@@ -299,10 +280,12 @@ def compile(trees, what, root=0, whole=False, contributors=None, chunks=1):
                            keep=(segment, weight, first, move, words, trees))
 
 
-def steps(program, rank, piece):
-    """mesh_program_steps: rank's steps of `program` for the operand `piece`, in its order."""
+def steps(program, rank, piece, page=0):
+    """mesh_program_steps_cut: rank's steps of `program` for the operand `piece`, in its order, the program's own cuts on
+    `page` bytes (0: any element; libnccl-mesh cuts on its region's pages, so that each SEND's or COPY's piece starts on
+    one)."""
     made = ffi.new('struct mesh_step[]', max(1, program.c.first[program.nodes]))
-    count = lib.mesh_program_steps(program.c, rank, piece[0], made)
+    count = lib.mesh_program_steps_cut(program.c, rank, piece[0], ffi.NULL, page, made)
     return [ffi.new('struct mesh_step *', made[i]) for i in range(count)]
 
 

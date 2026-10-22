@@ -36,7 +36,7 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
    (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase and bandwidth) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
    numbers with its bandwidth in bits a second, null where none is reported), its region in bytes with the bytes no lease holds (mesh_region), and every node's
-   record as the bridge holds it: its name, its bridge's region, its memory and hardware model, its boot and its
+   record as the bridge holds it: its node, its bridge's region, its memory and hardware model, its boot and its
    available memory (mesh_nodes_health, design/transport.md) */
 int main(void){
   struct port_view port[MESH_PORTS];
@@ -80,9 +80,7 @@ int main(void){
   printf(",\"nodes\":[");
   for(int i=0;i<known && i<64;i++){
     const struct mesh_health *h=&health[i].health;
-    printf("%s{\"node\":%u,\"name\":\"",i?",":"",health[i].node);
-    for(const char *c=health[i].name;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
-    printf("\",\"region\":%llu,\"memory\":%llu,\"model\":\"",(unsigned long long)health[i].region,(unsigned long long)health[i].memory);
+    printf("%s{\"node\":%u,\"region\":%llu,\"memory\":%llu,\"model\":\"",i?",":"",health[i].node,(unsigned long long)health[i].region,(unsigned long long)health[i].memory);
     for(const char *c=health[i].model;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
     printf("\",\"booted\":%llu,\"available\":%llu}",(unsigned long long)h->booted,(unsigned long long)h->available);
   }

@@ -17,7 +17,8 @@ library's own call; the partials merge (merge_partials) is an all-reduce, reduce
 partials operator.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
-store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; it takes no pg_options.
+store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; its pg_options are not
+read.
 The silent-link bound is the library's (nccl.h)."""
 import math
 import os
@@ -142,10 +143,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def shrink(self, exclude, abort=False):
         """This group without the ranks `exclude`, the kept ranks in their order (ncclCommShrink; `abort` revokes this
-        group's work in flight first)."""
+        group's work in flight first); None on a rank among those excluded."""
         made, ranks = ffi.new('ncclComm_t *'), ffi.new('int[]', list(exclude) or [0])
         check(LIB.ncclCommShrink(self.comm, ranks, len(exclude), made, ffi.NULL, 1 if abort else 0))
-        return ProcessGroupMesh._of(made[0])
+        return ProcessGroupMesh._of(made[0]) if made[0] != ffi.NULL else None
 
     def grow(self, size, unique=None, rank=-1):
         """This group's ranks and `size` - its size more (ncclCommGrow), met at the id this group's root gives
@@ -390,9 +391,8 @@ def counted(host, group):
 
 
 def create(opts, options):
-    """The group (torch's extended creator: `opts` its store, rank and size, `options` the caller's pg_options)."""
-    if options is not None:
-        raise TypeError("the mesh backend takes no pg_options: a group's map is its bridges'")
+    """The group (torch's extended creator: `opts` its store, rank and size; `options`, the caller's pg_options, not
+    read: a group's map is its bridges')."""
     return ProcessGroupMesh(opts.group_rank, opts.group_size, opts.store)
 
 

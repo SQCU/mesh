@@ -1,26 +1,25 @@
 import json
 from pathlib import Path
 
+import resource
+
 import torch
+import torch_mesh
 from torch_mesh import _stream, argmax, fused
 from torch_mesh.streamed import instance, node
 
 # docs/writing-a-service.md#the-step-kernel
 SOURCE = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_name('chain.metal').read_text()
-ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PATIENCE')
+ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PATIENCE', 'PEERS')
+PAGE = resource.getpagesize()
 _PIPELINES = {}
 
 
 # docs/writing-a-service.md#the-capability
 def capability(directory):
     family, threads, memory = _stream.device_facts()
-    path = Path(directory) / f'apple{family}.json'
-    held = json.loads(path.read_text())
-    if (family, threads, memory) != (held['family'], held['max_threads_per_threadgroup'], held['threadgroup_memory_bytes']):
-        raise ValueError(f'{path}: Apple{held["family"]} documents {held["max_threads_per_threadgroup"]} threads and '
-                         f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory a threadgroup, and this '
-                         f'device reports Apple{family}, {threads} and {memory}: the file is not this device\'s '
-                         f'capability')
+    held = json.loads((Path(directory) / f'apple{family}.json').read_text())
+    held['max_threads_per_threadgroup'], held['threadgroup_memory_bytes'] = threads, memory
     return held
 
 
@@ -30,6 +29,12 @@ def _width():
         probe = _stream.pipeline('kernel void width_probe(device uint* x [[buffer(0)]]) { x[0] = 0; }', 'width_probe')
         _PIPELINES['width'] = _stream.pipeline_facts(probe)[1]
     return _PIPELINES['width']
+
+
+# docs/writing-a-service.md#the-crossing
+def paged(count, dtype=torch.half):
+    size = torch.tensor([], dtype=dtype).element_size()
+    return -(-count * size // PAGE) * PAGE // size
 
 
 # docs/writing-a-service.md#the-step-kernel
@@ -46,7 +51,7 @@ def _floor2(n):
 
 
 # docs/writing-a-service.md#the-step-kernel
-def form(K, S, rows, held):
+def form(K, S, rows, peers, held):
     tile = held['simdgroup_matrix_edge']
     wrong = [f'{name} {n}' for name, n in (('width', K), ('share', S), ('rows', rows)) if n < tile or n % tile]
     if wrong:
@@ -75,12 +80,9 @@ def form(K, S, rows, held):
         if not RB:
             raise ValueError(f'chain step: {SG} simdgroups hold no {tile} x {tile} float partial each in '
                              f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory')
-        args = dict(TILE=tile, K=K, S=S, G=G, RG=RG, RB=RB, THREADS=SG * simd, SIMD=simd, PATIENCE=_stream.polls)
+        args = dict(TILE=tile, K=K, S=S, G=G, RG=RG, RB=RB, THREADS=SG * simd, SIMD=simd, PATIENCE=_stream.polls, PEERS=peers)
         handle = _pipeline(args)
-        threads, width, memory = _stream.pipeline_facts(handle)
-        if width != simd or memory > held['threadgroup_memory_bytes']:
-            raise RuntimeError(f'chain step {args}: its pipeline runs {width} threads a simdgroup and {memory} bytes of '
-                               f'threadgroup memory')
+        threads = _stream.pipeline_facts(handle)[0]
         if threads >= args['THREADS']:
             break
         if RG == 1:
@@ -100,14 +102,17 @@ def _pipeline(args):
 
 class Step:
     # docs/writing-a-service.md#the-step-kernel
-    def __init__(self, a, b, rows, capacity, held):
+    def __init__(self, a, b, rows, capacity, peers, held):
         S, K = a.shape
         tile = held['simdgroup_matrix_edge']
         tiled = lambda w: w.reshape(w.shape[0] // tile, tile, w.shape[1] // tile, tile).permute(2, 0, 1, 3).contiguous()
         self.At, self.Bt = tiled(a.T), tiled(b)
-        self.K, self.S, self.held, self.capacity = K, S, held, capacity
+        self.K, self.S, self.held, self.capacity, self.peers = K, S, held, capacity, peers
         self.X = torch.empty(capacity, K, dtype=torch.half, device='mps')
         self.Y = torch.empty(capacity, S, dtype=torch.half, device='mps')
+        self.slot = paged(capacity * K)
+        self.landing = torch_mesh.empty(peers * self.slot, dtype=torch.half)
+        self.sent = None
         self.forms = {}
         self.plan(rows)
         self.args = self.forms[rows][1]
@@ -121,12 +126,14 @@ class Step:
         if rows > self.capacity:
             raise ValueError(f'chain step: {rows} rows, past the capacity {self.capacity}')
         if rows not in self.forms:
-            self.forms[rows] = form(self.K, self.S, rows, self.held)
+            self.forms[rows] = form(self.K, self.S, rows, self.peers, self.held)
 
     # docs/writing-a-service.md#the-step-kernel
     def __call__(self, e, p, out, previous):
-        crossing = fused.all_reduce(p, _stream.polls)
+        landings = [self.landing[q * self.slot:q * self.slot + p.numel()].view_as(p) for q in range(self.peers)]
+        crossing = fused.all_reduce(p, landings, _stream.polls)
         self._encode(e, p, out, previous, crossing, 0)
+        self.sent = p
         self.phase += 2
         return crossing
 
@@ -137,9 +144,10 @@ class Step:
     # docs/writing-a-service.md#the-step-kernel
     def _encode(self, e, p, out, previous, crossing, last):
         handle, args, words = self.forms[e.shape[0]]
-        fused.encode(handle, [self.At, self.Bt, e, out, self.X, self.Y, p, self.stamps, self.err, self.arrivals],
+        fused.encode(handle, [self.At, self.Bt, e, out, self.X, self.Y, p, self.stamps, self.err, self.arrivals,
+                              self.sent if self.sent is not None else self.X],
                      [int(previous is None), self.phase, *words, last, int(out is not None), 0], 15,
-                     args['G'], 1, args['THREADS'], land=previous, publish=crossing)
+                     args['G'], 1, args['THREADS'], self.peers, land=previous, publish=crossing)
 
     # docs/writing-a-service.md#the-step-kernel
     def check(self):

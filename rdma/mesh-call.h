@@ -14,30 +14,33 @@ uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
    wire between their nodes, one free at both: its init exchanges these */
 uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t room);
 /* design/transport.md section 14: the live stream of identity `wire`, held by this client as its rows are: taken while
-   it is free (its owner word 0 to the client's own), `*stream` its index, each class's first unit then the stream's
-   `next` (next[0] large, next[1] small): 0, EINVAL, ENOLINK where no live stream has the identity, or EBUSY where
-   another client holds it or its last holder's units are still going; let go by its index (its owner word back to 0),
-   after which its bridge sends every unit it declared, the unsupplied ones as duds */
-int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream,uint64_t next[2]);
+   it is free (its owner word 0 to the client's own), `*stream` its index, and once its bridge has begun the holding
+   (struct mesh_stream `begun`, awaited at most MESH_PLATFORM_NS) its start words in `start`, which the communicator's
+   bootstrap hands its peer: 0, EINVAL, ENOLINK where no live stream has the identity (or its link is lost meanwhile),
+   EBUSY where another client holds it or its last holding is still ending, ETIMEDOUT where its bridge has not begun it
+   (the stream let go).  The peer's start words told (mesh_stream_tell), its bridge serves the holding.  Let go by its
+   index (its owner word back to 0), after which its bridge sends every presented byte not yet ready as a dud */
+int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream,uint64_t start[MESH_STREAM_START]);
+int mesh_stream_tell(struct mesh_ctx *,uint32_t stream,const uint64_t peer_start[MESH_STREAM_START]);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
 /* design/transport.md section 14, "A process a port": whether stream `stream` is still this client's holding of identity
    `wire`: live, its owner word this client's, its identity the one taken.  A pairing lost and made again opens every
    stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
-/* design/transport.md section 14: a held stream's class (`large` 1: its large units, 0: its small), as the client maps
-   it: its in and out rings, a ready word and a landed word a unit, its unit's bytes and its units; 0, EINVAL, EPERM
-   where the client does not hold it, or ENOLINK.  The holder supplies unit u (its sequence in the class, from the
-   class's `next`) once slot u mod units of the out ring holds the unit's bytes: ready[u mod units] := 1 + u / units,
-   after a release fence; unit u from the peer has landed in slot u mod units of the in ring once landed[u mod units]
-   reads at least 1 + u / units (~0: the link lost); the peer's units begin at the peer's `next`, which the
-   communicator's init exchanges.  The holder declares the units of a class it will supply, up to `declared`
-   (absolute) and its `deadline` (uptime ns): mesh_stream_declare; a live holder's is UINT64_MAX, never reached, and a
-   holder that can supply no more sets it to now; a declared unit not supplied by its deadline, or by the holding's
-   end, goes as a dud (all ones).  The class's two time rings, the bridge's to write (mesh.h struct mesh_stream
-   `posted_at`, `landed_at`): unit u's posting or landing time (mach_absolute_time ticks) is the second word of entry u
-   mod MESH_STREAM_TIMES where its first word reads 1 + u both before and after the second is read (the first two loads
-   acquiring), else u has none */
-struct mesh_stream_view { unsigned char *in,*out; _Atomic uint64_t *ready,*landed,*posted_at,*landed_at; uint32_t unit,units; };
-int mesh_stream_view(struct mesh_ctx *,uint32_t stream,int large,struct mesh_stream_view *);
-int mesh_stream_declare(struct mesh_ctx *,uint32_t stream,int large,uint64_t declared,uint64_t deadline);
+/* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): its two
+   lists (0 the send list, 1 the landing list) and their counts presented and taken, its three byte counts, its
+   deadline, and its time rings; 0, EINVAL, EPERM where the client does not hold it, or ENOLINK */
+struct mesh_stream_view {
+  struct mesh_entry *list[2];
+  _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed,*deadline,*posted_at,*landed_at;
+};
+int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
+/* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list
+   (`land` 1): its slot written, then the list's count one past it (a release store); 0, EINVAL where its rows leave the
+   page table, EAGAIN where the list's slot is not yet taken (MESH_STREAM_ENTRIES presented
+   and not taken: present it again), EPERM, or ENOLINK */
+int mesh_stream_present(struct mesh_ctx *,uint32_t stream,int land,struct mesh_entry entry);
+/* design/transport.md section 14: the holder's deadline (uptime ns): UINT64_MAX while it supplies, now where it can
+   supply no more */
+int mesh_stream_deadline(struct mesh_ctx *,uint32_t stream,uint64_t deadline);
 #endif

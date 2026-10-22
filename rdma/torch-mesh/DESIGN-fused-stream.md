@@ -52,19 +52,19 @@ input broadcast at a block's start.
 | Call | Takes | Returns |
 |---|---|---|
 | `fused.steps()` | nothing | the Metal text to compile a kernel after: rdma/mesh.metal, then `ncclMeshMetalSteps` |
-| `fused.all_reduce(tensor, polls, group=None)` | a contiguous MPS tensor, the operand in place; `polls`, the landing wait's bound (`_stream.polls`, the library's); a two-rank group | `Crossing(publish, land)`, six addresses each. A call the library won't fuse raises with its reason; nothing slower runs. |
-| `fused.encode(handle, buffers, constants, at, gx, gy, threads, land=None, publish=None)` | `_stream.encode`'s arguments, and the crossings it lands and publishes | nothing. One that publishes goes under the one commit rule. |
+| `fused.all_reduce(send, landings, polls, group=None)` | the rank's part; a landing tensor for each other rank, in rank order; `polls`, the landing waits' bound (`_stream.polls`, the library's); a group of n ranks | `Crossing(publish, land)`, a tuple of six addresses for each peer each. A call the library won't fuse raises with its reason; nothing slower runs. |
+| `fused.encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)` | `_stream.encode`'s arguments, the peer count, and the crossings it lands and publishes | nothing. One that publishes goes under the one commit rule. |
 
-- The kernel's constant block is its own words padded to an even count, then the landing's `mesh_step_binding`, then
-  the publication's, each address two words, low word first.
+- The kernel's constant block is its own words padded to an even count, then each peer's landing `mesh_step_binding`,
+  then each peer's publication, each address two words, low word first.
 - The call runs on main's `MeshStream`: the stream's workspace allocator (a fused group asks it for nothing), its
   `streamed`, and its `published()` for a publishing kernel. That is the one commit rule, the same as for every group.
 - The residency set is the device's one set, added once to each queue it meets.
 
 ## The chain (examples/)
 
-The host makes two calls a step: `fused.all_reduce` of the step's part, which only writes the two records, and the
-kernel's encode. One more dispatch after the last step lands the last crossing.
+The host makes two calls a step: `fused.all_reduce` of the step's part, which only writes the records (a publication
+and a landing for each peer), and the kernel's encode. One more dispatch after the last step lands the last crossing.
 
 **Landing crossing t − 1, at the start of step t's prologue.**
 1. Every thread of every worker calls `mesh_step_enter`, which stores the record's sequence in the ring's progress word

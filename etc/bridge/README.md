@@ -24,11 +24,9 @@ A document has these keys:
 
 - `purpose`: one line stating what the configuration is for (required).
 - the region, exactly one of `region_gib` (GiB) or `region_percent` (of the node's physical memory).
-- `keepalive_us` (optional): the most microseconds an exclusive flow goes without a frame while it runs
-  (design/transport.md): each such flow takes one queue pair more, and its send side posts a one-frame
-  SEND on it that often, so a link's controller that slows after a quiet stretch (the Mac mini's, 6-10 us after 40 us of
-  nothing) stays ready. Both ends of a flow state it for its frames to flow; a document that states none makes no such
-  queue pair.
+- `keepalive_us`: not read by the bridge. The keepalive's pace is the bridge's own (MESH_KEEPALIVE_NS, 5 us while a
+  link holds a stream), on every link whatever the document states (design/HETEROGENEOUS-LINKS.md section 10).
+  `rdma/bridge_configuration.py` still accepts the key.
 
 The region is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
 when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device

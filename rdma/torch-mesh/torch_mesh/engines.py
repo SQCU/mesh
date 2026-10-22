@@ -37,7 +37,8 @@ the engines, never a measurement's or a model's conclusion.
 Nothing is implicit.  An operation takes its engines as an operand (`Engines`), from the program or from the
 configuration the program names (`Engines.configured()`: MESH_ENGINES, e.g. "mps,cpu,ane:tile=128"); without
 one it is torch's own operation on its input's device.  An engine the configuration names and the node lacks is an
-error, not a silent omission.  An engine's limits are data (`Engine.limits`): its operand dtypes and whether its
+error (design/rubrics.md D2, the operator 10-19: "functions should throw ... before they try to guess parametric
+values"; a resolver's fallback path ranks below none).  An engine's limits are data (`Engine.limits`): its operand dtypes and whether its
 weights must be constants (the Neural Engine's: a share there is compiled); an operand an engine cannot take gives it
 no units for that decision.
 
@@ -460,7 +461,8 @@ class Engines:
 
 
 class Operation:
-    """A column-separable operation: `units` shared among `engines` (Engines; None: torch's own) in grains of `grain`,
+    """A column-separable operation: `units` shared among `engines` (Engines; None: torch's own) in grains of `grain` (a
+    remainder of less than a grain the first able engine's),
     a decision a name and row count (operations of one name, a stack's layers of one shape, share it and pool their
     evidence: the allocation is measured where the program runs it, between its other operations); its shares concatenate (`combine` 'concat', the shared axis the output's) or sum ('sum',
     the shared axis contracted); `constant` states that its weights do not change (an engine whose weights are
@@ -476,8 +478,6 @@ class Operation:
         self.name = name or f'{self.kind}{id(self):x}'
         self.shards, self.warm, self.calls = {}, set(), {}
         if engines is not None:
-            if units % grain:
-                raise ValueError(f'{self.name}: {units} units in grains of {grain}')
             engines.operations.append(self)
 
     def torch(self, x):
