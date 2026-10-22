@@ -14,14 +14,13 @@ ULA="$PREFIX:$(g ${h:0:4}):$(g ${h:4:4}):$(g ${h:8:4}):$(g ${h:12:4}):$(g ${h:16
 # its source, so a ULA on lo0 found no route along a cable (metal-microbench docs/measurement.md 2026-10-16); a stale
 # identity, or this one on lo0, is removed
 for i in lo0 $ports; do
-  for old in $(ifconfig "$i" 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2}'); do
+  cfg=$(ifconfig "$i" 2>/dev/null)
+  for old in $(printf '%s\n' "$cfg" | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2}'); do
     [ "$old" = "$ULA" ] && [ "$i" != lo0 ] && continue
     echo "[$(ts)] identity $old on $i -> removed"
     ifconfig "$i" inet6 "$old" -alias >/dev/null 2>&1
   done
-done
-for i in $ports; do
-  ifconfig "$i" 2>/dev/null | grep -q "inet6 ${ULA} " || {
+  [ "$i" = lo0 ] || printf '%s\n' "$cfg" | grep -q "inet6 ${ULA} " || {
     echo "[$(ts)] identity $ULA -> $i"
     ifconfig "$i" inet6 "$ULA" prefixlen 128 alias >/dev/null 2>&1; }
 done

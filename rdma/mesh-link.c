@@ -14,7 +14,7 @@ struct hdr *M;
 struct wire_mapping wire;
 struct port ports[MESH_PORTS];
 uint32_t port_count;
-int events=-1,listener=-1,hello=-1,network=-1,unreleased,finding;
+int events=-1,listener=-1,hello=-1,network=-1,addresses=-1,unreleased,finding;
 uint64_t now,sequence;
 struct mesh_ctx bridge={.fd=-1};
 static dispatch_queue_t finder;
@@ -29,6 +29,8 @@ static int find_wanted;
    alike */
 static _Atomic int stalled;
 static _Atomic uint32_t unguarded;
+/* the ports a provider's doorbell fault was absorbed on (fault_heard), a bit a port */
+static _Atomic uint32_t faulted;
 /* design/transport.md B9b: the window of a peer interface's termination that names no port of this process
    (`exit_at`: peer_terminated), before which the bridge does not exit nor read the devices, and which a port found
    meanwhile takes as its own (ports_found) */
@@ -269,7 +271,9 @@ static struct bound *bound_read(struct port *port,int side,uint32_t s){
    one unit more (`final`: a peer waiting on a unit no holder supplies reads a dud), told every member's send thread
    before the holding's end is (`held` 0, its release); a stream held by none whose every stripe has sent each unit
    before `final` (each member's lanes as its send thread tells them) is free, its next units `next`; and an owner word
-   taken while it is free is served from then, told the members (`held`) */
+   taken while it is free is served from then, told the members (`held`).  Each of the three, once a holding, wakes the
+   parent (mesh_notify of `control`: control_watch), whose turn tells the streams held (mesh-records.c busy_tell) and
+   takes a cable that joined the group at the holding's end (group_step), at the change and not a turn later */
 static void group_turn(struct port *port,struct bound *b,uint32_t s){
   struct stream_lanes *g=b->group;
   struct mesh_stream *x=b->x;
@@ -286,6 +290,7 @@ static void group_turn(struct port *port,struct bound *b,uint32_t s){
       atomic_store_explicit(&g->final[c],MAX(atomic_load_explicit(&g->final[c],memory_order_relaxed),end+1),memory_order_relaxed);
     }
     atomic_store_explicit(&g->held,0,memory_order_release);
+    mesh_notify(&M->control);
     return;
   }
   if(held)return;
@@ -293,6 +298,7 @@ static void group_turn(struct port *port,struct bound *b,uint32_t s){
     if(atomic_load_explicit(&x->free,memory_order_acquire)){
       atomic_store_explicit(&x->free,0,memory_order_relaxed);
       atomic_store_explicit(&g->held,owner,memory_order_release);
+      mesh_notify(&M->control);
     }
     return;
   }
@@ -310,6 +316,7 @@ static void group_turn(struct port *port,struct bound *b,uint32_t s){
   }
   atomic_store_explicit(&x->next[0],next[0],memory_order_relaxed);atomic_store_explicit(&x->next[1],next[1],memory_order_relaxed);
   atomic_store_explicit(&x->free,1,memory_order_release);
+  mesh_notify(&M->control);
 }
 /* whether a stream the link carries is held (its group's `held`, as the send thread's binding has it) */
 static int link_held(const struct link *l){
@@ -663,6 +670,9 @@ static void *port_progress(void *argument){
        `closing`), the guard told and the epoch at each waking, each tell waking its raiser (port_tell) */
     const uint64_t guard=atomic_load_explicit(&port->guard,memory_order_acquire);
     if(guard&1 || !atomic_load_explicit(&port->link.served,memory_order_acquire)){
+      /* a fault absorbed on the port (fault_heard: the handler, which may make no call but mmap, munmap and sigaction,
+         halted the port) wakes its agent's loop, which tells its parent (agent_reports) at once */
+      if(atomic_load_explicit(&faulted,memory_order_relaxed))wake();
       if(guard&1)port_tell(port->guarded+side,guard);
       const uint64_t epoch=atomic_load_explicit(&port->epoch,memory_order_acquire);
       if(epoch!=told){port_tell(port->seen+side,epoch);told=epoch;}
@@ -1854,6 +1864,24 @@ static void network_heard(int stopping){
   }
   if(unknown && !stopping)find_wanted=1;
 }
+/* design/transport.md: an IPv6 address of a port's interface added, changed or deleted (the kernel's KEV_INET6_SUBCLASS
+   events on `addresses`: a link-local address bin/mesh-fabric-init.sh puts in place, or its duplicate address detection
+   done): the hellos' group joined on the interface again (a join while it held no IPv6 address took nothing) and the
+   port's hello said at this turn (port_hello: an open port with no peer), so a hello that left before the address could
+   carry it, or before the peer's could take it, is said again as the address comes, not a pace (MESH_PAUSE_NS) later */
+static void addresses_heard(void){
+  union { struct kern_event_msg header; unsigned char bytes[512]; } event;
+  while(recv(addresses,event.bytes,sizeof event,0)>=(ssize_t)(KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data))){
+    const struct net_event_data *interface=(const void *)(event.bytes+KEV_MSG_HEADER_SIZE);
+    char name[IFNAMSIZ+16];
+    snprintf(name,sizeof name,"%.*s%u",(int)sizeof interface->if_name,interface->if_name,interface->if_unit);
+    for(uint32_t p=0;p<port_count;p++)if(!strcmp(name,ports[p].name)){
+      struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=ports[p].interface};
+      if(ports[p].interface)setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
+      ports[p].next=now;
+    }
+  }
+}
 
 /* design/transport.md B9b (EXIT-RECLAIM.md P2, and P3 as a window in place of IOServiceWaitQuiet): a
    Thunderbolt RDMA peer interface's termination, which IOKit tells in its first phase (kIOTerminatedNotification), on
@@ -1861,6 +1889,12 @@ static void network_heard(int stopping){
    ports whose peer interface is terminating (`terminated`, a bit a port index), which the event loop concludes
    (terminations_turn) */
 static _Atomic uint32_t terminated,terminations,untold;
+/* design/transport.md: a Thunderbolt RDMA peer interface's arrival (kIOFirstMatchNotification: a cable's far end come
+   to RDMA), on the terminations' queue, so a port's termination and a later arrival are taken in their order: the ports
+   whose peer interface arrived (`arrived`, a bit a port index) and whether one arrived whose interface is no port
+   (`arrived_elsewhere`), which the event loop takes (arrivals_turn) */
+static _Atomic uint32_t arrived;
+static _Atomic int arrived_elsewhere;
 #ifndef MESH_LOOP_FABRIC
 /* the exit's window and every found port's held to `until` at least (a port found meanwhile takes `exit_at`'s as it is
    counted: ports_found) */
@@ -1916,17 +1950,37 @@ static void peer_terminated(void *unused,io_iterator_t iterator){
     wake();
   }
 }
+/* the arrivals drained (which arms the notification again), each service released: the port its interface is
+   (peer_port) marked to be opened, one whose interface is no port of this process marked for the devices' read */
+static void peer_arrived(void *unused,io_iterator_t iterator){
+  (void)unused;
+  for(io_service_t service;(service=IOIteratorNext(iterator));IOObjectRelease(service)){
+    int named=0;
+    struct port *port=peer_port(service,&named);
+    if(port)atomic_fetch_or(&arrived,UINT32_C(1)<<port->index);
+    else atomic_store(&arrived_elsewhere,1);
+    wake();
+  }
+}
 /* armed at the start, before IOKit's registry is waited on and the devices are read: the notification on a serial
-   queue of its own, its iterator drained once (which arms it); without it a link's going off is the first sign */
-static void terminations_watch(void){
+   queue of its own, its iterator drained once (which arms it); without it a link's going off is the first sign.  The
+   parent (`arrivals`) hears the peer interfaces' arrivals on the same port and queue, its iterator drained once too:
+   without them a port whose open met its device's port not yet active opens at its link's next coming on or the next
+   hello heard on it */
+static void terminations_watch(int arrivals){
   IONotificationPortRef notifications=IONotificationPortCreate(kIOMainPortDefault);
-  io_iterator_t iterator=IO_OBJECT_NULL;
-  kern_return_t error=KERN_FAILURE;
+  io_iterator_t iterator=IO_OBJECT_NULL,came=IO_OBJECT_NULL;
+  kern_return_t error=KERN_FAILURE,heard=KERN_FAILURE;
   if(notifications){
     IONotificationPortSetDispatchQueue(notifications,dispatch_queue_create("mesh.terminations",DISPATCH_QUEUE_SERIAL));
     error=IOServiceAddMatchingNotification(notifications,kIOTerminatedNotification,IOServiceMatching("AppleThunderboltRDMAPeerInterface"),
                                            peer_terminated,NULL,&iterator);
+    if(arrivals)heard=IOServiceAddMatchingNotification(notifications,kIOFirstMatchNotification,
+                                                      IOServiceMatching("AppleThunderboltRDMAPeerInterface"),peer_arrived,NULL,&came);
   }
+  if(arrivals && heard)say("bridge: Thunderbolt RDMA peer interfaces' arrivals not heard (%#x): a port whose device was not yet "
+                           "active at its link's coming on opens at the next hello heard on it\n",(unsigned)heard);
+  if(arrivals && !heard)peer_arrived(NULL,came);
   if(error){say("bridge: Thunderbolt RDMA peer interfaces' terminations not heard (%#x): a link's going off is its first sign\n",(unsigned)error);return;}
   peer_terminated(NULL,iterator);
 }
@@ -1943,7 +1997,6 @@ static void terminations_watch(void){
    bridge does not exit.  Any other fault: the default action restored, the store made again, the process
    ended.  On the thread's alternate stack where it has one (port_progress); mmap, munmap and sigaction alone */
 static uintptr_t provider[2];
-static _Atomic uint32_t faulted;
 static _Atomic uintptr_t retried[MESH_PORTS];
 static void fault_heard(int number,siginfo_t *info,void *context){
   const uintptr_t pc=__darwin_arm_thread_state64_get_pc(((ucontext_t *)context)->uc_mcontext->__ss);
@@ -2003,6 +2056,17 @@ static void terminations_turn(void){
         ports[p].index,ports[p].name);
     ports[p].open=0;port_lost(ports+p,ENETDOWN);
   }
+}
+/* the arrivals taken on the event loop, after the terminations (a peer interface gone and then come is lost, then
+   opened): each port whose peer interface arrived and that has no peer is to be opened (port_open, past its quiet
+   window, its agent's end and any hold, as at its link's coming on; an open one opened again says its hello at once), so
+   its device is opened at the hardware's word that its far end is present and not only at the en interface's link,
+   which can come on before it (bin/mesh-fabric-init.sh: link active, no RDMA peer); an arrival at an interface that is
+   no port has the devices read again (find_wanted) */
+static void arrivals_turn(void){
+  const uint32_t came=atomic_exchange(&arrived,0);
+  for(uint32_t p=0;p<port_count;p++)if(came>>p&1 && !ports[p].yielding && ports[p].control<0)ports[p].opening=1;
+  if(atomic_exchange(&arrived_elsewhere,0))find_wanted=1;
 }
 
 /* design/transport.md section 14, "A process a port": the parent's side of a port's agent.  The bridge is a parent
@@ -2067,13 +2131,20 @@ static pid_t agent_elsewhere(const struct port *port){
   return 0;
 }
 /* the port's agent spawned (its socket's messages and its exit watched, tagged by the port); 0, or the error, the
-   port's next spawn held MESH_PAUSE_NS */
+   port's next spawn held MESH_PAUSE_NS.  An agent of its device from an earlier launch (agent_elsewhere) holds the spawn
+   until its exit, which the event loop hears (EVFILT_PROC, tagged by the port: `elsewhere` cleared) and spawns at once;
+   the processes are read again only then, not at every turn while it lives.  One whose exit cannot be watched is read
+   again at the next turn (at once where it has already gone) */
 static int agent_spawn(struct port *port){
   int pair[2],on=1;
+  if(port->elsewhere)return EBUSY;
   const pid_t elsewhere=agent_elsewhere(port);
   if(elsewhere){
-    if(elsewhere!=port->elsewhere)say("link %u (%s): process %d, an agent of its device from an earlier launch, holds its queue "
-                                      "pairs until its exit; its own agent spawned after it\n",port->index,port->name,(int)elsewhere);
+    struct kevent64_s watch;
+    EV_SET64(&watch,(uint64_t)elsewhere,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_AGENT|port->index,0,0);
+    if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){if(errno==ESRCH)wake();return EBUSY;}
+    say("link %u (%s): process %d, an agent of its device from an earlier launch, holds its queue pairs until its exit; its "
+        "own agent spawned after it\n",port->index,port->name,(int)elsewhere);
     port->elsewhere=elsewhere;
     return EBUSY;
   }
@@ -2466,7 +2537,7 @@ static int agent_main(char **argv){
   EV_SET64(&event,3,EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("agent events");
 #ifndef MESH_LOOP_FABRIC
-  terminations_watch();
+  terminations_watch(0);
 #endif
   for(;;){
     now=clock_ns();
@@ -2571,6 +2642,33 @@ static void region_adopt(void){
   atomic_store(&M->busy,0);atomic_store(&M->stopping,0);
 }
 
+/* design/transport.md: when the event loop's next turn is due if no event comes first: the earliest of the times its turn
+   waits for that are still ahead (the next liveness turn, `liveness`; the next health sample; the boot ledger's settle;
+   where the devices are to be read, the windows' end; each port's quiet window, spawn hold and next hello, and the bound
+   of its open's or link's job out; each slot's quiet), and no later than MESH_PAUSE_NS on (design/rubrics.md M3: the
+   wait ends in finite time).  Every other change a turn takes wakes the loop where it happens: the finder's read, a
+   job's end, a termination and an arrival (wake); a client's retire, a binding told, and a holding's start, end and
+   freeing (`control`: control_watch); a socket, a signal and an exit on the queue.  So a turn comes at the change or at
+   the time it waits for, where a fixed tick (250 ms) took each such time up to a tick late: a link's quiet window ended
+   5.000 s after its peer parted and its agent was asked to end 5.180 s after (the M5 Max's bridge log, 2026-10-22
+   00:09:25) */
+static inline void due_at(uint64_t *due,uint64_t at){ if(at>now && at<*due)*due=at; }
+static uint64_t turn_due(uint64_t liveness){
+  uint64_t due=MIN(liveness,now+MESH_PAUSE_NS);
+  due_at(&due,health_due());
+  if(boots_set)due_at(&due,boots_since+BOOTS_SETTLE_NS);
+  if(find_wanted)due_at(&due,windows_end());
+  for(uint32_t p=0;p<port_count;p++){
+    const struct port *port=ports+p;
+    due_at(&due,atomic_load(&port->quiet_at));due_at(&due,port->hold_to);
+    if(port->open && port->control<0)due_at(&due,port->next);
+    if(port->job)due_at(&due,port->job_at+MESH_PLATFORM_NS);
+    if(port->link.job)due_at(&due,port->link.job_at+MESH_PLATFORM_NS);
+  }
+  for(uint32_t s=0;s<MESH_STREAMS;s++)due_at(&due,slot_quiet[s]);
+  return due;
+}
+
 /* design/transport.md: the node's resident bridge; its one operand the path of its configuration (no default); a port's
    agent as its parent spawns it (agent_main) */
 int main(int argc,char **argv){
@@ -2642,6 +2740,14 @@ int main(int argc,char **argv){
      bind(listener,(struct sockaddr *)&any,sizeof any) || listen(listener,SOMAXCONN) || bind(hello,(struct sockaddr *)&any,sizeof any) ||
      fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
     die("bridge sockets");
+  /* design/transport.md: the kernel's IPv6 address events (addresses_heard); a bridge that cannot hear them says a
+     port's hello at its pace alone */
+  struct kev_request inet6={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_INET6_SUBCLASS};
+  if((addresses=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT))<0 || fcntl(addresses,F_SETFL,O_NONBLOCK) || ioctl(addresses,SIOCSKEVFILT,&inet6)){
+    say("bridge: the kernel's IPv6 address events not heard (%s): a port's hello after its address comes waits its pace\n",strerror(errno));
+    if(addresses>=0)close(addresses);
+    addresses=-1;
+  }
   int fd=-1;
   const int adopted=region_open(region,&geometry,&fd);
   shm=region;
@@ -2665,8 +2771,8 @@ int main(int argc,char **argv){
   record_changed();
   if(!atomic_load(&M->map_nodes))die("the map's lease");
   link_reserve();
-  int watched[3]={listener,hello,network};
-  for(int i=0;i<3;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
+  int watched[4]={listener,hello,network,addresses};
+  for(int i=0;i<4 && watched[i]>=0;i++){EV_SET64(&event,(uint64_t)watched[i],EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");}
   EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("bridge events");
   mesh_bridge_pages(M)->bridge_start=mesh_started(getpid());
@@ -2690,7 +2796,7 @@ int main(int argc,char **argv){
   /* design/transport.md B9b, B9: the peer interfaces' terminations heard from here on; the devices first read
      once IOKit's registry is quiet (no termination in its course: XNU's waitForState, its deadline MESH_PLATFORM_NS),
      else as they stand at the bound */
-  terminations_watch();
+  terminations_watch(1);
   mach_timespec_t quiet={(unsigned)(MESH_PLATFORM_NS/1000000000u),(clock_res_t)(MESH_PLATFORM_NS%1000000000u)};
   const kern_return_t busy=IOKitWaitQuiet(kIOMainPortDefault,&quiet);
   if(busy)say("bridge node %u: IOKit's registry not quiet within %.1f s (%#x): its devices read as they stand\n",node,
@@ -2707,6 +2813,7 @@ int main(int argc,char **argv){
     now=clock_ns();
     if(atomic_load_explicit(&found,memory_order_acquire))ports_found();
     terminations_turn();
+    arrivals_turn();
     ports_stalled();
     if(find_wanted && !finding && !atomic_load_explicit(&stalled,memory_order_relaxed) && now>=windows_end()){find_wanted=0;ports_find();}
     for(uint32_t p=0;p<port_count;p++){
@@ -2726,7 +2833,8 @@ int main(int argc,char **argv){
     }
     clients_turn(alive);
     struct kevent64_s ready[16];
-    struct timespec tick={0,250000000};
+    const uint64_t due=turn_due(liveness),at=clock_ns(),rest=due>at?due-at:0;
+    struct timespec tick={(time_t)(rest/1000000000u),(long)(rest%1000000000u)};
     int count=kevent64(events,NULL,0,ready,16,0,&tick);
     now=clock_ns();
     if(boots_set && now-boots_since>=BOOTS_SETTLE_NS)boots_clear();
@@ -2737,6 +2845,7 @@ int main(int argc,char **argv){
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_AGENT)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
         if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->agent)agent_reaped(port);
+        else if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->elsewhere)port->elsewhere=0;
         else if(port && e->filter==EVFILT_READ && (int)e->ident==port->agent_fd)agent_heard(port);
       }
       else if(e->filter==EVFILT_PROC){
@@ -2756,6 +2865,7 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)hello)hello_heard();
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard(0);
+      else if(e->filter==EVFILT_READ && addresses>=0 && e->ident==(uint64_t)addresses)addresses_heard();
 #ifdef MESH_LOOP_FABRIC
       /* design/transport.md: a cable's lower end dialed: its port's control socket, as a link's
          listener takes the lower node's dial */
@@ -2819,16 +2929,25 @@ int main(int argc,char **argv){
   }
   /* design/transport.md section 14, "A process a port": each agent asked to end, and its exit awaited, at most
      MESH_PLATFORM_NS (its own windows its own: agent_leave), so no agent of this launch holds its device's queue pairs
-     as the next launch's agents make theirs */
+     as the next launch's agents make theirs: each exit heard on a queue of the agents' exits alone (EVFILT_PROC), where a
+     poll every 50 ms took each up to 50 ms late (a queue not made waits out the bound) */
   for(uint32_t p=0;p<port_count;p++)agent_send(ports+p,(struct agent_message){.kind=AGENT_END});
+  const int exits=kqueue();
+  for(uint32_t p=0;exits>=0 && p<port_count;p++)if(ports[p].agent){
+    struct kevent64_s watch;EV_SET64(&watch,(uint64_t)ports[p].agent,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,p,0,0);
+    kevent64(exits,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+  }
   for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;;){
     uint32_t left=0;
     for(uint32_t p=0;p<port_count;p++)if(ports[p].agent){
       if(!waitpid(ports[p].agent,NULL,WNOHANG))left++;
       else ports[p].agent=0;
     }
-    if(!left || clock_ns()>=until)break;
-    poll(NULL,0,50);
+    const uint64_t at=clock_ns();
+    if(!left || at>=until)break;
+    struct kevent64_s ended;
+    struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
+    if(exits<0 || (kevent64(exits,NULL,0,&ended,1,0,&rest)<0 && errno!=EINTR))poll(NULL,0,(int)((until-at+999999)/1000000));
   }
   return 0;
 }

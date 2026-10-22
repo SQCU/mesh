@@ -498,6 +498,18 @@ every cable carrying load).
   at both (`wire`, a digest of this pairing's queue pair numbers and addresses).
 - A LINK names the address its lanes were made on (a make reads the port's address again, as a peer's restart can move
   its GID table); the connect and each stream's identity take the peer's address from its LINK.
+- Plug to link, at the hardware's pace. A port is opened when its interface's link comes on, when its RDMA peer
+  interface arrives (IOKit's first match of an `AppleThunderboltRDMAPeerInterface` whose RID is its interface's: the
+  en link can come on before the RDMA peer, and an open then finds the device's port not yet active), at a hello heard on
+  it, and when its last agent has ended; an open port with no peer says its hello at once, again whenever an IPv6
+  address of its interface is added or changed (the kernel's `KEV_INET6_SUBCLASS` events: a hello that left before the
+  address could carry it), and every MESH_PAUSE_NS otherwise. The parent's event loop sleeps until the next event or
+  the next time its turn waits for (a quiet window's end, a hold, a hello, a job's bound, a slot's quiet, the liveness
+  turn), at most MESH_PAUSE_NS; every other change it takes wakes it where the change is made (a progress thread's tell
+  and a holding's start, end and freeing notify the region's `control`; an agent of an earlier launch is awaited by its
+  exit, EVFILT_PROC). Between a cable's loss and its next pairing stand the quiet window (MESH_PLATFORM_NS), the old
+  agent's exit (the kernel's release of its device's objects), the new agent's open and the make and connect: the
+  operator's deadline and the hardware's calls, and no timer of the bridge's.
 - Calls in flight on a lost link fail as values (ncclRemoteError) and the next call takes a stream of the new pairing:
   "a bridge crashing on a computer two hops down should result in the bridge being restarted, not crashing again of
   course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
