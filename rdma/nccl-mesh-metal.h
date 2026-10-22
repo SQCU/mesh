@@ -152,7 +152,8 @@ struct metal_result metal_counted(struct metal_program *, int kind, const struct
 void *metal_contents(void *buffer);
 /* Tracks (rdma/NCCL.md "Per-channel progress"): a
    completion's work on two or more channels, recorded and then run with every channel progressing on its own, one
-   thread group a track on the GPU and one cooperative loop on the host.  metal_record(program, track, cursor, position, need): the
+   thread group serving every track in turn on the GPU (no track waits on another thread group, which Metal may not
+   run at once) and one cooperative loop on the host.  metal_record(program, track, cursor, position, need): the
    steps encoded after it (metal_copy .. metal_counted) become item `position` of cursor `cursor` (METAL_PUBLISH or
    METAL_CONSUME) of track `track`, in place of their dispatches, until the next metal_record; track METAL_NONE ends the
    recording, and the steps after it are dispatched as ever.  An item runs once every metal_depend of it holds (track

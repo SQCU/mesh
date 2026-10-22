@@ -967,11 +967,17 @@ uint64_t ncclMeshRetired(void);
    fused crossings, and torch-mesh's torch_mesh/fused.py on torch's stream, the steps still this library's:
    docs/acceptance-20261014.md A39, A40).  A fused all-reduce is the
    in-place call this rank publishes its whole operand in as one small piece and lands its peer's whole operand in as
-   one, combined, and nothing else (two ranks, the direct exchange, a sum of float16 within one small slot, no
-   scratch).  A fused all-gather is the in-place call (sendbuff
+   one, combined, and nothing else (the two-rank direct exchange's part, or a rank's of that shape in a program of more
+   ranks: a sum of float16 within one small slot, no scratch at this rank).  A fused all-gather is the in-place call (sendbuff
    recvbuff + rank x sendcount, NCCL's) this rank publishes its piece in as one small piece and lands its peer's piece
-   in as one, and nothing else (two ranks, the direct exchange, each piece within one small slot, any type, no
-   scratch).  On a stream whose `fused` is set, the call encodes every other step of the group as ever and the fused
+   in as one, and nothing else (two ranks, each piece within one small slot, any type).  A fused broadcast or reduce is
+   such a call at a rank whose part is one of the two (a broadcast's leaf and a root of one child, a reduce's leaf and
+   a root of one child, on any number of ranks).  The steps are this rank's alone: whether a rank fuses is read
+   from its own moves in the program every rank compiles alike, its peers' steps are the same on the wire whether they
+   fuse or not, and a rank that forwards (a SEND after its receive, or from a scratch copy), a root of two children or
+   more and an all-gather of three ranks or more move more than the two steps and fuse nothing.  On a stream whose
+   `fused` is set, the call encodes every other step of the group as ever (at a fused rank, an empty position's filler
+   published, and its peer's filler awaited, which the peer publishes without waiting on this rank) and the fused
    steps in no dispatch: their records are written and their bindings returned in *fused.  The caller's kernel that
    makes the operand publishes it (it calls ncclMeshMetalSteps' mesh_step_enter, stores the operand, an all-gather's
    piece, into d + record.dst with mesh_step_store, record.n bytes in the operand's layout, then mesh_step_release on
@@ -985,12 +991,15 @@ uint64_t ncclMeshRetired(void);
    is one threadgroup's release; a landing may be awaited by every threadgroup of the kernel after the call, each its
    own wait bounded as the library's, one failure recorded of them all.
    *publishes and *lands are this rank's steps where an in-place call of `kind` rooted at `root` (an all-reduce's and an
-   all-gather's root 0) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount) by `op` on comm
-   is, on its program, at most this rank's publication of its whole operand (an all-gather's piece) as one small piece
-   and its landing of its peer's as one (two ranks, the direct exchange, no scratch copy, within one small slot; a
-   reduce and an all-reduce a sum of float16, an all-gather any type): a broadcast's root publishes and its peer lands,
-   a copy; a reduce's peer publishes and its root lands, combined; an all-reduce and an all-gather both; both 0 where
-   it is not fusable.  Such a call on a stream whose `fused` is set writes those steps' records and returns their
+   all-gather's root 0; any rank of comm) of `count` elements of `type` (an all-gather's a rank's piece, its sendcount)
+   by `op` on comm is, on its program, this rank's fused steps and nothing else: a broadcast's root publishes and every
+   other rank lands, a copy; a reduce's root lands, combined, and every other rank publishes; an all-reduce and an
+   all-gather both; each of the whole operand (an all-gather's piece) as one small piece, in the operand itself (no
+   scratch at this rank), the receive a combine where the call reduces and a copy where it does not, and the
+   publication not after the landing in the rank's order (it publishes the operand as the caller made it, and what
+   lands is its last word); a reduce and an all-reduce a sum of float16, a broadcast and an all-gather any type.  Both
+   0 where it is not fusable at this rank, on any number of ranks; a table that does not compile returns its failure
+   (the call's own).  Such a call on a stream whose `fused` is set writes those steps' records and returns their
    bindings in *fused, and encodes the rest of the group as ever; the caller runs each as an all-reduce's: its
    publishing kernel encoded after the call returns (it needs the bindings), its landing kernel after that one. */
 typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2, ncclMeshFuseAllGather = 3 } ncclMeshFuseKind;
@@ -1063,15 +1072,20 @@ ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t
    operand's bytes), its operand cut into those segments (mesh-plan.h mesh_program_steps_cut): one tree program over
    unequal segments, not a rooted call a rank.  Both paths, every type and operator of the equal calls.  Every rank
    passes the same counts: the program's steps on every rank are cut by them, and a rank whose counts differ from its
-   peers' lays other positions (the calls do not pair: ncclInvalidUsage, as unequal counts to the equal calls are). */
+   peers' lays other positions.  Such calls do not pair, which is the caller's error and is not detected, as unequal
+   counts to the equal calls are not (no rank holds another's counts, and no payload is checked: above): a rank lands
+   whatever its peer published at a position as its own piece there, or waits at a position its peer never publishes
+   as any wait on a peer that publishes nothing does (rdma/NCCL.md "Bounded waits", "Failures"), and its channels'
+   positions differ from its peers' for the communicator's later groups. */
 ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,
                                 cudaStream_t stream);
 ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
                                     ncclComm_t comm, cudaStream_t stream);
 /* MPI_Alltoallv with counts on the host: rank r sends sendcounts[q] elements to rank q, its segments packed in rank order
    in sendbuff, and receives recvcounts[q] elements from rank q into recvbuff, packed in rank order (rank r's
-   sendcounts[q] is rank q's recvcounts[r], else the calls do not pair: ncclInvalidUsage; sendcounts[rank] is
-   recvcounts[rank], its own segment copied).  The counted all-to-all's call (below) with its counts known to both
+   sendcounts[q] is rank q's recvcounts[r], else the calls do not pair, the caller's error, not detected, as
+   ncclMeshAllGatherV's unequal counts are not (above); sendcounts[rank] is recvcounts[rank], its own segment copied,
+   ncclInvalidArgument where they differ).  The counted all-to-all's call (below) with its counts known to both
    ends: no count crosses, and each pair's elements move as one message of their size, in one group.  ncclAlltoAll is
    it with every count `count`, and ncclGather and ncclScatter its rooted forms (every count 0 but toward or from the
    root), so recvbuff off a gather's root and sendbuff off a scatter's are not read and may be NULL.  Both paths. */

@@ -515,14 +515,16 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
   return METAL_DONE;
 }
 
-/* the records as the track kernel reads them (TRACKS: track_head, track, track_item, track_op, track_dep) */
-struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint32_t tracks, polls; };
+/* the records as the track kernel reads them (TRACKS: track_head, track, track_item, track_op, track_dep, and each
+   track's track_state, its cursors and phase, which the kernel writes: zero, every track running at its first items) */
+struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, state_off, sequence, progress_off; uint32_t tracks, polls; };
 struct track_rec { uint32_t first[2], count[2]; };
 struct track_item { uint64_t position, need, target, word, v; uint32_t first_op, ops, first_dep, deps, wait_op, cursor; };
 struct track_op { uint64_t d, s, a, v; struct args p; uint32_t kind, pad; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
-_Static_assert(sizeof(struct track_head) == 64 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
-               sizeof(struct track_op) == 136 && sizeof(struct track_dep) == 16, "the track records");
+struct track_state { uint32_t next[2], phase, pad; };
+_Static_assert(sizeof(struct track_head) == 72 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
+               sizeof(struct track_op) == 136 && sizeof(struct track_dep) == 16 && sizeof(struct track_state) == 16, "the track records");
 
 static uint64_t up(uint64_t x) { return (x + 255) & ~(uint64_t)255; }
 
@@ -566,7 +568,8 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     }
     const uint64_t T = r->tracks, at_tracks = up(sizeof(struct track_head)), at_items = up(at_tracks + T * sizeof(struct track_rec));
     const uint64_t at_ops = up(at_items + r->items * sizeof(struct track_item)), at_deps = up(at_ops + r->ops * sizeof(struct track_op));
-    const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), bytes = up(at_count + T * sizeof(uint64_t));
+    const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), at_state = up(at_count + T * sizeof(uint64_t));
+    const uint64_t bytes = up(at_state + T * sizeof(struct track_state));
     const uint64_t sequence = ++ring->sequence, first = ring_take(ring, sequence, bytes);
     if (first == UINT64_MAX) {
       recording_free(r);
@@ -575,7 +578,9 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     }
     unsigned char *base = (unsigned char *)ring->buffer.contents + first;
     const uint64_t address = ring->buffer.gpuAddress;
-    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, first + at_count, sequence, 0, (uint32_t)T, program->polls};
+    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, first + at_count, first + at_state, sequence, 0,
+                                                     (uint32_t)T, program->polls};
+    memset(base + at_state, 0, T * sizeof(struct track_state));
     struct track_rec *rec = (struct track_rec *)(base + at_tracks);
     struct track_item *item = (struct track_item *)(base + at_items);
     uint32_t placed = 0;
@@ -609,7 +614,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
       id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
       [encoder setComputePipelineState:state];
       [encoder setArgumentTable:program->table];
-      [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+      [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
       [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
     } else {
       if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
@@ -618,7 +623,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
       [encoder setComputePipelineState:state];
       [encoder setBuffer:ring->buffer offset:first atIndex:0];
       [encoder setBuffer:ring->buffer offset:0 atIndex:1];
-      [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+      [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     }
   }
   recording_free(r);

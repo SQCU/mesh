@@ -246,10 +246,16 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such a group completes in its
     encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
-  - **Fused crossings.** A two-rank call that is one publication of the rank's whole operand and one landing of its
-    peer's (`ncclMeshFusableRooted`) runs its two steps in the caller's own kernels: on a stream whose `fused` is set
+  - **Fused crossings.** A call whose part at a rank is one publication of its whole operand, one landing of its
+    peer's, or both, and nothing else (`ncclMeshFusableRooted`: the two-rank direct exchange; on any number of ranks,
+    a broadcast's or a reduce's leaf, and a root of one child) runs those steps in the caller's own kernels at that
+    rank. Whether a rank fuses is read from its own moves in the program every rank compiles alike, and a peer's
+    steps are the same on the wire whether it fuses or not; a rank that forwards, a root of two children or more and
+    an all-gather of three ranks or more fuse nothing. On a stream whose `fused` is set
     the call writes the steps' argument records and returns their bindings (`ncclMeshFused`), and the caller's kernels
-    call the library's steps (`ncclMeshMetalSteps`) on them; the call dispatches neither step. Either
+    call the library's steps (`ncclMeshMetalSteps`) on them; the call dispatches neither step (at a fused rank it
+    encodes an empty position's filler and the wait for its peer's, which the peer publishes without waiting on this
+    rank). Either
     form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one `mesh_step_binding`
     record, and its stream names a `residencySet`, which the library fills with the buffers the bindings name and the
     caller makes resident for its queue (torch-mesh's `torch_mesh/fused.py` on torch's stream).
@@ -315,17 +321,23 @@ for groups such as the counted all-to-all among three or more ranks.
   - A step's first piece that has a receive before it (`mesh_group_before`) waits on that receive's channel having
     consumed it.
   - Neither cursor waits on the other beyond these.
-- **On the GPU.** The tracks are one dispatch, one thread group per track. Thread 0 picks the next item whose
-  conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a consumption
-  raises its track's count. A group that can pick nothing for `polls` passes records its blocked items' failures, as
-  a wait does, and ends; a track reads no other track's failure.
+- **On the GPU.** The tracks are one dispatch of one thread group that serves every track in turn, as the host
+  executor's loop does. Thread 0 looks at each track from the one after the last served and picks the first next
+  item whose conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a
+  consumption raises its track's count. Each look at a blocked track is one load of what it awaits. Once the
+  dispatch has looked `polls` times since an item last ran (at most a wait's bound of loads without progress,
+  however many tracks are blocked), every blocked track records its blocked items' failures, as a wait does, and a
+  track that still runs nothing at its next look ends; a track reads no other track's failure.
 - **On the host executor.** The same tracks run in one cooperative loop.
 - **What ranks share.** No rank orders anything another rank must share. Each channel's two ends agree on its
   positions (`mesh_group_lay`) and nothing else, so groups of any calls, including counted all-to-alls of per-rank
   shapes, among any number of ranks, complete wherever their steps' dependencies do.
 - **Not completion.** Issuing a group (`issue`) encodes no wait and is unchanged.
-- **Residency.** Thread groups of one dispatch wait on each other only through a step's receive before it. Metal does
-  not promise they are all resident; a wait on one that is not reaches its bound and fails as a value.
+- **Residency.** Metal does not promise that the thread groups of one dispatch run at once, and tracks depend on one
+  another: through a step's receive before it, and through peers (a landing on one channel that its peer publishes
+  only after consuming what this node publishes on another). So no track has a thread group of its own: the one
+  thread group runs every track, any track whose conditions hold progresses whatever the others await, and the
+  dispatch needs nothing resident but itself, however many channels its communicators hold.
 
 ### Bounded waits
 
