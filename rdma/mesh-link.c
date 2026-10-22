@@ -865,13 +865,14 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
   }
   for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1)lane_reset(port,k);
   for(uint32_t s=0;s<MESH_LINK_STREAMS && !error;s++){
+    l->bound[0][s]=l->bound[1][s]=(struct bound){0};
+    if(s>=plan_streams(plan))continue;
     struct stream_lanes *own=lanes_at(slot_of(port,s));
     for(uint32_t c=0;c<2;c++){
       atomic_store_explicit(&own->sent[c],0,memory_order_relaxed);atomic_store_explicit(&own->posted[c],0,memory_order_relaxed);
       atomic_store_explicit(&own->got[c],0,memory_order_relaxed);
     }
     atomic_store_explicit(&own->sending,0,memory_order_relaxed);atomic_store_explicit(&own->receiving,0,memory_order_release);
-    l->bound[0][s]=l->bound[1][s]=(struct bound){0};
   }
   return error;
 }
@@ -950,39 +951,47 @@ static void slot_reset(uint32_t slot){
   }
   atomic_thread_fence(memory_order_release);
 }
-/* design/transport.md section 14: the port's streams' rings, leased from the arena by the parent as the port first pairs
-   (recorded in the region, so a bridge adopting the region takes the same pages: section 2) and held for the region's
-   life, every agent and bridge of the port's: of each stream and each class (a large unit the region's
-   block, a small one a frame) its in and out rings of its units, then its ready and landed words (and after the large
-   class's, the slot's bridge words: mesh-bridge.h struct stream_lanes, within the block its words round to wherever the
-   page is 16 KiB, so the lease is the size it was before them), then its two time rings, told in the region (mesh.h
-   struct mesh_stream).  0, or ENOMEM where the region holds no room for them */
-static int stream_rings(struct port *port){
+/* design/transport.md section 14: the rings of each stream of the port's slots that its cable's plan carries (the first
+   `streams`: plan_streams of the plan its pairing makes, from the queue pairs both ends' devices hold for it,
+   design/HETEROGENEOUS-LINKS.md), a lease of the arena each, taken by the parent as a pairing first needs it and held for
+   the region's life, every agent and bridge of the port's (its offsets told in the region, mesh.h struct mesh_stream, so a
+   bridge adopting the region takes the same pages: section 2; a stream that has them has its units), and its pages
+   counted among the bridge's own once a bridge (`rings`, a bit a stream; and so any a bridge before it leased).  A
+   stream's lease: of each class (a large unit the region's block, a small one a frame) its in and out rings of its
+   units, then its ready and landed words (and after the large class's, the slot's bridge words: mesh-bridge.h struct
+   stream_lanes, within the block its words round to wherever the page is 16 KiB), then its two time rings: 19.0 MiB on
+   16 KiB pages, so a cable's rings are its streams' (four on a macOS 26 device's ten queue pairs, 76.1 MiB; one on the
+   M5 Ultra's macOS 27 device's two, 19.0 MiB), where every cable leased four.  0, or ENOMEM where the region holds no room
+   for one (those leased before it kept) */
+static int stream_rings(struct port *port,uint32_t streams){
   struct link *l=&port->link;
   const uint64_t pgsz=M->pgsz,block=(uint64_t)M->block*pgsz,unit[2]={block,MESH_FRAME},units[2]={MESH_STREAM_LARGE_UNITS,MESH_STREAM_SMALL_UNITS};
   const uint64_t times=(uint64_t)MESH_STREAM_TIMES*16;
   uint64_t bytes=0;
   const uint64_t words[2]={2*units[0]*8+sizeof(struct stream_lanes),2*units[1]*8};
   for(uint32_t c=0;c<2;c++)bytes+=(2*units[c]*unit[c]+block-1)/block*block+(words[c]+block-1)/block*block+(2*times+block-1)/block*block;
-  bytes*=MESH_LINK_STREAMS;
-  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
   const uint32_t pages=(uint32_t)(bytes/pgsz);
-  if(own->rings[port->index]==MESH_ABSENT)own->rings[port->index]=mesh_arena_alloc(&bridge,pages,M->block);
-  const uint32_t page=own->rings[port->index];
-  if(page==MESH_ABSENT)return ENOMEM;
-  held_pages+=pages;record_changed();
-  uint64_t at=M->data_off+(uint64_t)page*pgsz;
-  for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
+  int changed=0,error=0;
+  for(uint32_t s=0;s<MESH_LINK_STREAMS && !error;s++){
     struct mesh_stream *x=stream_of(port,s);
-    for(uint32_t c=0;c<2;c++){
-      x->unit[c]=(uint32_t)unit[c];x->units[c]=(uint32_t)units[c];
-      x->in[c]=at;x->out[c]=at+units[c]*unit[c];at+=(2*units[c]*unit[c]+block-1)/block*block;
-      x->ready[c]=at;x->landed[c]=at+units[c]*8;at+=(words[c]+block-1)/block*block;
-      x->posted_at[c]=at;x->landed_at[c]=at+times;at+=(2*times+block-1)/block*block;
+    if(l->rings>>s&1 || (s>=streams && !x->units[0]))continue;
+    if(!x->units[0]){
+      const uint32_t page=mesh_arena_alloc(&bridge,pages,M->block);
+      if(page==MESH_ABSENT){error=ENOMEM;break;}
+      uint64_t at=M->data_off+(uint64_t)page*pgsz;
+      for(uint32_t c=0;c<2;c++){
+        x->unit[c]=(uint32_t)unit[c];
+        x->in[c]=at;x->out[c]=at+units[c]*unit[c];at+=(2*units[c]*unit[c]+block-1)/block*block;
+        x->ready[c]=at;x->landed[c]=at+units[c]*8;at+=(words[c]+block-1)/block*block;
+        x->posted_at[c]=at;x->landed_at[c]=at+times;at+=(2*times+block-1)/block*block;
+      }
+      atomic_thread_fence(memory_order_release);
+      x->units[1]=(uint32_t)units[1];x->units[0]=(uint32_t)units[0];
     }
+    held_pages+=pages;l->rings|=UINT32_C(1)<<s;changed=1;
   }
-  l->rings=page;
-  return 0;
+  if(changed)record_changed();
+  return error;
 }
 /* design/transport.md section 14, "A process a port": a data lane's request rooms, the agent's, made at its first
    connect from its stream's units as the region tells them (a slot's each, then the dud's and the sink's), for the
@@ -1016,7 +1025,7 @@ static void slot_cancel(uint32_t slot){
 /* design/transport.md section 14: the streams of a port's slots (`port` NULL: of every port) cancelled (slot_cancel) */
 void streams_cancel(const struct port *port){
   for(uint32_t p=0;p<port_count;p++){
-    if((port && ports+p!=port) || ports[p].link.rings==MESH_ABSENT)continue;
+    if((port && ports+p!=port) || !ports[p].link.rings)continue;
     for(uint32_t s=0;s<MESH_LINK_STREAMS;s++)slot_cancel(slot_of(ports+p,s));
   }
 }
@@ -1044,11 +1053,12 @@ struct group { uint32_t node,s,phase,slot,members,target; uint64_t told,out[MESH
 static struct group groups[MESH_STREAMS];
 /* the bindings' generations, from this bridge's boot (main): no binding told is one an agent of an earlier launch told */
 static uint64_t generation;
-/* port `port`'s lanes of every stream frozen under a new generation, as its parent asks its agent to connect them:
-   their threads post nothing on them until a group opens them (group_make, group_open) */
+/* port `port`'s lanes of every stream its plan carries frozen under a new generation, as its parent asks its agent to
+   connect them: their threads post nothing on them until a group opens them (group_make, group_open) */
 static void port_frozen(struct port *port){
   generation++;
-  for(uint32_t s=0;s<MESH_LINK_STREAMS;s++)atomic_store_explicit(&lanes_at(slot_of(port,s))->told,generation<<2|BOUND_FROZEN,memory_order_release);
+  for(uint32_t s=0;s<plan_streams(port->link.plan);s++)
+    atomic_store_explicit(&lanes_at(slot_of(port,s))->told,generation<<2|BOUND_FROZEN,memory_order_release);
 }
 /* the group of stream s toward node `node`, a vacant entry taken where none is (a group a port's stream: there are as many
    entries as slots) */
@@ -1394,9 +1404,10 @@ static void link_turn(struct port *port){
   }
   if(l->job || held)return;
   if(l->state==LINK_DOWN){
+    const uint32_t streams=plan_streams(l->plan),ringed=(UINT32_C(1)<<streams)-1;
     if((l->page==MESH_ABSENT && ((l->page=mesh_bridge_pages(M)->link[port->index]=mesh_arena_alloc(&bridge,l->pages,M->block))==MESH_ABSENT ||
                                  !(held_pages+=l->pages))) ||
-       (l->rings==MESH_ABSENT && stream_rings(port))){
+       ((l->rings&ringed)!=ringed && stream_rings(port,streams))){
       say("link %u (%s): lanes not made: the region holds no room for their blocks and rings; paired again on hearing the peer\n",
           port->index,port->name);
       port_lost(port,ENOMEM);
@@ -1818,7 +1829,7 @@ static void ports_found(void){
       continue;
     }
     const int fresh=port==ports+port_count;
-    const uint32_t index=fresh?port_count:port->index,page=fresh?link_page[index]:port->link.page,rings=fresh?MESH_ABSENT:port->link.rings;
+    const uint32_t index=fresh?port_count:port->index,page=fresh?link_page[index]:port->link.page,rings=fresh?0:port->link.rings;
     if(!fresh){
       say("link %u (%s): its slot given to device %s\n",port->index,port->name,devices[i]);
       free(port->in);free(port->out);
@@ -2526,7 +2537,7 @@ static int agent_main(char **argv){
   close(fd);
   struct port *port=ports;
   *port=(struct port){.index=(uint32_t)index,.control=-1,.agent_fd=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
-  port->link.provider.device=&port->device;port->link.page=port->link.rings=MESH_ABSENT;
+  port->link.provider.device=&port->device;port->link.page=MESH_ABSENT;
   snprintf(port->device.name,sizeof port->device.name,"%s",argv[4]);snprintf(port->name,sizeof port->name,"%s",argv[4]+5);
   ones=(uint32_t)strtoul(argv[6],NULL,10);keepalive_ns=strtoull(argv[7],NULL,10);
   __atomic_store_n(&port_count,1,__ATOMIC_SEQ_CST);

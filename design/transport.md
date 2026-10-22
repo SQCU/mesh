@@ -486,7 +486,9 @@ every cable carrying load).
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one agent's at
   a time and no make meets the device's ceiling. At the bridge's stop every agent is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
-- Streams across agents. A port's rings and words are the parent's, leased once. A new agent's lanes are frozen as its
+- Streams across agents. A port's rings and words are the parent's, each stream's leased once, as the first pairing
+  whose plan carries the stream needs it (a cable's rings are its streams', 19.0 MiB a stream on 16 KiB pages). A new
+  agent's lanes are frozen as its
   link connects (`port_frozen`), and the parent opens each stream new in its group (`group_open`): owner word 0, ready
   and landed words 0, `next` 0, free and live. A holding of the lost pairing
   ended with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator

@@ -39,6 +39,16 @@ extents the device holds, and the port turns again 60 s later, doubling to 30 mi
 from it; a lease that does not fit fails at its start with an error naming the execution, and the region never grows.
 How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
 
+Beside its clients' leases the region holds the bridge's own pages, sized by the node's cables and their streams, never
+by a count of nodes: the map (two records a node it hears), a block a port, the duds' block, and each stream's rings as
+the first pairing whose plan carries it needs them, 19.0 MiB a stream on 16 KiB pages (its two classes' in and out
+rings, its words and its time rings: rdma/mesh-link.c `stream_rings`). A cable's plan carries as many streams as both
+ends' devices hold queue pairs for (design/HETEROGENEOUS-LINKS.md): four on two macOS 26 devices (76.1 MiB), one where
+either is the M5 Ultra's macOS 27 device (19.0 MiB). A region that cannot hold a pairing's rings logs "lanes not made:
+the region holds no room for their blocks and rings" and pairs again on hearing the peer, every quiet window, until it
+holds them: `example-1pct.json` on a 24 GiB Mac mini (245 MiB) holds three four-stream cables' rings and about 16 MiB
+beside.
+
 ## The loopback fabric's configurations
 
 A loop bridge (`rdma/.build/loop/mesh-flow-loop`, mesh design/transport.md), one of N on one

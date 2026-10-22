@@ -188,12 +188,19 @@ def nodes():
     """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node
     (a node is its number: peers.label names it from the name table), its bridge's region and its memory (bytes), its
     model, its boot (`booted`, ns since the epoch) and its `available` memory as its bridge last sampled it (what the
-    kernel can give without pressure, its reclaimable cache counted).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
-    bridges, never probed over another network.  OSError naming the bridge where it is unreachable."""
-    held, own = ffi.new('struct mesh_node_health[64]'), ffi.new('uint32_t *')
-    count = lib.mesh_nodes_health(held, 64)
-    if count < 0:
-        raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
+    kernel can give without pressure, its reclaimable cache counted).  What a client asks its own daemon about its node
+    and its neighbours, carried over the fabric by the bridges, never probed over another network: every record, however
+    many (the room grown to the count the bridge holds, where 64 were read and the rest dropped).  OSError naming the
+    bridge where it is unreachable."""
+    room, own = 64, ffi.new('uint32_t *')
+    while True:
+        held = ffi.new('struct mesh_node_health[]', room)
+        count = lib.mesh_nodes_health(held, room)
+        if count < 0:
+            raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
+        if count <= room:
+            break
+        room = count
     lib.mesh_reached(ffi.NULL, 0, own)
     text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
     return [{'node': r.node, 'region': r.region, 'memory': r.memory, 'model': text(r.model),

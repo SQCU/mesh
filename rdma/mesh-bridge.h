@@ -211,8 +211,9 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    subset of what each made), told the agent with the connect; a lane left out has no queue pair connected and its
    `qpn` UINT32_MAX, no queue pair's number (one made past the connected plan stays in INIT until the agent's exit).  Each
    lane's SEND gate (`gate`: the frames posted and retired, the send thread's; its capacity, set as the lane connects),
-   each data lane's progress (`lane`, struct lane_state), the arena page of the port's streams' rings (`rings`, leased as
-   the port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream), each stream's identity on this cable (`wire`, the
+   each data lane's progress (`lane`, struct lane_state), the streams of the port's slots whose rings the parent holds
+   (`rings`, a bit a stream: each its plan carries, leased as a pairing first needs it, mesh-link.c stream_rings; mesh.h
+   struct mesh_stream), each stream's identity on this cable (`wire`, the
    parent's, made as the link connects: mesh-link.c stream_wire), and each progress thread's hold of each stream's
    binding (`bound`, the receive thread's [0] and the send thread's [1], each on lines of its own: struct bound).  Lane
    MESH_LANE_KEEPALIVE's frames (design/transport.md: one whenever the link is up, every `keepalive_ns` while a stream
