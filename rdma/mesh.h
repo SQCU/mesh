@@ -14,10 +14,12 @@
 #define MESH_MODE 0666
 /* 129: a link's streams toward its peer node (struct mesh_stream), each held by one client at a time by its owner word
    (as rows are), so as many communicators as a link has streams use a node pair at once, the client naming the node
-   alone (design/transport.md section 14; the versions before it, this file's history).  132: a holder names its own
-   pages; the bridge cuts them into SENDs and posts receives into its landing pages, a page a SEND and a frame each of a
-   last page's (no rings, no fillers).  The wire is HELLO, FAREWELL, RECORD and LINK */
-#define MESH_VERSION 132u
+   alone (design/transport.md section 14; the versions before it, this file's history).  The wire's contract between
+   bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units (a page; a frame), a SEND filling a receive of a
+   whole unit.  It changes only where that contract does (the operator, 2026-10-21: "commits which do not change an
+   interface 'contract' in any way are not interface-version changes regardless of their hashes"): a holder naming its
+   own pages changed the contract between a node's bridge and its clients (MESH_LAYOUT), not this one */
+#define MESH_VERSION 131u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
 #define MESH_LAYOUT 134u

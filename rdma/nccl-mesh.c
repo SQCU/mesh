@@ -748,14 +748,19 @@ static void comm_leave(struct ncclComm *comm) {
   pthread_mutex_unlock(&attach_lock);
 }
 
+/* the contract between the ranks' libraries of a communicator, declared: its reports and gathers, the holdings' start
+   words, the plan both ranks compile (mesh-plan.h MESH_PLAN_VERSION) and the order each list's entries are presented in.
+   A rank whose report states another refuses the communicator as a value, naming both; it changes only where that
+   contract does, never with a build */
+#define MESH_COMM_CONTRACT (MESH_PLAN_VERSION * 1000u + 1u)
 /* a rank's report at a communicator's init (NCCL's bootstrap, below): its status (0, else why it cannot go on, so every
-   rank fails alike), its bridge's node and the nodes that bridge reaches with each one's bandwidth, and the streams free
+   rank fails alike), the contract its library keeps (`contract`: MESH_COMM_CONTRACT), its bridge's node and the nodes that bridge reaches with each one's bandwidth, and the streams free
    to take, each one's node and identity (`frees` of them: reach_read, mesh-call.h mesh_streams_free), and, at the
    second gather, the start words of its holding of the stream toward each of them (start[k], the bridge's, opaque:
    mesh-call.h mesh_stream_take, which the peer tells its own holding, comm_join) */
 struct report {
   int32_t rank, status;
-  uint32_t node, count, frees, padding;
+  uint32_t node, count, frees, contract;
   struct mesh_reach reach[MESH_STREAMS];
   uint64_t start[MESH_STREAMS][MESH_STREAM_START], free_wire[MESH_STREAMS];
   uint32_t free_node[MESH_STREAMS];
@@ -1201,10 +1206,14 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   struct report *mine = reports + rank;
   int status = nranks > 1 ? bootstrap_open(made, made->id, reports) : 0;
   const int making = status ? status : comm_attach(made, NULL);
-  *mine = (struct report){.rank = rank, .status = making};
+  *mine = (struct report){.rank = rank, .status = making, .contract = MESH_COMM_CONTRACT};
   if (!making) reach_read(made->attach, mine);
   if (!status && nranks > 1) status = gather(made, nranks, rank, reports, !rank);
   ncclResult_t result = status ? fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status)) : making ? comm_refused(making, made->name) : ncclSuccess;
+  for (int r = 0; !result && r < nranks; r++)
+    if (reports[r].contract != MESH_COMM_CONTRACT)
+      result = fail(ncclInvalidUsage, "communicator %s: rank %d's library keeps contract %u, this rank's %u: a communicator's "
+                    "ranks keep one contract", made->name, r, reports[r].contract, MESH_COMM_CONTRACT);
   for (int r = 0; !result && r < nranks; r++)
     if (reports[r].status && r != rank)
       result = fail(ncclRemoteError, "communicator %s: rank %d could not join it: %s", made->name, r, strerror(reports[r].status));
