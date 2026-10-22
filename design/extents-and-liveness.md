@@ -114,6 +114,26 @@ is exact.
    crossing lands in. A mismatch is "an error channel return kind of statistic, not a data dependent control flow for
    a collective verb or a bridge transaction" (the operator, 2026-10-22), returned in `meta`.
 
+## Dominating methods and choices
+
+Prior work separates what we must do from what we may choose. A method is strictly dominating when it is never worse
+on any measure, so there is nothing to trade. A choice trades one measure against another, and is made by measurement
+or by the balancer.
+
+Strictly dominating, so required:
+- **Freeing every row outside W(t) at a halt (d).** It releases earlier at no cost: no request references those rows.
+- **Releasing a row at its last use, when that use is known exactly (c, e).** It is never later than releasing at a
+  holding's end. XLA's buffer assignment and region inference take this for granted.
+- **Using the declaration and the counts (a, b) instead of inferring them at run time.** The facts are exact, an
+  inference can only be equal or wrong, and the inference costs time.
+
+Choices, so measured:
+- **Rematerialization.** It trades recomputation for memory ([Chen et al. 2016][chen]; [Checkmate][checkmate]). Only a
+  memory budget decides it.
+- **The documented flush.** It ends W(t) early at the cost of a dead stream. The plan bounds W(t), so it is not chosen
+  here.
+- **The size of the posting window.** A larger window hides more latency and keeps more rows in W(t) at a halt.
+
 ## What the rejected designs did
 
 Each took the most general program as its model, against (a)–(e):
