@@ -205,9 +205,14 @@ The queue pairs are not the same everywhere: the M5 Ultra on macOS 27 reports `m
 on every device, not 11, and its driver keeps a queue pair of each device for itself. A
 link's two bridges state what their devices hold and make the lanes both can, ten where
 both hold ten and one stream's two where either holds two; each makes them until its
-device refuses one, and both connect what the fewer made. The map lists each link with
-its streams, the communicators it carries at once, and two cables between two nodes are
-two links ([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
+device refuses one, and both connect what the fewer made. Two nodes joined by several
+cables have one stream of each index over all of them, its units striped across every
+cable whose plan holds it, so one communicator moves at the cables' bandwidth together;
+the map lists the pair once, at that bandwidth, with its streams, the communicators it
+carries at once (the most any one cable's plan holds). Losing a cable fails the calls in
+flight on it, and the streams go on over the others for the next call, with no re-pairing
+([design/transport.md](design/transport.md) section 14, "A stream over several cables";
+[design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md) section 11).
 
 RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of

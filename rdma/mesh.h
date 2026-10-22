@@ -89,8 +89,9 @@ _Static_assert(sizeof(struct mesh_stream)==192,"mesh_stream");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
    the record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
-   model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), its bridge's `reached` links, an entry a link: the node
-   it reaches, its streams and its bandwidth (mesh-plan.h struct mesh_reach; mesh-call.h mesh_nodes_reached), and its
+   model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), the nodes its bridge `reached`, an entry a node: the
+   node, its streams (the most any one cable's plan toward it holds) and the bandwidth of every cable up toward it
+   together (mesh-plan.h struct mesh_reach; mesh-link.c record_reach: a node's streams stripe over all its cables), and its
    host UUID (`uuid`: gethostuuid, the identity its node number is drawn from, AGENTS.md "A node is its hardware"; a
    loop bridge's, its host's mixed with its region's name), by which two hosts that share a number are told apart and
    logged (mesh-records.c number_shared) */

@@ -6,10 +6,11 @@
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
-/* design/transport.md section 14: this node's bridge's links with a live stream, one entry a link in the order of its
-   ports (mesh-plan.h struct mesh_reach): the node it reaches, its live streams and their shares of its bandwidth
-   together (mesh-link.c streams_open: a link's streams are the region's MESH_LINK_STREAMS from its port's index on,
-   mesh-observe.h), at most `room`; their count.  Two cables toward one node are two entries */
+/* design/transport.md section 14: the nodes this node's bridge reaches by a live stream, one entry a node in the order
+   of their streams' slots (mesh-plan.h struct mesh_reach): the node, its live streams and their bandwidths together,
+   at most `room`; their count.  A node's streams each stripe over every cable joining the two that carries it
+   (mesh-link.c group_open, "A stream over several cables"), so its entry's bandwidth is its cables' together and its
+   streams the communicators that take the two nodes at once */
 uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
 /* design/transport.md section 14: the streams free to take, each one's node and its `wire` (struct mesh_stream: its
    identity, alike at both its ends), at most `room`; their count.  The two ends of a communicator take the stream of one

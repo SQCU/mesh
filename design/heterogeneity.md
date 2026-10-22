@@ -25,10 +25,10 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
   its attention) is measured on each node and added as its own class (R3). A node has one rate per
   class and dtype, never one speed.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte. The bridges'
-  map joins two nodes where each one's bridge reaches the other, by each link between them (two cables, two links,
-  which the planner takes together at twice the slower one's bandwidth), each at the lesser of the two ends' bandwidths
-  and with its streams, the communicators it carries at once (mesh-plan.h `mesh_map`: β 8e9 over that bandwidth,
-  mesh-dataflow.c `mesh_join`).
+  map joins two nodes where each one's bridge reaches the other, by one link however many cables join them (each of
+  the pair's streams stripes its units over every cable: design/transport.md section 14, "A stream over several
+  cables"), at the lesser of the two ends' bandwidths, each end's its cables' together, and with its streams, the
+  communicators it carries at once (mesh-plan.h `mesh_map`: β 8e9 over that bandwidth, mesh-dataflow.c `mesh_join`).
 - **Parts**: a mesh dimension's integers p_r ≥ 1, one per coordinate, of P = Σp units.
 - **Share**: rank r's part of an extent N, N·p_r/P.
 - **Grain**: N/P, the unit a share is counted in (a head, an expert, a tile). A program chooses the

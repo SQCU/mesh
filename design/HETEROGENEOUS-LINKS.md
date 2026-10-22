@@ -379,3 +379,70 @@ one reach entry a cable.
 link's agent ending, where devices share them) reaches this link only at its next pairing. A link of plan 0 carries
 records but no stream and is no link of the map, so a node reached only over such links is pruned from the map though
 its records flow (`mesh-records.c` `map_put` joins records by their reach).
+
+## 11. A stream over several cables (2026-10-21)
+
+The fabric is recabled into rings and tori, so two nodes may be joined by more than one cable, and every cable must
+carry load. Section 10 listed each cable as a link of its own: a client's stream was one cable's (a link's four slots,
+`mesh_streams_free`, the least identity free at both ends), so a communicator moved at one cable's bandwidth however
+many joined the two nodes. The rubric's division (design/rubrics.md, Three kinds of source) answers where that belongs:
+a client "holds a stream toward each member's node" and reaches no port, link, cable or lane, so the bridge spreads
+each stream over the cables (design/transport.md section 14, "A stream over several cables").
+
+- **Each stream over every cable.** Stream s toward a node stripes its units over lane pair s of every cable joining
+  the two whose plan has it (a group: `mesh-link.c` `struct group`, `group_open`). Unit u rides stripe u mod n, as its
+  lane's (u / n)-th from its base, the stripes ordered by each cable's identity for that stream (`stream_wire`, alike
+  at both ends). The leader's send thread serves the holding, each member's send thread its stripe, and any member's
+  receive thread releases the units in order (`group_turn`, `lane_send`, `group_release`). The stream lives in the
+  leader's slot. A client takes it, views it, declares on it and gives it back as before: libnccl-mesh is unchanged.
+- **The map names the pair once.** A record's reach is a node an entry: every cable whose link is up toward it, their
+  bandwidths together, and the most streams any one plan holds (`record_reach`). `mesh_join` reads one link a pair at
+  the lesser of the two ends' figures, any entries naming the node summed (`mesh_paired`). `mesh_nodes_reached` (the
+  clients' view) lists a node once, its live streams and their bandwidths together. The pair's link carries what
+  section 10's parallel links did, at its cables' bandwidth together. Concurrency between two nodes is their streams:
+  the most one plan holds, not the sum. Two one-stream cables (the M5 Ultras) carry one stream at both cables'
+  bandwidth, where section 10 gave two streams at one cable's each.
+- **Cables change.** Where the cables of a group change, both ends agree, once, on the count at which each cable's
+  lanes change mapping (STREAM: design/transport.md section 3 and section 14). That count is fixed by the sender's SENDs
+  posted and the receiver's receives posted together, which neither end holds alone. Each end pads with duds and
+  absorbs into the link's sink to the bases both compute, then opens the group anew. A cable lost fails the calls in
+  flight on it; the group goes on over the others, with no re-pairing. A held slot cancelled waits MESH_PLATFORM_NS
+  before it opens again. A cable that joins is taken at the next holding. Cables all fresh (one per peer, or several
+  pairing together) open at once from bases 0, so one cable per peer pairs and serves as before, its wire unchanged.
+- **Waking.** A port's progress threads waited on the guard word while its link served no lane, so a link that came up
+  between a thread's read of its lanes and its wait slept MESH_PAUSE_NS before its first pass. They now wait on the
+  lanes' word while the guard is down, and `guard_wake` wakes both. Before this change that delay held a new link's
+  first SENDs; with groups it would hold each group's freeze.
+
+**Wire, layout and ABI.**
+- Wire: a message kind, STREAM (5), whose payload is `struct stream_told` (104 bytes). A bridge before it reads STREAM as
+  a protocol error and loses the link, so where two cables join two nodes the two versions re-pair each cycle.
+  MESH_VERSION is not moved here: the integration bumps it once. One cable per peer sends no STREAM, and its data path is
+  lane for lane the earlier one's. A bridge of this change and the base's (`kmesh-integration-b`, 131) over one loop
+  cable ran host and walk 16 of 16 exact.
+- Region: each stream slot's bridge words (`struct stream_lanes`, 1 KiB) after its large class's landed words, in the
+  block those round to on 16 KiB pages, so a port's ring lease is the size it was (MESH_LAYOUT kept). On smaller pages
+  the lease grows, and a region an earlier bridge leased on them would be too small. Every Apple silicon node's page is
+  16 KiB. A record's reach entries are one a node (the record's size and layout are unchanged). A stream's
+  `bandwidth` is its group's (its cables' shares for that stream together).
+- Client ABI: none. `mesh_nodes_reached` and `mesh_map` keep their signatures; their entries are a node and a pair.
+- Not changed here, others' files: `rdma/mesh-plan.h` (`mesh_map`'s comment still says two cables are two links, and
+  `struct mesh_link_map` `streams` still says a pair's links' streams together) and `rdma/NCCL.md` ("two cables between
+  two nodes have their streams together") belong to the collective layer's branch.
+
+**Tested** over loopverbs on node 1980260065 (no verbs device opened), each bridge's shared memory under a private
+prefix (`MESH_LOOP_PREFIX`, mesh-loop):
+
+| case | what came up | collectives |
+|---|---|---|
+| 2 nodes, two cables, every device ten | each of 4 streams over 2 cables (50 Gb/s a stream, 200 together); a second cable joining made the group anew in 3 ms | host and walk 1,000,003: 16 of 16 exact each; on the stream used, 3,060 units released, 1,530 on each cable |
+| 3-node doubled line | each neighbour pair's 4 streams over its 2 cables | 27 of 27 exact between joined ranks, host and walk; the ends' sendrecv refused (no cable joins them) and rank 1's sendrecv as section 7's P6, unchanged |
+| 2 nodes, two cables, every device holding 2 (the M5 Ultras) | one stream over both (200 Gb/s) | host and walk 1,000,003: 16 of 16; two communicators at once: one exact, the other refused at init (EBUSY) |
+| 2 nodes, a 1-stream cable and a 4-stream cable | stream 0 over both (125 Gb/s), streams 1 to 3 over the 4-stream cable | host and walk 16 of 16; five communicators at once: four exact, the fifth refused at init |
+| 4-node ring, one cable a peer | no group line logged; streams as before | host and walk 1,000,003: 48 of 48 exact |
+| one cable, this bridge and the base's | paired as two 131 bridges | host and walk 1,000,003: 16 of 16 |
+| two cables, a cable's agent killed while idle | the streams made anew over the other cable in 3 ms, no re-pairing; the cable back, the streams over both again in 3 ms | host and walk 1,000,003 between: 16 of 16 each |
+| two cables, the leader's cable cut under 30 back-to-back communicators | the call in flight failed ("the link to node 1 was lost at position 6", ncclRemoteError); the streams over the other cable 2 ms after | each later communicator's 16 of 16 exact (22 runs) |
+| the same, the other cable cut | the call in flight failed at position 99; three streams open over the remaining cable in 3 ms, the held one after its slot's 5 s; communicators took the free ones | 53 later runs, 16 of 16 each; the cable back, the free streams over both at once, the held one at its holder's end |
+| the M5 Ultras' two cables, the leader's cut under back-to-back communicators | the call in flight failed at position 173; the stream over the other cable 1 ms after | 32 later runs, 16 of 16 each |
+

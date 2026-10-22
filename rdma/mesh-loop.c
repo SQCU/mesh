@@ -5,10 +5,11 @@
 
      mesh-loop up FAMILY N REGION_MIB DIRECTORY
        FAMILY one of line, ring, star, complete, torus (two rows of N/2), double (a line whose neighbours two cables
-       join, parallel links); N bridges (.build/loop/mesh-flow-loop) of a
+       join, each of their streams striped over both); N bridges (.build/loop/mesh-flow-loop) of a
        region of REGION_MIB each, their configurations, logs and the map in DIRECTORY, every cable two loopverbs devices;
        the shared memory names MESH_LOOP_PREFIX's (default /meshloop): its regions PREFIX0 .. PREFIX<N-1> and its fabric
-       PREFIX-fabric; returns once every bridge's map holds the N nodes and its own cables paired (a JSON line a node)
+       PREFIX-fabric; returns once every bridge's map holds the N nodes and a live stream toward each neighbour (a JSON
+       line a node)
      mesh-loop nccl DIRECTORY COUNT host|walk
        N ranks, one a node: all-reduce, all-gather, reduce-scatter, broadcast and reduce from each root, and a send and
        receive around the ring, of COUNT float32 each, every value exact; `host` the host path (a NULL stream), `walk`
@@ -163,8 +164,18 @@ static int degree(const struct loop_map *map, int i) {
   for (int c = 0; c < map->cables; c++) d += map->cable[c].a == i || map->cable[c].b == i;
   return d;
 }
-/* every bridge's map holding the n nodes and its own cables paired (mesh_reached: a link an entry, so node i's bridge
-   lists its degree once every cable has paired, two cables toward one node two), within `seconds` */
+/* node i's neighbours: the nodes a cable joins it to, however many cables join each */
+static int neighbours(const struct loop_map *map, int i) {
+  int d = 0;
+  for (int j = 0; j < map->n; j++) {
+    int joined = 0;
+    for (int c = 0; c < map->cables; c++) joined |= j != i && ((map->cable[c].a == i && map->cable[c].b == j) || (map->cable[c].a == j && map->cable[c].b == i));
+    d += joined;
+  }
+  return d;
+}
+/* every bridge's map holding the n nodes and a live stream toward each of its neighbours (mesh_reached: a node an entry,
+   its streams over every cable joining the two), within `seconds` */
 static int converged(const struct loop_map *map, double seconds) {
   const uint64_t deadline = clock_ns() + (uint64_t)(seconds * 1e9);
   int done = 0;
@@ -176,7 +187,7 @@ static int converged(const struct loop_map *map, double seconds) {
       uint32_t node = 0;
       if (mesh_loop_bind(map->node[i].region)) return EINVAL;
       const int records = mesh_nodes_health(health, LOOP_NODES + 1), count = mesh_reached(reached, MESH_STREAMS, &node);
-      done = records == map->n && count == degree(map, i);
+      done = records == map->n && count == neighbours(map, i);
     }
     if (!done) usleep(100000);
   }

@@ -111,18 +111,60 @@ struct send_gate {
   _Alignas(64) uint64_t posted,retired,requests,completions;
   uint32_t capacity;
 };
-/* design/transport.md section 14: a data lane's progress, the bridge's alone, counted in the lane's own units (its i-th
-   its stream's MESH_STREAM_PAIRS i + its stripe): the units it has posted SENDs for (`sent`, the send thread's) and
-   those of them whose posting time it stored (`timed`, the send thread's: mesh-link.c link_send), and
-   received (`posted` receives posted, `got` landed, the receive thread's, posted at most `window` units ahead: the
-   lane's share of the completion queue in its frames), whether its receives were posted (`armed`, the receive
-   thread's), and its requests, one a slot of its stripe each way (`sends`, `receives`, made as the link connects;
-   the last of `sends` the dud's, from the bridge's all-ones block) */
+/* design/transport.md section 14: a data lane's progress, the bridge's alone, counted in the lane's own units (its
+   count since its link connected, which both ends of the cable keep alike: a SEND fills the oldest receive posted on its
+   queue pair): the units it has posted SENDs for (`sent`, the send thread's) and those of them whose posting time it
+   stored (`timed`, the send thread's: mesh-link.c link_send), and received (`posted` receives posted, `got` landed, the
+   receive thread's, posted at most `window` units ahead: the lane's share of the completion queue in its frames); and
+   its requests, one a slot of its stream's ring each way (`sends`, `receives`, made over the rings of the slot its
+   binding names, `sends_slot`, `receives_slot`, MESH_ABSENT none: mesh-link.c lane_requests), and after them the dud's,
+   from the bridge's all-ones block, and the sink's, into the link's block, where a drain absorbs what the peer pads
+   (mesh-link.c lane_reset) */
 struct lane_state {
   uint64_t sent,timed,posted,got;
-  uint32_t window,armed;
+  uint32_t window,sends_slot,receives_slot;
   struct prepared_send *sends;
   struct prepared_receive *receives;
+};
+/* design/transport.md section 14, "A stream over several cables": a stream slot's bridge words, after its large class's
+   landed words in its port's ring pages (mesh-link.c lanes_at, stream_rings), which no client header names.
+   - The binding of the slot's port's lanes of that stream, the parent's (`told`: (generation << 2) | state): frozen
+     (BOUND_FROZEN: nothing posted on them), drained (BOUND_DRAIN: SENDs padded with duds to `out` and receives absorbed
+     into the link's sink to `in`, each class's) or open (BOUND_OPEN: the lanes are stripe `stripe` of the stream of slot
+     `slot`, their bases `out` and `in`).  The parent writes its fields only once both threads have told the binding
+     before it (mesh-link.c group_advance), so a thread reads them as the binding it reads them under.
+   - What the port's progress threads tell of those lanes: each class's SENDs posted (`sent`) and the binding they hold
+     to (`sending`), the send thread's; each class's receives posted and landed (`posted`, `got`) and the binding they
+     hold to (`receiving`), the receive thread's.  A thread tells a binding once it acts on it alone: frozen, once it
+     posts no more; drained, once its lanes are at its counts.
+   - Where the slot holds a group's stream (its leader's: the group's least port), the group as the parent opened it:
+     its stripes (`stripes`), each one's port (`port`) and lane bases (`base_out`, `base_in`); the owner word its leader's
+     send thread serves and each class's holding end (`held`, `final`); and each class's first unit not yet released,
+     and not yet given its landing time, which any member's receive thread advances (`released`, `timed`) */
+enum { BOUND_FROZEN, BOUND_DRAIN, BOUND_OPEN };
+struct stream_lanes {
+  _Alignas(128) _Atomic uint64_t told;
+  uint32_t slot,stripe;
+  uint64_t out[2],in[2];
+  _Alignas(128) _Atomic uint64_t sent[2],sending;
+  _Alignas(128) _Atomic uint64_t posted[2],got[2],receiving;
+  _Alignas(128) uint32_t stripes,port[MESH_PORTS];
+  uint64_t base_out[MESH_PORTS][2],base_in[MESH_PORTS][2];
+  _Alignas(128) _Atomic uint64_t held,final[2];
+  _Alignas(128) _Atomic uint64_t released[2],timed[2];
+};
+_Static_assert(!(2*MESH_STREAM_LARGE_UNITS*8%128),"a slot's bridge words on lines of their own");
+/* a progress thread's hold of its port's binding of one stream (mesh-link.c bound_read): the binding and its state;
+   drained, the counts (`out`, `in`); open, the bases (`out`, `in`), the group's slot (its stream, `x`, and words,
+   `group`), this port's stripe of `stripes`, each stripe's port's words (`member`) and bases; the slot's own words
+   (`own`), and the send thread's most each class's holder declared as it read (`seen`) */
+struct bound {
+  _Alignas(128) uint64_t told;
+  uint32_t state,slot,stripe,stripes;
+  uint64_t out[2],in[2],seen[2];
+  struct mesh_stream *x;
+  struct stream_lanes *own,*group,*member[MESH_PORTS];
+  uint64_t base_out[MESH_PORTS][2],base_in[MESH_PORTS][2];
 };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
@@ -133,10 +175,16 @@ struct lane_state {
    its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets sends 0
    there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets).  Every message names
    its bridge's node and that node's host UUID (`uuid`, mesh.h struct mesh_record's), so a hello of this node's number
-   from another host is told (mesh-records.c number_shared) */
-enum { HELLO=1, FAREWELL, RECORD, LINK };
+   from another host is told (mesh-records.c number_shared).  A STREAM (design/transport.md section 14, "A stream over
+   several cables") carries a struct stream_told: on each cable of a group its bridge makes anew, once a change of the
+   cables joining the two nodes, as a pairing's LINK does once a cable */
+enum { HELLO=1, FAREWELL, RECORD, LINK, STREAM };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; uint8_t uuid[16]; };
+/* a STREAM's payload: the stream's index, the cables its group is made over (`members` of `wire`, each one's identity
+   for that stream, mesh-link.c stream_wire, alike at both ends: ascending), and the sender's lanes of that stream on
+   this cable as its threads froze them, each class's SENDs and receives posted */
+struct stream_told { uint32_t stream,members; uint64_t wire[MESH_PORTS],sent[2],posted[2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
 /* the wire's magic: its base, MESH_VERSION and the wire's revision (1<<12, past any base and version's: every link heard
    within MESH_PLATFORM_NS or concluded, design/transport.md B1, B2, B3, which a bridge of the same version
@@ -163,17 +211,13 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    subset of what each made), told the agent with the connect; a lane left out has no queue pair connected and its
    `qpn` UINT32_MAX, no queue pair's number (one made past the connected plan stays in INIT until the agent's exit).  Each
    lane's SEND gate (`gate`: the frames posted and retired, the send thread's; its capacity, set as the lane connects),
-   each data lane's progress (`lane`, struct lane_state), the arena page of the stream's rings (`rings`, leased as the
-   port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream), and the stream's holding, the send thread's alone: the
-   owner word it serves (`held`, 0 none), the most each class's holder declared as it read (`seen`), and where a holding
-   ended, the unit of each class before which every unit has gone, the unsupplied ones as duds (`final`); each class's
-   time rings (mesh.h struct mesh_stream), their addresses the link's own, set as its streams open (`posted_at`, the
-   send thread's; `landed_at`, the receive thread's: mesh-link.c streams_open); and the receive thread's first unit of
-   each class not yet released in order (`released`, mesh-link.c stream_landed) and not yet given its landing time
-   (`timed`, mesh-link.c link_receive), on a line of their own, apart from the send thread's (`alive_flight`).  Lane
-   MESH_LANE_KEEPALIVE's frames (design/transport.md: one whenever the link is up, every `keepalive_ns` while the
-   stream is held, else every MESH_PLATFORM_NS/5; the send thread's frame in flight), and its page: the keepalive's
-   block */
+   each data lane's progress (`lane`, struct lane_state), the arena page of the port's streams' rings (`rings`, leased as
+   the port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream), each stream's identity on this cable (`wire`, the
+   parent's, made as the link connects: mesh-link.c stream_wire), and each progress thread's hold of each stream's
+   binding (`bound`, the receive thread's [0] and the send thread's [1], each on lines of its own: struct bound).  Lane
+   MESH_LANE_KEEPALIVE's frames (design/transport.md: one whenever the link is up, every `keepalive_ns` while a stream
+   it carries is held, else every MESH_PLATFORM_NS/5; the send thread's frame in flight), and its page: the keepalive's
+   block, and the sink a drain absorbs into */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 #define LINK_ALIVE_SENT (UINT64_C(3)<<56)
@@ -188,16 +232,11 @@ struct link {
   uint32_t plan,made,peer_made,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing,psn;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2];
-  _Atomic uint64_t *posted_at[MESH_LINK_STREAMS][2];
+  uint64_t alive_at,job_at;
   uint64_t wire[MESH_LINK_STREAMS];
   _Atomic int alive_flight;
-  _Alignas(128) uint64_t released[MESH_LINK_STREAMS][2];
-  uint64_t timed[MESH_LINK_STREAMS][2];
-  _Atomic uint64_t *landed_at[MESH_LINK_STREAMS][2];
+  struct bound bound[2][MESH_LINK_STREAMS];
 };
-_Static_assert(offsetof(struct link,released)%128==0 && offsetof(struct link,landed_at)==offsetof(struct link,released)+128,
-  "the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's agent on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct agent_message).  The
    parent's: open the device (AGENT_OPEN), make the link's lanes (AGENT_MAKE, naming the link's keepalive page, which the
@@ -267,13 +306,18 @@ struct port {
      to end its agent (`recycle`) and whether that end was asked (`ending`), the part of its agent's next message
      read (`agent_in`, `agent_held` bytes of it), an agent of its device from an earlier launch last found alive
      (`elsewhere`: mesh-link.c agent_elsewhere), whether the last whole read of the devices no longer listed its device
-     (`unlisted`) and whether it gives its slot to a device waiting for one (`yielding`: mesh-link.c ports_found) */
+     (`unlisted`) and whether it gives its slot to a device waiting for one (`yielding`: mesh-link.c ports_found); and
+     its link's part in the groups (design/transport.md section 14, "A stream over several cables"): the streams it has
+     carried in no group since it connected (`fresh`, a bit a stream), and the peer's latest STREAM of each stream on it
+     (`stream_heard`), not yet taken into a group's drain (`streams_heard`, a bit a stream: mesh-link.c group_advance) */
   pid_t agent,elsewhere;
   uint32_t holder;
   int agent_fd,recycle,ending,unlisted,yielding;
   uint32_t aborts,agent_held;
   uint64_t agent_at,hold_to;
   unsigned char agent_in[sizeof(struct agent_message)];
+  uint32_t fresh,streams_heard;
+  struct stream_told stream_heard[MESH_LINK_STREAMS];
 };
 
 /* design/transport.md section 9: why this bridge stops, the code its FAREWELL carries (a signal's number) */
@@ -328,6 +372,7 @@ void health_turn(void);
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes);
 void number_shared(uint32_t node,const uint8_t *held,const uint8_t *heard,uint8_t *told,const struct port *port,const char *what);
 void port_lost(struct port *port,int64_t code);
+uint32_t record_reach(struct mesh_reach *reach,uint32_t room);
 void clients_turn(int liveness);
 
 #endif

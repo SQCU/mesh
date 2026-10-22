@@ -151,7 +151,7 @@ void record_changed(void){
   memcpy(own.name,host,sizeof own.name);
   memcpy(own.model,model,sizeof own.model);
   memcpy(own.uuid,node_uuid,sizeof own.uuid);
-  own.reached=mesh_nodes_reached(M,own.reach,MESH_STREAMS);
+  own.reached=record_reach(own.reach,MESH_STREAMS);
   own.health=health;
   struct known *k=known_at(M->node);
   if(k)record_put(k,&own);

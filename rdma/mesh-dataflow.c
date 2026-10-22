@@ -102,42 +102,37 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   }
 }
 
-/* design/transport.md section 14: the one join of two nodes' records.  A record's links toward `node` (its entries naming
-   it, a link an entry: mesh-call.h mesh_nodes_reached), ranked by bandwidth, then streams, the faster first, into
-   `ends` (room MESH_STREAMS); their count */
-static int mesh_reach_faster(const void *x,const void *y){
-  const struct mesh_reach *a=x,*b=y;
-  return a->bandwidth!=b->bandwidth?(a->bandwidth<b->bandwidth)-(a->bandwidth>b->bandwidth):(a->streams<b->streams)-(a->streams>b->streams);
-}
-static uint32_t mesh_paired(const struct mesh_record *record,uint32_t node,struct mesh_reach *ends){
-  uint32_t count=0;
-  for(uint32_t i=0;i<record->reached && i<MESH_STREAMS;i++)if(record->reach[i].node==node)ends[count++]=record->reach[i];
-  qsort(ends,count,sizeof *ends,mesh_reach_faster);
-  return count;
+/* design/transport.md section 14: the one join of two nodes' records.  A record's reach toward `node` (its entries naming
+   it: one a node, its streams over every cable joining the two, mesh-call.h mesh_nodes_reached; a record that names a
+   node more than once is read as one entry of them all), its streams and bandwidths summed into *pair; whether it
+   names the node */
+static int mesh_paired(const struct mesh_record *record,uint32_t node,struct mesh_reach *pair){
+  int named=0;
+  *pair=(struct mesh_reach){.node=node};
+  for(uint32_t i=0;i<record->reached && i<MESH_STREAMS;i++)
+    if(record->reach[i].node==node){named=1;pair->streams+=record->reach[i].streams;pair->bandwidth+=record->reach[i].bandwidth;}
+  return named;
 }
 /* the lesser of two ends' figures, where either states one (0: neither does) */
 static uint64_t mesh_lesser(uint64_t a,uint64_t b){ return a && b?(a<b?a:b):a?a:b; }
-/* the links joining a and b: as many as the fewer of the two records lists toward the other (none where either lists
-   none: each one's bridge reaches the other), the k-th of each one's ranked links taken together, link k (its node b's)
-   at the lesser bandwidth and the lesser streams either end states, the faster first, at most `room` written; their
-   count */
-static uint32_t mesh_join(const struct mesh_record *a,const struct mesh_record *b,struct mesh_reach *link,uint32_t room){
-  struct mesh_reach ends[2][MESH_STREAMS];
-  const uint32_t one=mesh_paired(a,b->node,ends[0]),other=mesh_paired(b,a->node,ends[1]),joins=one<other?one:other;
-  for(uint32_t k=0;k<joins && k<room;k++)
-    link[k]=(struct mesh_reach){.node=b->node,.streams=(uint32_t)mesh_lesser(ends[0][k].streams,ends[1][k].streams),
-                                .bandwidth=mesh_lesser(ends[0][k].bandwidth,ends[1][k].bandwidth)};
-  return joins;
+/* whether a and b are joined (each one's bridge reaches the other: mesh_paired), and *link the pair's one link (its node
+   b's) at the lesser of the two ends' bandwidths and of their streams, each 0 where neither states one: the pair once,
+   at its cables' bandwidth together, every cable joining the two carrying each of its streams' units */
+static int mesh_join(const struct mesh_record *a,const struct mesh_record *b,struct mesh_reach *link){
+  struct mesh_reach one,other;
+  if(!mesh_paired(a,b->node,&one) || !mesh_paired(b,a->node,&other))return 0;
+  *link=(struct mesh_reach){.node=b->node,.streams=(uint32_t)mesh_lesser(one.streams,other.streams),.bandwidth=mesh_lesser(one.bandwidth,other.bandwidth)};
+  return 1;
 }
 int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
-  struct mesh_reach fastest;
-  const uint32_t joins=mesh_join(a,b,&fastest,1);
-  if(joins)*beta=fastest.bandwidth?8e9/(double)fastest.bandwidth:0;
-  return joins!=0;
+  struct mesh_reach link;
+  const int joins=mesh_join(a,b,&link);
+  if(joins)*beta=link.bandwidth?8e9/(double)link.bandwidth:0;
+  return joins;
 }
 
-/* The records' whole map, its nodes ascending (the records sorted by node), each link where two join (mesh_join, the
-   faster first), at its bandwidth and streams, and its routing table (mesh-collective.c mesh_routes, each node marked
+/* The records' whole map, its nodes ascending (the records sorted by node), a link a pair of nodes that join (mesh_join),
+   at its bandwidth and streams, and its routing table (mesh-collective.c mesh_routes, each node marked
    by its bridge's number, so every member that holds the same records makes the same routes) */
 struct mesh_whole { uint32_t n,(*link)[2],*mark,*next,*streams; uint64_t *bandwidth; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
@@ -148,20 +143,18 @@ static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->bandwidt
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
   size_t joins=1;
-  struct mesh_reach join[MESH_STREAMS];
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=(size_t)mesh_join(r+a,r+b,join,MESH_STREAMS);
+  struct mesh_reach join;
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=(size_t)mesh_join(r+a,r+b,&join);
   *w=(struct mesh_whole){.n=n,.link=malloc(joins*sizeof *w->link),.bandwidth=malloc(joins*sizeof *w->bandwidth),
     .streams=malloc(joins*sizeof *w->streams),.mark=malloc(((size_t)n+1)*sizeof *w->mark),.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
   if(!w->link || !w->bandwidth || !w->streams || !w->mark || !w->next)return ENOMEM;
   uint32_t links=0;
   for(uint32_t a=0;a<n;a++){
     w->mark[a]=r[a].node;
-    for(uint32_t b=a+1;b<n;b++){
-      const uint32_t joined=mesh_join(r+a,r+b,join,MESH_STREAMS);
-      for(uint32_t k=0;k<joined;k++){
-        w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=join[k].bandwidth;w->streams[links]=join[k].streams;links++;
+    for(uint32_t b=a+1;b<n;b++)
+      if(mesh_join(r+a,r+b,&join)){
+        w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=join.bandwidth;w->streams[links]=join.streams;links++;
       }
-    }
   }
   w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.bandwidth=w->bandwidth,.relays=0,.next=NULL,
     .mark=w->mark,.streams=w->streams};

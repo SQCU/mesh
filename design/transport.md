@@ -129,8 +129,11 @@ The only words both sides touch are single-writer readiness words: the client wr
 
 A protocol is needed only where one side must learn something neither side can know beforehand. Here that is the
 queue-pair numbers, packet sequence numbers and GIDs the hardware assigns at each pairing (TN3205's out-of-band
-endpoint exchange): HELLO and LINK on the control socket, once a pairing. RECORD carries each node's links and memory
-(the map), which is data, not a dialogue.
+endpoint exchange): HELLO and LINK on the control socket, once a pairing. The other is the count at which each cable's
+lanes of a stream change mapping where the cables joining two nodes change, which the sender's SENDs posted and the
+receiver's receives posted together fix and neither end holds alone: STREAM, once such a change, on each cable of the
+stream (section 14, "A stream over several cables"). RECORD carries each node's links and memory (the map), which is
+data, not a dialogue.
 
 Everything about a call is known before it runs: both ends compile the same schedule, so each position's length and
 order are known at both ends. Data goes SEND into a posted receive. A side that supplies nothing is replaced by a dud
@@ -344,7 +347,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | Question | Ranked | Rubric |
 |---|---|---|
 | What a client names | a port and a lane pair (`bind[port][pair]`, 127) ≺ a node | M5, D7 |
-| Who takes a queue pair | a client's compare-and-swap on `hdr->lanes` (HEAD before 127) ≺ the bridge binds it at the client's asking (127) ≺ no client takes one: the bridge stripes a node's stream over the link's lane pairs | M5, M2, M9 |
+| Who takes a queue pair | a client's compare-and-swap on `hdr->lanes` (HEAD before 127) ≺ the bridge binds it at the client's asking (127) ≺ no client takes one: the bridge stripes a node's stream over the link's lane pairs ≺ over a lane pair of every cable joining the two nodes ("A stream over several cables", below) | M5, M2, M9, M1 |
 | How a client holds the stream | a request and an answer in its slot (127) ≺ its owner word taken while the stream is free, as rows are | M2 |
 | Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life | M4, M9 |
 | How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more | M4, M10 |
@@ -354,23 +357,26 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
 
 **The stream.**
-- Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own, since a
-  queue pair carries one ring (a SEND fills the oldest receive posted on it): as many as its plan has lane pairs for
-  (four of ten queue pairs, one of two: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)); the rest are never live. Each stream has two classes: large units
-  (the region's block) and small units (one frame). Each class is a ring of units in the bridge's arena, with a ready
-  word and a landed word per unit (`struct mesh_stream`).
-- A stream's units of a class ride its lane of that class in order, alike at both ends (`MESH_STREAM_PAIRS`, the pairs
-  a stream stripes over, is one).
-- Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
-  GID and queue pair number) and which no other stream between the two nodes has.
-- The receive thread posts receives into the in ring for the link's life, and raises a unit's landed word only once it
-  and every unit before it have landed. A run has landed once its last unit's word says so, whichever lanes it rode.
+- A node pair has up to `MESH_LINK_STREAMS` (4) streams, stream s on lane pair s of every cable joining the two whose
+  plan has it, since a queue pair carries one ring (a SEND fills the oldest receive posted on it): as many as the
+  cables' plans have lane pairs for (four of ten queue pairs, one of two: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)),
+  the rest never live. Each stream has two classes: large units (the region's block) and small units (one frame). Each
+  class is a ring of units in the bridge's arena, with a ready word and a landed word per unit (`struct mesh_stream`).
+- A stream's units of a class stripe over its cables in order, alike at both ends: unit u rides stripe u mod n of its n
+  cables (ordered by each cable's identity for that stream, alike at both ends), as that stripe's lane's (u / n)-th unit
+  from its base. On a single cable, n is 1 and the base 0: unit u is the lane's u-th, as before groups.
+- Each stream has an identity, `wire`, which both bridges compute alike and which no other stream between the two nodes
+  has: on a single cable from its pairing on, its large lane's two ends (each port's GID and queue pair number); over
+  several, or after a drain, those cables' identities and bases with the stream's index.
+- The receive threads post receives into the in ring for the group's life, and a unit's landed word is raised only once
+  it and every unit before it have landed, by whichever member's receive thread first reads them all landed. A run has
+  landed once its last unit's word says so, whichever cables it rode.
 - Clients see the stream's rings and words, its `peer` node, `wire`, `live`, `free` and `next`. They never see a port,
   lane, queue pair, request or completion.
 - The words only the bridge writes: landed, `live`, `free`, `next`, and each class's two time rings (`posted_at`,
   `landed_at`, mesh.h struct mesh_stream): unit u's entry, u mod MESH_STREAM_TIMES, holds 1 + u and the ticks
   (mach_absolute_time, unconverted) read once at the end of the send thread's pass that posted u, or of the receive
-  thread's pass that released it, after every post or landed word of the pass, never between two and never before a
+  thread's pass that released it (or, several cables releasing together, that timed it), after every post or landed word of the pass, never between two and never before a
   landed word. The library reads them as it reads landed words and converts the ticks to ns (nccl.h ncclMeshTimes): no
   request, wake or file.
 
@@ -381,7 +387,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 - The holder's first units are the stream's `next`, which its communicator's init tells its peers through NCCL's
   bootstrap. One communicator holds a stream at a time. Each channel's head credit (a position published once the
   peer's position LAG back is consumed) sizes the ring for that channel alone, so two communicators on one ring could
-  write a slot before it is read. Communicators that share a node pair hold different streams of its link: an init's
+  write a slot before it is read. Communicators that share a node pair hold different streams of it: an init's
   first gather carries each rank's free streams (`mesh_streams_free`), and both ends of each pair of members take the
   stream of the least `wire` free at both (`mesh_stream_take`), so the two ends of a communicator hold the two ends of
   one stream. An init is refused (EBUSY) only where no stream toward a member's node is free at both ends.
@@ -393,9 +399,51 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 **Duds, and a holding's end.**
 - The send thread posts unit u when its ready word reads `1 + u / units`. Where u is declared, not supplied, and the
   deadline has passed, it posts a dud: a SEND from the bridge's all-ones block.
-- When the owner word changes, the send thread ends the holding: every unit up to the most declared or supplied goes,
+- When the owner word changes, the leader's send thread (the group's least port's, whose slot holds the stream) ends the
+  holding, telling every member its end before it: every unit up to the most declared or supplied goes,
   the unsupplied ones as duds, and one unit more. Once every lane has sent them, the stream is free again, its `next`
   the first unit after them.
+
+**A stream over several cables** (the fabric recabled into rings and tori: two nodes joined by more than one cable, and
+every cable carrying load).
+- A client sees nodes and streams only (design/rubrics.md, Three kinds of source: it "holds a stream toward each
+  member's node" and reaches no port, link, cable or lane), so the bridge stripes each stream's units over every cable
+  joining the two nodes, and a communicator moves at the cables' bandwidth together. Its record names the pair once,
+  at that bandwidth, with the streams the pair has (the most any one cable's plan holds: `record_reach`), which
+  `mesh_join` reads as the pair's one link. The bridge chooses no route and forwards nothing (M1): a path through
+  other nodes is the collective layer's.
+- A group is the stream of index s toward a node over its cables (`struct group`, the parent's). Its stream lives in
+  its leader's slot (the least member port's), and each member's lanes of s are bound to it (`struct stream_lanes`
+  `told`, read by the port agent's threads: `bound_read`). The leader's send thread serves the holding (`held`,
+  `final`, `free`, `next`), each member's send thread sends its stripe, and each member's receive thread releases the
+  units in order from every member's landings (`group_release`).
+- A group is made anew where its cables change. Its stripe count fixes where every unit lands, and a receive posted
+  ahead holds the slot it was posted for, so the two ends must agree on the count at which each cable's lanes change
+  mapping. Nothing either end holds tells it the other's: the sender's SENDs posted and the receiver's receives
+  posted differ by what is in flight. So the change is told once a change, on each cable of the group (STREAM: this end's
+  lanes of the stream as it froze them, each class's SENDs and receives posted, and the cables it names), as a
+  pairing's LINK is told once a cable: the stream cannot exist until then, and the exchange is paid once per change of
+  cabling, never per call or transfer (design/rubrics.md, Two channels). Both ends then compute each cable's bases alike:
+  out = max(this end's SENDs, the peer's receives), to which it pads with duds, filling every receive the peer posted;
+  in = max(the peer's SENDs, this end's receives), to which it absorbs into the link's sink, taking every SEND the peer
+  posted or pads. Once its lanes are there (drained), the group opens from those bases, its words new and its identity
+  new. Its steps are freeze, tell, drain, open (`group_make`, `group_advance`, `group_open`), each a word the parent
+  writes and both progress threads tell back as they act on it (`sending`, `receiving`). Each step ends with the
+  peer's STREAM, its own threads' passes or a link's loss.
+- A cable lost fails the calls in flight on it (their units are gone: design/rubrics.md C6), the group cancelled at once
+  (`groups_lost`: landed words ~0). The group is made anew over the other cables, with no re-pairing (M3) and no
+  person (M6), and the next call takes it. A slot whose stream was cancelled while a client held it opens again no
+  sooner than MESH_PLATFORM_NS later (`slot_quiet`), the bound within which the holder's groups end at a landed word
+  ~0, as a re-pairing's connect always came that long after a loss. Where the leader moves (its own cable lost), the
+  stream opens in the new leader's slot at once.
+- A cable that joins is taken at the stream's next holding: a group held at this end is made anew only once its holder
+  lets go, so no running call fails because a cable was plugged in. A group whose cables are each fresh (connected and
+  in no group since) opens at once from bases 0 at both ends, with no exchange: one cable per peer pairs and serves
+  exactly as before groups, its log and its wire unchanged. One end that opened that way and finds the peer making the
+  group over the same cables (its STREAM) makes it anew too.
+- Concurrency between two nodes is their streams: the most any one cable's plan holds, not the sum (two one-stream
+  cables, the M5 Ultra's, carry one stream at both cables' bandwidth, and a second concurrent communicator is refused at
+  its init with EBUSY, as with one such cable).
 
 **A process a port** (version 130, its streams new at every pairing from 131; the operator's choice of 10-20).
 - The bridge is a parent and an agent a port. The parent, its heartbeat's child, holds the region, the map and records, the
@@ -438,8 +486,9 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one agent's at
   a time and no make meets the device's ceiling. At the bridge's stop every agent is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
-- Streams across agents. A port's rings and words are the parent's, leased once. A new agent opens every stream new as
-  its link connects: owner word 0, ready and landed words 0, `next` 0, free and live. A holding of the lost pairing
+- Streams across agents. A port's rings and words are the parent's, leased once. A new agent's lanes are frozen as its
+  link connects (`port_frozen`), and the parent opens each stream new in its group (`group_open`): owner word 0, ready
+  and landed words 0, `next` 0, free and live. A holding of the lost pairing
   ended with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator
   reads its holding gone (mesh-call.h `mesh_stream_held`: live, its owner word its client's, its identity the one it
   took) and starts no group on it (libnccl-mesh `comm_failure`, `ncclCommGetAsyncError`). No holder keeps a stream from
