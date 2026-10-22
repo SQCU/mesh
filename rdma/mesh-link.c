@@ -951,18 +951,19 @@ static void slot_reset(uint32_t slot){
   }
   atomic_thread_fence(memory_order_release);
 }
-/* design/transport.md section 14: the rings of each stream of the port's slots that its cable's plan carries (the first
-   `streams`: plan_streams of the plan its pairing makes, from the queue pairs both ends' devices hold for it,
-   design/HETEROGENEOUS-LINKS.md), a lease of the arena each, taken by the parent as a pairing first needs it and held for
-   the region's life, every agent and bridge of the port's (its offsets told in the region, mesh.h struct mesh_stream, so a
-   bridge adopting the region takes the same pages: section 2; a stream that has them has its units), and its pages
-   counted among the bridge's own once a bridge (`rings`, a bit a stream; and so any a bridge before it leased).  A
-   stream's lease: of each class (a large unit the region's block, a small one a frame) its in and out rings of its
-   units, then its ready and landed words (and after the large class's, the slot's bridge words: mesh-bridge.h struct
-   stream_lanes, within the block its words round to wherever the page is 16 KiB), then its two time rings: 19.0 MiB on
-   16 KiB pages, so a cable's rings are its streams' (four on a macOS 26 device's ten queue pairs, 76.1 MiB; one on the
-   M5 Ultra's macOS 27 device's two, 19.0 MiB), where every cable leased four.  0, or ENOMEM where the region holds no room
-   for one (those leased before it kept) */
+/* design/transport.md section 14: the rings of each of the port's first `streams` slots (the streams its own device
+   carries with any peer, from the queue pairs it holds for a link, and at least its pairing's plan's:
+   design/HETEROGENEOUS-LINKS.md; link_turn), a lease of the arena each, taken by the parent at the port's first pairing
+   and held for the region's life, every agent and bridge of the port's (its offsets told in the region, mesh.h struct
+   mesh_stream, so a bridge adopting the region takes the same pages: section 2; a stream that has them has its units),
+   and its pages counted among the bridge's own once a bridge (`rings`, a bit a stream; and so any a bridge before it
+   leased).  A stream's lease: of each class (a large unit the region's block, a small one a frame) its in and out rings
+   of its units, then its ready and landed words (and after the large class's, the slot's bridge words: mesh-bridge.h
+   struct stream_lanes, within the block its words round to wherever the page is 16 KiB), then its two time rings: 19.0
+   MiB on 16 KiB pages, so a port's rings follow its own device's budget, never the peer of the moment (four on a macOS
+   26 device's ten queue pairs, 76.1 MiB, whatever cable it pairs; one on the M5 Ultra's macOS 27 device's two, 19.0
+   MiB).  Leased in stream order, so a plan's streams before the rest.  0, or ENOMEM where the region holds no room for
+   one (those leased before it kept) */
 static int stream_rings(struct port *port,uint32_t streams){
   struct link *l=&port->link;
   const uint64_t pgsz=M->pgsz,block=(uint64_t)M->block*pgsz,unit[2]={block,MESH_FRAME},units[2]={MESH_STREAM_LARGE_UNITS,MESH_STREAM_SMALL_UNITS};
@@ -1437,10 +1438,16 @@ static void link_turn(struct port *port){
   }
   if(l->job || held)return;
   if(l->state==LINK_DOWN){
+    /* the link's block, then the rings of every stream this port's own device carries with any peer (plan_streams of
+       link_plan of its budget, the plan's first), leased at its first pairing whatever the peer of the moment holds, so
+       a cable moved to a peer of more streams finds them leased (design/rubrics.md M7: committed earlier); the link
+       needs its block and its plan's rings alone */
     const uint32_t streams=plan_streams(l->plan),ringed=(UINT32_C(1)<<streams)-1;
-    if((l->page==MESH_ABSENT && ((l->page=mesh_bridge_pages(M)->link[port->index]=mesh_arena_alloc(&bridge,l->pages,M->block))==MESH_ABSENT ||
-                                 !(held_pages+=l->pages))) ||
-       ((l->rings&ringed)!=ringed && stream_rings(port,streams))){
+    const uint32_t carried=MAX(streams,plan_streams(link_plan(port->budget))),leased=(UINT32_C(1)<<carried)-1;
+    if(l->page==MESH_ABSENT && (l->page=mesh_bridge_pages(M)->link[port->index]=mesh_arena_alloc(&bridge,l->pages,M->block))!=MESH_ABSENT)
+      held_pages+=l->pages;
+    if(l->page!=MESH_ABSENT && (l->rings&leased)!=leased)stream_rings(port,carried);
+    if(l->page==MESH_ABSENT || (l->rings&ringed)!=ringed){
       say("link %u (%s): lanes not made: the region holds no room for their blocks and rings; paired again on hearing the peer\n",
           port->index,port->name);
       port_lost(port,ENOMEM);
