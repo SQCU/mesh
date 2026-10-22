@@ -6,8 +6,11 @@ any cabling.
 
 - Operator (2026-10-01): "MAKING K-MANY COMPUTERS INTO A SHARED ADDRESS SPACE WHERE EXTREMELY HIGH NUMBERS OF CPU
   CORES CAN ASYNCHRONOUSLY START WRITING TO STRIPES OF THE REALLY BIG SHARED ADDRESS SPACE."
-- Operator (2026-10-03): "i cannot and will not precommit to a specific ordering or routing!" Every algorithm
-  holds for every membership and topology, read from an explicit link map (metal-microbench docs/principles.md §4).
+- Operator (2026-10-03): "i cannot and will not precommit to a specific ordering or routing!"
+- Operator (2026-09-23): "our tensor parallelism code should be fast both on days when the 5 computers are a ring and
+  also on days when the 5 computers are a star. try to avoid making too many assumptions, attempting to write code
+  which infers complex data structures instead of reading them from explicit configurations if those configurations
+  would be more correct" (metal-microbench docs/principles.md §4).
 
 Goals A and B ([design/collective-goals.md](design/collective-goals.md)) were the two-node targets of September
 2026: history, not the task.

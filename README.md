@@ -1,25 +1,26 @@
 # mesh
 
 The [collective goal](GOAL.md): the lowest attainable overhead collective operations for
-arbitrary programs on any number of Macs in any cabling ([rdma/NCCL.md](rdma/NCCL.md)). No ordering or
-routing is committed to ahead of the hardware.
+arbitrary programs on any number of Macs in any cabling ([rdma/NCCL.md](rdma/NCCL.md)). The operator, 2026-10-03:
+"i cannot and will not precommit to a specific ordering or routing!"
 
 Provisioning for a fabric of Apple Silicon Macs wired together with Thunderbolt and
-talking RDMA. The invariant: **a node may never become unreachable, and may never
-decide on its own to stop executing.**
+talking RDMA. The operator, 2026-08-27 ([THREAT-MODEL.md](THREAT-MODEL.md)): "the *absolute* requirement for this
+project is that machines may not become unreachable and may never 'choose' to turn off or stop executing rdma chained
+intermediates or results for larper reasons".
 
-Nodes are expected to be unplugged, carried to another room, and replugged into a
-different position in the mesh. Nothing here encodes cable position.
+Nothing here encodes cable position. The operator, 2026-09-25: "absolutely no part of the project's scope or
+requirements ever gave off the impression that mesh units are permanent, stationary, stay online forever, or that
+anyone is allowed to stop working, whether services or agents working on services, if a meshed compute network is
+unplugged, turned off, turned on, retopoed, etc."
 
-**The threat is the false negative** — a node that should be working and reachable
-and silently is not, for any reason, however locally sensible. Stock macOS ships in
-exactly that vulnerable mode: it sleeps, it locks, it waits for consent, and it
-reboots itself on an internal policy. Correcting that default is the only work
-that justifies a human being physically present. See [THREAT-MODEL.md](THREAT-MODEL.md)
-before changing settings that look wrong.
+The operator, 2026-08-27 (THREAT-MODEL.md): "the most important class of compromise is the false negative: the
+computer should be on and receiving work and doing work, but isn't, for any reason, no matter how sensible the
+'reason' might sound", and "correcting this default is the first, urgent, and only human-intervention-justifying
+priority". Stock macOS sleeps, locks, waits for consent, and reboots itself on an internal policy.
 
 A node stays awake by its power policy (`sleep 0`, `standby 0`, `autopoweroff 0`, `autorestart 1`, set by each run
-of `install.sh`), never by a process holding assertions. Until 2026-10-13 `io.mesh.caffeinate` ran `caffeinate -dimsu`,
+of `install.sh`), not by a process holding assertions. Until 2026-10-13 `io.mesh.caffeinate` ran `caffeinate -dimsu`,
 which kept the display on and declared the user active forever, so `dasd` never found the node idle and never ran
 the system's own idle maintenance: the Neural Engine daemon's compiled-model cache, which SIP lets only
 `aned`'s garbage collection delete (`com.apple.aned.danglingModelsGC`, `com.apple.aned.modelCacheGC`, refused 7,750
@@ -46,55 +47,54 @@ rdma_ctl: This tool needs to be executed from Recovery OS.    exit=77
 ```
 
 Entering 1TR requires physically holding the power button, which is a deliberate
-Apple anti-tampering property — no MDM, script, or remote console can do it.
-**Budget exactly one physical visit per machine, forever.** Everything else here
-exists to make that visit the only one.
+Apple anti-tampering property — no MDM, script, or remote console can do it. It is
+the one step of a node's provisioning that takes a physical visit; every other step
+runs remotely.
 
 ## Bringing up a new node
 
 Hands-on, once, ~5 minutes:
 
-1. **Setup Assistant** — create the admin account. Leave FileVault **off**: it would
-   demand a keyboard at every boot, which breaks the invariant. Encrypt payloads at
-   the application layer instead. Confirm Activation Lock is Disabled.
-2. **Recovery** — hold power → Terminal → `rdma_ctl enable` → reboot. Writes
+1. **Setup Assistant** creates the admin account, with FileVault off (with it on,
+   every boot waits at a keyboard) and Activation Lock disabled.
+2. **Recovery**: power held → Terminal → `rdma_ctl enable` → reboot. This writes
    `rdma-enable=1` to NVRAM, which then persists.
-3. **Bootstrap** — open Terminal and run:
+3. **Bootstrap**, in Terminal:
 
    ```
    curl -fsSL https://raw.githubusercontent.com/SQCU/mesh/main/bootstrap.sh | sudo bash
    ```
 
-   This opens sshd *first*, then fetches and runs `install.sh`. Confirm port 22
-   answers before walking away.
+   This opens sshd *first*, then fetches and runs `install.sh`; port 22 answers
+   from then on.
 
-Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
+Everything after that is remote: `ssh node.local` and a rerun of `sudo install.sh`.
 
 The two gitignored credential files, `networks.conf` (every known Wi-Fi network) and `tailscale.key` (a reusable,
-pre-approved Tailscale auth key, not ephemeral), are not in the fetched tarball. From a machine that holds them, once:
+pre-approved Tailscale auth key, not ephemeral), are not in the fetched tarball. They reach a node from a machine that
+holds them, once:
 
 ```
 for f in networks.conf tailscale.key; do ssh node.local "sudo sh -c 'umask 077; cat > /usr/local/mesh/$f'" < $f; done
 ```
 
 Then `ssh node.local 'sudo /usr/local/mesh/bin/mesh-networks.sh; sudo /usr/local/mesh/bin/mesh-tailscale-init.sh'` (or a
-rerun of `install.sh`) adds the networks and joins the tailnet labeled with the node's hardware serial number (never a host name: AGENTS.md, "A node is its hardware; names are virtual"). Disable
-the node's key expiry in the Tailscale admin console (or use a tagged key, whose nodes do not expire), or the node
-must log in again when its node key expires.
+rerun of `install.sh`) adds the networks and joins the tailnet labeled with the node's hardware serial number, not a
+host name (AGENTS.md, "Node identity and names"; the operator, 2026-10-21: "we never rely on something like a
+localhostname as a name or identifier for something which we are programming"). A node's key expires unless its
+expiry is disabled in the Tailscale admin console or it joined with a tagged key, whose nodes do not expire; a node
+whose key expired logs in again.
 
-**Gitignored documents go to peers directly.** Git carries everything a node converges to. A document a node needs
-that must stay out of git goes to it over ssh from a peer that holds it, never through git. There are two kinds:
+**Gitignored documents.** Git carries everything a node converges to except two kinds of document, which reach a node
+over ssh from a peer that holds them:
 - credentials (`networks.conf`, `tailscale.key`), because the repository is public;
 - `NODE-STANDUPS.md` at the checkout's root, the record of which macOS and toolchains each node had and what went
-  wrong at its standup. It stays out of git so that one day's versions are never read as requirements or as a version
-  of this repository.
+  wrong at its standup (`ssh <node> 'cat > mesh/NODE-STANDUPS.md' < NODE-STANDUPS.md`).
 
-Copy them to a node when it joins the mesh, as above. Copy them to every node again whenever one changes: a network
-added, a key replaced, a standup recorded (`ssh <node> 'cat > mesh/NODE-STANDUPS.md' < NODE-STANDUPS.md`). Build
-products are gitignored too and never copied: each node builds its own.
+Build products are gitignored too; each node builds its own.
 
 **Nodes of your own.** The roster every node trusts is `keys/authorized_keys` (public keys, each labeled
-`owner:machine`). Fork this repository, append your public key to it, and bootstrap from the fork:
+`owner:machine`). A fork of this repository with its owner's public key appended bootstraps its owner's nodes:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/<you>/mesh/main/bootstrap.sh | sudo MESH_REPO=<you>/mesh bash
@@ -104,33 +104,28 @@ A node remembers the repository and branch it was bootstrapped from (`/usr/local
 and converges from them when someone reruns its bootstrap (below); the bridge and the library are built by hand
 (`rdma/NCCL.md` "Build and run").
 
-> The failure to guard against here is not "the wrong code ran" — that is answered by
-> replacing the machine. It is a bootstrap that half-completes and leaves the node
-> unreachable. That is why `bootstrap.sh` opens sshd *before* it fetches anything:
-> if every later step fails, the machine is still remotely recoverable.
-> Set `MESH_BRANCH` to fetch a branch other than `main`. Never index by commit —
-> see **Never index version control by commit** in [AGENTS.md](AGENTS.md).
+`bootstrap.sh` opens sshd *before* it fetches anything, so a node whose later steps
+fail is still reachable. `MESH_BRANCH` selects a branch other than `main` (Which
+definition a node is running, below).
 
 ## What provisioning does that looks wrong
 
-Repo reasoning, not operator policy — see [THREAT-MODEL.md](THREAT-MODEL.md) for what
-was actually asked for. Each of these is open to revisiting:
+The repository's reasons, with no operator quote behind them ([THREAT-MODEL.md](THREAT-MODEL.md)
+has the operator's words):
 
 - **FileVault stays off.** It demands a keyboard at every boot, so a node under it
-  cannot reboot unattended. Encrypt payloads at the application layer instead,
-  whenever that is wanted — nothing here argues data at rest is unimportant.
+  cannot reboot unattended.
 - **The application firewall is off**, set by each run of `install.sh`. It can only
-  subtract reachability. This is the weakest-supported item here and the first to
-  revisit if a node ever lives somewhere with less physical control.
+  subtract reachability.
 - **Passwordless sudo** via `/etc/sudoers.d/mesh`, `visudo -c` validated before it is
   written. A password prompt on a keyboard-less node blocks both recovery and any
   future agent that provisions a machine and then has to administer it.
 - **The provisioning source is a public repo**, so a node reaches a consistent
   definition with no credentials.
 
-## Traversal is a stream, and nodes patch themselves
+## Traversal is a stream, and a node converges when its installer runs
 
-`mesh-peers` emits facts as they arrive and never waits to prove a negative; it runs until it is stopped:
+`mesh-peers` emits facts as they arrive and does not wait to prove a negative; it runs until it is stopped:
 
 ```
 node <n> self|peer [name=<name>]    each node this node's bridge holds a record of (its map), at once; then each node
@@ -146,18 +141,19 @@ gone <n>                            an announcement withdrawn
 `<n>` is the node's identity, its bridge node number (FNV-1 of its host UUID, `rdma/peers.py` `node_number`): a
 bridge record and an announcement are the same node when their numbers are, and `self` is this machine's own number.
 `name=` is the name table's (`etc/mesh-nodes.json`, entries keyed by host UUID, `rdma/peers.py` `table`), absent for a
-node it does not list; a name is a label for people, never matched to find a node (AGENTS.md, "A node is its hardware;
-names are virtual"). The beacon announces the host UUID as its instance name and its number, UUID and serial in its
+node it does not list; a name is a label for people, which nothing matches to find a node (AGENTS.md, "Node identity
+and names"). The beacon announces the host UUID as its instance name and its number, UUID and serial in its
 TXT record; a node still running an older beacon (one that announced its LocalHostName) shows as
 `unidentified-<key>` until `install.sh` next runs there. The SRV target `dns-sd -L` resolves is used only as
 mDNS's pointer to the node's address records.
 
-The fabric's nodes are the bridge's map, so a node cabled to this one is known along its cable and never asked over
-Wi-Fi (the operator, 2026-10-16); its facts are node-info's, which its resident rank answers (metal-microbench
+The fabric's nodes are the bridge's map, so a node cabled to this one is known along its cable (the operator,
+2026-10-16: "you should never be using networking over wifi etc when it is physically and literally tethered / cabled
+to a host machine"); its facts are node-info's, which its resident rank answers (metal-microbench
 docs/elastic.md#call-delivery). Discovery on the shared LAN is its mDNS (git 1587656: control
 traffic needs no fabric), so it is not limited to one cable hop; a node on no shared LAN is found only over its own
 cables. Every line arrives when its event does: a slow node delays only its own lines, and a node that is not there
-is simply absent. The consumer reads a stream and deals with out-of-order arrival.
+is simply absent.
 
 **A node converges when someone runs its installer, and at no other time.** Nothing fetches, installs, builds or
 restarts on a schedule: the operator, 2026-10-21, "this is a genre of code where automatically updating and building
@@ -207,16 +203,16 @@ Verified between `Mac16,11` and `Mac17,6` over one Thunderbolt 5 cable with
 | 256 KB | 15 | 960 | 64.5 Gbit/s | 65.0 us |
 | 1 MB | 3 | 768 | 70.9 Gbit/s | 237 us |
 
-**Queues are counted in 4 KB frames, not in messages.** `size/4096 * rx_depth` must
-stay under 4095. The first attempt here asked for 64 KB messages at the default
+**Queues are counted in 4 KB frames, not in messages.** A queue holds under 4095
+frames (`size/4096 * rx_depth`). The first attempt here asked for 64 KB messages at the default
 rx-depth of 500 — 8000 frames — and failed as `Failed to modify QP to RTR` on one side
 and `Operation not permitted` on the other, which reads like a permissions or fabric
 problem and is neither.
 
-Other limits worth knowing before writing against this, all from TN3205: send/receive
-only (`IBV_WR_SEND`, `IBV_ACCESS_LOCAL_WRITE`), 10 UC queue pairs per device, ~16 MB
-maximum message, sender and receiver must post the **same frame count**, no hardware
-ACK, and a per-controller IOMMU so a buffer is registered separately per device.
+Other limits, all from TN3205: send/receive only (`IBV_WR_SEND`,
+`IBV_ACCESS_LOCAL_WRITE`), 10 UC queue pairs per device, ~16 MB maximum message, the
+**same frame count** posted by sender and receiver, no hardware ACK, and a
+per-controller IOMMU so a buffer is registered separately per device.
 
 The queue pairs are not the same everywhere: the M5 Ultra on macOS 27 reports `max_qp` 3
 on every device, not 11, and its driver keeps a queue pair of each device for itself. A
@@ -228,9 +224,9 @@ RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of
 this depends on the routing layer.
 
-> [design/transport.md](design/transport.md) is the transport: who owns which pages and addresses, why a
-> send or a receive does not fail, and which kernel calls can wedge a node (killing a verbs process can need a
-> physical power cycle). Read it before writing or running anything that opens a verbs device.
+[design/transport.md](design/transport.md) is the transport: who owns which pages and addresses, why a
+send or a receive does not fail, and which kernel calls can wedge a node (killing a verbs process can need a
+physical power cycle).
 
 ## Links, and knowing when you only have one
 
@@ -244,16 +240,14 @@ backwards, and the label hides a real dependency:
 - **The fabric is the dependable one.** Copper, point to point, between two machines
   we own. It needs no infrastructure that anyone else controls.
 
-So the fabric can be a node's *only* link, and control has to ride it when that is the
+So the fabric can be a node's *only* link, and control rides it when that is the
 case — `ssh` and `mesh-peers` both work over `fabric-adjacent` link-local
 addresses for exactly this reason. Breaking the fabric is a reachability failure, not
 an inconvenience, which is why the transport's stop (design/transport.md) is a reachability
 matter.
 
-The invariant is not "every link comes back" — that cannot be promised for a network
-that may not exist. It is: **a node comes back with every link the room actually
-offers, and reports all of them**, so a drop to one is visible rather than discovered
-later:
+A node comes back with every link the room offers, and `mesh-status` reports all of
+them, so a drop to one is visible rather than discovered later:
 
 ```
 LINKS
@@ -263,38 +257,36 @@ LINKS
 ```
 
 The plane count is `mesh-status`'s: the LAN, and a fabric port whose cable link is up (each port's RDMA peer is in
-its RDMA section, from `/var/run/mesh-fabric`, the fabric init's). It prints `DEGRADED` while only one remains. Do not
-run anything that can disrupt the remaining link while degraded.
+its RDMA section, from `/var/run/mesh-fabric`, the fabric init's). It prints `DEGRADED` while only one remains.
 
-### The list has to have more than one entry
+### The list of known networks
 
 macOS auto-joins any known network in range, so "find an available network" needs no
 code. It needs a list, and a list of one is a venue change away from needing a
 keyboard. `networks.conf` (gitignored — it holds live credentials) seeds every node,
 `install.sh` copies it to `/usr/local/mesh/networks.conf` and seeds it
-(`mesh-networks.sh`) at each run. Entries are only added, never removed. Format is in `networks.conf.example`.
+(`mesh-networks.sh`) at each run. `mesh-networks.sh` adds entries and removes none. Format is in `networks.conf.example`.
 
 ## Adding a machine to the fabric
 
-Steps 1-3 above, then cable it to any free Thunderbolt port on any existing node —
-position does not matter and nothing records it. Then verify, from either end:
+Steps 1-3 above, and a cable to any free Thunderbolt port on any existing node;
+position does not matter and nothing records it. From either end:
 
 ```
 mesh-status                     # rdma_enX PORT_ACTIVE, io.mesh.* all loaded
 mesh-peers                      # the new node appears: in its bridge's map, and its announcement
 ```
 
-What each step proves, in order, so a failure tells you where to look:
+What each reading shows, in order:
 
-| check | passes when | fails if |
+| reading | shows | otherwise |
 |---|---|---|
-| `rdma_ctl status` = enabled | the Recovery visit happened | needs a physical 1TR visit; nothing remote fixes it |
-| some `rdma_enX` is `PORT_ACTIVE` | a cable is in, both ends RDMA-enabled | cable, or the far end never had `rdma_ctl enable` |
-| `ifconfig <port>` has an `fe80::` address | `mesh-fabric-init` ran | check `/usr/local/mesh/log/fabric.log` |
-| the peer appears in `mesh-peers` | its bridge's record reached this one, or its beacon announced it | check `~/Library/Logs/io.mesh.bridge.log`, `/usr/local/mesh/log/router.log`; confirm both nodes advertise |
+| `rdma_ctl status` = enabled | the Recovery visit happened | a physical 1TR visit; nothing remote enables it |
+| some `rdma_enX` is `PORT_ACTIVE` | a cable is in, both ends RDMA-enabled | the cable, or the far end never had `rdma_ctl enable` |
+| `ifconfig <port>` has an `fe80::` address | `mesh-fabric-init` ran | its log is `/usr/local/mesh/log/fabric.log` |
+| the peer appears in `mesh-peers` | its bridge's record reached this one, or its beacon announced it | the logs are `~/Library/Logs/io.mesh.bridge.log` and `/usr/local/mesh/log/router.log` |
 
 A node that answers `mesh-peers` is administrable and workloadable.
-Nothing else is required of it.
 
 ## Is anything missing?
 
@@ -338,7 +330,7 @@ Apple's documented fix is not sufficient. Measured on `Mac16,11`: after
 `networksetup -setnetworkserviceenabled "Thunderbolt Bridge" off`, `bridge0` was
 still `UP`, `RUNNING`, `status: active`, with all three members attached and a live
 address-cache entry. Making the service inactive drops the IPv4 address and nothing
-else. The bridge interface itself has to be destroyed.
+else. `mesh-fabric-init` destroys the bridge interface itself.
 
 [tn]: https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt
 
@@ -350,7 +342,7 @@ No static IPs. Identity travels with the machine:
 - IPv6 link-local on each fabric port, EUI-64 from that port's own MAC
 
 A Bonjour `<LocalHostName>.local` name is not identity: macOS renames a running machine when another claims its name
-(AGENTS.md, "A node is its hardware; names are virtual").
+(AGENTS.md, "Node identity and names").
 
 That link-local is *exactly* the value the paired RDMA device reports as one of its GIDs (`GID[0]` on macOS 26;
 on macOS 27 the M5 Ultra's devices list another address first, `23ff:…`, then the link-local at `GID[1]`), so a port's
@@ -361,10 +353,9 @@ survives being unplugged and replugged into a different port on a different mach
 macOS does not autoconfigure link-local on an interface with no network service, so
 `mesh-fabric-init` assigns it. It deliberately does **not** create SystemConfiguration
 services for these ports: those writes need Full Disk Access and fail headlessly with
-`Unable to access the System Configuration database`, and configd has no business
-renumbering an RDMA fabric.
+`Unable to access the System Configuration database`.
 
-`net.inet6.ip6.forwarding` is on, because in a ring a node must transit for its
+`net.inet6.ip6.forwarding` is on, because in a ring a node transits for its
 neighbours. RDMA itself never routes — TN3205 is explicit that the application
 forwards — so this reaches nodes, it does not carry fabric payload.
 
@@ -397,14 +388,14 @@ the node's uplink.
 | `install.sh` | provision/converge a node, run by hand. Idempotent — re-running is the drift fix, and nothing reruns it. Each run sets the power policy, the firewall, sshd, screen sharing and NTP, runs the networks, fabric and tailnet inits and the health report, loads every unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and the admin user's LaunchAgents that declare the Background session type (into user/<uid>), and starts the beacon, telemetry and the observer where they are not running. It deletes `io.mesh.update`, `io.mesh.keeper`, `io.mesh.cartlane.learner` and `io.mesh.cartlane.viewer` where they remain, the update's bootout last since that job may be the run's own parent. It runs with root's home: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
 | `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
-| `AGENTS.md` | **the contract.** Accessibility is required; rejection filtering is banned. Read before changing anything. |
-| `THREAT-MODEL.md` | why several settings here look wrong under a normal hardening model. |
+| `AGENTS.md` | the operator's words for this repo: recovery, the hardware, access, version control, node identity, review. |
+| `THREAT-MODEL.md` | the operator's words on access, verbatim (2026-08-27). |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
 | `bin/mesh-tailscale-init.sh` | the node's own tailnet edge (design/ACCESS-TOPOLOGY-SPEC.md: a stationary node is not carried by a laptop's tailnet). Builds the open-source `tailscale` and `tailscaled` at a pinned version with a pinned Go toolchain (fetched, used and deleted with its caches; Tailscale ships no CLI-only macOS binary, and the App Store and standalone apps need a GUI approval), runs `tailscaled` as `io.mesh.tailscale` (state in `/usr/local/mesh/tailscale`), and brings it up from `/usr/local/mesh/tailscale.key` where it is not running; with no key it logs the login URL to `tailscale.log`. Run by `install.sh`; it builds only when the pinned version changes and only with 4 GiB free above the disk floor. A Mac with `/Applications/Tailscale.app` already has its edge from the app, and a second client would contend for the tailnet's routes and DNS, so there it does nothing and `mesh-status` names the app. |
 | `bin/mesh-rdma.sh` | the node's RDMA devices, one line each: `<port> device=<rdma_port> rid=<RID> rdma_peer=present\|absent`. Every script that names fabric ports reads them here. It reads the IORegistry's archive form (`ioreg -a`, a property list, through `plutil`) and keys each device by its registry entry ID, because a tree walk lists an object once for each path to it: on macOS 27 (the M5 Ultra Studio, 2026-10-21) each `AppleThunderboltRDMAInterface` is listed twice, so the earlier text walk named every port twice and its RID lookup matched no `AppleThunderboltRDMAPeerInterface`, reporting `rdma_peer=absent` on a cabled port. |
-| `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement, its instance name the host UUID and its TXT record the node's number, UUID, serial, model and RDMA state. Must never exit voluntarily. |
-| `etc/mesh-nodes.json` | the name table: each node's name for people, keyed by its host UUID (`rdma/peers.py` `table` and `label`; `node <number>` for a node it does not list). Read by `mesh-peers`, node-info, `mesh-top`, the observer and telemetry; never by anything that has to find a node. |
+| `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement, its instance name the host UUID and its TXT record the node's number, UUID, serial, model and RDMA state. It execs `dns-sd -R`, which runs until it is stopped. |
+| `etc/mesh-nodes.json` | the name table: each node's name for people, keyed by its host UUID (`rdma/peers.py` `table` and `label`; `node <number>` for a node it does not list). Read by `mesh-peers`, node-info, `mesh-top`, the observer and telemetry; by nothing that finds a node. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code, and every `/Applications/Xcode*.app` readied for the library's kernels (license, first launch, Metal toolchain). Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on each fabric port, babeld across every fabric port. Resident; launchd restarts it. |
@@ -425,11 +416,11 @@ ends within 15 s of its SIGTERM. |
 | `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_observe`, `mesh_map`, `mesh_map_wait`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
-## No GUI, including for the toolchain
+## The toolchain, installed headlessly
 
-Nodes need Apple's SDK: `infiniband/verbs.h` and `librdma.tbd` ship only in the
-Command Line Tools, and TN3205 requires both to build anything against RDMA. So
-every node needs CLT, not just ones that compile the router.
+`infiniband/verbs.h` and `librdma.tbd`, which TN3205's RDMA programs build against,
+ship only in the Command Line Tools. So `mesh-devtools-init` installs CLT on every
+node, not just ones that compile the router.
 
 CLT installs headlessly. The trap is only the *implicit* path — invoking bare `cc`
 with no toolchain opens the GUI installer. The explicit path never does:
@@ -446,9 +437,9 @@ The marker file is load-bearing, not folklore: without it `softwareupdate -l` li
 is idempotent — it exits immediately when `verbs.h` is already resolvable.
 
 The Metal compiler is not in the Command Line Tools: it is an Xcode component, and
-`softwareupdate` offers no Xcode. Every node gets one, so that any node builds the
-library's kernels itself (`rdma/Makefile`, `kernels`). Copy an Xcode from a machine
-that has one, once per node, over the tailnet:
+`softwareupdate` offers no Xcode. Every node has one, so that any node builds the
+library's kernels itself (`rdma/Makefile`, `kernels`), copied once per node from a
+machine that has one, over the tailnet:
 
 ```
 ditto -c --keepParent /Applications/Xcode-<version>.app - | ssh <node> 'sudo ditto -x - /Applications'
@@ -485,9 +476,9 @@ So every node takes a routable identity address and the fabric is routed:
 - **Enumeration**: the bridges' map names every node on the fabric, `mesh-peers` adds the shared LAN's (above), and
   each node's record lists its routes.
 
-babeld is vendored as a prebuilt arm64 binary — see [vendor/PROVENANCE.md](vendor/PROVENANCE.md)
-for the source, hashes, and the one-line build fix. A node must never need a
-toolchain: invoking `cc` on a virgin Mac opens the Command Line Tools GUI installer.
+babeld is vendored as a prebuilt arm64 binary ([vendor/PROVENANCE.md](vendor/PROVENANCE.md):
+the source, hashes, and the one-line build fix), so the router runs on a node that has
+no toolchain yet: invoking `cc` on a virgin Mac opens the Command Line Tools GUI installer.
 
 RDMA itself is untouched by any of this and still never routes. TN3205 is explicit
 that the application forwards across a topology. This layer exists so that nodes can
@@ -533,31 +524,31 @@ Job submission needs no new machinery. Every node already runs sshd and trusts t
 operator roster; the only missing piece was knowing which nodes exist, which the bridge's map and `mesh-peers` (the
 LAN) answer.
 
-> If you write a plist to `/Library/LaunchDaemons` with `inetdCompatibility`, do not
-> also set `StandardOutPath`. It overrides the socket launchd dups onto stdout, and
-> the service answers every connection with silence while looking perfectly healthy.
+In a `/Library/LaunchDaemons` plist with `inetdCompatibility`, `StandardOutPath`
+overrides the socket launchd dups onto stdout, and the service answers every
+connection with silence while looking perfectly healthy.
 
 ## Which definition a node is running
 
-Fetching is by branch only — `main`, or whatever `MESH_BRANCH` names. Never by commit;
-the reasoning is in [AGENTS.md](AGENTS.md), and it is not negotiable because a pinned
-node cannot receive the change that would unpin it.
+Fetching is by branch: `main`, or the branch `MESH_BRANCH` names. The operator,
+2026-08-27 ([THREAT-MODEL.md](THREAT-MODEL.md)): "you can *never* index by commit *ever*
+unless you register that commit as a branch". A node pinned at a commit would fetch its
+bootstrap at that commit too, so no rerun would bring it the change that unpins it
+([AGENTS.md](AGENTS.md), "Version control").
 
 Branch-addressed content on `raw.githubusercontent.com` carries `cache-control:
 max-age=300`, so a node can briefly fetch a copy up to five minutes old. That is a
 wait, not a fault: it clears itself, and a node that needs the newest definition
-sooner can simply be reached and re-run. Do not reach for a commit hash to dodge it —
-that trades a transient for a permanent.
+sooner can simply be reached and re-run.
 
-What matters is that convergence is visible rather than silent. Each node records the
-branch it converged from and when:
+Each node records the branch it converged from and when:
 
 ```
 mesh-status         branch main converged 2026-08-28T00:56:27Z
 node-info           branch=main converged=2026-08-28T00:56:27Z, every node's through its bridge
 ```
 
-A node that has not converged since a push is the thing worth noticing, and you can see it from any machine.
+So whether a node has converged since a push reads from any machine.
 
 ## A new bridge on a node
 

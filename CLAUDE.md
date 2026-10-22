@@ -1,3 +1,3 @@
-See [AGENTS.md](AGENTS.md) — the accessibility contract that binds all changes to this repo, and [THREAT-MODEL.md](THREAT-MODEL.md) for why.
+See [AGENTS.md](AGENTS.md), the operator's words for this repo, and [THREAT-MODEL.md](THREAT-MODEL.md), the operator's words on access. Code is ranked by [design/rubrics.md](design/rubrics.md).
 
-Short version, in the operator's words (THREAT-MODEL.md): "accessibility is required; inaccessibility is *contractually forbidden*", and "rejection filtering and defensive programming are broadly forbidden by our security model". So code acts. It does not decline to act, hold back a capability by node class, or fail toward a less reachable state.
+The operator, 2026-08-27 (THREAT-MODEL.md): "accessibility is required; inaccessibility is *contractually forbidden*", and "rejection filtering and defensive programming are broadly forbidden by our security model". In collective and data code, design/rubrics.md C6: rejection filters ≺ none (2026-10-20: "count every rejection filter everywhere in client and data processing code. then delete absolutely all of them.").
