@@ -12,7 +12,8 @@
        receive around the ring, of COUNT float32 each, every value exact; `host` the host path (a NULL stream), `walk`
        the Metal path's walk with its kernels on the CPU (nccl-mesh-host.c), never a GPU.  The bridges forward nothing:
        the collectives run over the family's cables (its trees), and a send around the ring between two ranks no cable
-       joins (a line's ends, a star's leaves, a torus's) fails as a value
+       joins (a line's ends, a star's leaves, a torus's) fails as a value at those two ranks alone, every other rank's
+       sendrecv exact
      mesh-loop down DIRECTORY
        every bridge stopped (SIGTERM, a release: design/transport.md section 2), the fabric and every node's region
        unlinked
@@ -263,7 +264,10 @@ static int children(int count, int (^run)(int)) {
   return failed;
 }
 
-/* a rank's NCCL calls, each checked exactly (every value an integer a float32 holds): rank r's element k is r + k mod 97 */
+/* a rank's NCCL calls, each checked exactly (every value an integer a float32 holds): rank r's element k is r + k mod 97;
+   a call's result is its group's, then, where that is ncclSuccess, its communicator's asynchronous error
+   (ncclCommGetAsyncError, NCCL's channel for work a group enqueued: a walk's wait that reached its bound records its
+   failure in the failure words, which the group, its result its encoding's, does not read) */
 static float value_of(int rank, uint64_t k) { return (float)(rank + (int)(k % 97)); }
 static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int walk, uint16_t root_port) {
   const int n = map->n;
@@ -295,6 +299,8 @@ static int rank_calls(const struct loop_map *map, int rank, uint64_t count, int 
       ncclRecv(d, count, ncclFloat32, (rank + n - 1) % n, comm, on);
       result = ncclGroupEnd();
     }
+    ncclResult_t async = ncclSuccess;
+    if (!result && !ncclCommGetAsyncError(comm, &async)) result = async;
     uint64_t wrong = 0;
     const uint64_t checked = call == 1 ? count * (uint64_t)n : call == 4 && rank != root ? 0 : count;
     for (uint64_t k = 0; !result && k < checked; k++) {

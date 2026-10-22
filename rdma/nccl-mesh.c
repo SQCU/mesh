@@ -308,8 +308,8 @@ struct ncclComm {
   double until;
   pthread_t init;
   struct said why, failure;
-  void **scratch, **spent;
-  size_t *scratch_bytes;
+  void **scratch, **spent, *zeros;
+  size_t *scratch_bytes, zeros_bytes;
   uint32_t scratches, scratch_used, spents;
   struct attach *attach;
   uint32_t held;
@@ -381,6 +381,7 @@ static void comm_free(struct ncclComm *comm) {
   routes_free(comm, 1);
   for (uint32_t k = 0; k < comm->scratches; k++) metal_release(comm->scratch[k]);
   for (uint32_t k = 0; k < comm->spents; k++) metal_release(comm->spent[k]);
+  if (comm->zeros) metal_release(comm->zeros);
   for (uint32_t h = 0; h < comm->count; h++) metal_release(comm->channels[h].buffer);
   if (comm->violation) metal_release(comm->violation);
   comm_leave(comm);
@@ -1789,6 +1790,9 @@ struct call {
   uint32_t unit;
   unsigned char pre[8];
   int premultiplied;
+  /* a point-to-point call or an all-to-all with a step toward or from a rank no link of this node joins (plan_calls):
+     that step is not laid, the call's other steps are, and the call fails at this rank alone, as a value */
+  int unlinked;
   struct steps *bound;
   unsigned char *result, *copy;
   int owned;
@@ -1916,9 +1920,15 @@ static size_t piece_bytes(const struct mesh_step *step) { return step->piece.ele
 
 /* every call that crosses a link planned: a collective along the communicator's table (comm_compile; an uneven one's
    segments its counts, mesh_program_steps_cut: its program's segments must be the ranks), its operand's element a
-   merge's row where it merges, a point-to-point call one SEND or COPY step; a step that moves bytes toward or from a
-   rank no link of this node joins refused (the bridges forward nothing) */
-static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
+   merge's row where it merges, a point-to-point call one SEND or COPY step.  A step that moves bytes toward or from a
+   rank no link of this node joins has no channel (the bridges forward nothing): it is dropped (a counts receive of it
+   no longer counted), its call is `unlinked`, and the first such step's message is kept in `apart`; every other step
+   of the group is planned.  Only a point-to-point call's or an all-to-all's can be such a step: a collective's every
+   move is between joined ranks, at every rank alike (comm_compile).  Whether two ranks are joined is read from the
+   map every member made alike (map_of), so both ends of every pair drop or keep their steps toward each other alike,
+   and the positions both lay on each channel are the same: a group of calls on several peers loses only what crosses
+   no link, at the rank whose call it is, and no peer waits on positions this rank never lays */
+static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n, struct said *apart) {
   for (size_t i = 0; i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
@@ -1960,13 +1970,27 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       s->count = counted_steps(comm, c, s->steps);
       s->borrowed = 1;
     } else s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->segments, s->steps);
-    for (uint32_t k = 0; k < s->count; k++)
-      if (piece_bytes(s->steps + k) && comm->toward[s->steps[k].peer] < 0)
-        return fail(ncclInvalidUsage, "a call of %s moves bytes between rank %d and rank %u (node %u), which no link of this node joins: the "
-                    "bridges forward nothing, so a route through another node is refused", comm->name, comm->rank, s->steps[k].peer,
-                    comm->members[s->steps[k].peer]);
+    uint32_t kept = 0;
+    for (uint32_t k = 0; k < s->count; k++) {
+      const struct mesh_step step = s->steps[k];
+      if (!piece_bytes(&step) || comm->toward[step.peer] >= 0) { s->steps[kept++] = step; continue; }
+      if (!apart->id)
+        snprintf(apart->text, sizeof apart->text, "a call of %s moves bytes between rank %d and rank %u (node %u), which no link of this node "
+                 "joins: the bridges forward nothing, so that call fails at this rank, and the group's other calls were carried", comm->name,
+                 comm->rank, step.peer, comm->members[step.peer]);
+      apart->id = 1;
+      c->unlinked = 1;
+      c->counting -= counted(c) && !hosted(c) && step.op != MESH_STEP_SEND && step.buffer == 2;
+    }
+    s->count = kept;
   }
   return ncclSuccess;
+}
+
+/* a group's calls toward unlinked ranks (plan_calls `apart`), once the rest of the group ran: their failure, this
+   rank's alone, its message the first such step's; ncclSuccess where none */
+static ncclResult_t apart_of(const struct said *apart) {
+  return apart->id ? fail(ncclInvalidUsage, "%s", apart->text) : ncclSuccess;
 }
 
 /* a step's piece on one channel: its positions [first, first + pieces), at byte offset of its operand, a position
@@ -2119,14 +2143,53 @@ static void nil_send(struct ncclComm *comm) {
   }
 }
 
+/* design/transport.md section 10: a group that crosses a link and that this rank cannot run, for `result` (last.text its
+   message), its arguments checked (a refusal after them: a revoke, its communicator failed, a lease's GPU work or its
+   own GPU work past the platform's deadline, a Metal program not begun, out of memory in its staging): its communicator
+   fails for good (comm_fail; its first failure kept and returned), as its peers' groups fail at their bound where it
+   lays nothing (run's MESH_PLATFORM_NS, a GPU wait's polls) and would mispair with its next.  Where it is the
+   communicator's first failure (`first`), it is planned (plan_calls, where `planned` is 0), its positions laid
+   (schedule_group), and on each channel its first position's out run declared with the deadline now (nil_send's guard:
+   a holding still its own), so the bridge sends that run as a dud and each peer's group lands it: one run, as a peer
+   may still hold up to LAG of this rank's positions of an earlier group unread, and its in ring has room for one run
+   past 2 LAG (mesh-plan.h mesh_wire), while a dud goes as the bridge reaches it, with no credit.  A stream's
+   declaration covers every unit before the one it names, so no later group of the failed communicator declares
+   anything: its peers' waits past that run end at their bound.  A group that crosses no link has no peer: its failure
+   is its own.  Under group_lock */
+static ncclResult_t refused(struct ncclComm *comm, struct call *list, size_t n, ncclResult_t result, int planned, int first) {
+  int remote = 0;
+  for (size_t i = 0; i < n; i++) remote |= crosses(list + i);
+  if (!remote) return result;
+  char why[sizeof last.text];
+  snprintf(why, sizeof why, "%s", last.text);
+  comm_fail(comm, result, "%s", why);
+  struct said apart = {0, {0}};
+  struct schedule *plans = first && comm->attach ? calloc(comm->count + 1, sizeof *plans) : NULL;
+  if (plans && (planned || !plan_calls(comm, list, n, &apart)) && !schedule_group(comm, list, n, plans)) {
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    for (uint32_t h = 0; h < comm->count; h++) {
+      struct channel *ch = comm->channels + h;
+      const uint64_t through = ch->end > plans[h].start ? plans[h].runs[0].first + plans[h].runs[0].units : 0;
+      if (through <= *ch->declared || !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire)) continue;
+      mesh_stream_declare(&comm->attach->context, ch->stream, ch->large, through, now);
+      *ch->declared = through;
+    }
+  }
+  schedules_free(comm, plans);
+  return told(comm->failed, &comm->failure);
+}
+
 /* the group's schedule (schedule_group), its units declared (declare); a failure the communicator's (comm_fail: its
    channels stand mid-schedule); *made NULL where it failed */
 static ncclResult_t schedule(struct ncclComm *comm, struct call *list, size_t n, struct schedule **made) {
   struct schedule *plans = calloc(comm->count + 1, sizeof *plans);
   *made = NULL;
-  if (!plans) return fail(ncclSystemError, "out of memory");
+  if (!plans) return comm_fail(comm, ncclSystemError, "out of memory");
   const ncclResult_t result = schedule_group(comm, list, n, plans);
-  if (result) { schedules_free(comm, plans); return comm_fail(comm, result, "%s", last.text); }
+  if (result) {
+    schedules_free(comm, plans);
+    return comm_fail(comm, result, "%s", last.text);
+  }
   comm->crossed = 1;
   declare(comm, 0);
   *made = plans;
@@ -2187,15 +2250,19 @@ static int landing(const struct channel *ch, const struct run *r) {
 /* every channel's positions published and consumed on the host: a SEND's piece supplied into its run, a REDUCE's
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct exchange's
    sums go to a copy, as its SENDs read the operand); a landing that reads the link's loss fails it, and so does
-   a revoke, at its next look: a peer's process gone or its communicator revoked ends its bindings, whose duds land here
-   (design/transport.md sections 5 and 14: a client's wait is a loop that stops on a word, never on a clock; a peer that
-   computes for long is waited for).  Every look spins: nothing parks.  A position whose publication reads in place
-   what its consumption writes (sends_what_lands) is consumed once it is published.  Its positions then count as
-   awaited for the GPU work after it (`waited`) */
+   a revoke, at its next look: a peer's process gone or its communicator revoked ends its bindings, whose duds land here.
+   It fails as a value where nothing lands and nothing can be published for MESH_PLATFORM_NS (nccl.h; design/transport.md
+   section 5, the operator's deadline: a send or receive channel never goes 5 s without something concluding), its
+   clock read only on a look that moved nothing, each RUN_LOOKS of them: a peer whose group never comes (its process
+   ended before it, or it failed a group this rank ran) ends this wait as a GPU wait's bound ends one.  Every look
+   spins: nothing parks.  A position whose publication reads in place what its consumption writes (sends_what_lands) is
+   consumed once it is published.  Its positions then count as awaited for the GPU work after it (`waited`) */
+#define RUN_LOOKS 64
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
+  uint64_t idle = 0, since = 0;
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
-    int open = 0;
+    int open = 0, moved = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
       struct schedule *p = plans + h;
@@ -2223,6 +2290,7 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
           if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
         }
         ch->consumed++;
+        moved = 1;
       }
       while (ch->sent < ch->end && ch->sent < ch->consumed + LAG) {
         const uint64_t at = ch->sent;
@@ -2239,11 +2307,28 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
           if (at + 1 == m->first + m->pieces) p->out_at++;
         } else supply(ch, r, NULL, 0);
         ch->sent++;
+        moved = 1;
       }
       open |= ch->sent < ch->end || ch->consumed < ch->end;
     }
     for (uint32_t h = 0; !open && h < comm->count; h++) comm->channels[h].waited = comm->channels[h].end;
     if (!open) return ncclSuccess;
+    if (moved) { idle = 0; continue; }
+    if (++idle % RUN_LOOKS) continue;
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (idle == RUN_LOOKS) since = now;
+    if (now - since < MESH_PLATFORM_NS) continue;
+    uint32_t q = comm->count;
+    for (uint32_t h = 0; h < comm->count; h++) {
+      const struct channel *ch = comm->channels + h;
+      if (ch->consumed >= ch->end) continue;
+      if (q == comm->count) q = h;
+      if (!landing(ch, plans[h].runs + 2 * (ch->consumed - plans[h].start) + 1)) { q = h; break; }
+    }
+    if (q == comm->count) q = 0;
+    return fail(ncclRemoteError, "nothing landed at position %llu of the channel to node %u, and nothing could be published, for %.0f s: "
+                "the peer's group there never came (its process ended before it, or it failed a group this rank ran)",
+                (unsigned long long)comm->channels[q].consumed, comm->channels[q].node, (double)MESH_PLATFORM_NS / 1e9);
   }
 }
 
@@ -2354,12 +2439,23 @@ static void counted_failed(struct call *list, size_t n) {
     }
 }
 
+/* a group's counted all-to-alls with a step dropped toward an unlinked rank (plan_calls): each word set to 2 where still
+   0, as they are planned, so neither end of the call (the host's, the GPU's: each sets it only from 0) reports it whole */
+static void unlinked_failed(struct call *list, size_t n) {
+  for (size_t i = 0; i < n; i++)
+    if (list[i].unlinked) counted_failed(list + i, 1);
+}
+
 /* one group on the host: its leases' GPU points reached, its communicator not failed (comm_failure) and its GPU work finished,
    each within the platform's deadline; its calls planned and staged (a SEND read and a receive written in place), its
    units declared (schedule), run with the groups' lock released (run), then finished; a run's failure the
-   communicator's (comm_fail: its channels stand mid-group) */
+   communicator's (comm_fail: its channels stand mid-group); a failure of this rank's from its revoke to its staging
+   fails its communicator, the first one's group laid and its first positions sent as duds (refused); a host-path group
+   while its GPU groups are issued, which every rank meets alike in program order, and a plan every rank makes alike
+   (comm_compile, program_of) fail the call alone, and a plan out of memory fails the communicator; its calls toward
+   unlinked ranks in `apart` (plan_calls), their failure the caller's to return once the group ran */
 static int comm_issued(const struct ncclComm *comm);
-static ncclResult_t launch(struct call *list, size_t n) {
+static ncclResult_t launch(struct call *list, size_t n, struct said *apart) {
   const ncclComm_t comm = list[0].comm;
   ncclResult_t result = ncclSuccess;
   int remote = 0;
@@ -2369,24 +2465,35 @@ static ncclResult_t launch(struct call *list, size_t n) {
     if (reducing(list[i].what) && (result = reduction(list + i))) return result;
     remote |= crosses(list + i);
   }
-  if (revoked(comm)) return revoked_fail(comm);
+  const int stopped = revoked(comm);
   const uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + MESH_PLATFORM_NS;
   int late = 0;
-  for (size_t i = 0; i < n && !late; i++) {
+  for (size_t i = 0; i < n && !late && !stopped; i++) {
     const struct call *c = list + i;
     late = lease_wait(c->send, 0, until) || lease_wait(c->recv, 1, until) ||
            (counted(c) && (lease_wait(c->counts, 0, until) || lease_wait(c->received, 1, until) || lease_wait(c->landed, 1, until)));
   }
-  if (late) return fail(ncclSystemError, "a lease's GPU work (ncclMeshMemUse) did not reach its point within the platform's deadline");
   pthread_mutex_lock(&group_lock);
   group_numbered(comm);
-  if (remote) result = comm_failure(comm);
-  if (!result && remote && comm_issued(comm))
+  const int first = !comm->failed;
+  if (remote && comm_issued(comm))
     result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
-  if (!result && remote && finished && comm->last && !gpu_reached(finished, comm->last, until))
-    result = fail(ncclSystemError, "communicator %s's GPU work did not finish within the platform's deadline before its host-path group", comm->name);
+  else {
+    if (stopped) result = revoked_fail(comm);
+    else if (late) result = fail(ncclSystemError, "a lease's GPU work (ncclMeshMemUse) did not reach its point within the platform's deadline");
+    if (!result && remote) result = comm_failure(comm);
+    if (!result && remote && finished && comm->last && !gpu_reached(finished, comm->last, until))
+      result = fail(ncclSystemError, "communicator %s's GPU work did not finish within the platform's deadline before its host-path group", comm->name);
+    if (result) result = refused(comm, list, n, result, 0, first);
+  }
   if (!result && remote && finished) metal_collect(finished);
-  if (!result) result = plan_calls(comm, list, n);
+  int planned = 0;
+  if (!result) {
+    result = plan_calls(comm, list, n, apart);
+    planned = !result;
+    if (result == ncclSystemError && remote) result = comm_fail(comm, result, "%s", last.text);
+  }
+  if (planned) unlinked_failed(list, n);
   for (size_t i = 0; i < n && !result; i++) {
     struct call *c = list + i;
     struct steps *s = c->bound;
@@ -2413,6 +2520,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
         else memcpy(s->host[b], c->result, bytes);
     }
   }
+  if (result && planned) result = refused(comm, list, n, result, 1, first);
   struct schedule *plans = NULL;
   if (!result && remote && !(result = schedule(comm, list, n, &plans))) atomic_fetch_add(&comm->runs, 1);
   pthread_mutex_unlock(&group_lock);
@@ -2584,7 +2692,9 @@ static ncclResult_t arrive(struct metal_program *program, struct ncclComm *comm,
    are, mesh 3981ca80^'s `received`) and `landed`, then its word released (1, or 2 where the counts pass its layout,
    which also fails the communicator through failure word [5], or where a wait before it recorded a failure;
    nccl-mesh-metal.h METAL_COUNTED_ARRIVED), the rows maybe
-   still on the wire; `violation` the communicator's failure words (NULL: none) */
+   still on the wire; `violation` the communicator's failure words (NULL: none), none for a call with a step dropped
+   toward an unlinked rank (its word already 2: unlinked_failed), whose counts from that rank never land and fail
+   nothing but that call */
 static ncclResult_t counted_end(struct metal_program *program, struct call *c, void *violation) {
   if (c->ended) return ncclSuccess;
   c->ended = 1;
@@ -2602,8 +2712,8 @@ static ncclResult_t counted_end(struct metal_program *program, struct call *c, v
                  "a counted all-to-all's landed counts");
   if (!result)
     result = gpu(metal_counted(program, METAL_COUNTED_ARRIVED, &(struct metal_counted){
-      .d = c->arrived_at.buffer, .dst = c->arrived_at.offset, .s = c->got_at.buffer, .src = c->got_at.offset, .a = violation, .bytes = R,
-      .first = R, .aux = c->capacity, .scalar = c->rows}), "a counted all-to-all's word");
+      .d = c->arrived_at.buffer, .dst = c->arrived_at.offset, .s = c->got_at.buffer, .src = c->got_at.offset, .a = c->unlinked ? NULL : violation,
+      .bytes = R, .first = R, .aux = c->capacity, .scalar = c->rows}), "a counted all-to-all's word");
   return result;
 }
 
@@ -2626,9 +2736,32 @@ static ncclResult_t counted_stage(struct metal_program *program, struct call *c,
   c->got_at = (struct where){got, 0};
   struct steps *st = c->bound;
   if (st) { st->gpu[0] = c->counts_at; st->gpu[1] = c->send_at; st->gpu[2] = c->got_at; st->gpu[3] = c->recv_at; }
-  const ncclResult_t result = gpu(metal_counted(program, METAL_COUNTED_START, &(struct metal_counted){
+  ncclResult_t result = gpu(metal_counted(program, METAL_COUNTED_START, &(struct metal_counted){
     .d = got, .dst = seg_first(rseg, me) * sizeof(int64_t), .s = c->counts_at.buffer, .src = c->counts_at.offset, .aux = R * sizeof(int64_t),
     .bytes = sseg[me], .first = seg_first(sseg, me), .scalar = seg_first(sseg, n)}), "a counted all-to-all's counts");
+  /* the counts of each rank no link joins (its step dropped: plan_calls) never land: their segment copied from the
+     communicator's buffer of zeros (`zeros`: made zero, metal_shared, and written by nothing; grown where short, the one
+     it replaces kept until the communicator's end, as the GPU may yet read it), as the host path's landed counts
+     start (counted_got), so the rows placed after them, and `received` and `landed`, read none for that rank */
+  struct ncclComm *comm = c->comm;
+  size_t most = 0;
+  for (int q = 0; c->unlinked && q < n; q++)
+    if (q != me && comm->toward[q] < 0 && rseg[q] * sizeof(int64_t) > most) most = rseg[q] * sizeof(int64_t);
+  if (most && !result && comm->zeros_bytes < most) {
+    void **spent = comm->zeros ? realloc(comm->spent, (comm->spents + 1) * sizeof *spent) : comm->spent;
+    if (spent) comm->spent = spent;
+    void *made = comm->zeros && !spent ? NULL : metal_shared(most);
+    if (!made) result = fail(ncclSystemError, "out of GPU memory");
+    else {
+      if (comm->zeros) comm->spent[comm->spents++] = comm->zeros;
+      comm->zeros = made; comm->zeros_bytes = most;
+    }
+  }
+  if (most && !result) metal_resident(program, comm->zeros);
+  for (int q = 0; most && !result && q < n; q++)
+    if (q != me && comm->toward[q] < 0 && rseg[q])
+      result = gpu(metal_copy(program, METAL_PLAIN, got, seg_first(rseg, q) * sizeof(int64_t), comm->zeros, 0, rseg[q] * sizeof(int64_t)),
+                   "a counted all-to-all's counts from a rank no link joins");
   return result || (st && c->counting) ? result : counted_end(program, c, violation);
 }
 
@@ -2986,9 +3119,10 @@ static void *workspace(struct metal_program *program, const struct call *c, size
     }
     if (comm->scratch_bytes[k] < (bytes ? bytes : 16)) {
       void **spent = comm->scratch[k] ? realloc(comm->spent, (comm->spents + 1) * sizeof *spent) : comm->spent;
+      if (spent) comm->spent = spent;
       void *made = (comm->scratch[k] && !spent) ? NULL : metal_scratch(bytes);
       if (!made) return NULL;
-      if (comm->scratch[k]) { comm->spent = spent; comm->spent[comm->spents++] = comm->scratch[k]; }
+      if (comm->scratch[k]) comm->spent[comm->spents++] = comm->scratch[k];
       comm->scratch[k] = made; comm->scratch_bytes[k] = bytes ? bytes : 16;
     }
     metal_resident(program, comm->scratch[k]);
@@ -3208,7 +3342,10 @@ static ncclResult_t losses_through(uint64_t ticket) {
    issued (with issue) or completed with every group before it; its results into recvbuff as it completes; the
    program's end signals `finished` where the library made its encoder.  The Metal 4 form makes its channels' stream buffers
    resident through the stream's residency set; without a workspace its scratch is the communicator's (workspace), so it
-   is not issued. */
+   is not issued.  A failure of this rank's from its revoke to its staging fails its communicator (refused), and a plan
+   out of memory too.  A group with a call toward an unlinked rank (plan_calls `apart`) is completed, never issued (its
+   ticket 0), and returns that call's failure: the rest of it is encoded whole, and its command buffer is committed as
+   any group's is */
 static ncclResult_t launch_metal(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclMeshIssue *const issue = list[0].issue;
@@ -3237,11 +3374,21 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
                                          list[0].what != MESH_ALLGATHER)))
     result = fail(ncclInvalidUsage, "a fused crossing is one in-place ncclAllReduce, ncclBroadcast, ncclReduce or ncclAllGather on a Metal 4 "
                                     "stream, not issued (ncclMeshFusableRooted)");
+  const int checked = !result;
   if (!result && revoked(comm)) result = revoked_fail(comm);
+  struct said apart = {0, {0}};
   pthread_mutex_lock(&group_lock);
-  if (!result) group_numbered(comm);
+  if (checked) group_numbered(comm);
+  const int first = !comm->failed;
   if (!result && remote) result = comm_failure(comm);
-  if (!result) result = plan_calls(comm, list, n);
+  if (result && checked) result = refused(comm, list, n, result, 0, first);
+  int planned = 0;
+  if (!result) {
+    result = plan_calls(comm, list, n, &apart);
+    planned = !result;
+    if (result == ncclSystemError && remote) result = comm_fail(comm, result, "%s", last.text);
+  }
+  if (planned) unlinked_failed(list, n);
   if (!result && list[0].fused && (!remote || !list[0].bound || list[0].bound->buffers != 1))
     result = fail(ncclInvalidUsage, "a fused crossing whose program copies its operand before publishing it (ncclMeshFusableRooted)");
   if (result) { pthread_mutex_unlock(&group_lock); counted_failed(list, n); calls_free(list, n); return result; }
@@ -3251,8 +3398,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, list[0].polls, &message)
                                          : metal_begin(list[0].command, list[0].encoder, violation, list[0].polls, &message);
   if (!program) {
+    result = refused(comm, list, n, fail(ncclSystemError, "%s", message), 1, first);
     pthread_mutex_unlock(&group_lock); counted_failed(list, n); calls_free(list, n);
-    return fail(ncclSystemError, "%s", message);
+    return result;
   }
   comm->scratch_used = 0;
   if (remote) touch(comm);
@@ -3302,7 +3450,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       if (!direct) result = gpu(metal_copy(program, METAL_PLAIN, scratch, 0, own.buffer, own.offset, bytes), "a scratch copy");
     }
   }
-  int scheduled = 0, published = 0, owned = 1;
+  int scheduled = 0, published = 0, owned = 1, laid = 0;
+  const int issuing = issue && !apart.id;
   uint64_t ticket = 0;
   if (!result && remote) {
     struct inflight *g = calloc(1, sizeof *g);
@@ -3311,6 +3460,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       g->comm = comm;
       g->end = g->start + comm->count;
       for (uint32_t h = 0; h < comm->count; h++) g->start[h] = comm->channels[h].end;
+      laid = 1;
       result = schedule(comm, list, n, &g->plans);
       if (result) { free(g->start); free(g); }
       else {
@@ -3324,7 +3474,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
           const int what = list[0].what, rooted = comm->rank == list[0].root, both = what == MESH_ALLREDUCE || what == MESH_ALLGATHER;
           fusing = (typeof(fusing)){list[0].fused, list, 0, 0, both || (what == MESH_BROADCAST) == rooted, both || (what == MESH_REDUCE) == rooted};
         }
-        if (!result) result = walk(program, issue ? g : NULL, issue ? NULL : g, &published);
+        if (!result) result = walk(program, issuing ? g : NULL, issuing ? NULL : g, &published);
         if (!result && list[0].fused && (fusing.published != fusing.publishes || fusing.landed != fusing.lands))
           result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publication and landing of its whole operand "
                                           "(ncclMeshFusableRooted)");
@@ -3336,14 +3486,15 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     }
   } else if (!result)
     result = epilogue(program, list, n);
+  if (result && remote && !laid) result = refused(comm, list, n, result, 1, first);
   program_end(program, list[0].encoder != NULL, result);
-  if (result && scheduled) walk_failed(comm, issue ? 0 : ticket, result);
+  if (result && scheduled) walk_failed(comm, issuing ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   pthread_mutex_unlock(&group_lock);
   if (owned && result) counted_failed(list, n);
   if (owned) calls_free(list, n);
   if (result) comm->async = result;
-  return result;
+  return result ? result : apart_of(&apart);
 }
 
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int *published) {
@@ -3491,10 +3642,11 @@ ncclResult_t ncclGroupEnd(void) {
   calls = NULL; call_count = call_capacity = 0;
   if (!n) { free(list); return ncclSuccess; }
   if (list[0].stream) return launch_metal(list, n);
-  const ncclResult_t result = launch(list, n);
+  struct said apart = {0, {0}};
+  const ncclResult_t result = launch(list, n, &apart);
   if (result) list[0].comm->async = result;
   calls_free(list, n);
-  return result;
+  return result ? result : apart_of(&apart);
 }
 
 /* a call refused before it joins its group: its arguments, the stream's form taken into it */

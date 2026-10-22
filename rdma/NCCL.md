@@ -436,10 +436,18 @@ Porting:
 
 The bridges forward nothing (design/transport.md). A communicator's init holds a stream only toward the members whose
 nodes its bridge reaches and whose bridges reach its node, and its channels go only toward those members. A collective
-whose members no path between members joins fails at its first call that needs its programs, naming two, and a call
-whose program or point-to-point step moves bytes between two members not joined fails at that call
-(`ncclInvalidUsage`). A node a route would cross between two members takes part only as a member of the
-communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`).
+whose members no path between members joins fails at its first call that needs its programs, naming two, at every
+member alike. A point-to-point call, or an all-to-all's exchange (`ncclAlltoAll`, `ncclGather`, `ncclScatter`,
+`ncclMeshAlltoAllV`, `ncclMeshAlltoAllCounted`), between two members not joined has no channel: that call fails at its
+own rank (`ncclInvalidUsage`, naming the two), after the rest of its group ran; the group's other calls and the
+call's exchanges with joined members run as they would without it, and a counted all-to-all's word reads 2. On the
+Metal path such a group is completed, never issued (its ticket 0), and its command buffer is committed as any group's
+is. The communicator stays in step and goes on; the group is not issued again on it, as its other calls have already
+paired with their peers'. Both ends
+of a pair read whether they are joined from the map every member made alike, so they drop or keep their exchange with
+each other alike and no peer waits on a position the other never lays: on a line of three, the ring's sendrecv fails
+at the two ends and completes exact at the middle. A node a route would cross between two members takes part only as a
+member of the communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`).
 
 ## Rules a program keeps
 
@@ -453,14 +461,16 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
 
 ## Failures
 
-The library keeps no clock that fails a group. A host-path group's waits end at their landings, at a landed word's
-`~0` (its bridge's, where the link is lost or the bridge stops), or at a revoke; a GPU wait at its landing, at a
+A host-path group's waits end at their landings, at a landed word's `~0` (its bridge's, where the link is lost or the
+bridge stops), at a revoke, or where nothing lands and nothing can be published for `MESH_PLATFORM_NS` (the operator's
+platform deadline, design/transport.md section 5), when the group fails as a value; a GPU wait at its landing, at a
 landed word's `~0` or at its bound ([Bounded waits](#bounded-waits)). A group declares its units to its bridge as it is issued, with no deadline while its
 member lives. A member that fails, is revoked or ends has the units it declared and did not supply sent at once as
 duds: all ones, placed where a send must happen and its producer is gone (design/transport.md section 10). Its peers
 land them as bytes like any other. A dud is no signal and fails nothing at the consumer; the failure is the
 producer's own (design/rubrics.md M4: "nothing else changes"; M10). A peer that has not yet issued its group is waited
-for, a host-path group's wait on it until a landing or a revoke. The failure is returned:
+for, a host-path group's wait on it until a landing, a revoke or `MESH_PLATFORM_NS` with nothing landed or published. The
+failure is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
@@ -469,7 +479,17 @@ for, a host-path group's wait on it until a landing or a revoke. The failure is 
 
 and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
 fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, which they
-land and complete with: the failure stays with the member that failed. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
+land and complete with: the failure stays with the member that failed. A group that fails at its member before it
+runs, for a cause of that member's alone (a revoke, its communicator failed, a lease's or its own GPU work past the
+platform's deadline, a Metal program not begun, out of memory), fails its communicator; where that is the
+communicator's first failure, the group is laid as its peers lay it and its first position on each channel is sent as
+a dud, one run, which a peer's in ring always has room for. No more is sent: a dud goes as the bridge reaches it, with
+no credit, so more could overwrite positions of an earlier group that a peer has not yet read, and a stream's
+declaration covers every unit before the one it names, so the communicator's later groups declare nothing. The
+peers' waits past that run end at their bound, as a value. On a map of three or more, a member whose communicator
+failed on one link thus never leaves a member joined to it by another waiting without bound. A failure every member
+meets alike (a call's arguments, a host-path group while its GPU groups are issued, a program the map does not
+compile) fails the call alone and lays nothing. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
 init) on the map as it is then (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of
 returning if the link topo changed mid function execution"). A communicator keeps the map its init made, so a change
 that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator
