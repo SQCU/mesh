@@ -77,15 +77,18 @@ The inputs cross a block at a time, a block early. They depend on nothing in the
 Before the first step of each block, rank 0 copies the next block's inputs from its file into its ring, and broadcasts
 them into every rank's ring. Both go on the GPU's own queue, and the host does not wait for them. The host waits for
 that broadcast just before the next block's first step, the first thing that reads it. A step then has two host calls:
-its kernel and one all-reduce of its part of z. Nothing else crosses during a block.
+the fused all-reduce of its part of z, which only writes the crossing's records, and its kernel. Nothing else crosses
+during a block.
 
 The library lands each block's broadcast sooner than that wait, though. A call finishes every call issued before it, so
-the block's first all-reduce lands the next block's inputs too. That all-reduce waits for the whole block's bytes to
-arrive, once a block.
+the block's first fused all-reduce lands the next block's inputs too. That landing waits for the whole block's bytes
+to arrive, once a block.
 
-At the end of each block, rank 0 puts tanh of that block's sums, and a copy of them, on the GPU's queue as well. The
-copy writes straight into the output file's memory. No step waits for the host, and the next section says when the
-host waits for the GPU.
+Each step's kernel lands the step before's sum, and on rank 0 it also writes tanh of that sum, the step before's output,
+into a staging buffer one block deep. So a block's last output is written by the next block's first step, and one step
+after each block ends, rank 0 puts a copy of the block's outputs on the GPU's queue. After the last step, one more
+dispatch of the kernel lands the last sum, and the last block is copied the same way. The copy writes straight into the
+output file's memory. No step waits for the host, and the next section says when the host waits for the GPU.
 
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
 place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
@@ -93,16 +96,17 @@ place, with no copy. They also use memory the bridge already holds, so no second
 ## The rings
 
 The input ring is two blocks deep. While the GPU works through one block, the next block's inputs arrive in the
-other. The sum ring is one block deep: a block's sums are copied out at the block's end, before the next block writes
-over them.
+other. The sum ring is one block deep. It holds each step's part of z, which the next step's kernel reads as its own
+part when it lands the sum, before a later step writes over it.
 
 How long is a block? The configuration gives `ring_bytes`, the bytes of the region the two rings may hold on each node.
 If each ring can hold the whole stream, a block is the whole stream, and no slot is used twice. If not, a block is a third
 of the slots that fit: two blocks for the inputs and one for the sums. If `ring_bytes` cannot hold three slots, the
 service stops with an error. It never picks a depth of its own.
 
-The host may run ahead of the GPU, but never by more than the input ring. At the end of each block it puts a mark on
-the GPU's queue. At the start of a block, it waits for the mark two blocks back, so one block is still queued.
+The host may run ahead of the GPU, but never by more than the input ring. After each block's outputs are copied, one
+step into the next block, it puts a mark on the GPU's queue. At the start of a block, it waits for the newest mark, the
+one two blocks back, so one block is still queued.
 
 There is a second bound, and today it is the tighter one. Metal's queue holds at most 64 command buffers not yet done,
 and torch makes the host wait when it is full. Today each publication and each copy ends a command buffer, so the host
@@ -119,13 +123,17 @@ has a limit, so a stuck kernel ends instead of hanging the GPU. Once a wait has 
 reads that at its start and ends at once, so queued steps never spin again. The limit is the library's own, `NCCL_MESH_POLLS` loads
 (`_stream.polls`), which holds a GPU at most the platform's 5 seconds. It is not a setting.
 
-The kernel does three things. First, each worker writes its slice of x = e_t + tanh(z), where z is the last step's sum.
-Second, the workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the
-rank's part of z from y and its rows of B. The all-reduce then adds the parts on the same stream, and the next step's
-kernel starts once that sum has landed. A step's all-reduce follows torch-mesh's one commit rule, the same for every
-caller (torch-mesh README, Performance). While the GPU still holds enough of the stream's buffers, the all-reduce joins
-the open command buffer instead of paying for a commit of its own. The next step's all-reduce, or the host's next wait,
-commits that buffer.
+The kernel does three things, and it runs the step's crossing itself (torch-mesh's `fused`: rdma/nccl.h
+`ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for the peer's part of z
+to land, adds its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
+workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the rank's part
+of z from y and its rows of B, and publish it. Each worker stores its slice of the part into the crossing's slot. The
+last worker to finish releases the slot, so the bridge sends it. Within a block, no kernel of the library's runs between
+two steps. The wait and the release are the library's own steps (`ncclMeshMetalSteps`), which the kernel calls. Each
+wait is bounded, and the release is one fence and the slot's ready words. A step's publication follows torch-mesh's one
+commit rule, the same for every caller (torch-mesh README, Performance). While the GPU still holds enough of the
+stream's buffers, it joins the open command buffer instead of paying for a commit of its own. The next step's
+publication, or the host's next wait, commits that buffer.
 
 G is the number of the GPU's cores, so the whole GPU works: one worker a core. The columns come in tiles of 8, and
 each worker takes a fair share of them. If there are n tiles, each worker takes n/G of them, rounded down, and the first
@@ -178,19 +186,20 @@ RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
   ~/.venv-mesh-uv/bin/python examples/chain-service.py examples/chain-service.json
 ```
 
-Each rank prints one line at the end. It gives the parts, the rows, the steps, the block, the two rings' depths and
-the seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four
-times a step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and
-the all-reduce alone. It gives the bytes a step's two collectives move, and those bytes a second. Rank 0 also checks
-two windows of steps against a plain float64 run of the same rule: the first steps, and the first steps of the last
-block, which start from rank 0's own output. The second window reads slots the ring has used before.
+Each rank prints one line at the end. It gives the parts, the rows, the steps, the block, the two rings' depths and the
+seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four times a
+step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and a plain
+all-reduce alone (the library's own kernels, not fused), the crossing the fused step no longer pays. It gives the bytes
+a step's two collectives move, and those bytes a second. Rank 0 also checks two windows of steps against a plain float64
+run of the same rule: the first steps, and the first steps of the last block, which start from rank 0's own output. The
+second window reads slots the ring has used before.
 
-The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling
-its kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the
-first block's time. It then gives the time a step of the later blocks takes, and the rows a second they reach. A block's
-end is the moment the host's wait on its mark returns: the host issues ahead of the GPU, so it is already waiting
-when the block ends, and no wait is added to take the time. The whole-run times include the first block; these do
-not.
+The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling its
+kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the first
+block's time. It then gives the time a step of the later blocks takes, and the rows a second they reach. The first
+block's end is the moment the host's wait on its mark returns, and that mark comes one step into the next block, so the
+later steps counted are the ones after it: the host issues ahead of the GPU, so it is already waiting when the block
+ends, and no wait is added to take the time. The whole-run times include the first block; these do not.
 
 ## What to read next
 

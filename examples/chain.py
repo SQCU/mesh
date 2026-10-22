@@ -1,10 +1,11 @@
 from pathlib import Path
 
 import torch
-from torch_mesh import _stream
+from torch_mesh import _stream, argmax, fused
 from torch_mesh.streamed import instance, node
 
-SOURCE = Path(__file__).with_name('chain.metal').read_text()
+# docs/writing-a-service.md#the-step-kernel
+SOURCE = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_name('chain.metal').read_text()
 TILE = 8
 RG = 1
 ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'THREADS', 'PATIENCE')
@@ -80,6 +81,7 @@ class Step:
         self.handle, self.planned = _pipeline(self.args), {}
         self.stamps = torch.zeros(self.args['G'], dtype=torch.int32, device='mps')
         self.err = torch.zeros(1, dtype=torch.int32, device='mps')
+        self.arrivals = torch.zeros(1, dtype=torch.int32, device='mps')
         self.phase = 0
         self.plan(rows)
 
@@ -88,10 +90,21 @@ class Step:
         self.planned[rows] = words(self.args, rows, self.capacity)
 
     # docs/writing-a-service.md#the-step-kernel
-    def __call__(self, e, z, p, first):
-        _stream.encode(self.handle, [self.At, self.Bt, e, z, self.X, self.Y, p, self.stamps, self.err],
-                       [int(first), self.phase, *self.planned[e.shape[0]]], 15, self.args['G'], 1, self.args['THREADS'])
+    def __call__(self, e, p, out, previous):
+        crossing = fused.all_reduce(p, _stream.polls)
+        self._encode(e, p, out, previous, crossing, 0)
         self.phase += 2
+        return crossing
+
+    # docs/writing-a-service.md#the-step-kernel
+    def land(self, e, out, previous):
+        self._encode(e, None, out, previous, None, 1)
+
+    # docs/writing-a-service.md#the-step-kernel
+    def _encode(self, e, p, out, previous, crossing, last):
+        fused.encode(self.handle, [self.At, self.Bt, e, out, self.X, self.Y, p, self.stamps, self.err, self.arrivals],
+                     [int(previous is None), self.phase, *self.planned[e.shape[0]], last, int(out is not None), 0], 15,
+                     self.args['G'], 1, self.args['THREADS'], land=previous, publish=crossing)
 
     # docs/writing-a-service.md#the-step-kernel
     def check(self):

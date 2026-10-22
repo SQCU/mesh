@@ -87,7 +87,7 @@ class Pace:
 
     # docs/writing-a-service.md#the-rings
     def wait(self):
-        if len(self.marks) == RING_BLOCKS:
+        if len(self.marks) == RING_BLOCKS - 1:
             began = time.perf_counter()
             self.marks.popleft().synchronize()
             self.done.append(time.perf_counter())
@@ -108,10 +108,17 @@ def fill(E, rank, inputs, first, steps, block):
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
+def drain(first, steps, block, O, outputs):
+    if O is not None:
+        held = span(first, steps, block, len(O))[0]
+        torch.from_numpy(outputs[held]).copy_(O[:held.stop - held.start], non_blocking=True)
+
+
+# docs/writing-a-service.md#how-the-example-moves-its-data
 def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
     e, p, pace = E.unbind(0), P.unbind(0), Pace()
     deep, sums = len(e), len(p)
-    landing = fill(E, rank, inputs, 0, steps, block)
+    landing, crossing = fill(E, rank, inputs, 0, steps, block), None
     for t in range(steps):
         if t % block == 0:
             pace.wait()
@@ -119,18 +126,14 @@ def chain_stream(step, rank, steps, block, E, P, O, inputs, outputs):
             landing.wait()
             landing = ahead
         issued = time.perf_counter()
-        step(e[t % deep], p[(t - 1) % sums], p[t % sums], t == 0)
-        dist.all_reduce(p[t % sums])
+        crossing = step(e[t % deep], p[t % sums], None if O is None else O[(t - 1) % block], crossing)
         if t == 0:
             first = time.perf_counter() - issued
-        if (t + 1) % block == 0 or t + 1 == steps:
-            if rank == 0:
-                held, slots = span(t - t % block, steps, block, sums)
-                drained = O[:held.stop - held.start]
-                torch.tanh(P[slots], out=drained)
-                torch.from_numpy(outputs[held]).copy_(drained, non_blocking=True)
-            if t + 1 < steps:
-                pace.mark()
+        if t % block == 0 and t:
+            drain(t - block, steps, block, O, outputs)
+            pace.mark()
+    step.land(e[(steps - 1) % deep], None if O is None else O[(steps - 1) % block], crossing)
+    drain((steps - 1) // block * block, steps, block, O, outputs)
     return pace.waited, pace.done, first
 
 
@@ -181,7 +184,7 @@ def main():
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
     step.check()
-    steady = (began + seconds - done[0]) / (steps - block) if done else None
+    steady = (began + seconds - done[0]) / (steps - block - 1) if done else None
     opened = done[0] - began if done else None
     dist.barrier()
     torch.mps.synchronize()
