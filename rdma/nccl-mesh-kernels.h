@@ -26,7 +26,8 @@
    collectives in the same order on every rank, so the order of a program's reads and writes is known from the programs
    both ranks compiled and is encoded in the stream's order (rdma/NCCL.md "One track"); the host issues no group on a
    communicator whose failure it has read (nccl-mesh.c comm_failure), a group already encoded runs as encoded, and each
-   wait on a peer that never publishes ends at its own bound.  mesh_step_enter: a kernel whose record is the argument
+   wait on a peer that never publishes ends at its own bound, or sooner once any wait on the same failure words has
+   failed (mesh_step_failed).  mesh_step_enter: a kernel whose record is the argument
    ring's (every Metal 4 dispatch's, and a deferred step's on either form) first stores the record's sequence in
    `progress` (`first` in one thread of the dispatch; every dispatch before it has finished: a barrier stands between
    each two, or a classic encoder's serial order), the argument ring's own record of what the GPU has begun
@@ -34,21 +35,26 @@
    its setBytes, its sequence 0, and it stores none.  It reads nothing, and its result is true (kept so that a caller's
    kernel that tests it compiles as it is).  mesh_step_wait: a wait on a holding's count at `word` until it reaches
    `target`, at most p.polls loads (mesh_wait_bounded: the program's bound, at most NCCL_MESH_POLLS, metal_begin),
-   ended by the count, by the link's loss (~0) or by the bound, reading nothing but that word.  mesh_step_claim:
-   failure word [1]'s low half exchanged for 1, true in the one caller that found it 0, so of every wait that fails (a
-   dispatch's threadgroups', the tracks') one records.  mesh_step_check: the wait's failure recorded by its claimant in
+   ended by the count, by the link's loss (~0) or by the bound, reading nothing but that word; given the failure words
+   vb, ended also once their claim is taken, read every 2^10 loads (mesh.metal mesh_wait_bounded's stop).
+   mesh_step_claim: failure word [1]'s low half exchanged for 1, true in the one caller that found it 0, so of every wait
+   that fails (a dispatch's threadgroups', the tracks') one records.  mesh_step_failed: whether that claim is taken,
+   where p.polls names failure words (a dispatch with none has no claim).  mesh_step_check: the wait's failure recorded by its claimant in
    failure words [0] (its cause, nccl-mesh-metal.h METAL_*), [3] and [4] and then [2], stored last by the claimant; a
    loser records nothing and waits for nothing: a revoke, the link lost or the bound reached; a landing is no failure,
    whatever its bytes (a dud's among them: placed where a send must happen and its producer is gone, never a value a
    consumer reads as a signal, design/rubrics.md M4).  The host reads the record after the command buffer and fails the
    group as a value (nccl-mesh.c comm_failure); no kernel halts on it.  mesh_step_counts: the record's waits, `landed`
-   at p.aux until p.scalar and `sent` at p.first until p.sent, each where its target is not 0.  mesh_step_await: the
+   at p.aux until p.scalar and `sent` at p.first until p.sent, each where its target is not 0 and no wait on vb has
+   failed (mesh_step_failed), each ended once one has: a dispatch's later waits, a wide landing's later threadgroups'
+   among them, end at once, so a dispatch spins about one bound however many waves its threadgroups run in (a resident
+   grid past the GPU's co-residency reset the Mini, 2026-10-21).  mesh_step_await: the
    counts awaited by thread 0 and checked, then the threadgroup past a device barrier and one system-scope fence, after
    which its landed bytes are read (a running kernel sees the NIC's stores late without a fence: mesh.metal
-   mesh_wait_bounded); every threadgroup of a dispatch may await them, each its own bounded wait, calling it from every
-   thread alike; its result is true, kept as mesh_step_enter's.  mesh_step_sent: thread 0's wait for `sent` alone (a
-   publication's record: the published bytes read by the NIC, so a kernel may write them again), then a device
-   barrier.  mesh_step_release: a publication, the operand already written by the caller's kernel (its last
+   mesh_wait_bounded); every threadgroup of a dispatch may await them, each its own bounded wait, ended at once after any
+   of them failed (mesh_step_counts), calling it from every thread alike; its result is true, kept as mesh_step_enter's.  mesh_step_sent: thread 0's wait for `sent` alone (a
+   publication's record: the published bytes read by the NIC, so a kernel may write them again; none once a wait on vb
+   has failed, as mesh_step_counts'), then a device barrier.  mesh_step_release: a publication, the operand already written by the caller's kernel (its last
    threadgroup to arrive calls it, after every other threadgroup's stores): a device barrier, then thread 0's one
    system-scope fence (mesh.metal mesh_publish: every store of the operand visible before the count the bridge acts on)
    and its one store of the holding's `ready` (p.scalar at p.aux).  mesh_step_read: element k of a landing buffer the
@@ -65,6 +71,10 @@ static NSString *const STEPS =
   "return mesh_wait_bounded((volatile coherent(system) device const ulong *)word, target, p.polls); }\n"
   "static inline bool mesh_step_claim(device uchar *vb) { "
   "return atomic_exchange_explicit((device atomic_uint *)(vb + 8), 1u, memory_order_relaxed) == 0u; }\n"
+  "static inline bool mesh_step_failed(constant mesh_args &p, device uchar *vb) { "
+  "return p.polls && atomic_load_explicit((device atomic_uint *)(vb + 8), memory_order_relaxed) != 0u; }\n"
+  "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, ulong target, device uchar *vb) { "
+  "return mesh_wait_bounded((volatile coherent(system) device const ulong *)word, target, p.polls, p.polls ? (device atomic_uint *)(vb + 8) : nullptr); }\n"
   "static inline void mesh_step_check(constant mesh_args &p, ulong status, ulong target, device uchar *vb) { "
   "if (!p.polls) return; "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; "
@@ -75,14 +85,14 @@ static NSString *const STEPS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "v[0] = cause; v[3] = ulong(p.channel); v[4] = ulong(p.polls); mesh_publish(v + 2, p.at + 1); }\n"
   "static inline void mesh_step_counts(constant mesh_args &p, device uchar *words, device uchar *vb) { "
-  "if (p.scalar) mesh_step_check(p, mesh_step_wait(p, words + p.aux, p.scalar), p.scalar, vb); "
-  "if (p.sent) mesh_step_check(p, mesh_step_wait(p, words + p.first, p.sent), p.sent, vb); }\n"
+  "if (p.scalar && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.aux, p.scalar, vb), p.scalar, vb); "
+  "if (p.sent && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.first, p.sent, vb), p.sent, vb); }\n"
   "static inline bool mesh_step_await(constant mesh_args &p, device uchar *words, device uchar *vb, uint i) { "
   "if (i == 0) mesh_step_counts(p, words, vb); "
   "threadgroup_barrier(mem_flags::mem_device); "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); return true; }\n"
   "static inline void mesh_step_sent(constant mesh_args &p, device uchar *words, device uchar *vb, uint i) { "
-  "if (i == 0 && p.sent) mesh_step_check(p, mesh_step_wait(p, words + p.first, p.sent), p.sent, vb); "
+  "if (i == 0 && p.sent && !mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, words + p.first, p.sent, vb), p.sent, vb); "
   "threadgroup_barrier(mem_flags::mem_device); }\n"
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
   "threadgroup_barrier(mem_flags::mem_device); "
@@ -97,7 +107,7 @@ static NSString *const STEPS =
    operand and the landed bytes system-coherent: the operand may itself have landed in place (a COPY earlier in the
    group, mesh-plan.h mesh_compile's node outside the contributors), and the landed bytes are the NIC's.  Every kernel but
    publish and spin is wide (its threads over the elements); a wide landing's every threadgroup awaits its counts (l,
-   its thread in its threadgroup), and a track runs its body in one threadgroup (l its thread there) */
+   its thread in its threadgroup), each ending at once after any has failed (mesh_step_counts), and a track runs its body in one threadgroup (l its thread there) */
 static NSString *const KERNELS =
   @"\n"
   "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, device ulong *progress, uint i, uint g, uint l, threadgroup ulong *tg\n"

@@ -296,7 +296,8 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     metal-microbench tools/poll_probe.m, 2026-10-21), and one more fence after the observed count before the landed
     bytes are read (`mesh_step_await`), each byte loaded coherent (`mesh_payload`). The bridge sets the counts `~0`
     where the link is lost; the stream's `polls` bounds the wait ([Bounded waits](#bounded-waits)). No kernel stops at a
-    stop word or at another wait's failure ([Failures](#failures)).
+    stop word, and no kernel halts on a failure; a wait ends early only once another wait on the same failure words has
+    failed ([Bounded waits](#bounded-waits), [Failures](#failures)).
 
 ### What each program owns
 
@@ -367,10 +368,13 @@ kernel like a dma or networking send/rcv channel for more than 5 seconds without
 `NCCL_MESH_POLLS` (nccl.h), is `NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings
 pass 0. A wait that reaches its bound records its entry, its channel and the bound in its communicator's failure
 words, and the group fails as a value after its command buffer (`ncclCommGetAsyncError`, or the communicator's next
-group: "landed nothing within N polls"). No kernel halts on the record: every later dispatch runs as encoded, and a later
-wait on a peer that publishes nothing more ends at its own bound, so a command buffer of k such waits holds the GPU
-up to k bounds. The bound is a count of polls and nothing else: it exists because a GPU spin with no end halts the
-node (the Mini's watchdog reset, 2026-10-21), not to guard any buffer.
+group: "landed nothing within N polls"). No kernel halts on the record: every later dispatch runs as encoded. But once
+one wait has recorded a failure, every other wait on the same failure words ends: a later one at once
+(`mesh_step_failed`, read before each wait), and one under way within 2^10 loads (`mesh_wait_bounded`'s stop word, the
+failure claim). So a dispatch's waits hold the GPU about one bound in all, whatever its width: a wide landing's
+threadgroups run in waves where the grid passes the GPU's co-residency, and each wave's threadgroups wait on their own.
+The bound is a count of polls and nothing else: it exists because a GPU spin with no end halts the node (the Mini's
+watchdog reset, 2026-10-21), not to guard any buffer.
 `ncclMeshComplete` bounds the completion's waits by the stream it is given.
 
 The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
@@ -546,8 +550,8 @@ and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding st
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and the pages its groups
 presented and did not publish go at once as duds, so its peers' groups fail rather than wait); an init
 still running (a non-blocking one's) ends as a value, its host-path groups return at their next look, its GPU waits
-end at their landings or their bounds (no kernel stops at the revoke; a wait that reaches its bound after it names it as
-its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
+end at their landings or their bounds, or once another wait on the communicator's failure words has failed (no kernel
+stops at the revoke; a wait that reaches its bound after it names it as its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
 streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. `ncclCommDestroy` awaits the command buffers the library committed for the communicator, at most
 `MESH_PLATFORM_NS`; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder

@@ -1017,7 +1017,7 @@ uint64_t ncclMeshRetired(void);
    store of that holding's `ready`; it is encoded after the call returns.  The landing: the
    kernel after it calls mesh_step_enter and mesh_step_await on a (every threadgroup may: each its own bounded wait for
    the holding's `landed` past the landing, and its `sent` past the group's send, so that once it returns the send
-   buffer may be written again), then reads the landed bytes from d + record.dst (its landing buffer) with
+   buffer may be written again; each ends at once after any wait on its failure words has failed), then reads the landed bytes from d + record.dst (its landing buffer) with
    mesh_step_read and combines them with its own part where it reduces.  A kernel that writes the send buffer again
    with no landing after the publication calls mesh_step_sent on the publication's bindings first.  The call encodes no
    dispatch of either fused step, so the caller's kernels are ordered by its stream alone: on the classic form, its
@@ -1037,8 +1037,8 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
                                    int* publishes, int* lands);
 /* The Metal text of the steps the library's kernels and a fused crossing's kernels run, after rdma/mesh.metal's: the
    argument record (struct mesh_args), a fused step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's
-   order, a classic kernel's form of them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_check,
-   mesh_step_counts, mesh_step_await, mesh_step_sent, mesh_step_release and mesh_step_read (any element type: a landed
+   order, a classic kernel's form of them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
+   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_sent, mesh_step_release and mesh_step_read (any element type: a landed
    element, loaded system-coherent from the caller's own landing buffer), on a holding's counts (`ready` to store,
    `landed` and `sent` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.
    Every thread of the threadgroup calls mesh_step_await, mesh_step_sent and mesh_step_release (each holds a barrier);

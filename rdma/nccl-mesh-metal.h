@@ -58,7 +58,8 @@ void *metal_retain(void *object);
    or metal_gate's, or those a wait names): at most `polls` loads of a count (rdma/mesh.metal mesh_wait_bounded), past
    which the dispatch records a failure, which the host finds there after the command buffer (nccl-mesh.c
    comm_failure) and the call fails as a value; no kernel halts on the record, every later dispatch running as encoded,
-   a later wait ending at its own count or bound.  The failure words: [0] the cause (METAL_BOUND the bound reached,
+   a later wait on those failure words ending at once, and one under way within 2^10 loads (nccl-mesh-kernels.h
+   mesh_step_failed), so a dispatch's waits spin about one bound in all, however many waves its threadgroups run in.  The failure words: [0] the cause (METAL_BOUND the bound reached,
    METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6]; a landing is none, whatever its
    bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording [0],
    [3], [4] and [2]: nccl-mesh-kernels.h mesh_step_claim), [2] 1 + the entry (stored last by the claimant, by the GPU

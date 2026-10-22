@@ -38,16 +38,25 @@ __attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coh
 // because a GPU spin with no end halts the node (the Mini's watchdog reset, 2026-10-21), and the caller tells a word
 // short of `target` (the bound reached) from a landing. A reader orders its later loads after the observation with a
 // system-scope fence of its own, after the barrier that gives the observation to its threads (nccl-mesh-metal.m
-// mesh_step_await).
+// mesh_step_await). With `stop` (not null), the wait also ends once the word at `stop` is not 0, read every 2^10 loads:
+// a dispatch's failure claim (nccl-mesh-kernels.h mesh_step_claim), so that once one wait of a dispatch has failed, every
+// other wait of it ends within 2^10 loads instead of at its own bound (the Mini's watchdog reset, 2026-10-21: a dispatch's
+// whole spin is what must stay bounded, and a wide dispatch runs its threadgroups' waits in waves).
 template <typename W>
-__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
+__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls,
+                                                                  device metal::atomic_uint *stop) {
     W seen;
     uint k = 0u;
     do {
         metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
         seen = *word;
-    } while (seen < target && ++k < polls);
+    } while (seen < target && ++k < polls && ((k & 1023u) != 0u || !stop || metal::atomic_load_explicit(stop, metal::memory_order_relaxed) == 0u));
     return seen;
+}
+
+template <typename W>
+__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
+    return mesh_wait_bounded(word, target, polls, nullptr);
 }
 
 // A landing's completion word (M07) once it holds 1 plus the invocation's cycle (M30; 0 in a one-pass program), or
