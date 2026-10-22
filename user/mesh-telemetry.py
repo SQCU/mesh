@@ -4,8 +4,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-sys.path[:0] = [HERE, os.path.join(ROOT, "bin")]
-import mesh_restart
+sys.path[:0] = [HERE, os.path.join(ROOT, "bin"), os.path.join(ROOT, "rdma")]
+import mesh_restart, peers
 RATE = int(os.environ.get("MESH_TELEMETRY_RATE", "1000"))
 BANDWIDTH_RATE = int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE)))
 PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
@@ -470,7 +470,8 @@ def host_facts():
     memory = output(["/usr/sbin/sysctl", "-n", "hw.memsize"])
     chip = output(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"])
     cores = number(output(["/usr/sbin/ioreg", "-r", "-c", "AGXAccelerator", "-d", "1"]), r'"gpu-core-count" = (\d+)')
-    name = output(["/usr/sbin/scutil", "--get", "LocalHostName"]) or socket.gethostname().split(".")[0]
+    own = peers.host()
+    name = peers.label(own["node"], peers.table(os.environ.get("MESH_NODES", ""), os.path.join(ROOT, "etc", "mesh-nodes.json"), "/usr/local/mesh/etc/mesh-nodes.json"))
     capacity_doc, capacity_path = document([
         os.environ.get("MESH_CAPACITY", ""),
         os.path.join(ROOT, "etc", "mesh-capacity.json"),
@@ -479,6 +480,8 @@ def host_facts():
     kind, metrics = capacity(capacity_doc, model, chip, int(cores) if cores else None)
     return {
         "name": name,
+        "node": own["node"],
+        "node_id": own["node_id"],
         "host": {"model": model, "chip": chip, "gpu_cores": int(cores) if cores else None, "memory_bytes": int(memory) if memory.isdigit() else None, "system": platform.platform()},
         "capacity": {"kind": kind, "source": (capacity_doc or {}).get("source"), "path": capacity_path, "metrics": metrics},
     }

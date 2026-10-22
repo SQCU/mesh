@@ -1,7 +1,8 @@
 #!/bin/bash
 s=$0; [ -L "$s" ] && s=$(readlink "$s"); HERE="$(cd "$(dirname "$s")" && pwd)"
 b(){ printf '\n\033[1m%s\033[0m\n' "$*"; }
-b "NODE"; printf "  branch %s converged %s\n" "$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null || echo unknown)" "$(awk '{print $2}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"; echo "  $(scutil --get ComputerName) / $(scutil --get LocalHostName).local  up $(uptime | sed 's/.*up //;s/,.*users.*//')"
+b "NODE"; printf "  branch %s converged %s\n" "$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null || echo unknown)" "$(awk '{print $2}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"; _id=$(ioreg -a -rd1 -c IOPlatformExpertDevice | plutil -extract 0.IOPlatformUUID raw -o - -)
+echo "  $(plutil -extract "nodes.$_id.name" raw -o - "$HERE/../etc/mesh-nodes.json" 2>/dev/null || echo unnamed) / host UUID $_id  up $(uptime | sed 's/.*up //;s/,.*users.*//')"
 b "POWER"; pmset -g custom | awk '/^ (sleep|displaysleep|disksleep|standby|autorestart|womp|powermode)/{printf "  %-22s %s\n",$1,$2}'
 b "ASSERTIONS"; pmset -g assertions | awk '/UserIsActive|PreventUserIdleDisplaySleep|PreventUserIdleSystemSleep|PreventSystemSleep/ && NF==2 {printf "  %-30s %s\n",$1,$2}'
 b "HEALTH"; [ -f /var/run/mesh-health ] && sed -e 's/^warn=/WARN /' -e 's/^/  /' /var/run/mesh-health || echo "  no report: /var/run/mesh-health is written by the keeper (mesh-health.sh)"

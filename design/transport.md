@@ -18,8 +18,11 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   arena page it maps (`mesh_buffer`, `mesh_page_entry`), claimed by compare-and-swap on bitmaps. A client's memory is
   rows whose owner word is its own. "Lease" in the code means only this: rows owned. It has no term, renewal or expiry.
 - **A link.** The two ports at the ends of one cable and the queue pairs the bridges make on them at each pairing:
-  ten unreliable-connected queue pairs (index 0 carries the keepalive frame), created, moved through INIT, RTR and RTS,
-  on two completion queues of the port's device context.
+  the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
+  either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
+  [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)),
+  index 0, where the plan has it, carrying the keepalive frame; created, moved through INIT, RTR and RTS, on two
+  completion queues of the port's device context.
 - **A posted receive.** An `ibv_recv_wr` with one SGE: an address in the region, a length, a key. The queue pair's
   next arriving SEND fills the oldest posted receive. Its completion is an entry in the receive completion queue.
 - **A SEND.** An `ibv_send_wr` with one SGE naming a range of the region. TN3205: only SEND and RECV exist on this
@@ -97,7 +100,7 @@ definition): its stops keep the region as ever, and it has no release.
 receives. It reads and writes its own rows and its readiness words. It names nothing else.
 
 Why the cut is there: the device's state lives as long as the node and its cables (registration of most of RAM, links
-paired and re-paired while no call runs, ten queue pairs per link shared by every client), and a call lives for one
+paired and re-paired while no call runs, a link's queue pairs shared by every client), and a call lives for one
 call and may fail, be revoked or be killed. A call that held device state would leave it half-done at its end, and
 another party would have to repair it with verbs calls. No call holds any.
 
@@ -112,7 +115,7 @@ and Van Horn, 1966):
 2. *Device registers and state machines.* Queue-pair handles, requests, SGEs, doorbells and the RESET-INIT-RTR-RTS
    sequence have preconditions the hardware does not check, or checks by faulting: a post while another queue pair of
    the device is destroyed stored to a doorbell mapping that had moved (October 16-17). One agent sequences them.
-3. *Finite shared resources.* Ten queue pairs a link, each queue's frames and its share of the completion queue.
+3. *Finite shared resources.* A link's queue pairs, each queue's frames and its share of the completion queue.
    Deadlock and overcommit come from parties taking parts of what they need on their own (dining philosophers;
    Coffman's hold-and-wait); the fixes, an arbiter or one acquisition order, need the allocation state out of reach.
    `ibv_post_send` accepts posts past the queue's frames and corrupts later, so its credit has one writer.
@@ -344,8 +347,9 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
 
 **The stream.**
-- Each link carries `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own, since a
-  queue pair carries one ring (a SEND fills the oldest receive posted on it). Each stream has two classes: large units
+- Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own, since a
+  queue pair carries one ring (a SEND fills the oldest receive posted on it): as many as its plan has lane pairs for
+  (four of ten queue pairs, one of two: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)); the rest are never live. Each stream has two classes: large units
   (the region's block) and small units (one frame). Each class is a ring of units in the bridge's arena, with a ready
   word and a landed word per unit (`struct mesh_stream`).
 - A stream's units of a class ride its lane of that class in order, alike at both ends (`MESH_STREAM_PAIRS`, the pairs
@@ -391,14 +395,16 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   clients' slots, device discovery, hellos and the control sockets. A port's agent is `mesh-flow` spawned again by the
   parent: the same image (its LC_UUID checked, so a binary replaced on disk is no agent of a running parent), in a
   process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the region,
-  makes and connects the link's ten queue pairs and runs the port's progress threads. The parent asks it to open,
+  makes and connects the link's queue pairs (its plan's, from the queue pairs both ends' devices hold, each end's told
+  in its HELLO: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)) and runs the port's progress threads. The parent asks it to open,
   make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes, absorbed
   faults, guards not held and terminations it heard. Queue pairs exist only in an agent, and an agent is the bridge
   ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
-- A link's ten queue pairs are made once and connected once in an agent's life. None is moved to another state,
-  destroyed or forgotten; the kernel releases them at the agent's exit. A device holds ten usable queue pairs and a
-  link takes all ten, so a returning peer's lanes cannot exist beside the old ones, and the old agent's exit is their
-  one release (RESET panicked the M5 on 10-19; destroy is ruled out by its history, M3).
+- A link's queue pairs are made once and connected once in an agent's life. None is moved to another state,
+  destroyed or forgotten; the kernel releases them at the agent's exit. A link takes every queue pair its device holds
+  for it (ten of a macOS 26 device's ten; two of the M5 Ultra's macOS 27 device's two by max_qp − 1), so a returning peer's lanes
+  cannot exist beside the old ones, and the old agent's exit is their one release (RESET panicked the M5 on 10-19;
+  destroy is ruled out by its history, M3).
 - A link lost once its agent was asked for lanes (a farewell, the control socket's end, a failed completion, the link
   going off, a termination, an absorbed fault, a protocol error, the agent's own end): its streams cancelled (landed
   words ~0), its lanes served no more (the agent halted, before the control socket closes), the port closed. Once the
@@ -428,3 +434,6 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
   course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
   calls-in-flight failed and ought to be retried" (the operator, 10-20).
 - XMAGIC carries MESH_VERSION, so bridges of different versions never pair (129, 130, 131), and a client refuses a region of another version: both ends of a link, and every client, run the rule.
+  A change that keeps every exchange of a version's meaning and adds information only in a field that version sends
+  as 0 keeps the version: the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) ride a HELLO's `count`, a
+  peer's 0 there meaning a bridge before them, which makes every lane, and two ends that both hold ten pair as before.

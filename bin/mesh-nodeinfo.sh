@@ -4,7 +4,8 @@ PREFIX=fd6d:6573:68
 fact(){ printf '%s=%s\n' "$1" "$(printf '%s' "$2" | tr -s '[:space:]' _)"; }
 U=$(cat /usr/local/mesh/admin-user 2>/dev/null || id -un); H=$(eval echo "~$U"); S=$H/.cache/mesh
 booted(){
-  fact node_id "$(ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformUUID/{print $(NF-1)}')"
+  fact node_id "$(ioreg -a -rd1 -c IOPlatformExpertDevice | plutil -extract 0.IOPlatformUUID raw -o - -)"
+  fact serial "$(ioreg -a -rd1 -c IOPlatformExpertDevice | plutil -extract 0.IOPlatformSerialNumber raw -o - -)"
   fact model "$(sysctl -n hw.model 2>/dev/null)"
   fact cores "$(sysctl -n hw.ncpu 2>/dev/null)"
   fact memgb "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
@@ -14,7 +15,8 @@ booted(){
 }
 own(){
   boot=$(sysctl -n kern.bootsessionuuid 2>/dev/null); B=${HOME:-/nonexistent}/.cache/mesh/nodeinfo.boot
-  fact name "$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
+  nm=$(plutil -extract "nodes.$(ioreg -a -rd1 -c IOPlatformExpertDevice | plutil -extract 0.IOPlatformUUID raw -o - -).name" raw -o - "${0%/*}/../etc/mesh-nodes.json" 2>/dev/null)
+  [ -z "$nm" ] || fact name "$nm"
   fact boot_id "$boot"
   if [ -n "$boot" ] && [ "$(head -1 "$B" 2>/dev/null)" = "boot_id=$boot" ]; then sed 1d "$B"
   else mkdir -p "${B%/*}" 2>/dev/null && { fact boot_id "$boot"; booted; } > "$B.$$" && mv -f "$B.$$" "$B" && sed 1d "$B" || booted; fi

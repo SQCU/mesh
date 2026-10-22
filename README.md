@@ -122,15 +122,24 @@ was actually asked for. Each of these is open to revisiting:
 `mesh-peers` emits facts as they arrive and never waits to prove a negative; it runs until it is stopped:
 
 ```
-node <name> self|peer               each node this node's bridge holds a record of (its map), at once; then each node
+node <n> self|peer [name=<name>]    each node this node's bridge holds a record of (its map), at once; then each node
                                     that announces _meshnode._tcp (Bonjour) on the shared LAN, as it announces
-info <name> via=bridge node=... model=... memory=... region=...   its bridge's record of the node
-info <name> via=mdns model=... rdma=...                           the node's announcement, as it is resolved
-path <name> kind=<kind> addr=<a>    each address the node advertises: lan, lan-v6, fabric-adjacent (a link-local
+info <n> via=bridge model=... memory=... region=...                its bridge's record of the node
+info <n> via=mdns node=<n> node_id=<uuid> serial=... model=... rdma=...   the node's announcement, as it is resolved
+path <n> kind=<kind> addr=<a>       each address the node advertises: lan, lan-v6, fabric-adjacent (a link-local
                                     on one of this node's RDMA ports), fabric-routed (its fd6d:6573:68:: identity),
                                     fabric-v4ll
-gone <name>                         an announcement withdrawn
+gone <n>                            an announcement withdrawn
 ```
+
+`<n>` is the node's identity, its bridge node number (FNV-1 of its host UUID, `rdma/peers.py` `node_number`): a
+bridge record and an announcement are the same node when their numbers are, and `self` is this machine's own number.
+`name=` is the name table's (`etc/mesh-nodes.json`, entries keyed by host UUID, `rdma/peers.py` `table`), absent for a
+node it does not list; a name is a label for people, never matched to find a node (AGENTS.md, "A node is its hardware;
+names are virtual"). The beacon announces the host UUID as its instance name and its number, UUID and serial in its
+TXT record; a node still running an older beacon (one that announced its LocalHostName) shows as
+`unidentified-<key>` until its next update installs this one. The SRV target `dns-sd -L` resolves is used only as
+mDNS's pointer to the node's address records.
 
 The fabric's nodes are the bridge's map, so a node cabled to this one is known along its cable and never asked over
 Wi-Fi (the operator, 2026-10-16); its facts are node-info's, which its resident rank answers (metal-microbench
@@ -191,6 +200,12 @@ Other limits worth knowing before writing against this, all from TN3205: send/re
 only (`IBV_WR_SEND`, `IBV_ACCESS_LOCAL_WRITE`), 10 UC queue pairs per device, ~16 MB
 maximum message, sender and receiver must post the **same frame count**, no hardware
 ACK, and a per-controller IOMMU so a buffer is registered separately per device.
+
+The queue pairs are not the same everywhere: the M5 Ultra on macOS 27 reports `max_qp` 3
+on every device, not 11, and its driver keeps a queue pair of each device for itself. A
+link's two bridges state what their devices hold and make the lanes both can, ten where
+both hold ten and one stream's two where either holds two
+([design/HETEROGENEOUS-LINKS.md](design/HETEROGENEOUS-LINKS.md)).
 
 RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of
@@ -320,9 +335,10 @@ No static IPs. Identity travels with the machine:
 A Bonjour `<LocalHostName>.local` name is not identity: macOS renames a running machine when another claims its name
 (AGENTS.md, "A node is its hardware; names are virtual").
 
-That link-local is *exactly* the value the paired RDMA device reports as `GID[0]`,
-so a port's IP address and its RDMA identity are the same number. Nothing depends on
-a GID index, and the address encodes node identity rather than cable position — it
+That link-local is *exactly* the value the paired RDMA device reports as one of its GIDs (`GID[0]` on macOS 26;
+on macOS 27 the M5 Ultra's devices list another address first, `23ff:…`, then the link-local at `GID[1]`), so a port's
+IP address and its RDMA identity are the same number. The bridge chooses the GID that is the link-local
+(`rdma/mesh-verbs.h` `device_gid`), never an index, and the address encodes node identity rather than cable position — it
 survives being unplugged and replugged into a different port on a different machine.
 
 macOS does not autoconfigure link-local on an interface with no network service, so
@@ -369,7 +385,8 @@ the node's uplink.
 | `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
 | `bin/mesh-tailscale-init.sh` | the node's own tailnet edge (design/ACCESS-TOPOLOGY-SPEC.md: a stationary node is not carried by a laptop's tailnet). Builds the open-source `tailscale` and `tailscaled` at a pinned version with a pinned Go toolchain (fetched, used and deleted with its caches; Tailscale ships no CLI-only macOS binary, and the App Store and standalone apps need a GUI approval), runs `tailscaled` as `io.mesh.tailscale` (state in `/usr/local/mesh/tailscale`), and brings it up from `/usr/local/mesh/tailscale.key` whenever it is not running; with no key it logs the login URL to `tailscale.log`. Run by `install.sh` and every keeper pass; it builds only when the pinned version changes and only with 4 GiB free above the disk floor. A Mac with `/Applications/Tailscale.app` already has its edge from the app, and a second client would contend for the tailnet's routes and DNS, so there it does nothing and `mesh-status` names the app. |
 | `bin/mesh-rdma.sh` | the node's RDMA devices, one line each: `<port> device=<rdma_port> rid=<RID> rdma_peer=present\|absent`. Every script that names fabric ports reads them here. It reads the IORegistry's archive form (`ioreg -a`, a property list, through `plutil`) and keys each device by its registry entry ID, because a tree walk lists an object once for each path to it: on macOS 27 (the M5 Ultra Studio, 2026-10-21) each `AppleThunderboltRDMAInterface` is listed twice, so the earlier text walk named every port twice and its RID lookup matched no `AppleThunderboltRDMAPeerInterface`, reporting `rdma_peer=absent` on a cabled port. |
-| `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
+| `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement, its instance name the host UUID and its TXT record the node's number, UUID, serial, model and RDMA state. Must never exit voluntarily. |
+| `etc/mesh-nodes.json` | the name table: each node's name for people, keyed by its host UUID (`rdma/peers.py` `table` and `label`; `node <number>` for a node it does not list). Read by `mesh-peers`, node-info, `mesh-top`, the observer and telemetry; never by anything that has to find a node. |
 | `bin/mesh-keeper.sh` | a pass every 60 s (drift has no event to wait on): re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, runs the fabric init (port recovery), writes health warnings when they change, loads each unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and background agent; loads the admin user's own LaunchAgents that declare the Background session type into its background domain (user/<uid>) on every node, so the user's services (the bridge, a rank) run from boot with nobody at the node and never in a console session, where Local Network privacy would hold them. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, ports without their RDMA peer. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
@@ -450,15 +467,15 @@ cables directly, point to point.
 `mesh-peers` shows what the fabric is, not just which addresses exist (abridged):
 
 ```
-node <self> self
-node <peer> peer
-info <peer> via=bridge node=<n> model=Mac16,11 memory=... region=...
-path <peer> kind=lan addr=<a>
-path <peer> kind=fabric-adjacent addr=fe80::<b>%<port>
-path <self> kind=fabric-routed addr=fd6d:6573:68:<c>
+node 1980260065 self name=Ms-MacBook-Pro
+node 1974797816 peer name=Ms-Mac-mini
+info 1974797816 via=bridge model=Mac16,11 memory=... region=...
+path 1974797816 kind=lan addr=<a>
+path 1974797816 kind=fabric-adjacent addr=fe80::<b>%<port>
+path 1980260065 kind=fabric-routed addr=fd6d:6573:68:<c>
 ```
 
-A node's own facts (`name=<peer> node_id=... boot_id=... ula=fd6d:6573:68:<d>` and the rest below) come from
+A node's own facts (`node_id=<host UUID> serial=... name=<the name table's> boot_id=... ula=fd6d:6573:68:<d>` and the rest below) come from
 `mesh-nodeinfo.sh`, which the node's resident rank runs for a `{"facts"}` request (metal-microbench
 docs/elastic.md#call-delivery), as the rank's user, so no root process runs the user's checkouts or bridge reader. Every value is one token (a space in it is written `_`: `chip=Apple_M4_Pro`), so a reader
 that splits a line on whitespace reads it whole; `rdma/peers.py` `fields` reads a value to the next `key=` of its line

@@ -25,7 +25,8 @@
 struct wire_mapping { char *data; size_t length; };
 /* design/transport.md: a port's device: its context, protection domain and the whole region's `extents`
    registered on it (design/transport.md), the queue pairs it holds against those it can use (`max_pairs`:
-   its max_qp less one, design/transport.md's "max_qp: 11 (10 usable)") */
+   its max_qp less one, design/transport.md's "max_qp: 11 (10 usable)" on macOS 26; the M5 Ultra's macOS 27 devices
+   report 3, and their driver holds a queue pair of each device itself: design/HETEROGENEOUS-LINKS.md) */
 struct mesh_device {
   char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **extent_mrs;
@@ -35,16 +36,28 @@ struct mesh_device {
   union ibv_gid gid;
   uint8_t gid_index;
 };
-/* the port's own address (its GID) and its index in the port's GID table, the first entry the table holds: a Thunderbolt
-   port's table does not always begin at index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and
-   index 0's empty address failed every queue pair's connection with EIO) */
+/* the port's own address (its GID) and its index in the port's GID table: the entry that is the port's link-local
+   address (fe80::/64, the EUI-64 of its interface's MAC, README "Addressing"), which the peer at the cable's other end
+   reaches; else the first entry the table holds.  A Thunderbolt port's table does not always begin at index 0 (the
+   Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed every queue
+   pair's connection with EIO), and its first entry is not always the link-local: the M5 Ultra Studio's macOS 27
+   rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its fe80:: link-local, [2] its fd6d ULA, and
+   the Mini (macOS 26) failed every lane's connection toward [0] with EIO */
 static __attribute__((unused)) int device_gid(struct mesh_device *device){
+  int first=-1;
+  union ibv_gid found;
   for(int i=0;i<device->port.gid_tbl_len && i<256;i++){
     union ibv_gid g;
+    int nonzero=0;
     if(ibv_query_gid(device->context,1,i,&g))continue;
-    for(int b=0;b<16;b++)if(g.raw[b]){device->gid=g;device->gid_index=(uint8_t)i;return 0;}
+    for(int b=0;b<16;b++)nonzero|=g.raw[b];
+    if(!nonzero)continue;
+    if(g.raw[0]==0xfe && (g.raw[1]&0xc0)==0x80){device->gid=g;device->gid_index=(uint8_t)i;return 0;}
+    if(first<0){first=i;found=g;}
   }
-  return ENXIO;
+  if(first<0)return ENXIO;
+  device->gid=found;device->gid_index=(uint8_t)first;
+  return 0;
 }
 /* design/transport.md */
 /* design/transport.md */
@@ -69,8 +82,10 @@ struct mesh_queue {
   uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
-/* a program's queue pairs on one port and their two completion queues */
-struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn; };
+/* a program's queue pairs on one port (`count` entries of `queues`, by lane, an entry of a lane left out of its plan
+   holding none) and their two completion queues, polled through `poll` */
+struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn;
+  int (*poll)(struct ibv_cq *,int,struct ibv_wc *); };
 /* design/transport.md */
 /* design/algorithm-sources.md#programtensor */
 /* design/transport.md */
@@ -175,22 +190,25 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
   if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   return 0;
 }
-/* `count` UC queue pairs in INIT, against the device's usable queue pairs, on the provider's two completion queues: a
-   link's, made once in its port agent's life (design/transport.md section 14: no queue pair is moved to another state,
-   destroyed or forgotten; the kernel releases them at the agent's exit).  0, or the error (ENOSPC: the device holds
-   no more queue pairs). */
-static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,int count){
+/* a UC queue pair in INIT for each lane of `plan` (a bit a lane, design/HETEROGENEOUS-LINKS.md), queue q lane q, against
+   the device's usable queue pairs, on the provider's two completion queues: a link's, made once in its port agent's life
+   (design/transport.md section 14: no queue pair is moved to another state, destroyed or forgotten; the kernel releases
+   them at the agent's exit).  0, or the error (ENOSPC: the device holds no more queue pairs). */
+static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t plan){
   struct mesh_device *device=provider->device;
-  if(device->pairs+(uint32_t)count>device->max_pairs)return ENOSPC;
+  const uint32_t count=(uint32_t)__builtin_popcount(plan),entries=plan?32-(uint32_t)__builtin_clz(plan):0;
+  if(device->pairs+count>device->max_pairs)return ENOSPC;
   uint32_t frames=device->frame_capacity;
-  provider->queues=calloc((size_t)count,sizeof *provider->queues);
+  provider->queues=calloc(entries?entries:1,sizeof *provider->queues);
   if(!provider->queues)return ENOMEM;
-  provider->count=count;provider->psn=arc4random()&0xffffff;
+  provider->count=(int)entries;provider->psn=arc4random()&0xffffff;
   if(!provider->completion && !(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
   if(!provider->sent && !(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
-  for(int q=0;q<count;q++){
-    const int error=pair_make(provider,q);
-    if(provider->queues[q].pair)provider->qp_count=q+1;
+  provider->poll=provider->completion->context->ops.poll_cq;
+  for(uint32_t q=0;q<entries;q++){
+    if(!(plan>>q&1))continue;
+    const int error=pair_make(provider,(int)q);
+    if(provider->queues[q].pair)provider->qp_count++;
     if(error)return error;
   }
   return 0;

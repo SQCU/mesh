@@ -1,9 +1,10 @@
 #!/usr/bin/env mesh-python
-import argparse, collections, concurrent.futures, curses, html, json, os, subprocess, sys, time, urllib.request
+import argparse, collections, concurrent.futures, curses, html, json, os, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path[:0] = [HERE, os.path.join(HERE, "..", "rdma")]
-import mesh, mesh_disk
+import mesh, mesh_disk, peers
+TABLE = peers.table(os.path.join(HERE, "..", "etc", "mesh-nodes.json"), "/usr/local/mesh/etc/mesh-nodes.json")
 
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 LATEST = "/v1/latest?measures=scalars"
@@ -70,7 +71,8 @@ def shape(nodes, edges):
 class Top:
     def __init__(self, args):
         self.args, self.nodes = args, {}
-        self.me = subprocess.run(["/usr/sbin/scutil", "--get", "LocalHostName"], capture_output=True, text=True).stdout.strip() or "self"
+        self.own = peers.host()["node"]
+        self.me = peers.label(self.own, TABLE)
         self.series = collections.defaultdict(lambda: collections.deque(maxlen=240))
         self.pool = concurrent.futures.ThreadPoolExecutor()
         self.names, self.paired, self.unmapped = {}, set(), None
@@ -79,19 +81,19 @@ class Top:
         """The map of this node's bridge (mesh.current: mesh_map), naming each bridge node, and its records (mesh.nodes:
         each node's model, memory, region, boot and available memory); then this node's own telemetry asked for where no
         ask of it is under way (`wait`: until it answers)."""
-        own, records = None, {}
+        own, records = self.own, {}
         try:
             now = mesh.current()
-            self.names, self.unmapped, own = dict(zip(now.nodes, now.names)), None, now.node
-            self.paired = {frozenset((now.names[a], now.names[b])) for a, b in now.map.pairs}
-            records = {record["name"]: record for record in mesh.nodes()}
+            self.names, self.unmapped = {number: peers.label(number, TABLE) for number in now.nodes}, None
+            labels = [peers.label(number, TABLE) for number in now.nodes]
+            self.paired = {frozenset((labels[a], labels[b])) for a, b in now.map.pairs}
+            records = {record["node"]: record for record in mesh.nodes()}
         except (OSError, ValueError) as error: self.paired, self.unmapped = set(), str(error)
-        self.me = self.names.get(own) or self.me
         for number, name in [(own, self.me)] + list(self.names.items()):
             if name not in self.nodes and (not self.args.nodes or name in self.args.nodes or number == own):
                 self.nodes[name] = Node(name, number, number == own)
         for node in self.nodes.values():
-            node.record = records.get(node.name) or {}
+            node.record = records.get(node.number) or {}
             if node.me and (node.asked is None or node.asked.done()): node.asked = self.pool.submit(fetch, node)
         if wait: concurrent.futures.wait([node.asked for node in self.nodes.values() if node.asked])
         for node in self.nodes.values(): self.account(node)
