@@ -125,37 +125,6 @@ predates this rule and remains is debt to remove, not precedent: the bridge map'
 `name` (`rdma/mesh-link.c`, which also reaches metal-microbench's `tools/mesh/grid.py`
 name selection), and the bootstrap's `gethostname()` (`rdma/nccl-mesh.c`).
 
-## No tuples
-
-The operator, 2026-10-21: "anything which claims to be fitted on a specific pair of
-devices has to go forever. thjere will be no tuples in this codebase. there can be no
-tuples in this codebase. the instant it muts be said that 'x was fitted on node1, node2,
-not node3 or node4', we cede that it is not a model of anything that matters, it is not
-durable, it is not predictive, and it cannot be used in code for programs that are
-uniform to all meshes we might ever run hereon". And: "there are several points in this
-codebase where using an online optimizer to solve a problem is more responsible than
-attempting to a priori 'model' and 'persist' data; they are chiefly related to the
-incredible mysteries of tensor parallelism ... some things in this list of 'models'
-should probably become 'configurations', emphasizing semantically their unjustified
-nature".
-
-Every value the code acts on is one of three kinds, and says which:
-
-- **Fact:** read from the running mesh, per node, keyed by its identity (a link's
-  bandwidth as its bridge reports it, a device's queue pairs, the memory a plan counts).
-- **Online optimizer:** decides from observations of the members it is serving, and
-  persists nothing but those observations. Tensor-parallel placement and routing belong
-  here; no closed form chooses them ahead of observation.
-- **Configuration:** a stated choice that claims no justification, named a
-  configuration, the same for every mesh (a resolution, a window, a starting split of
-  equal parts).
-
-Nothing may be fitted on, derived from, sized for or keyed to particular machines,
-pairs or sets of machines: no constant from "one pair ledger pass", no table of two
-chips from which others are extrapolated, no code path defined for two members, no
-configuration that names the machines it was written for. A measurement of particular
-machines may be kept as a dated record; no code reads it.
-
 ## Fail toward access
 
 When something goes wrong, the fallback must be the *more* accessible state:
@@ -191,8 +160,6 @@ node access). They do not govern the RDMA collective or TP code.
 - [ ] No comments added to code.
 - [ ] No host name (`LocalHostName`, `ComputerName`, `HostName`, `gethostname()`) read
       to identify, select, match or label a node; identity is the host UUID.
-- [ ] No tuples: nothing fitted on, sized for or naming particular machines; every value
-      a fact, an online optimizer's observation, or a configuration named as one.
 - [ ] Every failure path ends in the more accessible state.
 - [ ] Nothing writes `authorized_keys`, network order, firewall, or power policy in
       a way that could reduce access. Merge, never truncate.
