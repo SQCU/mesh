@@ -1,8 +1,6 @@
 # Collective goal
 
-The current user instructions define the work. The excerpts below are verbatim
-from the September 14 conversation. Papers describe mechanisms; existing code,
-agent plans, inventories and old specifications do not add requirements.
+The excerpts below are verbatim from the September 14 conversation.
 
 Superseded by the operator's 2026-09-22 telos in [collective-goals.md](collective-goals.md).
 
@@ -36,7 +34,7 @@ Superseded by the operator's 2026-09-22 telos in [collective-goals.md](collectiv
 
 > runtime testing is not part of any requirement and does not inform any actions
 
-(Superseded 2026-09-18 and 2026-09-22: measuring Goal A and Goal B on the pair is the task.)
+(Superseded 2026-09-18 and 2026-09-22 by measuring Goal A and Goal B on the pair, [collective-goals.md](collective-goals.md).)
 
 > never ask for permission to handle integration and build steps
 
@@ -50,7 +48,9 @@ Superseded by the operator's 2026-09-22 telos in [collective-goals.md](collectiv
 
 mesh a07d7f66 (2026-09-14, "Remove obsolete collective specifications and anchor scope in user instructions") deleted
 the operator lines below with design/collective-goals.md's normative section; they are restored verbatim with the
-session and time the record gave each (AGENTS.md: "Verbatim operator quotes outrank everything else here"). Lines of
+session and time the record gave each. design/rubrics.md: text an agent wrote without citing the operator's words ≺
+the operator's text, "user written text takes precedence over claude written text without a citation to user text"
+(10-21). Lines of
 that record still held elsewhere are not repeated: "pallas is to provide an api header style ..." (2026-09-14T16:51:47Z,
 [SPECIFICATION.md](SPECIFICATION.md) section 25) and "successful compilation is not important ..." (above).
 
@@ -118,7 +118,7 @@ Current-session clarification:
 > we do not even need to run the programs to know whether they satisfy our
 > distributed collective async properties
 
-(Superseded 2026-09-18 and 2026-09-22: measuring Goal A and Goal B on the pair is the task.)
+(Superseded 2026-09-18 and 2026-09-22 by measuring Goal A and Goal B on the pair, [collective-goals.md](collective-goals.md).)
 
 Current-session constraint on implementation work:
 
@@ -134,15 +134,11 @@ From the same record's implementation inventory, 2026-09-14 (the current convers
 > possible to write a refcounter for buffers over a known data flow when you know
 > functions are completely feed forward?
 
-The subsequent deployment clarification is also authoritative:
+The subsequent deployment clarification:
 
 > we should note that writing something which sounds like it satisfies all contraints but is slow and doesn't utilize flops on two computers concurrently would be 'fake'. so would anything which is depthwise recurrent, like a resnet with 4 ffn-residual-layers, running slower with the mesh collectives than without them, because some asshole decided to add a global sync or global guard or global wait again
 
 > the importable path is that oyu are writing a tensor function invariant streaming partial function library. what do you think the linear algebra notes earlier meant?
-
-The user's repeated-block workloads motivate actual use of this invariant
-library. They do not authorize a model-specific API or numerical implementation
-inside Mesh. Block counts and function compositions belong to the caller.
 
 The subsequent transport clarification distinguishes two abstraction levels:
 
@@ -150,19 +146,13 @@ The subsequent transport clarification distinguishes two abstraction levels:
 
 > remember that a streaming transportmessagesize transport layer implementation should be totally transparent to all users of a send or receive api call exposed through our mesh api; this is something which is purely internal and have no effect on any caller or user of this api at any point in the future.
 
-The numerical partial is not a transport request. One request does not limit a
-tensor's byte count. Internal fragmentation does not change its shape, partition,
-numerical function or public send/receive declaration.
-
-The subsequent exact-tail clarification is authoritative:
+The subsequent exact-tail clarification:
 
 > an exact tail change has to implement exact tails by choosing what to push to the send interface instead of trying to do weird truncation logic inside of the send or recv interface. throw out the requirement if the requirement is stupid / cooked / washed / chopped
 
-Tail selection belongs to preparation of the messages submitted to transport.
-It does not authorize SEND or RECV to reinterpret or shorten those messages.
-The current implementation prepares matching native request extents and retains
-padding; it does not implement padding-free wire tails. The incorrect requirement
-to shorten a SEND against an incompatible preposted RECV is withdrawn. See
+The implementation then prepared matching native request extents and retained
+padding; it did not implement padding-free wire tails. The requirement to shorten a
+SEND against an incompatible preposted RECV was withdrawn on that clarification. See
 [prepared native requests](transport.md).
 
 The user-selected continuation objective is the attachment
@@ -181,12 +171,10 @@ functions, reduce-scatter and supplied consumers at each declared depth. The
 function representation is shared by calls, maps and reductions; model stages
 remain caller code.
 The earlier completion claim was too broad: the single-use value extent and
-example-only integration remain
-implementation restrictions, not user-authorized definitions of the deployment
-target. The implementation description records these gaps and actual transport
-costs. Deletion, documentation and successful builds alone are not completion.
+example-only integration were implementation restrictions. The implementation
+description records these gaps and actual transport costs.
 
-The subsequent peer-count clarification is authoritative:
+The subsequent peer-count clarification:
 
 > special casing one peer is an error in library design for the same reason as special casing exactly one tensor function ever and no guardless continuation of work between multiple tensor functions.
 

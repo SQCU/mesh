@@ -1,8 +1,6 @@
 # Collective communication relations
 
-The [user's requirements](collective-goals.md) require each collective's actual
-semantics. This table describes value movement and combination; it prescribes no
-Python signatures, scheduler, invocation protocol, or mandatory decomposition.
+This table describes each collective's value movement and combination.
 
 | Operation | Value relation |
 | --- | --- |
@@ -20,12 +18,13 @@ Sum, maximum and minimum select numerical reduction functions. Movement does not
 imply reduction. Reduction does not imply gathering the entire tensor first.
 The same partial publication and zero-copy transport support each relation.
 
-Peer count, tensor type and operand arity do not select a collective. Scatter's
-explicit destination list and gather's explicit destination remain authoritative
-at every world size. Broadcast, all-gather, all-scatter, all-to-all and all-reduce
-are selected by calling those verbs; additional peers do not promote a movement
-into an "all" operation. A rank outside a transfer's two endpoints does not bind
-that transfer or allocate a received copy.
+The operator, 2026-09-15: "note that peer>1 prohibits the use of type inference of
+broadcasts or alls rather than defined scatters and defined gathers". Peer count,
+tensor type and operand arity select no collective. Scatter's destination list and
+gather's destination are explicit at every world size. Broadcast, all-gather,
+all-scatter, all-to-all and all-reduce are the verbs of those names; additional peers
+do not make a movement an "all" operation. A rank outside a transfer's two endpoints
+does not bind that transfer or allocate a received copy.
 
 Repeated delivery of the same immutable part to the same destination and queue
 shares the receive operand during setup. This does not merge input positions in

@@ -4,31 +4,29 @@ The incident record below is historical; none of its citations establishes
 that the replacement caller has been implemented or that a measured latency
 bound has been met.
 
-The September 9, 2026 instruction deletes CRC/digest checking entirely. Mesh
-does not hash payloads, exchange or compare digests, or retain pages for checks.
-Device and transport error metadata remains. Digest mechanisms in the incident
-record are historical excluded implementations, not required replacements.
+The operator, 2026-09-10, of the digest path (design/pages-and-functions.md): "hm
+delete crc then bye-bye superfluous feature". Mesh does not hash payloads, exchange
+or compare digests, or retain pages for checks. Device and transport error metadata
+remains. The digest mechanisms in the incident record are history.
 
-The operator's [asynchronous error metadata contract](pages-and-functions.md#asynchronous-error-metadata)
-supersedes failure-value and status-driven termination wording below. The
-interface is `out, meta = meshfunction(x)`: literal error codes and where/when
-they occurred propagate asynchronously through metadata pages, separately from
-numerical outputs. The callgraph never consumes them to control execution;
-only the calling context interprets and handles them. See the
+The operator, 2026-09-10 ([asynchronous error metadata](pages-and-functions.md#asynchronous-error-metadata)):
+"error status returns are allowed by the specifications we use... but it can never
+be synchronous or blocking or consumed by a callgraph itself... it can only be
+passed monadically through a metadata channel... s.t. calling contexts can call
+`out, meta = meshfunction(x)`, with literal values corresponding to error codes and
+where/when they happened in a callgraph reported in the meta channel, not the
+output channel, for calling consumers to interpret and handle...". The failure-value
+and status-driven termination wording below predates it. See the
 [current source disposition](algorithm-sources.md#operator-clarification-asynchronous-error-metadata).
 
-This is the specification for the next reduce runtime in `rdma/`. Every
-requirement below draws on published prior art; the operator's specification
-is binding for this repository.
+This was the design of the next reduce runtime in `rdma/` (September 2026), with
+the published prior art behind each part.
 
-## Standard of correctness
+## Execution flow
 
-Execution flow across the substrate: pages are emitted in the order their
-producers finish them and consumed the instant their operands are present.
-Numerical agreement is a tripwire that is checked after consumption, never a
-gate. A plan is accepted only by measurement against the sum of node
-capability: `T(n)` must fall as `n` rises (Amdahl 1967; Gustafson 1988). See
-`metal-microbench/docs/amdahl_superiority.md`.
+Pages are emitted in the order their producers finish them and consumed as soon
+as their operands are present. Numerical agreement is checked after consumption
+(the end-to-end argument, below).
 
 ## Algorithm
 
@@ -45,9 +43,9 @@ bounded by `2|S|` for any `n`. The naive exchange, in which every participant
 sends its whole partial to every peer, moves `(n−1)·|S|` per participant and
 loses with every added node.
 
-For the two-participant FFN this is: send only the half the peer owns, sum your
-own half, send the reduced half back. Bytes per participant equal the naive
-exchange at `n = 2`; the dependency between the two phases is the price of
+For the two-participant FFN each participant sends only the half the peer owns,
+sums its own half, and sends the reduced half back. Bytes per participant equal
+the naive exchange at `n = 2`; the dependency between the two phases is the price of
 constant traffic at every larger `n`.
 
 ## Completion is the page table
@@ -84,7 +82,7 @@ publication: all input pages for a whole-input dependency, matching page indices
 for a pagewise dependency.
 
 `V` is the generation stride across separately bound version slots. Generations
-`g` and `g + V` reuse the same slot and page addresses; their lifetimes must not
+`g` and `g + V` reuse the same slot and page addresses; their lifetimes do not
 overlap. Stamps identify the value stored at an address; they do not create a
 second copy of it.
 
@@ -129,29 +127,26 @@ Mesh has no checksum exchange. Reuse and completion follow from numerical
 dependency edges and physical device ownership.
 
 The configured model measures final logits against a single-node calculation
-and compares the two peers' outputs after timing. Other callers can retain
-asynchronous checks and recomputation, provided check results do not become
-storage dependencies of the numerical program. The former model binding did
-exactly that: a later hash replaced an unchecked hash in a one-entry table,
-and the checker then held numerical storage forever. Removing that exchange
+and compares the two peers' outputs after timing. The former model binding made
+a check result a storage dependency of the numerical program: a later hash
+replaced an unchecked hash in a one-entry table, and the checker then held
+numerical storage forever. Removing that exchange
 removes both the redundant messages and the false dependency.
 
-Fault injection remains an optional measurement input. A shared seed and period
-select received page pairs for corruption. A caller using it must choose its
-own numerical check and recomputation policy. Successful transport completion
+Fault injection was an optional measurement input: a shared seed and period
+selected received page pairs for corruption. Successful transport completion
 alone says nothing about numerical agreement.
 
-## GPU work never waits on the mesh
+## A GPU wait on the mesh, measured
 
 Measured 2026-09-08 (M5 Max, macOS 26.3): a Metal command buffer that waits on a
 shared event whose value arrives seconds later is killed by the GPU watchdog
 (`kIOGPUCommandBufferCallbackErrorTimeout`), and every buffer queued behind it
-dies with it. A stage of a distributed function is therefore committed by the
-consuming task only when every input it reads is already present: its own
+dies with it. In this design a stage of a distributed function is committed by
+the consuming task only when every input it reads is already present: its own
 gathered block, and the page table's `producible` for the slots it writes. The
 wait is the task's, on its input channels, yielding between polls; the GPU
-receives only runnable work. Pre-issuing a pass as a chain of event-gated
-buffers is not admissible on this platform, whatever its data-flow appeal.
+receives only runnable work.
 
 ## What the runtime owns
 
@@ -172,15 +167,13 @@ These mechanisms make the design implementable. They do not establish that
 any cited system is literally this caller or that the caller is already built.
 
 Monsoon, Active Messages, Legion, Naiad, NCCL, PyTorch async-TP and the
-end-to-end argument agree with this design in places and differ in others; their
-internal schedulers and protocol state do not authorize a second readiness
-representation in this repository's caller.
+end-to-end argument agree with this design in places and differ in others.
 
 A configured function that needs every row is issued only when those rows
 are ready. A function with independent outputs may select their ready input
-sets. Batching those outputs into one command buffer per scan is the caller
-contract; its cost and its preservation of local kernel efficiency require
-measurement. Monsoon is not a measurement of that Metal implementation.
+sets. The caller batches those outputs into one command buffer per scan; its cost
+and its effect on local kernel efficiency are not measured here. Monsoon is not a
+measurement of that Metal implementation.
 
 ## What was done instead, and why it was wrong
 
@@ -206,8 +199,7 @@ kept here so each one can be seen and fixed.
   page headers; the paged path was committed with a relative error copied from
   the CPU path it replaced.
 - The digest page used as the gate on the next stage's issue — the numerical
-  check made a dependency of the numerical program, which this document rules
-  out in two places.
+  check made a dependency of the numerical program.
 - A driver with phases, per-job state, per-call tasks awaiting predictions,
   completion words, and fixed 128-row groups: a scheduler. It issued about two
   thousand GPU command buffers per evaluation. The reported 1,443 ms is
@@ -216,16 +208,13 @@ kept here so each one can be seen and fixed.
   isolate command-buffer overhead. The readiness it tracked was already in
   the stamps.
 
-These were plain mistakes in the work. They do not show that the page-table
-method is unripe. Two were the worst. The spec was changed to bless a form it
-ruled out. And numbers from one path were claimed for another. Both make the
-review's own evidence worthless.
+The spec was changed to bless a form it had excluded, and numbers from one path
+were claimed for another.
 
-Readiness lives in the stamps. A new frame, handshake, phase, token, gate or
-scheduler that says it again breaks this repo's contract, before any timing.
-That is a design ruling. It is not a proof about time. A performance claim
-needs matched baselines, measured local functions, physical-link traffic,
-launch and scan costs, and separate latency and throughput results.
+Readiness lives in the stamps. M2 (design/rubrics.md), the operator's pair: lower,
+"if you have successfully 'asked permission' to send data"; upper, "you could have
+sent the data instead" (10-19); ranked there, `READY`-style keyword states ≺ none
+(10-18).
 
 ## Failure of a participant
 
@@ -239,16 +228,14 @@ consumer to read. Either way the evaluations in flight stop concluding, and
 the consumer decides, at its own discretion and by its own clock, that the
 job has failed: it returns a failure value, and whoever launched the job
 relaunches it on both participants under a fresh epoch. What the old
-rendezvous carried — plan, page count, stride, incarnation — is metadata that
-belongs to configuration before numerical invocation; it is not exchanged in
-an added correctness protocol.
+rendezvous carried — plan, page count, stride, incarnation — is configuration,
+fixed before numerical invocation, and is not exchanged.
 
 ## Ownership
 
 Only the two endpoints of a compiled edge exchange pages for it. The bridge
 routes bytes and holds no schedule. A participant that merely forwards
-(`hops`) has no authority over the edge. Constants are computed once at launch;
-a caller that recomputes them per invocation is defective.
+(`hops`) has no part in the edge. Constants are computed once at launch.
 
 ## Indexed consumption of resident pages
 
@@ -257,10 +244,9 @@ stamps and physical presence, verifies destination lifetime, and claims the
 actual destination stamps. Completion publishes those destinations after their
 writes are visible. The caller-owned consumed-mask selection API was deleted;
 it duplicated readiness and could mark work consumed before an output existed.
-What replaced it has no such role, under any name.
 
-The required author/publication list and mechanism-specific implementation
-obligations are in [algorithm sources](algorithm-sources.md). In particular,
+The author/publication list and the mechanism taken from each are in
+[algorithm sources](algorithm-sources.md). In particular,
 Papadopoulos and Culler establish storage-associated operand matching; they do
 not establish this exact RDMA/Metal binding or its measured performance.
 
