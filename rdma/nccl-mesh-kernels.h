@@ -54,10 +54,14 @@
    mesh_wait_bounded); every threadgroup of a dispatch may await them, each its own bounded wait, ended at once after any
    of them failed (mesh_step_counts), calling it from every thread alike; its result is true, kept as mesh_step_enter's.  mesh_step_sent: thread 0's wait for `sent` alone (a
    publication's record: the published bytes read by the NIC, so a kernel may write them again; none once a wait on vb
-   has failed, as mesh_step_counts'), then a device barrier.  mesh_step_release: a publication, the operand already written by the caller's kernel (its last
-   threadgroup to arrive calls it, after every other threadgroup's stores): a device barrier, then thread 0's one
-   system-scope fence (mesh.metal mesh_publish: every store of the operand visible before the count the bridge acts on)
-   and its one store of the holding's `ready` (p.scalar at p.aux).  mesh_step_read: element k of a landing buffer the
+   has failed, as mesh_step_counts'), then a device barrier.  mesh_step_write: element k of the operand a publication sends, stored system-coherent (a plain store
+   reaches the NIC only once its command buffer has ended, and the bridge sends as soon as `ready` passes: 2,041,216 of
+   4,194,304 plain-stored words read stale on the M5, none stored so, metal-microbench docs/measurement.md, 2026-09-29);
+   the caller's kernel stores every element it publishes through it, once.  mesh_step_release: a publication, the
+   operand already written through mesh_step_write by the caller's kernel (its last threadgroup to arrive calls it,
+   after every other threadgroup's stores): a device barrier, then thread 0's one system-scope fence (mesh.metal
+   mesh_publish: every store of the operand visible before the count the bridge acts on) and its one store of the
+   holding's `ready` (p.scalar at p.aux).  mesh_step_read: element k of a landing buffer the
    NIC wrote, loaded system-coherent (mesh.metal mesh_payload; half4 where it names no type: float16 fourths), so the
    caller names no transport qualifier of its own (they are compiled here, under mesh.metal's pragma: a header after
    it, MetalPerformancePrimitives', may end that pragma). */
@@ -97,6 +101,8 @@ static NSString *const STEPS =
   "static inline void mesh_step_release(constant mesh_args &p, device uchar *words, uint i) { "
   "threadgroup_barrier(mem_flags::mem_device); "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux), p.scalar); }\n"
+  "template <typename T> static inline void mesh_step_write(device uchar *operand, ulong k, T value) { "
+  "((volatile coherent(system) device T *)operand)[k] = value; }\n"
   "template <typename T = half4> static inline T mesh_step_read(device const uchar *landing, ulong k) { "
   "return mesh_payload((volatile coherent(system) device const T *)landing + k); }\n";
 

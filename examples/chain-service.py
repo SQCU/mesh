@@ -110,7 +110,7 @@ class Pace:
 def fill(E, rank, inputs, first, steps, block):
     held, slots = span(first, steps, block, len(E))
     if rank == 0:
-        E[slots].copy_(torch.from_numpy(inputs[held]), non_blocking=True)
+        E[slots].copy_(torch.from_numpy(inputs[held]))
     return dist.broadcast(E[slots], src=0, async_op=True)
 
 

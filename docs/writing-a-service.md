@@ -88,7 +88,9 @@ step. Each rank has two rings, one for the inputs and one for the sums.
 
 The inputs cross a block at a time, a block early. They depend on nothing in the chain, so nothing makes them wait.
 Before the first step of each block, rank 0 copies the next block's inputs from its file into its ring, and broadcasts
-them into every rank's ring. Both go on the GPU's own queue, and the host does not wait for them. The host waits for
+them into every rank's ring. The copy's command buffer ends before the broadcast is issued: the NIC reads a GPU's plain
+stores only once their command buffer has ended (metal-microbench docs/measurement.md, 2026-09-29), and the broadcast
+sends the ring's own pages. The broadcast goes on the GPU's own queue, and the host does not wait for it. The host waits for
 that broadcast just before the next block's first step, the first thing that reads it. A step then has two host calls:
 the fused all-reduce of its part of z, which only writes the crossing's records, and its kernel. Nothing else crosses
 during a block.
@@ -141,7 +143,8 @@ The kernel does three things, and it runs the step's crossing itself (torch-mesh
 z to land, adds them to its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
 workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the rank's part
 of z from y and its rows of B, and publish it. Each worker writes its slice of the part straight into the step's send
-tensor, and the last worker to finish releases it to every peer: one fence and one store of each holding's `ready`,
+tensor, each element once through the library's `mesh_step_write` (a system-coherent store: the bridge sends as soon as
+`ready` passes, while the kernel's command buffer still runs), and the last worker to finish releases it to every peer: one fence and one store of each holding's `ready`,
 after which the bridge sends the tensor's own pages down each link. Nothing is copied. Within a block, no kernel of the library's runs between two
 steps. The wait and the release are the library's own steps (`ncclMeshMetalPrelude`), which the kernel calls. Each wait
 is bounded. A step's publication follows torch-mesh's one

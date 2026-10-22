@@ -96,11 +96,13 @@ struct Activated {
 
 // docs/writing-a-service.md#the-step-kernel
 struct Summand {
-    device half* P; uint col0, ld;
+    device half* P; uint col0, ld; threadgroup float* own; uint lane, lanes;
     void operator()(thread simdgroup_float8x8& acc, uint ct, uint rt) thread {
-        simdgroup_half8x8 o;
-        for (uint e = 0; e < 2; e++) o.thread_elements()[e] = half(acc.thread_elements()[e]);
-        simdgroup_store(o, P + rt * 8 * ld + col0 + ct * 8, ld);
+        simdgroup_store(acc, own, 8);
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = lane; e < 64; e += lanes)
+            mesh_step_write<half>((device uchar*)P, (rt * 8 + e / 8) * ld + col0 + ct * 8 + e % 8, half(own[e]));
+        simdgroup_barrier(mem_flags::mem_threadgroup);
     }
 };
 
@@ -159,7 +161,7 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     stage<RG, RB, K, SG>(X, K, At, ys, groups, ks0, sgid, red, activated);
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, SIMD, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 2u)) return;
-    Summand summand{P, x0, K};
+    Summand summand{P, x0, K, red + sgid * RB * 64, lane, SIMD};
     stage<RG, RB, S, SG>(Y, S, Bt, xs, groups, ks1, sgid, red, summand);
     for (uint q = 0; q < PEERS; q++) mesh_step_enter(*words.publish[q].p, words.publish[q].v, words.publish[q].progress, w == 0 && tid == 0);
     threadgroup_barrier(mem_flags::mem_device);

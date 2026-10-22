@@ -30,7 +30,8 @@ publishing kernel: a step kernel that lands crossing t - 1 and publishes crossin
 with crossing t - 1's Crossing as `land` and crossing t's as `publish`.
 
 The publishing kernel: mesh_step_enter(*b.p, b.v, b.progress, first) in one thread for each publication b, then its
-threadgroups write the part into the send tensor, then the last threadgroup to arrive (the kernel's own count of
+threadgroups write the part into the send tensor through mesh_step_write (system-coherent: the NIC reads a plain store
+only once its command buffer has ended), then the last threadgroup to arrive (the kernel's own count of
 arrivals, after every other threadgroup's stores) calls mesh_step_release(*b.p, b.a, tid) for each: one system fence and
 one store of that holding's `ready`.  The landing kernel: mesh_step_enter, then mesh_step_await(*l.p, l.a, l.v, tid) for
 each landing l in every threadgroup that reads (each its own wait, bounded by polls: the landed bytes, and this rank's

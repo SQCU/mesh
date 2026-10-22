@@ -84,8 +84,10 @@ __attribute__((always_inline)) static inline T mesh_payload(volatile coherent(sy
     return value;
 }
 
-// Publishes a count: a system-scope fence orders every store before it (the bytes a SEND reads from the client's own
-// pages) before `value` is stored into `cell` (a holding's `ready`, design/transport.md section 14; a failure word).
+// Publishes a count: a system-scope fence orders every system-coherent store before it (the bytes a SEND reads from the
+// client's own pages, stored system-coherent: a plain store reaches the NIC only once its command buffer has ended,
+// metal-microbench docs/measurement.md, 2026-09-29) before `value` is stored into `cell` (a holding's `ready`,
+// design/transport.md section 14; a failure word).
 template <typename W>
 __attribute__((always_inline)) static inline void mesh_publish(volatile coherent(system) device W *cell, ulong value) {
     metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
