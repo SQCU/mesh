@@ -1362,11 +1362,14 @@ ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
 }
 
 /* ncclCommDestroy: comm stopped (comm_stop), its init's thread joined (a non-blocking init's, which the stop ends), its
-   host-path groups returned (each at its next look) and the GPU work the library committed for it awaited, at most
-   MESH_PLATFORM_NS (each of its waits ends at its landing or its bound), its groups in flight lost; then its streams
+   host-path groups returned (each at its next look) and the GPU work the library committed for it awaited (gpu_wait,
+   group_lock released for it: its command buffer's Completed or Error status, which the platform's watchdog gives
+   one that overruns, and no clock; the stop that is the destroy's own does not end it, and a buffer not committed
+   is not awaited: nothing would run it while its committer waits), its groups in flight lost; then its streams
    given back (its bridge posts nothing more of their holdings), its pool's leases returned, and comm freed.  Work encoded in a caller's encoder is the
    caller's to finish first (NCCL's: no communicator is destroyed under its own operations in flight): a kernel of it
    still queued would write the stream given back (rdma/NCCL.md "Failures") */
+static int gpu_wait(struct ncclComm *comm, int group);
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
   comm_stop(comm);
@@ -1377,7 +1380,7 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
     usleep(20);
     pthread_mutex_lock(&group_lock);
   }
-  if (finished && comm->last) metal_wait(finished, comm->last, MESH_PLATFORM_NS);
+  gpu_wait(comm, 0);
   if (finished) metal_collect(finished);
   inflight_lose(comm);
   pthread_mutex_unlock(&group_lock);
@@ -2072,15 +2075,53 @@ static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate) {
   }
 }
 
+/* the communicators a program touched, each once, until its end (program_end); a program holds group_lock from its
+   begin to its end but across a wait (room_wait), which sets its list aside, so the list is empty at every taking of
+   the lock */
+static struct ncclComm *touching;
+static void touch(struct ncclComm *comm) {
+  if (comm->touched) return;
+  comm->touched = 1;
+  comm->next_touched = touching;
+  touching = comm;
+}
+/* whether channel ch's list (0 send, 1 landing) has room for `need` entries more: its entries presented and not taken
+   by the bridge, with them, at most MESH_STREAM_ENTRIES */
+static int room_for(const struct channel *ch, int list, uint64_t need) {
+  return atomic_load_explicit(ch->view.presented[list], memory_order_relaxed) - atomic_load_explicit(ch->view.taken[list], memory_order_acquire) +
+         need <= MESH_STREAM_ENTRIES;
+}
+/* the wait for room on channel ch's list with group_lock released, as a condition variable's wait releases its mutex
+   (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): comm kept from its destroy
+   (`runs`), and the list of communicators the program being encoded touched set aside (it is comm alone where a group
+   presents, launch_metal), so a program another thread encodes meanwhile ends with its own; each look spins, ending at
+   the bridge's `taken` advancing, at a revoke or at the holding's end, never at a clock; then the lock taken again, the
+   list restored and comm's failure read again (comm_failure: a group in flight of it may have failed meanwhile).
+   Under group_lock */
+static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, int list, uint64_t need) {
+  const int mine = touching == comm;
+  if (mine) { touching = comm->next_touched; comm->touched = 0; }
+  atomic_fetch_add(&comm->runs, 1);
+  pthread_mutex_unlock(&group_lock);
+  ncclResult_t result = ncclSuccess;
+  while (!result && !room_for(ch, list, need))
+    if (revoked(comm)) result = revoked_fail(comm);
+    else if (!mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
+      result = fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended before the group's entries there were "
+                    "presented (design/transport.md section 14); none was presented", comm->name, ch->node);
+  pthread_mutex_lock(&group_lock);
+  atomic_fetch_sub(&comm->runs, 1);
+  if (mine) touch(comm);
+  return result ? result : comm_failure(comm);
+}
 /* each channel's entries presented (mesh-call.h mesh_stream_present), its send list's and then its landing list's, once
    the bridge has room for all of them (each list's entries presented and not taken fewer than MESH_STREAM_ENTRIES with
    them: the bridge takes an entry as it reads it while fewer than that of the list are taken and not done), so a group
    is presented whole or not at all; a send entry's bytes ready once `ready` passes them (word 0), a landing entry gated
-   as gate_of says.  The wait for room ends at the bridge's `taken` advancing, and no clock ends it: each look spins and
-   reads the revoke and the holding (mesh_stream_held), whose end fails the call (design/rubrics.md M3, 10-18: every
-   wait killable).  0; ncclSystemError where a list's entries are more than the bridge ever takes, ncclInvalidUsage at a
-   revoke, ncclRemoteError at the holding's end (nothing presented, the call's failure alone); a refused presentation
-   fails comm (its lists stand mid-group) */
+   as gate_of says.  The wait for room (room_wait) holds no lock and no clock ends it (design/rubrics.md M3, 10-18:
+   every wait killable).  0; ncclSystemError where a list's entries are more than the bridge ever takes, the wait's
+   failure (a revoke, the holding's end, comm's failure: nothing presented, the call's failure alone); a refused
+   presentation fails comm (its lists stand mid-group).  Under group_lock */
 static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans) {
   struct mesh_ctx *context = &comm->attach->context;
   for (uint32_t h = 0; h < comm->count; h++)
@@ -2091,12 +2132,9 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
         return fail(ncclSystemError, "communicator %s: the group lays %llu entries on its %s list toward node %u, and its bridge takes at most %u "
                     "not yet done (mesh.h MESH_STREAM_ENTRIES); none was presented", comm->name, (unsigned long long)need, list ? "landing" : "send",
                     ch->node, MESH_STREAM_ENTRIES);
-      while (need && atomic_load_explicit(ch->view.presented[list], memory_order_relaxed) - atomic_load_explicit(ch->view.taken[list], memory_order_acquire) + need >
-                         MESH_STREAM_ENTRIES) {
-        if (revoked(comm)) return revoked_fail(comm);
-        if (!mesh_stream_held(context, ch->stream, *ch->wire))
-          return fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended before the group's entries there were "
-                      "presented (design/transport.md section 14); none was presented", comm->name, ch->node);
+      if (need && !room_for(ch, list, need)) {
+        const ncclResult_t result = room_wait(comm, ch, list, need);
+        if (result) return result;
       }
     }
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -2310,28 +2348,56 @@ static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
 }
 
 static int plan_direct(struct call *c, struct where own);
-/* design/transport.md section 5: a host-path group's wait for its communicator's last GPU program (its count `last` on
-   `finished`, signalled at the end of its command buffer, `command`): it ends at that signal or at the command buffer's
-   end as its status tells it, a completion or an error (the platform's watchdog ends a command buffer that overruns
-   with an error status: nccl-mesh-metal.m metal_ended), and no clock ends it.  A command buffer not committed is
-   refused at once, as a value: nothing runs it while its committer waits here.  Each MESH_PAUSE_NS slice of the wait
-   reads the revoke and comm's holdings again (design/rubrics.md M3, 10-18: every wait killable).  ncclSuccess; the
-   revoke's failure, a holding's end, the command buffer's error, or ncclInvalidUsage where it is not committed, the
-   call's failure alone */
-static ncclResult_t gpu_finished(struct ncclComm *comm) {
-  while (metal_signaled(finished) < comm->last) {
-    const int ended = metal_ended(comm->command);
-    if (ended < 0)
-      return fail(ncclSystemError, "communicator %s's last GPU program's command buffer ended in an error before its host-path group", comm->name);
-    if (ended == 2)
-      return fail(ncclInvalidUsage, "a host-path group on communicator %s before the command buffer of its last GPU program is committed", comm->name);
-    if (ended) break;
-    if (revoked(comm)) return revoked_fail(comm);
-    for (uint32_t h = 0; h < comm->count; h++)
-      if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) return held_fail(comm, comm->channels + h);
-    metal_wait(finished, comm->last, MESH_PAUSE_NS);
+/* what a wait for a communicator's GPU work (gpu_wait) ended at: its last program's end (GPU_ENDED), its command buffer's
+   error status (GPU_ERROR), that buffer not committed (GPU_UNCOMMITTED: nothing runs it while its committer waits), a
+   revoke (GPU_REVOKED) or a holding's end (GPU_HOLDING) */
+enum { GPU_ENDED, GPU_ERROR, GPU_UNCOMMITTED, GPU_REVOKED, GPU_HOLDING };
+/* design/transport.md section 5: the wait for comm's last GPU program (its count `last` on `finished`, signalled at the
+   end of its command buffer, `command`) with group_lock released for it, as a condition variable's wait releases its
+   mutex (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): the count and the buffer
+   read under the lock; the wait in MESH_PAUSE_NS slices, ending at the signal or at the buffer's end as its status tells
+   it (Completed, or Error, which the platform's watchdog gives a buffer that overruns: nccl-mesh-metal.m metal_ended),
+   never at a clock, and for a group (`group`: comm kept from its destroy meanwhile by `runs`) at a revoke or a holding's
+   end too; then the lock taken again, and the wait made again where a later program touched comm meanwhile.  Under
+   group_lock */
+static int gpu_wait(struct ncclComm *comm, int group) {
+  int ended = GPU_ENDED;
+  while (ended == GPU_ENDED && finished && comm->last && metal_signaled(finished) < comm->last) {
+    const uint64_t last = comm->last;
+    void *command = metal_retain(comm->command);
+    if (group) atomic_fetch_add(&comm->runs, 1);
+    pthread_mutex_unlock(&group_lock);
+    while (metal_signaled(finished) < last) {
+      const int status = metal_ended(command);
+      if (status) { ended = status < 0 ? GPU_ERROR : status == 2 ? GPU_UNCOMMITTED : GPU_ENDED; break; }
+      if (group && revoked(comm)) { ended = GPU_REVOKED; break; }
+      for (uint32_t h = 0; group && h < comm->count && ended == GPU_ENDED; h++)
+        if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
+      if (ended != GPU_ENDED) break;
+      metal_wait(finished, last, MESH_PAUSE_NS);
+    }
+    metal_release(command);
+    pthread_mutex_lock(&group_lock);
+    if (group) atomic_fetch_sub(&comm->runs, 1);
+    if (comm->last == last) break;
   }
-  return ncclSuccess;
+  return ended;
+}
+/* a host-path group's wait for its communicator's GPU work (gpu_wait), its end as the call's failure alone: the
+   command buffer's error, one not committed, a revoke, a holding's end; else comm's failure read again (comm_failure: a
+   group in flight of it may have failed meanwhile).  Under group_lock */
+static ncclResult_t gpu_finished(struct ncclComm *comm) {
+  switch (gpu_wait(comm, 1)) {
+  case GPU_ERROR:
+    return fail(ncclSystemError, "communicator %s's last GPU program's command buffer ended in an error before its host-path group", comm->name);
+  case GPU_UNCOMMITTED:
+    return fail(ncclInvalidUsage, "a host-path group on communicator %s before the command buffer of its last GPU program is committed", comm->name);
+  case GPU_REVOKED: return revoked_fail(comm);
+  case GPU_HOLDING:
+    return fail(ncclRemoteError, "communicator %s: a holding of its streams ended before its host-path group (design/transport.md section 14)",
+                comm->name);
+  default: return comm_failure(comm);
+  }
 }
 /* one group on the host: its communicator not failed (comm_failure) and its GPU work finished (gpu_finished); its calls
    planned, each crossing call's send buffer a lease
@@ -2629,15 +2695,6 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   ch->consumed = at + 1;
   if (ch->waited < at + 1) ch->waited = at + 1;
   return ncclSuccess;
-}
-
-/* the communicators a program touched, each once, until its end (program_end) */
-static struct ncclComm *touching;
-static void touch(struct ncclComm *comm) {
-  if (comm->touched) return;
-  comm->touched = 1;
-  comm->next_touched = touching;
-  touching = comm;
 }
 
 /* the channel every group in flight through `through` lies on alone, all of one communicator (each group's `lone`,

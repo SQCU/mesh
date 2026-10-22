@@ -26,7 +26,7 @@
 #define MESH_VERSION 134u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 137u
+#define MESH_LAYOUT 138u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -116,7 +116,10 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    of it is outstanding (design/transport.md section 14, "A holding's end").  `posts`,
    the bridge's: each of the stream's two lanes' units over its pairing, each way, posted and completed, counted from 0
    as the port's child makes the link's queue pairs, and `rows` (a region offset) their rings of the rows the units
-   name.  Nothing is posted on a stream but its holders' entries' pages, and a holding ends with nothing of it
+   name, and `child` and `child_start`, the pid and start (mesh-dataflow.h mesh_started) of the port's child that
+   posts them, written as it opens the stream: a unit's buffer is the hardware's until it completes or the queue pair
+   holding it is gone with that process (verbs), so the units outstanding count only while it lives
+   (mesh-dataflow.c mesh_pinned).  Nothing is posted on a stream but its holders' entries' pages, and a holding ends with nothing of it
    outstanding or the stream never live again in the pairing, so on a live stream both ends'
    counts are equal whenever no holder holds it: a holder's communicator reads them as it takes the stream and keeps
    their difference as a statistic, and nothing reads it to decide anything.  A holding that ended with units
@@ -140,6 +143,8 @@ struct mesh_stream {
   _Alignas(64) _Atomic uint64_t ready;
   _Alignas(64) _Atomic uint64_t sent;
   _Atomic uint64_t landed,taken[2];
+  _Atomic uint32_t child;
+  uint64_t child_start;
   struct mesh_posts posts[2];
 };
 _Static_assert(sizeof(struct mesh_stream)==384,"mesh_stream");

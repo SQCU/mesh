@@ -413,16 +413,19 @@ static void mesh_reclaim(struct hdr *m){
    landed or a SEND not done (mesh.h struct mesh_posts: the plan's window in flight, at most a lane's queue each way).
    A row is held for nothing else: a holder that gave or died has no future write targeting any other of its rows (the
    bridge posts a unit only while its holding is its holder's, and tells it first: mesh-link.c unit_told), so they are
-   released at once, and a row in W(t) once its unit completes or its port's child exits.  Each lane's units completed are read before those posted, every
+   released at once, and a row in W(t) once its unit completes or the port child that posted it is gone (its pid and
+   start, struct mesh_stream `child`, no longer a live process: its queue pairs, and the requests on them, went with
+   it), whichever launch of the bridge spawned it.  Each lane's units completed are read before those posted, every
    read sequentially consistent after the caller's give or retirement */
 static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count){
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
     const struct mesh_stream *x=mesh_stream_at(m,s);
-    if(!x->rows)continue;
-    for(int way=0;way<2;way++)
+    int live=-1;
+    for(int way=0;x->rows && way<2;way++)
       for(int lane=0;lane<2;lane++){
         const uint64_t done=atomic_load(&x->posts[way].done[lane]),posted=atomic_load(&x->posts[way].posted[lane]);
-        for(uint64_t u=done;u<posted && u-done<MESH_LANE_UNITS;u++)
+        if(done<posted && live<0){const pid_t child=(pid_t)atomic_load(&x->child);live=mesh_holds(child,x->child_start);}
+        for(uint64_t u=done;live>0 && u<posted && u-done<MESH_LANE_UNITS;u++)
           if(atomic_load(mesh_unit_row(m,x->rows,way,lane,u))-first<count)return 1;
       }
   }

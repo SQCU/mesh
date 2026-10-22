@@ -265,9 +265,9 @@ static int stream_settled(const struct port *port,uint32_t t){
    in flight: no queue pair moved to another state, nothing awaited).  Its words made new and its owner word
    MESH_STREAM_GIVEN alone (stream_free), the stream not live for the rest of its pairing, so no communicator takes it;
    each outstanding unit's row stays held until the unit completes or the port's child exits (mesh.h struct
-   mesh_posts).  A link none of whose streams is then live is lost as at a failed lane (`broken`: the child tells its
-   parent, which loses the link; the child's exit releases its queue pairs and with them the window's rows, and the
-   port's next child pairs from 0) */
+   mesh_posts).  A link none of whose streams is then live is lost by a failed lane's path (`broken`: the child tells
+   its parent, which loses the link; the child's exit releases its queue pairs and with them the window's rows, and the
+   port's next child pairs from 0), booked as what it is (`lost`, LINK_STREAMS_ENDED, not a lane's EIO) */
 static void stream_gone(struct port *port,uint32_t t){
   struct link *l=&port->link;
   struct mesh_stream *x=stream_of(port,t);
@@ -286,6 +286,7 @@ static void stream_gone(struct port *port,uint32_t t){
   for(uint32_t s=0;s<plan_streams(l->plan);s++)live|=atomic_load_explicit(&stream_of(port,s)->live,memory_order_acquire);
   if(live)return;
   say("link %u (%s): no stream toward node %u live: the link lost\n",port->index,port->name,port->peer);
+  atomic_store_explicit(&l->lost,LINK_STREAMS_ENDED,memory_order_relaxed);
   atomic_fetch_or_explicit(&l->broken,l->plan>>MESH_LANE_FIRST<<MESH_LANE_FIRST,memory_order_release);
   wake();
 }
@@ -326,8 +327,8 @@ static void stream_turn_one(struct port *port,uint32_t t){
    (rows outside the page table, a holder's error) at once as duds from the all-ones block; each while its lane's gate
    holds its frames (ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's);
    each unit told before it is posted and posted only while its holding is its holder's (unit_told); the completions
-   are the link's (link_send); a failed post is the lane's (lane_lost: its child's exit unpins it, streams_unpin).  The
-   lanes it posted on, a bit a lane */
+   are the link's (link_send); a failed post is the lane's (lane_lost: its child's exit releases its row,
+   mesh-dataflow.c mesh_pinned).  The lanes it posted on, a bit a lane */
 static uint32_t stream_send(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
@@ -387,7 +388,8 @@ static void stream_receive_turn(struct port *port,uint32_t t){
    p mod 2), each lane at most its window ahead of its landings, into the page its row names once its entry's word
    allows (the row released by its reader), and an entry not the holder's to name (rows outside the page table, a
    holder's error) into the spare page; each unit told before it is posted and posted only while its holding is its
-   holder's (unit_told); a failed post is the lane's (lane_lost: its child's exit unpins it, streams_unpin) */
+   holder's (unit_told); a failed post is the lane's (lane_lost: its child's exit releases its row, mesh-dataflow.c
+   mesh_pinned) */
 static void stream_post(struct port *port,uint32_t t,uint32_t served){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
@@ -784,7 +786,8 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
    before any lane is served, every one new: a holding of a lost pairing ended with it (its owner word 0: its holder's
    give, a compare-and-swap from its own client, then matches nothing, and its communicator reads its holding gone,
    mesh-call.h mesh_stream_held), its words 0 (its lists' counts, `ready`, `sent`, `landed`) and its lanes' units
-   posted and completed each way 0 (`posts`: its lanes' units are 0 as their queue pairs are made, lane_reset), its peer
+   posted and completed each way 0 (`posts`: its lanes' units are 0 as their queue pairs are made, lane_reset), this
+   child its poster (`child`, `child_start`: its exit ends every unit it posted, mesh-dataflow.c mesh_pinned), its peer
    node, its share of the link's bandwidth and its identity told, then live; and its time rings' addresses the link's
    own (`posted_at`, `landed_at`: the progress threads read no line of the region a client writes for them).  None is
    kept for a holder of a lost pairing: no holder can, by letting go or by never letting go, keep a stream of the link
@@ -810,6 +813,8 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
     atomic_store_explicit(&l->begun[s],0,memory_order_relaxed);atomic_store_explicit(&l->ended[s],0,memory_order_relaxed);
     atomic_store_explicit(&l->stopped[s],0,memory_order_relaxed);
     l->sending[s]=(struct walk){.ring=l->sending[s].ring};l->landing[s]=(struct walk){.ring=l->landing[s].ring};
+    x->child_start=mesh_started(getpid());
+    atomic_store_explicit(&x->child,(uint32_t)getpid(),memory_order_release);
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
     atomic_store_explicit(&x->bandwidth,bandwidth/MESH_LINK_STREAMS,memory_order_relaxed);
     atomic_store_explicit(&x->wire,l->wire[s],memory_order_relaxed);
@@ -851,6 +856,7 @@ static void link_lost(struct port *port){
   atomic_fetch_add_explicit(&l->pairing,1,memory_order_relaxed);l->state=LINK_DOWN;l->heard=0;
   atomic_store_explicit(&l->served,0,memory_order_release);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
+  atomic_store_explicit(&l->lost,0,memory_order_relaxed);
 }
 /* design/transport.md section 14: a stream's lane k's progress made new at its link's connect, its sequences 0 and
    its receive window the receives the fewer frames of its share of the completion queue and its receive queue hold, a
@@ -932,19 +938,6 @@ void streams_let_go(void){
       if(owner && !(owner&MESH_STREAM_GIVEN) && !owned(owner))atomic_compare_exchange_strong(&x->owner,&owner,owner|MESH_STREAM_GIVEN);
     }
 }
-/* design/transport.md section 14: a port's streams once its child is reaped: the queue pairs it held are gone with
-   it, so no request is outstanding on their lanes and each lane's units posted count completed (no row held:
-   mesh-dataflow.c mesh_pinned, design/extents-and-liveness.md d), and the region's closed leases are looked at again
-   (`unreleased`).  The port's next child opens the streams (streams_open) */
-static void streams_unpin(const struct port *port){
-  for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
-    struct mesh_stream *x=stream_of(port,s);
-    for(int way=0;way<2;way++)
-      for(int c=0;c<2;c++)
-        atomic_store_explicit(&x->posts[way].done[c],atomic_load_explicit(&x->posts[way].posted[c],memory_order_relaxed),memory_order_release);
-  }
-  unreleased=1;
-}
 /* design/transport.md section 14: the link's turn, on the event loop: a job's end taken (made: LINK told the peer every
    lane; connected: up, every lane served, the stream live); a job that failed loses the link (port_lost); while it is
    up, a lane a progress thread found failed (`broken`) loses it; then, while no port's job is out past MESH_PLATFORM_NS (B12) and once the port's last
@@ -979,12 +972,12 @@ static void link_turn(struct port *port){
   if(!port->greeted)return;
   if(l->state==LINK_UP){
     const uint32_t broken=atomic_exchange_explicit(&l->broken,0,memory_order_acq_rel);
-    if(broken){
-      say("link %u (%s): lanes %#x toward node %u failed, or no stream of the link live: the link lost\n",port->index,port->name,
-          broken,port->peer);
-      port_lost(port,EIO);
-      return;
-    }
+    const int lost=atomic_exchange_explicit(&l->lost,0,memory_order_relaxed);
+    if(broken && lost==LINK_STREAMS_ENDED)
+      say("link %u (%s): no stream toward node %u live, each holding ended with units outstanding: the link lost\n",
+          port->index,port->name,port->peer);
+    else if(broken)say("link %u (%s): lanes %#x toward node %u failed: the link lost\n",port->index,port->name,broken,port->peer);
+    if(broken){port_lost(port,lost?lost:EIO);return;}
   }
   if(l->job || held)return;
   if(l->state==LINK_DOWN){
@@ -1722,7 +1715,10 @@ static void child_heard(struct port *port){
       }
       atomic_store_explicit(&l->done,1,memory_order_release);
     }
-    else if(heard.kind==CHILD_BROKEN && current && l->state==LINK_UP)atomic_fetch_or(&l->broken,heard.broken);
+    else if(heard.kind==CHILD_BROKEN && current && l->state==LINK_UP){
+      if(heard.result)atomic_store_explicit(&l->lost,heard.result,memory_order_relaxed);
+      atomic_fetch_or(&l->broken,heard.broken);
+    }
     else if(heard.kind==CHILD_FAULTED)atomic_fetch_or(&faulted,bit);
     else if(heard.kind==CHILD_UNGUARDED)atomic_fetch_or(&unguarded,bit);
     else if(heard.kind==CHILD_TERMINATED)atomic_fetch_or(&terminated,bit);
@@ -1743,7 +1739,9 @@ static void child_turn(struct port *port){
    unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, and the
    k-th in a row within MESH_CHILD_SETTLE_NS of its spawn, k from 2, holds the port's next spawn 60 2^(k-2) s, at most an
    hour (the boot ledger's rule, a port's: restarted, "not crashing again of course", the operator 10-20).  Its streams cancelled again,
-   its link down with no lanes, and the port to be opened by its next child */
+   the region's closed leases looked at again (`unreleased`: the rows its units named are held no more, its queue
+   pairs gone with it, mesh-dataflow.c mesh_pinned), its link down with no lanes, and the port to be opened by its next
+   child */
 static void child_reaped(struct port *port){
   struct link *l=&port->link;
   const pid_t pid=port->child;
@@ -1769,7 +1767,7 @@ static void child_reaped(struct port *port){
   if(port->job){port->result=ECHILD;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
   if(l->job){l->result=ECHILD;atomic_store_explicit(&l->done,1,memory_order_release);}
   streams_cancel(port);
-  streams_unpin(port);
+  unreleased=1;
   l->state=LINK_DOWN;l->lanes=l->heard=0;l->share=(struct frames){0};l->plan=0;
   memset(l->qpn,0,sizeof l->qpn);
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
@@ -1915,7 +1913,8 @@ static void child_jobs(struct port *port){
 }
 static void child_reports(struct port *port){
   const uint32_t broken=atomic_exchange_explicit(&port->link.broken,0,memory_order_acq_rel);
-  if(broken)child_tell((struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken});
+  if(broken)child_tell((struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken,
+                                              .result=atomic_exchange_explicit(&port->link.lost,0,memory_order_relaxed)});
   if(atomic_exchange(&faulted,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_FAULTED});}
   if(atomic_exchange(&unguarded,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_UNGUARDED});}
   if(atomic_exchange(&terminated,0)){child_halted=1;child_tell((struct child_message){.kind=CHILD_TERMINATED});}

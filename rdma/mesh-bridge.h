@@ -168,7 +168,9 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    the progress threads serve (`served`, a bit a lane, the event loop's to set and to clear, a thread's to clear where
    it found its lane failed, every lane at a failed completion, mesh-link.c link_failed, and the termination's queue's,
    B9b), and the lanes a progress thread found failed, or every lane of a link none of whose streams is live
-   (`broken`: the event loop loses the link on reading it).  The
+   (`broken`: the event loop loses the link on reading it), and the code the loss is booked with where it is not a
+   failed lane's EIO (`lost`: LINK_STREAMS_ENDED, no stream live, the child's to set and to tell, the parent's to book,
+   design/rubrics.md M10).  The
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends hold, set as the
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
@@ -186,7 +188,7 @@ enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
   struct mesh_verbs provider;
   int state,job,result,heard,lanes;
-  _Atomic int done;
+  _Atomic int done,lost;
   _Atomic uint32_t served,broken,pairing;
   uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,lists,job_pairing,psn;
   struct frames share;
@@ -214,7 +216,8 @@ _Static_assert(offsetof(struct link,stopped)%128==0,"the receive thread's words 
    device holds for a link), the lanes made or not (CHILD_MAKE names the lanes of the plan in `lanes`; CHILD_MADE:
    each lane's queue pair number, the first sequence number and each lane's share), connected or not (CHILD_CONNECTED),
    and the lanes a progress thread found failed, or every lane of a link none of whose streams is live (CHILD_BROKEN,
-   naming its connect's pairing), a fault absorbed on the
+   naming its connect's pairing, `result` the loss's code where it is not a failed lane: LINK_STREAMS_ENDED), a fault
+   absorbed on the
    provider's doorbell (CHILD_FAULTED), a guard not held within MESH_PLATFORM_NS (CHILD_UNGUARDED), its port's peer
    interface terminating (CHILD_TERMINATED, as the child heard it: B9b) */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,
@@ -222,7 +225,12 @@ _Static_assert(offsetof(struct link,stopped)%128==0,"the receive thread's words 
    for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
    child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
    its bytes (the operator, 2026-10-21) */
-#define MESH_CHILD_VERSION 1u
+#define MESH_CHILD_VERSION 2u
+/* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
+   outstanding (mesh-link.c stream_gone): the ends of its clients' holdings, not a failure of its lanes (EIO) or its
+   hardware (design/rubrics.md M10: a fact named as what it is), told the parent in CHILD_BROKEN's `result` (version
+   2 of the children's contract) */
+#define LINK_STREAMS_ENDED ECONNABORTED
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
        CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_UNGUARDED, CHILD_TERMINATED };
 struct child_message {

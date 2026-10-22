@@ -53,7 +53,8 @@
    it returns ncclSuccess (it flushes nothing), and ncclCommGetAsyncError reads ncclSuccess once it is done; its
    revokeFlags is not read; from any thread, under comm's own
    lock, never one a group holds while it waits.  ncclCommDestroy waits for the GPU work the library committed for comm
-   at most MESH_PLATFORM_NS, then gives its streams back and frees it (a holding given with units outstanding takes its
+   until its command buffer's status is Completed or Error (none not committed, no clock), then gives its streams back
+   and frees it (a holding given with units outstanding takes its
    stream out of its link's pairing: design/transport.md section 14); a lease a group of a revoked or failed comm named
    is the caller's to keep until then, since its bridge may still post receives into it for entries presented; work in a caller's encoder is the caller's to
    finish first (a kernel of it still queued would write a stream given back: rdma/NCCL.md "Failures").  Making a communicator (a lone rank's too) attaches the process's client of its node's bridge where it has

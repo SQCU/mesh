@@ -538,7 +538,8 @@ lists (`MESH_STREAM_ENTRIES` presented and not taken) waits for the bridge's `ta
 waits for its own communicator's GPU work until its command buffer completes, an error status (which the platform's
 watchdog gives a command buffer that overruns) failing the group, and one not yet committed failing it at once
 (`ncclInvalidUsage`). Each wait reads the revoke and its holding between
-looks, so a revoke or the holding's end ends it (design/rubrics.md M3, 10-18). A host-path group's waits end at
+looks, so a revoke or the holding's end ends it (design/rubrics.md M3, 10-18), and holds no lock: the groups' lock is
+released for the wait and taken again after, so other communicators' groups and revokes go on (M4). A host-path group's waits end at
 their counts, at a count's `~0` (its bridge's, where the link is lost or the bridge stops), at its holding's end (its stream
 no longer the communicator's own: a pairing lost and made again, a bridge restarted), or at a revoke; a GPU wait at its
 count, at a count's `~0` or at its bound ([Bounded waits](#bounded-waits)), the operator's "poll bound for the node"
@@ -569,8 +570,9 @@ its groups published and nothing else); an init
 still running (a non-blocking one's) ends as a value, its host-path groups return at their next look, its GPU waits
 end at their landings or their bounds, or once another wait on the communicator's failure words has failed (no kernel
 stops at the revoke; a wait that reaches its bound after it names it as its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
-streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. `ncclCommDestroy` awaits the command buffers the library committed for the communicator, at most
-`MESH_PLATFORM_NS`; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
+streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. `ncclCommDestroy` awaits the command buffer of the last GPU program the library committed for the communicator until its
+status is Completed or Error (the platform's watchdog ends one that overruns), with no clock and the groups' lock
+released meanwhile; one not committed is not awaited; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
 may take. Likewise a lease a group of a revoked or failed communicator named is the caller's to keep until
 `ncclCommDestroy`: the communicator still holds its streams, its bridge may still post receives into that lease for

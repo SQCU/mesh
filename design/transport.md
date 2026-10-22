@@ -173,12 +173,14 @@ seconds without something happening/concluding."
 
 Since 2026-10-22 no wait of the bridge or the collective on a peer's data is bounded by a clock, and the bridge decides
 nothing by one (section 14: "we don't introduce race conditions or use timing anywhere"). The deadline bounds the
-bridge's own lifecycle (a driver call's job, a quiet window, a child's end), the bootstrap's phases and a destroy's
-wait for its communicator's GPU work. A group's presentation waits for its bridge to take its entries (`taken`), and a
-host-path group's wait for its own GPU work ends at its command buffer's completion status, which the platform's
-watchdog ends with an error where the buffer overruns (a buffer not yet committed is refused at once, as a value:
-nothing runs it while its committer waits); each wait re-reads the revoke and its holding between looks
-(rubric M3, 10-18), and no transaction fails because time passed (2026-10-22). A GPU wait keeps its poll bound; a link
+bridge's own lifecycle (a driver call's job, a quiet window, a child's end) and the bootstrap's phases. A group's
+presentation waits for its bridge to take its entries (`taken`), and a host-path group's wait for its own GPU work, and
+a destroy's, end at the command buffer's completion status, which the platform's watchdog ends with an error where the
+buffer overruns (a buffer not yet committed fails a group at once, as a value, and a destroy does not await it:
+nothing runs it while its committer waits). A group's waits re-read the revoke and its holding between looks (rubric
+M3, 10-18), and no transaction fails because time passed (2026-10-22). None of these waits holds the library's groups'
+lock: each releases it for the wait and takes it again after, as a condition variable's wait releases its mutex, so
+other communicators' groups and revokes go on (rubric M4). A GPU wait keeps its poll bound; a link
 carries no keepalive.
 
 The only thing that cannot be stopped is a thread inside a kernel call that waits on something that never happens. A
@@ -468,7 +470,8 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   names no client, so none takes it), and the stream is not live for the rest of its link's pairing. No queue pair is
   moved to another state and nothing is awaited. A link none of whose streams is live is lost by the path every lost
   link takes (`broken`, the child's CHILD_BROKEN, port_lost, the child asked to end once its quiet window has passed):
-  its exit releases its queue pairs, and the next child pairs from 0. On a link of two queue pairs (one stream) that
+  its exit releases its queue pairs, and the next child pairs from 0. The loss is booked as what it is,
+  `LINK_STREAMS_ENDED` (ECONNABORTED) in the links table and the log, not a failed lane's EIO (rubric M10). On a link of two queue pairs (one stream) that
   follows at once, after the port's quiet window as every loss's. On a link of several streams, a dead stream's
   outstanding units stay posted, and the rows they name held, until they complete or that port's child ends, which may
   be the pairing's whole life: at most a lane's receive window and its SEND gate, each within a ring of
@@ -481,8 +484,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   so it frees every row outside W(t) at once (design/extents-and-liveness.md, d): a lease of it is released at once,
   by the client's return (`mesh_lease_return`) or the bridge's release of a retired client's
   (`mesh_retired_release`). A lease with a row in W(t) is closed instead and released at the bridge's next turn after
-  its units complete, or after its port's child exits (`streams_unpin`: its queue pairs are gone, so every unit posted
-  counts completed). A lease returned while its holder still holds the stream and its presented entries still name it
+  its units complete, or once the port child that posted them is gone: a work request's buffer is the hardware's until
+  it completes or until the queue pair holding it is gone with the process that owns it (verbs), so each stream records
+  that child's pid and start (`child`, `child_start`, as the client slots identify processes) and its units count only
+  while that process lives. A lease returned while its holder still holds the stream and its presented entries still name it
   is in L(P, t): returning it is the holder's error, as a use of a freed buffer is.
 - The flush. The operator permitted it on 2026-10-22: "'The standard way to complete outstanding requests without the
   peer is to move the queue pair to the Error state. Every pending request is then flushed with IBV_WC_WR_FLUSH_ERR,
@@ -526,11 +531,12 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one child's at
   a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
-- Streams across children. A port's streams' lists, rings and words are the parent's, leased once. As a child is reaped,
-  each lane's units posted count completed: the queue pairs that held them are gone, so no row stays held for them. A
-  new child opens every stream new as its link connects: owner word 0, its counts 0 (`ready`, `sent`, `landed`, its
-  lists', `posts`), and live. A region adopted from a launch before keeps its streams' counts until each port's next
-  child connects (a port index can name another device in the next launch, so no earlier child's exit is assumed). A holding of the lost pairing
+- Streams across children. A port's streams' lists, rings and words are the parent's, leased once. Each stream names
+  the child that posts on it (`child`, `child_start`), and its units count only while that process lives: a child's
+  exit, whether this launch reaps it or it is an earlier launch's, releases every row its units named, by no port
+  index and with no wait for a next pairing (the parent looks at the closed leases again as it reaps its own). A new
+  child opens every stream new as its link connects: owner word 0, its counts 0 (`ready`, `sent`, `landed`, its
+  lists', `posts`), itself its poster, and live. A holding of the lost pairing
   ended with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator
   reads its holding gone (mesh-call.h `mesh_stream_held`: live, its owner word its client's, its identity the one it
   took) and starts no group on it (libnccl-mesh `comm_failure`, `ncclCommGetAsyncError`). No holder keeps a stream from
