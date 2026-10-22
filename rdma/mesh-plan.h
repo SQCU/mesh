@@ -9,7 +9,6 @@ struct mesh_reach { uint32_t node,padding; uint64_t bandwidth; };
 int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node);
 
 int mesh_region(uint64_t *bytes,uint64_t *unleased);
-int mesh_busy(uint64_t *busy,uint64_t *idle_since);
 
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark; };

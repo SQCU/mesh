@@ -5,8 +5,6 @@
 #include <limits.h>
 #include <mach-o/dyld.h>
 #include <spawn.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
@@ -14,7 +12,6 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <sysexits.h>
-#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -24,13 +21,7 @@ extern char **environ;
 enum { TIMER_OPEN=1, TIMER_END=2 };
 enum { TAG_BRIDGE=1, TAG_HOLDER=2 };
 
-static void say(const char *format,...){
-  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
-  struct tm utc;gmtime_r(&t.tv_sec,&utc);
-  fprintf(stderr,"%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ %.3f heartbeat: ",utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,utc.tm_hour,
-          utc.tm_min,utc.tm_sec,t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)/1e9);
-  va_list arguments;va_start(arguments,format);vfprintf(stderr,format,arguments);va_end(arguments);
-}
+static void say(const char *format,...){ va_list arguments;va_start(arguments,format);mesh_say("heartbeat: ",format,arguments);va_end(arguments); }
 static uint64_t wall_us(void){return clock_gettime_nsec_np(CLOCK_REALTIME)/1000u;}
 
 static int events;
@@ -46,6 +37,7 @@ static int wanted=1,replacing,timer_open;
 static pid_t told[3*MESH_PORTS+MESH_CLIENTS];
 static uint32_t told_count;
 
+static sigset_t heard_set(void){ sigset_t set;sigemptyset(&set);for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&set,heard[i]);return set; }
 static int watch(uint64_t ident,int16_t filter,uint16_t flags,uint32_t fflags,int64_t data,uint64_t udata){
   struct kevent64_s event;EV_SET64(&event,ident,filter,flags,fflags,data,udata,0,0);
   return kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
@@ -125,8 +117,7 @@ static void replace_turn(void){
   for(uint32_t k=0;k<count;k++)watch((uint64_t)holders[k],EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,TAG_HOLDER);
 }
 static void run_again(void){
-  sigset_t held;sigemptyset(&held);
-  for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&held,heard[i]);
+  sigset_t held=heard_set();
   sigprocmask(SIG_BLOCK,&held,NULL);
   struct kevent64_s left[8];
   const struct timespec none={0,0};
@@ -146,10 +137,8 @@ static void open_bridge(void){
   if(replacing || timer_open)return;
   posix_spawnattr_t attributes;
   posix_spawn_file_actions_t actions;
-  sigset_t none,defaults;
-  sigemptyset(&none);sigemptyset(&defaults);
-  for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&defaults,heard[i]);
-  sigaddset(&defaults,SIGPIPE);
+  sigset_t none,defaults=heard_set();
+  sigemptyset(&none);sigaddset(&defaults,SIGPIPE);
   posix_spawnattr_init(&attributes);
   posix_spawnattr_setflags(&attributes,POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_SETSIGDEF|POSIX_SPAWN_SETSIGMASK);
   posix_spawnattr_setpgroup(&attributes,0);
@@ -228,8 +217,7 @@ int main(int argc,char **argv){
   char resolved[PATH_MAX];
   if(_NSGetExecutablePath(self,&room) || !realpath(self,resolved)){say("the heartbeat's own image not read\n");return 1;}
   memcpy(self,resolved,sizeof self);
-  sigset_t held,pending;sigemptyset(&held);
-  for(size_t i=0;i<sizeof heard/sizeof *heard;i++)sigaddset(&held,heard[i]);
+  sigset_t held=heard_set(),pending;
   sigprocmask(SIG_BLOCK,&held,NULL);
   if((events=kqueue())<0 || fcntl(events,F_SETFD,FD_CLOEXEC)){say("events: %s\n",strerror(errno));return 1;}
   for(size_t i=0;i<sizeof heard/sizeof *heard;i++){

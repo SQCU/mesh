@@ -33,14 +33,6 @@ int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
   if(node)*node=m->node;
   munmap(m,length);return (int)count;
 }
-int mesh_busy(uint64_t *busy,uint64_t *idle_since){
-  struct hdr *m;size_t length;
-  int error=mesh_open(0,&m,&length,NULL);
-  if(error)return -error;
-  *busy=atomic_load_explicit(&m->busy,memory_order_acquire);*idle_since=atomic_load_explicit(&m->idle_since,memory_order_acquire);
-  if(!*busy && !*idle_since)*busy=1;
-  munmap(m,length);return 0;
-}
 int mesh_region(uint64_t *bytes,uint64_t *unleased){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -69,7 +61,7 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   }
 }
 /* design/transport.md section 3, RECORD; section 15, "The library" */
-static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *bandwidth){
+int mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint64_t *bandwidth){
   uint64_t slowest=0;
   for(int end=0;end<2;end++){
     const struct mesh_record *r=end?b:a;
@@ -82,12 +74,6 @@ static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *
   *bandwidth=slowest;
   return 1;
 }
-int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
-  uint64_t bandwidth=0;
-  const uint32_t joined=mesh_join(a,b,&bandwidth);
-  if(joined)*beta=bandwidth?8e9/(double)bandwidth:0;
-  return (int)joined;
-}
 struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
@@ -98,7 +84,7 @@ static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w
   qsort(r,n,sizeof *r,mesh_node_order);
   size_t joins=1;
   uint64_t bandwidth;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=(size_t)mesh_join(r+a,r+b,&bandwidth);
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=(size_t)mesh_joined(r+a,r+b,&bandwidth);
   *w=(struct mesh_whole){.n=n,.link=malloc(joins*sizeof *w->link),.bandwidth=malloc(joins*sizeof *w->bandwidth),
     .mark=malloc(((size_t)n+1)*sizeof *w->mark),.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
   if(!w->link || !w->bandwidth || !w->mark || !w->next)return ENOMEM;
@@ -106,7 +92,7 @@ static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w
   for(uint32_t a=0;a<n;a++){
     w->mark[a]=r[a].node;
     for(uint32_t b=a+1;b<n;b++)
-      if(mesh_join(r+a,r+b,&bandwidth)){
+      if(mesh_joined(r+a,r+b,&bandwidth)){
         w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=bandwidth;links++;
       }
   }
@@ -194,7 +180,7 @@ void mesh_retire(struct hdr *m,uint64_t client){
     }
   }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
-  mesh_notify(&m->control);
+  mesh_retired_release(m,own);
 }
 static int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
   uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1);

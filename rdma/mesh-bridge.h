@@ -12,7 +12,6 @@
 #include <ifaddrs.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
-#include <mach-o/getsect.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <net/if.h>
@@ -20,8 +19,6 @@
 #include <net/net_kev.h>
 #include <poll.h>
 #include <spawn.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
@@ -64,23 +61,10 @@ union mesh_network_event {
 };
 _Static_assert(sizeof(union mesh_network_event)==48,"M24");
 /* design/transport.md section 15, "The SEND gate" */
-#define MESH_GATE_MASK ((UINT64_C(1)<<48)-1)
-struct send_gate {
-  _Alignas(64) struct frames posted;
-  struct frames retired,capacity;
-};
-_Static_assert(sizeof(struct send_gate)==64,"a gate half a line, the send thread's");
-static inline int gate_holds(const struct send_gate *gate,struct frames f){
-  return ((gate->posted.n-gate->retired.n)&MESH_GATE_MASK)+f.n<=gate->capacity.n;
-}
-static inline uint64_t gate_post(struct send_gate *gate,uint32_t k,struct frames f){
-  gate->posted.n+=f.n;
-  return ((uint64_t)k<<48)|(gate->posted.n&MESH_GATE_MASK);
-}
-static inline void gate_retire(struct send_gate *gate,uint64_t id){ gate->retired.n=id&MESH_GATE_MASK; }
 struct lane_state {
   _Alignas(MESH_LINE) uint64_t sent;
   uint64_t done;
+  uint32_t sends;
   _Alignas(MESH_LINE) uint64_t posted;
   uint64_t got;
   uint32_t window;
@@ -92,7 +76,7 @@ struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _At
 struct walk { struct taken *ring; uint64_t taken,done,timed,at; struct mesh_pages pages,base,count; };
 enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
 /* design/transport.md section 3; section 14, "A process a port" */
-enum { HELLO=1, FAREWELL, RECORD, LINK };
+enum { HELLO=1, RECORD=3, LINK };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
@@ -119,17 +103,14 @@ _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,
 struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; struct ibv_cq *completion,*sent; uint32_t psn;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *); };
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
-enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
   struct mesh_verbs provider;
-  int state,job,result,heard,lanes;
-  _Atomic int done,lost;
+  int state,heard,lanes;
+  _Atomic int lost;
   _Atomic uint32_t served,broken,pairing;
-  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,lists,job_pairing,psn;
+  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,lists,psn;
   struct frames share;
-  struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
-  uint64_t job_at;
   uint64_t held[MESH_LINK_STREAMS],number[MESH_LINK_STREAMS];
   uint32_t hold[MESH_LINK_STREAMS];
   struct walk sending[MESH_LINK_STREAMS];
@@ -143,10 +124,10 @@ struct link {
 };
 _Static_assert(offsetof(struct link,stopped)%MESH_LINE==0,"the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port"; section 15, "The children" */
-#define MESH_CHILD_VERSION 3u
+#define MESH_CHILD_VERSION 4u
 #define LINK_STREAMS_ENDED ECONNABORTED
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
-       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_TERMINATED };
+       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN };
 struct child_message {
   uint32_t kind,pairing;
   int32_t result,refused;
@@ -161,8 +142,7 @@ struct port;
 struct progress { struct port *port; int way; };
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,stuck,budget,refusals,family,unit;
-  int64_t farewell;
+  uint32_t index,interface,peer,greeted,connecting,writing,open,opening,stuck,budget,refusals,family,unit,job_pairing;
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;
   _Atomic int done,closing;
@@ -176,7 +156,6 @@ struct port {
   dispatch_queue_t work;
   struct link link;
   struct progress progress[2];
-  _Atomic(pthread_t) thread[3];
   pid_t child,elsewhere;
   uint32_t holder;
   int child_fd,recycle,ending;

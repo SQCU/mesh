@@ -746,9 +746,7 @@ gathers, parses or joins bridge records itself.
 - `mesh_reached(out, capacity, &node)`: this node's bridge's node, and the nodes it reaches, each with the bandwidth of
   its stream toward it in bits a second; their count (0: the node alone), or -errno where the bridge is unreachable. A
   node is all a client names of the mesh (design/rubrics.md, Three kinds of source). `mesh_region(&bytes, &unleased)`:
-  the region's arena and the bytes no lease holds. `mesh_busy(&busy, &idle_since)`: the streams held at the bridge (0
-  between calls) and the wall clock in ns at which none last came to be held (0 while any is; `mesh.h` struct hdr
-  `busy`, `idle_since`). `mesh_nodes_health`: every node's record the bridge holds (its
+  the region's arena and the bytes no lease holds. `mesh_nodes_health`: every node's record the bridge holds (its
   bridge's node, its region's bytes, the node's memory and `hw.model`, its boot and the memory available as its bridge
   last sampled it).
 - **A link map** (`struct mesh_link_map`), an operand: `nodes` nodes and `links` links of a kind. `MESH_LINKS_MESH`

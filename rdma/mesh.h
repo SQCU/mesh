@@ -11,8 +11,8 @@
 #define MESH_PORT "18519"
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
-#define MESH_VERSION 134u
-#define MESH_LAYOUT 141u
+#define MESH_VERSION 135u
+#define MESH_LAYOUT 142u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_STREAMS 32
@@ -103,10 +103,9 @@ struct mesh_client {
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,streams,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,bridge_off,stream_off,client_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
+  _Atomic uint64_t bridge_pid,serial,map,map_off,map_nodes,health;
 };
 _Static_assert(sizeof(struct hdr)<=4096,"struct hdr");
-_Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
 static inline void mesh_notify(_Atomic uint64_t *word){
   atomic_fetch_add_explicit(word,1,memory_order_release);
