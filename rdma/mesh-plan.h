@@ -258,9 +258,11 @@ uint32_t mesh_program_advise(const struct mesh_program *,struct mesh_operand,uin
    (COUNTED and HOSTED), then its point-to-point calls in call order; each placement its call and mesh_lay's place (a
    point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at the rank; the end.
    So separate send and receive calls pair as NCCL's do: a rank's j-th point-to-point SEND to a peer is the peer's j-th
-   point-to-point receive from it.  HOSTED: a counted all-to-all whose counts both ends hold (ncclAlltoAll, ncclGather,
-   ncclScatter, ncclMeshAlltoAllV), NCCL's sends and receives of it (classifyCollToP2pTasks), each receive into its own
-   segment. */
+   point-to-point receive from it.  HOSTED: an exchange (mesh_exchange_steps: ncclAlltoAll, ncclGather, ncclScatter,
+   ncclMeshAlltoAllV), NCCL's sends and receives of it (classifyCollToP2pTasks), each receive into its own segment, a
+   rank between a part's ends relaying it from its relay buffer.  A point-to-point call is one step toward a peer the
+   routing table joins by a route of two nodes; a part whose route has a member between its ends is no step of any
+   rank's but crosses the members' proxies (libnccl-mesh, once its transport relays in place: design/pages-and-functions.md). */
 enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_POINT, MESH_GROUP_HOSTED };
 /* The receive before each step of a call of kind `kind` (mesh_steps_before; the walk's rule, a step's first event
    waiting until that receive is consumed): none before a HOSTED call's, whose receives each progress alone, as NCCL's
@@ -280,6 +282,70 @@ uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,in
    then, after every counts receive, its rows (buffer 3).  Their count, at most 4 (nodes - 1). */
 uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,int hosted,struct mesh_operand element,
                             struct mesh_operand counts,struct mesh_step *steps);
+/* A routing table, an operand (design/rubrics.md C3: made between calls, passed to each call, never chosen inside
+   one): for each ordered pair (a, b) of `nodes` nodes, the routes a block from a to b takes and each one's share of it,
+   so a pair's bytes cross several paths at once and every link carries a share (each link far slower than a node's
+   memory, through which a member between two others relays).  Pair (a, b)'s routes are [pair[a * nodes + b], pair[a *
+   nodes + b + 1]) (pair: nodes x nodes + 1 entries, nondecreasing; a pair a == b none); route k is the nodes
+   node[start[k] .. start[k + 1]) from a to b inclusive, every two consecutive ones linked (mesh_link_between), none
+   twice, and share[k], above 0, its share (mesh_block_parts cuts a block by them).  `routes` the routes (start: routes +
+   1 entries).  A pair joined by no route moves nothing (a map that does not join its nodes). */
+struct mesh_routing { uint32_t nodes,routes; const uint32_t *pair,*start,*node; const double *share; };
+/* 0 where a routing table fits a map of as many nodes (struct mesh_routing's rules, every hop one the map links), else
+   EINVAL. */
+int mesh_routing_check(const struct mesh_link_map *,const struct mesh_routing *);
+/* The room a routing table of `nodes` nodes and at most `most` routes a pair takes: *routes its routes (share's
+   entries; start's, plus one), *hops its route nodes (node's entries); pair's is nodes x nodes + 1. */
+void mesh_routing_room(uint32_t nodes,uint32_t most,uint32_t *routes,uint32_t *hops);
+/* A tree set's routing table (into pair, start, node and share, of mesh_routing_room's room at the most trees a root
+   has): pair (a, b)'s routes the paths from a up each of b's trees (mesh_trees_path's in each tree, not only the
+   heaviest), each share the sum of the weights of the trees that give that path (exp(log_weight) over the heaviest of
+   b's), ordered by their nodes (the fewer first, then by node number at the first that differs), so the table is a
+   function of the trees' paths and weights alone, not of their order.  Writes *routing over those arrays; its routes
+   (UINT32_MAX where its room could not be had, nothing written).  A pair whose destination roots no tree has none. */
+uint32_t mesh_routing_trees(const struct mesh_trees *,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,uint32_t *node,double *share);
+/* The routing solver (libnccl-mesh's at every epoch of a communicator, its creation's and each one after its map
+   changed: rdma/NCCL.md "Epochs"): the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root: Garg and
+   Konemann's concurrent flow over the links' bandwidths), as mesh_routing_trees makes a table of them, so each pair's
+   bytes split over the paths the packing loads, each by its flow; where the map does not join its nodes (no packing),
+   each pair its route on the map's table (mesh_route_path), one share, and none for a pair the map does not join.
+   Room: mesh_routing_room's at `most`.  Its routes (UINT32_MAX where its room could not be had). */
+uint32_t mesh_routing_pack(const struct mesh_link_map *,double eps,uint32_t most,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,
+                           uint32_t *node,double *share);
+/* A block of a pattern (who sends how many elements to whom): `elements` elements of `element_bytes` bytes (its type
+   `type`, carried) from rank `from` to rank `to`, read at `from` from its buffer `source` from element `first`, landed
+   at `to` in its buffer `target` from element `at`. */
+struct mesh_block { uint32_t from,to,source,target,type,element_bytes; uint64_t first,at,elements; };
+/* A block's parts (design/rubrics.md C2: one mechanism on every cabling, a direct exchange a route of two nodes): block
+   x (from != to, of elements) cut among its pair's routes, or (`shortest`) among those of them of the fewest nodes, by
+   their shares: in quanta of the least multiple of `page` bytes and of an element (mesh_program_steps_cut's), each route
+   the floor of its share of the block's quanta, the first ones one quantum more for the remainder, the route holding
+   the block's end ending there, so every part starts on a page wherever the block does (design/transport.md section 14:
+   an entry starts on a page); a route of no element has no part.  Into parts[0 ..): part k on route `route`, elements
+   [first, first + elements) of the block.  Its two ends cut it alike from the block and the table alone.  Their count,
+   at most the pair's routes; 0 where the block moves nothing (from == to, no element, a rank past the table's nodes) or
+   its pair has no route. */
+struct mesh_part { uint32_t route,padding; uint64_t first,elements; };
+uint32_t mesh_block_parts(const struct mesh_routing *,const struct mesh_block *,int shortest,uint64_t page,struct mesh_part *parts);
+/* An exchange's steps at `rank` (HOSTED): each block's parts (mesh_block_parts, at `page`; `pairwise`, its pair's
+   routes of the fewest nodes, else every route of it).  A part on a route of two nodes: a SEND at its `from` (from its
+   source at first plus the part's first) and a COPY at its `to` (into its target at `at` plus the part's first), both
+   of round 0.  A part on a longer route, where not `pairwise` (every member knows the block and takes part: an
+   all-to-all's, a gather's, a scatter's): hop j in round j, the route's first rank SENDing it from its source, its last
+   receiving it (COPY) into its target, and a rank between them receiving it into its buffer `relay` at the next of the
+   bytes it relays (each part from a multiple of `page`) and SENDing it on from there in the next round, the bytes of
+   that SEND the very bytes that landed (its transport sends them on from where they landed as they land: its step
+   waits on none, and so no step of a HOSTED call waits on another, mesh_group_before); `pairwise`, none (a pair's
+   bytes whose only ends know them cross its members' proxies, libnccl-mesh).  A round's SENDs, then its receives, each in block, then route order,
+   so a hop's SENDs at one end and its receives at the other are the same parts in the same order (mesh_lay).  block[k]
+   (NULL: not written) the block step k moves a part of; *relayed (NULL: not written) the bytes of `relay` the rank
+   uses.  Their count, at most mesh_exchange_room's; UINT32_MAX, nothing written, where a block names a rank past the
+   table's nodes or moves elements between two ranks the table joins by no route, or room could not be had. */
+uint32_t mesh_exchange_steps(const struct mesh_routing *,uint32_t rank,const struct mesh_block *blocks,uint32_t count,int pairwise,uint32_t relay,
+                             uint64_t page,struct mesh_step *steps,uint32_t *block,uint64_t *relayed);
+/* The most steps mesh_exchange_steps makes at a rank of a pattern (two a route of each block), and (*parts, NULL: not
+   written) the most parts a block of it has. */
+uint32_t mesh_exchange_room(const struct mesh_routing *,const struct mesh_block *blocks,uint32_t count,uint32_t *parts);
 /* A group's advisories: mesh_program_advise's checks over its calls laid together (projection of both ends' entries on
    each list and of each call's steps, the point-to-point calls' together; causality over every call's steps on the
    shared lists; each call's priorities, alignment and hazards), and bound (GPU waits of polls 0 or past `bound`: a wait
@@ -292,8 +358,9 @@ uint32_t mesh_group_advise(const struct mesh_group *,void (*warn)(void *,const c
    all-reduce's node that sends its operand to one node only and forwards nothing sends it from the operand itself (the
    two-node direct exchange: no scratch).  8: a step is one entry of its holding's send list or landing list
    (mesh_group_lay, each list in its own order), the program's own cuts on pages (mesh_program_steps_cut); no wire, no
-   positions, no fillers. */
-#define MESH_PLAN_VERSION 8u
+   positions, no fillers.  9: an exchange crosses a routing table (struct mesh_routing, mesh_exchange_steps), its blocks
+   cut among a pair's routes on pages, a rank between a part's ends relaying it. */
+#define MESH_PLAN_VERSION 9u
 
 /* design/transport.md: what a node's record carries of its health to every bridge: `booted`, the wall
    clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes
