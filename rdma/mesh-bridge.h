@@ -281,10 +281,12 @@ struct agent_message {
    and guard told wakes the raiser parked on it, port_tell, port_wait), and the threads that post on its queue pairs
    (`thread`: its two progress threads, each storing itself as it starts, and its link job's while one runs, by which a
    provider's fault names its port, mesh-link.c fault_heard); the queue pairs its device holds for a link as its agent
-   told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md) */
+   told them at its opening (`budget`, the parent's: design/HETEROGENEOUS-LINKS.md); and its interface as the kernel's
+   events name it (`family`, `unit`: an en<N>'s APPLE_IF_FAM_ETHERNET and N, read once from its name as the port is
+   named; a loop port's family 0, which no event carries: mesh-link.c addresses_heard) */
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,stuck,budget;
+  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,open,opening,stuck,budget,family,unit;
   int64_t farewell;
   char name[IFNAMSIZ];
   int control,job,result,refused,threads;

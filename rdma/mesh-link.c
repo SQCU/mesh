@@ -1881,6 +1881,8 @@ static void ports_found(void){
     port->link.rings=rings;
     port->link.provider.device=&port->device;
     snprintf(port->device.name,sizeof port->device.name,"%s",devices[i]);snprintf(port->name,sizeof port->name,"%s",devices[i]+5);
+    /* the interface as the kernel's events name it, its name read once here into typed values (addresses_heard) */
+    if(!strncmp(port->name,"en",2)){port->family=APPLE_IF_FAM_ETHERNET;port->unit=(uint32_t)strtoul(port->name+2,NULL,10);}
     /* design/transport.md B9b: counted for a termination's queue (quiet_all, peer_port) once whole, then
        held to the window a termination that named no port set meanwhile (`exit_at`: its own may be among them) */
     if(fresh)__atomic_store_n(&port_count,port_count+1,__ATOMIC_SEQ_CST);
@@ -1919,14 +1921,16 @@ static void network_heard(int stopping){
    events on `addresses`: a link-local address bin/mesh-fabric-init.sh puts in place, or its duplicate address detection
    done): the hellos' group joined on the interface again (a join while it held no IPv6 address took nothing) and the
    port's hello said at this turn (port_hello: an open port with no peer), so a hello that left before the address could
-   carry it, or before the peer's could take it, is said again as the address comes, not a pace (MESH_PAUSE_NS) later */
+   carry it, or before the peer's could take it, is said again as the address comes, not a pace (MESH_PAUSE_NS) later.
+   The port is the event's interface family and unit, the port's own read once (struct port `family`, `unit`): no name
+   is built or compared per event.  Another Ethernet-family interface of the same unit (bridge0, awdl0, anpi<N>) is
+   taken as the port's, and its event says the port's hello early, as the pace would: a hello on an open port with no
+   peer is never wrong */
 static void addresses_heard(void){
   union { struct kern_event_msg header; unsigned char bytes[512]; } event;
   while(recv(addresses,event.bytes,sizeof event,0)>=(ssize_t)(KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data))){
     const struct net_event_data *interface=(const void *)(event.bytes+KEV_MSG_HEADER_SIZE);
-    char name[IFNAMSIZ+16];
-    snprintf(name,sizeof name,"%.*s%u",(int)sizeof interface->if_name,interface->if_name,interface->if_unit);
-    for(uint32_t p=0;p<port_count;p++)if(!strcmp(name,ports[p].name)){
+    for(uint32_t p=0;p<port_count;p++)if(interface->if_family==ports[p].family && interface->if_unit==ports[p].unit){
       struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=ports[p].interface};
       if(ports[p].interface)setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
       ports[p].next=now;
