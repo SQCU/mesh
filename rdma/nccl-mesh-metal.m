@@ -352,20 +352,26 @@ struct metal_result metal_truncdiv(struct metal_program *program, int type, void
 }
 
 /* a wait's arguments (nccl-mesh-metal.h struct metal_wait): `landed` at aux until scalar, `sent` at first until sent,
-   the landed bytes at src, dst the destination's offset, its entry and channel for its failure's record */
+   the landed bytes at src, dst the destination's offset, its entry and channel for its failure's record.  Its page
+   counts become the record's words here and in release_args alone */
 static struct args wait_args(const struct metal_wait *w, size_t dst_offset, size_t n, int op) {
-  return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = w->target, .aux = w->word, .op = (uint32_t)op,
-                       .first = w->sent_word, .sent = w->sent_target, .at = w->at, .channel = w->channel};
+  return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = pages_to_word(w->target), .aux = w->word, .op = (uint32_t)op,
+                       .first = w->sent_word, .sent = pages_to_word(w->sent_target), .at = w->at, .channel = w->channel};
 }
 
 /* a publication's arguments (struct metal_release): its count at aux stored scalar; `sent` at first until sent, for
    mesh_step_sent; dst the operand's offset (a deferred one's) */
 static struct args release_args(const struct metal_release *r, size_t dst_offset) {
-  return (struct args){.dst = dst_offset, .scalar = r->value, .aux = r->word, .first = r->sent_word, .sent = r->sent_target};
+  return (struct args){.dst = dst_offset, .scalar = pages_to_word(r->value), .aux = r->word, .first = r->sent_word,
+                       .sent = pages_to_word(r->sent_target)};
 }
 
 struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
   return dispatch(program, KIND_publish, r->words, NULL, NULL, NULL, release_args(r, 0), 1, 1);
+}
+
+struct metal_result metal_open_gate(struct metal_program *program, void *words, size_t word, uint64_t value) {
+  return dispatch(program, KIND_publish, words, NULL, NULL, NULL, (struct args){.scalar = value, .aux = word}, 1, 1);
 }
 
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {

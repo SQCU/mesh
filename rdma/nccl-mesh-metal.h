@@ -1,6 +1,6 @@
 /* libnccl-mesh's Metal half (nccl-mesh-metal.m): a group's work on the GPU, encoded into the caller's command
    buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A channel's holding (mesh-call.h mesh_stream_view: its
-   three byte counts) is one buffer over the region's page that holds them, and the bytes it sends and lands are the
+   three page counts) is one buffer over the region's page that holds them, and the bytes it sends and lands are the
    client's own pages.  A wait for a landing is rdma/mesh.metal's mesh_wait_bounded (nccl-mesh-kernels.h
    mesh_step_wait) on the holding's `landed` until it covers the entry, and where a write meets bytes a SEND reads, on
    its `sent`; it ends at the count, at the link's loss (the bridge's ~0) or at its program's bound (metal_begin's
@@ -12,6 +12,21 @@
 #include <string.h>
 /* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, What a client cannot reach) */
 #pragma GCC visibility push(hidden)
+
+/* A count of a holding's pages (mesh.h struct mesh_stream `ready`, `sent` and `landed`; an entry's end): a type of its
+   own, so a byte count, an entry or an element count is never added to it, taken from it or compared with it but
+   through a named conversion.  pages_of: a piece's bytes as the pages it fills, rounded up, the one conversion from
+   bytes.  pages_to_word and pages_from_word: the count as a region word or a kernel's argument record holds it, used
+   at those boundaries alone (and in a sum that only tells whether counts moved, nccl-mesh.c run).  pages_lost: the
+   bridge's ~0, its link lost. */
+typedef struct { uint64_t n; } mesh_pages;
+static inline mesh_pages pages_of(uint64_t bytes, uint64_t page) { return (mesh_pages){(bytes + page - 1) / page}; }
+static inline mesh_pages pages_add(mesh_pages a, mesh_pages b) { return (mesh_pages){a.n + b.n}; }
+static inline mesh_pages pages_sub(mesh_pages a, mesh_pages b) { return (mesh_pages){a.n - b.n}; }
+static inline int pages_below(mesh_pages a, mesh_pages b) { return a.n < b.n; }
+static inline int pages_lost(mesh_pages a) { return a.n == UINT64_MAX; }
+static inline uint64_t pages_to_word(mesh_pages a) { return a.n; }
+static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){word}; }
 
 /* a copy's loads: plain, or coherent (METAL_LAND: bytes the NIC may have landed in the same command buffer) */
 enum { METAL_PLAIN, METAL_LAND };
@@ -97,14 +112,17 @@ struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, 
                                    uint64_t divisor);
 /* A wait (design/transport.md section 14): in `words` (the Metal buffer over a holding's counts), the count at `word`
    (its `landed`) until it reaches `target` (0: none), and the count at `sent_word` (its `sent`) until it reaches
-   `sent_target` (0: none); `data` at `data_offset` the landed bytes a landing combines (the group's landing area); its
-   failure recorded in `violation`'s words at entry `at` of channel `channel`. */
-struct metal_wait { void *words, *violation, *data; size_t word, sent_word, data_offset; uint64_t target, sent_target, at; uint32_t channel; };
-/* A publication: in `words`, the count at `word` (a holding's `ready`, or a communicator's gate word) stored `value` after
-   one system fence; the count at `sent_word` (the holding's `sent`) reaches `sent_target` once the NIC is done reading
-   the published bytes (a deferred publication's record, read by mesh_step_sent; 0 none). */
-struct metal_release { void *words; size_t word; uint64_t value; size_t sent_word; uint64_t sent_target; };
+   `sent_target` (0: none), each in pages; `data` at `data_offset` the landed bytes a landing combines (the group's
+   landing area); its failure recorded in `violation`'s words at entry `at` of channel `channel`. */
+struct metal_wait { void *words, *violation, *data; size_t word, sent_word, data_offset; mesh_pages target, sent_target; uint64_t at; uint32_t channel; };
+/* A publication: in `words`, the count at `word` (a holding's `ready`) stored `value` after one system fence; the count
+   at `sent_word` (the holding's `sent`) reaches `sent_target` once the NIC is done reading the published pages (a
+   deferred publication's record, read by mesh_step_sent; 0 none). */
+struct metal_release { void *words; size_t word; mesh_pages value; size_t sent_word; mesh_pages sent_target; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
+/* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
+   number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
+struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
 /* the wait alone (a COPY's landing in place, a group's end on `sent`), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
 /* the wait, then every threadgroup's piece of the landed bytes combined into dst (an ncclDataType_t or METAL_MERGE, op as

@@ -12,7 +12,9 @@
 #define STR(...) #__VA_ARGS__
 #define XSTR(...) STR(__VA_ARGS__)
 /* a kernel's arguments, one layout for the host (struct args) and the kernels (struct mesh_args): a wait's count at
-   aux until scalar and its holding's `sent` at first until sent (0 none), a publication's count at aux stored scalar */
+   aux until scalar and its holding's `sent` at first until sent (0 none), a publication's count at aux stored scalar.
+   A holding's counts are pages, as words here (nccl-mesh-metal.m wait_args, release_args); aux and first are byte
+   offsets, at an entry */
 #define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 first, sent, at, sequence; U32 count, mask, channel; }
 
 /* a step of a compiled program, the library's one implementation of it (metal-microbench docs/acceptance-20261014.md
