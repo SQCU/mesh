@@ -98,7 +98,8 @@ int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct
   struct mesh_stream *x=stream_owned(context,stream,&error);
   if(!x)return error;
   const struct hdr *m=context->M;
-  if(land<0 || land>1 || entry.at<m->data_off || (entry.at-m->data_off)%m->pgsz || entry.bytes>m->length-entry.at)return EINVAL;
+  const uint64_t page=(uint64_t)m->block*m->pgsz;
+  if(land<0 || land>1 || entry.row>=mesh_rows(m) || (entry.bytes+page-1)/page>mesh_rows(m)-entry.row)return EINVAL;
   _Atomic uint64_t *presented=land?&x->lands:&x->sends;
   const uint64_t e=atomic_load_explicit(presented,memory_order_relaxed);
   if(e-atomic_load_explicit(&x->taken[land],memory_order_acquire)>=MESH_STREAM_ENTRIES)return EAGAIN;

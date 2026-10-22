@@ -15,14 +15,15 @@
 /* 129: a link's streams toward its peer node (struct mesh_stream), each held by one client at a time by its owner word
    (as rows are), so as many communicators as a link has streams use a node pair at once, the client naming the node
    alone (design/transport.md section 14; the versions before it, this file's history).  The wire's contract between
-   bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units (a page; a frame), a SEND filling a receive of a
-   whole unit.  It changes only where that contract does (the operator, 2026-10-21: "commits which do not change an
-   interface 'contract' in any way are not interface-version changes regardless of their hashes"): a holder naming its
-   own pages changed the contract between a node's bridge and its clients (MESH_LAYOUT), not this one */
-#define MESH_VERSION 131u
+   bridges: HELLO, FAREWELL, RECORD and LINK, and each lane's units, a SEND filling a receive of a whole unit.  It
+   changes only where that contract does (the operator, 2026-10-21: "commits which do not change an interface 'contract'
+   in any way are not interface-version changes regardless of their hashes").  132: every unit on a stream's lanes is
+   a page, landing in its row's own page (design/pages-and-functions.md), wherever the receiver's plan put it; a
+   holding's unit u goes on its stream's lane u mod 2 */
+#define MESH_VERSION 132u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 134u
+#define MESH_LAYOUT 135u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -60,17 +61,22 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
-/* design/transport.md section 14: an entry of a holding's send list or landing list: the holder's own bytes, `bytes` of
-   them from region offset `at` (a page's first byte: a lease's), and the count that governs them: a send entry's byte k
-   is ready once the word at region offset `word` (0: the holding's `ready`) reads at least `base` + k + 1; a landing
-   entry is received into once the word at `word` (0: none) reads at least `base` */
-struct mesh_entry { uint64_t at,bytes,word,base; };
+/* design/pages-and-functions.md; design/transport.md section 14: an entry of a holding's send list or landing list: the
+   holder's rows from `row` on (a row a page), `bytes` of them, and the count that governs them: a send entry's byte k is
+   ready once the word at region offset `word` (0: the holding's `ready`) reads at least `base` + k + 1, and is sent from
+   its row's page wherever that is; a landing entry's pages land in its rows' own pages, wherever they are, once the word
+   at `word` (0: none) reads at least `base` (the rows released by their reader: design/pages-and-functions.md, a page
+   is written again only after release).  Every row's page is fixed by its holder's plan before the holding's first
+   call and stays its for the holding (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
+   compiled plans which do not change dynamically during a chain of function calls") */
+struct mesh_entry { uint64_t row,bytes,word,base; };
 /* design/transport.md section 14: the stream toward node `peer` (0 none), `live` while its link is up, its share of the
    link's bandwidth and `wire`, its identity, the same at both its ends and no other stream's between the two nodes (0
    until it is live): the bridge's.  A holder takes `owner` from 0 to its own while `free`; the bridge then makes the
-   holding's words new (every count 0) and freezes `start`, its own ends' places on the link, which it stores before
-   `begun` (the owner it serves); the holder hands `start` to its peer through its communicator's bootstrap and stores
-   the peer's in `peer_start`, then `told` (the owner), and the bridge serves the holding.  The holder presents its
+   holding's words new (every count 0) and freezes `start`, its own ends' places on the link (per lane: its SENDs and
+   its receives posted so far), which it stores before `begun` (the owner it serves); the holder hands `start` to its
+   peer through its communicator's bootstrap and stores the peer's in `peer_start`, then `told` (the owner), and the
+   bridge serves the holding.  The holder presents its
    entries in order: entry e of a list in slot e mod MESH_STREAM_ENTRIES of `lists` (region offsets: the send list,
    then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
    bridge's, per list) is past it.  Three byte counts over the holding, each in its list's order and all of it before:
@@ -80,8 +86,8 @@ struct mesh_entry { uint64_t at,bytes,word,base; };
    byte not ready goes as a dud (all ones), as at the holding's end (its owner word let go to 0).  The two time rings
    (`posted_at`, `landed_at`, region offsets) of MESH_STREAM_TIMES entries of two words: entry e's, slot e mod
    MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last byte
-   landed; its first word 0 while its second is stored.  `touching`, the bridge's: the owner word of a holding whose landing
-   pages still have receives posted into them (0 none), whose rows the bridge releases only once it no longer reads it.
+   landed; its first word 0 while its second is stored.  `touching`, the bridge's: the owner word of a holding into whose
+   rows the bridge may still map a landed page (0 none), whose rows are reclaimed only once it no longer reads it.
    Nothing in it names a lane, a unit, a frame or a queue pair */
 struct mesh_stream {
   _Alignas(64) _Atomic uint32_t peer;

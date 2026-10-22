@@ -21,8 +21,8 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
   the unreliable-connected queue pairs of its plan, ten where both ends' devices hold ten (macOS 26's) and fewer where
   either holds fewer (the M5 Ultra's macOS 27 devices report max_qp 3, two usable by the max_qp − 1 rule:
   [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)),
-  its streams' lane pairs (and lanes 0 and 1 where the plan has them, nothing posted on either), the keepalive a frame
-  on the small lane of a stream that serves no holding ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 10);
+  its streams' lane pairs and, where the plan has them, lane 0 (the keepalive's frames) and lane 1 (nothing posted)
+  ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 10);
   created, moved through INIT, RTR and RTS, on two
   completion queues of the port's device context.
 - **A posted receive.** An `ibv_recv_wr` with one SGE: an address in the region, a length, a key. The queue pair's
@@ -358,27 +358,27 @@ the fix of version 125's real defect (clients holding work requests and queue pa
 bridge. A client naming its own pages holds no DMA state, and needs no ring.
 
 **The stream.**
-- Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own: its large
-  lane carries whole pages, its small lane the frames of each entry's last page (as many streams as the link's plan
-  has lane pairs for: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)).
+- Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own (as
+  many streams as the link's plan has lane pairs for: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)). Every unit on
+  a stream's lanes is a whole page: page p of a holding goes on the stream's lane p mod 2.
 - Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
   GID and queue pair number) and which no other stream between the two nodes has.
-- A holding has two lists of entries the holder presents in order, each its own pages (`struct mesh_entry`: a page's
-  first byte, any number of bytes, the count that governs them): a send list and a landing list. Both ends present
-  entries of equal sizes in equal order, per direction (the schedule). Three byte counts over the holding, each in its
+- A holding has two lists of entries the holder presents in order, each its own rows (`struct mesh_entry`: its first
+  row, any number of bytes over the rows from it, the count that governs them): a send list and a landing list. Each
+  list is a sequence of pages, and page i of a send list lands as page i of the peer's landing list. Each end lays its
+  own pages where its plan put them: scattered rows in one client may land as one run of rows in another, and one
+  buffer may go to several runs in several clients, with nothing copied. Every placement is the holder's plan, fixed
+  before the holding's first call (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
+  compiled plans which do not change dynamically during a chain of function calls"). Three byte counts over the holding, each in its
   list's order with every byte before: `ready` (the holder's: produced), `sent` and `landed` (the bridge's: SENDs
   completed; landed). The holder never sees a lane, a unit, a frame or a queue pair.
-- The bridge cuts each entry alike at both ends: its whole pages, a SEND each on the large lane, then its last page's
-  frames on the small lane, the last carrying only its bytes. Every receive is a whole unit (a page, or a frame, which
-  lies in its entry's last page), so a SEND is never longer than the receive it fills: ends whose entries differ
-  garble their own pages and never fail the link, and a SEND and its receive cover the same frames (TN3205).
-- Why pages: `max_sge` is 1 ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)) and the region is registered in 1 GiB
-  extents (rdma/mesh-verbs.h), so a range across an extent cannot be posted; a page never crosses one, every lease
-  starts on one, and both ends cut "page i of the entry, page i" without knowing each other's addresses. A data
-  function lays the buffers it crosses on pages; an entry not on a page is refused as a value, never copied.
-- The send thread posts a unit from the holder's own pages once the entry's count covers its bytes; the receive thread
-  posts receives straight into the holder's landing pages (at most a window ahead), and raises `landed` once every
-  byte before has landed, whichever lane carried it. A SEND whose receive is not yet posted waits in the hardware's
+- Every SEND and every receive is one whole page (an entry's last page too), found through its row
+  (design/pages-and-functions.md: the page table). So a SEND always fills its receive exactly (TN3205), ends whose
+  lists differ garble their own pages and never fail the link, and neither end knows the other's addresses.
+- The send thread posts a unit from its row's page once the entry's count covers its bytes; the receive thread posts
+  each receive straight into its row's own page (at most a window ahead) once the entry's word says the row's reader
+  released it (a page is written again only after release), and raises `landed` once every byte before has landed,
+  whichever lane carried it: the stamp of every row it covers. A SEND whose receive is not yet posted waits in the hardware's
   credit (TN3205): posting a receive is the credit, and nothing else paces a holding (no lag, no fillers).
 - The words only the bridge writes: `live`, `free`, `begun`, `sent`, `landed`, `taken`, `touching`, `start` and the two
   time rings (`posted_at`: an entry's first SEND posted; `landed_at`: its last byte landed; mach_absolute_time ticks
@@ -405,10 +405,10 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 - When the owner word changes (the holder let go, or the event loop let go a holder gone), the send thread ends the
   holding: every presented unit goes, the unready as duds; then the stream is free. The receive thread turns the
   stream to spares (the spare page, the second page of the port's link block), which receive the peer's SENDs to the
-  ended holding. It keeps one spare posted a lane, and posts the next as each lands; the peer's SENDs wait in the
+  ended holding and its keepalive. It keeps one spare posted a lane, and posts the next as each lands; the peer's SENDs wait in the
   hardware's credit meanwhile (TN3205). A whole window of spares would put the next holding's first index a window
-  past the peer's SENDs, and the peer would send that window as duds (512 pages and 2,048 frames on a two-lane link,
-  16 MiB, about 1.6 ms) before the holding's first byte (the operator, 2026-10-21: "get rid of megabyte / millisecond
+  past the peer's SENDs, and the peer would send that window as duds (megabytes, about a millisecond) before the
+  holding's first byte (the operator, 2026-10-21: "get rid of megabyte / millisecond
   pointless overheads").
 - Receives already posted into the ended holding's pages cannot be taken back: `touching` names its owner until all of
   them have landed (the peer's SENDs to it, or its duds as the next holding aligns), and a gone owner's rows are

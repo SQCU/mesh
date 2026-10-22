@@ -321,38 +321,24 @@ the configuration's `keepalive_us`, where a document left it out, turned the fas
 
 **The hardware facts it rests on.**
 - The Studios' macOS 27 devices report max_qp 3, and the driver keeps one queue pair of each device (section 4). A
-  link to a Studio has two queue pairs: one stream's large lane and small lane. No queue pair is left for a lane of
-  its own.
+  link to a Studio has two queue pairs: one stream's two lanes. No queue pair is left for a lane of its own.
 - TN3205: a SEND fills the oldest receive its queue pair has posted, and the two must cover the same number of 4 KiB
   frames. A SEND waits in the hardware's credit until the peer has a receive posted.
 - max_sge is 1 (section 1), so every SEND and every receive names one range.
 
-**The form.** The keepalive takes no queue pair of its own. It is a frame of the all-ones block on a stream's small
-lane (rdma/mesh-link.c `link_alive`).
+**The form** (rdma/mesh-link.c `link_alive`, version 132: every unit on a stream's lanes is a page).
 - When: the link has posted no SEND for MESH_PLATFORM_NS/5 while this end holds none of its streams, or for
-  MESH_KEEPALIVE_NS (5 us) while it holds one. Any SEND counts, so a link busy with data sends none.
-- Where: the small lane of the link's least stream that serves no holding at this end and has no SEND in flight on
-  that lane.
-- What: one SEND from the all-ones block, one frame as every small-lane receive is. On a stream that has served no
-  holding at this end this pairing it is 16 bytes: the peer's receive for it can only be a spare, since the peer
-  serves no holding of the stream until this end has told its start. Otherwise it is MESH_FRAME bytes, a whole dud.
-- Alignment: it is a SEND of the lane like any other, counted in the lane's SENDs. A holding's start words are each
-  lane's SENDs and receives posted so far, and each lane's first index for a holding is the greater of its own count
-  and its peer's (design/transport.md section 14). Both ends count the frame, so it never moves a holding's units.
-- Its receive: a stream that serves no holding receives into the spare page. After a holding that is the window of
-  spares, as before. At a fresh pairing it is one spare on the small lane (`lane_post`), so the frame has a receive
-  to fill. A frame sent before the peer posts one waits in credit, and the next holding's start counts it.
-- A peer that still serves a holding this end has ended (its client gone): the frame fills that holding's next
-  small-lane receive. It lands as a dud would, all ones (design/rubrics.md M4: "a dud landed as bytes like any
-  other").
-- Its pace is the bridge's own figure, MESH_KEEPALIVE_NS. "the bridge chooses, and it chooses based upoin the actual
-  driver and api the rdma firmware supplies. only the bridge is allowed to know these configuration details" (the
-  operator, 2026-10-21, design/transport.md section 14). The bridge no longer reads the configuration's `keepalive`, so
-  no document can turn the keepalive off. The parent still states the pace on a child's command line (MESH_CHILD_VERSION
-  unchanged), and a child of this build keeps its own, so a parent of an earlier build that states 0 sets nothing.
-- Lanes 0 and 1 are still made where the plan has them (section 5), so a bridge of the plans before this change pairs
-  with this one, and nothing is posted on them. An older bridge's frames on lane 0 wait in credit, harmlessly. A change
-  of MESH_VERSION could drop the two lanes and free their queue pairs.
+  MESH_KEEPALIVE_NS (5 us) while it holds one. Any SEND counts, so a link busy with data sends none. Nothing is in
+  flight on the keepalive's lane.
+- Where the plan has lane 0 (three or more queue pairs at both ends): a frame of the all-ones block (16 bytes) on lane
+  0, at either pace. The peer keeps one-frame receives posted there into its link block's first page. No holding's
+  unit uses lane 0, so the frame never moves one.
+- Where it has none (two queue pairs): while no stream is held at this end, a page of the all-ones block on its
+  stream's first lane, into the one spare a lane the peer keeps posted between holdings. It is a SEND of the lane like
+  any other, so a holding's start (each lane's SENDs and receives posted so far, and each lane's first index the
+  greater of its own count and its peer's) counts it and it never moves a holding's units.
+- Its pace is the bridge's own figure, MESH_KEEPALIVE_NS: "only the bridge is allowed to know these configuration
+  details" (the operator, 2026-10-21). The configuration's `keepalive` is not read.
 
 **What it cannot do.** A link sends no keepalive while every one of its streams serves a holding at this end. On a
 two-queue-pair link that is the one stream, held by a communicator. A timed frame on a held stream's lane would fill

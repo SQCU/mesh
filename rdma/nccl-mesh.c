@@ -1962,7 +1962,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    destination, a combine's landing area: `data`) and their region offset (`at`); a landing's `need` (the send entries a
    combine into bytes an earlier SEND of its call on its channel reads waits to be published: that entry + 1, 0 none)
    and `sent` (that SEND's end, the `sent` the combine awaits) */
-struct message { struct call *c; uint32_t step; uint64_t entry, end, need, sent; size_t offset, bytes; struct where data; uint64_t at; };
+struct message { struct call *c; uint32_t step; uint64_t entry, end, need, sent; size_t offset, bytes; struct where data; uint64_t row; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
    landing list's), and its landing entries' gate (`word` a region offset, 0 none; `base`: gate_of) */
 struct schedule { struct message *out, *in; size_t outs, ins; uint64_t first[2], word, base; };
@@ -2095,10 +2095,10 @@ static struct where spare_where(struct metal_program *program, struct ncclComm *
 
 static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + page - 1) / page * page); }
 
-/* where each entry's bytes lie (struct message `data`, `at`): a SEND's in the buffer its step reads (the send buffer,
+/* where each entry's bytes lie (struct message `data`, `row`): a SEND's in the buffer its step reads (the send buffer,
    where it reads that in place), a COPY's in its step's buffer, a combine's in the group's landing area (a lease of
-   comm's pool, each entry from a page of it); each a page's first byte of this node's region (design/transport.md
-   section 14: an entry starts on a page, max_sge 1 and registrations in extents a page never crosses).  0, else the
+   comm's pool, each entry from a page of it); each a page's first byte of a lease of this process, named to the bridge
+   by its row, through which the bridge finds each of its pages (design/pages-and-functions.md).  0, else the
    call fails as a value, naming the piece (ncclInvalidUsage: the piece's buffer is no lease, or its cut, NCCL's, does
    not lie on a page; nothing is copied to move it), nothing presented */
 static ncclResult_t place_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder) {
@@ -2122,12 +2122,16 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
         else x->data = shifted(st->buffer[step->buffer], x->offset);
         const unsigned char *address = address_of(x->data);
         const int inside = in_region(comm, x->data, x->bytes);
-        if (inside && !((size_t)(address - region) % page)) { x->at = (uint64_t)(address - region); continue; }
+        pthread_mutex_lock(&attach_lock);
+        const struct lease *held = inside ? lease_at(address) : NULL;
+        const uint64_t row = held ? held->row + (uint64_t)(address - (const unsigned char *)held->address) / page : 0;
+        pthread_mutex_unlock(&attach_lock);
+        if (held && !((size_t)(address - region) % page)) { x->row = row; continue; }
         return fail(ncclInvalidUsage, "%s on communicator %s: the %zu bytes its %s rank %u %s (buffer %u, byte %zu) %s", call_name(x->c), comm->name,
                     x->bytes, send ? "SEND to" : "receive from", step->peer, send ? "reads" : "lands in", step->buffer, x->offset,
-                    inside ? "do not start on a page: an entry is a page's first byte (design/transport.md section 14), and a cut NCCL's call fixes "
-                             "is never moved by a copy"
-                           : "are not in this node's region: a crossing's bytes are a lease's (ncclMemAlloc), never copied");
+                    held ? "do not start on a page: an entry is a page's first byte (design/transport.md section 14), and a cut NCCL's call fixes "
+                           "is never moved by a copy"
+                         : "are in no lease of this process: a crossing's bytes are a lease's (ncclMemAlloc), never copied");
       }
   return ncclSuccess;
 }
@@ -2173,9 +2177,9 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
     const struct schedule *p = plans + h;
     int status = 0;
     for (size_t k = 0; !status && k < p->outs; k++)
-      status = mesh_stream_present(context, ch->stream, 0, (struct mesh_entry){p->out[k].at, p->out[k].bytes, 0, p->out[k].end - p->out[k].bytes});
+      status = mesh_stream_present(context, ch->stream, 0, (struct mesh_entry){p->out[k].row, p->out[k].bytes, 0, p->out[k].end - p->out[k].bytes});
     for (size_t k = 0; !status && k < p->ins; k++)
-      status = mesh_stream_present(context, ch->stream, 1, (struct mesh_entry){p->in[k].at, p->in[k].bytes, p->word, p->base});
+      status = mesh_stream_present(context, ch->stream, 1, (struct mesh_entry){p->in[k].row, p->in[k].bytes, p->word, p->base});
     if (status)
       return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
                        "presented to its bridge: %s", comm->name, ch->node, strerror(status));
