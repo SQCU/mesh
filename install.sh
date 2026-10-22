@@ -217,4 +217,4 @@ try "health report written (/var/run/mesh-health)" "$MESH_ROOT/bin/mesh-health.s
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$MESH_ROOT/revision"
 printf 'reported_failures=%s retained_jobs=%s replaced_jobs=%s\n' "$failures" "$retained" "$replaced" > "$MESH_ROOT/install-status"
 echo "installer completed: $failures reported failures; $retained loaded jobs current, $replaced loaded now or with a new definition for their next load"
-launchctl bootout system/io.mesh.update >/dev/null 2>&1
+launchctl bootout system/io.mesh.update >/dev/null 2>&1 || :
