@@ -1,6 +1,6 @@
 # Mesh telemetry implementation claims
 
-Controlling specifications: [`../mesh-coprocessor-demo.md`](../mesh-coprocessor-demo.md),
+Related documents: [`../mesh-coprocessor-demo.md`](../mesh-coprocessor-demo.md),
 [`../rl-training-spec.md`](../rl-training-spec.md), and
 [`../ALGORITHM-CONTRACTS.md`](../ALGORITHM-CONTRACTS.md).
 
@@ -13,12 +13,6 @@ Implementation surfaces:
   records say of it (its telemetry is not read across nodes: the bridge carries no request).
 - `rdma/workload.py` owns workload-independent operation envelopes and measures.
 - `xonotic/solver/strat/strat_responder.py` owns distributed Gram placement and counterfactual measures.
-
-The claims are substantiated only when active aggregates have the same support as the
-nodes in the bridge's records whose telemetry answered, the capacity of nodes outside the map is reported only as
-inventory, missing objective
-coordinates retain their own support measures, and both forward and optimization work
-are observed on distinct mesh hosts.
 
 Page-table capacity is the configured region disintegrated into receive ownership and
 application arena ownership. Neither component is capped by a historical workload count,
@@ -37,8 +31,8 @@ noninteractive sudo and keeps the same in-memory ring, port, and sequence protoc
 Mach CPU ticks provide the unprivileged whole-CPU residency coordinate; privileged sampling
 adds power, frequency, and thermal coordinates but is not the source of CPU availability.
 An instrumented interval with unspecified arithmetic publishes a zero lower bound and a
-missing upper bound. It never publishes zero as an invented upper bound; component support
-and missing capacity remain explicit coordinates.
+missing (not zero) upper bound; component support and missing capacity remain explicit
+coordinates.
 
 CPU FP32 characterization doubles a square SGEMM realization from matrix order one until
 one measured multiplication occupies the requested sampling duration or allocation
@@ -51,12 +45,10 @@ The M4 Pro trajectory reached its requested interval at square order 8192 and me
 characterization stream remains the measurement artifact rather than a preset workload
 size.
 
-Ports 8788 and 8787 should each have one answering provider. Installation retains a
-loaded system job or an answering userspace provider rather than forcing an ownership
-transfer. User installation measures the system job's socket ownership before relying on it. It can bootstrap the same userspace interface when the system
-provider is absent. Definition refresh and any pre-existing supervisor overlap require
-a continuity-preserving handoff; routine installation no longer resolves them by stopping
-the working provider. Retained jobs are not reported as newly deployed generations.
+Installation retains a loaded system job or an answering userspace provider on ports 8788
+and 8787 rather than forcing an ownership transfer. User installation measures the system job's socket ownership before relying on it. It can bootstrap the same userspace interface when the system
+provider is absent. Routine installation does not resolve a definition refresh or a
+pre-existing supervisor overlap by stopping the working provider. Retained jobs are not reported as newly deployed generations.
 
 Interactive observer polling requests the node's labelled scalar/array-length measure
 projection; the complete latest node record remains available without that query.

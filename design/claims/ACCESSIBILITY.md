@@ -1,15 +1,15 @@
 # Accessibility implementation claims
 
-Controlling specifications: [`../../THREAT-MODEL.md`](../../THREAT-MODEL.md),
-[`../../AGENTS.md`](../../AGENTS.md), and
-[`../transport.md`](../transport.md), with network realization controlled by
+The operator's words on access are [`../../THREAT-MODEL.md`](../../THREAT-MODEL.md)
+(2026-08-27). Related documents: [`../../AGENTS.md`](../../AGENTS.md),
+[`../transport.md`](../transport.md) and
 [`../ACCESS-TOPOLOGY-SPEC.md`](../ACCESS-TOPOLOGY-SPEC.md).
 
 Implementation surfaces:
 
 - `bootstrap.sh`, `install.sh`, `install-user.sh`, and `enable-autologin.sh` realize the
   same reachability posture on every node.
-- `bin/mesh-bridge.sh` performs catchable bridge teardown and restart.
+- `bin/mesh-bridge.sh` performed catchable bridge teardown and restart (deleted in 67f959bf, 2026-10-01).
 - `networks.conf`, `install.sh`, and `bin/mesh-networks.sh` carry one noninteractive
   network inventory into every node's credential store and preferred-network set.
 - `rdma/mesh-flow.c` retains the configured registration and page capacity across every

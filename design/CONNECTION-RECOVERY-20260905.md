@@ -33,7 +33,7 @@ owner and operation observations without changing the shared-memory ABI.
 | Owner | Existing behavior | Limit |
 | --- | --- | --- |
 | `rdma/mesh-flow.c`, `main` / `verbs_up` | Repeats out-of-band pairing at full configured capacity; detects port loss, peer re-pair requests and stalled completions; retires the pair and retries. | A verbs call blocked in the kernel prevents this loop and signal handlers from progressing. |
-| `rdma/mesh-client.c`, `refresh` / `reattach` | Checks named-region identity every 600 pump/read/stream turns; remaps a replacement region and restores client registration. | Submitted frames are not replayed. Interrupted streams become failed. Direct callers caching arena addresses also require care when the extent changes. |
+| `rdma/mesh-client.c`, `refresh` / `reattach` | Checks named-region identity every 600 pump/read/stream turns; remaps a replacement region and restores client registration. | Submitted frames are not replayed. Interrupted streams become failed. |
 | `rdma/mesh.py`, `Mesh.read` / `pump` | Calls the C read/pump APIs used by `strat_responder.incoming`. | Reattachment is exercised by the current API; it is not application-level delivery acknowledgement. |
 | `xonotic/darkplaces-work/host.c`, `MeshX_Pump` | Pumps the transport every server frame, through `mesh_ipc.c` and the C client. | Receiving future frames does not reconstruct messages lost across a connection interruption. |
 
