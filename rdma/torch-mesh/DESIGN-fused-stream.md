@@ -75,11 +75,12 @@ No worker waits for another to publish.
 
 Since 2026-10-22 the library gates no landing. A step's receives are posted as `fused.exchange` presents them, so the
 peer's part for crossing t may land while step t's kernel still reads crossing t − 1's from the same landing tensor.
-The operator: "if source says to write continuously into ab uffer, the nic must write continuously into that buffer
-even if this means that dat aprocessing code can race or lose parts of a stream". The program guards the pages it
-names again (design/pages-and-functions.md, Freeing: rows for NFE k+1 point at other pages until NFE k's are
-released). The landing wait no longer covers `sent` either: a kernel that writes a send tensor again first calls
-`mesh_step_sent` on the publication that last sent from it (torch_mesh/fused.py).
+The operator, 2026-10-22: "data procesisng code gets to write their own guards in their own source. if source says to
+write continuously into ab uffer, the nic must write continuously into that buffer even if this means that dat
+aprocessing code can race or lose parts of a stream." The page table's own guard is design/pages-and-functions.md,
+Freeing: rows for NFE k+1 point at other pages until NFE k's are released. The landing wait no longer covers `sent`
+either: `mesh_step_sent` on the publication that last sent from a send tensor waits for its `sent`, and the chain's
+kernel calls it before it writes that tensor again (examples/chain.metal:79; torch_mesh/fused.py).
 
 **What moved in chain-service.py.** Step t − 1's output is written by step t's kernel. So a block's outputs are copied
 one step after the block ends, and the pace mark moves with that copy. The host still waits for the mark two blocks
@@ -88,15 +89,13 @@ of the slots `ring_bytes` holds, and the float64 check reads the same windows. R
 since the kernel writes tanh(z) itself. The plain all-reduce timing (`crossing_microseconds`) is kept, as the
 crossing the fused step no longer pays.
 
-## What the first two-rank run must show
+## Main's readings beside the first two-rank run
 
-- No command buffer error (no GPU fault, so the residency set covers what the kernel touches). The async error reads
-  ncclSuccess, and the chain's `err` word is 0.
-- The float64 check reads what main's chain reads on the same inputs: 1.37e-3 at step 0 and 1.19e-3 at step 3,584. The
-  arithmetic is the same (each sum rounded to float16 once, own part first). Only tanh's last bit may differ, so
-  differences in the last digits are expected.
-- The steady step falls below main's 35.4 µs. The plain crossing alone (`crossing_microseconds`) stays where it was
-  (17.2 µs in the last short run; about 12 µs for a bare crossing), since that path is unchanged. Each run logs
-  aggregate rows/s, steps/s per stream, the host and paced times and the parts tuple, beside main's readings by the
-  same harness.
-- `ncclMeshTimes` gives nonzero times for the crossings' groups, so the balancer has stretches.
+- Main's chain, its float64 check on the same inputs: 1.37e-3 at step 0 and 1.19e-3 at step 3,584. The arithmetic is the
+  same (each sum rounded to float16 once, own part first); only tanh's last bit differs.
+- Main's steady step: 35.4 µs. The plain crossing alone (`crossing_microseconds`), a path the branch leaves unchanged:
+  17.2 µs in the last short run; about 12 µs for a bare crossing.
+- The harness logs aggregate rows/s, steps/s per stream, the host and paced times and the parts tuple
+  (examples/chain-service.py:127), and `ncclMeshTimes` gives the crossings' groups' times, the balancer's stretches.
+- A command buffer error, the async error and the chain's `err` word report a fault on the run, the residency set's
+  coverage among them.

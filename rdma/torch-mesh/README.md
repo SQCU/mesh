@@ -26,20 +26,20 @@ program imports `mesh`, `torch_mesh` and the mesh's modules with nothing of its 
 dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or no backend: MPS's default is mesh
 ```
 
-- `"nccl"` becomes `"mesh"` (or omit it); `"cuda"` becomes `"mps"`; drop `torch.cuda.set_device`. `device_id`
-  needs its index (`mps:0`).
+- `"nccl"` becomes `"mesh"` (or is omitted); `"cuda"` becomes `"mps"`; `torch.cuda.set_device` goes. `device_id`
+  takes its index (`mps:0`).
 - One rank a node, launched as torchrun launches one (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); each node's
   bridge is its resident service, so a launch starts no bridge.
 - A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
   exchange their nodes, the nodes their bridges reach and their streams' pages posted (kept as a statistic: equal on a
   live stream), and the group keeps the map its init made of them.
-- A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
+- A bidirectional exchange with one peer pairs as one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
-  ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
+  ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
   communicators hold one stream, and a link has up to four (one for each lane pair its plan holds), so the world group
   and three subgroups use a node pair at once; one more is refused (EBUSY) until a group is destroyed
-  ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
+  ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing or a lost link; a GPU
   wait also at its bound, and a host-path wait at a revoke. No clock ends a wait on a peer's data.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
@@ -61,8 +61,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   synchronize.
   - The region's pages are host memory, which the NIC reads and writes coherently with the CPU. So a rank that makes an
     input on the host stores it straight into the pages a crossing sends from.
-  - A CPU store and the GPU's work on the same pages are the program's to order: a store comes before the commit of
-    the command buffer that reads it.
+  - Nothing in torch-mesh orders a CPU store against the GPU's work on the same pages: a command buffer reads the
+    stores made before its commit.
   - A tensor outside the region raises (`torch_mesh.empty` makes one inside it).
   Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on region
   tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
@@ -154,7 +154,8 @@ command the step encoded, from any thread, and replayed them as one program; had
 send buffer publish it by range (`MetalRecordPublish`), so its sends started as the ranges were stored; gated the
 replay's command buffers on the calls' landings (`MetalRecordGate`); and made each call persistent, its receives posted
 ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
-(`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
+(`DYLD_INSERT_LIBRARIES`): the operator, 2026-10-14, "monkeypatching is bad and unmaintainable" (metal-microbench
+docs/acceptance-20261014.md A53); and torch documents no MPS command capture to take its place
 (no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
 Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (a bridge posts a holding's
 receives into the holder's own landing pages, a window ahead of the data: [design/transport.md](../../design/transport.md)
@@ -164,16 +165,18 @@ autograd, is compiled and committed by the same rule.
 ## What does not
 
 - FSDP2 (`fully_shard`): torch's MPS has no streams or `current_device`, and its copy-in ops have no MPS kernel.
-  The project does not shard parameters (FSDP is a last resort among the parallelisms): port to DDP, tensor or
-  expert parallelism, or shard optimizer state by hand over `reduce_scatter_tensor` and `all_gather_into_tensor`.
+  The project does not shard parameters: the operator, "anything and everything is possible independently of the
+  'refuser's fsdp' chosen only when all other tp mechanisms have reached their limits" (metal-microbench
+  docs/principles.md section 4, recorded 2026-09-26). DDP, tensor and expert parallelism run (above), and optimizer
+  state can be sharded over `reduce_scatter_tensor` and `all_gather_into_tensor`.
 - Streams: torch's MPS has one queue and no `torch.mps.Stream`, so CUDA-stream overlap (DeepSpeed `overlap_comm`,
   Megatron's overlapped gradient reduction, side streams) does not port as written. What overlaps here: an
   `async_op=True` collective waited after the compute it may overlap, or a compiled graph of functional
   collectives.
 - `init_device_mesh("mps", ...)` and `DeviceMesh("mps", ...)`: torch 2.14's DeviceMesh setup calls
-  `torch.mps.is_initialized` and `set_device`, which torch's MPS module does not have. Form an MPS mesh from the
-  groups instead, which skips that setup: `DeviceMesh.from_group(dist.group.WORLD, "mps", mesh_dim_names=("tp",))`
-  (a list of groups and `mesh=` for more dimensions); DTensor, tensor and context parallelism then run on it.
+  `torch.mps.is_initialized` and `set_device`, which torch's MPS module does not have. An MPS mesh formed from the
+  groups skips that setup: `DeviceMesh.from_group(dist.group.WORLD, "mps", mesh_dim_names=("tp",))` (a list of groups
+  and `mesh=` for more dimensions); DTensor, tensor and context parallelism run on it.
   DTensor's own sharding has no rule for MPS's `linear_backward` or SDPA: on a mesh dimension `partition` attaches,
   its RaggedTensor's dispatch carries both (Uneven nodes, below). torch-mesh patches nothing of torch.
 - ReduceOp PREMUL_SUM and the bitwise ops; `monitored_barrier` (it needs a CPU device type the group does not
@@ -222,7 +225,7 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 ### Parts from the run's own evidence
 
-Nobody needs to know the parts in advance. Call `partition.rebalance` once a step, on every rank alike:
+The parts are not needed in advance. `partition.rebalance`, called once a step on every rank alike, moves them:
 
 ```python
 parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved within the capacities
@@ -237,7 +240,7 @@ parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved wit
   stretches of the slowest rank's, not the ranks' totals, which can agree while every collective still waits. That
   step is DFPA: the ranks' measured points, the grains given to whoever finishes earliest with them, and a stop once
   the measurements promise no gain past their own resolution. The parts then stand, so jitter does not reshard.
-- Parts that move past a capacity are the program's to attach again (capacities and parts both), its buffers taking
+- Parts that move past a capacity are attached again by the program (capacities and parts both), its buffers taking
   new shapes.
 - `partition.balancing(mesh, "tp")` returns what the last window saw.
 - A placement has two throughputs, the aggregate and each stream's, so the calls trace a frontier rather than a best:
@@ -403,8 +406,8 @@ w = s["lm_head"].to("cpu")                        # decoded
     library's: the host path, `counted`, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
-  - A host that blocks outside torch while a publication waits in the open buffer stalls its peer. Avoiding that is
-    the program's responsibility; the peer's bounded wait ends the call as a value
+  - A host that blocks outside torch while a publication waits in the open buffer stalls its peer: nothing else
+    commits that buffer, and the peer's bounded wait ends the call as a value
     ([NCCL.md](../NCCL.md#bounded-waits)).
   - The stream's commit state is one object a torch stream owns (`_stream.mm` `MeshStream`), read and written by the
     host inside torch's queue, with no counter a caller enters, so no caller's exception leaves it deferring. No thread
