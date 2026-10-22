@@ -130,12 +130,14 @@ enum { RECV_NONE, RECV_SERVE, RECV_SPARE };
    sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets) */
 enum { HELLO=1, FAREWELL, RECORD, LINK };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
-  uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
+  uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
 static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
-/* the wire's magic: its base, MESH_VERSION and the wire's revision (1<<12, past any base and version's: every link heard
-   within MESH_PLATFORM_NS or concluded, design/transport.md B1, B2, B3, which a bridge of the same version
-   without them breaks), so bridges of different versions or revisions drop each other's hellos and never pair */
-#define XMAGIC (0x4d595048u+MESH_VERSION+(1u<<12))
+/* the wire's magic: what marks a datagram or a control stream's header as the mesh's, so a reader finds a message's
+   bounds.  It is the value version 131 sends, fixed: no version enters it, so bridges of any version pair (the operator,
+   2026-10-21: "rejection filter removal. categorical. all of them without sanction in rubric"; "even this fake limit
+   too must go away").  A message states its sender's MESH_VERSION in `version` (0 from a bridge before it), which no
+   reader tests */
+#define XMAGIC (0x4d595048u+131u+(1u<<12))
 /* design/transport.md section 14: a port's link lanes (MESH_LINK_LANES), its queue pairs made once and connected once
    in its child's life ("A process a port": `lanes` once the child was asked for them, the parent's; a link lost after it
    pairs again with the port's next child), on the two completion queues its device's context holds, each lane's share of them (`share`

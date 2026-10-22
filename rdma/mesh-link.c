@@ -692,7 +692,7 @@ static int port_coalesce(struct port *port,const struct message *said,const void
 }
 void port_say(struct port *port,struct message said,const void *payload,uint32_t bytes){
   if(port->control<0 || (said.kind!=HELLO && !port->greeted) || port_coalesce(port,&said,payload,bytes))return;
-  said.magic=XMAGIC;said.node=M->node;said.boot=M->boot;said.block=M->block*M->pgsz;said.port=port->index;said.bytes=bytes;
+  said.magic=XMAGIC;said.version=MESH_VERSION;said.node=M->node;said.boot=M->boot;said.block=M->block*M->pgsz;said.port=port->index;said.bytes=bytes;
   said.lid=port->lid;memcpy(said.gid,port->gid,16);
   size_t length=port->out_length+sizeof said+bytes;
   if(length>port->out_room){
@@ -1206,7 +1206,7 @@ static void port_hello(struct port *port){
   port->next=now+MESH_PAUSE_NS;
   setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_IF,&port->interface,sizeof port->interface);
   struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=everyone,.sin6_scope_id=port->interface};
-  struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
+  struct message said={.magic=XMAGIC,.version=MESH_VERSION,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
   sendto(hello,&said,sizeof said,0,(struct sockaddr *)&to,sizeof to);
 }
 /* design/transport.md: a node heard on a port: the lower node dials the higher's listener on the address
@@ -1220,7 +1220,7 @@ static void hello_heard(void){
     if(!port || heard.magic!=XMAGIC || heard.kind!=HELLO || heard.node==M->node || port->control>=0)continue;
     if(!port->open){if(!port->job)port->opening=1;continue;}
     if(M->node>heard.node){
-      struct message said={.magic=XMAGIC,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
+      struct message said={.magic=XMAGIC,.version=MESH_VERSION,.kind=HELLO,.node=M->node,.boot=M->boot,.block=M->block*M->pgsz,.port=port->index};
       sendto(hello,&said,sizeof said,0,(struct sockaddr *)&from,sizeof from);
       continue;
     }

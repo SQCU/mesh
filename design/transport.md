@@ -460,7 +460,11 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   "a bridge crashing on a computer two hops down should result in the bridge being restarted, not crashing again of
   course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
   calls-in-flight failed and ought to be retried" (the operator, 10-20).
-- XMAGIC carries MESH_VERSION, so bridges of different versions never pair (129, 130, 131, 132), and a client refuses a region of another version: both ends of a link, and every client, run the rule.
+- XMAGIC marks a message as the mesh's, at the value version 131 sends, fixed: no version enters it, so bridges of any
+  version pair (the operator, 2026-10-21: "rejection filter removal. categorical. all of them without sanction in
+  rubric"). A message states its sender's MESH_VERSION in `version`, which no reader tests. A client reads a region
+  only at the layout it was built for (MESH_LAYOUT): every field of another layout lies at other offsets, so a client
+  writing it would write the bridge's words at random; that is a bound on memory, not a version check.
   A change that keeps every exchange of a version's meaning and adds information only in a field that version sends
   as 0 keeps the version: the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) ride a HELLO's `count`, a
   peer's 0 there meaning a bridge before them, which makes every lane, and two ends that both hold ten pair as before.
