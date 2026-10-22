@@ -115,7 +115,8 @@ Each step on a rank is one kernel, run through torch-mesh's own calls. `streamed
 template in [examples/chain.metal](../examples/chain.metal), `_stream.pipeline` compiles it, and `_stream.encode` puts
 it on torch's stream, so no host waits for it ([examples/chain.py](../examples/chain.py)). The rank's GPU cores run it
 as G workers that are all on the GPU at once. They hand work to each other through stamp words in memory. Every wait
-has a limit, so a stuck kernel ends instead of hanging the GPU. The limit is the library's own, `NCCL_MESH_POLLS` loads
+has a limit, so a stuck kernel ends instead of hanging the GPU. Once a wait has failed, each later step's kernel
+reads that at its start and ends at once, so queued steps never spin again. The limit is the library's own, `NCCL_MESH_POLLS` loads
 (`_stream.polls`), which holds a GPU at most the platform's 5 seconds. It is not a setting.
 
 The kernel does three things. First, each worker writes its slice of x = e_t + tanh(z), where z is the last step's sum.

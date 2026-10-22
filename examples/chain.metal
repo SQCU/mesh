@@ -115,8 +115,9 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     constexpr uint SG = THREADS / 32;
     threadgroup float red[SG * 64];
     threadgroup atomic_uint stop;
-    if (tid == 0) atomic_store_explicit(&stop, 0u, memory_order_relaxed);
+    if (tid == 0) atomic_store_explicit(&stop, atomic_load_explicit(err, memory_order_relaxed) ? 1u : 0u, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (atomic_load_explicit(&stop, memory_order_relaxed)) return;
     const bool first = words[0] != 0;
     uint phase = words[1];
     const uint R = words[2], groups = R / (TILE * RG), ks0 = words[3], ks1 = words[4];
