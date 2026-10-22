@@ -8,5 +8,5 @@
   "ring_bytes": 25165824,
   "check": 8,
   "rotation_blocks": [1, 1],
-  "capability": "../etc/compute/apple9.json"
+  "capabilities": "etc/compute"
 }

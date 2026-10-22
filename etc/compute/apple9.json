@@ -1,5 +1,5 @@
 {
-  "family": "Apple9",
+  "family": 9,
   "chips": ["A17 Pro", "M3-series", "A18-series", "M4-series"],
   "sources": {
     "family, threads, threadgroup memory": "Apple, Metal Feature Set Tables (developer.apple.com/metal/Metal-Feature-Set-Tables.pdf), read 2026-10-21: the Metal GPUs table, and the GPU implementation limits by family",

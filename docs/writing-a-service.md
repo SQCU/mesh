@@ -178,18 +178,28 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
 A capability file states what Apple documents about a GPU family: its threads and threadgroup memory a threadgroup,
 the alignment of that memory, and the edge of its matrix unit. [etc/compute/apple9.json](../etc/compute/apple9.json)
 covers the M4-series, and [etc/compute/apple10.json](../etc/compute/apple10.json) the M5-series. Each names its sources,
-Apple's Metal Feature Set Tables and the Metal Shading Language Specification. The service is given the file for the
-node it runs on. It checks the file against what Metal reports of the device and stops where they differ. What no
+Apple's Metal Feature Set Tables and the Metal Shading Language Specification, and its `family` as a number: n of Metal's
+`MTLGPUFamilyApple<n>`.
+
+The configuration names the directory that holds the files, and each rank takes from it the file of its own GPU,
+`apple<n>.json`, where n is the newest Apple family its Metal device supports (`chain.capability`). torch-mesh's
+`_stream.device_facts` finds n by asking Metal for each family from Apple1 up, since a GPU of a family supports every
+earlier one's. So every node runs the same configuration, and the ranks of one run may hold different GPUs, each with
+its own file. The rank checks the file against what Metal reports of the device, its family, threads and threadgroup
+memory, and stops where they differ. A GPU whose family has no file stops at load, naming the file it lacks; that
+family's file, written from Apple's tables, is the remedy, and no other family's file is taken in its place. What no
 document states, the SIMD width and how many threads a compiled kernel holds, is read from the compiled pipeline.
 
 ## The configuration
 
 The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
 width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
-two rings. It also says how many first steps to check, gives the two rotations' blocks, and names the node's capability
-file. The kernel's form
-follows from the shape and that file, and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and rows there are, so the configuration does not. Every value
-must be there. The service has no defaults, and a missing value is an error.
+two rings. It also says how many first steps to check, gives the two rotations' blocks, and names `capabilities`, the
+directory of capability files, from which each rank takes its own GPU's. Its paths are read from the directory the
+service runs in, the checkout's root in the sample. The kernel's form follows from the shape and the capability file,
+and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and
+rows there are, so the configuration does not. Every value must be there. The service has no defaults, and a missing
+value is an error.
 
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
 measures the calls writes the parts. Both Macs are always loaded fully.

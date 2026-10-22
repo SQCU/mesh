@@ -12,13 +12,15 @@ _PIPELINES = {}
 
 
 # docs/writing-a-service.md#the-capability
-def capability(path):
-    held = json.loads(Path(path).read_text())
-    threads, memory = _stream.device_facts()
-    if (threads, memory) != (held['max_threads_per_threadgroup'], held['threadgroup_memory_bytes']):
-        raise ValueError(f'{path}: {held["family"]} documents {held["max_threads_per_threadgroup"]} threads and '
-                         f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory a threadgroup, and this device '
-                         f'reports {threads} and {memory}: the file is not this device\'s capability')
+def capability(directory):
+    family, threads, memory = _stream.device_facts()
+    path = Path(directory) / f'apple{family}.json'
+    held = json.loads(path.read_text())
+    if (family, threads, memory) != (held['family'], held['max_threads_per_threadgroup'], held['threadgroup_memory_bytes']):
+        raise ValueError(f'{path}: Apple{held["family"]} documents {held["max_threads_per_threadgroup"]} threads and '
+                         f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory a threadgroup, and this '
+                         f'device reports Apple{family}, {threads} and {memory}: the file is not this device\'s '
+                         f'capability')
     return held
 
 
@@ -48,8 +50,8 @@ def form(K, S, rows, held):
     tile = held['simdgroup_matrix_edge']
     wrong = [f'{name} {n}' for name, n in (('width', K), ('share', S), ('rows', rows)) if n < tile or n % tile]
     if wrong:
-        raise ValueError(f'chain step: the {held["family"]} matrix unit takes {tile} x {tile} tiles, so a width, a share '
-                         f'and a row count are positive multiples of {tile}, not {", ".join(wrong)}')
+        raise ValueError(f'chain step: the Apple{held["family"]} matrix unit takes {tile} x {tile} tiles, so a width, '
+                         f'a share and a row count are positive multiples of {tile}, not {", ".join(wrong)}')
     simd, cores = _width(), node()[1]
     kt, st, rt = K // tile, S // tile, rows // tile
     G = min(cores, max(kt, st))
