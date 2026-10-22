@@ -82,7 +82,7 @@ class Tick:
         self.handle, self.args, self.ks = form(KIN, H, HR, L, rows, len(shares), held)
         sizes = [(KIN + H) * 4 * HR] + [2 * H * 4 * HR] * (L - 1)
         layers = torch.split(weights, sizes)
-        self.W = torch.cat([tiled(w.view(-1, 4 * HR), tile) for w in layers]).contiguous()
+        self.W = torch.cat([tiled(w.view(4 * HR, -1).T, tile) for w in layers]).contiguous()
         self.bias = bias.to('mps')
         self.C = torch.zeros(L, rows, HR, dtype=torch.float32, device='mps')
         self.arrivals = torch.zeros(1, dtype=torch.int32, device='mps')

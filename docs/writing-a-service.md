@@ -296,8 +296,9 @@ zeros there, its h(-1). Rank 0 writes the top layer's landed h to the output sta
 
 **Configuration.** `input`, `weights`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
 `shares` (one count of hidden units a rank, multiples of 8, their sum the width) and `capabilities`. The weights file
-holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order. Rank 0 slices each rank's
-columns before the communicator exists, and each rank tiles its own.
+holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order. Rank 0 gathers each rank's
+gate rows before the communicator exists (whole rows of [4H, K], no strided gather), and each rank transposes and
+tiles its own on its GPU.
 
 ## What to read next
 

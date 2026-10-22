@@ -28,12 +28,12 @@ def prepared(config):
         if w_ih.shape != (4 * H, KIN if l == 0 else H) or w_hh.shape != (4 * H, H) or b.shape != (4 * H,):
             raise ValueError(f'Layer {l} is w_ih_{l} [4H, its input], w_hh_{l} [4H, H] and b_{l} [4H], H the sum of '
                              f'the shares')
-        layers.append((np.concatenate([w_ih, w_hh], 1).T, b))
+        layers.append((np.concatenate([w_ih, w_hh], 1), b))
     held = []
     for r, h in enumerate(shares):
         units = np.arange(sum(shares[:r]), sum(shares[:r]) + h)
         columns = np.stack([units, H + units, 2 * H + units, 3 * H + units], 1).reshape(-1)
-        held.append((np.concatenate([np.ascontiguousarray(w[:, columns], dtype=np.float16).reshape(-1) for w, _ in layers]),
+        held.append((np.concatenate([np.ascontiguousarray(w[columns], dtype=np.float16).reshape(-1) for w, _ in layers]),
                      np.concatenate([b[columns] for _, b in layers]).astype(np.float32)))
     return held
 
