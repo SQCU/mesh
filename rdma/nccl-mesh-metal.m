@@ -12,20 +12,14 @@
 /* a typed kernel's kind by its operation and its ncclDataType_t (int8 uint8 int32 uint32 int64 uint64 float16 float32
    float64 bfloat16 e4m3 e5m2, then the partials merge's rows, METAL_MERGE), KINDS where none is compiled: float64's,
    truncdiv's but the integers', combine3's and premul's of the merge */
-enum { OP_COMBINE, OP_LAND, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OPS };
+enum { OP_LAND, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OPS };
 #define INTEGERS(op) KIND_##op##_i8, KIND_##op##_u8, KIND_##op##_i32, KIND_##op##_u32, KIND_##op##_i64, KIND_##op##_u64
 #define FLOATS(op) KIND_##op##_f16, KIND_##op##_f32, KINDS, KIND_##op##_bf16, KIND_##op##_e4m3, KIND_##op##_e5m2
 static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
-  {INTEGERS(combine), FLOATS(combine), KIND_combine_merge}, {INTEGERS(land), FLOATS(land), KIND_land_merge},
-  {INTEGERS(combine3), FLOATS(combine3), KINDS}, {INTEGERS(premul), FLOATS(premul), KINDS},
+  {INTEGERS(land), FLOATS(land), KIND_land_merge}, {INTEGERS(combine3), FLOATS(combine3), KINDS}, {INTEGERS(premul), FLOATS(premul), KINDS},
   {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}};
-/* a copy's kind by its width (0 words of 4 bytes, 1 bytes) and its mode (METAL_PLAIN, METAL_LAND, METAL_SEND); a
-   counted step's by its width and its kind (nccl-mesh-metal.h METAL_COUNTED_*) */
-static const uint8_t COPY[2][METAL_SEND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4, KIND_copy_send_4},
-                                                {KIND_copy_plain_1, KIND_copy_land_1, KIND_copy_send_1}};
-static const uint8_t COUNTED[2][METAL_COUNTED_OWN + 1] = {
-  {KIND_counted_start, KIND_counted_check, KIND_counted_arrived, KIND_counted_send_4, KIND_counted_land_4, KIND_counted_own_4},
-  {KIND_counted_start, KIND_counted_check, KIND_counted_arrived, KIND_counted_send_1, KIND_counted_land_1, KIND_counted_own_1}};
+/* a copy's kind by its width (0 words of 4 bytes, 1 bytes) and its loads (METAL_PLAIN, METAL_LAND) */
+static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4}, {KIND_copy_plain_1, KIND_copy_land_1}};
 
 ARGS(args, uint64_t, uint32_t);
 /* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
@@ -296,19 +290,12 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
 
 /* kernel `kind` (KINDS_OF) on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the
    program's failure words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the
-   progress word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`) as one
-   threadgroup of up to 1024 threads over a block's piece, any other over `units` threads */
-static struct metal_result dispatch_as(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
-                                       uint64_t units, int group);
-/* a GROUP kernel where `a` is given (a stream class's ready or landed words) */
-static struct metal_result dispatch(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
-                                    uint64_t units) {
-  return dispatch_as(program, kind, d, s, a, v, p, units, a != NULL);
-}
+   progress word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`: publish,
+   spin) as one threadgroup of up to 1024 threads, any other over `units` threads */
 static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p);
 static int recording_on(const struct metal_program *program);
-static struct metal_result dispatch_as(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
-                                       uint64_t units, int group) {
+static struct metal_result dispatch(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
+                                    uint64_t units, int group) {
   if (kind >= KINDS) return (struct metal_result){EINVAL, "no kernel of this operation and data type (nccl-mesh-metal.m TYPED)"};
   if (!units) return METAL_DONE;
   if (recording_on(program)) return record_step(program, kind, d, s, a, v, p);
@@ -338,96 +325,74 @@ static struct metal_result dispatch_as(struct metal_program *program, uint32_t k
 
 struct metal_result metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
   const int words = !((dst_offset | src_offset | bytes) & 3);
+  if (mode < METAL_PLAIN || mode > METAL_LAND) return metal_failed(EINVAL);
   return dispatch(program, COPY[!words][mode], dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = words ? bytes / 4 : bytes},
-                  words ? bytes / 4 : bytes);
+                  words ? bytes / 4 : bytes, 0);
 }
 
 /* operation `op`'s kernel of `type` (TYPED), KINDS where none is compiled */
 static uint32_t typed(int op, int type) { return (unsigned)type <= METAL_MERGE ? TYPED[op][type] : KINDS; }
 
-struct metal_result metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
-                                  size_t n) {
-  const uint32_t kind = typed(OP_COMBINE, type);
-  return dispatch(program, kind, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op}, n);
-}
-
 struct metal_result metal_combine3(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset,
                                    void *with, size_t with_offset, size_t n) {
-  const uint32_t kind = typed(OP_COMBINE3, type);
-  return dispatch_as(program, kind, dst, src, with, NULL,
-                     (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op, .aux = with_offset}, n, 0);
+  return dispatch(program, typed(OP_COMBINE3, type), dst, src, with, NULL,
+                  (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op, .aux = with_offset}, n, 0);
 }
 
 struct metal_result metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                       uint64_t scalar) {
-  const uint32_t kind = typed(OP_PREMUL, type);
-  return dispatch(program, kind, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar}, n);
+  return dispatch(program, typed(OP_PREMUL, type), dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar},
+                  n, 0);
 }
 
 struct metal_result metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                    uint64_t divisor) {
-  const uint32_t kind = typed(OP_TRUNCDIV, type);
-  return dispatch(program, kind, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor}, n);
+  return dispatch(program, typed(OP_TRUNCDIV, type), dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor},
+                  n, 0);
 }
 
-/* a wait's arguments (nccl-mesh-metal.h struct metal_wait): its word at aux for 1 + scalar, its run's first unit at src
-   (a landing's piece), its position and channel for its failure's record */
+/* a wait's arguments (nccl-mesh-metal.h struct metal_wait): `landed` at aux until scalar, `sent` at first until sent,
+   the landed bytes at src, dst the destination's offset, its entry and channel for its failure's record */
 static struct args wait_args(const struct metal_wait *w, size_t dst_offset, size_t n, int op) {
-  return (struct args){.dst = dst_offset, .src = w->slot, .n = n, .scalar = w->cycle, .aux = w->word, .op = (uint32_t)op, .at = w->at,
-                       .channel = w->channel};
+  return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = w->target, .aux = w->word, .op = (uint32_t)op,
+                       .first = w->sent_word, .sent = w->sent_target, .at = w->at, .channel = w->channel};
 }
 
-/* a release's arguments (struct metal_release): its slot at dst, its count words at aux each scalar */
-static struct args release_args(const struct metal_release *r, size_t src_offset, size_t bytes) {
-  return (struct args){.dst = r->slot, .src = src_offset, .n = bytes, .scalar = r->value, .aux = r->word, .count = r->count};
+/* a publication's arguments (struct metal_release): its count at aux stored scalar; `sent` at first until sent, for
+   mesh_step_sent; dst the operand's offset (a deferred one's) */
+static struct args release_args(const struct metal_release *r, size_t dst_offset) {
+  return (struct args){.dst = dst_offset, .scalar = r->value, .aux = r->word, .first = r->sent_word, .sent = r->sent_target};
 }
 
 struct metal_result metal_publish(struct metal_program *program, const struct metal_release *r) {
-  return dispatch(program, KIND_publish, r->buffer, NULL, NULL, NULL, release_args(r, 0, 1), 1);
+  return dispatch(program, KIND_publish, r->words, NULL, NULL, NULL, release_args(r, 0), 1, 1);
 }
 
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {
-  return dispatch(program, KIND_spin, w->buffer, w->buffer, NULL, w->violation, wait_args(w, 0, 1, 0), 1);
-}
-
-struct metal_result metal_send_small(struct metal_program *program, void *src, size_t src_offset, size_t bytes, const struct metal_release *r) {
-  return dispatch(program, KIND_send_small, r->buffer, src, r->buffer, NULL, release_args(r, src_offset, bytes), 1);
+  return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
 }
 
 struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
-  const uint32_t kind = type < 0 ? (uint32_t)KIND_land_copy : typed(OP_LAND, type);
-  return dispatch(program, kind, dst, w->buffer, w->buffer, w->violation, wait_args(w, dst_offset, n, op), 1);
+  return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, wait_args(w, dst_offset, n, op), n, 0);
 }
 
 /* a deferred step's program is one whose records the argument ring holds (metal_begin4, or metal_begin with a residency
    set) */
-struct metal_result metal_send_deferred(struct metal_program *program, size_t bytes, const struct metal_release *r, uint64_t bound[6]) {
+struct metal_result metal_send_deferred(struct metal_program *program, void *operand, size_t offset, const struct metal_release *r, uint64_t bound[6]) {
   if (!program->ring) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's, or a classic stream's with its residency set"};
-  return record4(program, (id<MTLBuffer>)r->buffer, nil, (id<MTLBuffer>)r->buffer, nil, release_args(r, 0, bytes), bound);
+  return record4(program, (id<MTLBuffer>)operand, nil, (id<MTLBuffer>)r->words, nil, release_args(r, offset), bound);
 }
 
-struct metal_result metal_land_deferred(struct metal_program *program, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w,
-                                        uint64_t bound[6]) {
+struct metal_result metal_land_deferred(struct metal_program *program, void *landing, size_t offset, const struct metal_wait *w, uint64_t bound[6]) {
   if (!program->ring) return (struct metal_result){EINVAL, "a step run by its caller's kernel is the Metal 4 form's, or a classic stream's with its residency set"};
-  return record4(program, (id<MTLBuffer>)dst, (id<MTLBuffer>)w->buffer, (id<MTLBuffer>)w->buffer, (id<MTLBuffer>)w->violation,
-                 wait_args(w, dst_offset, n, op), bound);
-}
-
-/* a counted all-to-all's dispatch (nccl-mesh-metal.h metal_counted): its kernel by kind (COUNTED), its copies' width the
-   widest word that divides every offset, row and piece it moves; each one's arguments as the kernel above reads them */
-struct metal_result metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
-  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return metal_failed(EINVAL);
-  const int words = !((k->dst | k->src | k->row | k->bytes | k->aux) & 3);
-  const struct args p = {.dst = k->dst, .src = k->src, .n = k->bytes, .scalar = k->scalar, .aux = k->aux, .first = k->first, .slot = k->row,
-                         .at = k->limit, .count = k->entries, .mask = kind == METAL_COUNTED_ARRIVED && k->a};
-  return dispatch(program, COUNTED[!words][kind], k->d, k->s, kind >= METAL_COUNTED_SEND ? k->a : NULL, kind == METAL_COUNTED_ARRIVED ? k->a : NULL,
-                  p, kind == METAL_COUNTED_START ? (k->bytes ? k->bytes : 1) : 1);
+  return record4(program, (id<MTLBuffer>)landing, (id<MTLBuffer>)landing, (id<MTLBuffer>)w->words, (id<MTLBuffer>)w->violation,
+                 wait_args(w, offset, 0, 0), bound);
 }
 
 /* the tracks being recorded (nccl-mesh-metal.h metal_record): each step's kernel and bindings as its dispatch would bind
    them (`v` its failure words, else the program's; its polls the program's where it has such words), each item's
-   position, credit, steps, dependencies and the landing a consumption awaits (its first wait: spin's word in d, a
-   landing's in a), each track's items by cursor; the buffers named, made resident at metal_tracks */
+   position, `need`, steps, dependencies and the landing a consumption awaits (its first wait on `landed`: spin's word
+   in d, a landing's in a), each track's items by cursor; the buffers named, made resident at metal_tracks */
 struct host_op { void *d, *s, *a, *v; struct args p; uint32_t kind; };
 struct host_item { uint64_t position, need, target; void *word_buffer, *v; size_t word; uint32_t first_op, ops, first_dep, deps, wait_op, cursor; };
 struct host_dep { uint64_t count; uint32_t other; };
@@ -467,11 +432,11 @@ static struct metal_result record_step(struct metal_program *program, uint32_t k
   for (id b in @[(id)made.d, (id)made.s, (id)made.a, (id)made.v]) [r->named addObject:b];
   struct host_item *it = r->item + r->current;
   it->ops++;
-  if (it->cursor == METAL_CONSUME && it->wait_op == UINT32_MAX && WORD[kind]) {
+  if (it->cursor == METAL_CONSUME && it->wait_op == UINT32_MAX && WORD[kind] && p.scalar) {
     it->wait_op = (uint32_t)(r->ops - 1);
     it->word_buffer = WORD[kind] == WORD_D ? made.d : made.a;
     it->word = p.aux;
-    it->target = 1 + p.scalar;
+    it->target = p.scalar;
   }
   if (!it->v && p.polls) it->v = made.v;
   return METAL_DONE;
