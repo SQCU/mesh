@@ -68,5 +68,5 @@ The bridge was registered once for the maximum configuration, reused for both
 cases, and stopped normally at the end. This is FFN evidence, not a full 48-layer
 NFE result. The evaluator still reports `native_internal_storage_verified=false`;
 these measurements do not establish the private backend's internal storage mapping.
-The migrated Xonotic generated-encoder path still requires its own real-input
-application execution evidence.
+The migrated Xonotic generated-encoder path had no real-input application run
+in this record.
