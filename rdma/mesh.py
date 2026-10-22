@@ -119,11 +119,11 @@ def _members(whole, members, current):
             break
         room = made
     if count < 0:
-        return count, None, None, None
+        return count, None, None
     N = count + made.relays
     lmap = LinkMap(KINDS[made.kind], count, link[0:made.links], bandwidth[0:made.links], made.relays, table[0:N * N],
                    mark[0:N])
-    return count, lmap, list(node[0:N]), [ffi.string(n).decode() for n in name[0:N]]
+    return count, lmap, list(node[0:N])
 
 
 def members(whole, among, marks=None):
@@ -137,7 +137,7 @@ def members(whole, among, marks=None):
     if marks is not None:
         whole = LinkMap(whole.kind, whole.nodes, whole.pairs, whole.bandwidth, whole.relays, None, marks)
     among = None if among is None else list(among)
-    count, lmap, _, _ = _members(whole, among, False)
+    count, lmap, _ = _members(whole, among, False)
     if count < 0:
         raise ValueError(f'mesh_map_members over {among}: {os.strerror(-count)}')
     return lmap
@@ -160,21 +160,21 @@ def current(members=None):
     node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
     `map` the members' map as libnccl-mesh reads it (its relays, a link where two nodes' bridges reach each other, at its bandwidth, `mark` each node's
     bridge node number, `next` the routing table; members(map, ...) of the whole map is the
-    map over any of them), `nodes` and `names` each map node's (then each relay's) bridge
-    node and name, `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
+    map over any of them), `nodes` each map node's (then each relay's) bridge node (a node is its number;
+    a name a person reads is peers.label's, from the name table), `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
     a node no bridge reaches among its nodes, and the members' map as it is, joined or not (joined() names two it leaves
     apart).  OSError naming the bridge where it is unreachable."""
     serial, own = wait(), ffi.new('uint32_t *')
     lib.mesh_reached(ffi.NULL, 0, own)
-    count, lmap, nodes, names = _members(None, members, True)
+    count, lmap, nodes = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
+    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0], serial=serial)
 
 
 def nodes():
-    """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node and
-    name, its bridge's region and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
+    """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node (a
+    name a person reads is peers.label's), its bridge's region and its memory (bytes), its model, its boot (`booted`, ns since the epoch) and its
     `available` memory as its bridge last sampled it (what the kernel can give without pressure, its reclaimable cache
     counted).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
     bridges, never probed over another network.  OSError naming the bridge where it is unreachable."""
@@ -184,7 +184,7 @@ def nodes():
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
     lib.mesh_reached(ffi.NULL, 0, own)
     text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
-    return [{'node': r.node, 'name': text(r.name), 'region': r.region, 'memory': r.memory, 'model': text(r.model),
+    return [{'node': r.node, 'region': r.region, 'memory': r.memory, 'model': text(r.model),
              'booted': r.health.booted, 'available': r.health.available, 'own': r.node == own[0]} for r in held[0:count]]
 
 

@@ -15,7 +15,6 @@ struct port ports[MESH_PORTS];
 uint32_t port_count;
 int events=-1,listener=-1,hello=-1,network=-1,unreleased,finding;
 uint64_t now,sequence;
-char host[MESH_NAME_BYTES];
 struct mesh_ctx bridge={.fd=-1};
 static dispatch_queue_t finder;
 /* design/transport.md: the devices to be read again (an interface that no port is attached or its link came on), read
@@ -1735,39 +1734,6 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   return refused;
 }
 
-/* design/transport.md: the node's name, its LocalHostName (else its host name), read at the start and, on
-   each liveness turn, on the finder's queue (configd answers there, never on the event loop: host_read); the event loop
-   takes a change (host_taken), so a renamed node's next record carries its new name (the map's label of it; a node is
-   its number) */
-static void host_name(char *name){
-  CFStringRef local=SCDynamicStoreCopyLocalHostName(NULL);
-  if(!local || !CFStringGetCString(local,name,MESH_NAME_BYTES,kCFStringEncodingUTF8))gethostname(name,MESH_NAME_BYTES);
-  if(local)CFRelease(local);
-  name[MESH_NAME_BYTES-1]=0;
-}
-static char host_heard[MESH_NAME_BYTES];
-static _Atomic int host_reading,host_read_done;
-static void host_read(void){
-  if(atomic_load(&host_read_done) || atomic_exchange(&host_reading,1))return;
-  dispatch_async(finder,^{
-    char name[MESH_NAME_BYTES]={0};
-    host_name(name);
-    memcpy(host_heard,name,sizeof name);
-    atomic_store_explicit(&host_read_done,1,memory_order_release);
-    atomic_store(&host_reading,0);
-    wake();
-  });
-}
-static void host_taken(void){
-  if(!atomic_load_explicit(&host_read_done,memory_order_acquire))return;
-  if(strcmp(host_heard,host)){
-    say("node %u: renamed %s to %s\n",M->node,host,host_heard);
-    memcpy(host,host_heard,sizeof host);
-    record_changed();
-  }
-  atomic_store_explicit(&host_read_done,0,memory_order_release);
-}
-
 /* design/transport.md section 14, "A process a port": a port's child, `mesh-flow --child VERSION DEVICE INDEX ONES
    KEEPALIVE` as its parent spawned it (child_spawn), VERSION the contract's (mesh-bridge.h MESH_CHILD_VERSION): the parent's region mapped (its magic, version and
    bridge the parent's), its port the parent's port INDEX on DEVICE (its streams' words the region's), the duds' block
@@ -2075,7 +2041,6 @@ int main(int argc,char **argv){
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;
-  host_name(host);
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
   /* design/transport.md: the node's memory and hardware model, which its record carries with its region */
   size_t size=sizeof memory;
@@ -2103,8 +2068,8 @@ int main(int argc,char **argv){
   if(busy)say("bridge node %u: IOKit's registry not quiet within %.1f s (%#x): its devices read as they stand\n",node,
               (double)MESH_PLATFORM_NS/1e9,(unsigned)busy);
   ports_find();
-  say("bridge node %u (%s): configuration %s, region %llu bytes, arena %llu pages, rows %u, a link's keepalive after %llu ns "
-      "without a SEND while it holds a stream (design/HETEROGENEOUS-LINKS.md section 10)\n",node,host,name,
+  say("bridge node %u: configuration %s, region %llu bytes, arena %llu pages, rows %u, a link's keepalive after %llu ns "
+      "without a SEND while it holds a stream (design/HETEROGENEOUS-LINKS.md section 10)\n",node,name,
       (unsigned long long)region_bytes,(unsigned long long)mesh_arena_pages(M),M->rows,(unsigned long long)MESH_KEEPALIVE_NS);
   uint64_t liveness=0;
   while(!stop){
@@ -2122,11 +2087,9 @@ int main(int argc,char **argv){
       child_turn(port);
     }
     health_turn();
-    host_taken();
     int alive=now>=liveness;
     if(alive){
       liveness=now+MESH_PAUSE_NS;
-      host_read();
       record_retell();
     }
     clients_turn(alive);

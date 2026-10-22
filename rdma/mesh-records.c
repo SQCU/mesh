@@ -89,7 +89,7 @@ static void map_put(const struct mesh_record *record){
   /* design/transport.md: a node the prune drops is logged (one put now and never reached yet is not a loss) */
   for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
     struct known *gone=known_at(next[k].node);
-    say("node %u (%s) unreachable, heard %.1f s before\n",next[k].node,next[k].name,gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0);
+    say("node %u unreachable, heard %.1f s before\n",next[k].node,gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0);
     if(gone)gone->gone=now;
   }
   uint64_t kept=0;
@@ -104,11 +104,11 @@ static void map_put(const struct mesh_record *record){
   }
   free(next);free(reached);free(order);
 }
-/* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), name, boot and facts are the
+/* design/transport.md: a record whose reached nodes (each with its stream's bandwidth), boot and facts are the
    held one's changes only its health and sequence, written under the region's health serial and never the map's: the
    map serial moves only where the mesh changes, and a health sample is no change of the mesh */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
-  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
+  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
     a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
   for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
     same=a->reach[k].node==b->reach[k].node && a->reach[k].bandwidth==b->reach[k].bandwidth;
@@ -125,7 +125,6 @@ struct mesh_record *record_held(uint32_t node){
 }
 void record_changed(void){
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=wire.length-held_pages*M->pgsz,.memory=memory};
-  memcpy(own.name,host,sizeof own.name);
   memcpy(own.model,model,sizeof own.model);
   own.reached=mesh_nodes_reached(M,own.reach,MESH_STREAMS);
   own.health=health;
@@ -151,12 +150,11 @@ void health_turn(void){
 }
 /* a record heard: as much of it as this bridge's record holds, the rest 0 (design/HETEROGENEOUS-LINKS.md section 6,
    item 3: struct mesh_record is only appended to, so a longer one's first bytes are this one; a change of MESH_STREAMS or
-   of the name's or the model's room is not an append, and moves MESH_VERSION), its reach at most MESH_STREAMS nodes;
+   of the model's room is not an append, and moves MESH_VERSION), its reach at most MESH_STREAMS nodes;
    one naming no node, or this node, is not another node's */
 void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes){
   struct mesh_record heard={0};
   memcpy(&heard,payload,MIN((size_t)bytes,sizeof heard));
-  heard.name[sizeof heard.name-1]=0;
   if(!heard.node || heard.node==M->node)return;
   heard.reached=MIN(heard.reached,(uint32_t)MESH_STREAMS);
   heard.model[sizeof heard.model-1]=0;
@@ -177,8 +175,8 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
   }
   if(held && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
   /* design/transport.md: a node that joins or comes back is logged here */
-  if(!held && k && k->gone)say("node %u (%s) back after %.1f s\n",heard.node,heard.name,(double)(now-k->gone)/1e9);
-  else if(!held && k && !k->heard)say("node %u (%s) joined\n",heard.node,heard.name);
+  if(!held && k && k->gone)say("node %u back after %.1f s\n",heard.node,(double)(now-k->gone)/1e9);
+  else if(!held && k && !k->heard)say("node %u joined\n",heard.node);
   if(k){k->heard=now;k->gone=0;k->boot=heard.boot;k->sequence=heard.sequence;}
   if(held && record_links_same(held,&heard))health_put(held,&heard);
   else map_put(&heard);

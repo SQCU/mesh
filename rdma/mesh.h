@@ -104,12 +104,13 @@ struct mesh_stream {
   _Alignas(64) _Atomic uint64_t peer_start[MESH_STREAM_START];
 };
 _Static_assert(sizeof(struct mesh_stream)==384,"mesh_stream");
-/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
-   the record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
+/* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
+   record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
    model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), and the `reached` nodes its bridge reaches (mesh-plan.h
-   struct mesh_reach) */
-struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t region,memory;
+   struct mesh_reach).  No host name: a name a person reads is a label the readers take from the name table by node
+   number (etc/mesh-nodes.json, rdma/peers.py label; AGENTS.md "A node is its hardware; names are virtual") */
+struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and
    that process's start (`start`, mesh_started: with the pid, its identity, which a reused pid does not share).  The
