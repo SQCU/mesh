@@ -209,9 +209,11 @@ struct agent_message {
 /* design/transport.md: a port, its link, its control socket's queues each way, its verbs work's queue (its
    open's job `job`, dispatched at `job_at`; `stuck` once a job of the port outlived MESH_PLATFORM_NS, or a progress
    thread did not hold within it, and the port was concluded around it, until the call returns and each progress thread
-   has told the conclusion's epoch: design/transport.md B12, mesh-link.c ports_stalled), the end of its quiet window
-   (`quiet_at`, MESH_PLATFORM_NS past its last loss or a peer interface's termination heard, B9b, moved only later and by
-   any thread, before which no port job is dispatched on it and the bridge does not exit: B9), whether its device is to
+   has told the conclusion's epoch: design/transport.md B12, mesh-link.c ports_stalled; another port's stuck call holds
+   none of this one's jobs), the end of its quiet window (`quiet_at`, MESH_PLATFORM_NS past its last loss, its own peer
+   interface's termination heard or one told for no port, B9b, mesh-link.c peer_terminated, moved only later and by any
+   thread, before which no port job is dispatched on it, its agent is not asked to end and the bridge does not exit:
+   B9), whether its device is to
    be opened (`opening`: at the start, at its link's coming on, at a hello heard while it is not open, B16, and as the
    call it was concluded around returns, B12; never on a clock), its link lanes, and its progress threads (#progress: the
    epochs each has seen of `epoch`, which a conclusion around a stuck call moves); the guard of its device's verbs
@@ -244,11 +246,12 @@ struct port {
      socket, when it was spawned, the agents in a row that ended unbidden within MESH_AGENT_SETTLE_NS of their spawn and
      the hold they set before the next (`hold_to`), whether the port's link, lost once its lanes were asked for, waits
      to end its agent (`recycle`) and whether that end was asked (`ending`), the part of its agent's next message
-     read (`agent_in`, `agent_held` bytes of it), and an agent of its device from an earlier launch last found alive
-     (`elsewhere`: mesh-link.c agent_elsewhere) */
+     read (`agent_in`, `agent_held` bytes of it), an agent of its device from an earlier launch last found alive
+     (`elsewhere`: mesh-link.c agent_elsewhere), whether the last whole read of the devices no longer listed its device
+     (`unlisted`) and whether it gives its slot to a device waiting for one (`yielding`: mesh-link.c ports_found) */
   pid_t agent,elsewhere;
   uint32_t holder;
-  int agent_fd,recycle,ending;
+  int agent_fd,recycle,ending,unlisted,yielding;
   uint32_t aborts,agent_held;
   uint64_t agent_at,hold_to;
   unsigned char agent_in[sizeof(struct agent_message)];

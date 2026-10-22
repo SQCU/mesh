@@ -36,8 +36,8 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
    (`up`, else the errno), its node, its ports by index (ports_read: each port's peer node, phase and bandwidth) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
    numbers with its bandwidth in bits a second, null where none is reported), its region in bytes with the bytes no lease holds (mesh_region), and every node's
-   record as the bridge holds it: its name, its bridge's region, its memory and hardware model, its boot and its
-   available memory (mesh_nodes_health, design/transport.md) */
+   record as the bridge holds it, however many: its name, its bridge's region, its memory and hardware model, its boot
+   and its available memory (mesh_nodes_health, design/transport.md; `nodes_errno` where they could not be read) */
 int main(void){
   struct port_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
@@ -75,10 +75,18 @@ int main(void){
     }
     printf("]}");
   }
-  struct mesh_node_health health[64];
-  const int known=mesh_nodes_health(health,64);
+  struct mesh_node_health *health=NULL;
+  int known=0;
+  for(uint32_t held=64;;held=(uint32_t)known){
+    struct mesh_node_health *grown=realloc(health,held*sizeof *health);
+    if(!grown)return 1;
+    health=grown;
+    known=mesh_nodes_health(health,held);
+    if(known<=(int)held)break;
+  }
+  if(known<0)printf(",\"nodes_errno\":%d",-known);
   printf(",\"nodes\":[");
-  for(int i=0;i<known && i<64;i++){
+  for(int i=0;i<known;i++){
     const struct mesh_health *h=&health[i].health;
     printf("%s{\"node\":%u,\"name\":\"",i?",":"",health[i].node);
     for(const char *c=health[i].name;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
@@ -87,6 +95,6 @@ int main(void){
     printf("\",\"booted\":%llu,\"available\":%llu}",(unsigned long long)h->booted,(unsigned long long)h->available);
   }
   printf("]}\n");
-  free(nodes);free(link);free(bandwidth);
+  free(nodes);free(link);free(bandwidth);free(health);
   return 0;
 }
