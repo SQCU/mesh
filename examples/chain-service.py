@@ -13,11 +13,25 @@ import chain
 RING_BLOCKS = 2
 
 
+# docs/writing-a-service.md#rotations
+def rotated(w, block, axis):
+    v = np.moveaxis(np.asarray(w, np.float64), axis, -1)
+    shape, n = v.shape, v.shape[-1]
+    if block < 1 or block & (block - 1) or n % block:
+        raise ValueError(f'A rotation block is a power of two that divides its {n} columns, not {block}')
+    s = 1
+    while s < block:
+        v = v.reshape(*shape[:-1], n // (2 * s), 2, s)
+        v = np.stack((v[..., 0, :] + v[..., 1, :], v[..., 0, :] - v[..., 1, :]), axis=-2) / np.sqrt(2.0)
+        s *= 2
+    return np.moveaxis(v.reshape(shape), -1, axis)
+
+
 # docs/writing-a-service.md#the-function
-def reference(inputs, a, b, steps, carried):
+def reference(inputs, a, b, blocks, steps, carried):
     x, out = inputs[0] + carried, []
     for t in range(steps):
-        out.append(np.tanh(np.tanh(x @ a.T) @ b))
+        out.append(np.tanh(rotated(np.tanh(rotated(x, blocks[0], -1) @ a.T), blocks[1], -1) @ b))
         if t + 1 < steps:
             x = inputs[t + 1] + out[-1]
     return np.stack(out)
@@ -49,9 +63,11 @@ def shares(config, rank, size):
     full = tuple(weights[name] for name in ('a', 'b'))
     if any(w.shape != (sum(parts), width) for w in full):
         raise ValueError('The weights a and b are [sum of the parts, width] each')
+    blocks = config['rotation_blocks']
+    folded = rotated(full[0], blocks[0], 1), rotated(full[1], blocks[1], 0)
     for r in range(size):
         begin = sum(parts[:r])
-        for held, w in zip((a, b), full):
+        for held, w in zip((a, b), folded):
             part = torch.from_numpy(np.ascontiguousarray(w[begin:begin + parts[r]])).to('mps', torch.half)
             if r:
                 dist.send(part, dst=r)
@@ -154,7 +170,8 @@ def checked(config, inputs, outputs, full, steps, block):
     for first in sorted({0, (steps - 1) // block * block}):
         last = min(steps, first + count)
         carried = np.asarray(outputs[first - 1], np.float64) if first else 0.0
-        expected = reference(np.asarray(inputs[first:last], np.float64), *weights, last - first, carried)
+        expected = reference(np.asarray(inputs[first:last], np.float64), *weights, config['rotation_blocks'],
+                             last - first, carried)
         found[first] = float(np.max(np.abs(expected - outputs[first:last])))
     return found
 
