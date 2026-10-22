@@ -147,7 +147,7 @@ static double arithmetic(ncclDataType_t t, double a, double b, int combine) {
 
 /* the partials merge (nccl.h ncclMeshRedOpCreatePartials) of `rows` rows of `unit` float32 [m, l, O], y into x: a row
    with l > 0 rescaled to the greater m and summed, one with none counting for none, two such the row [PARTIAL_NONE, 0,
-   0] (nccl-mesh-metal.m merge_row) */
+   0] (nccl-mesh-kernels.h merge_row) */
 static const float PARTIAL_NONE = -3.4028234663852886e38f;
 static void merge_rows(float *x, const float *y, size_t rows, size_t unit) {
   for (size_t r = 0; r < rows; r++, x += unit, y += unit) {
@@ -1847,7 +1847,7 @@ static uint64_t counted_rows(const int64_t *v, uint64_t first, uint64_t entries)
 }
 /* where the piece at byte `offset` (`length` bytes) of a counted message lies among the rows of the counts [first, first
    + entries), after the rows of every count before them: its byte place in the rows buffer, and *valid the bytes of it the
-   counts carry, within `limit` bytes of the buffer (the kernels' rule, nccl-mesh-metal.m counted_send/counted_land) */
+   counts carry, within `limit` bytes of the buffer (the kernels' rule, nccl-mesh-kernels.h counted_send/counted_land) */
 static size_t counted_span(const int64_t *v, uint64_t first, uint64_t entries, size_t row, size_t offset, size_t length, size_t limit,
                            size_t *valid) {
   const size_t at = (size_t)counted_rows(v, 0, first) * row + offset, rows = (size_t)counted_rows(v, first, entries) * row;

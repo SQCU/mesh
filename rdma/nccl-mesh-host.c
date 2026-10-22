@@ -2,7 +2,7 @@
    (nccl-mesh-metal.h) on the CPU, so libnccl-mesh's Metal path runs on host threads: N ranks on one host over
    mesh-flow-loop's bridges, with no GPU kernel anywhere (several ranks' spinning kernels on one GPU have no
    forward-progress guarantee: the no-cross-queue-spin rule).  Each kernel runs as the walk encodes it, in the walk's
-   order, its body transcribed from nccl-mesh-metal.m's: copies and combines in host memory (the host path's arithmetic,
+   order, its body transcribed from nccl-mesh-kernels.h's: copies and combines in host memory (the host path's arithmetic,
    nccl-mesh.c combine_into, premultiply and truncdiv, which nccl-mesh.c exports hidden to this file where
    MESH_HOST_EXECUTOR is defined), a run's ready words release-stored, a wait for a landing a poll of its run's last
    unit's landed word (mesh.metal mesh_wait_bounded: until it reaches 1 + the cycle or the bridge stores ~0, for at most
@@ -197,7 +197,7 @@ struct op {
   uint32_t polls;
 };
 
-/* nccl-mesh-metal.m's counted kernels (counted_start .. counted_own), one step each */
+/* nccl-mesh-kernels.h's counted kernels (counted_start .. counted_own), one step each */
 static uint64_t counted_rows(const int64_t *c, uint64_t first, uint64_t count) {
   uint64_t rows = 0;
   for (uint64_t k = 0; k < count; k++) rows += c[first + k] > 0 ? (uint64_t)c[first + k] : 0;
@@ -242,7 +242,7 @@ static void run_counted(int kind, const struct metal_counted *k) {
   }
 }
 
-/* a step's body, nccl-mesh-metal.m's kernel of its kind, run as made */
+/* a step's body, nccl-mesh-kernels.h's kernel of its kind, run as made */
 static void run_op(const struct op *o) {
   _Atomic uint64_t *v = o->v;
   const uint32_t polls = o->polls;

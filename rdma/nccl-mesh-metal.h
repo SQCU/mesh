@@ -44,7 +44,7 @@ void *metal_retain(void *object);
    a later wait ending at its own landing or bound.  The failure words: [0] the cause (METAL_BOUND the bound reached,
    METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6]; a landing is none, whatever its
    bytes), [1] the claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording [0],
-   [3], [4] and [2]: nccl-mesh-metal.m mesh_step_claim), [2] 1 + the position (stored last by the claimant, by the GPU
+   [3], [4] and [2]: nccl-mesh-kernels.h mesh_step_claim), [2] 1 + the position (stored last by the claimant, by the GPU
    alone, which the host reads, as METAL_COUNTED_ARRIVED does), [3] the channel, [4] the bound, [5] a counted all-to-all's overflow,
    and [6] the host's stop (a revoke's), which a failed wait reads to name its cause.  The bound is the caller's, carried per crossing (nccl.h
    ncclMeshStream polls); 0, or more than nccl.h NCCL_MESH_POLLS, is NCCL_MESH_POLLS (design/transport.md;
