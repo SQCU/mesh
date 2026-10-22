@@ -461,8 +461,10 @@ static void tracks_free(struct recording *r) {
 
 /* the tracks run (nccl-mesh-metal.h metal_tracks) as one cooperative loop: each pass advances every cursor of every
    track while its next item may run; a pass that advances none is one look, the looks bounded as a wait's are
-   (step_wait: the program's polls, MESH_PLATFORM_NS since the last advance, with its backoff), after which each cursor
-   that cannot run has its failure recorded and the loop ends once nothing more can run */
+   (step_wait: the program's polls, MESH_PLATFORM_NS since the last advance, with its backoff), after which each
+   cursor's next item that still cannot run has its failure recorded, each track's consumption first, until one that
+   can run now (the track kernel's record pass, nccl-mesh-kernels.h TRACKS: this loop runs the tracks as one thread
+   group alone would), and the loop ends once a pass after the records advances nothing */
 struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
   struct recording *r = program->recording;
   if (r) r->on = 0;
@@ -489,10 +491,14 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     if (moved) { looks = 0; since = now_ns(); expired = 0; continue; }
     if (expired) break;
     if (++looks >= program->polls || now_ns() - since > MESH_PLATFORM_NS) {
-      for (uint32_t t = 0; t < r->tracks; t++)
-        for (int c = 0; c < 2; c++)
-          if (r->track[t].cursor[c].next < r->track[t].cursor[c].count) item_expired(r->track[t].cursor[c].item + r->track[t].cursor[c].next);
       expired = 1;
+      for (uint32_t t = 0; t < r->tracks && expired; t++)
+        for (int c = METAL_CONSUME; c >= METAL_PUBLISH && expired; c--) {
+          const struct cursor *k = r->track[t].cursor + c;
+          if (k->next >= k->count) continue;
+          if (item_ready(r->track + t, c, count, t)) expired = 0;
+          else item_expired(k->item + k->next);
+        }
       continue;
     }
     if (looks > 4096) usleep(20);
