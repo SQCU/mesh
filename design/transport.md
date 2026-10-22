@@ -425,7 +425,7 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   another's: the holder's `owner`, `sends` and `lands`; `ready`, the GPU's or the holder's; the send thread's `sent`
   and `taken[0]`; the receive thread's `taken[1]` and `landed`; and `posts`, a line each way. A lane's progress at the
   child is the same: the send thread's SENDs posted and done, and the receive thread's receives posted and landed, on
-  lines of their own (`struct lane_state`). design/lint.md L1-LINE checks it.
+  lines of their own (`struct lane_state`).
 - The count first. A completion pass stores the count a GPU waits on (`sent` or `landed`, with release) before
   anything else: the clock read, `posts`, and the time rings come after it, and the clock is read only where an entry
   is to be timed.
@@ -478,10 +478,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The send thread ends the
   holding at the first pass that reads the give, or its client's retirement: nothing more of it is posted, its entries
   taken and not posted are dropped, and the receive thread is told (`ended`). Each progress thread reads whether the
-  holding is still its holder's (its owner word not given, its client's slot its own) once a pass, never a unit
+  holding is still its holder's (its owner word not given, its client's slot its own) once a pass, not once a unit
   (mesh-link.c `holding_kept`). Each unit is told before it is posted: its row in its lane's ring, then its lane's
-  count, with release (`unit_told`); nothing is read back and nothing awaited (design/lint.md S1-SEQCST: the
-  sequentially consistent store and loads each unit took until layout 139 made the core wait for its store to be seen).
+  count, with release (`unit_told`); nothing is read back and nothing awaited. Until layout 139 each unit took a
+  sequentially consistent store and loads, so the core waited for its store to be seen.
   The holding's end orders the rest: the receive thread stores `stopped` after its last post of the holding, and the
   send thread stores the owner word (`stream_free`) after reading it. So a reader that has read the owner word past the
   holding has read every unit ever posted for it (`mesh_pinned`, under Rows). Nothing in the bridge closes a holding
@@ -511,13 +511,16 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   holding, so the lease is held while the child serving it lives. Otherwise the word read is the end's store or a later
   one, which follows every tell of the holding, so the counts and rows read after it name every unit the holding
   posted. A lease with a row in W(t), or returned before its holding's end was published, is closed instead
-  (`mesh_lease_close`), and released once its units complete, or once the port child that posted them is gone. One
-  writer per lease state: a live client releases its own closed leases, at an allocation that finds no room
-  (`mesh_own_release`), and the bridge releases a retired client's, at its turn (`mesh_retired_release`). A release
-  is a compare-and-swap of the lease's `closed` word from the value read before its pin check. The word counts the
-  lease's closures and never takes a value twice, so a releaser that a release and a new closure overtook fails. Only
-  then is the lease's FREE bit set. The reclaim frees a lease only where its fetch-and took that bit, and the lease's
-  rows stay hot until it is freed, so no reclaimer frees a lease allocated since (`mesh_reclaim`, `mesh_lease_free`). A
+  (`mesh_lease_close`), and released once its units complete, or once the port child that posted them is gone. The
+  bridge releases closed leases at its turn (`mesh_retired_release`), and a client releases its own at an allocation
+  that finds no room (`mesh_own_release`). A lease's `closed` word holds its state (live, closed, released, free) in
+  its low two bits and its row's generation above them. Each move is a compare-and-swap from the one state it leaves
+  to a greater value, and the next allocation of the row starts the next generation. So the word takes each value once
+  at most, and each generation is closed once, released once and freed once. A release swaps from the closed value
+  read before its pin check. Two releasers that read one closure release it once, and a releaser overtaken by a free
+  and a new closure fails. The release sets the lease's FREE bit after its swap. The reclaim frees a lease where its
+  fetch-and took that bit and its swap moved the lease from released to free. A retirement closes only a live lease
+  (`mesh_retire`), so a lease its client released before it died is freed once (`mesh_reclaim`, `mesh_lease_free`). A
   work request's buffer is the hardware's until
   it completes or until the queue pair holding it is gone with the process that owns it (verbs), so each stream records
   that child's pid and start (`child`, `child_start`, as the client slots identify processes) and its units count only

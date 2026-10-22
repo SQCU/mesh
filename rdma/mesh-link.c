@@ -471,7 +471,7 @@ static void link_send(struct port *port,uint32_t posted){
     struct walk *w=l->sending+t;
     walk_count(w,past(stream_through(s[0].done,s[1].done),w->base),&stream_of(port,t)->sent);
   }
-  const uint64_t at=posted?mach_absolute_time():0; /* meshlint: measure */
+  const uint64_t at=posted?mach_absolute_time():0;
   for(uint32_t t=0;t<plan_streams(l->plan);t++){
     const uint32_t k=MESH_LANE_FIRST+2*t,lanes=UINT32_C(3)<<k;
     if(!((posted|completed)&lanes))continue;
@@ -520,7 +520,7 @@ static void link_receive(struct port *port){
     walk_count(w,past(stream_through(s[0].got,s[1].got),w->base),&stream_of(port,t)->landed);
     timing|=w->timed!=w->done;
   }
-  const uint64_t at=timing?mach_absolute_time():0; /* meshlint: measure */
+  const uint64_t at=timing?mach_absolute_time():0;
   for(uint32_t t=0;t<plan_streams(l->plan);t++){
     const uint32_t k=MESH_LANE_FIRST+2*t;
     if(!(landed&(UINT32_C(3)<<k)))continue;
@@ -2066,7 +2066,7 @@ static void region_adopt(void){
     for(uint32_t row=0;row<mesh_rows(M);row++){
       struct mesh_buffer *buffer=&mesh_buffers(M)[row];
       if(atomic_load(&buffer->owner)!=(owner&~MESH_RETIRING))continue;
-      if(buffer->pages)mesh_lease_close(buffer);
+      if(buffer->pages)mesh_lease_close(buffer,owner&~MESH_RETIRING);
       mesh_bits_clear(mesh_plane(M,MESH_ROW_OWN),row,1);
     }
     atomic_store(&slot->owner,0);

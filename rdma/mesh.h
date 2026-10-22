@@ -26,11 +26,11 @@
 #define MESH_VERSION 134u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge).  139:
-   each writer's words of a stream on a line of their own (MESH_LINE, struct mesh_stream).  140: a lease's `closed`
-   counts its closures (struct mesh_buffer) */
-#define MESH_LAYOUT 140u
+   each writer's words of a stream on a line of their own (MESH_LINE, struct mesh_stream).  141: a lease's `closed`
+   is its row's state and generation (struct mesh_buffer; 140 counted closures alone) */
+#define MESH_LAYOUT 141u
 /* hw.cachelinesize on Apple silicon: the line a store makes another core's copy of invalid, so words of different
-   writers lie on different lines (design/lint.md L1-LINE) */
+   writers lie on different lines (the bridge audit of 2026-10-22, item 3) */
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
@@ -56,20 +56,35 @@ _Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)) && !(MESH_STREAM_T
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor; design/transport.md, #M02: `pages`, on a lease's first row, its arena
-   pages (not the transport's pages, which are rows).  `closed`, on that row: bit 0 while the lease is closed (returned
-   or retired while a request may still name it, for its release: mesh-dataflow.c mesh_release), and above it the
-   row's closures counted, never reset, so the word never takes a value twice and a releaser's compare-and-swap from
-   the value it read fails where the lease was released or closed again since (mesh_lease_close) */
+   pages (not the transport's pages, which are rows).  `closed`, on that row: the lease's state in its low two bits
+   and the row's generation above them, one generation a lease.  Live (MESH_LEASE_LIVE), closed (returned or retired
+   while a request may still name it: mesh_lease_close), released (its FREE bit set for the reclaim:
+   mesh-dataflow.c mesh_release), free (mesh_lease_free); the next allocation of the row begins the next generation
+   (mesh_rows_alloc).  Each move goes to a greater value (live, closed, released, free, then the next generation's
+   live), so the word takes each value once at most, and each is a compare-and-swap from the one state it leaves: a lease
+   is closed once, released once and freed once, and a swap from a value read before another's move fails */
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
   uint32_t pages;
 };
 _Static_assert(sizeof(struct mesh_buffer)==32 && _Alignof(struct mesh_buffer)==32,"mesh_buffer");
-/* a lease's row closed: its closures one more and bit 0 set, a release store after what its closer wrote before */
-static inline void mesh_lease_close(struct mesh_buffer *b){
-  uint32_t was=atomic_load_explicit(&b->closed,memory_order_relaxed);
-  while(!atomic_compare_exchange_weak_explicit(&b->closed,&was,(was+2u)|1u,memory_order_release,memory_order_relaxed)){}
+enum { MESH_LEASE_LIVE, MESH_LEASE_CLOSED, MESH_LEASE_RELEASED, MESH_LEASE_FREE, MESH_LEASE_STATE=3 };
+/* a lease's row moved from state `from`, as read in `*was`, to `to` in the same generation: 1, or 0 where it was not
+   in `from` or another moved it since (`*was` then the value found) */
+static inline int mesh_lease_move(struct mesh_buffer *b,uint32_t *was,uint32_t from,uint32_t to){
+  return (*was&MESH_LEASE_STATE)==from &&
+         atomic_compare_exchange_strong_explicit(&b->closed,was,(*was&~(uint32_t)MESH_LEASE_STATE)|to,memory_order_acq_rel,memory_order_acquire);
+}
+/* `owner`'s live lease closed, a release store after what its closer wrote before; 0 where it is not live (closed,
+   released or freed already: a retirement does not close a lease its client released or freed) or not `owner`'s.  The
+   state is read first and the owner after it: the swap from that state succeeds only where the generation read
+   stands, and its owner is the one read (mesh-dataflow.c mesh_rows_alloc stores a generation's live state before its
+   owner, after the last generation's free stored 0) */
+static inline int mesh_lease_close(struct mesh_buffer *b,uint64_t owner){
+  uint32_t was=atomic_load_explicit(&b->closed,memory_order_acquire);
+  return (was&MESH_LEASE_STATE)==MESH_LEASE_LIVE && atomic_load_explicit(&b->owner,memory_order_acquire)==owner &&
+         mesh_lease_move(b,&was,MESH_LEASE_LIVE,MESH_LEASE_CLOSED);
 }
 /* design/algorithm-sources.md#programtensor; design/transport.md */
 struct mesh_page_entry {
