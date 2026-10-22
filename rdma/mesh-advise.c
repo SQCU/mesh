@@ -224,7 +224,7 @@ static void groups(const struct mesh_wire *wire) {
                          rows_routed(rows + 9, &trees, n, -1, 0) || rows_routed(rows + 10, &trees, n, 0, 0) ||
                          rows_routed(rows + 11, &trees, n, (int32_t)n - 1, 1);
       /* every step of the forwarded calls between two ranks the map links */
-      struct mesh_link_map map = {MESH_LINKS_GRAPH, n, family_cables(maps[m].family, n, link), link, NULL, 0, NULL, NULL};
+      struct mesh_link_map map = {MESH_LINKS_GRAPH, n, family_cables(maps[m].family, n, link), link, NULL, 0, NULL, NULL, NULL};
       uint32_t unlinked = 0;
       for (int i = 9; !failed && i < CALLS; i++)
         for (uint32_t r = 0; r < n; r++)
