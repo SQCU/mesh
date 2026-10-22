@@ -132,7 +132,8 @@ queue-pair numbers, packet sequence numbers and GIDs the hardware assigns at eac
 endpoint exchange): HELLO and LINK on the control socket, once a pairing. The other is the count at which each cable's
 lanes of a stream change mapping where the cables joining two nodes change, which the sender's SENDs posted and the
 receiver's receives posted together fix and neither end holds alone: STREAM, once such a change, on each cable of the
-stream (section 14, "A stream over several cables"). RECORD carries each node's links and memory (the map), which is
+stream (section 14, "A stream over several cables", where it is ranked: below no such message on M2, above re-pairing
+on M6). RECORD carries each node's links and memory (the map), which is
 data, not a dialogue.
 
 Everything about a call is known before it runs: both ends compile the same schedule, so each position's length and
@@ -423,7 +424,18 @@ every cable carrying load).
   posted differ by what is in flight. So the change is told once a change, on each cable of the group (STREAM: this end's
   lanes of the stream as it froze them, each class's SENDs and receives posted, and the cables it names), as a
   pairing's LINK is told once a cable: the stream cannot exist until then, and the exchange is paid once per change of
-  cabling, never per call or transfer (design/rubrics.md, Two channels). Both ends then compute each cable's bases alike:
+  cabling, never per call or transfer. Ranked (design/rubrics.md, which this does not amend: its account of the
+  bridge's messages names the pairing's exchange and the map's records alone):
+  - new ≺ old on M2 and on Two channels: STREAM (`struct stream_told`, `port_say` of kind STREAM in `group_advance`)
+    is a message about other traffic, each end's SENDs and receives posted, on the TCP control socket, and it decides
+    when a running RDMA lane changes mapping (freeze, drain, open), where the old form had no message but the
+    pairing's and the records; the drain's duds and sink come close to a flush, which M has no API for.
+  - old ≺ new on bandwidth per stream (Quantities): a stream at its cables' bandwidth together, where it moved at one
+    cable's however many joined its nodes.
+  - re-pairing a group's cables at every change of cabling, the one form with no STREAM that keeps the striping ≺
+    STREAM (M6: every cable of the group down for a quiet window and a pairing at each change, against one exchange).
+  The code keeps STREAM on that ranking; the pair on M2 stands against it.
+  Both ends then compute each cable's bases alike:
   out = max(this end's SENDs, the peer's receives), to which it pads with duds, filling every receive the peer posted;
   in = max(the peer's SENDs, this end's receives), to which it absorbs into the link's sink, taking every SEND the peer
   posted or pads. Once its lanes are there (drained), the group opens from those bases, its words new and its identity
