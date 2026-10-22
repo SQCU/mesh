@@ -245,10 +245,16 @@ reduce-scatter 196-212 us; one uneven all-gather against the same segments as N 
     waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such a group completes in its
     encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
-  - **Fused crossings.** A two-rank call that is one publication of the rank's whole operand and one landing of its
-    peer's (`ncclMeshFusableRooted`) runs its two steps in the caller's own kernels: on a stream whose `fused` is set
+  - **Fused crossings.** A call whose part at a rank is one publication of its whole operand, one landing of its
+    peer's, or both, and nothing else (`ncclMeshFusableRooted`: the two-rank direct exchange; on any number of ranks,
+    a broadcast's or a reduce's leaf, and a root of one child) runs those steps in the caller's own kernels at that
+    rank. Whether a rank fuses is read from its own moves in the program every rank compiles alike, and a peer's
+    steps are the same on the wire whether it fuses or not; a rank that forwards, a root of two children or more and
+    an all-gather of three ranks or more fuse nothing. On a stream whose `fused` is set
     the call writes the steps' argument records and returns their bindings (`ncclMeshFused`), and the caller's kernels
-    call the library's steps (`ncclMeshMetalSteps`) on them; the call dispatches neither step. Either
+    call the library's steps (`ncclMeshMetalSteps`) on them; the call dispatches neither step (at a fused rank it
+    encodes an empty position's filler and the wait for its peer's, which the peer publishes without waiting on this
+    rank). Either
     form: a Metal 4 kernel binds them through its argument table; a classic one takes them as one `mesh_step_binding`
     record, and its stream names a `residencySet`, which the library fills with the buffers the bindings name and the
     caller makes resident for its queue (torch-mesh's `torch_mesh/fused.py` on torch's stream).
