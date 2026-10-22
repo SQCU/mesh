@@ -96,9 +96,12 @@ All but custom_op, DTensor, Shard and the parallel styles are underscored: torch
 upgrade.
 
 A partitioned dimension may be any of its mesh's (a RaggedShard on any mesh dimension: each placement's methods take
-their mesh dimension's group and coordinate, and the redistribution moves one mesh dimension a step).  Refused (on
-every rank alike): _StridedShard (FSDP2 with TP, nested views), a flattened or unflattened partitioned dimension, a
-BlockMask (flex attention), from_local's run_check and LocalTensor's RNG tracker on a RaggedShard (NotImplementedError).
+their mesh dimension's group and coordinate, and the redistribution moves one mesh dimension a step).  Not implemented
+(NotImplementedError on every rank alike; the code past it computes even splits or indexes another dimension's
+capacities): _StridedShard (FSDP2 with TP, nested views), a flattened or unflattened partitioned dimension, a BlockMask
+(flex attention) and LocalTensor's RNG tracker on a RaggedShard.  from_local's run_check on a RaggedShard broadcasts its
+Replicate mesh dimensions, as torch's does, and compares no shape (a ragged one's differ by rank); relay writes a
+Partial mesh dimension's term as distribute_tensor does.
 Left as they are: the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.
 Under torch.compile the SDPA ring is a graph break (UnsupportedOperatorException on fake tensors).
 
@@ -115,6 +118,7 @@ from torch._subclasses.fake_tensor import FakeTensor, UnsupportedOperatorExcepti
 from torch.distributed._local_tensor import maybe_enable_local_tracker, maybe_run_for_local_tensor
 from torch.distributed.tensor import DTensor, Partial, Replicate, Shard, _random
 from torch.distributed.tensor import distribute_tensor as _distribute_tensor
+from torch.distributed.tensor._collective_utils import mesh_broadcast
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor._op_schema import OpSchema
 from torch.distributed.tensor._redistribute import _gen_transform_infos_non_cached
@@ -486,13 +490,15 @@ def shard(mesh, name, dim):
 @torch.no_grad()
 def relay(tensor, full):
     """Writes DTensor `tensor`'s local buffer from its logical value `full` under the current parts: on a partitioned
-    dimension its valid elements, zeros past them (a plain tensor: all of `full`).  In place: no reallocation."""
+    dimension its valid elements, zeros past them (a plain tensor: all of `full`); on a Partial mesh dimension this
+    coordinate's term, as torch's distribute_tensor writes one (Partial._partition_value: the value over the coordinates
+    for a sum, the value itself for avg, max and min).  In place: no reallocation."""
     if not isinstance(tensor, DTensor):
         return tensor.copy_(full)
     mesh, value, coordinate = tensor.device_mesh, full, tensor.device_mesh.get_coordinate()
     for i, p in enumerate(tensor.placements):
         if p.is_partial():
-            raise NotImplementedError('mesh: relay of a Partial placement')
+            value = p._partition_value(value, mesh, i)
         if p.is_shard():
             value = p._select_split_tensor(value, mesh.size(i), coordinate[i], with_padding=False, clone=False)
     tensor._local_tensor.copy_(value)
@@ -687,10 +693,14 @@ def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=
     if not _ragged(placements):
         return DTensor.from_local(local_tensor, device_mesh, placements, run_check=run_check, shape=shape, stride=stride,
                                   grad_placements=grad_placements)
-    if run_check:
-        raise NotImplementedError('mesh: from_local\'s run_check on a RaggedShard')
     if local_tensor.device.type != device_mesh.device_type and not local_tensor.is_meta:
         local_tensor = local_tensor.to(device_mesh.device_type)
+    if run_check and device_mesh._is_current_rank_part_of_mesh():
+        with torch.no_grad():
+            for i, p in enumerate(placements):
+                if p.is_replicate():
+                    local_tensor = local_tensor.contiguous()
+                    mesh_broadcast(local_tensor, device_mesh, mesh_dim=i)
     if shape is None or stride is None:
         shape, stride = _global_info(local_tensor, device_mesh, placements)
     return _FromLocal.apply(local_tensor, device_mesh, placements, torch.Size(shape), tuple(stride),
@@ -699,17 +709,13 @@ def from_local(local_tensor, device_mesh, placements, *, run_check=False, shape=
 
 def redistribute(tensor, placements, *, async_op=False):
     """tensor.redistribute(placements=...), a Shard on an attached mesh dimension its RaggedShard (the tensor's own
-    there first)."""
+    there first); a ragged one to Partial from Replicate takes each coordinate's term (Partial._partition_value), and
+    from a Shard to Partial(sum) places its valid elements among zeros (_local_redistribute)."""
     placements = _placements(tensor.device_mesh, placements, tensor.ndim, tensor.placements)
     if _same(tensor.placements, placements):
         return tensor
     if not (_ragged(placements) or _ragged(tensor.placements)):
         return DTensor.redistribute(tensor, placements=placements, async_op=async_op)
-    for current, target in zip(tensor.placements, placements):
-        if target.is_partial() and current != target and not (isinstance(current, Shard) and type(target) is Partial
-                                                               and target.reduce_op == 'sum'):
-            raise RuntimeError(f'Can not redistribute from {current} to {target}, only Shard to Partial(sum) '
-                               f'redistribution is supported!')
     return _Redistribute.apply(tensor, placements, async_op)
 
 

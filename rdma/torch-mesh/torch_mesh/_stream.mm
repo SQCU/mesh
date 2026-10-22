@@ -292,7 +292,8 @@ using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t
 
 // A tensor as the library reads it, with ProcessGroupNCCL's dtype semantics: a collective that moves data moves any
 // dtype (one NCCL lacks as its bytes); a reduction reduces a complex tensor as its real view (sum and average) and a bool
-// tensor's sum and product as max and min.  `at` is an ncclMeshBuffer (its storage's MTLBuffer and byte offset) on the
+// tensor's sum and product as max and min (its average the library's uint8 average: the sum truncated by the ranks, 1
+// only where every rank holds 1).  `at` is an ncclMeshBuffer (its storage's MTLBuffer and byte offset) on the
 // Metal path and a host pointer on the host path (NULL: none).
 struct Operand {
   const void *at = nullptr;
@@ -331,10 +332,7 @@ struct Group {
   }
   Operand reducing(const at::Tensor &tensor, int64_t &op, bool written) {
     const at::Tensor t = contiguous(tensor, written);
-    if (t.scalar_type() == at::kBool) {
-      TORCH_CHECK(op != ncclAvg, "a bool tensor has no average");
-      op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
-    }
+    if (t.scalar_type() == at::kBool) op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
     if (t.is_complex()) {
       TORCH_CHECK(op == ncclSum || op == ncclAvg, "a complex tensor reduces by sum and average alone");
       return {where(t), (size_t)t.numel() * 2, kind(at::toRealValueType(t.scalar_type()))};
@@ -825,8 +823,9 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
 // library writes the two steps' argument records and returns their bindings, GPU addresses the caller's kernels reach
 // by address, and adds every buffer they name to the set, which is resident for every command buffer of each queue it
 // was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a buffer from
-// it.  A call the library does not fuse (not two ranks, a tensor that is no region tensor or does not start on a page)
-// fails as a value, the library's refusal; nothing falls back to a slower form.
+// it.  A call the library does not fuse (a tensor that is no region tensor or does not start on a page) fails as a
+// value, the library's refusal; nothing falls back to a slower form.  The peer is rank 1 - rank: past two ranks, ranks 0
+// and 1 exchange their parts and a rank past 1 names no rank (the library's ncclInvalidArgument, "peer").
 static id<MTLResidencySet> fused_residency_;
 static std::vector<void *> fused_queues_;
 
@@ -853,9 +852,9 @@ static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
 static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 
 // The fused exchange of `send` (this rank's part, which its publishing kernel writes) and `landing` (where the peer's
-// part lands), contiguous MPS region tensors of one dtype and size, on two-rank communicator `comm`, the landing's wait
+// part lands), contiguous MPS region tensors of one dtype and size, on communicator `comm`, the landing's wait
 // bounded by `polls` (nccl.h ncclMeshStream polls; _stream.polls the library's most): one group of ncclSend(send) and
-// ncclRecv(landing) toward the other rank, on torch's stream, the stream's `fused` set; its publication's bindings and
+// ncclRecv(landing) toward rank 1 - rank, on torch's stream, the stream's `fused` set; its publication's bindings and
 // its landing's (ncclMeshFused, six GPU addresses each).  A dtype NCCL lacks moves as its bytes.  Nothing is committed
 // here: the publication is the caller's kernel, encoded after this returns (fused_published).
 static std::pair<std::vector<uint64_t>, std::vector<uint64_t>> fused_all_reduce(const at::Tensor &send, const at::Tensor &landing, int64_t comm,
@@ -864,10 +863,8 @@ static std::pair<std::vector<uint64_t>, std::vector<uint64_t>> fused_all_reduce(
                   send.numel() == landing.numel(),
               "fused all_reduce: send and landing are contiguous MPS tensors of one dtype and size (region tensors: torch_mesh.empty)");
   TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused all_reduce: polls ", polls, " is not a 32-bit count of loads");
-  int ranks = 0, rank = 0;
-  checked(ncclCommCount(communicator(comm), &ranks));
+  int rank = 0;
   checked(ncclCommUserRank(communicator(comm), &rank));
-  TORCH_CHECK(ranks == 2, "fused all_reduce: a two-rank group (this one has ", ranks, ")");
   const ncclDataType_t type = kind(send.scalar_type()) == ncclNumTypes ? ncclUint8 : kind(send.scalar_type());
   const size_t count = type == ncclUint8 && kind(send.scalar_type()) == ncclNumTypes ? (size_t)send.nbytes() : (size_t)send.numel();
   const int peer = 1 - rank;

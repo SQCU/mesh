@@ -11,7 +11,8 @@ links among the ranks' nodes their bridges hold paired), its collectives the lib
 complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Allgatherv,
 Reduce_scatter_block, Reduce_scatter, Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions
 pair), Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use
-(Gather's off the root, Scatter's send off it).  Allgatherv and Reduce_scatter take a count a rank, as mpi4py spells
+(Gather's off the root, Scatter's send off it); an array of a dtype the library has no type of moves as its bytes, and
+a reduction takes the library's types alone.  Allgatherv and Reduce_scatter take a count a rank, as mpi4py spells
 them (a receive buffer [array, counts], recvcounts): one program over the segments (ncclMeshAllGatherV,
 ncclMeshReduceScatterV), every rank passing the same counts; Allgather and Reduce_scatter_block are the same calls with
 equal counts (the library takes equal segments as its equal program).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
@@ -69,13 +70,19 @@ def to_region(array):
 
 
 def at(array):
+    """A buffer's address: a C-contiguous array's own (another would cross only through a copy: rdma/NCCL.md "Memory")."""
     if array is None:
         return ffi.NULL
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
         raise ValueError('a buffer is a C-contiguous numpy array')
-    if array.dtype not in TYPES:
-        raise ValueError(f'a buffer of {array.dtype}: the library moves {sorted(map(str, TYPES))}')
     return ffi.cast('void *', array.ctypes.data)
+
+
+def kind(dtype):
+    """The library's type a call that moves `dtype` takes and the count of it in one element: (its type, 1), or, a dtype
+    the library has no type of, (ncclUint8, its itemsize), moved as its bytes.  A reduction takes TYPES alone."""
+    dtype = np.dtype(dtype)
+    return (TYPES[dtype], 1) if dtype in TYPES else (lib.ncclUint8, dtype.itemsize)
 
 
 def segments(spec, size):
@@ -120,10 +127,10 @@ class Comm:
 
     def Shrink(self, exclude, abort=False):
         """This communicator without the ranks `exclude`, each kept rank's order kept (ncclCommShrink; `abort` revokes
-        this one's groups in flight first, NCCL_SHRINK_ABORT)."""
+        this one's groups in flight first, NCCL_SHRINK_ABORT); None on a rank among those excluded."""
         made, ranks = ffi.new('ncclComm_t *'), ffi.new('int[]', list(exclude) or [0])
         check(lib.ncclCommShrink(self.comm, ranks, len(exclude), made, ffi.NULL, 1 if abort else 0))
-        return Comm._of(made[0], self)
+        return Comm._of(made[0], self) if made[0] != ffi.NULL else None
 
     def Grow(self, size):
         """This communicator's ranks and `size` - its size more, which join with Comm.joining at the id its root
@@ -147,10 +154,14 @@ class Comm:
 
     def Create_cart(self, dims, periods=None, reorder=False):
         """This communicator's ranks as a process grid of shape `dims` (row-major: the last dimension varies
-        fastest); `periods` (default every dimension) where Shift wraps."""
-        if math.prod(dims) != self.size:
-            raise ValueError(f'a grid {list(dims)} of {math.prod(dims)} ranks over {self.size}')
-        return Cartcomm(self, list(dims), list(periods) if periods is not None else [True] * len(dims))
+        fastest); `periods` (default every dimension) where Shift wraps.  A grid of fewer ranks than the communicator
+        holds its first ones (a Split of them), the others None, as MPI_Cart_create gives them MPI_COMM_NULL; one of
+        more has no rank for a coordinate."""
+        cells = math.prod(dims)
+        if cells > self.size:
+            raise ValueError(f'a grid {list(dims)} of {cells} ranks over {self.size}')
+        base = self if cells == self.size else self.Split(0 if self.rank < cells else UNDEFINED, self.rank)
+        return Cartcomm(base, list(dims), list(periods) if periods is not None else [True] * len(dims)) if base is not None else None
 
     def Get_rank(self):
         return self.rank
@@ -168,7 +179,8 @@ class Comm:
         check(lib.ncclReduce(at(send), at(target), send.size, TYPES[send.dtype], op, root, self.comm, ffi.NULL))
 
     def Bcast(self, buf, root=0):
-        check(lib.ncclBroadcast(at(buf), at(buf), buf.size, TYPES[buf.dtype], root, self.comm, ffi.NULL))
+        t, k = kind(buf.dtype)
+        check(lib.ncclBroadcast(at(buf), at(buf), buf.size * k, t, root, self.comm, ffi.NULL))
 
     def Allgather(self, sendbuf, recvbuf):
         self.Allgatherv(sendbuf, [recvbuf, [recvbuf.size // self.size] * self.size])
@@ -182,7 +194,8 @@ class Comm:
         send = to_region(array[before:before + counts[self.rank]] if sendbuf is IN_PLACE else sendbuf)
         if send.size != counts[self.rank]:
             raise ValueError(f'a send buffer of {send.size} elements: counts[{self.rank}] is {counts[self.rank]}')
-        check(lib.ncclMeshAllGatherV(at(send), at(array), ffi.new('size_t[]', counts), TYPES[array.dtype], self.comm, ffi.NULL))
+        t, k = kind(array.dtype)
+        check(lib.ncclMeshAllGatherV(at(send), at(array), ffi.new('size_t[]', [c * k for c in counts]), t, self.comm, ffi.NULL))
 
     def Reduce_scatter_block(self, sendbuf, recvbuf, op=SUM):
         self.Reduce_scatter(sendbuf, recvbuf, None, op)
@@ -198,33 +211,39 @@ class Comm:
                                          ffi.NULL))
 
     def Alltoall(self, sendbuf, recvbuf):
-        check(lib.ncclAlltoAll(at(sendbuf), at(recvbuf), sendbuf.size // self.size, TYPES[sendbuf.dtype], self.comm, ffi.NULL))
+        t, k = kind(sendbuf.dtype)
+        check(lib.ncclAlltoAll(at(sendbuf), at(recvbuf), sendbuf.size // self.size * k, t, self.comm, ffi.NULL))
 
     def Gather(self, sendbuf, recvbuf, root=0):
         count = (recvbuf.size // self.size) if sendbuf is IN_PLACE else sendbuf.size
         dtype = (recvbuf if sendbuf is IN_PLACE else sendbuf).dtype
         send = recvbuf[self.rank * count:][:count] if sendbuf is IN_PLACE else sendbuf
-        check(lib.ncclGather(at(send), at(recvbuf if self.rank == root else None), count, TYPES[dtype], root, self.comm, ffi.NULL))
+        t, k = kind(dtype)
+        check(lib.ncclGather(at(send), at(recvbuf if self.rank == root else None), count * k, t, root, self.comm, ffi.NULL))
 
     def Scatter(self, sendbuf, recvbuf, root=0):
         count = (sendbuf.size // self.size) if recvbuf is IN_PLACE else recvbuf.size
         dtype = (sendbuf if recvbuf is IN_PLACE else recvbuf).dtype
         target = sendbuf[self.rank * count:][:count] if recvbuf is IN_PLACE else recvbuf
-        check(lib.ncclScatter(at(sendbuf if self.rank == root else None), at(target), count, TYPES[dtype], root, self.comm, ffi.NULL))
+        t, k = kind(dtype)
+        check(lib.ncclScatter(at(sendbuf if self.rank == root else None), at(target), count * k, t, root, self.comm, ffi.NULL))
 
     def Sendrecv(self, sendbuf, dest, recvbuf, source):
         check(lib.ncclGroupStart())
         try:
-            check(lib.ncclSend(at(sendbuf), sendbuf.size, TYPES[sendbuf.dtype], dest, self.comm, ffi.NULL))
-            check(lib.ncclRecv(at(recvbuf), recvbuf.size, TYPES[recvbuf.dtype], source, self.comm, ffi.NULL))
+            (t, k), (u, j) = kind(sendbuf.dtype), kind(recvbuf.dtype)
+            check(lib.ncclSend(at(sendbuf), sendbuf.size * k, t, dest, self.comm, ffi.NULL))
+            check(lib.ncclRecv(at(recvbuf), recvbuf.size * j, u, source, self.comm, ffi.NULL))
         finally:
             check(lib.ncclGroupEnd())
 
     def Send(self, buf, dest):
-        check(lib.ncclSend(at(buf), buf.size, TYPES[buf.dtype], dest, self.comm, ffi.NULL))
+        t, k = kind(buf.dtype)
+        check(lib.ncclSend(at(buf), buf.size * k, t, dest, self.comm, ffi.NULL))
 
     def Recv(self, buf, source):
-        check(lib.ncclRecv(at(buf), buf.size, TYPES[buf.dtype], source, self.comm, ffi.NULL))
+        t, k = kind(buf.dtype)
+        check(lib.ncclRecv(at(buf), buf.size * k, t, source, self.comm, ffi.NULL))
 
     def Barrier(self):
         box = empty(1, np.int32)

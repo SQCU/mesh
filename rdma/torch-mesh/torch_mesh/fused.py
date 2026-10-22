@@ -60,11 +60,11 @@ def steps():
 
 
 def all_reduce(send, landing, polls, group=None):
-    """The fused exchange over a two-rank mesh group of `send` (this rank's part, which its publishing kernel writes) and
-    `landing` (where the peer's part lands, which its landing kernel reads and adds to its own): a Crossing, its
-    publication's and its landing's six addresses each (nccl.h ncclMeshFused).  One the library does not fuse raises
-    RuntimeError with the library's reason (ncclInvalidUsage: a tensor that is no region tensor, or does not start on a
-    page)."""
+    """The fused exchange over a mesh group of `send` (this rank's part, which its publishing kernel writes) and
+    `landing` (where the peer's part lands, which its landing kernel reads and adds to its own), the peer rank 1 - rank
+    (past two ranks, ranks 0 and 1 exchange, and a rank past 1 names no peer and raises): a Crossing, its publication's
+    and its landing's six addresses each (nccl.h ncclMeshFused).  One the library does not fuse raises RuntimeError with
+    the library's reason (ncclInvalidUsage: a tensor that is no region tensor, or does not start on a page)."""
     import torch.distributed as dist
     group = group or dist.distributed_c10d._get_default_group()
     publish, land = _stream.fused_all_reduce(send, landing, group.handle, int(polls))

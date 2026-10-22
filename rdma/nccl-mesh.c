@@ -34,7 +34,6 @@
 
 enum { WHAT_SEND = 16, WHAT_RECV, WHAT_COUNTED };
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
-#define OPS 64
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
 /* a failure's message: its text, and `id`, where the message is kept with its failure (a communicator's, comm_fail; a
@@ -228,8 +227,9 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
 
 /* -- communicators -------------------------------------------------------------------------------- */
 
-/* an operator made on the communicator: PreMulSum's scalar (`value`), or the partials merge's row of `unit` elements */
-struct redop { int used; ncclDataType_t type; unsigned char value[8]; uint32_t unit; };
+/* an operator made on the communicator: PreMulSum's scalar (`value`, or where it lies, `at`, read at each host-path
+   call: ncclScalarDevice), or the partials merge's row of `unit` elements */
+struct redop { int used; ncclDataType_t type; unsigned char value[8]; uint32_t unit; const void *at; };
 /* a compiled collective the communicator runs for the calls it fits (ncclMeshProgram), its own copy */
 struct entry { uint64_t below; struct mesh_program program; };
 
@@ -256,10 +256,11 @@ struct spare { void *address; size_t bytes; uint64_t holder; };
 /* a communicator: rank r on the bridge of node members[r]; its map (map_of: its members joined where their bridges
    reach each other's nodes, the routing table mesh_routes'), made at its init alike by every member and kept; the page
    its entries start on (`page`, its bridge's region's); its message paths, the caller's (count 0: none), else the map's
-   shortest-path trees (`trees`); its table of programs (`entries`), the caller's (`listed`, kept for its life), else the
-   structural one compiled along its paths or trees where a call or a query first needs it (`compiled`: comm_compile),
-   its configured forms first (`forms`, ncclMeshCommForms, which its splits and shrinks keep), fixed once a group of it
-   crossed a link (`crossed`); its name, and the count of splits and shrinks made of it, which name theirs; the
+   shortest-path trees (`trees`); its table of programs (`entries`), compiled where a call or a query first needs it
+   (`compiled`: comm_compile): its configured forms first (`forms`, ncclMeshCommForms, which its splits and shrinks keep,
+   taken again at the compile after a change), then the caller's programs (`given`, `listed` of them, kept for its
+   life), else the structural ones along its paths or trees; its operators made on it (`ops`, `nops` slots, a freed
+   one reused); its name, and the count of splits and shrinks made of it, which name theirs; the
    process's attach it holds (`attach`, until ncclCommDestroy); the attach's holds of streams it uses (`held`, a bit a
    hold; `binding` while it counts among their users); its channels (`count`), one toward each member whose node its
    bridge reaches, toward[r] rank r's (-1: none); its pool of leases (`spares`, `nspares`: the pages its groups send
@@ -286,12 +287,12 @@ struct ncclComm {
   struct mesh_link_map map;
   uint64_t page;
   struct mesh_trees paths, trees;
-  struct entry *entries;
+  struct entry *entries, *given;
   ncclMeshForm *forms;
-  uint32_t programs, splits, *members, form_count, count;
-  int nranks, rank, listed, compiled, crossed, binding, touched;
+  uint32_t programs, splits, *members, form_count, count, nops;
+  int nranks, rank, listed, compiled, binding, touched;
   char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
-  struct redop ops[OPS];
+  struct redop *ops;
   ncclResult_t async, failed;
   pthread_mutex_t guard;
   int revoked, *peers, initing, *toward;
@@ -348,15 +349,18 @@ static void map_free(struct mesh_link_map *map) {
   *map = (struct mesh_link_map){0};
 }
 
-/* the trees and the programs compiled on the map; with `all`, the map, the caller's paths and programs too */
+/* the trees and the table compiled on the map; with `all`, the map, the caller's paths and programs too */
 static void routes_free(struct ncclComm *comm, int all) {
   trees_free(&comm->trees);
   comm->compiled = 0;
-  if (all) { trees_free(&comm->paths); map_free(&comm->map); }
-  if (comm->listed && !all) return;
   for (uint32_t e = 0; e < comm->programs; e++) program_free(&comm->entries[e].program);
   free(comm->entries);
   comm->entries = NULL; comm->programs = 0;
+  if (!all) return;
+  trees_free(&comm->paths); map_free(&comm->map);
+  for (int e = 0; e < comm->listed; e++) program_free(&comm->given[e].program);
+  free(comm->given);
+  comm->given = NULL; comm->listed = 0;
 }
 
 /* comm's bootstrap's sockets closed (NCCL's bootstrapClose), under its guard */
@@ -387,6 +391,7 @@ static void comm_free(struct ncclComm *comm) {
   if (comm->violation) metal_release(comm->violation);
   comm_leave(comm);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->toward); free(comm->timed);
+  free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
   free(comm->members); free(comm->forms);
   free(comm);
@@ -428,16 +433,35 @@ static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, 
 
 static int has_root(int what) { return what == MESH_REDUCE || what == MESH_BROADCAST; }
 
+/* whether a tree rooted at r takes a share above 0 (a log weight above -inf): one that carries r's segment */
+static int root_carried(const struct mesh_trees *trees, uint32_t r) {
+  for (uint32_t t = 0; t < trees->count; t++)
+    if (trees->root[t] == r && trees->log_weight[t] > -INFINITY) return 1;
+  return 0;
+}
+
 /* a configured form's entries (ncclMeshCommForms): its collective along the communicator's trees (`along`) or the map's
    packed trees (mesh_trees_pack at the form's eps and most, made here: mesh cc8a6f8e^ comm_routes' sets[1]; a segment
    cut among a root's trees by the form's shares, else equally, never by the flows the packing infers from the map's
-   links), whole or two-phase, at its chunks, below its bound; a rooted one at its root, or at each root (-1), none
-   where its root is past the communicator's ranks (a split's) */
+   links; a tree of share 0 carries none of it; the shortest trees cut alike where the form gives shares), whole or two-phase, at its chunks, below its bound; a rooted one at
+   its root, or at each root (-1), none where its root is past the communicator's ranks (a split's).  A root every one
+   of whose trees takes share 0 has no tree to carry its segment: the form fails there as a value */
 static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees *along, const ncclMeshForm *x) {
   const uint32_t n = (uint32_t)comm->nranks;
-  struct mesh_trees packed = {n, 0, NULL, NULL, NULL};
+  struct mesh_trees packed = {n, 0, NULL, NULL, NULL}, weighed = {n, 0, NULL, NULL, NULL};
   const struct mesh_trees *trees = along;
   ncclResult_t result = ncclSuccess;
+  /* the shortest trees (the caller's paths, else one a root) cut by the form's shares: root r's k-th tree in their
+     order shares[r x most + k], a tree past `most` none */
+  if (x->trees != ncclMeshTreesPacked && x->shares) {
+    if (trees_copy(&weighed, along)) result = fail(ncclSystemError, "out of memory");
+    for (uint32_t t = 0; !result && t < weighed.count; t++) {
+      uint32_t k = 0;
+      for (uint32_t u = 0; u < t; u++) k += weighed.root[u] == weighed.root[t];
+      ((double *)weighed.log_weight)[t] = k < x->most ? log(x->shares[(size_t)weighed.root[t] * x->most + k]) : -INFINITY;
+    }
+    trees = &weighed;
+  }
   if (x->trees == ncclMeshTreesPacked) {
     uint32_t *root = calloc((size_t)n * x->most + 1, sizeof *root), *parent = calloc((size_t)n * n * x->most + 1, sizeof *parent);
     double *weight = calloc((size_t)n * x->most + 1, sizeof *weight);
@@ -454,51 +478,65 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
   for (uint32_t r = 0; !result && r < (has_root(x->collective) && x->root < 0 ? n : 1); r++) {
     const uint32_t root = has_root(x->collective) ? (x->root < 0 ? r : (uint32_t)x->root) : 0;
     if (root >= n) continue;
-    if (compile_entry(comm, trees, (uint32_t)x->collective, root, x->whole, x->chunks, x->below))
+    /* the single-phase all-reduce sums up each node's heaviest tree whatever its weight (mesh_compile) */
+    const int weighs = x->shares && !(x->collective == MESH_ALLREDUCE && x->whole);
+    for (uint32_t q = has_root(x->collective) ? root : 0; !result && weighs && q < (has_root(x->collective) ? root + 1 : n); q++)
+      if (!root_carried(trees, q))
+        result = fail(ncclInvalidArgument, "the configured form of collective %d: every tree of root %u takes share 0", x->collective, q);
+    if (!result && compile_entry(comm, trees, (uint32_t)x->collective, root, x->whole, x->chunks, x->below))
       result = fail(ncclInternalError, "the configured form of collective %d at root %u does not compile", x->collective, root);
   }
   trees_free(&packed);
+  trees_free(&weighed);
   return result;
 }
 
-/* the communicator's structural table on its map, where the caller listed no programs: its configured forms first, in
-   their order (compile_form), then, along the caller's paths (checked against the map) or else the map's shortest-path
-   trees (mesh_trees_shortest: each member's in-tree of the routes over the links between members), the single-phase
-   all-reduce (each member's sum up its own tree; the direct exchange where every two members are linked), the
-   reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, uncut and
-   of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a call takes the first
-   entry that fits it (program_of), so a collective no form names, or a size past every form's bound, runs the default.
-   A map whose links do not join its members fails it, naming two: the bridges forward nothing, so no route crosses a
-   node outside the communicator */
+/* the communicator's table on its map: its configured forms first, in their order (compile_form), then the caller's
+   programs where it listed some (ncclMeshCommInitRank), else, along the caller's paths (checked against the map) or
+   else the map's shortest-path trees (mesh_trees_shortest: each member's in-tree of the routes over the links between
+   members), the single-phase all-reduce (each member's sum up its own tree; the direct exchange where every two members
+   are linked), the reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and
+   broadcast, uncut and of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a
+   call takes the first entry that fits it (program_of), so a collective no form names, or a size past every form's
+   bound, runs the caller's program or the default.  Where trees are compiled (a form, or no programs listed), a map
+   whose links do not join its members fails it, naming two: the bridges forward nothing, so no route crosses a node
+   outside the communicator */
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
-  if (comm->listed || n < 2) return ncclSuccess;
-  uint32_t apart[2] = {0, 0};
-  const int joined = mesh_link_map_joined(&comm->map, apart);
-  if (joined == ENOTCONN)
-    return fail(ncclInvalidUsage, "rank %u (node %u) and rank %u (node %u) of %s are joined by no path of links between its members: the "
-                "bridges forward nothing, so a route through a node outside the communicator is refused", apart[0], comm->members[apart[0]],
-                apart[1], comm->members[apart[1]], comm->name);
-  if (joined) return fail(ncclInternalError, "the members' map of %s: %s", comm->name, strerror(joined));
+  if (n < 2) return ncclSuccess;
   const struct mesh_trees *along = &comm->paths;
-  if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
-    return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
-  if (!comm->paths.count) {
-    uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
-    double *weight = calloc(n + 1, sizeof *weight);
-    comm->trees = (struct mesh_trees){n, 0, root, parent, weight};
-    if (!root || !parent || !weight) return fail(ncclSystemError, "out of memory");
-    if (!(comm->trees.count = mesh_trees_shortest(&comm->map, root, parent, weight)))
-      return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
-    along = &comm->trees;
+  if (!comm->listed || comm->form_count) {
+    uint32_t apart[2] = {0, 0};
+    const int joined = mesh_link_map_joined(&comm->map, apart);
+    if (joined == ENOTCONN)
+      return fail(ncclInvalidUsage, "rank %u (node %u) and rank %u (node %u) of %s are joined by no path of links between its members: the "
+                  "bridges forward nothing, so a route through a node outside the communicator is refused", apart[0], comm->members[apart[0]],
+                  apart[1], comm->members[apart[1]], comm->name);
+    if (joined) return fail(ncclInternalError, "the members' map of %s: %s", comm->name, strerror(joined));
+    if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
+      return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
+    if (!comm->paths.count) {
+      uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
+      double *weight = calloc(n + 1, sizeof *weight);
+      comm->trees = (struct mesh_trees){n, 0, root, parent, weight};
+      if (!root || !parent || !weight) return fail(ncclSystemError, "out of memory");
+      if (!(comm->trees.count = mesh_trees_shortest(&comm->map, root, parent, weight)))
+        return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
+      along = &comm->trees;
+    }
   }
-  size_t room = 3 + 2 * (size_t)n;
+  size_t room = comm->listed ? (size_t)comm->listed : 3 + 2 * (size_t)n;
   for (uint32_t f = 0; f < comm->form_count; f++) room += has_root(comm->forms[f].collective) && comm->forms[f].root < 0 ? n : 1;
-  if (!(comm->entries = calloc(room, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
+  if (!(comm->entries = calloc(room + 1, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
   for (uint32_t f = 0; f < comm->form_count; f++) {
     const ncclResult_t result = compile_form(comm, along, comm->forms + f);
     if (result) return result;
   }
+  for (int e = 0; e < comm->listed; e++) {
+    if (program_copy(&comm->entries[comm->programs].program, &comm->given[e].program)) return fail(ncclSystemError, "out of memory");
+    comm->entries[comm->programs++].below = comm->given[e].below;
+  }
+  if (comm->listed) return ncclSuccess;
   if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 1, 1, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 1, 0) ||
       compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 1, 0))
     return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
@@ -546,35 +584,28 @@ static ncclMeshForm *forms_copy(const ncclMeshForm *forms, uint32_t count, uint3
 }
 
 /* nccl.h ncclMeshCommForms: the forms checked and copied, taken at the communicator's next compile of its table (one
-   compiled before, by ncclMeshFusableRooted, dropped); refused once a group of it crossed a link (its members compile
-   its table alike from them), or where its table is the caller's programs */
+   compiled before, by an earlier group or ncclMeshFusableRooted, dropped), ahead of the caller's programs where it
+   listed some: its members compile its table alike from them, so every member sets them at the same point between its
+   groups (a group in flight keeps its own steps, never the table) */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int count) {
   if (!comm || count < 0 || (count && !forms)) return fail(ncclInvalidArgument, "ncclMeshCommForms's arguments");
   for (int f = 0; f < count; f++) {
     const ncclMeshForm *x = forms + f;
-    int shared = !x->shares || x->trees == ncclMeshTreesPacked;
-    for (size_t k = 0; x->shares && shared && k < (size_t)comm->nranks * x->most; k++) shared = x->shares[k] > 0 && isfinite(x->shares[k]);
+    int shared = !x->shares || x->most;
+    for (size_t k = 0; x->shares && shared && k < (size_t)comm->nranks * x->most; k++) shared = x->shares[k] >= 0 && isfinite(x->shares[k]);
     if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !x->chunks || !shared ||
         (x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesPacked) || (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
       return fail(ncclInvalidArgument, "form %d: a collective (mesh-plan.h MESH_*), a rooted one's root (-1 every root), its trees "
-                  "(shortest, or packed with eps > 0, most > 0 and shares above 0 or none) and chunks > 0", f);
+                  "(shortest, or packed with eps > 0 and most > 0), shares of 0 or more (most of them a root) or none, and chunks > 0", f);
   }
   ncclMeshForm *made = count ? forms_copy(forms, (uint32_t)count, (uint32_t)comm->nranks) : NULL;
   if (count && !made) return fail(ncclSystemError, "out of memory");
   pthread_mutex_lock(&group_lock);
-  ncclResult_t result = ncclSuccess;
-  if (comm->listed) result = fail(ncclInvalidUsage, "communicator %s runs the caller's programs (ncclMeshCommInitRank): they are its table", comm->name);
-  else if (comm->crossed)
-    result = fail(ncclInvalidUsage, "communicator %s: its forms are set before its first group that crosses a link (its members compile its "
-                  "table alike from them)", comm->name);
-  else {
-    free(comm->forms);
-    comm->forms = made; comm->form_count = (uint32_t)count; made = NULL;
-    routes_free(comm, 0);
-  }
+  free(comm->forms);
+  comm->forms = made; comm->form_count = (uint32_t)count;
+  routes_free(comm, 0);
   pthread_mutex_unlock(&group_lock);
-  free(made);
-  return result;
+  return ncclSuccess;
 }
 
 /* the program a call of `bytes` runs: its communicator's table's first entry of its collective (and root, a rooted
@@ -942,11 +973,13 @@ static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
 }
 
 /* the bootstrap's sockets of comm's init at `id`, the root's to each rank r (peers[r], placed by the rank its first
-   report names, that report kept in `reports`; a socket not yet placed waits at peers[0]) or a non-root's to the root
+   report names, that report kept in `reports`; a socket not yet placed waits at peers[0]; one whose report fails (its
+   peer closed it) or names no rank still to meet closed alone, the root accepting the next, though one that sends
+   nothing holds the root's read until the phase ends) or a non-root's to the root
    (peers[0], placed once connected), each placed before the revoke is read, so a revoke either finds it or is read.  Its
    phase ends MESH_PLATFORM_NS after the init began where no rank was met, and MESH_PLATFORM_NS after the first rank met
-   (the root's first accept, a non-root's connect) for the rest of the phase, the first gather's (`until`): 0, ECANCELED
-   (comm revoked), ETIMEDOUT, or the errno */
+   (the root's first accept, a non-root's connect) for the rest of the phase, the first gather's (`until`): 0,
+   ECANCELED (comm revoked), ETIMEDOUT, or the errno */
 static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports) {
   int *peers = comm->peers, status = 0;
   char host[NCCL_UNIQUE_ID_BYTES];
@@ -984,7 +1017,8 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   uint16_t port = (uint16_t)atoi(colon + 1);
   int listener = !strcmp(root.id, id) ? root.fd : -1;
   if (listener < 0 && (listener = bootstrap_listen(host, &port)) < 0) return errno;
-  for (int r = 1; r < comm->nranks && !status; r++) {
+  int met = 0;
+  for (int r = 1; r < comm->nranks && !status;) {
     struct report heard;
     struct pollfd look = {listener, POLLIN, 0};
     int fd = -1;
@@ -993,16 +1027,19 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
       else if (now_s() >= comm->until) status = ETIMEDOUT;
       else if (poll(&look, 1, BOOTSTRAP_SLICE_MS) < 0 && errno != EINTR) status = errno;
       else if ((fd = accept(listener, NULL, NULL)) < 0 && errno != EWOULDBLOCK && errno != ECONNABORTED && errno != EINTR) status = errno;
-    if (!status && r == 1) comm->until = now_s() + bound;
+    if (!status && !met) { comm->until = now_s() + bound; met = 1; }
     if (!status) bootstrap_put(comm, 0, fd);
     if (!status && revoked(comm)) status = ECANCELED;
-    if (!status && !(status = whole(comm, fd, &heard, sizeof heard, 0)) && (heard.rank <= 0 || heard.rank >= comm->nranks || peers[heard.rank] >= 0))
-      status = EPROTO;
+    const int read = status ? status : whole(comm, fd, &heard, sizeof heard, 0);
+    if (read == ECANCELED || read == ETIMEDOUT) status = read;
     if (status) { bootstrap_put(comm, 0, -1); break; }
+    /* a connection whose report does not come, or names no rank still to meet, is closed alone */
+    if (read || heard.rank <= 0 || heard.rank >= comm->nranks || peers[heard.rank] >= 0) { bootstrap_put(comm, 0, -1); continue; }
     reports[heard.rank] = heard;
     pthread_mutex_lock(&comm->guard);
     peers[heard.rank] = fd; peers[0] = -1;
     pthread_mutex_unlock(&comm->guard);
+    r++;
   }
   close(listener);
   if (listener == root.fd) root.fd = -1;
@@ -1050,7 +1087,10 @@ static uint64_t wire_between(const struct report *mine, const struct report *the
   return least;
 }
 
-/* 0, or EINVAL where two of the `n` gathered reports are of one node (a bridge's streams join nodes, so a rank a node) */
+/* 0, or EINVAL where two of the `n` gathered reports are of one node: a communicator keeps its holdings and the start
+   words its ranks exchange a node (start[k] by the node's index in a report's reach, comm_hold_toward by node), so two
+   ranks of one node would share one slot, a peer telling one rank's holding the other's start words and laying both
+   ranks' bytes on one stream; and no stream joins two ranks of one node (a bridge reaches other nodes) */
 static int comm_apart(const struct report *reports, uint32_t n) {
   for (uint32_t a = 0; a < n; a++)
     for (uint32_t b = a + 1; b < n; b++)
@@ -1058,7 +1098,7 @@ static int comm_apart(const struct report *reports, uint32_t n) {
   return 0;
 }
 static ncclResult_t apart_fail(const char *name) {
-  return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (a rank a node: a bridge's streams join nodes)", name);
+  return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings and their start words are kept a node)", name);
 }
 static ncclResult_t hold_fail(const char *name, int rank, int status) {
   return fail(ncclSystemError, "communicator %s: rank %d could not hold its streams at its bridge (%s: EBUSY, a stream another communicator holds, "
@@ -1067,13 +1107,12 @@ static ncclResult_t hold_fail(const char *name, int rank, int status) {
 }
 
 /* a communicator's table, the caller's operands (nccl.h ncclMeshCommInitRank): its paths (NULL: none, the map's
-   shortest-path trees) and its programs copied (none: the structural table, comm_routes); 0, or ENOMEM */
+   shortest-path trees) and its programs copied (`given`; none: the structural table, comm_routes); 0, or ENOMEM */
 static int comm_table(struct ncclComm *made, const struct mesh_trees *paths, const ncclMeshProgram *programs, int count) {
-  made->listed = count > 0;
-  if ((paths && trees_copy(&made->paths, paths)) || (count && !(made->entries = calloc((size_t)count, sizeof *made->entries)))) return ENOMEM;
+  if ((paths && trees_copy(&made->paths, paths)) || (count && !(made->given = calloc((size_t)count, sizeof *made->given)))) return ENOMEM;
   for (int e = 0; e < count; e++) {
-    if (program_copy(&made->entries[e].program, programs[e].program)) return ENOMEM;
-    made->entries[made->programs++].below = programs[e].below;
+    if (program_copy(&made->given[e].program, programs[e].program)) return ENOMEM;
+    made->given[made->listed++].below = programs[e].below;
   }
   return 0;
 }
@@ -1182,9 +1221,9 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
 /* design/transport.md section 14, a communicator's init on NCCL's bootstrap at its id, the one path of every init
    (ncclMeshCommInitRank, blocking or not): its bootstrap's sockets opened (bootstrap_open), then made attached
    (comm_attach) and the nodes its bridge reaches read (reach_read), then every rank's report gathered (two ranks on one
-   node fail every rank alike: comm_apart); each rank holding the stream toward each member's node it is joined to
-   (comm_hold); a second gather carrying each rank's holding's status and its holdings' start words (NCCL's own init
-   exchanges each peer's connection through its bootstrap: ncclTransportP2pSetup), which each rank tells its own
+   node fail every rank alike: comm_apart, a bound); each rank holding the stream toward each member's node it is
+   joined to (comm_hold); a second gather carrying each rank's holding's status and its holdings' start words
+   (NCCL's own init exchanges each peer's connection through its bootstrap: ncclTransportP2pSetup), which each rank tells its own
    holdings as it makes its channels (comm_join).  A rank that cannot go on, a stream held by another (EBUSY) or gone (ENOLINK), a peer silent past
    its phase's end (bootstrap_open, gather: MESH_PLATFORM_NS) or a revoke fails the init as a value, made holding nothing of its
    bridge's (comm_leave) and its sockets closed; the next init reads the streams as they then stand.  Made, it keeps its
@@ -1248,7 +1287,6 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId com
   char id[sizeof commId.internal + 1];
   memcpy(id, commId.internal, sizeof commId.internal);
   id[sizeof commId.internal] = 0;
-  if (!*id) return fail(ncclInvalidArgument, "the unique id is empty (ncclGetUniqueId)");
   struct ncclComm *made = comm_new(nranks, rank, name && *name ? name : id);
   (void)small;
   if (!made || comm_table(made, paths, programs, count)) {
@@ -1285,10 +1323,7 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
   return result ? result : ncclCommInitRank(comm, 1, id, 0);
 }
 
-ncclResult_t ncclCommFinalize(ncclComm_t comm) {
-  if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
-  return revoked(comm) ? fail(ncclInvalidUsage, "ncclCommFinalize after ncclCommRevoke (NCCL: not supported)") : ncclSuccess;
-}
+ncclResult_t ncclCommFinalize(ncclComm_t comm) { return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL"); }
 
 static void inflight_lose(struct ncclComm *comm);
 static ncclResult_t comm_failure(struct ncclComm *comm);
@@ -1315,7 +1350,8 @@ static void comm_stop(struct ncclComm *comm) {
    under comm's own lock alone, never one a group holds while it waits.  ncclCommDestroy then gives its streams back
    (comm_free) and frees it */
 ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
-  if (!comm || revokeFlags != NCCL_REVOKE_DEFAULT) return fail(ncclInvalidArgument, "comm is NULL or revokeFlags is %d", revokeFlags);
+  (void)revokeFlags;
+  if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
   comm_stop(comm);
   return ncclSuccess;
 }
@@ -1556,23 +1592,28 @@ static int lease_wait(const void *ptr, int write, uint64_t until) {
 }
 
 
-/* an operator made into the communicator's table, its handle past ncclNumOps */
+/* an operator made into the communicator's table (a freed slot, else one more), its handle past ncclNumOps */
 static ncclResult_t op_make(ncclComm_t comm, struct redop made, ncclRedOp_t *op) {
-  for (int k = 0; k < OPS; k++)
-    if (!comm->ops[k].used) {
-      comm->ops[k] = made;
-      *op = (ncclRedOp_t)(ncclNumOps + k);
-      return ncclSuccess;
-    }
-  return fail(ncclInvalidUsage, "%d operators made on one communicator", OPS);
+  uint32_t k = 0;
+  while (k < comm->nops && comm->ops[k].used) k++;
+  if (k == comm->nops) {
+    if (comm->nops >= (uint32_t)INT_MAX - ncclNumOps) return fail(ncclInvalidUsage, "operator handles past INT_MAX (ncclRedOp_t)");
+    struct redop *grown = realloc(comm->ops, (comm->nops + 1) * sizeof *grown);
+    if (!grown) return fail(ncclSystemError, "out of memory");
+    comm->ops = grown;
+    comm->nops++;
+  }
+  comm->ops[k] = made;
+  *op = (ncclRedOp_t)(ncclNumOps + (int)k);
+  return ncclSuccess;
 }
 
 ncclResult_t ncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataType_t datatype, ncclScalarResidence_t residence,
                                       ncclComm_t comm) {
   if (!op || !scalar || !comm || (unsigned)datatype >= ncclNumTypes) return fail(ncclInvalidArgument, "PreMulSum's arguments");
-  if (residence != ncclScalarHostImmediate) return fail(ncclInvalidArgument, "the host path reads the scalar when the operator is made (ncclScalarHostImmediate)");
-  struct redop made = {1, datatype, {0}, 0};
-  memcpy(made.value, scalar, SIZE[datatype]);
+  const int immediate = residence == ncclScalarHostImmediate;
+  struct redop made = {1, datatype, {0}, 0, immediate ? NULL : scalar};
+  if (immediate) memcpy(made.value, scalar, SIZE[datatype]);
   return op_make(comm, made, op);
 }
 
@@ -1580,12 +1621,12 @@ ncclResult_t ncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataTyp
 ncclResult_t ncclMeshRedOpCreatePartials(ncclRedOp_t *op, size_t dim, ncclDataType_t datatype, ncclComm_t comm) {
   if (!op || !comm || datatype != ncclFloat32 || dim > UINT32_MAX - 2)
     return fail(ncclInvalidArgument, "the partials merge's arguments: its operator, its communicator, float32 and a row's dim");
-  return op_make(comm, (struct redop){1, datatype, {0}, (uint32_t)(2 + dim)}, op);
+  return op_make(comm, (struct redop){1, datatype, {0}, (uint32_t)(2 + dim), NULL}, op);
 }
 
 ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
   const int k = (int)op - ncclNumOps;
-  if (!comm || k < 0 || k >= OPS || !comm->ops[k].used) return fail(ncclInvalidArgument, "operator %d is none of this communicator's", (int)op);
+  if (!comm || k < 0 || k >= (int)comm->nops || !comm->ops[k].used) return fail(ncclInvalidArgument, "operator %d is none of this communicator's", (int)op);
   comm->ops[k].used = 0;
   return ncclSuccess;
 }
@@ -1766,6 +1807,8 @@ struct call {
   int combine, post;
   uint32_t unit;
   unsigned char pre[8];
+  /* a premultiplier in device memory (ncclScalarDevice), read into `pre` once its lease's GPU points are reached */
+  const void *scalar_at;
   int premultiplied, direct;
   struct steps *bound;
   unsigned char *result, *copy;
@@ -2187,7 +2230,6 @@ static ncclResult_t schedule(struct metal_program *program, struct ncclComm *com
   if (result) { schedules_free(comm, plans); return result; }
   if (*gate) comm->gates++;
   commit_group(comm, plans);
-  comm->crossed = 1;
   *made = plans;
   return ncclSuccess;
 }
@@ -2308,18 +2350,30 @@ static ncclResult_t reduction(struct call *c) {
     return ncclSuccess;
   }
   const struct redop *made = comm->ops + ((int)c->op - ncclNumOps);
+  /* NCCL's hostToDevRedOp refuses it alike ("Data type supplied to user-created ncclRedOp_t does not match"): a
+     scalar of one type read as another's is a value no one gave (design/rubrics.md D2, the operator 10-19: "functions
+     should throw ... before they try to guess parametric values"); and the merge's rows are float32 [m, l, O]
+     (merge_rows, nccl-mesh-kernels.h merge_row), which another type's elements would be read and written past */
   if (made->type != c->type) return fail(ncclInvalidArgument, "an operator made on the communicator reduces the datatype it was made for");
   if (made->unit) { c->combine = COMBINE_MERGE; c->unit = made->unit; return ncclSuccess; }
-  memcpy(c->pre, made->value, SIZE[c->type]);
+  /* a scalar in device memory is read where the reduction runs: the host path's call; the Metal path's kernels take it
+     as an argument written when the group is encoded, before the work that may write it runs */
+  if (made->at && c->stream)
+    return fail(ncclInvalidArgument, "a PreMulSum scalar in device memory (ncclScalarDevice) on the Metal path: its kernels take the scalar as an "
+                "argument written when the group is encoded, so none reads it where the GPU runs");
+  if (made->at) c->scalar_at = made->at;
+  else memcpy(c->pre, made->value, SIZE[c->type]);
   c->premultiplied = 1;
   return ncclSuccess;
 }
 
-/* an all-to-all's own segment: its byte offsets in the send and the receive buffer, and its bytes */
+/* an all-to-all's own segment: its byte offsets in the send and the receive buffer, and its bytes, the lesser of
+   what it sends itself and what it receives from itself (each in its own segment's bytes) */
 static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
   const int n = c->comm->nranks, me = c->comm->rank;
   *sent = seg_first(c->segments, me) * SIZE[c->type]; *landed = seg_first(c->segments + n, me) * SIZE[c->type];
-  return c->segments[me] * SIZE[c->type];
+  const uint64_t out = c->segments[me], in = c->segments[n + me];
+  return (out < in ? out : in) * SIZE[c->type];
 }
 
 static int plan_direct(struct call *c, struct where own);
@@ -2336,7 +2390,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
   ncclResult_t result = ncclSuccess;
   int remote = 0;
   for (size_t i = 0; i < n; i++) {
-    if (list[i].comm != comm) return fail(ncclInvalidUsage, "a group on several communicators");
+    /* a call on a stream is ordered by that stream's GPU work, which the host path cannot follow */
     if (list[i].stream) return fail(ncclInvalidUsage, "a group on several streams");
     if (reducing(list[i].what) && (result = reduction(list + i))) return result;
     remote |= crosses(list + i);
@@ -2344,8 +2398,11 @@ static ncclResult_t launch(struct call *list, size_t n) {
   if (revoked(comm)) return revoked_fail(comm);
   const uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + MESH_PLATFORM_NS;
   int late = 0;
-  for (size_t i = 0; i < n && !late; i++) late = lease_wait(list[i].send, 0, until) || lease_wait(list[i].recv, 1, until);
+  for (size_t i = 0; i < n && !late; i++)
+    late = lease_wait(list[i].send, 0, until) || lease_wait(list[i].recv, 1, until) || lease_wait(list[i].scalar_at, 0, until);
   if (late) return fail(ncclSystemError, "a lease's GPU work (ncclMeshMemUse) did not reach its point within the platform's deadline");
+  for (size_t i = 0; i < n; i++)
+    if (list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
   pthread_mutex_lock(&group_lock);
   group_numbered(comm);
   const uint64_t holder = comm->groups;
@@ -2462,14 +2519,15 @@ static _Atomic uint64_t retired;
 static struct loss { uint64_t ticket; ncclResult_t result; char reason[256]; } *losses;
 static size_t lost;
 
+static void call_parts_free(struct call *c) {
+  steps_free(c->bound);
+  free(c->result);
+  free(c->copy);
+  free(c->segments);
+  free(c->complement);
+}
 static void calls_free(struct call *list, size_t n) {
-  for (size_t i = 0; i < n; i++) {
-    steps_free(list[i].bound);
-    free(list[i].result);
-    free(list[i].copy);
-    free(list[i].segments);
-    free(list[i].complement);
-  }
+  for (size_t i = 0; i < n; i++) call_parts_free(list + i);
   free(list);
 }
 
@@ -2773,10 +2831,11 @@ static struct where where_of(const void *argument) {
    ordered with its work), else a buffer the program keeps until its end */
 static void *workspace(struct metal_program *program, const struct call *c, size_t bytes) {
   if (c->workspace) return c->workspace(bytes ? bytes : 16, c->context);
-  if (metal_metal4(program)) {
-    /* the Metal 4 form, which signals nothing at its end: the communicator's scratch, the group's k-th request its k-th
-       buffer, grown where short (the one it replaces kept until the communicator's end, as the GPU may yet read it);
-       its groups run in the encoder's order, each complete at its end, so one group's scratch is free for the next */
+  if (metal_metal4(program) || c->encoder) {
+    /* the Metal 4 form, and the classic form in the caller's encoder, which signal nothing at their end (a borrowed
+       program keeps nothing): the communicator's scratch, the group's k-th request its k-th buffer, grown where short
+       (the one it replaces kept until the communicator's end, as the GPU may yet read it); its groups run in the
+       encoder's order, each complete at its end, so one group's scratch is free for the next */
     struct ncclComm *comm = c->comm;
     const uint32_t k = comm->scratch_used++;
     if (k == comm->scratches) {
@@ -3013,14 +3072,15 @@ static ncclResult_t losses_through(uint64_t ticket) {
   return result;
 }
 
-/* whether a group is a fused crossing's (nccl.h ncclMeshFused): two ranks, not issued, nothing else in flight, its
-   steps that cross at most one SEND and at most one COPY in all, each the whole of an ncclSend's, an ncclRecv's, an
-   in-place ncclBroadcast's or an in-place ncclAllGather's (sendbuff recvbuff + rank x sendcount, NCCL's), no combine
-   (the caller's kernel combines: an all-reduce or a reduce is the caller's ncclSend and ncclRecv in one group), no
-   scratch */
+/* whether a group is a fused crossing's (nccl.h ncclMeshFused): its steps that cross at most one SEND and at most
+   one COPY in all (the two records ncclMeshFused holds: one publication, one landing), both toward one peer (one
+   channel, whose stream order the caller's kernels keep: complete_track; steps on two channels would be tracks' items,
+   which no caller's kernel runs), each the whole of an
+   ncclSend's, an ncclRecv's, an in-place ncclBroadcast's or an in-place ncclAllGather's (sendbuff recvbuff + rank x
+   sendcount, NCCL's: the buffer the caller's kernel writes is the one sent), no combine (the caller's kernel combines:
+   an all-reduce or a reduce is the caller's ncclSend and ncclRecv in one group), no scratch */
 static int fusable(const struct call *list, size_t n) {
-  uint32_t sends = 0, copies = 0;
-  if (list[0].comm->nranks != 2 || inflight) return 0;
+  uint32_t sends = 0, copies = 0, peer = UINT32_MAX;
   for (size_t i = 0; i < n; i++) {
     const struct call *c = list + i;
     size_t length;
@@ -3032,8 +3092,9 @@ static int fusable(const struct call *list, size_t n) {
     for (uint32_t k = 0; k < c->bound->count; k++) {
       const uint32_t op = c->bound->steps[k].op;
       if (!piece_bytes(c->bound->steps + k)) continue;
-      if (op == MESH_STEP_REDUCE) return 0;
+      if (op == MESH_STEP_REDUCE || (peer != UINT32_MAX && c->bound->steps[k].peer != peer)) return 0;
       if (op == MESH_STEP_SEND ? ++sends > 1 : ++copies > 1) return 0;
+      peer = c->bound->steps[k].peer;
     }
   }
   return 1;
@@ -3045,8 +3106,9 @@ static int fusable(const struct call *list, size_t n) {
    lease of the communicator's pool (a reduce-scatter's, a non-root's reduce), its scratch leases of the pool, read in
    place where it may (plan_direct); then the group scheduled and its entries presented (schedule: a piece off a page or
    outside the region fails the call as a value, nothing presented), its operands made in place, its gate stored where
-   its landings wait on the communicator's (gate_of), in flight after the others, issued (with issue) or completed with
-   every group before it; its results into recvbuff as it completes; the program's end signals `finished` where the
+   its landings wait on the communicator's (gate_of), in flight after the others, issued (with issue; a fused one is
+   completed at once, its steps the caller's kernels') or completed with every group before it, its waits bounded by
+   its calls' greatest polls; its results into recvbuff as it completes; the program's end signals `finished` where the
    library made its encoder.  The Metal 4 form makes its channels' counts and the pool's leases resident through the
    stream's residency set.  A fused group on the classic form takes the stream's residency set too (metal_begin),
    through which the buffers its deferred steps' bindings name are made resident for the caller's kernels. */
@@ -3055,13 +3117,19 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   ncclMeshIssue *const issue = list[0].issue;
   ncclResult_t result = ncclSuccess;
   int remote = 0;
+  /* the group's waits' bound: its calls' greatest (0, the most: nccl.h NCCL_MESH_POLLS, any 0 among them) */
+  uint32_t polls = list[0].polls;
   if (issue) *issue = (ncclMeshIssue){0, 0};
   for (size_t i = 0; i < n && !result; i++) {
-    if (list[i].comm != comm) result = fail(ncclInvalidUsage, "a group on several communicators");
-    else if (list[i].command != list[0].command || list[i].encoder != list[0].encoder)
+    polls = !polls || !list[i].polls ? 0 : polls > list[i].polls ? polls : list[i].polls;
+    /* a group's dispatches are one program in one command buffer or encoder: a call encoded into another would be
+       ordered by neither */
+    if (list[i].command != list[0].command || list[i].encoder != list[0].encoder)
       result = fail(ncclInvalidUsage, "a group on several command buffers or encoders");
-    else if (list[i].polls != list[0].polls) result = fail(ncclInvalidUsage, "a group of several bounds (ncclMeshStream polls)");
-    else if (!on_gpu(list[i].type)) result = fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 there)", (int)list[i].type);
+    /* Metal's shading language has no 64-bit floating type on Apple GPUs: a float64 combine has no kernel (a float64
+       call that combines nothing moves its bytes) */
+    else if (reducing(list[i].what) && !on_gpu(list[i].type))
+      result = fail(ncclInvalidArgument, "a float64 reduction on the Metal path (Apple GPUs have no float64 arithmetic)");
     else if (reducing(list[i].what)) result = reduction(list + i);
     remote |= crosses(list + i);
   }
@@ -3069,8 +3137,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && metal4 && (!list[0].encoder || !list[0].residency))
     result = fail(ncclInvalidArgument, "a Metal 4 ncclMeshStream (argumentTable) without its encoder or residency set");
   else if (!result && !metal4 && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
-  else if (!result && !metal4 && list[0].encoder && !list[0].workspace)
-    result = fail(ncclInvalidArgument, "an ncclMeshStream with an encoder and no workspace");
   else if (!result && !metal4 && list[0].fused && !list[0].residency)
     result = fail(ncclInvalidArgument, "a fused crossing on a classic ncclMeshStream without its residency set (the caller's kernels reach "
                                        "the library's buffers by address)");
@@ -3081,17 +3147,17 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && remote) result = comm_failure(comm);
   if (!result) result = plan_calls(comm, list, n);
   if (!result) result = operands_check(list, n);
-  if (!result && list[0].fused && (issue || !remote || !fusable(list, n)))
+  if (!result && list[0].fused && remote && !fusable(list, n))
     result = fail(ncclInvalidUsage, "a fused crossing is ncclSend and ncclRecv in one group (the caller's kernel combining what lands with its own "
-                                    "part: an all-reduce's or a reduce's form), an in-place ncclBroadcast or an in-place ncclAllGather, of two ranks, "
-                                    "the whole operand one SEND and one landing, not issued, with no group in flight (ncclMeshFusableRooted)");
+                                    "part: an all-reduce's or a reduce's form), an in-place ncclBroadcast or an in-place ncclAllGather, the whole "
+                                    "operand one SEND and one landing (ncclMeshFused's two records; ncclMeshFusableRooted)");
   if (result) { pthread_mutex_unlock(&group_lock); calls_free(list, n); return result; }
   if (finished) metal_collect(finished);
   void *const violation = remote ? comm->violation : NULL;
   const char *message = NULL;
-  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, list[0].polls, &message)
+  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, polls, &message)
                                          : metal_begin(list[0].command, list[0].encoder, list[0].fused ? list[0].residency : NULL, violation,
-                                                       list[0].polls, &message);
+                                                       polls, &message);
   if (!program) {
     pthread_mutex_unlock(&group_lock); calls_free(list, n);
     return fail(ncclSystemError, "%s", message);
@@ -3127,7 +3193,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       if (!named(st->buffer[b] = spare_where(program, comm, bytes, holder))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
     }
   }
-  struct inflight *g = NULL;
+  struct inflight *g = NULL, *before = NULL;
   int gate = 0, published = 0, scheduled = 0;
   uint64_t ticket = 0;
   if (!result && remote) {
@@ -3143,6 +3209,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
       g->lone = lone_of(g);
       g->list = list; g->n = n; g->ticket = ticket = ++tickets;
+      before = inflight_last;
       if (inflight_last) inflight_last->next_group = g; else inflight = g;
       inflight_last = g;
       scheduled = 1;
@@ -3180,8 +3247,16 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && g) {
     int lands = 0, publishes = 0;
     for (uint32_t h = 0; h < comm->count; h++) { publishes |= g->end[h][0] > g->start[h][0]; lands |= g->end[h][1] > g->start[h][1]; }
-    if (g->fused) { *list[0].fused = (ncclMeshFused){{0}, {0}}; fusing.out = list[0].fused; fusing.published = fusing.landed = 0; }
-    result = walk(program, issue ? g : NULL, issue ? NULL : g, &published);
+    /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
+       library encodes no wait of it; the groups in flight before it are completed first, so it completes alone on its
+       one channel's track (complete_track: the caller's kernels keep that stream's order) */
+    const int issuing = issue && !g->fused;
+    if (g->fused && before) {
+      result = complete(program, before, &published);
+      if (!result) result = retire(program);
+    }
+    if (g->fused) { fusing.out = list[0].fused; fusing.published = fusing.landed = 0; }
+    if (!result) result = walk(program, issuing ? g : NULL, issuing ? NULL : g, &published);
     if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))
       result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publication and landing of its whole operand "
                                       "(ncclMeshFusableRooted)");
@@ -3191,7 +3266,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, list, n);
   program_end(program, list[0].encoder != NULL, result);
-  if (result && scheduled) walk_failed(comm, issue ? 0 : ticket, result);
+  if (result && scheduled) walk_failed(comm, issue && !list[0].fused ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   if (!scheduled) spares_give(comm, holder);
   pthread_mutex_unlock(&group_lock);
@@ -3259,7 +3334,6 @@ ncclResult_t ncclMeshPosition(ncclComm_t comm, uint64_t *group) {
 
 ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint64_t *issued, uint64_t *ended) {
   if (!comm || (count && (!issued || !ended))) return fail(ncclInvalidArgument, "comm, issued or ended is NULL");
-  if (!comm->timed && comm->nranks > 1) return fail(ncclInvalidUsage, "communicator %s holds no stream", comm->name);
   /* the bridges' ticks (mach_absolute_time) in ns of the same clock, CLOCK_UPTIME_RAW's */
   static mach_timebase_info_data_t base;
   pthread_mutex_lock(&group_lock);
@@ -3291,11 +3365,11 @@ ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint
   return ncclSuccess;
 }
 
-/* whether a rank's moves of a program are at most one SEND and one receive, each of every part of what it moves: the
-   whole operand in one piece each way, or (`gather`, an all-gather's) one segment's every part, its own sent and another's
-   received */
+/* whether a rank's moves of a program are at most one SEND and one receive, toward one peer, each of every part of what
+   it moves: the whole operand in one piece each way, or (`gather`, an all-gather's) one segment's every part, its own
+   sent and another's received (a rank that forwards, a chain's middle, takes the unfused form) */
 static int whole_moves(const struct mesh_program *program, uint32_t rank, int gather) {
-  uint32_t sends = 0, receives = 0;
+  uint32_t sends = 0, receives = 0, peer = UINT32_MAX;
   for (uint32_t i = program->first[rank]; i < program->first[rank + 1]; i++) {
     const struct mesh_move *m = program->move + i;
     const uint32_t s = program->segment[m->part];
@@ -3306,7 +3380,10 @@ static int whole_moves(const struct mesh_program *program, uint32_t rank, int ga
       within += of && p >= m->part && p < m->part + m->parts;
     }
     const int send = m->op == MESH_STEP_SEND;
-    if (within != m->parts || m->parts != parts || (gather && send != (s == rank)) || (send ? sends++ : receives++)) return 0;
+    if (within != m->parts || m->parts != parts || (gather && send != (s == rank)) || (peer != UINT32_MAX && m->peer != peer) ||
+        (send ? sends++ : receives++))
+      return 0;
+    peer = m->peer;
   }
   return 1;
 }
@@ -3319,9 +3396,11 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
   const int what = kind == ncclMeshFuseBroadcast ? MESH_BROADCAST : kind == ncclMeshFuseReduce ? MESH_REDUCE
                  : kind == ncclMeshFuseAllGather ? MESH_ALLGATHER : MESH_ALLREDUCE;
-  if (comm->nranks != 2 || !count || root < 0 || root > 1 || (!has_root(what) && root) || (int)type < 0 || (int)type >= ncclNumTypes ||
-      comm->toward[1 - comm->rank] < 0)
+  /* no crossing (one rank, no elements) has no fused step; a rooted kind's root is one of the ranks, and the type one
+     NCCL names (SIZE) */
+  if (comm->nranks < 2 || !count || (has_root(what) && (root < 0 || root >= comm->nranks)) || (int)type < 0 || (int)type >= ncclNumTypes)
     return ncclSuccess;
+  if (!has_root(what)) root = 0;
   const int rooted = comm->rank == root;
   /* an all-reduce and a reduce are the caller's ncclSend and ncclRecv (each rank both; a reduce's root lands and its
      peer publishes), whatever their size; a broadcast and an all-gather the communicator's program, which a configured
@@ -3330,7 +3409,8 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
      all-gather's every rank's piece */
   if (what == MESH_BROADCAST || what == MESH_ALLGATHER) {
     pthread_mutex_lock(&group_lock);
-    const struct mesh_program *program = comm_compile(comm) ? NULL : program_of(comm, what, root, (what == MESH_ALLGATHER ? 2 : 1) * count * SIZE[type]);
+    const size_t bytes = (what == MESH_ALLGATHER ? (size_t)comm->nranks : 1) * count * SIZE[type];
+    const struct mesh_program *program = comm_compile(comm) ? NULL : program_of(comm, what, root, bytes);
     const int whole = program && !program->scratch && whole_moves(program, (uint32_t)comm->rank, what == MESH_ALLGATHER);
     pthread_mutex_unlock(&group_lock);
     if (!whole) return ncclSuccess;
@@ -3346,6 +3426,40 @@ const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
 
 ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
 
+/* one communicator's calls of a group, launched as its own group: on the Metal path (launch_metal, which owns them) or
+   the host path (launch) */
+static ncclResult_t launch_one(struct call *list, size_t n) {
+  if (list[0].stream) return launch_metal(list, n);
+  const ncclResult_t result = launch(list, n);
+  if (result) list[0].comm->async = result;
+  calls_free(list, n);
+  return result;
+}
+
+/* a group's calls of one communicator (ncclGroupEnd), launched as a group of their own (launch_one: on a thread of its
+   own where they take the host path), its result and its message */
+struct part { struct call *list; size_t n; ncclResult_t result; struct said said; pthread_t thread; int threaded, metal; };
+static void *part_run(void *argument) {
+  struct part *p = argument;
+  p->result = launch_one(p->list, p->n);
+  p->said = last;
+  return NULL;
+}
+/* whether any of a part's calls crosses a link */
+static int part_crosses(const struct part *p) {
+  int any = 0;
+  for (size_t i = 0; i < p->n; i++) any |= crosses(p->list + i);
+  return any;
+}
+
+/* the group ended: a fused crossing's records zeroed (filled by its steps: ncclMeshFused), then each communicator's
+   calls, in their order, a group of its own, the communicators in the order the group first names them, every one
+   launched whatever another's result, the first failure (in that order) returned, as NCCL's group on several
+   communicators has every one progress together: the Metal path's each issued (its stream's issue record, else one of
+   the library's) and, where the stream asked no issue, all completed through the greatest ticket on the last one's
+   stream (ncclMeshComplete: its walk interleaves their channels as tracks; a stream that asked issue gets that ticket
+   and `published` any's); the host path's each on a thread of its own, joined; two that cross a link and name one
+   fused record, which holds one crossing, the later failing as a value */
 ncclResult_t ncclGroupEnd(void) {
   if (depth <= 0) return fail(ncclInvalidUsage, "ncclGroupEnd without ncclGroupStart");
   if (--depth) return ncclSuccess;
@@ -3353,10 +3467,92 @@ ncclResult_t ncclGroupEnd(void) {
   const size_t n = call_count;
   calls = NULL; call_count = call_capacity = 0;
   if (!n) { free(list); return ncclSuccess; }
-  if (list[0].stream) return launch_metal(list, n);
-  const ncclResult_t result = launch(list, n);
-  if (result) list[0].comm->async = result;
-  calls_free(list, n);
+  for (size_t i = 0; i < n; i++)
+    if (list[i].fused) *list[i].fused = (ncclMeshFused){{0}, {0}};
+  int several = 0;
+  for (size_t i = 1; i < n; i++) several |= list[i].comm != list[0].comm;
+  if (!several) return launch_one(list, n);
+  struct part *part = calloc(n, sizeof *part);
+  unsigned char *taken = calloc(n, 1);
+  if (!part || !taken) { free(part); free(taken); calls_free(list, n); return fail(ncclSystemError, "out of memory"); }
+  size_t parts = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (taken[i]) continue;
+    const ncclComm_t comm = list[i].comm;
+    struct part *p = part + parts++;
+    p->metal = list[i].stream != NULL;
+    for (size_t j = i; j < n; j++) p->n += list[j].comm == comm;
+    p->list = malloc(p->n * sizeof *p->list);
+    size_t k = 0;
+    for (size_t j = i; j < n; j++)
+      if (list[j].comm == comm) {
+        taken[j] = 1;
+        if (p->list) p->list[k++] = list[j];
+        else call_parts_free(list + j);
+      }
+    if (!p->list) { p->result = fail(ncclSystemError, "out of memory"); p->said = last; }
+  }
+  free(taken); free(list);
+  for (size_t b = 1; b < parts; b++)
+    for (size_t a = 0; a < b && part[b].list; a++)
+      if (part[a].list && part[b].list[0].fused && part[a].list[0].fused == part[b].list[0].fused && part_crosses(part + a) && part_crosses(part + b)) {
+        part[b].result = fail(ncclInvalidUsage, "a fused crossing on several communicators: one ncclMeshFused holds one crossing's records");
+        part[b].said = last;
+        calls_free(part[b].list, part[b].n);
+        part[b].list = NULL;
+      }
+  /* the caller's issue record, and the stream the Metal parts complete on where it asked none: the last Metal part's,
+     made from its calls' fields (the caller's ncclMeshStream need not outlive its calls) */
+  ncclMeshIssue *issue = NULL, internal = {0, 0};
+  ncclMeshStream on = {0};
+  int metals = 0;
+  for (size_t k = 0; k < parts; k++) {
+    const struct call *c = part[k].list;
+    if (!c || !part[k].metal) continue;
+    if (!metals++) issue = c->issue;
+    uint32_t polls = c->polls;
+    for (size_t i = 1; i < part[k].n; i++) polls = !polls || !c[i].polls ? 0 : polls > c[i].polls ? polls : c[i].polls;
+    on = (ncclMeshStream){c->command, c->encoder, c->workspace, c->context, NULL, c->table, c->residency, polls, NULL};
+  }
+  uint64_t ticket = 0;
+  int published = 0;
+  for (size_t k = 0; k < parts; k++) {
+    struct part *p = part + k;
+    if (!p->list || !p->metal) continue;
+    ncclMeshIssue *const used = issue ? issue : &internal;
+    for (size_t i = 0; i < p->n; i++) p->list[i].issue = used;
+    p->result = launch_one(p->list, p->n);
+    p->said = last;
+    p->list = NULL;
+    if (!p->result) { published |= used->published; ticket = used->ticket > ticket ? used->ticket : ticket; }
+  }
+  ncclResult_t completed = ncclSuccess;
+  struct said completing = {0, ""};
+  if (!issue && ticket) {
+    int any = 0;
+    if ((completed = ncclMeshComplete(ticket, &on, &any))) completing = last;
+  }
+  for (size_t k = 0; k < parts; k++) {
+    struct part *p = part + k;
+    if (!p->list || p->metal) continue;
+    const int error = pthread_create(&p->thread, NULL, part_run, p);
+    p->threaded = !error;
+    if (error) {
+      p->result = fail(ncclSystemError, "a thread for communicator %s's calls: %s", p->list[0].comm->name, strerror(error));
+      p->said = last;
+      calls_free(p->list, p->n);
+    }
+  }
+  ncclResult_t result = ncclSuccess;
+  struct said first = {0, ""};
+  for (size_t k = 0; k < parts; k++) {
+    if (part[k].threaded) pthread_join(part[k].thread, NULL);
+    if (part[k].result && !result) { result = part[k].result; first = part[k].said; }
+  }
+  free(part);
+  if (completed && !result) { result = completed; first = completing; }
+  if (issue) *issue = (ncclMeshIssue){ticket, published};
+  if (result) last = first;
   return result;
 }
 
@@ -3378,7 +3574,7 @@ static ncclResult_t admit(struct call *made) {
   const ncclComm_t comm = c.comm;
   if (reducing(c.what)) {
     const int k = (int)c.op - ncclNumOps;
-    if ((int)c.op < 0 || (k >= 0 && (k >= OPS || !comm->ops[k].used))) return fail(ncclInvalidArgument, "operator %d", (int)c.op);
+    if ((int)c.op < 0 || (k >= 0 && (k >= (int)comm->nops || !comm->ops[k].used))) return fail(ncclInvalidArgument, "operator %d", (int)c.op);
     const uint32_t u = k >= 0 ? comm->ops[k].unit : 0;
     int rows = !u || !(c.count % u);
     for (int r = 0; u && c.segments && r < comm->nranks; r++) rows &= !(c.segments[r] % u);
@@ -3528,10 +3724,7 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *s
     c.segments[n + q] = recvcounts ? recvcounts[q] : (from < 0 || from == q) && (to < 0 || to == me) ? count : 0;
     if (q != me) c.count += c.segments[q] + c.segments[n + q];
   }
-  const unsigned long long sent = c.segments[me], received = c.segments[n + me];
-  if (sent == received) return enqueue(c);
-  free(c.segments);
-  return fail(ncclInvalidArgument, "an all-to-all's own segment, sent (%llu) and received (%llu), differ", sent, received);
+  return enqueue(c);
 }
 ncclResult_t ncclMeshAlltoAllV(const void *sendbuff, const size_t *sendcounts, void *recvbuff, const size_t *recvcounts, ncclDataType_t datatype,
                                ncclComm_t comm, cudaStream_t stream) {
@@ -3590,17 +3783,14 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
 }
 
 /* ncclCommSplit: every rank's (color, key) and its report (reach_read; none for NCCL_SPLIT_NOCOLOR) all-gathered on comm
-   (in a lease, each rank's row from a page),
-   the ranks of this color ordered by key, then rank; two ranks of a color on one node refused alike (comm_apart), each
-   rank's streams toward its color's nodes held (comm_hold: a stream its parent holds refuses it, EBUSY),
-   and a second all-gather on comm carrying each rank's holding's status and its holdings' start words, which each
+   (in a lease, each rank's row from a page), the ranks of this color ordered by key, then rank (two of a color on one
+   node refused alike: comm_apart), each rank's streams toward its color's nodes held (comm_hold: the streams its parent holds are not free, EBUSY where none is), and a
+   second all-gather on comm carrying each rank's holding's status and its holdings' start words, which each
    rank tells its own as the child's channels are made (comm_join): NCCL's bootstrapSplit (the child's exchange over its parent's), with the init's
    two gathers.  A failure at any rank of a color fails that color's split on each of its ranks as a value, what it held
-   let go (comm_free) */
-ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config) {
-  (void)config;
-  if (!comm || !newcomm) return fail(ncclInvalidArgument, "comm or newcomm is NULL");
-  if (depth) return fail(ncclInvalidUsage, "ncclCommSplit inside a group");
+   let go (comm_free).  Inside a group, its all-gathers run at once, the group's calls set aside until it returns
+   (aside) */
+static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newcomm) {
   const int n = comm->nranks;
   const uint32_t split = comm->splits++;
   struct row { int64_t color, key; struct report report; } mine = {color, key, {.rank = comm->rank}}, *every = calloc((size_t)n, sizeof *every);
@@ -3651,15 +3841,38 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
   return result;
 }
 
+/* the calling thread's group set aside (`to` 1: its depth and calls kept, none open) or taken back (0), so a call that
+   runs its own collectives at once (ncclCommSplit, ncclCommGrow) runs them inside a group as it does outside one */
+static void aside(int to) {
+  static _Thread_local struct { int depth; struct call *calls; size_t count, capacity; } kept;
+  if (to) {
+    kept.depth = depth; kept.calls = calls; kept.count = call_count; kept.capacity = call_capacity;
+    depth = 0; calls = NULL; call_count = call_capacity = 0;
+    return;
+  }
+  free(calls);
+  depth = kept.depth; calls = kept.calls; call_count = kept.count; call_capacity = kept.capacity;
+}
+
+ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config) {
+  (void)config;
+  if (!comm || !newcomm) return fail(ncclInvalidArgument, "comm or newcomm is NULL");
+  aside(1);
+  const ncclResult_t result = split(comm, color, key, newcomm);
+  aside(0);
+  return result;
+}
+
 /* ncclCommShrink: comm's ranks but the excluded ones, in rank order, with no exchange among them (a departed member
-   answers none), so holding no stream: a shrink to two ranks or more, whose channels would be none, is refused (ENOLCK);
-   with NCCL_SHRINK_ABORT, comm revoked first (ncclCommRevoke) */
+   answers none), so holding no stream: a shrink to two ranks or more is made with no channel, its map none, so its
+   first call that crosses a link fails as a value (comm_routes: no map of its members; plan_calls: no link toward the
+   peer); a rank among those it excludes is in no shrunk communicator (*newcomm NULL, as NCCL_SPLIT_NOCOLOR's); with
+   NCCL_SHRINK_ABORT, comm revoked first (ncclCommRevoke) */
 ncclResult_t ncclCommShrink(ncclComm_t comm, int *excludeRanksList, int excludeRanksCount, ncclComm_t *newcomm, ncclConfig_t *config,
                             int shrinkFlags) {
   (void)config;
   if (!comm || !newcomm || excludeRanksCount < 0 || (excludeRanksCount && !excludeRanksList))
     return fail(ncclInvalidArgument, "ncclCommShrink's arguments");
-  if (depth) return fail(ncclInvalidUsage, "ncclCommShrink inside a group");
   *newcomm = NULL;
   int *ranks = calloc((size_t)comm->nranks, sizeof *ranks), count = 0, kept = 0;
   if (!ranks) return fail(ncclSystemError, "out of memory");
@@ -3670,11 +3883,7 @@ ncclResult_t ncclCommShrink(ncclComm_t comm, int *excludeRanksList, int excludeR
     kept |= !excluded && r == comm->rank;
   }
   if (shrinkFlags & NCCL_SHRINK_ABORT) ncclCommRevoke(comm, NCCL_REVOKE_DEFAULT);
-  const ncclResult_t result =
-    !kept ? fail(ncclInvalidArgument, "rank %d is among the ranks it excludes", comm->rank)
-    : count > 1 ? fail(ncclInvalidUsage, "a shrink of %s to %d ranks would hold no stream (ENOLCK): it makes no exchange among them, and only "
-                       "an exchange holds a communicator's streams (an init's bootstrap, ncclCommSplit over its parent)", comm->name, count)
-    : comm_sub(comm, ranks, count, comm->splits++, -1, newcomm);
+  const ncclResult_t result = kept ? comm_sub(comm, ranks, count, comm->splits++, -1, newcomm) : ncclSuccess;
   free(ranks);
   return result;
 }
@@ -3685,15 +3894,17 @@ ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId *uniqueId) {
 }
 
 /* ncclCommGrow: NCCL's bootstrap at the id of comm's root (ncclCommGetUniqueId), which the root broadcasts on comm to
-   comm's other ranks (from a lease: a crossing's bytes are a lease's); comm's ranks (rank -1) keep their ranks and a new one (comm NULL) takes `rank`, every rank
-   reporting its node and the nodes its bridge reaches; the communicator, named by the id, holds its streams as every init does */
+   comm's other ranks (from a lease: a crossing's bytes are a lease's); comm's ranks keep their ranks (the `rank` they
+   pass, NCCL's -1, not read) and a new one (comm NULL) takes `rank`, every rank reporting its node and the nodes its
+   bridge reaches; the communicator, named by the id, holds its streams as every init does.  Inside a group, its
+   broadcast runs at once, the group's calls set aside until it returns (aside) */
 ncclResult_t ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId *uniqueId, int rank, ncclComm_t *newcomm, ncclConfig_t *config) {
   (void)config;
-  if (!newcomm || (comm ? rank != -1 || nRanks < comm->nranks || (!comm->rank && !uniqueId) : !uniqueId))
+  if (!newcomm || (comm ? nRanks < comm->nranks || (!comm->rank && !uniqueId) : !uniqueId))
     return fail(ncclInvalidArgument, "ncclCommGrow's arguments");
-  if (depth) return fail(ncclInvalidUsage, "ncclCommGrow inside a group");
   if (!comm) return ncclCommInitRank(newcomm, nRanks, *uniqueId, rank);
   ncclUniqueId *id = NULL, given;
+  aside(1);
   ncclResult_t result = ncclMemAlloc((void **)&id, sizeof *id);
   if (!result) {
     *id = comm->rank ? (ncclUniqueId){{0}} : *uniqueId;
@@ -3701,5 +3912,6 @@ ncclResult_t ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId *uniqu
     given = *id;
     ncclMemFree(id);
   }
+  aside(0);
   return result ? result : ncclCommInitRank(newcomm, nRanks, given, comm->rank);
 }

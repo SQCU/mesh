@@ -704,8 +704,9 @@ static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,ui
 
 /* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]), a segment's parts by the program's
    weights (its trees': the caller's, a configured form's shares, or equal; libnccl-mesh never compiles the packing's
-   flows into them), each a whole number of quanta of `q` elements from the segment's start but the segment's last;
-   0 where the cut is none */
+   flows into them), each a whole number of quanta of `q` elements from the segment's start but the segment's last,
+   the remainder's quanta one each to the first parts of weight above 0 (a part of weight 0, a tree of share 0, takes
+   none); 0 where the cut is none */
 static int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t q,uint64_t *lo,
                                uint64_t *count){
   const uint32_t segments=mesh_program_segments(program);
@@ -723,8 +724,9 @@ static int mesh_program_ranges(const struct mesh_program *program,uint64_t eleme
     uint64_t remainder=floors<units?units-floors:0,at=base;
     for(uint32_t p=0;p<program->parts;p++){
       if(program->segment[p]!=g)continue;
-      uint64_t share=(uint64_t)floor((double)units*mesh_exp(program->log_weight[p]-most)/total);
-      if(remainder && at+share*q<base+length){share++;remainder--;}
+      const double weight=mesh_exp(program->log_weight[p]-most);
+      uint64_t share=(uint64_t)floor((double)units*weight/total);
+      if(remainder && weight>0 && at+share*q<base+length){share++;remainder--;}
       share*=q;
       if(at+share>base+length)share=base+length-at;
       lo[p]=at;count[p]=share;at+=share;

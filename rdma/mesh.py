@@ -81,14 +81,6 @@ def joined(lmap):
     return None
 
 
-def _apart(lmap, named, nodes):
-    """ValueError naming the first two of `nodes` (map node v's name nodes[v]) lmap does not join, where it does not:
-    the map a communicator of them reads, which no collective runs on."""
-    pair = joined(lmap)
-    if pair is not None:
-        raise ValueError(f'{named}: no route of the map joins {nodes[pair[0]]} and {nodes[pair[1]]}')
-
-
 def routes(lmap):
     """mesh_routes: the routing table of lmap's links by its marks (each node's in-tree of shortest routes, a parent
     among equals the one of the least hash of its mark, the parent's and the root's: a route moves only where the
@@ -140,14 +132,14 @@ def members(whole, among, marks=None):
     none), so two members are linked where their route crosses no other member: the rule mesh_map reads the bridges'
     records by.  `marks` (None: the whole map's own) each whole-map node's mark, as the bridges mark each node by its
     node number, so the table is the bridges' (a whole map given links and bandwidths alone, link_map('graph', N, links,
-    bandwidths), takes them here; its table, made by other marks, is made again by these)."""
+    bandwidths), takes them here; its table, made by other marks, is made again by these).  The map as it is, whether
+    or not it joins its members (joined() names two it leaves apart)."""
     if marks is not None:
         whole = LinkMap(whole.kind, whole.nodes, whole.pairs, whole.bandwidth, whole.relays, None, marks)
     among = None if among is None else list(among)
-    count, lmap, nodes, _ = _members(whole, among, False)
+    count, lmap, _, _ = _members(whole, among, False)
     if count < 0:
         raise ValueError(f'mesh_map_members over {among}: {os.strerror(-count)}')
-    _apart(lmap, f'mesh_map_members over {among}', [f'whole-map node {v}' for v in nodes])
     return lmap
 
 
@@ -170,16 +162,13 @@ def current(members=None):
     bridge node number, `next` the routing table; members(map, ...) of the whole map is the
     map over any of them), `nodes` and `names` each map node's (then each relay's) bridge
     node and name, `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
-    a node no bridge reaches among its nodes (joined() names two it leaves apart).  OSError naming the bridge where it is
-    unreachable; ValueError naming two members no route joins, where `members` are given and the map leaves them apart
-    (no session runs on it: nccl-mesh.c comm_read)."""
+    a node no bridge reaches among its nodes, and the members' map as it is, joined or not (joined() names two it leaves
+    apart).  OSError naming the bridge where it is unreachable."""
     serial, own = wait(), ffi.new('uint32_t *')
     lib.mesh_reached(ffi.NULL, 0, own)
     count, lmap, nodes, names = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    if members:
-        _apart(lmap, f"the bridges' map over {list(members)}", [f'node {v} ({names[i] or "no record"})' for i, v in enumerate(nodes)])
     return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
 
 

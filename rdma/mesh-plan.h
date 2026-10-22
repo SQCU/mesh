@@ -287,8 +287,8 @@ uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segment
    mesh_program_advise. */
 uint32_t mesh_group_advise(const struct mesh_group *,void (*warn)(void *,const char *),void *arg);
 /* The planner's rules' version: the trees, routes, compiles and lists above, and libnccl-mesh's table of programs made
-   of them (nccl-mesh.c comm_routes: the caller's, or the communicator's configured forms, nccl.h ncclMeshCommForms,
-   and then every collective along the caller's paths or the shortest-path trees, uncut).  7: the single-phase
+   of them (nccl-mesh.c comm_routes: the communicator's configured forms, nccl.h ncclMeshCommForms, then the caller's
+   programs, or every collective along the caller's paths or the shortest-path trees, uncut).  7: the single-phase
    all-reduce's node that sends its operand to one node only and forwards nothing sends it from the operand itself (the
    two-node direct exchange: no scratch).  8: a step is one entry of its holding's send list or landing list
    (mesh_group_lay, each list in its own order), the program's own cuts on pages (mesh_program_steps_cut); no wire, no
