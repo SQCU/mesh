@@ -118,7 +118,8 @@
    NCCL_MESH_POLLS (design/transport.md); the waits a group encodes at its call take its calls' greatest, and those
    ncclMeshComplete encodes its stream's.  A wait that reaches its bound or reads a lost link records its
    cause, entry and channel in its communicator's failure words, on which no kernel halts (every later dispatch runs as
-   encoded, a later wait ending at its landing or its own bound), and the group fails as a value after its command
+   encoded, a later wait on those words ending at once, one under way within 2^10 loads: nccl-mesh-kernels.h
+   mesh_step_failed), and the group fails as a value after its command
    buffer (ncclCommGetAsyncError, or the communicator's next group).
    The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
    id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
@@ -221,7 +222,9 @@ struct mesh_trees;
 
 /* design/transport.md: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
    above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
-   rises, rdma/NCCL.md "Bounded waits"); each wait's own, so k waits that never land hold the GPU up to k times it */
+   rises, rdma/NCCL.md "Bounded waits"); each wait's own, and once one wait has recorded a failure every other wait on
+   the same failure words ends at once or within 2^10 loads (nccl-mesh-kernels.h mesh_step_failed), so waits that never
+   land hold the GPU about one bound in all */
 #define NCCL_MESH_POLLS 4500000u
 /* The stream: NULL (the host path) or an ncclMeshStream (the Metal path, above). */
 typedef void *cudaStream_t;
