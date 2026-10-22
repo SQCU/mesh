@@ -40,14 +40,23 @@ inline uint2 share(uint w) {
 }
 
 // docs/writing-a-service.md#the-step-kernel
+inline uint lane_element(uint lane) {
+    uint q = lane / 4;
+    return ((q & 4) + (lane / 2) % 4) * 8 + (q & 2) * 2 + (lane % 2) * 2;
+}
+
+// docs/writing-a-service.md#the-step-kernel
 template <uint RG>
-inline void partial(device const half* src, uint ld, device const half* wp, uint k0, uint k1, thread simdgroup_float8x8* acc) {
+inline void partial(coherent(device) device const half* src, uint ld, device const half* wp, uint k0, uint k1, uint at,
+                    thread simdgroup_float8x8* acc) {
     for (uint kt = k0; kt < k1; kt++) {
         simdgroup_half8x8 b;
         simdgroup_load(b, wp + kt * 64, 8);
         for (uint r = 0; r < RG; r++) {
             simdgroup_half8x8 a;
-            simdgroup_load(a, src + r * 8 * ld + kt * 8, ld);
+            half2 v = *(coherent(device) device const half2*)(src + (r * 8 + at / 8) * ld + kt * 8 + at % 8);
+            a.thread_elements()[0] = v[0];
+            a.thread_elements()[1] = v[1];
             simdgroup_multiply_accumulate(acc[r], a, b, acc[r]);
         }
     }
@@ -55,8 +64,8 @@ inline void partial(device const half* src, uint ld, device const half* wp, uint
 
 // docs/writing-a-service.md#the-step-kernel
 template <uint RG, uint RB, uint KIN, uint SG, typename Epi>
-inline void stage(device const half* src, uint ld, device const half* Wt, uint2 tiles, uint groups, uint ks, uint sgid,
-                  threadgroup float* red, thread Epi& epi) {
+inline void stage(coherent(device) device const half* src, uint ld, device const half* Wt, uint2 tiles, uint groups, uint ks, uint sgid,
+                  uint at, threadgroup float* red, thread Epi& epi) {
     constexpr uint KT = KIN / 8;
     const uint items = tiles.y * groups, per = SG / ks;
     for (uint pass = 0; pass < items; pass += per) {
@@ -65,7 +74,7 @@ inline void stage(device const half* src, uint ld, device const half* Wt, uint2 
         uint ct = item / groups, g = item % groups;
         simdgroup_float8x8 acc[RG];
         for (uint r = 0; r < RG; r++) acc[r] = simdgroup_float8x8(0.0f);
-        if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tiles.x + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, acc);
+        if (active) partial<RG>(src + g * RG * 8 * ld, ld, Wt + (tiles.x + ct) * KT * 64, seg * KT / ks, (seg + 1) * KT / ks, at, acc);
         for (uint r0 = 0; r0 < RG && ks > 1; r0 += RB) {
             for (uint r = 0; r < RB; r++) simdgroup_store(acc[r0 + r], red + (sgid * RB + r) * 64, 8);
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -86,23 +95,19 @@ inline void stage(device const half* src, uint ld, device const half* Wt, uint2 
 
 // docs/writing-a-service.md#the-step-kernel
 struct Activated {
-    device half* Y; uint col0, ld;
+    coherent(device) device half* Y; uint col0, ld, at;
     void operator()(thread simdgroup_float8x8& acc, uint ct, uint rt) thread {
-        simdgroup_half8x8 o;
-        for (uint e = 0; e < 2; e++) o.thread_elements()[e] = half(tanh(acc.thread_elements()[e]));
-        simdgroup_store(o, Y + rt * 8 * ld + col0 + ct * 8, ld);
+        *(coherent(device) device half2*)(Y + (rt * 8 + at / 8) * ld + col0 + ct * 8 + at % 8) =
+            half2(tanh(acc.thread_elements()[0]), tanh(acc.thread_elements()[1]));
     }
 };
 
 // docs/writing-a-service.md#the-step-kernel
 struct Summand {
-    device half* P; uint col0, ld; threadgroup float* own; uint lane, lanes;
+    device half* P; uint col0, ld, at;
     void operator()(thread simdgroup_float8x8& acc, uint ct, uint rt) thread {
-        simdgroup_store(acc, own, 8);
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = lane; e < 64; e += lanes)
-            mesh_step_write<half>((device uchar*)P, (rt * 8 + e / 8) * ld + col0 + ct * 8 + e % 8, half(own[e]));
-        simdgroup_barrier(mem_flags::mem_threadgroup);
+        mesh_step_write<half2>((device uchar*)P, ((rt * 8 + at / 8) * ld + col0 + ct * 8 + at % 8) / 2, 
+                               half2(acc.thread_elements()[0], acc.thread_elements()[1]));
     }
 };
 
@@ -114,7 +119,8 @@ struct chain_words { uint first, phase, rows, ks0, ks1, last, drains, pad; mesh_
 template <uint TILE, uint K, uint S, uint G, uint RG, uint RB, uint THREADS, uint SIMD, uint PATIENCE, uint PEERS>
 [[max_total_threads_per_threadgroup(THREADS)]]
 kernel void chain_step(device const half* At [[buffer(0)]], device const half* Bt [[buffer(1)]], device const half* E [[buffer(2)]],
-                       device half* out [[buffer(3)]], device half* X [[buffer(4)]], device half* Y [[buffer(5)]], device half* P [[buffer(6)]],
+                       device half* out [[buffer(3)]], coherent(device) device half* X [[buffer(4)]],
+                       coherent(device) device half* Y [[buffer(5)]], device half* P [[buffer(6)]],
                        device atomic_uint* stamps [[buffer(7)]], device atomic_uint* err [[buffer(8)]],
                        device atomic_uint* arrivals [[buffer(9)]], device const half* Pprev [[buffer(10)]],
                        constant chain_words<PEERS>& words [[buffer(15)]],
@@ -157,12 +163,13 @@ kernel void chain_step(device const half* At [[buffer(0)]], device const half* B
     if (words.last) return;
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, SIMD, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 1u)) return;
-    Activated activated{Y, ys.x * TILE, S};
-    stage<RG, RB, K, SG>(X, K, At, ys, groups, ks0, sgid, red, activated);
+    const uint at = lane_element(lane);
+    Activated activated{Y, ys.x * TILE, S, at};
+    stage<RG, RB, K, SG>(X, K, At, ys, groups, ks0, sgid, at, red, activated);
     publish(stamps, w, tid, phase);
     if (!await_stamps<G, SIMD, PATIENCE>(stamps, phase, sgid, lane, &stop, err, 2u)) return;
-    Summand summand{P, x0, K, red + sgid * RB * 64, lane, SIMD};
-    stage<RG, RB, S, SG>(Y, S, Bt, xs, groups, ks1, sgid, red, summand);
+    Summand summand{P, x0, K, at};
+    stage<RG, RB, S, SG>(Y, S, Bt, xs, groups, ks1, sgid, at, red, summand);
     for (uint q = 0; q < PEERS; q++) mesh_step_enter(*words.publish[q].p, words.publish[q].v, words.publish[q].progress, w == 0 && tid == 0);
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, G, tid, &last)) {

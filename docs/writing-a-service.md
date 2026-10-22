@@ -141,7 +141,10 @@ reads that at its start and ends at once, so queued steps never spin again. The 
 The kernel does three things, and it runs the step's crossing itself (torch-mesh's `fused`: rdma/nccl.h
 `ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for every peer's part of
 z to land, adds them to its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
-workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Third, they make the rank's part
+workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Workers read each other's x and y
+within one dispatch, which Metal makes visible only through `coherent(device)` memory, so those loads and stores carry
+it: each lane moves the two elements its 8 x 8 matrix fragment holds (MLX's coordinates, steel/gemm/mma.h), since
+`simdgroup_load` and `simdgroup_store` take no coherent pointer. Third, they make the rank's part
 of z from y and its rows of B, and publish it. Each worker writes its slice of the part straight into the step's send
 tensor, each element once through the library's `mesh_step_write` (a system-coherent store: the bridge sends as soon as
 `ready` passes, while the kernel's command buffer still runs), and the last worker to finish releases it to every peer: one fence and one store of each holding's `ready`,
