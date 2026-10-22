@@ -135,10 +135,10 @@ affected: `device_up` reads the port active before it allocates.
 - *Do max_cq 6 and max_pd 6 constrain the design?* Not for one context a device: a port's child takes one PD and two
   CQs, and the kernel's one PD and one CQ leave at least five of each. They would bound a design that spreads one
   link over several contexts of a device (section 8, P3): at most two more contexts' CQ pairs.
-- *Can a QP on 27 carry what several did on 26?* No. On this transport a queue pair carries one ring, because a SEND
-  fills the oldest posted receive and must cover its frame count exactly (TN3205). Several rings on one queue pair
-  need either a fixed interleave, where an idle holder blocks the rest, or receives into staging with a header and a
-  copy, which gives up zero copy. 27 adds no SRQ and no immediate data that would change this, and its QP's
+- *Can a QP on 27 carry what several did on 26?* No. On this transport a queue pair carries one sequence of receives,
+  because a SEND fills the oldest posted receive and must cover its frame count exactly (TN3205). Several streams on
+  one queue pair need either a fixed interleave, where an idle holder blocks the rest, or receives into staging with a
+  header and a copy, which gives up zero copy. 27 adds no SRQ and no immediate data that would change this, and its QP's
   capacities equal 26's.
 - *macOS 27 or M5 Ultra?* Not separable with this data. Node 521750041 is both the only macOS 27 machine and the only
   M5 Ultra. The kernel objects and librdmacm are visibly the OS's (a driver and SDK change), but the count 3 could
@@ -172,15 +172,16 @@ The keepalive lane comes first once a stream fits beside it. The reserved lane 1
 full plan is lane for lane the layout of MESH_VERSION 131. The plan of a smaller budget is always a subset of a
 larger one's.
 
-Section 10 moves the keepalive off lane 0. The plans stay as in this table, so the two ends' LINKs still match, but
-nothing is posted on lane 0 or lane 1, and every plan keeps the keepalive.
+Section 10 gives every plan the keepalive. The plans stay as in this table, so the two ends' LINKs still match. A
+plan with lane 0 sends it there; a plan without lane 0 sends it on its stream's first lane while no stream is held.
+Nothing is posted on lane 1.
 
 - **Streams.** Streams beyond the plan's are never opened: not live, not free, never offered to a client
   (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports
   `bandwidth / MESH_LINK_STREAMS` as before, so the map's per-link figure is comparable across plans.
 - **Completion queues.** Each lane's share of the two completion queues is `cqe / lanes`, so a two-lane link's lanes
-  get 2048 frames each, against 409 on a ten-lane link. The receive window stays capped by the ring's units and the
-  queue pair's capacity.
+  get 2048 frames each, against 409 on a ten-lane link. A lane's receive window is its share counted in its units (a
+  page on a stream's lane, a frame on lane 0), at most the queue pair's receive capacity (mesh-link.c).
 
 **What a two-lane link costs.** Node 521750041's link to node 1974797816 gets the 0xc plan: one stream and no
 keepalive lane.
@@ -212,17 +213,16 @@ unchanged. So:
 
 A binary built on 26 and run on 27 is untested. Every node builds its own with `make -C rdma all install`.
 
-**MESH_VERSION.** `XMAGIC` adds MESH_VERSION to the magic, so bridges of different versions drop each other's
-hellos. The map parts into one per version until every node runs the newer one (README, "A new bridge on a node").
-For versions to join one map:
+**MESH_VERSION.** Until 7d236bbb, `XMAGIC` added MESH_VERSION to the magic, so bridges of different versions dropped
+each other's hellos and the map parted into one per version. Now `XMAGIC` is fixed at the value version 131 sends, and
+no version enters it, so bridges of any version pair (the operator, 2026-10-21: "rejection filter removal. categorical.
+all of them without sanction in rubric"). For versions to join one map:
 1. *Extend in place* (done here). New information goes in a field the older version sends as 0 and never reads, with 0
    meaning the older behavior. The older version's exchanges keep their meaning, so MESH_VERSION does not change.
    That covers additive changes like this one.
-2. *A version-stating hello* (not done). A version-independent header (a fixed magic, then the sender's
-   MESH_VERSION), so a bridge hears an older peer instead of dropping it. Where it still speaks the older wire, it
-   pairs at the older version; where it does not, it logs which version the peer runs, so the operator sees a
-   version split instead of a silent one. The first bridge with this header still needs a MESH_VERSION bump, since a
-   131 bridge drops it.
+2. *A version-stating hello* (done in part, 7d236bbb). The header is version-independent: the fixed magic, and the
+   sender's MESH_VERSION in `version` (0 from a bridge before it). No reader tests `version`, so a bridge hears a
+   peer of any version and pairs with it. Not done: logging which version a peer runs.
 3. *Records only appended.* `struct mesh_record` and the region's header and slots are appended to, never reordered,
    as the region rule already requires. A newer bridge then floods records an older one can still read up to its
    own length.
@@ -272,8 +272,8 @@ same line at default budgets on this branch behaves identically (section 8, P6).
 - **P4. Publish the plan.** `struct mesh_link_info` (the bridge's observation pages) has no room for the plan without a
   MESH_LAYOUT bump, so mesh-stat cannot show it yet; the log line does. A record's `reach` could carry each link's
   stream count so a planner knows how many communicators a node pair takes at once.
-- **P5. A keepalive on a two-lane link.** Done in section 10, on every link: a dud frame on the small lane of a stream
-  that serves no holding.
+- **P5. A keepalive on a two-lane link.** Done in section 10, on every link: lane 0's frame where the plan has lane 0,
+  else a page of all ones on the stream's first lane while no stream is held.
 - **P6. The line harness's unbounded sendrecv** (section 7). It predates this change and is a library and harness
   issue, not the transport's.
 - **P7. Host names in the bridge's area** (AGENTS.md debts). The record's `name` (`mesh-link.c` `host_name`, which
@@ -338,8 +338,8 @@ the configuration's `keepalive_us`, where a document left it out, turned the fas
 - Its pace is the bridge's own figure, MESH_KEEPALIVE_NS: "only the bridge is allowed to know these configuration
   details" (the operator, 2026-10-21). The configuration's `keepalive` is not read.
 
-**What it cannot do.** A link sends no keepalive while every one of its streams serves a holding at this end. On a
-two-queue-pair link that is the one stream, held by a communicator. A timed frame on a held stream's lane would fill
+**What it cannot do.** A link without lane 0 sends no keepalive while its stream serves a holding at this end. That is
+a two-queue-pair link, whose one stream a communicator holds. A timed frame on a held stream's lane would fill
 the receive the stream's next unit is owed, because the peer posts its receives in the holding's order ahead of the
 SENDs. Every later unit would then land one receive late. Counts cannot repair that inside a holding. The receiver
 could tell the frame from data only by a header (rubrics M2) or a copy (the operator, 10-21: "zero copy methods must
@@ -348,10 +348,13 @@ always be used over access by copy"). An RDMA WRITE would fill no receive, but t
 What would change that:
 - a third usable queue pair (P1: measure what a macOS 27 device holds);
 - a second device context with its own queue pairs (P3);
-- a stream on one lane, every entry's last page sent whole: the landing contract changes, and a small crossing sends
-  16 KiB where it now sends 4 KiB.
+- a stream on one lane, which frees the other queue pair for lane 0. Since version 132 every unit is a whole page, so
+  this no longer changes what a small crossing sends.
 
-**Ranked (design/rubrics.md, rubric M; the bridge is mesh code).**
+**Ranked (design/rubrics.md, rubric M; the bridge is mesh code).** These ranks are 128d0e84's (2026-10-21), which sent
+the keepalive as a small-lane frame and posted nothing on lane 0. Since 00348634 (version 132) there are no small
+lanes, and lane 0 carries the keepalive again where the plan has it, at either pace: the form above. So the "Lost"
+line below no longer holds, and lane 0's receives are posted again.
 - M8: a link with no keepalive (0xc before this change) ≺ a keepalive while a stream serves no holding (this change).
   On a link of four or more queue pairs that holds one stream, the keepalive on an idle stream's small lane ≡ lane 0's.
 - M1: a lane, its receives and a frame kind kept for the keepalive alone ≺ a dud on a lane that exists anyway: one kind

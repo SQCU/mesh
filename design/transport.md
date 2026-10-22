@@ -11,9 +11,10 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
 
 - **The registered region.** One POSIX shared-memory object per node, `/mesh0`, mapped by the bridge and registered
   with every Thunderbolt RDMA device of the node by that port's child as it opens the device (section 14), one ibv_mr
-  per 1 GiB extent,
-  aligned to 1 GiB (`tbt_post_recv` keeps only the low 32 bits of an SGE address with the extent's key, so an extent
-  crossing a 4 GiB boundary aliased receives 4 GiB low: September 5). Every address a request names is inside it.
+  per extent of `MESH_EXTENT` bytes (1 GiB, the bridge's choice), aligned so that each lies inside one 4 GiB bank. The
+  hardware fact is the bank: `tbt_post_recv` keeps only the low 32 bits of an SGE address with the extent's key, so an
+  extent crossing a 4 GiB boundary aliased receives 4 GiB low (September 5). Every address a request names is inside
+  it.
 - **The page table.** The region's rows (one row is one block, 16 KiB on the pair) and, per row, an owner word and the
   arena page it maps (`mesh_buffer`, `mesh_page_entry`), claimed by compare-and-swap on bitmaps. A client's memory is
   rows whose owner word is its own. "Lease" in the code means only this: rows owned. It has no term, renewal or expiry.
@@ -30,9 +31,10 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
 - **A SEND.** An `ibv_send_wr` with one SGE naming a range of the region. TN3205: only SEND and RECV exist on this
   transport (no RDMA WRITE or READ), a SEND and the receive it fills must cover the same number of 4 KiB frames, and a
   SEND is held by the hardware's credit until the peer has a receive posted.
-- **A readiness word.** A 64-bit word in shared memory with exactly one writer and one or more readers: a client's
-  "supplied" word for a position it sends, the bridge's "landed" word for a position it received. All-ones
-  (~0) in a landed word is a position whose data never came (section 10).
+- **A readiness word.** A 64-bit count in shared memory with exactly one writer and one or more readers, in pages: a
+  holding's `ready` (the holder's: the pages it supplied) and its `sent` and `landed` (the bridge's: the pages whose
+  SENDs completed, the pages landed), each in its list's order (section 14). All-ones (~0) in `sent` or `landed` is a
+  lost link; a page whose data never came lands as a dud (section 10).
 
 Nothing else is needed to move data: rows, requests naming rows, completions, and readiness words.
 
@@ -49,8 +51,8 @@ bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash
 bridge adopts the region, the same memory, where its layout is that bridge's:
 - clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
 - the port children register the same pages again, so nothing is wired twice and nothing is reloaded;
-- the bridge's own pages (each port's link page and rings, the duds' block, the map) are recorded in the region and
-  taken again;
+- the bridge's own pages (each port's link pages, its streams' lists and time rings, the duds' block, the map) are
+  recorded in the region and taken again;
 - every stream is set not live and held by none, its landed words ~0, so a communicator of the old pairing fails and is
   made again, and the next pairing opens each stream new;
 - a retirement a dead process left half done is finished.
@@ -62,7 +64,7 @@ the region.
 release is the heartbeat's: it stops the bridge by SIGTERM (its children end, so the kernel frees every object of their
 devices), and once the bridge has ended it makes the region *expire*, its layout version made 0. A bridge that finds a region of another layout expires it the same way and ends
 (EX_TEMPFAIL). No party signals a client. An expired region is:
-- attached by no new client (mesh_open refuses its version);
+- attached by no new client (mesh_open attaches a region of its own layout alone, and an expired one's is 0);
 - returned to each client that holds a lease or communicator of it as a value, at its next lease or communicator
   (ncclRemoteError, and ncclMeshRegionExpired: nccl.h Memory); a client the library made no Metal buffer for frees what
   it holds of it, or ends, and the library then unmaps it and closes its descriptor; a client with Metal buffers over
@@ -135,8 +137,8 @@ endpoint exchange): HELLO and LINK on the control socket, once a pairing. RECORD
 (the map), which is data, not a dialogue.
 
 Everything about a call is known before it runs: both ends compile the same schedule, so each position's length and
-order are known at both ends. Data goes SEND into a posted receive. A side that supplies nothing is replaced by a dud
-of the scheduled length (section 10). A lost link is a driver event (link off, an error completion, the control
+order are known at both ends. Data goes SEND into a posted receive. A side that supplies nothing is replaced by a dud,
+an all-ones page (section 10). A lost link is a driver event (link off, an error completion, the control
 socket's end). There are no requests, acknowledgements, handshakes, agreements, digests, sessions, meetings or stamps.
 
 ## 4. SEND and RECV do not fail
@@ -270,17 +272,18 @@ written at each boot, and the node stays reachable by ssh in between.
 
 ## 10. Duds
 
-If a client has not supplied a position it scheduled by the position's deadline (the call's own, at most the
-platform's 5 s), the bridge sends a dud: the scheduled number of frames of all-ones. The bridge chooses which rows
-every SEND names, so a dud is a SEND whose SGE names the bridge's own all-ones rows (one run as long as the longest
-position, written once at its start): nothing is copied into the client's rows or anywhere else. The receiving
-bridge's receive fills as for any SEND, so every posted receive is consumed in order and nothing is left posted.
+If a holder has not made a presented page ready by its holding's `deadline` (the holder's, set where it can supply
+no more: section 14), the bridge sends a dud: the whole page of all-ones. The bridge chooses which page every SEND
+names, so a dud is a SEND whose SGE names a page of the bridge's own all-ones block (written once at its start):
+nothing is copied into the client's rows or anywhere else. The receiving bridge's receive fills as for any SEND, so
+every posted receive is consumed in order and nothing is left posted.
 
 All-ones reads as failed wherever it lands: it is NaN in fp16 (0xFFFF) and fp32 (0xFFFFFFFF), and ~0 in a landed
 word. A dud is a client error, recorded against the client and its call, never a transport error.
 
-Positions of a call whose client failed, was revoked or exited are sent as duds at once, without waiting for a
-deadline. Received positions whose consumer is gone land in their rows, and the rows are released as they land.
+The pages of a holding whose client failed, was revoked or exited are sent as duds at once (its owner word let go),
+without waiting for a deadline. Pages received for a holder that is gone land in its rows, and those rows are released
+once no stream touches them (`touching`, section 14).
 
 ## 11. Reliability: three nines
 
@@ -343,7 +346,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | How a client holds the stream | a request and an answer in its slot (127) ≺ its owner word taken while the stream is free, as rows are | M2 |
 | Where receives go | into a communicator's rows, restarted per communicator (HEAD before 127) ≺ into the stream's in ring, posted by the bridge for the link's life, which clients copy out of (127-131) ≺ into the holder's own landing pages as it presents them, the bridge's spare page between holdings (132) | M4, M9, M8 |
 | How a holding ends | the link concluded ≺ every unit it declared or supplied sent, the unsupplied ones as duds, and one more | M4, M10 |
-| Where the next holding starts | the bridge's answer in the client's slot (127) ≺ the stream's `next`, published once free, exchanged at init through NCCL's bootstrap | M2, C7 |
+| Where the next holding starts | the bridge's answer in the client's slot (127) ≺ the stream's `start` words, frozen as a holding begins, exchanged at init through NCCL's bootstrap | M2, C7 |
 | A queue pair's re-pairing | moved to RESET (127, panicked the M5) ≺ destroyed and made again ≺ none: made and connected once in the bridge's life, a lost link down until a person relaunched it (129) ≺ none in a process: made and connected once in a port child's life, released by its exit, the link paired again by the port's next child (130) | M3, M4, M6 |
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on the guard word while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
@@ -363,27 +366,30 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   a stream's lanes is a whole page: page p of a holding goes on the stream's lane p mod 2.
 - Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
   GID and queue pair number) and which no other stream between the two nodes has.
-- A holding has two lists of entries the holder presents in order, each a run of its own pages (`struct mesh_entry`:
-  the run's first page, as its literal region offset, any number of bytes, the count that governs them): a send list
-  and a landing list. Each list is a sequence of pages, and page i of a send list lands as page i of the peer's
-  landing list. Each end lays its own pages where its plan put them, a scattered buffer being several entries:
-  scattered pages in one client may land as one run in another, and one buffer may go to several runs in several
-  clients, with nothing copied. An entry's offset is compiled once from its holder's page table, so the bridge reads
-  no table on the data path. Every placement is the holder's plan, fixed
+- A holding has two lists of entries the holder presents in order: a send list and a landing list. An entry is a
+  range of the holder's rows (`struct mesh_entry {row, pages, word, base}`: `pages` rows from row `row`), each row a
+  page, read in order through the page table: the range is the entry's block table (design/pages-and-functions.md).
+  Each list is a sequence of pages, and page i of a send list lands as page i of the peer's landing list. Each end
+  lays its own pages where its plan put them, a scattered buffer being several entries: scattered pages in one client
+  may land as one run in another, and one buffer may go to several runs in several clients, with nothing copied. No
+  entry names a byte offset, so none can lie off a page. Every placement is the holder's plan, fixed
   before the holding's first call (the operator, 2026-10-21: "all placements can be demanded as ahead of time known
-  compiled plans which do not change dynamically during a chain of function calls"). Three byte counts over the holding, each in its
-  list's order with every byte before: `ready` (the holder's: produced), `sent` and `landed` (the bridge's: SENDs
-  completed; landed). The holder never sees a lane, a unit, a frame or a queue pair.
-- Every SEND and every receive is one whole page (an entry's last page too), at its entry's offset plus the page's
-  place in it. So a SEND always fills its receive exactly (TN3205), ends whose lists differ garble their own pages and
-  never fail the link, and neither end knows the other's addresses.
-- The send thread posts a unit from its page once the entry's count covers its bytes; the receive thread posts each
-  receive straight into its page (at most a window ahead) once the entry's word says the page's reader released it (a
-  page is written again only after release), and raises `landed` once every byte before has landed, whichever lane
-  carried it: the stamp of every page it covers. A SEND whose receive is not yet posted waits in the hardware's
-  credit (TN3205): posting a receive is the credit, and nothing else paces a holding (no lag, no fillers).
+  compiled plans which do not change dynamically during a chain of function calls"). Three page counts over the
+  holding, each in its list's order with every page before: `ready` (the holder's: produced), `sent` and `landed` (the
+  bridge's: SENDs completed; landed). A send entry's page k is ready once the word at `word` (0: the holding's
+  `ready`) reads at least `base` + k + 1; a landing entry is received into once the word at `word` (0: none) reads at
+  least `base`. The holder never sees a lane, a unit, a frame or a queue pair.
+- Every SEND and every receive is one whole page, the page its row names (the bridge reads the row's page as it posts
+  it: one read a page). A send entry whose rows lie outside the page table goes as duds, and a landing entry's pages
+  land in the spare page. So a SEND always fills its receive exactly (TN3205), ends whose lists differ garble their
+  own pages and never fail the link, and neither end knows the other's addresses.
+- The send thread posts a unit from its page once the entry's word says the page is ready; the receive thread posts
+  each receive straight into its page (at most a window ahead) once the entry's word says the page's reader released
+  it (a page is written again only after release), and raises `landed` once every page before has landed, whichever
+  lane carried it. A SEND whose receive is not yet posted waits in the hardware's credit (TN3205): posting a receive is
+  the credit, and nothing else paces a holding (no lag, no fillers).
 - The words only the bridge writes: `live`, `free`, `begun`, `sent`, `landed`, `taken`, `touching`, `start` and the two
-  time rings (`posted_at`: an entry's first SEND posted; `landed_at`: its last byte landed; mach_absolute_time ticks
+  time rings (`posted_at`: an entry's first SEND posted; `landed_at`: its last page landed; mach_absolute_time ticks
   read once at the end of the pass).
 
 **Holding it.**
@@ -398,12 +404,12 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 - One communicator holds a stream at a time; communicators that share a node pair hold different streams of its link,
   each end taking the stream of the least `wire` free at both. An init is refused (EBUSY) only where none is.
 - `deadline` (uptime ns), the holder's: UINT64_MAX while it supplies; now where it can supply no more, after which
-  every presented byte not ready goes as a dud. No unit of a producer still at work is ever sent as a dud (rubrics C5
+  every presented page not ready goes as a dud. No unit of a producer still at work is ever sent as a dud (rubrics C5
   and Quantities, the operator 10-20).
 
 **Duds, and a holding's end.**
-- A presented byte not ready by the deadline, or at the holding's end, goes as a dud: a SEND of the same length from
-  the bridge's all-ones block. A failed client's positions go out as duds (rubric M4's upper pole).
+- A presented page not ready by the deadline, or at the holding's end, goes as a dud: a SEND of the whole page from
+  the bridge's all-ones block. A failed client's pages go out as duds (rubric M4's upper pole).
 - When the owner word changes (the holder let go, or the event loop let go a holder gone), the send thread ends the
   holding: every presented unit goes, the unready as duds; then the stream is free. The receive thread turns the
   stream to spares (the spare page, the second page of the port's link block), which receive the peer's SENDs to the
@@ -447,8 +453,9 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one child's at
   a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
   farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS.
-- Streams across children. A port's rings and words are the parent's, leased once. A new child opens every stream new as
-  its link connects: owner word 0, ready and landed words 0, `next` 0, free and live. A holding of the lost pairing
+- Streams across children. A port's streams' lists, time rings and words are the parent's, leased once. A new child
+  opens every stream new as its link connects: owner word 0, its counts 0 (`ready`, `sent`, `landed`, its lists'), free
+  and live. A holding of the lost pairing
   ended with it: its holder's give (a compare-and-swap from its own client) then matches nothing, and its communicator
   reads its holding gone (mesh-call.h `mesh_stream_held`: live, its owner word its client's, its identity the one it
   took) and starts no group on it (libnccl-mesh `comm_failure`, `ncclCommGetAsyncError`). No holder keeps a stream from

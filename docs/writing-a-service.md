@@ -28,7 +28,7 @@ rot₀ and rot₁ are normalized Hadamard rotations of an operand's columns, in 
 block, a power of two that divides the operand's width (x's width for rot₀, the sum of the parts for rot₁). A block of 1
 is no rotation, and a block of the whole width is the full Hadamard. A Hadamard H is linear, symmetric and orthogonal,
 so rot₀(x) Aᵀ = x (A H)ᵀ and rot₁(y) B = y (H B). Rank 0 holds the whole weights before it sends each rank its part, so
-it folds each rotation into them there, once (`rotated` in examples/chain-service.py). rot₁ spans both ranks' columns
+it folds each rotation into them there, once (`rotated` in examples/chain-service.py). rot₁ spans every rank's columns
 of y, and it folds all the same: each rank's rows of H B are the rows its part of y meets. The step kernel never rotates
 anything, and a rotation costs no time a step. The float64 check rotates the operands themselves, so it checks the fold.
 An operand would have to be rotated as it is made only where its parameters are stored rotated and quantized, so that
@@ -60,7 +60,8 @@ language model and this chain look the same: rows of bytes, sent and landed.
 The collective client is a library inside your process. It is `libnccl-mesh` ([rdma/NCCL.md](../rdma/NCCL.md)), and
 it is reached through torch-mesh ([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)), `mesh_mpi.py` or
 `python/mesh`. It rents rows of the region for your tensors and opens groups of ranks. It turns calls like all-reduce,
-broadcast and send into work on the bridge's streams. Its waits end when data lands, never when a clock runs out.
+broadcast and send into work on the bridge's streams. Its waits end when data lands, or at their bound: a GPU wait's
+loads, or a host wait's platform deadline, 5 s in which nothing moves. Then the call fails as a value.
 
 The client does not own the devices, and it does not know your function or where your inputs come from. It does not
 pick how the work is split, and it is not a process of its own. It lives and dies with the service that loads it, and nothing
@@ -218,7 +219,7 @@ rows there are, so the configuration does not. Every value must be there. The se
 value is an error.
 
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
-measures the calls writes the parts. Both Macs are always loaded fully.
+measures the calls writes the parts. Every Mac is always loaded fully.
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
 sample. Its `ring_bytes` holds three blocks of 512 steps, so the sample's rings wrap many times.
 
@@ -247,9 +248,10 @@ Each rank prints one line at the end. It gives the parts, the rows, the steps, t
 seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four times a
 step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and a plain
 all-reduce alone (the library's own kernels, not fused), the crossing the fused step no longer pays. It gives the bytes
-a step's two collectives move, and those bytes a second. Rank 0 also checks two windows of steps against a plain float64
-run of the same rule: the first steps, and the first steps of the last block, which start from rank 0's own output. The
-second window reads slots the ring has used before.
+a rank's crossing moves a step (its part out to each of the n - 1 peers, and each peer's part in), and those bytes a
+second. Rank 0 also checks two windows of steps against a plain float64 run of the same rule: the first steps, and the
+first steps of the last block, which start from rank 0's own output. The second window reads slots the ring has used
+before.
 
 The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling its
 kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the first

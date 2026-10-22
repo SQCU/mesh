@@ -5,8 +5,9 @@ passes, in JSON, TOML or YAML. `bin/mesh-user.sh CONFIGURATION [CHECKOUT]` reads
 loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and region
 in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's launchd agent
 definition, so the keeper's load at boot keeps it, and records the document's path beside it. A
-changed configuration is renamed into place and takes effect when the bridge stops itself, between calls (README.md,
-A new bridge on a node): its running calls are never ended for it. There
+changed configuration is renamed into place, and `mesh-user.sh` sends the heartbeat SIGHUP: the bridge restarts on
+it, its region kept (README.md, A new bridge on a node). Calls in flight across the restart fail as values, and the
+next communicator runs on the new bridge (design/transport.md section 2). There
 is no default anywhere in the code: without a configuration the bridge and `mesh-user.sh` refuse to start, naming what
 they need.
 
@@ -29,11 +30,15 @@ A document has these keys:
   `rdma/bridge_configuration.py` still accepts the key.
 
 The region is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
-when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
-checks the region against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a region of more
-extents than that device registers is refused for that port, logged with the extent, its bytes, the errno and the
-extents the device holds, and the port turns again 60 s later, doubling to 30 min, keeping its extents
-(design/transport.md). The bridge starts and serves the node either way; the region is never clamped. Clients lease
+when the device comes up, before any queue pair exists. The bridge never deregisters it: the kernel releases the
+registration at the port's child's exit (design/transport.md section 5). The bridge registers the region in extents
+of MESH_EXTENT, 1 GiB (rdma/mesh-verbs.h). That size is the bridge's choice. The hardware fact is that
+`tbt_post_recv` keeps only the low 32 bits of an SGE address, so no registration may cross a 4 GiB boundary, and 1
+GiB divides that bank. Each device checks the region's extents against its own `max_mr` as it comes up, on its
+port's queue: a region of more extents than that device registers is refused for that port, logged with the extent,
+its bytes, the errno and the extents the device holds. After the k-th refusal in a row the port opens again at a
+hello heard on it from 60·2^(k−1) s on (at most an hour), or at its link's coming on, keeping its extents
+(rdma/mesh-link.c `port_opened`). The bridge starts and serves the node either way; the region is never clamped. Clients lease
 from it; a lease that does not fit fails at its start with an error naming the execution, and the region never grows.
 How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
 
@@ -43,11 +48,12 @@ These two ship with the bridge to show the form. Neither is likely to be what an
 didactic programming exercises.
 
 - `example-1pct.json`: one percent of the node's memory (245 MiB on a 24 GiB Mac mini, 1.3 GiB on a 128 GiB M5). It
-  allows small streaming transfers: a libnccl-mesh session toward one peer leases 24 MiB (its rings, its SEND cells
-  and after them in the same lease its publication targets, its completion words and its transfer lists). It does not allow programs that stage large operands in
-  the region.
-- `example-10pct.yaml`: ten percent of the node's memory. It holds many sessions' crossing rings, and it is too small
-  for many applications: a model's weights and KV pool in the region, or a long reduction's staging.
+  allows small streaming transfers. A libnccl-mesh communicator leases one page for its gate, and a pool for the
+  pages its groups send from and land in that are not the caller's (a reduce-scatter's operand, a tree's scratch, a
+  combine's landing area; rdma/nccl.h, Memory). Every operand that crosses a link is the program's own lease. It does
+  not allow programs that keep large operands in the region.
+- `example-10pct.yaml`: ten percent of the node's memory. It holds the operands of many crossings, and it is too
+  small for many applications: a model's weights and KV pool in the region, or a long reduction's operands.
 
 The proper configuration for an application is the client writer's to derive and write explicitly for each node of
 their mesh.
@@ -79,8 +85,9 @@ row), the crossed capacity set, the conversion staging, a call's per-layer input
 library's, beside the computation), and the whole model alone. Beside the arena: the region's tables (64.5 bytes an
 arena page, a row's page-table entry, buffer record and delivery word and its plane bits, and 0.5 MiB of header,
 ports and client slots, rdma/mesh.h `mesh_layout`, from MESH_VERSION 111: 0.06 GiB at 16 GiB, 0.056 at 14; at 110 every row
-also carried a publication's targets, 1,136.5 bytes an arena page and 0.5 MiB, 1.11 GiB at 16 GiB, touched as rows were leased; a
-program's targets now follow its SEND cells in their lease, design/transport.md), the node's base wired and macOS
+also carried a publication's targets, 1,136.5 bytes an arena page and 0.5 MiB, 1.11 GiB at 16 GiB, touched as rows were leased; from
+111 a program's targets followed its SEND cells in their lease; at MESH_LAYOUT 135 there are neither, and a row has no delivery
+word: its page-table entry, buffer record and plane bits, 48.5 bytes an arena page on one-page rows), the node's base wired and macOS
 memory, the rank's process, the Neural Engine's own copy of its columns, and a 2 GiB margin. A served engine (metal-microbench server/bridge.py) leases its model and pool
 from its node's region too; neither file holds one.
 
@@ -112,7 +119,8 @@ metal-microbench tools/mesh/programs.py under `MESH_MODEL=e2b-engine` (12b, 26b-
 `pages=pool_request(1, 4096)` with `ctx_max` 4096 (metal-microbench output_data/lifecycle-20261015/studio_window.py).
 
 The region is the operator's decision; each document states the arithmetic it follows from. A Studio's base wired
-memory and its devices' `max_mr` are read when it arrives: the pair's devices register 100 one-GiB extents, and a device
+memory and its devices' `max_mr` are read when it arrives: the pair's devices report `max_mr` 100, so each registers
+up to 100 of the bridge's 1 GiB extents, and a device
 that registers fewer than its region's extents pairs no port until the region is lowered (its refusal logged with the
 extent, above), never a clamped region. Each of a node's devices registers the whole region, so a Studio cabled on
 several ports registers it once a device.
