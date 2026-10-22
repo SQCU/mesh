@@ -438,17 +438,21 @@ static void lane_landed(struct port *port,uint32_t k){ port->link.lane[k].got++;
    link block: no holding's unit uses lane 0); else, while no stream is held here, a page of the all-ones block on the
    first lane of the link's first stream, into the one spare its peer keeps posted there between holdings (or, where
    the peer has begun a holding, into a spare it posts up to its `reach`, which counts this SEND).  A plan without lane 0 sends
-   none while a stream is held here: every lane is a held stream's, whose units land in order */
+   none while a stream is held here: every lane is a held stream's, whose units land in order.  The lane is the plan's,
+   not the lanes still served: a plan with lane 0 whose lane 0 was just lost (lane_lost) sends nothing, never a page on
+   a stream's lane, where a holding may be served.  A peer that has begun a holding whose end here has ended (its
+   holder gone before presenting the matching sends) takes the page into that holding's next receive: a dud page there,
+   all ones, placed where a send must happen and its producer is gone (design/HETEROGENEOUS-LINKS.md section 10) */
 #define ALIVE_BYTES 16u
 static void link_alive(struct port *port,uint32_t served){
   struct link *l=&port->link;
   const int held=link_held(l);
   uint32_t k=0;
   uint64_t bytes=ALIVE_BYTES;
-  if(!(served&1)){
+  if(!(l->plan&1)){
     if(held || !plan_streams(l->plan) || !(served>>MESH_LANE_FIRST&1))return;
     k=MESH_LANE_FIRST;bytes=page_bytes();
-  }
+  }else if(!(served&1))return;
   if(l->lane[k].done!=l->lane[k].sent)return;
   const uint64_t at=mach_absolute_time();
   if(at-l->sent_at<alive_ticks[held])return;

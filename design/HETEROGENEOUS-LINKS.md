@@ -334,7 +334,14 @@ the configuration's `keepalive_us`, where a document left it out, turned the fas
 - Where it has none (two queue pairs): while no stream is held at this end, a page of the all-ones block on its
   stream's first lane, into the one spare a lane the peer keeps posted between holdings. It is a SEND of the lane like
   any other, so a holding's start (each lane's SENDs and receives posted so far, and each lane's first index the
-  greater of its own count and its peer's) counts it and it never moves a holding's units.
+  greater of its own count and its peer's) counts it and it never moves the units of a holding live at both ends.
+  One case differs: the peer has begun a holding whose end here has ended (its holder's process died before it
+  presented the matching sends). The peer posts that holding's receives in order, so the page fills the next one. It
+  lands there as a dud: all ones, placed where a send must happen and its producer is gone. The peer's host path
+  moves its deadline only when an entry finishes (rdma/nccl-mesh.c `run`), so this drip of one page a second does
+  not keep a call waiting; a dud that completes an entry is read as from any producer that is gone.
+- The lane is chosen by the plan (`l->plan & 1`), not by the lanes still served: where the plan has lane 0 and lane
+  0 was just lost, the keepalive sends nothing rather than a page on a stream's lane.
 - Its pace is the bridge's own figure, MESH_KEEPALIVE_NS: "only the bridge is allowed to know these configuration
   details" (the operator, 2026-10-21). The configuration's `keepalive` is not read.
 
