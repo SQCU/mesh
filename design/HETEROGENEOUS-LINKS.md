@@ -173,8 +173,10 @@ full plan is lane for lane the layout of MESH_VERSION 131. The plan of a smaller
 larger one's.
 
 - **Streams.** Streams beyond the plan's are never opened: not live, not free, never offered to a client
-  (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports
-  `bandwidth / MESH_LINK_STREAMS` as before, so the map's per-link figure is comparable across plans.
+  (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reported
+  `bandwidth / MESH_LINK_STREAMS` as before, so the map's per-link figure was comparable across plans (section 10
+  makes each stream's share the link's over its live streams, and the reach entry the link's whole figure with its
+  stream count).
 - **Completion queues.** Each lane's share of the two completion queues is `cqe / lanes`, so a two-lane link's lanes
   get 2048 frames each, against 409 on a ten-lane link. The receive window stays capped by the ring's units and the
   queue pair's capacity.
@@ -255,19 +257,18 @@ same line at default budgets on this branch behaves identically (section 8, P6).
   its link up (pooled across a machine's devices or not). No release call; exit releases everything. The second
   Studio, cabled, gives a second device with its link up. If 3 are usable, `max_pairs` for this driver is `max_qp`,
   and the plan gains the keepalive lane (0xd).
-- **P2. Make until refused.** The device, not the stated budget, has the last word. Each end could make its plan's
-  queue pairs in the order 2, 3, 0, 4, 5, 6, 7, 8, 9, 1, so that the first c made always contain `link_plan(c)`.
-  It would stop at the first refusal and name in LINK how many it made, and both ends would connect
-  `link_plan(min(made, peer's made))`. Queue pairs made past that stay in INIT until the agent's exit. Two 131-
-  compatible ends both make ten, so the wire stays compatible. This removes the reliance on `max_qp - 1` for any
-  hardware.
+- **P2. Make until refused.** Done within the plan (section 10): each end makes its plan's queue pairs in the order 2,
+  3, 0, 4, 5, 6, 7, 8, 9, 1, stops at the first refusal, names in LINK how many it made, and both ends connect
+  `link_plan(min(made, peer's made))`. The plan itself is still made from the stated budgets (`max_qp - 1`), so a
+  device that holds more than it states (P1's 3 usable) is not found by it: making past the stated count would try,
+  on the M5 Ultra, a queue pair no process has yet made there, which no probe has run.
 - **P3. More streams on few queue pairs.** If P1 finds a per-context count, an agent can open more than one context on
   its device and spread a link's lanes over them, each context with its own two CQs (max_cq 6, one the kernel's,
   bounds it to two contexts). The progress threads would poll both pairs of CQs. Otherwise, more streams on two queue
   pairs would need a staging ring and a copy (section 4), which this design has refused so far.
-- **P4. Publish the plan.** `struct mesh_link_info` (the bridge's observation pages) has no room for the plan without a
-  MESH_LAYOUT bump, so mesh-stat cannot show it yet; the log line does. A record's `reach` could carry each link's
-  stream count so a planner knows how many communicators a node pair takes at once.
+- **P4. Publish the plan.** Done for the streams (section 10): a record's `reach` carries each link's stream count,
+  and `mesh_map` and mesh-stat's map give it a link. `struct mesh_link_info` still has no room for the plan's lanes
+  (the keepalive's) without a layout change; the log line has them.
 - **P5. A keepalive on a two-lane link.** For example, a one-frame small-class unit sent by the bridge on the stream
   while no holder holds it, agreed by both ends as a unit no client reads. Only if the controller's slow start
   matters on that link.
@@ -298,3 +299,83 @@ Either order works. Rebuilding node 1974797816 restarts its bridge, so the link 
 re-pair (the usual cost of a SIGHUP restart). Do it with no program running across that link. Once both node
 521750041 and node 1974797816 run it, their link should log "paired with node ... (queue pairs for the link: this
 port's 2, its 10; plan 0xc, 2 lanes, 1 stream)" and "2 lanes up".
+
+## 10. Make until refused, and each link in the map (2026-10-21, the bridge review's B4 and B5)
+
+Two faults the bridge review found in the change above, for meshes rather than pairs:
+- **B5.** The budget assumed each device's queue pairs independent of the node's other links. A machine whose devices
+  share them (unmeasured on macOS 27: P1; node 521750041's two links, to 1974797816 and to 455770905, both came up,
+  weak evidence against sharing at 2 + 2) would refuse a later link's make past what is left; `pair_up` returned
+  ENOSPC, and that link re-paired every 5 s for good.
+- **B4.** The map could not hold two cables between two nodes, nor say how many streams a link has.
+  `mesh_nodes_reached` listed each node once at its first live stream's bandwidth, `mesh_join` joined two records by
+  one link, and every stream reported `bandwidth / MESH_LINK_STREAMS`: a one-stream link (the Studios' 0xc) and a
+  four-stream one looked the same, a second communicator over the first was refused at init (EBUSY) with no sign in the
+  map, and the planner's parallel links (`mesh_routes`, `mesh_trees_pack`) were never used.
+
+**Make until refused** (`mesh-verbs.h` `pair_up`; `mesh-link.c` `link_make`, `link_connect`, `link_tell`,
+`link_heard`, `link_turn`, `agent_command`, `agent_jobs`; `mesh-bridge.h` `lane_order`):
+- The plan to make is as before, `link_plan(min(budgets))`. The agent makes its completion queues, then the plan's
+  queue pairs in `lane_order` (2, 3, 0, 4, 5, 6, 7, 8, 9, 1), and stops at the device's first refusal: a refusal is a
+  smaller make, never the link's failure. The agent tells the lanes made and the refusal (AGENT_MADE `lanes`,
+  `refusal`), and the parent logs a make short of the plan.
+- The LINK's `count` is the queue pairs made, `pair` naming each. A peer's LINK is taken where its count is at most
+  the plan's; more is a bridge before budgets, which makes every lane, logged as before.
+- Both ends connect `link_plan(min(made, peer's made))`, asked of the agent with those lanes (AGENT_CONNECT `lanes`);
+  each lane's share of the completion queues is taken at the connect, over them. Queue pairs made past it stay in
+  INIT until the agent's exit (no destroy, no state change: transport.md section 14).
+- Why the two ends agree, for any k nodes and any links: the first c of `lane_order` hold `link_plan(c)`, each plan's
+  lanes are the order's first `plan_lanes` of it, and `link_plan(plan_lanes(link_plan(b))) = link_plan(b)`. So the
+  lanes each end made are the order's first `made` of the plan, `link_plan(min)` lies within both, and both compute it
+  from the same two counts; where both made the plan whole it is the plan. Checked for every pair of budgets 0 to 11
+  and every refusal point at each end. A link's plan is its own: a node's other links do not enter it.
+- **Compatibility**, MESH_VERSION 131 kept. Where the device refuses none, the make is the plan whole and the LINK is
+  byte for byte the budget bridge's, so this bridge pairs with main's wherever main's make would succeed, and with a
+  bridge before budgets wherever both hold ten. Where the device refuses some, a budget bridge reads the LINK as
+  planned apart and the link re-pairs, as its own ENOSPC did; two bridges of this change connect the smaller plan.
+- Completion queues refused are a make of none: plan 0, the link paired and its records flowing, no stream.
+
+**Each link in the map** (`mesh-call.c` `mesh_nodes_reached`; `mesh-dataflow.c` `mesh_join`, `mesh_joined`,
+`mesh_whole_make`; `mesh-link.c` `streams_open`; `mesh-collective.c` `mesh_map_members`; `mesh-records.c`
+`record_links_same`; `mesh-stat.c`):
+- A reach entry is a link (a port) with a live stream: its node, its live streams (`struct mesh_reach` `streams`, the
+  word that was `padding`) and their shares of its bandwidth together. Two cables toward one node are two entries.
+- A stream's share is the link's bandwidth over its live streams (the remainder to the first ones), so a one-stream
+  link's stream reports the link's whole bandwidth, and the entry's figure is the link's whatever its plan.
+- Two records join by as many links as the fewer lists toward the other, each side's ranked by bandwidth then streams,
+  the k-th with the k-th, each at the lesser bandwidth and the lesser streams either states (0 where neither does). The
+  whole map lists each (`mesh_map`), and the planner takes a pair's parallel links together.
+- `struct mesh_link_map` gains `streams` (NULL: none): `mesh_map` writes each link's, `mesh_map_members` carries it,
+  mesh-stat prints it as each link's fourth figure, and no planner function reads it. A planner reads there how many
+  communicators a node pair takes at once: its links' streams together.
+- Not changed: a communicator's own map (`nccl-mesh.c` `map_of`) takes each pair's first reach entry, one link a pair,
+  since a communicator holds one stream toward each member.
+
+**Layout and ABI.** The region's bytes are unchanged (MESH_LAYOUT 133 kept): `struct mesh_record` is the same size, its
+reach entries now one a link with `streams` in the former padding (0 from a bridge before it, read as none stated), and
+a stream's `bandwidth` word its share over its link's live streams. The wire is unchanged in size; the LINK's `count`
+reads as above. The client ABI changes: `struct mesh_link_map` has one more pointer at its end, so libmesh, its C
+callers and Python's `_mesh_c` are built together (`make -C rdma all`, and `bin/mesh-user.sh`, which builds `_mesh_c`
+at every deploy); `struct mesh_reach`'s second word is renamed `streams`, its size and offsets unchanged.
+
+**Tested** over loopverbs on node 1980260065 (no verbs device opened). `LOOPVERBS_HOLDS=rdma_loop<i>=<n>` makes a loop
+device refuse queue pairs past n while stating its max_qp as ever, as a machine whose devices share them would; the
+loop harness's family `double` joins each neighbouring pair by two cables, and the harness counts a node converged at
+one reach entry a cable.
+
+| case | what came up | collectives |
+|---|---|---|
+| 3-node line, every device ten | "10 lanes up (plan 0x3ff: 4 streams)"; map: two links, 100 Gb/s and 4 streams each | host 65,536: 27 of 27 exact (the ends' sendrecv refused, no cable joins them; rank 1's wait unbounded, P6) |
+| 3-node `double` line | four links, two a pair, 4 streams each | host: 27 of 27 exact, as the line |
+| 2 nodes, one device holding 4 of its stated 10 | that end "4 of the plan's 10 queue pairs made (made 0x1d)", both "3 lanes up (plan 0xd: 1 stream, keepalive on)", each lane's share 1365 frames; map: 1 stream | host 16 of 16, walk 1,000,003 16 of 16 exact; two communicators at once: one exact, the other refused at init (EBUSY) |
+| 2 nodes, two cables, every device holding 2 | two links "2 lanes up (plan 0xc)"; map: two links of 1 stream | three communicators at once: two exact, the third refused at init (EBUSY) |
+| 2 nodes, two cables, one device holding 0, another 1 | both links "0 lanes up (plan 0)", records flowing | none (no stream) |
+| 4-node ring, its cables' ends refusing at 6 / 10, budget 2 (max_qp 3) / 10, 10 / 10, 3 / 5 | plans 0x3d, 0xc, 0x3ff, 0xd; map: 2, 1, 4, 1 streams | host 65,536: 48 of 48; walk 1,000,003: 48 of 48 exact |
+| this change / main's, both ten | "10 lanes up" at both | host: 16 of 16 exact |
+| this change at max_qp 3 / main's at ten, and the reverse | 0xc at both ends | walk 16 of 16, host 16 of 16 exact |
+| this change holding 4 of 10 / main's at ten | main's end "node 1's LINK names 4 lanes, this end's plan 10: the two ends planned apart", re-pairing each agent cycle | none |
+
+**Still open.** A make refused short holds its smaller plan for its agent's life: a queue pair freed later (another
+link's agent ending, where devices share them) reaches this link only at its next pairing. A link of plan 0 carries
+records but no stream and is no link of the map, so a node reached only over such links is pruned from the map though
+its records flow (`mesh-records.c` `map_put` joins records by their reach).

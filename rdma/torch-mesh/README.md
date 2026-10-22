@@ -37,7 +37,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
   ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
-  communicators hold one stream, and a link has four, so the world group and three subgroups use a node pair at once;
+  communicators hold one stream, and a link has four (where both its ends hold ten queue pairs; fewer otherwise, as the
+  map's `streams` says: [NCCL.md](../NCCL.md#rules-a-program-keeps)), so the world group and three subgroups use a node pair at once;
   one more is refused (EBUSY) until a group is destroyed ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing (a dud's too) or a lost
   link; a GPU wait also at its bound, and a host-path wait at a revoke.

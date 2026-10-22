@@ -67,6 +67,14 @@ static inline uint32_t link_plan(uint32_t budget){
 static inline uint32_t plan_lanes(uint32_t plan){ return (uint32_t)__builtin_popcount(plan); }
 static inline uint32_t plan_streams(uint32_t plan){ return (uint32_t)__builtin_popcount(plan>>MESH_LANE_FIRST)/(2*MESH_STREAM_PAIRS); }
 _Static_assert(MESH_LINK_LANES<32,"a bit a lane");
+/* design/HETEROGENEOUS-LINKS.md P2, make until refused: the order a link's lanes are made in, the first stream's lane
+   pair, the keepalive's lane, the other streams' lane pairs, lane 1 last, so that the first c made always hold
+   link_plan(c) (and the lanes of link_plan(b) are the first plan_lanes(link_plan(b)) of it, for every b): a make the
+   device refuses part of has made the plan of the fewer, a subset of every larger plan, and both ends connect
+   link_plan of the fewer queue pairs either made (mesh-link.c link_make, link_turn) */
+static const uint8_t lane_order[MESH_LINK_LANES]={MESH_LANE_FIRST,MESH_LANE_FIRST+1,MESH_LANE_KEEPALIVE,4,5,6,7,8,9,1};
+_Static_assert(MESH_LINK_LANES==10 && MESH_LANE_FIRST==2 && MESH_LANE_KEEPALIVE==0 && MESH_STREAM_PAIRS==1,
+               "lane_order is the layout's: link_plan(c) within its first c");
 
 _Static_assert(sizeof(struct ibv_send_wr)==128,"M06");
 _Static_assert(sizeof(struct ibv_sge)==16,"M07 M09");
@@ -118,12 +126,14 @@ struct lane_state {
 };
 /* design/transport.md: a message on a port's control socket (the bridge's wire: HELLO, FAREWELL, RECORD
    and LINK, nothing else), `bytes` of what follows it: a RECORD's record.  A FAREWELL's `code` is why its bridge stops;
-   a port's LINK tells its link lanes' queue pairs (#lanes: `count` the lanes of its plan, each one's number and first
-   sequence number in `pair`, 0 for a lane the plan leaves out).  A HELLO on a control socket states in `count` 1 + the
-   queue pairs its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets
-   sends 0 there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets).  Every message
-   names its bridge's node and that node's host UUID (`uuid`, mesh.h struct mesh_record's), so a hello of this node's
-   number from another host is told (mesh-records.c number_shared) */
+   a port's LINK tells its link lanes' queue pairs (#lanes: `count` the queue pairs its make made, the first `count` of
+   lane_order, each one's number and first sequence number in `pair`, 0 for a lane not made; every lane of its plan
+   where its device refused none, so a LINK is a bridge's before make until refused wherever that bridge's make would
+   have succeeded: design/HETEROGENEOUS-LINKS.md P2).  A HELLO on a control socket states in `count` 1 + the queue pairs
+   its port's device holds for a link (design/HETEROGENEOUS-LINKS.md: hello_budget; a bridge before budgets sends 0
+   there and makes MESH_LINK_LANES, so two ends that both hold that many pair as before budgets).  Every message names
+   its bridge's node and that node's host UUID (`uuid`, mesh.h struct mesh_record's), so a hello of this node's number
+   from another host is told (mesh-records.c number_shared) */
 enum { HELLO=1, FAREWELL, RECORD, LINK };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; uint8_t uuid[16]; };
@@ -146,8 +156,12 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    it found its lane failed, every lane at a failed completion, mesh-link.c link_failed, and the termination's queue's,
    B9b), and the lanes a progress thread found failed (`broken`: the event loop loses the link on reading it).  The
    lanes its pairing makes (`plan`, a bit a lane: link_plan of the fewer queue pairs its two ends hold, set as the
-   parent hears the peer's HELLO and told the agent with the make; its lanes left out have no queue pair and their
-   `qpn` UINT32_MAX, no queue pair's number).  Each
+   parent hears the peer's HELLO and told the agent with the make), those its make made (`made`, a bit a lane: the
+   plan's in lane_order until the device refused one, and `refusal`, the refusal's code, 0 where it made the plan
+   whole: design/HETEROGENEOUS-LINKS.md P2) and the queue pairs the peer's make made (`peer_made`, its LINK's `count`);
+   from its connect, `plan` is the lanes it connects and serves, link_plan of the fewer queue pairs either end made (a
+   subset of what each made), told the agent with the connect; a lane left out has no queue pair connected and its
+   `qpn` UINT32_MAX, no queue pair's number (one made past the connected plan stays in INIT until the agent's exit).  Each
    lane's SEND gate (`gate`: the frames posted and retired, the send thread's; its capacity, set as the lane connects),
    each data lane's progress (`lane`, struct lane_state), the arena page of the stream's rings (`rings`, leased as the
    port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream), and the stream's holding, the send thread's alone: the
@@ -168,10 +182,10 @@ enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 #define LINK_ALIVE_RECEIVES 256u
 struct link {
   struct mesh_verbs provider;
-  int state,job,result,heard,refused,lanes;
+  int state,job,result,heard,refused,lanes,refusal;
   _Atomic int done;
   _Atomic uint32_t served,broken,pairing;
-  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing,psn;
+  uint32_t plan,made,peer_made,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],share,page,pages,rings,job_pairing,psn;
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t alive_at,job_at,held[MESH_LINK_STREAMS],seen[MESH_LINK_STREAMS][2],final[MESH_LINK_STREAMS][2];
@@ -188,10 +202,12 @@ _Static_assert(offsetof(struct link,released)%128==0 && offsetof(struct link,lan
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct agent_message).  The
    parent's: open the device (AGENT_OPEN), make the link's lanes (AGENT_MAKE, naming the link's keepalive page, which the
    parent may lease after the agent's spawn), connect them to the peer's (AGENT_CONNECT: the peer's lanes, address, node
-   and the link's bandwidth), serve no lane again (AGENT_HALT), end (AGENT_END).  The agent's, each naming the pairing it
-   was asked for: the device opened or not (AGENT_OPENED: its address and bandwidth, and in `lanes` the queue pairs the
-   device holds for a link), the lanes made or not (AGENT_MAKE names the lanes of the plan in `lanes`; AGENT_MADE:
-   each lane's queue pair number, the first sequence number and each lane's share), connected or not (AGENT_CONNECTED),
+   and the link's bandwidth, and in `lanes` the lanes it connects), serve no lane again (AGENT_HALT), end (AGENT_END).
+   The agent's, each naming the pairing it was asked for: the device opened or not (AGENT_OPENED: its address and
+   bandwidth, and in `lanes` the queue pairs the device holds for a link), the lanes made or not (AGENT_MAKE names the
+   lanes of the plan in `lanes`; AGENT_MADE: the lanes made in `lanes`, the plan's in lane_order until the device refused
+   one, that refusal's code in `refusal` (0: none), each made lane's queue pair number and the first sequence number),
+   connected or not (AGENT_CONNECTED: each lane's share of the completion queues),
    and the lanes a progress thread found failed (AGENT_BROKEN, naming its connect's pairing), a fault absorbed on the
    provider's doorbell (AGENT_FAULTED), a guard not held within MESH_PLATFORM_NS (AGENT_UNGUARDED), its port's peer
    interface terminating (AGENT_TERMINATED, as the agent heard it: B9b) */
@@ -199,7 +215,7 @@ enum { AGENT_OPEN=1, AGENT_MAKE, AGENT_CONNECT, AGENT_HALT, AGENT_END,
        AGENT_OPENED, AGENT_MADE, AGENT_CONNECTED, AGENT_BROKEN, AGENT_FAULTED, AGENT_UNGUARDED, AGENT_TERMINATED };
 struct agent_message {
   uint32_t kind,pairing;
-  int32_t result,refused;
+  int32_t result,refused,refusal;
   uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,broken,node,page,lanes;
   uint16_t lid,padding;
   uint8_t gid[16];

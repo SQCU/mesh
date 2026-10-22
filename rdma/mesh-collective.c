@@ -277,17 +277,20 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
         if((whole->link[k][0]==a && whole->link[k][1]==b) || (whole->link[k][0]==b && whole->link[k][1]==a)){
           map->link[l][0]=place[a];map->link[l][1]=place[b];
           if(map->bandwidth)map->bandwidth[l]=whole->bandwidth?whole->bandwidth[k]:0;
+          if(map->streams)map->streams[l]=whole->streams?whole->streams[k]:0;
           l++;
         }
       if(l==from){
         map->link[l][0]=place[a];map->link[l][1]=place[b];
         if(map->bandwidth)map->bandwidth[l]=0;
+        if(map->streams)map->streams[l]=0;
         l++;
       }
     }
     for(uint32_t k=0;!every && k<L;k++){
       map->link[k][0]=place[whole->link[k][0]];map->link[k][1]=place[whole->link[k][1]];
       if(map->bandwidth)map->bandwidth[k]=whole->bandwidth?whole->bandwidth[k]:0;
+      if(map->streams)map->streams[k]=whole->streams?whole->streams[k]:0;
     }
     for(uint32_t i=0;map->next && i<T;i++)for(uint32_t j=0;j<T;j++)
       map->next[(size_t)i*T+j]=at[i]<W && at[j]<W?place[table[(size_t)at[i]*W+at[j]]]:i;

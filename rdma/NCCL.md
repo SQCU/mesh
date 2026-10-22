@@ -78,7 +78,8 @@ torch-mesh's `_stream`) compiles them in its own process, as before. Only the li
   it holds rows (the stream's owner word taken while the stream is free). The second carries each rank's holding's
   status and where its streams' units start. A communicator names
   nodes alone. An init fails as a value where two ranks are on one node (`ncclInvalidUsage`), where no stream
-  toward a member's node is free at both ends (EBUSY: a link has four, each held by one communicator) or the link is
+  toward a member's node is free at both ends (EBUSY: a link has as many as its plan has lane pairs for, four where
+  both ends hold ten queue pairs, each held by one communicator; `mesh_map`'s `streams`, mesh-stat's) or the link is
   gone (ENOLINK)
   (`ncclSystemError`), or where its bootstrap's phase passes its bound (`ncclRemoteError`, ETIMEDOUT); what it held is
   let go, and the next init reads the streams as they then stand.
@@ -457,8 +458,10 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
   Separate send then receive calls in the same order on both sides do not pair: a channel has one position axis for
   both directions. The library does not detect it, nor unequal counts or different collectives on two ranks: no landed
   payload is checked, so these are the caller's error.
-- Communicators know nothing of one another, and no two hold one stream: a link has four, so four communicators use
-  a node pair at once, and a fifth is refused (EBUSY) until one of them is destroyed.
+- Communicators know nothing of one another, and no two hold one stream. A link has as many streams as its plan has
+  lane pairs for (four where both its ends hold ten queue pairs, one on the M5 Ultra's macOS 27 links: `mesh_map`'s
+  `streams`), and two cables between two nodes have their streams together; as many communicators as that use a node
+  pair at once, and one more is refused (EBUSY) until one of them is destroyed.
 
 ## Failures
 

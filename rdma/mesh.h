@@ -65,7 +65,8 @@ _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_e
    supplies (`in`, `out`, region offsets), of `units[c]` units of `unit[c]` bytes, a word a unit its holder stores to
    supply it (`ready`: 1 plus the unit's cycle, its sequence over the ring) and a word a unit the bridge stores as it
    lands (`landed`: 1 plus its cycle; ~0 once the link is lost: a landing only raises a word, so ~0 stands); its share of
-   the link's bandwidth; `wire`, the stream's identity, the same at both its ends and no other stream's between the two
+   the link's bandwidth (the link's over its live streams, so its live streams' shares together are the link's:
+   mesh-call.h mesh_nodes_reached); `wire`, the stream's identity, the same at both its ends and no other stream's between the two
    nodes, by which the two ends of a communicator hold the two ends of one stream (0 until it is live); `free` while no
    client holds it and every unit its last holder declared has gone, the first unit a holder then supplies of each class
    (`next`); and its holder's: its owner word (`owner`, taken 0 to its own while `free`, as rows are, and let go to 0),
@@ -88,10 +89,11 @@ _Static_assert(sizeof(struct mesh_stream)==192,"mesh_stream");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node, name and boot,
    the record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
-   model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), the `reached` nodes its bridge reaches (mesh-plan.h
-   struct mesh_reach), and its host UUID (`uuid`: gethostuuid, the identity its node number is drawn from, AGENTS.md "A
-   node is its hardware"; a loop bridge's, its host's mixed with its region's name), by which two hosts that share a
-   number are told apart and logged (mesh-records.c number_shared) */
+   model (hw.model, mesh-plan.h MESH_MODEL_BYTES with its NUL), its bridge's `reached` links, an entry a link: the node
+   it reaches, its streams and its bandwidth (mesh-plan.h struct mesh_reach; mesh-call.h mesh_nodes_reached), and its
+   host UUID (`uuid`: gethostuuid, the identity its node number is drawn from, AGENTS.md "A node is its hardware"; a
+   loop bridge's, its host's mixed with its region's name), by which two hosts that share a number are told apart and
+   logged (mesh-records.c number_shared) */
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; uint8_t uuid[16]; };
 /* design/transport.md: a client slot, a process's attach (`owner`, 0 vacant; its low 32 bits the process's pid) and

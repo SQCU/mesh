@@ -33,7 +33,8 @@ static inline int mesh_holds(pid_t pid,uint64_t start){ return start?mesh_starte
 /* design/algorithm-sources.md#programtensor */
 void mesh_retire(struct hdr *,uint64_t client);
 /* design/transport.md section 14: the one join of two nodes' records: 1 where each one's bridge reaches the other,
-   else 0; *beta 8e9 over the lesser bandwidth either reports (0 where neither reports one) */
+   else 0; *beta 8e9 over the fastest of the links joining them, each at the lesser bandwidth either end reports (0
+   where neither reports one: mesh-dataflow.c mesh_join) */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);

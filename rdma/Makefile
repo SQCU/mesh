@@ -8,7 +8,7 @@ MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 all: $(IMAGES:%=.build/%)
 native-audit: .build/mesh-link.s .build/mesh-records.s .build/mesh-call.s .build/mesh-dataflow.s
-.build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-bridge.h mesh-dataflow.h mesh-call.h Makefile
+.build/%.s: %.c mesh.h mesh-plan.h mesh-observe.h mesh-verbs.h mesh-bridge.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
@@ -57,7 +57,7 @@ clean-kernels: .build/libnccl-mesh.sha256
 # design/transport.md: the compiled collectives' advisories (mesh_program_advise) over the loopback
 # fabric's maps, at .build/mesh-advise with libmesh's sources compiled in (the installed libmesh.dylib untouched); not in `all`
 mesh-advise: .build/mesh-advise
-.build/mesh-advise: mesh-advise.c mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h \
+.build/mesh-advise: mesh-advise.c mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h mesh-observe.h \
   nccl.h Makefile
 	mkdir -p .build
 	cc -fblocks -O2 -Wall -Wextra -Werror -o $@ mesh-advise.c mesh-dataflow.c mesh-call.c mesh-collective.c
@@ -67,7 +67,7 @@ mesh-advise: .build/mesh-advise
 # deployed mesh-flow is built from the same source without MESH_LOOP_FABRIC and stays as it is
 LOOP = .build/loop
 mesh-flow-loop: $(LOOP)/mesh-flow-loop
-$(LOOP)/mesh-flow-loop: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-dataflow.c mesh-call.h mesh-call.c mesh-collective.h \
+$(LOOP)/mesh-flow-loop: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-observe.h mesh-dataflow.h mesh-dataflow.c mesh-call.h mesh-call.c mesh-collective.h \
   mesh-collective.c loopverbs.c Makefile
 	mkdir -p $(LOOP)
 	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -DMESH_LOOP_FABRIC -o $@ mesh-link.c mesh-records.c mesh-dataflow.c mesh-call.c mesh-collective.c loopverbs.c \
@@ -77,7 +77,7 @@ $(LOOP)/mesh-flow-loop: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h me
 # CPU (nccl-mesh-host.c), both at .build/host under the libraries' install names, and the loop's driver (mesh-loop.c)
 HOST = .build/host
 host: $(HOST)/libmesh.dylib $(HOST)/libnccl-mesh.dylib $(HOST)/mesh-loop $(LOOP)/mesh-flow-loop
-$(HOST)/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
+$(HOST)/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h mesh-observe.h Makefile
 	mkdir -p $(HOST)
 	cc -fblocks -O2 $(WARN) -DMESH_LOOP_FABRIC -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
 $(HOST)/libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-host.c nccl-mesh-metal.h nccl.h mesh-collective.h mesh-call.h mesh-dataflow.h \
@@ -155,7 +155,7 @@ kernels: .build/libnccl-mesh.metallib
 	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation
-.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
+.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h mesh-observe.h Makefile
 	mkdir -p .build
 	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
 # the built images; never an installed image (the launchd job's binary and the libraries clients map)
