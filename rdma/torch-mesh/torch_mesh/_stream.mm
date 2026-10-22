@@ -201,7 +201,7 @@ static void mark(int64_t comm, int64_t kind) {
 }
 
 // A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
-// and the commit rule applied where it published.  Its staged copies (`held`) and its workspace are held together:
+// and the commit rule applied where it published.  Its workspace (`held`) is held:
 // split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
 static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
   const auto *encode = &call;
@@ -302,13 +302,13 @@ struct Operand {
   ncclDataType_t type = ncclUint8;
 };
 
-// A group's operands: one device's tensors (MPS: the Metal path; CPU: the host path), a non-contiguous one through a
-// contiguous copy in the region (a crossing call's send buffer is a lease's, and the library copies none into the
-// region: nccl.h Memory) written back after the group where a call writes it.
+// A group's operands: one device's tensors (MPS: the Metal path; CPU: the host path), each contiguous; a non-contiguous
+// one fails as a value, as nothing is copied to make it one (the operator, 2026-10-21: "zero copy methods must always
+// be used over access by copy because memory bandwidth and flops are too scarce on this hardware api"; "code which
+// can't perform well can fail instead of being run").
 struct Group {
   bool metal = false;
   std::deque<ncclMeshBuffer> buffers;
-  std::vector<std::tuple<at::Tensor, at::Tensor, bool>> staged;
 
   const void *where(const at::Tensor &t) {
     if (!t.is_mps()) return t.data_ptr();
@@ -316,16 +316,11 @@ struct Group {
     return &buffers.back();
   }
   at::Tensor contiguous(const at::Tensor &t, bool written) {
+    (void)written;
     TORCH_CHECK(t.is_mps() == metal, "the mesh backend's group takes MPS tensors or CPU tensors, not both");
-    if (t.is_contiguous()) return t;
-    for (auto &[original, copy, writes] : staged)
-      if (original.is_same(t)) {
-        writes |= written;
-        return copy;
-      }
-    at::Tensor copy = region_empty(t.sizes().vec(), t, metal).copy_(t);
-    staged.emplace_back(t, copy, written);
-    return copy;
+    TORCH_CHECK(t.is_contiguous(), "the mesh backend's operand is a contiguous region tensor (torch_mesh.empty); a non-contiguous "
+                "one is not copied into one (zero copy: nccl.h Memory)");
+    return t;
   }
   Operand moving(const at::Tensor &tensor, bool written) {
     const at::Tensor t = contiguous(tensor, written);
@@ -450,10 +445,10 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
 }
 
 // One group of `calls` on comm: on MPS tensors encoded on torch's stream, issued and not completed where `split` (its
-// ticket; 0 complete) unless a call writes a staged copy; on CPU tensors the host path, first completing every group
+// ticket; 0 complete); on CPU tensors the host path, first completing every group
 // issued on torch's streams (ncclMeshComplete encodes every issued group's completion on the current one) and waiting
 // for each stream a group was issued on (the session's positions run in its order), the GIL released while it runs
-// where `unlock`.  Every staged copy a call writes is written back after it.
+// where `unlock`.
 static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, bool unlock) {
   Group g;
   for (const Call &c : calls)
@@ -464,12 +459,7 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
   for (const Call &c : calls) issues.push_back(prepare(c, g));
   uint64_t ticket = 0;
   if (g.metal) {
-    std::vector<at::Tensor> held;
-    for (auto &[original, copy, written] : g.staged) {
-      split &= !written;
-      held.push_back(copy);
-    }
-    ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm, std::move(held));
+    ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm, {});
   } else {
     bool streamed = false;
     for (MeshStream *s : streams_made()) streamed |= s->streamed;
@@ -487,8 +477,6 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
     if (unlock) unlocked.emplace();
     checked(encoded(issues, communicator(comm), nullptr));
   }
-  for (auto &[original, copy, written] : g.staged)
-    if (written) original.copy_(copy);
   return ticket;
 }
 

@@ -1193,7 +1193,7 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank, node = reports[me].node;
   uint64_t bandwidth;
   size_t offset = 0;
-  comm->page = m->pgsz;
+  comm->page = (uint64_t)m->block * m->pgsz;
   int status = map_of(comm, reports);
   if (!status && !(comm->violation = metal_shared((size_t)getpagesize()))) status = ENOMEM;
   if (!status) comm->words = metal_contents(comm->violation);

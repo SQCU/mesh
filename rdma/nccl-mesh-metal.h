@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include "mesh.h"
 /* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, What a client cannot reach) */
 #pragma GCC visibility push(hidden)
 
@@ -19,7 +20,7 @@
    bytes.  pages_to_word and pages_from_word: the count as a region word or a kernel's argument record holds it, used
    at those boundaries alone (and in a sum that only tells whether counts moved, nccl-mesh.c run).  pages_lost: the
    bridge's ~0, its link lost. */
-typedef struct { uint64_t n; } mesh_pages;
+typedef struct mesh_pages mesh_pages;
 static inline mesh_pages pages_of(uint64_t bytes, uint64_t page) { return (mesh_pages){(bytes + page - 1) / page}; }
 static inline mesh_pages pages_add(mesh_pages a, mesh_pages b) { return (mesh_pages){a.n + b.n}; }
 static inline mesh_pages pages_sub(mesh_pages a, mesh_pages b) { return (mesh_pages){a.n - b.n}; }

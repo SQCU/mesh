@@ -158,11 +158,22 @@ static inline void stream_time(_Atomic uint64_t *ring,uint64_t e,uint64_t at){
 static inline uint64_t page_bytes(void){ return (uint64_t)M->block*M->pgsz; }
 /* design/pages-and-functions.md: the arena offset of row r's page (the row's own word: the page table read in the
    order of an entry's rows, its block table) */
-static inline uint64_t row_at(struct mesh_row r){ return atomic_load_explicit(&mesh_page(M)[r.r].address,memory_order_relaxed)-M->data_off; }
-/* the verbs boundary, the one place a page is bytes: the SGE of row r's page; of the spare page, the link block's
-   second; of lane 0's one-frame receive, in the link block's first page; and of `bytes` of the all-ones block */
-static inline struct ibv_sge page_span(const struct port *port,struct mesh_row r){
-  return wire_span(&port->device,page_bytes(),row_at(r),page_bytes());
+/* 0 where the row holds no page of the arena (a row with no page bound reads address 0), so no SGE ever names memory
+   outside the registered arena: a bound on memory */
+static inline int row_at(struct mesh_row r,uint64_t *at){
+  const uint64_t a=atomic_load_explicit(&mesh_page(M)[r.r].address,memory_order_relaxed),arena=(uint64_t)mesh_arena_pages(M)*M->pgsz;
+  if(a<M->data_off || a-M->data_off>arena-page_bytes())return 0;
+  *at=a-M->data_off;
+  return 1;
+}
+/* the verbs boundary, the one place a page is bytes: the SGE of row r's page (0 where the row holds none: row_at); of
+   the spare page, the link block's second; of lane 0's one-frame receive, in the link block's first page; and of
+   `bytes` of the all-ones block */
+static inline int page_span(const struct port *port,struct mesh_row r,struct ibv_sge *span){
+  uint64_t at;
+  if(!row_at(r,&at))return 0;
+  *span=wire_span(&port->device,page_bytes(),at,page_bytes());
+  return 1;
 }
 static inline struct ibv_sge spare_span(const struct port *port){
   return wire_span(&port->device,page_bytes(),link_block(port)+page_bytes(),page_bytes());
@@ -332,7 +343,8 @@ static int lane_send(struct port *port,uint32_t k){
       }
     }
     if(!gate_holds(gate,each))break;
-    struct ibv_sge span=ready?page_span(port,from):ones_span(port,page_bytes());
+    struct ibv_sge span;
+    if(!ready || !page_span(port,from,&span))span=ones_span(port,page_bytes());
     struct ibv_send_wr posting={.wr_id=gate_post(gate,k,each),.sg_list=&span,.num_sge=1,
                                 .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
     const int error=q->send(q->pair,&posting,&bad);
@@ -409,7 +421,8 @@ static int lane_post(struct port *port,uint32_t k){
       if(e->word && mesh_pages_lt(mesh_pages_load(e->word),e->base))break;
       if(e->whole){into=1;to=mesh_row_after(e->row,mesh_pages_sub(unit_page(u,c),e->page));}
     }
-    struct ibv_sge span=into?page_span(port,to):spare_span(port);
+    struct ibv_sge span;
+    if(!into || !page_span(port,to,&span))span=spare_span(port);
     struct ibv_recv_wr request={.wr_id=k,.sg_list=&span,.num_sge=1},*bad;
     const int error=q->receive(q->pair,&request,&bad);
     if(error)return error<0?-error:error;
@@ -1349,6 +1362,8 @@ static void ports_found(void){
     port->link.lists=MESH_ABSENT;
     port->link.provider.device=&port->device;
     snprintf(port->device.name,sizeof port->device.name,"%s",devices[i]);snprintf(port->name,sizeof port->name,"%s",devices[i]+5);
+    /* the interface as the kernel's events name it, its name read once here into typed values (addresses_heard) */
+    if(!strncmp(port->name,"en",2)){port->family=APPLE_IF_FAM_ETHERNET;port->unit=(uint32_t)strtoul(port->name+2,NULL,10);}
     /* design/transport.md B9b: counted for a termination's queue (quiet_all, peer_port) once whole, then
        held to the window a termination heard meanwhile set (`exit_at`) */
     __atomic_store_n(&port_count,port_count+1,__ATOMIC_SEQ_CST);
@@ -1386,14 +1401,15 @@ static void network_heard(int stopping){
    events on `addresses`: a link-local address bin/mesh-fabric-init.sh puts in place, or its duplicate address detection
    done): the hellos' group joined on the interface again (a join while it held no IPv6 address took nothing) and the
    port's hello said at this turn, so a hello that left before the address could carry it is said again as the address
-   comes, not a pace (MESH_PAUSE_NS) later */
+   comes, not a pace (MESH_PAUSE_NS) later.  The port is the event's interface family and unit, the port's own read once
+   (struct port `family`, `unit`): no name is built or compared per event (design/rubrics.md, Strings are messages).
+   Another Ethernet-family interface of the same unit (bridge0, awdl0, anpi<N>) is taken as the port's, and its event
+   says the port's hello early, as the pace would: a hello on an open port with no peer is never wrong */
 static void addresses_heard(void){
   union { struct kern_event_msg header; unsigned char bytes[512]; } event;
   while(recv(addresses,event.bytes,sizeof event,0)>=(ssize_t)(KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data))){
     const struct net_event_data *interface=(const void *)(event.bytes+KEV_MSG_HEADER_SIZE);
-    char name[IFNAMSIZ+16];
-    snprintf(name,sizeof name,"%.*s%u",(int)sizeof interface->if_name,interface->if_name,interface->if_unit);
-    for(uint32_t p=0;p<port_count;p++)if(!strcmp(name,ports[p].name)){
+    for(uint32_t p=0;p<port_count;p++)if(interface->if_family==ports[p].family && interface->if_unit==ports[p].unit){
       struct ipv6_mreq group={.ipv6mr_multiaddr=everyone,.ipv6mr_interface=ports[p].interface};
       if(ports[p].interface)setsockopt(hello,IPPROTO_IPV6,IPV6_JOIN_GROUP,&group,sizeof group);
       ports[p].next=now;
