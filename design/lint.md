@@ -103,8 +103,10 @@ backend complexity out of linear algebra.
 - **R1-USE.** A dispatch declares every allocation of a residency set (`useResource` over `allAllocations`). Its pass
   is then ordered against every pass that names any of them, not only the buffers it reaches.
   - Source: GPU audit 2026-10-22, item 12.
-  - Right: declare the buffers the dispatch's records name, each with its own use (torch_mesh/fused.py `_DECLARED`:
-    a landing's buffer, record and counts read; a publication's record read, its operand and counts written).
+  - Right: declare the buffers the dispatch's records name, each with its own use (torch_mesh/fused.py `_DECLARED`).
+    A landing's record and counts are read, and its buffer is written: the NIC's bytes are the GPU's to see only after
+    the landing wait, so a later pass that reads them is ordered after it. A publication's record is read, and its
+    operand and counts are written. Either's `progress` word (binding 5) is written by `mesh_step_enter`.
 
 ### Units, placement and planning
 - **U1-PAGE.** A unit's length is the whole page, not the plan's bytes.

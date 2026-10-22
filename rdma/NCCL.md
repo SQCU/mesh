@@ -286,10 +286,11 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     an in-place all-gather. On a stream whose `fused` is set, the call writes the steps' argument records into the
     caller's lists and returns their bindings (`ncclMeshFused`: room given, counts written, the records in its peers'
     order, its channels'); it dispatches no step. It
-    completes at once, issued or not. Of the groups in flight before it, it completes first only those it meets: one
-    whose entries name a row its own entries name, or one with a send entry not yet published on a channel where it
-    publishes (its release raises `ready`, a count, past that entry). The others stay in flight until their own
-    completion, so a block-ahead broadcast is waited for where its caller waits for it, not before each crossing. Its
+    completes at once, issued or not. The groups in flight before it are completed first through the last of its
+    communicator's with a send entry not yet published on a channel where it publishes (its release raises `ready`, a
+    count, past that entry), with every group before that one, since completion is in issue order. The groups after
+    that one stay in flight until their own completion, so a block-ahead broadcast is waited for where its caller waits
+    for it, not before each crossing. Pages both name are the caller's to guard: the bridge lands as presented. Its
     landings are recorded at their own entries even where an earlier group's landings on the channel are not yet
     consumed: the counts are cumulative, so `landed` past its entry is past theirs.
     `ncclMeshFusableRooted` gives the counts: an all-reduce's n - 1 of each, a reduce's root n - 1
@@ -438,18 +439,24 @@ system call".
   a pool of leases for the pages its groups send from and land in that are not the caller's (a reduce-scatter's
   operand, a tree's scratch, a combine's landing area). A lease of the pool is held by a group until it completes, and
   returned at `ncclCommDestroy`.
-  - A later group takes it again only once the GPU has ended every command that read it, since a landing's receives
-    are posted as presented. Each program frees exactly the leases it gave back, by its own end: it takes a stamp word
-    no lease names and stores its end's number there once every dispatch before has ended. On the classic form its
-    command buffer's completed handler stores it; on the Metal 4 form one dispatch after its barrier does
-    (`nccl-mesh-metal.h` `metal_stamp`, `METAL_STAMP`; `nccl-mesh.c` `stamp_end`).
-  - `spare_take` counts a lease free once its word reads its program's number. That holds in whatever order the caller
-    commits its programs, on any queues. Nothing waits, so the pool grows by the programs the GPU has not ended. A
-    lease whose program could not be stamped, or whose group was lost with its communicator, is kept until
-    `ncclCommDestroy`.
-  - This is the narrow form. The operator's design replaces the pool (2026-10-22, relayed): a not-in-place
-    reduction's extra pages are rows of the page table, landed into by scatter, read in place by the reduce and
-    released by use count.
+  - A later group takes it again only once the GPU has ended every program that named it, since a landing's receives
+    are posted as presented. Each lease has a use count (design/pages-and-functions.md, Freeing 6): the ends of the
+    programs that named it not yet seen.
+  - Every program that touches a communicator names each lease of its pool that a group holds, or that was given
+    back while it ran (`nccl-mesh.c` `stamp_end`). That covers the issuing program's operand copies and
+    `complement_copy`, and the completing and retiring programs' combines, `sent` waits and result copies.
+  - The program takes an idle stamp word and stores its own end number there once every dispatch before has ended.
+    On the classic form its command buffer's completed handler stores it; on the Metal 4 form one dispatch after its
+    barrier does (`nccl-mesh-metal.h` `metal_stamp`, `METAL_STAMP`). `ends_seen` lowers each named lease's count as
+    its word reads that number.
+  - `spare_take` takes a lease whose count is 0. That holds in whatever order the caller commits its programs, on any
+    queues. Nothing waits, so the pool grows by the leases named by programs the GPU has not ended.
+  - The words are a page's less 16 (2,032 on a 16 KiB page). Where all are in use, or the stamp cannot be encoded, the
+    call fails as a value and the leases its program named are kept until `ncclCommDestroy`; so is a lease whose
+    group was lost with its communicator.
+  - This is the narrow form. The full fix moves the stamp into each lease's page-table row, so no table of words can be
+    exhausted. The operator's design replaces the pool (2026-10-22, relayed): a not-in-place reduction's extra pages
+    are rows of the page table, landed into by scatter, read in place by the reduce and released by use count.
 - `ncclMemAlloc(ptr, size)` is the lease, the system call: whole pages of the region covering `size` (one page for 0),
   already registered; a lease registers nothing. Its bookkeeping is the region's (the lease's rows are owned by the
   client's slot), so when the process exits or dies its bridge returns the pages as it returns every retired client's

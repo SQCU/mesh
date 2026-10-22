@@ -256,13 +256,13 @@ struct channel {
   int64_t differ[2];
 };
 /* a lease of a communicator's pool (struct ncclComm `spares`): its address and bytes, the group holding it (its
-   number + 1: group_numbered; 0 none), and, once given back on the Metal path, the end that frees it: `slot` 1 + the
-   stamp word its program's end stores (nccl-mesh-metal.h METAL_STAMP), `until` the number stored there (struct ncclComm
-   `ends`); 0 none (free once no group holds it), SPARE_PENDING given back in the program being encoded (stamp_end),
-   SPARE_KEPT held until ncclCommDestroy (its readers' end not seen) */
-struct spare { void *address; size_t bytes; uint64_t holder, until; uint32_t slot; };
-#define SPARE_PENDING UINT32_MAX
-#define SPARE_KEPT (UINT32_MAX - 1)
+   number + 1: group_numbered; 0 none), the ends of the programs that named it not yet seen (`uses`, its use count:
+   design/pages-and-functions.md, Freeing 6; stamp_end, ends_seen), and whether it was given back since its
+   communicator's last program end (`given`) */
+struct spare { void *address; size_t bytes; uint64_t holder; uint32_t uses; int given; };
+/* a program's end not yet seen (struct ncclComm `ends`, by its stamp word, nccl-mesh-metal.h METAL_STAMP + its index):
+   the number it stores there (0: the word idle), and the leases of the pool it named (indices into `spares`) */
+struct end { uint64_t number; uint32_t count, *leases; };
 
 /* a communicator: rank r on the bridge of node members[r]; its map (map_of: its members joined where their bridges
    reach each other's nodes, the routing table mesh_routes'), made at its init alike by every member and kept; the page
@@ -275,20 +275,20 @@ struct spare { void *address; size_t bytes; uint64_t holder, until; uint32_t slo
    (`attach`, until ncclCommDestroy); the attach's holds of streams it uses (`held`, a bit a hold; `binding` while it
    counts among their users); its channels (`count`), one toward each member whose node its bridge reaches, toward[r]
    rank r's (-1: none); its pool of leases (`spares`, `nspares`: the pages its groups send from and land in that are not
-   the caller's, spare_take), whether leases of it were given back while the program being encoded ran (`stamping`), the
-   number of its programs' ends that stamped them (`ends`) and the leases naming each stamp word (`stamps`, `nstamps` of
-   them: stamp_end); its failure words (`words`, nccl-mesh-metal.h: its GPU work's failure records, which the host reads
-   and no kernel halts on, and the stop a revoke sets; `violation` the Metal buffer over them) and its failure once kept
-   (`failed`, its message `failure`: comm_fail); `last`, the count of the last GPU program signalling `finished` that
-   touched it, and that program's command buffer (`command`, retained), (`touched`, `next_touched` while one is encoded:
-   program_end), and the number its next group issued takes (`groups`: group_numbered) and, of its last GROUP_TIMES
-   groups, group g's at g mod GROUP_TIMES, each channel's first send entry of the group and its last landing entry, each
-   plus one (`timed`, 0 where the group has none on it: schedule_group, ncclMeshTimes); `runs`, its host-path groups
-   running; `revoked`, set by ncclCommRevoke and ncclCommDestroy, failing every group after it; `peers`, its bootstrap's
-   sockets, kept for its life once its init succeeds (NCCL's bootstrapState), which a revoke shuts down and comm_free
-   closes, under `guard`, and the end of its bootstrap's present phase (`until`, bootstrap_open, gather).  A
-   non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy joins it), `async`
-   ncclInProgress until it ends and `why` its failure's message (its id 0 while none is kept) */
+   the caller's, spare_take), its programs' ends not yet seen by stamp word (`ends`, `nstamps` words: those of `pending`
+   in use, those of `idle` free) and the numbers given them (`ended`: stamp_end, ends_seen); its failure words (`words`,
+   nccl-mesh-metal.h: its GPU work's failure records, which the host reads and no kernel halts on, and the stop a revoke
+   sets; `violation` the Metal buffer over them) and its failure once kept (`failed`, its message `failure`: comm_fail);
+   `last`, the count of the last GPU program signalling `finished` that touched it, and that program's command buffer
+   (`command`, retained), (`touched`, `next_touched` while one is encoded: program_end), and the number its next group
+   issued takes (`groups`: group_numbered) and, of its last GROUP_TIMES groups, group g's at g mod GROUP_TIMES, each
+   channel's first send entry of the group and its last landing entry, each plus one (`timed`, 0 where the group has
+   none on it: schedule_group, ncclMeshTimes); `runs`, its host-path groups running; `revoked`, set by ncclCommRevoke
+   and ncclCommDestroy, failing every group after it; `peers`, its bootstrap's sockets, kept for its life once its init
+   succeeds (NCCL's bootstrapState), which a revoke shuts down and comm_free closes, under `guard`, and the end of its
+   bootstrap's present phase (`until`, bootstrap_open, gather).  A non-blocking init (nccl.h ncclMeshCommInitRank) runs
+   on `init` (`initing`: ncclCommDestroy joins it), `async` ncclInProgress until it ends and `why` its failure's message
+   (its id 0 while none is kept) */
 struct attach;
 /* the groups a communicator's record of units holds (`timed`): as many as the Metal 4 argument ring's records
    (nccl-mesh-metal.m RECORDS, a group's dispatches one at least), within which a caller bounds the groups it encodes ahead
@@ -317,9 +317,9 @@ struct ncclComm {
   uint32_t held;
   struct channel *channels;
   struct spare *spares;
-  uint32_t nspares, *stamps, nstamps;
-  int stamping;
-  uint64_t ends;
+  uint32_t nspares, nstamps, *pending, npending, *idle, nidle;
+  struct end *ends;
+  uint64_t ended;
   _Atomic uint64_t *words;
   void *violation;
   uint64_t last, groups, (*timed)[2];
@@ -404,7 +404,8 @@ static void comm_free(struct ncclComm *comm) {
   metal_release(comm->command);
   comm_leave(comm);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->toward); free(comm->timed);
-  free(comm->ops); free(comm->stamps);
+  for (uint32_t w = 0; comm->ends && w < comm->nstamps; w++) free(comm->ends[w].leases);
+  free(comm->ops); free(comm->ends); free(comm->pending); free(comm->idle);
   pthread_mutex_destroy(&comm->guard);
   free(comm->members); free(comm->forms);
   free(comm);
@@ -1202,8 +1203,11 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
   int status = map_of(comm, reports);
   if (!status && !(comm->violation = metal_shared((size_t)getpagesize()))) status = ENOMEM;
   if (!status) comm->words = metal_contents(comm->violation);
-  if (!status && !(comm->stamps = calloc(comm->nstamps = (uint32_t)((size_t)getpagesize() / sizeof(uint64_t) - METAL_STAMP), sizeof *comm->stamps)))
+  comm->nstamps = (uint32_t)((size_t)getpagesize() / sizeof(uint64_t) - METAL_STAMP);
+  if (!status && (!(comm->ends = calloc(comm->nstamps, sizeof *comm->ends)) || !(comm->pending = calloc(comm->nstamps, sizeof *comm->pending)) ||
+                  !(comm->idle = calloc(comm->nstamps, sizeof *comm->idle))))
     status = ENOMEM;
+  for (uint32_t w = 0; !status && w < comm->nstamps; w++) comm->idle[comm->nidle++] = comm->nstamps - 1 - w;
   if (!status && !(comm->channels = calloc((size_t)n + 1, sizeof *comm->channels))) status = ENOMEM;
   for (uint32_t q = 0; !status && q < n; q++) {
     if (q == me || !joined(reports, me, q, &bandwidth)) continue;
@@ -1971,23 +1975,34 @@ static void schedules_free(const struct ncclComm *comm, struct schedule *plans) 
   free(plans);
 }
 
+/* the program ends of comm that the GPU has reached seen (each stamp word reading its end's number): every lease the
+   end named has one use less, and the word is idle again.  Under group_lock */
+static void ends_seen(struct ncclComm *comm) {
+  for (uint32_t k = 0; k < comm->npending;) {
+    const uint32_t w = comm->pending[k];
+    struct end *e = comm->ends + w;
+    if (atomic_load_explicit(comm->words + METAL_STAMP + w, memory_order_acquire) != e->number) { k++; continue; }
+    for (uint32_t j = 0; j < e->count; j++) comm->spares[e->leases[j]].uses--;
+    free(e->leases);
+    *e = (struct end){0, 0, NULL};
+    comm->idle[comm->nidle++] = w;
+    comm->pending[k] = comm->pending[--comm->npending];
+  }
+}
+
 /* a lease of comm's pool of at least `bytes` (its smallest free one that holds them, else a new one: ncclMemAlloc),
    held by the group numbered `holder` until that group ends (spares_give); NULL where the region cannot meet it, the
-   failure formatted (ncclMemAlloc's).  A lease is free once no group holds it and the end of the program that gave it
-   back has been stamped (its stamp word reads that end's number: every command that read the lease has ended, in
-   whatever order the caller commits its programs); the bridge posts a landing's receives as it is presented, so a lease
-   the stream's earlier work may still read is never landed in again.  Nothing waits: the pool grows by the programs the
-   GPU has not ended.  Under group_lock */
+   failure formatted (ncclMemAlloc's).  A lease is free once no group holds it, it was not given back in the program
+   being encoded, and the end of every program that named it has been seen (its use count 0: ends_seen): the bridge
+   posts a landing's receives as it is presented, so a lease a command the GPU has not ended may read or write is never
+   landed in again, in whatever order the caller commits its programs and on whatever queues.  Nothing waits: the pool
+   grows by the leases named by programs the GPU has not ended.  Under group_lock */
 static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder) {
   struct spare *best = NULL;
+  ends_seen(comm);
   for (uint32_t k = 0; k < comm->nspares; k++) {
     struct spare *x = comm->spares + k;
-    if (x->slot && x->slot <= comm->nstamps &&
-        atomic_load_explicit(comm->words + METAL_STAMP + x->slot - 1, memory_order_acquire) == x->until) {
-      comm->stamps[x->slot - 1]--;
-      x->slot = 0;
-    }
-    if (!x->holder && !x->slot && x->bytes >= bytes && (!best || x->bytes < best->bytes)) best = x;
+    if (!x->holder && !x->uses && !x->given && x->bytes >= bytes && (!best || x->bytes < best->bytes)) best = x;
   }
   if (!best) {
     struct spare *grown = realloc(comm->spares, (comm->nspares + 1) * sizeof *grown);
@@ -2002,31 +2017,50 @@ static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder) {
   return best->address;
 }
 /* every lease of comm's pool the group numbered `holder` held given back: free at once where `stamped` is 0 (the host
-   path, whose work has ended), else once the end of the program being encoded is stamped (the Metal path: stamp_end,
-   after every dispatch that reads them).  Under group_lock */
+   path, whose work has ended), else named by the end of the program being encoded (the Metal path: stamp_end).  Under
+   group_lock */
 static void spares_give(struct ncclComm *comm, uint64_t holder, int stamped) {
   for (uint32_t k = 0; holder && k < comm->nspares; k++)
-    if (comm->spares[k].holder == holder) {
-      comm->spares[k] = (struct spare){comm->spares[k].address, comm->spares[k].bytes, 0, 0, stamped ? SPARE_PENDING : 0};
-      comm->stamping |= stamped;
-    }
+    if (comm->spares[k].holder == holder) { comm->spares[k].holder = 0; comm->spares[k].given |= stamped; }
 }
-/* the leases of comm's pool given back while the program ran (SPARE_PENDING) freed by its own end: a stamp word no lease
-   names given the program's end number, which metal_stamp stores there once every dispatch the program encoded has
-   ended; where every word is named or the stamp is not encoded, they are kept until ncclCommDestroy (their readers'
-   end unseen, so never landed in again).  Under group_lock */
-static void stamp_end(struct metal_program *program, struct ncclComm *comm) {
-  uint32_t w = 0;
-  while (w < comm->nstamps && comm->stamps[w]) w++;
-  const uint64_t end = ++comm->ends;
-  const int stamped = w < comm->nstamps && !metal_stamp(program, comm->violation, (METAL_STAMP + w) * sizeof(uint64_t), end).status;
+/* the end of the program being encoded, for comm: every lease of its pool that a group holds or that was given back
+   while the program ran (the leases the program may name: its operands, landing areas and scratch, the SENDs and
+   combines of groups it completes, the results it copies out as it retires them) has one use more, freed once the GPU
+   has ended the program (ends_seen).  An idle stamp word takes the program's end number, which metal_stamp stores
+   there once every dispatch the program encoded has ended.  0; ncclSystemError where every word is in use (`nstamps`
+   ends named leases and are not yet seen: the GPU ends programs before more are encoded) or the stamp is not encoded,
+   the named leases then kept until ncclCommDestroy.  Under group_lock */
+static ncclResult_t stamp_end(struct metal_program *program, struct ncclComm *comm) {
+  uint32_t named = 0;
+  for (uint32_t k = 0; k < comm->nspares; k++) named += comm->spares[k].holder || comm->spares[k].given;
+  if (!named) return ncclSuccess;
+  ends_seen(comm);
+  uint32_t *leases = comm->nidle ? malloc(named * sizeof *leases) : NULL;
+  const uint32_t w = comm->nidle ? comm->idle[comm->nidle - 1] : 0;
+  const uint64_t number = comm->ended + 1;
+  const struct metal_result stamped = leases ? metal_stamp(program, comm->violation, (METAL_STAMP + w) * sizeof(uint64_t), number) : METAL_DONE;
+  uint32_t n = 0;
   for (uint32_t k = 0; k < comm->nspares; k++)
-    if (comm->spares[k].slot == SPARE_PENDING) {
-      comm->spares[k].slot = stamped ? w + 1 : SPARE_KEPT;
-      comm->spares[k].until = end;
-      if (stamped) comm->stamps[w]++;
+    if (comm->spares[k].holder || comm->spares[k].given) {
+      comm->spares[k].uses++;
+      comm->spares[k].given = 0;
+      if (leases) leases[n++] = k;
     }
-  comm->stamping = 0;
+  if (!comm->nidle)
+    return fail(ncclSystemError, "communicator %s: %u program ends that named leases of its pool are not yet seen ended (its stamp words, "
+                "nccl-mesh-metal.h METAL_STAMP): the GPU ends programs before more are encoded; the leases this one named are kept "
+                "until ncclCommDestroy", comm->name, comm->nstamps);
+  if (!leases) return fail(ncclSystemError, "out of memory");
+  if (stamped.status) {
+    free(leases);
+    return fail(ncclSystemError, "communicator %s: a program's end stamp: %s; the leases of its pool it named are kept until ncclCommDestroy",
+                comm->name, stamped.message);
+  }
+  comm->ended = number;
+  comm->nidle--;
+  comm->ends[w] = (struct end){number, n, leases};
+  comm->pending[comm->npending++] = w;
+  return ncclSuccess;
 }
 /* a lease of comm's pool (spare_take) as a where: on the Metal path its Metal buffer (lease_buffer, made resident
    through the program's residency set where it has one), on the host path its address; {NULL, 0} where none was had,
@@ -2554,8 +2588,8 @@ static void calls_free(struct call *list, size_t n) {
 }
 
 /* a group done with: its schedule, its calls, and the leases of its communicator's pool it held given back where
-   `retired` (retire: freed by the end of the program retiring it, stamp_end), else kept (a group lost with its
-   communicator, whose readers' end no program will stamp) */
+   `retired` (retire: free once every program that named them has ended, stamp_end), else kept (a group lost with its
+   communicator, whose programs' ends nothing will see) */
 static void inflight_free(struct inflight *g, int retired) {
   if (retired) spares_give(g->comm, g->holder, 1);
   schedules_free(g->comm, g->plans);
@@ -2836,10 +2870,11 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
 }
 
 /* a fused group's steps recorded for its caller's kernels (nccl.h ncclMeshFused), no dispatch: each channel in turn,
-   its publications in order once their steps' receives before them are recorded (no group before it has a send entry
-   there not yet published: launch_metal completes such a group first, meets), and each landing at its own entry, also
-   where landings of groups before it on the channel are not consumed yet (the counts are cumulative, so `landed` past
-   its entry is past theirs; the channel's count passes it once theirs are consumed: consumed_past) */
+   its own publications in order once their steps' receives before them are recorded (on a channel where it publishes
+   no group before it has a send entry not yet published: launch_metal completes such a group first, meets; on any
+   other an earlier group's sends are that group's), and each landing at its own entry, also where landings of groups
+   before it on the channel are not consumed yet (the counts are cumulative, so `landed` past its entry is past theirs;
+   the channel's count passes it once theirs are consumed: consumed_past) */
 static ncclResult_t complete_fused(struct metal_program *program, struct inflight *g, int *published) {
   struct ncclComm *const comm = g->comm;
   ncclResult_t result = ncclSuccess;
@@ -2847,9 +2882,10 @@ static ncclResult_t complete_fused(struct metal_program *program, struct infligh
   metal_gate(program, comm->violation);
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     struct channel *ch = comm->channels + h;
-    for (uint64_t at = g->start[h][1]; !result && (ch->published < g->end[h][0] || at < g->end[h][1]);) {
+    const int sends = g->end[h][0] > g->start[h][0];
+    for (uint64_t at = g->start[h][1]; !result && ((sends && ch->published < g->end[h][0]) || at < g->end[h][1]);) {
       const struct message *r = at < g->end[h][1] ? in_at(g, h, at) : NULL;
-      if (ch->published < g->end[h][0] && publishable(comm, h, ch->published)) result = publish(program, comm, h, ch->published + 1, published);
+      if (sends && ch->published < g->end[h][0] && publishable(comm, h, ch->published)) result = publish(program, comm, h, ch->published + 1, published);
       else if (r && ready(r->c->bound, r->step)) result = consume(program, comm, h, at++, METAL_NONE, 0);
       else
         result = fail(ncclInternalError, "a fused crossing's entries on channel %u admit no order (published %llu of %llu, recorded %llu of %llu)", h,
@@ -2859,29 +2895,13 @@ static ncclResult_t complete_fused(struct metal_program *program, struct infligh
   return result;
 }
 
-/* whether two entries' rows meet, and whether one of group g's entries names a row entry m names */
-static int rows_meet(const struct message *x, const struct message *y) {
-  return x->row < y->row + pages_to_word(y->pages) && y->row < x->row + pages_to_word(x->pages);
-}
-static int names_row(const struct inflight *g, const struct message *m) {
-  for (uint32_t h = 0; h < g->comm->count; h++) {
-    for (size_t k = 0; k < g->plans[h].outs; k++) if (rows_meet(g->plans[h].out + k, m)) return 1;
-    for (size_t k = 0; k < g->plans[h].ins; k++) if (rows_meet(g->plans[h].in + k, m)) return 1;
-  }
-  return 0;
-}
 /* whether fused group g's records follow the completion of group x, in flight before it (launch_metal): x is the
-   library's to encode (not fused), and on a channel where g publishes x has a send entry not yet published (g's release
-   raises `ready`, a count, past it), or one of x's entries names a row one of g's names (g writes every row it names:
-   its operands by its caller's kernel, its landings by the NIC) */
+   library's to encode (not fused), of g's communicator, and on a channel where g publishes x has a send entry not yet
+   published (g's release raises `ready`, a count, past it).  Nothing else of x orders g: the bridge lands g's bytes as
+   g presents them, and pages both name are their caller's to guard */
 static int meets(const struct inflight *x, const struct inflight *g) {
-  if (x->fused) return 0;
-  for (uint32_t h = 0; x->comm == g->comm && h < g->comm->count; h++)
+  for (uint32_t h = 0; !x->fused && x->comm == g->comm && h < g->comm->count; h++)
     if (g->end[h][0] > g->start[h][0] && x->end[h][0] > x->start[h][0] && g->comm->channels[h].published < x->end[h][0]) return 1;
-  for (uint32_t h = 0; h < x->comm->count; h++) {
-    for (size_t k = 0; k < x->plans[h].outs; k++) if (names_row(g, x->plans[h].out + k)) return 1;
-    for (size_t k = 0; k < x->plans[h].ins; k++) if (names_row(g, x->plans[h].in + k)) return 1;
-  }
   return 0;
 }
 
@@ -3127,15 +3147,20 @@ static ncclResult_t retire(struct metal_program *program) {
   return result;
 }
 
-/* a program's end: the leases of each communicator it touched that it gave back (`stamping`) freed by its own end
-   (stamp_end); where the library made its encoder and the group succeeded, its end signals `finished` at its count
-   (`issued`, which a host-path group and a destroy await: a program the caller was told to commit), each communicator
-   it touched keeping that count as its `last` and the command buffer as its `command` (gpu_finished); a borrowed
-   encoder's, or a failed group's, signals nothing, so no wait of the library's is on a command buffer the caller may
-   never commit.  Under group_lock */
-static void program_end(struct metal_program *program, int borrowed, ncclResult_t result) {
-  for (struct ncclComm *comm = touching; comm; comm = comm->next_touched)
-    if (comm->stamping) stamp_end(program, comm);
+/* a program's end, its result: the leases of each communicator it touched that it may name counted as used until the
+   GPU has ended it (stamp_end: a stamp that fails fails the program, an earlier failure's message kept); where the
+   library made its encoder and the group succeeded, its end signals `finished` at its count (`issued`, which a
+   host-path group and a destroy await: a program the caller was told to commit), each communicator it touched keeping
+   that count as its `last` and the command buffer as its `command` (gpu_finished); a borrowed encoder's, or a failed
+   group's, signals nothing, so no wait of the library's is on a command buffer the caller may never commit.  Under
+   group_lock */
+static ncclResult_t program_end(struct metal_program *program, int borrowed, ncclResult_t result) {
+  for (struct ncclComm *comm = touching; comm; comm = comm->next_touched) {
+    const struct said kept = last;
+    const ncclResult_t stamped = stamp_end(program, comm);
+    if (result) last = kept;
+    else result = stamped;
+  }
   const uint64_t count = borrowed || result ? 0 : ++issued;
   void *command = count ? metal_command(program) : NULL;
   metal_end(program, count ? (finished ? finished : (finished = metal_event())) : NULL, count);
@@ -3148,6 +3173,7 @@ static void program_end(struct metal_program *program, int borrowed, ncclResult_
   }
   metal_release(command);
   touching = NULL;
+  return result;
 }
 
 /* a walk's failure: comm (the walk's own group's; NULL: none) and every communicator with a group in flight through
@@ -3364,9 +3390,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       lands += (uint32_t)(g->end[h][1] - g->start[h][1]);
     }
     /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
-       library encodes no wait of it.  Of the groups in flight before it, those it meets are completed first (through
-       the last of them: complete), and the others stay in flight to their own completion (a block-ahead broadcast's,
-       at its caller's wait), so nothing of theirs is waited on in the stream before its caller's kernels */
+       library encodes no wait of it.  The groups in flight before it are completed first through the last it meets
+       (complete: every group before that one too, in issue order), and the groups after that one stay in flight to
+       their own completion (a block-ahead broadcast's, at its caller's wait) */
     const int issuing = issue && !g->fused;
     struct inflight *met = NULL;
     for (struct inflight *x = inflight; g->fused && x != g; x = x->next_group)
@@ -3389,7 +3415,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, list, n);
-  program_end(program, list[0].encoder != NULL, result);
+  result = program_end(program, list[0].encoder != NULL, result);
   if (result && scheduled) walk_failed(comm, issue && !fused ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = !fused && ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   if (!scheduled) spares_give(comm, holder, 0);
@@ -3427,7 +3453,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
       }
       result = walk(program, NULL, through, &any);
       if (!result) result = retire(program);
-      program_end(program, stream->commandEncoder != NULL, result);
+      result = program_end(program, stream->commandEncoder != NULL, result);
       if (result) walk_failed(NULL, ticket, result);
     }
   }

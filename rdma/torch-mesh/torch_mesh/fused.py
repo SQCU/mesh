@@ -23,10 +23,10 @@ source is compiled after steps() and calls them on the bindings exchange returns
   encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)
                                              _stream.encode's dispatch with `land`'s landing bindings and `publish`'s
                                              publication bindings after the constants, `peers` of each, declaring the
-                                             buffers those bindings name (each landing's buffer, record and counts read,
-                                             each publication's record read and its operand and counts written) and no
-                                             other; a dispatch that publishes is a publication under the stream's one
-                                             commit rule
+                                             buffers those bindings name (each landing's record and counts read and its
+                                             buffer written, each publication's record read and its operand and counts
+                                             written, either's progress word written) and no other; a dispatch that
+                                             publishes is a publication under the stream's one commit rule
 
 The kernel's constant block at `at` is its own words padded to an even count, then the landings' mesh_step_bindings,
 then the publications' (all zero where encode is given none), each address two words, its low word first:
@@ -67,8 +67,10 @@ STEPS = _stream.metal_prelude() + '\n'
 Crossing = namedtuple('Crossing', 'publish land')
 _NONE = (0,) * 6
 # the bindings a dispatch declares (_stream.encode reads, writes), by nccl.h ncclMeshFused's order (0 d, 2 the record,
-# 3 a): a landing's buffer, record and counts read; a publication's record read, its operand and counts written
-_DECLARED = {'land': ((0, 2, 3), ()), 'publish': ((2,), (0, 3))}
+# 3 a, 5 progress): a landing's record and counts read, its buffer written (the NIC's bytes, seen by the GPU after the
+# landing wait, so a later pass that reads them is ordered after it); a publication's record read, its operand and
+# counts written; either's progress word written (mesh_step_enter)
+_DECLARED = {'land': ((2, 3), (0, 5)), 'publish': ((2,), (0, 3, 5))}
 
 
 def steps():

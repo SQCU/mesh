@@ -629,17 +629,19 @@ static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
 
 static id<MTLResidencySet> fused_residency_;
 // The fused residency set's buffers by GPU address, read again when the set has grown (the library adds to it and
-// nothing removes a buffer from it: fused_residency).
+// nothing removes a buffer from it: fused_residency); its count taken before the set is read, so a buffer added
+// meanwhile is read again at the next look.
 static std::map<uint64_t, id<MTLBuffer>> fused_buffers_;
 static NSUInteger fused_seen_ = 0;
 
 static id<MTLBuffer> fused_buffer(uint64_t address) {
   if (!fused_residency_) return nil;
-  if (fused_residency_.allocationCount != fused_seen_) {
+  const NSUInteger count = fused_residency_.allocationCount;
+  if (count != fused_seen_) {
     fused_buffers_.clear();
     for (id<MTLAllocation> held in fused_residency_.allAllocations)
       if ([(id)held conformsToProtocol:@protocol(MTLBuffer)]) fused_buffers_[((id<MTLBuffer>)held).gpuAddress] = (id<MTLBuffer>)held;
-    fused_seen_ = fused_residency_.allocationCount;
+    fused_seen_ = count;
   }
   auto found = fused_buffers_.upper_bound(address);
   if (found == fused_buffers_.begin()) return nil;
@@ -649,9 +651,10 @@ static id<MTLBuffer> fused_buffer(uint64_t address) {
 
 // A kernel that runs a fused crossing's steps reaches the library's buffers by address, through the residency set,
 // which makes them resident but declares no use of them.  Its encoder declares the buffers its records name at the
-// GPU addresses `reads` and `writes` (torch_mesh/fused.py encode: each landing's buffer, record and counts read, each
-// publication's record read and its operand and counts written), so its pass is ordered against the passes that name
-// those buffers (nccl-mesh-metal.h metal_uses), and against no other buffer of the set.
+// GPU addresses `reads` and `writes` (torch_mesh/fused.py encode: each landing's record and counts read and its buffer
+// written, each publication's record read and its operand and counts written, either's progress word written), so its
+// pass is ordered against the passes that name those buffers (nccl-mesh-metal.h metal_uses), and against no other
+// buffer of the set.
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
                    int64_t at, int64_t gx, int64_t gy, int64_t threads, const std::vector<uint64_t> &reads, const std::vector<uint64_t> &writes) {
   if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));

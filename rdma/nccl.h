@@ -149,9 +149,11 @@
    ncclMemAlloc or communicator, whose slot owns the process's leases and holds the streams its communicators use; a
    communicator leases a pool of leases for the pages its groups send from and land in that are not the caller's (a
    reduce-scatter's operand, a tree's scratch, a combine's landing area), held by a group until it completes, taken
-   again once the GPU has ended every command that read them (each program frees the leases it gave back by its own
-   end, a number it stores in a word of its own: its command buffer's completion, or the Metal 4 form's last
-   dispatch), and returned at ncclCommDestroy.
+   again once the GPU has ended every program that named them (each lease counts the programs that named it whose
+   ends are not yet seen; a program's end stores its own number in a stamp word of its own: its command buffer's
+   completion, or the Metal 4 form's last dispatch), and returned at ncclCommDestroy.  At most a page's words less 16
+   such ends are unseen at once (2,032 on a 16 KiB page); past that, or where the stamp cannot be encoded, the call
+   fails as a value (ncclSystemError) and the leases its program named are kept until ncclCommDestroy.
    ncclMemAlloc is the lease,
    the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
    call"): whole pages of the region covering size, which the bridge registered on every device when the device came up,
@@ -201,7 +203,8 @@
    the communicator's asynchronous error (ncclCommGetAsyncError) and the next group's result.  A
    Metal-path group that returns a failure signals nothing the library waits for: the commands it left in the stream's
    command buffer are not committed after the communicator's ncclCommDestroy or ncclCommAbort, which wait for none of
-   them.
+   them.  A failed or lost group's receives were posted as it presented them, so a buffer it names may still be landed
+   in until its stream's holding ends (ncclCommDestroy gives it back) or its port's child exits.
 
    Not implemented (not exported): ncclCommInitRankScalable,
    ncclCommSuspend, ncclCommResume, ncclCommMemStats, ncclCommWindowRegister, ncclCommWindowDeregister,
@@ -1018,9 +1021,10 @@ uint64_t ncclMeshRetired(void);
    residencySet, Metal path above; metal-microbench docs/kernels.md#collectives, Q5P's in-stream form and its one-sided
    fused crossings, and torch-mesh's torch_mesh/fused.py on torch's stream, the steps still this library's:
    docs/acceptance-20261014.md A39, A40).  A fused group, on a stream whose `fused` is set, is completed at once (issue
-   or not: issue->ticket 0), the groups in flight before it that it meets completed first (one whose entries name a row
-   its entries name, or with a send not yet published on a channel where it publishes), the others left in flight to
-   their own completion, each of its channels in turn,
+   or not: issue->ticket 0).  The groups in flight before it are completed first through the last of its communicator's
+   with a send entry not yet published on a channel where it publishes (its release raises `ready`, a count, past that
+   entry), with every group before that one (completion is in issue order); the groups after that one stay in flight
+   to their own completion.  Each of its channels is recorded in turn,
    and its steps that cross are at most one SEND and one landing in place toward each peer
    (ncclMeshFused's records), each of a whole buffer, no combine: ncclSend(send, n, type, q) and ncclRecv(landing_q, n,
    type, q) toward each peer q in one group (an all-reduce's or a reduce's one-shot form: each rank sends its part to
