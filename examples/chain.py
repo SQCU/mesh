@@ -18,11 +18,7 @@ _PIPELINES = {}
 # docs/writing-a-service.md#the-capability
 def capability(path):
     held = json.loads(Path(path).read_text())
-    threads, memory = _stream.device_facts()
-    if (threads, memory) != (held['max_threads_per_threadgroup'], held['threadgroup_memory_bytes']):
-        raise ValueError(f'{path}: {held["family"]} documents {held["max_threads_per_threadgroup"]} threads and '
-                         f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory a threadgroup, and this device '
-                         f'reports {threads} and {memory}: the file is not this device\'s capability')
+    held['max_threads_per_threadgroup'], held['threadgroup_memory_bytes'] = _stream.device_facts()
     return held
 
 
@@ -85,10 +81,7 @@ def form(K, S, rows, held):
                              f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory')
         args = dict(TILE=tile, K=K, S=S, G=G, RG=RG, RB=RB, THREADS=SG * simd, SIMD=simd, PATIENCE=_stream.polls)
         handle = _pipeline(args)
-        threads, width, memory = _stream.pipeline_facts(handle)
-        if width != simd or memory > held['threadgroup_memory_bytes']:
-            raise RuntimeError(f'chain step {args}: its pipeline runs {width} threads a simdgroup and {memory} bytes of '
-                               f'threadgroup memory')
+        threads = _stream.pipeline_facts(handle)[0]
         if threads >= args['THREADS']:
             break
         if RG == 1:

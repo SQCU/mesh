@@ -192,8 +192,9 @@ A capability file states what Apple documents about a GPU family: its threads an
 the alignment of that memory, and the edge of its matrix unit. [etc/compute/apple9.json](../etc/compute/apple9.json)
 covers the M4-series, and [etc/compute/apple10.json](../etc/compute/apple10.json) the M5-series. Each names its sources,
 Apple's Metal Feature Set Tables and the Metal Shading Language Specification. The service is given the file for the
-node it runs on. It checks the file against what Metal reports of the device and stops where they differ. What no
-document states, the SIMD width and how many threads a compiled kernel holds, is read from the compiled pipeline.
+node it runs on. Where Metal reports a limit of the device (its threads and threadgroup memory a threadgroup), the
+service takes the device's figure. What no document states, the SIMD width and how many threads a compiled kernel
+holds, is read from the compiled pipeline.
 
 ## The configuration
 
