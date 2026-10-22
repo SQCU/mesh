@@ -316,6 +316,7 @@ void port_say(struct port *port,struct message said,const void *payload,uint32_t
 void streams_cancel(const struct port *port);
 void streams_let_go(void);
 void record_changed(void);
+uint32_t record_reach(struct mesh_reach *reach,uint32_t room);
 void record_retell(void);
 void map_adopt(void);
 struct mesh_record *record_held(uint32_t node);

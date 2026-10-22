@@ -592,8 +592,13 @@ static void *port_progress(void *argument){
       if(guard&1)port_tell(port->guarded+side,guard);
       const uint64_t epoch=atomic_load_explicit(&port->epoch,memory_order_acquire);
       if(epoch!=told){port_tell(port->seen+side,epoch);told=epoch;}
-      os_sync_wait_on_address_with_timeout(&port->guard,guard,sizeof port->guard,OS_SYNC_WAIT_ON_ADDRESS_NONE,
-        OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
+      /* the wait on the word that holds the thread: the guard while it stands, else the lanes served while they are
+         none, so a change of that word between the read above and the wait ends the wait at once (a wait on the guard
+         for a link's coming up slept MESH_PAUSE_NS where the lanes were served between the two) */
+      if(guard&1)os_sync_wait_on_address_with_timeout(&port->guard,guard,sizeof port->guard,OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                                      OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
+      else os_sync_wait_on_address_with_timeout(&port->link.served,0,sizeof port->link.served,OS_SYNC_WAIT_ON_ADDRESS_NONE,
+                                                OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
       continue;
     }
     port_pass(port,side,&told);
@@ -601,7 +606,10 @@ static void *port_progress(void *argument){
   return NULL;
 }
 /* design/transport.md B13: the progress threads parked on the port's guard look again */
-static void guard_wake(struct port *port){ os_sync_wake_by_address_all(&port->guard,sizeof port->guard,OS_SYNC_WAKE_BY_ADDRESS_NONE); }
+static void guard_wake(struct port *port){
+  os_sync_wake_by_address_all(&port->guard,sizeof port->guard,OS_SYNC_WAKE_BY_ADDRESS_NONE);
+  os_sync_wake_by_address_all(&port->link.served,sizeof port->link.served,OS_SYNC_WAKE_BY_ADDRESS_NONE);
+}
 /* design/transport.md: the port's two progress threads started, once; 0, or pthread_create's error */
 static int port_threads(struct port *port){
   int error=0;
@@ -714,6 +722,26 @@ void port_say(struct port *port,struct message said,const void *payload,uint32_t
 uint64_t owners[MESH_CLIENTS];
 /* design/transport.md: this node's record, its region, memory and model with its ports and health */
 char model[MESH_MODEL_BYTES];
+/* design/transport.md section 14: this node's reach as its record tells it (mesh-records.c record_changed), a node an
+   entry in the order of its first port: of each node, every cable whose link is up toward it with a stream in its plan,
+   their bandwidths together, at most `room`; their count.  The cables, not the streams live this instant, so two nodes
+   that several cables join are one link of the map at all their cables' bandwidth (mesh-dataflow.c mesh_join), which a
+   cable's link coming up or lost moves (link_turn, link_set) */
+uint32_t record_reach(struct mesh_reach *reach,uint32_t room){
+  uint32_t count=0;
+  for(uint32_t p=0;p<port_count;p++){
+    const struct port *port=ports+p;
+    if(port->link.state!=LINK_UP || !plan_streams(port->link.plan))continue;
+    uint32_t k=0;
+    while(k<count && reach[k].node!=port->peer)k++;
+    if(k==count){
+      if(count==room)continue;
+      reach[count++]=(struct mesh_reach){.node=port->peer};
+    }
+    reach[k].bandwidth+=port->bandwidth;
+  }
+  return count;
+}
 /* a port's link as the port table tells it; a change is a new record */
 static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code){
   struct mesh_link_info *link=&mesh_links(M)[port->index];

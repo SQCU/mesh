@@ -126,7 +126,7 @@ struct mesh_record *record_held(uint32_t node){
 void record_changed(void){
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=wire.length-held_pages*M->pgsz,.memory=memory};
   memcpy(own.model,model,sizeof own.model);
-  own.reached=mesh_nodes_reached(M,own.reach,MESH_STREAMS);
+  own.reached=record_reach(own.reach,MESH_STREAMS);
   own.health=health;
   struct mesh_record *held=record_held(M->node);
   if(held && record_links_same(held,&own))health_put(held,&own);
