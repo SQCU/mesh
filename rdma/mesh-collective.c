@@ -367,6 +367,25 @@ uint32_t mesh_trees_path(const struct mesh_trees *trees,uint32_t from,uint32_t t
   return 0;
 }
 
+/* The path between a and b in tree t, a and b included, into path (room nodes): up from a to the first of its
+   ancestors that is b's too, then down to b; its node count, 0 where a or b does not reach t's root. */
+static uint32_t mesh_tree_between(const struct mesh_trees *trees,uint32_t t,uint32_t a,uint32_t b,uint32_t *path){
+  const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
+  uint32_t index[n],down[n],up=0,count=0,at=a;
+  for(uint32_t v=0;v<n;v++)index[v]=UINT32_MAX;
+  for(;up<n;at=parent[at]){
+    index[at]=up;
+    path[up++]=at;
+    if(at==r)break;
+  }
+  if(index[r]==UINT32_MAX)return 0;
+  for(at=b;index[at]==UINT32_MAX && count<n;at=parent[at])down[count++]=at;
+  if(index[at]==UINT32_MAX)return 0;
+  up=index[at]+1;
+  for(uint32_t i=0;i<count;i++)path[up+i]=down[count-1-i];
+  return up+count;
+}
+
 /* The tree set's members' hops: each linked pair's route on the map's table, its physical links (u N + x, the sender's
    way) at hop[(a n + b) N ..] (count[a n + b]), and its length (its links, then its pairs' striped inverse
    bandwidths, as mesh_routes measures) */
@@ -978,9 +997,19 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
   free(order);
   return 0;
 }
+/* a hosted all-to-all's: a SEND waits on the receive of an earlier round that wrote what it reads (a member forwarding a
+   block sends it on once it has landed there, mesh_routed_steps), the latest by round, then the steps' order; every other
+   step on none */
+static int mesh_overlap(const struct mesh_step *x,const struct mesh_step *y);
 int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count,int32_t *before){
   if(kind!=MESH_GROUP_HOSTED)return mesh_steps_before(steps,count,before);
-  for(uint32_t k=0;k<count;k++)before[k]=-1;
+  for(uint32_t k=0;k<count;k++){
+    before[k]=-1;
+    for(uint32_t j=0;steps[k].op==MESH_STEP_SEND && j<count;j++)
+      if(steps[j].op!=MESH_STEP_SEND && steps[j].round<steps[k].round && mesh_step_bytes(steps+j) && mesh_overlap(steps+k,steps+j) &&
+         (before[k]<0 || steps[j].round>steps[before[k]].round || (steps[j].round==steps[before[k]].round && j>(uint32_t)before[k])))
+        before[k]=(int32_t)j;
+  }
   return 0;
 }
 
@@ -1014,6 +1043,38 @@ uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segment
     if(q!=rank && got[q])steps[k++]=(struct mesh_step){MESH_STEP_COPY,q,0,2,mesh_segment_first(got,q),{counts.type,counts.element_bytes,got[q]}};
   for(uint32_t q=0;element.elements && q<nodes;q++)
     if(q!=rank && got[q])steps[k++]=(struct mesh_step){MESH_STEP_COPY,q,0,3,0,element};
+  return k;
+}
+
+/* block (a, b)'s path: in the heaviest tree of `root`, or of b where root is -1, between a and b (mesh_tree_between);
+   trees NULL, the one hop from a to b */
+static uint32_t mesh_block_path(const struct mesh_trees *trees,int32_t root,uint32_t a,uint32_t b,uint32_t *path){
+  if(!trees){path[0]=a;path[1]=b;return 2;}
+  const uint32_t t=mesh_trees_heaviest(trees,root<0?b:(uint32_t)root);
+  return t<trees->count?mesh_tree_between(trees,t,a,b,path):0;
+}
+uint32_t mesh_routed_steps(uint32_t nodes,const struct mesh_trees *trees,int32_t root,uint32_t rank,const uint64_t *sizes,struct mesh_operand element,
+                           struct mesh_step *steps){
+  const uint32_t n=nodes;
+  uint32_t k=0,rounds=1,path[n+1];
+  for(uint32_t round=0;round<rounds;round++)for(uint32_t receive=0;receive<2;receive++){
+    uint64_t forwarded=0;
+    for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++){
+      const uint32_t hops=a==b?0:mesh_block_path(trees,root,a,b,path);
+      uint32_t i=0;
+      while(i<hops && path[i]!=rank)i++;
+      const uint64_t elements=i<hops?sizes[(size_t)a*n+b]:0,at=forwarded;
+      if(!elements)continue;
+      if(hops-1>rounds)rounds=hops-1;
+      forwarded+=i && i+1<hops?elements:0;
+      uint64_t row=0,column=0;
+      for(uint32_t q=0;q<b;q++)row+=sizes[(size_t)a*n+q];
+      for(uint32_t q=0;q<a;q++)column+=sizes[(size_t)q*n+b];
+      const struct mesh_operand piece={element.type,element.element_bytes,elements};
+      if(!receive && i==round && i+1<hops)steps[k++]=(struct mesh_step){MESH_STEP_SEND,path[i+1],round,i?2:0,i?at:row,piece};
+      if(receive && i && i-1==round)steps[k++]=(struct mesh_step){MESH_STEP_COPY,path[i-1],round,i+1<hops?2:1,i+1<hops?at:column,piece};
+    }
+  }
   return k;
 }
 /* whether call i is a point-to-point call of `rank`'s, its SEND (send) or its receive, toward `peer` on the class */

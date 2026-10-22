@@ -34,7 +34,8 @@
    stand.  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
    every member from the same reports and kept for its life: no node outside the communicator is on it, since the
    bridges forward nothing, so two members no path between members joins fail a collective, and a call between two
-   members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
+   members not joined fails, as values (ncclInvalidUsage); a collective crosses the members between two others on its
+   trees (ncclAlltoAll, ncclGather and ncclScatter forwarding each block: ncclMeshAlltoAllV, below).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
    Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
    two ranks or more holds none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow meets at the bootstrap of the
@@ -1078,9 +1079,17 @@ ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const 
    sendcounts[q] is rank q's recvcounts[r], else the calls do not pair, the caller's error, not detected, as
    ncclMeshAllGatherV's unequal counts are not (above); sendcounts[rank] is recvcounts[rank], its own segment copied,
    ncclInvalidArgument where they differ).  The counted all-to-all's call (below) with its counts known to both
-   ends: no count crosses, and each pair's elements move as one message of their size, in one group.  ncclAlltoAll is
-   it with every count `count`, and ncclGather and ncclScatter its rooted forms (every count 0 but toward or from the
-   root), so recvbuff off a gather's root and sendbuff off a scatter's are not read and may be NULL.  Both paths. */
+   ends: no count crosses, and each pair's elements move as one message of their size, in one hop, in one group.  Each
+   rank passes its own row and column of the counts alone, so the call runs where the communicator's map links every
+   two members; on a map that leaves two unlinked, a block between them would be laid by the members between them,
+   which do not hold its size, and every rank refuses the call alike from the one map (ncclInvalidUsage, naming two),
+   before anything is laid.  ncclAlltoAll is it with every count `count`, and ncclGather and ncclScatter its rooted
+   forms (every count 0 but toward or from the root), so recvbuff off a gather's root and sendbuff off a scatter's are
+   not read and may be NULL; their counts every rank holds, so they run on any map that joins the members, each block
+   forwarded by the members between its ends along the communicator's trees (the paths of ncclMeshCommInitRank, else
+   the map's shortest-path trees: a gather's up the root's tree, a scatter's down it, an all-to-all's along its
+   destination's; mesh-plan.h mesh_routed_steps), hop i in round i, a member sending a block on once it has landed
+   there and waiting on nothing else.  Both paths. */
 ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, void* recvbuff, const size_t* recvcounts, ncclDataType_t datatype,
                                ncclComm_t comm, cudaStream_t stream);
 /* MPI_Alltoallv with counts the GPU wrote (mesh 3981ca80^'s, its signature; expert-parallel dispatch and combine with no
@@ -1104,7 +1113,10 @@ ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, v
    and landed are ncclMeshBuffers (counts read on the GPU, every row's place computed there from them: no host reads a
    count), and received and arrived host pointers in this process's leases (ncclMemAlloc), which the GPU writes
    (system-coherent, the word last); its waits are in-stream waits on the streams' landed words (rdma/mesh.metal
-   mesh_wait_bounded, ended by a lost link or the stream's bound), as every Metal-path group's.  A word a call
+   mesh_wait_bounded, ended by a lost link or the stream's bound), as every Metal-path group's.  Each pair's counts and
+   rows move in one hop between its two ends, so the call runs where the communicator's map links every two members; on
+   a map that leaves two unlinked, the members between them would lay their counts segment, whose size only the pair's
+   ends pass, so every rank refuses the call alike from the one map (ncclInvalidUsage, naming two; *arrived 2).  A word a call
    in flight. */
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
                                      size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,

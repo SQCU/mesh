@@ -4,7 +4,8 @@
    chunks 1 to 4, every root of a rooted collective, the all-reduce whole and two-phase, every node or the even nodes
    contributing, over operands of 1, 4,096 and 1,000,003 float32 and 2^20 half, on mesh_wire_of's wire at a 16 KiB
    block; mesh_group_advise over a group on each map and tree set (collectives, both counted all-to-alls, point-to-point
-   calls each way at two sizes).  It prints each one's advisories and a summary line, then the totals; it refuses
+   calls each way at two sizes, and the all-to-all, a gather and a scatter forwarded along the trees, mesh_routed_steps,
+   with the count of their steps between ranks the map does not link).  It prints each one's advisories and a summary line, then the totals; it refuses
    nothing, exits 0.  `mesh-advise mutate`: programs and groups broken on purpose, each named with the check it must
    fire and whether it did. */
 #include "mesh-plan.h"
@@ -100,6 +101,19 @@ static int rows_counted(struct rows *c, uint32_t n, int hosted, uint32_t skew) {
   }
   return 0;
 }
+/* an all-to-all forwarded along the trees (mesh_routed_steps) at every rank, of ragged sizes every rank holds: the
+   all-to-all (root -1), or a gather to `root` or a scatter from it (`scatter`) */
+static int rows_routed(struct rows *c, const struct mesh_trees *trees, uint32_t n, int32_t root, int scatter) {
+  uint64_t sizes[MOST * MOST];
+  for (uint32_t a = 0; a < n; a++)
+    for (uint32_t b = 0; b < n; b++)
+      sizes[a * n + b] = root < 0 || (int32_t)(scatter ? a : b) == root ? 1 + (a * 5 + b * 3) % 7 * 700 : 0;
+  for (uint32_t r = 0; r < n; r++) {
+    if (!(c->steps[r] = malloc((2 * (size_t)n * n + 1) * sizeof **c->steps))) return 1;
+    c->count[r] = mesh_routed_steps(n, trees, root, r, sizes, (struct mesh_operand){1, 4, 0}, c->steps[r]);
+  }
+  return 0;
+}
 /* a point-to-point call at every rank: a SEND to the rank `shift` on, or a receive from the rank `shift` back */
 static int rows_point(struct rows *c, uint32_t n, int send, uint32_t shift, struct mesh_operand operand) {
   for (uint32_t r = 0; r < n; r++) {
@@ -187,7 +201,8 @@ static int programs(const struct mesh_wire *wire) {
 
 static void groups(const struct mesh_wire *wire) {
   static const uint32_t kind[] = {MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_HOSTED, MESH_GROUP_COUNTED,
-                                  MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT};
+                                  MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_HOSTED, MESH_GROUP_HOSTED,
+                                  MESH_GROUP_HOSTED};
   enum { CALLS = sizeof kind / sizeof *kind };
   uint64_t count = 0, total[CHECKS] = {0};
   for (size_t m = 0; m < sizeof maps / sizeof *maps; m++)
@@ -205,11 +220,21 @@ static void groups(const struct mesh_wire *wire) {
                          rows_counted(rows + 3, n, 1, 0) || rows_counted(rows + 4, n, 0, 0) ||
                          rows_point(rows + 5, n, 1, 1, (struct mesh_operand){0, 4, 3000}) || rows_point(rows + 6, n, 0, 1, (struct mesh_operand){0, 4, 3000}) ||
                          rows_point(rows + 7, n, 1, n - 1, (struct mesh_operand){0, 4, 1000003}) ||
-                         rows_point(rows + 8, n, 0, n - 1, (struct mesh_operand){0, 4, 1000003});
+                         rows_point(rows + 8, n, 0, n - 1, (struct mesh_operand){0, 4, 1000003}) ||
+                         rows_routed(rows + 9, &trees, n, -1, 0) || rows_routed(rows + 10, &trees, n, 0, 0) ||
+                         rows_routed(rows + 11, &trees, n, (int32_t)n - 1, 1);
+      /* every step of the forwarded calls between two ranks the map links */
+      struct mesh_link_map map = {MESH_LINKS_GRAPH, n, family_cables(maps[m].family, n, link), link, NULL, 0, NULL, NULL};
+      uint32_t unlinked = 0;
+      for (int i = 9; !failed && i < CALLS; i++)
+        for (uint32_t r = 0; r < n; r++)
+          for (uint32_t k = 0; k < rows[i].count[r]; k++) unlinked += !mesh_link_between(&map, r, rows[i].steps[r][k].peer);
+      if (!failed) printf("group %s %s: forwarded all-to-all, gather and scatter steps between unlinked ranks: %u\n", maps[m].name,
+                          packed ? "packed" : "shortest", unlinked);
       for (int gpu = 0; gpu < 2; gpu++) {
-        char label[160];
-        snprintf(label, sizeof label, "group %s %s (allreduce, allgather, broadcast, all-to-all hosted and counted, 4 point-to-point) %s", maps[m].name,
-                 packed ? "packed" : "shortest", gpu ? "GPU polls NCCL_MESH_POLLS" : "host");
+        char label[192];
+        snprintf(label, sizeof label, "group %s %s (allreduce, allgather, broadcast, all-to-all hosted and counted, 4 point-to-point, all-to-all, "
+                 "gather and scatter forwarded) %s", maps[m].name, packed ? "packed" : "shortest", gpu ? "GPU polls NCCL_MESH_POLLS" : "host");
         if (failed) { printf("%s: does not compile\n", label); break; }
         group_advise(label, rows, kind, CALLS, n, gpu ? NCCL_MESH_POLLS : 0, gpu ? NCCL_MESH_POLLS : 0, wire, total);
         count++;
@@ -289,6 +314,16 @@ static int mutate(const struct mesh_wire *wire) {
   GROUP("G4 a GPU group of polls 0", 1, 2, 0, 6);
   if (rows_collective(rows + 0, &trees, MESH_ALLREDUCE, 0, 0, 1, small)) return 1;
   GROUP("G5 a GPU group of polls past NCCL_MESH_POLLS", 1, 2, NCCL_MESH_POLLS + 1, 6);
+  uint32_t line_link[64][2], *line_root, *line_parent;
+  double *line_weight;
+  const uint32_t line_count = map_trees(1, 0, line_link, &line_root, &line_parent, &line_weight);
+  const struct mesh_trees line = {4, line_count, line_root, line_parent, line_weight};
+  kind[0] = MESH_GROUP_HOSTED;
+  if (!line_count || rows_routed(rows + 0, &line, 4, -1, 0)) return 1;
+  for (uint32_t r = 0; r < 4; r++)
+    for (uint32_t k = 0; k < rows[0].count[r]; k++) rows[0].steps[r][k].round -= rows[0].steps[r][k].round > 0;
+  GROUP("G6 line4's all-to-all, each forwarded block sent on in the round it lands", 1, 4, NCCL_MESH_POLLS, 4);
+  free(line_root); free(line_parent); free(line_weight);
 #undef GROUP
   rows_free(&reduce); rows_free(&gather);
   free(root); free(parent); free(weight);
