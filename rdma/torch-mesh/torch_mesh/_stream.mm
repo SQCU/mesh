@@ -829,8 +829,9 @@ static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
   return fused_residency_;
 }
 
-// The library's steps (ncclMeshMetalSteps), the text a kernel that runs them is compiled after, following rdma/mesh.metal.
-static std::string fused_steps() { return ncclMeshMetalSteps(); }
+// The library's Metal prelude (ncclMeshMetalPrelude): rdma/mesh.metal as the loaded library was built with it, then its
+// steps; the text a kernel that runs them is compiled after.
+static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 
 // The fused all-reduce of `operand` (a contiguous MPS tensor, the call's send and receive buffer; its dtype the
 // library's to fuse or refuse) on communicator `comm`, its landing's wait bounded by `polls` (nccl.h ncclMeshStream
@@ -901,7 +902,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("region_empty", &region_empty);
   module.def("address", &address);
   module.def("records", &records);
-  module.def("fused_steps", &fused_steps);
+  module.def("metal_prelude", &metal_prelude);
   module.def("fused_all_reduce", &fused_all_reduce);
   module.def("fused_published", &fused_published);
 }

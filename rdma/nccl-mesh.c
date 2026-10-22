@@ -3485,6 +3485,7 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
 }
 
 const char *ncclMeshMetalSteps(void) { return metal_steps(); }
+const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
 
 ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
 

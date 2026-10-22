@@ -504,6 +504,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
 }
 
 const char *metal_steps(void) { return ""; }
+const char *metal_prelude(void) { return ""; }
 
 void metal_keep(struct metal_program *program, void *object) {
   if (!hold(object)) return;

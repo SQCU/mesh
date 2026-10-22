@@ -5,8 +5,9 @@ part and adding it to its own; the call dispatches neither step.  The steps are 
 compiled after steps() and calls them (mesh_step_enter, mesh_step_store and mesh_step_release to publish;
 mesh_step_enter, mesh_step_await and mesh_step_read to land) on the bindings all_reduce returns, which encode passes it.
 
-  steps()                                    the Metal text a kernel source is compiled after: rdma/mesh.metal, then the
-                                             library's steps (ncclMeshMetalSteps), struct mesh_step_binding among them
+  steps()                                    the Metal text a kernel source is compiled after, from the library the
+                                             process loaded (ncclMeshMetalPrelude): rdma/mesh.metal as it was built
+                                             with, then its steps, struct mesh_step_binding among them
   all_reduce(tensor, polls, group=None)      the fused all-reduce of tensor (contiguous, on MPS) in place: a
                                              Crossing, its publication's bindings and its landing's; one the library
                                              does not fuse raises, and nothing runs a slower form in its place
@@ -29,13 +30,11 @@ A publishing kernel is a publication like a group that publishes, under the stre
 kernels are the data function's, and the steps they call are the library's under NCCL's contract: every rank issues the
 same collectives in the same order and leaves in-flight buffers alone, and the library delivers the bytes."""
 from collections import namedtuple
-import importlib.util
-from pathlib import Path
 
 from . import _stream
 
 # the checkout this package is installed from (its editable install: README "Install"), whose library it links
-STEPS = (Path(importlib.util.find_spec('mesh').origin).with_name('mesh.metal')).read_text() + '\n' + _stream.fused_steps() + '\n'
+STEPS = _stream.metal_prelude() + '\n'
 Crossing = namedtuple('Crossing', 'publish land')
 _NONE = (0,) * 6
 

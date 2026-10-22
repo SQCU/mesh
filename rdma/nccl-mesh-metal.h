@@ -167,6 +167,8 @@ struct metal_result metal_tracks(struct metal_program *, uint32_t tracks, const 
 /* the steps' Metal text (after rdma/mesh.metal): the argument record, a deferred step's bindings as one record
    (mesh_step_binding) and mesh_step_* */
 const char *metal_steps(void);
+/* rdma/mesh.metal as this library was built with it, then metal_steps' text: what a caller's kernel compiles after */
+const char *metal_prelude(void);
 void metal_keep(struct metal_program *, void *object);
 void metal_end(struct metal_program *, void *event, uint64_t value);
 void metal_collect(void *event);

@@ -1,6 +1,7 @@
 #import <Metal/Metal.h>
 #include "nccl-mesh-metal.h"
 #include "nccl-mesh-kernels.h"
+#include "mesh_metal.h"
 #include "nccl.h"
 #include <dlfcn.h>
 #include <errno.h>
@@ -627,6 +628,17 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
 void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
 
 const char *metal_steps(void) { return STEPS.UTF8String; }
+
+/* mesh.metal's text as this library was built (.build/mesh_metal.h, xxd of it), then STEPS: made once, kept */
+const char *metal_prelude(void) {
+  static NSString *text;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSString *words = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
+    text = [[NSString alloc] initWithFormat:@"%@\n%@", words, STEPS];
+  });
+  return text.UTF8String;
+}
 
 void metal_keep(struct metal_program *program, void *object) { [program->kept addObject:(id)object]; }
 

@@ -999,6 +999,10 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
    mesh_step_release (each holds a barrier); mesh_step_enter's and mesh_step_await's results are true (no kernel halts on a
    failure: rdma/NCCL.md "Bounded waits"), kept so that a kernel testing them compiles as it is. */
 const char* ncclMeshMetalSteps(void);
+/* rdma/mesh.metal's text as this library was built with it, then ncclMeshMetalSteps' text: the whole of what a caller's
+   kernel is compiled after, from the library the process loaded, so it never reads a file that may be another
+   build's (a checkout's mesh.metal newer or older than the installed library), and needs no path to one. */
+const char* ncclMeshMetalPrelude(void);
 /* The argument records this process has encoded on the default device (the Metal 4 form's dispatches' and either form's
    fused steps'; `issued`, counting from its first program) and how many its ring holds unread by the GPU at most
    (`capacity`): an encode past that refuses with
