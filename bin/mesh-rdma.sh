@@ -1,15 +1,24 @@
 #!/bin/bash
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-x(){ printf '%s' "$1" | plutil -extract "$2" raw -o - - 2>/dev/null; }
-d=$(ioreg -a -r -c AppleThunderboltRDMAInterface -d 1 2>/dev/null)
-q=$(ioreg -a -r -c AppleThunderboltRDMAPeerInterface -d 1 2>/dev/null)
-peers=" "; i=0
-while x "$q" "$i.IORegistryEntryID" >/dev/null; do peers="$peers$(x "$q" "$i.RID") "; i=$((i+1)); done
-seen=" "; i=0
-while id=$(x "$d" "$i.IORegistryEntryID"); do
-  n=$(x "$d" "$i.IORegistryEntryName"); r=$(x "$d" "$i.RID"); i=$((i+1))
-  case "$seen" in *" $id "*) continue ;; esac
-  seen="$seen$id "
-  case "$peers" in *" $r "*) p=present ;; *) p=absent ;; esac
-  echo "${n#rdma_} device=$n rid=$r rdma_peer=$p"
-done
+{ ioreg -a -r -c AppleThunderboltRDMAPeerInterface -d 1; echo '<!--devices-->'; ioreg -a -r -c AppleThunderboltRDMAInterface -d 1; } 2>/dev/null | awk '
+/<!--devices-->/ { devices = 1; next }
+/<dict>/ { depth++; key = ""; next }
+/<\/dict>/ {
+  if (depth == 1) {
+    if (!devices) { if (rid != "") peer[rid] = 1 }
+    else if (!(id in seen)) {
+      seen[id] = 1; port = name; sub(/^rdma_/, "", port)
+      print port " device=" name " rid=" rid " rdma_peer=" ((rid in peer) ? "present" : "absent")
+    }
+    id = name = rid = ""
+  }
+  depth--; key = ""; next
+}
+depth == 1 && /<key>/ { key = $0; sub(/.*<key>/, "", key); sub(/<\/key>.*/, "", key); next }
+depth == 1 && key != "" {
+  value = $0; sub(/^[ \t]*<[a-z]+>/, "", value); sub(/<\/[a-z]+>[ \t]*$/, "", value)
+  if (key == "IORegistryEntryID") id = value
+  else if (key == "IORegistryEntryName") name = value
+  else if (key == "RID") rid = value
+  key = ""
+}'

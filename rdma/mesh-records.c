@@ -143,6 +143,8 @@ void record_retell(void){
   struct mesh_record own;memcpy(&own,held,sizeof own);
   for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
 }
+/* when the next health sample is due (the event loop's turn waits for it: mesh-link.c turn_due) */
+uint64_t health_due(void){ return health_sent+MESH_HEALTH_NS; }
 void health_turn(void){
   if(now-health_sent<MESH_HEALTH_NS)return;
   health_sent=now;health.available=available_now();
