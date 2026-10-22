@@ -259,6 +259,13 @@ Nothing of the node's brings a fabric port down: a port whose cable link is up w
 objects. A job an operator disables (`launchctl disable`) stays off: the keeper and the installers load no disabled job
 (`bin/mesh-agent.sh`).
 
+A record's `boot` orders a node's runs (a later boot is a newer record: mesh-records.c record_heard, RFC 2328 s13), so a
+node's boots never go back: each is the wall clock at the bridge's start, or one past the node's last where the clock
+is not past it, the last read from the region it adopts and from `CONFIGURATION.boot` beside its configuration, where
+each boot is kept (mesh-link.c boot_next). A clock set back (a node's first start ahead, then corrected by NTP) no longer
+hides the node's next run from every node that heard the earlier one; with the file and the region both lost it orders
+by the wall clock alone, as every boot did before.
+
 A fault the bridge's start or its pairing meets would recur at every boot, since launchd and the keeper start the
 bridge at boot. The bridge therefore keeps a boot ledger beside its configuration (`boots`): the boot it started in,
 and how many boots in a row ended while a bridge was in its first 10 minutes with the ledger set, a panic, a power loss

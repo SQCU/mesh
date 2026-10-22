@@ -97,6 +97,38 @@ static __attribute__((unused)) void boots_hold(const char *configuration){
   }
   boots_since=clock_ns();
 }
+/* design/transport.md: this bridge's boot, the identity of its run and the order of its node's records (a node's later
+   boot is the newer: mesh-records.c record_heard): the wall clock at its start (`wall`), or one past the latest boot a
+   bridge of this node had where the wall clock is not past it (`adopted`, the boot in the region it adopted, and the
+   boot kept beside its configuration, `CONFIGURATION.boot`), so a wall clock set back since (a node's first start ahead,
+   then corrected) never orders its new run before its old one at the nodes that heard the old; the boot then kept
+   there.  A boot not kept, or a keeping unread, is said, and the bridge runs on its boot */
+static uint64_t boot_next(const char *configuration,uint64_t wall,uint64_t adopted){
+  char path[PATH_MAX+8],next[PATH_MAX+16];
+  snprintf(path,sizeof path,"%s.boot",configuration);
+  snprintf(next,sizeof next,"%s.new",path);
+  unsigned long long kept=0;
+  FILE *in=fopen(path,"r");
+  if(in){
+    if(fscanf(in,"%llu",&kept)!=1){say("bridge boot: %s holds no boot; the wall clock and the region order this one\n",path);kept=0;}
+    fclose(in);
+  }
+  else if(errno!=ENOENT)say("bridge boot: %s not read (%s); the wall clock and the region order this one\n",path,strerror(errno));
+  const uint64_t last=MAX((uint64_t)kept,adopted);
+  const uint64_t boot=wall>last || last==UINT64_MAX?wall:last+1;
+  if(boot!=wall)say("bridge boot: the wall clock (%llu ns) is not past this node's last boot (%llu); this boot is one past "
+                    "it\n",(unsigned long long)wall,(unsigned long long)last);
+  FILE *out=fopen(next,"w");
+  int written=0;
+  if(out){
+    fprintf(out,"%llu\n",(unsigned long long)boot);
+    written=!fflush(out) && !fsync(fileno(out));
+    written=!fclose(out) && written && !rename(next,path);
+  }
+  if(!written)say("bridge boot: %llu not kept at %s (%s): a later start orders after it by the region it adopts, else by "
+                  "the wall clock\n",(unsigned long long)boot,path,strerror(errno));
+  return boot;
+}
 uint64_t memory;
 static int64_t stop_reason;
 static void farewell_text(int64_t code,char *out,size_t room){
@@ -2055,8 +2087,10 @@ int main(int argc,char **argv){
   const int adopted=region_open(region,&geometry,&fd);
   shm=region;
   if(adopted)region_adopt();
-  /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
-  M->node=node;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
+  /* a node's later boot is a newer record (boot_next: never before its last, whatever the wall clock); none is idle
+     since the start, on the wall clock */
+  const uint64_t wall=clock_gettime_nsec_np(CLOCK_REALTIME);
+  M->boot=boot_next(argv[1],wall,adopted?M->boot:0);M->node=node;M->idle_since=wall;
   say("bridge node %u: region %s %s\n",node,region,adopted?"adopted from the bridge before this one (its clients' leases stand)":"made new");
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
