@@ -119,7 +119,7 @@ lost elsewhere or a node joining; a route between two nodes the higher-marked on
 No node outside the communicator is on it: the bridges forward nothing. Two ranks are linked where a link joins them; a
 communicator has a channel of each class toward each member it is joined to, and none toward another ([Routes between
 unlinked ranks](#routes-between-unlinked-ranks)). A later communicator reads the reports again, so a node that joins,
-a node gone or a link lost (down until its ports' next agents pair it again, with nobody acting: design/transport.md
+a node gone or a link lost (down until its ports' next children pair it again, with nobody acting: design/transport.md
 section 14) reaches the next communicator with no edit and no restart. libmesh's whole map of every node's record (`mesh_map` over no members, Python `mesh.current()`) joins two
 nodes by the same rule.
 
