@@ -162,18 +162,44 @@ that layout fail as a value with `*arrived` 2. Reproduction target (metal-microb
 part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
 473-480 us, the host idle 7.4-7.9 ms. A crossing counted call had failed since its restoration (mesh 598cb6cf: a NULL
 program read where the uneven collectives check their segments) and, on a reused region, could read a pair's position
-with no rows as a filler; with both fixed, on the loopback fabric (a line of 4) every rank's counts and rows land,
-host path and walk.
+with no rows as a filler; both are fixed.
+
+Each pair's counts and rows move in one hop, between the pair's two ends, so the call runs where the communicator's map
+links every two members (two members, a fully cabled map). The bridges forward nothing, so a pair no link joins would
+cross members between them, and each would have to lay that pair's counts segment, whose size only the pair's two ends
+pass (`sendsegs` at the sender, `recvsegs` at the receiver). On a map that leaves two members unlinked (a line, a
+ring of four or more, a star), every rank therefore refuses the call alike, from the one map, before anything is
+laid: `ncclInvalidUsage` naming the first two unlinked members, `*arrived` 2, and the communicator's next call runs as
+if the refused one had not been made (2026-10-21, on the loopback fabric: refused at every rank of a line of 3, an
+all-reduce after it exact; exact on a fully cabled 3, `*arrived` 1).
 
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, sendcounts, recv, recvcounts, type, comm, stream)` is
 MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
 `recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`). It is the
 counted all-to-all's call with its counts known to both ends: no count crosses, each pair's elements move as one
-message of their own size, one call a group. NCCL's `ncclAlltoAll` is it with every count `count`, and `ncclGather` and
-`ncclScatter` its rooted forms (every count 0 but toward or from the root), where they were each rank's sends and
-receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). On the loopback fabric (a line of 4) every rank's
-elements land, host path and walk, the all-to-all, every root's gather and scatter and an uneven all-to-all with
-zero counts among its pairs.
+message of their own size, one call a group, NCCL's sends and receives of it (NCCL's own lowering,
+`classifyCollToP2pTasks`). Each rank passes its own row and column of the counts alone, so, as the counted call, it
+runs where the map links every two members and every rank refuses it alike on any other map (`ncclInvalidUsage`,
+naming two): a block between two unlinked members would be laid by the members between them, which do not hold its
+size.
+
+NCCL's `ncclAlltoAll` (every count `count`), `ncclGather` and `ncclScatter` (every count 0 but toward or from the root)
+are the same call with counts every rank holds, so they run on any map that joins the members: each block (a, b) is
+forwarded by the members between a and b along the communicator's trees (`mesh-plan.h` `mesh_routed_steps`; the
+caller's `paths`, else the map's shortest-path trees), a gather's up the root's tree, a scatter's down it, an
+all-to-all's along the path in its destination's tree (`mesh_trees_path`). Hop i of a block is in round i: a member
+between its ends receives it into a scratch of the group's (its blocks in (a, b) order) and sends it on in the next
+round, its first position waiting until the block landed there (`mesh_group_before`); every other step waits on
+nothing. Every wait is then on a receive of a strictly earlier round, and a channel lays its rounds in order, so no
+wait closes a cycle at any lag and any size (an event waits only on events at earlier or equal positions of its own
+channel, and on another channel's only at an earlier round). Where every two members are linked each block takes
+one hop, the direct exchange as before. `mesh-advise` checks these calls on the loopback families (pair, line of 4,
+ring of 5, star of 8, tori of 6 and 8; shortest and packed trees) with every other call in one group: no projection,
+priority, depth, causality or hazard warning, and no step between ranks the map does not link. On the loopback fabric
+(2026-10-21) every element lands exact, host path and walk, at 1,000 and 300,007 float32 a block: the all-to-all and
+every root's gather and scatter on a line of 3 and of 4, a star of 4, a ring of 5, a fully cabled 3 and a line of 4
+whose two first links hold one stream and its last four (`LOOPVERBS_MAX_QP`); the uneven all-to-all exact on the fully
+cabled 3 and refused at every rank alike on the others, an all-reduce after it exact.
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -448,7 +474,11 @@ nodes its bridge reaches and whose bridges reach its node, and its channels go o
 whose members no path between members joins fails at its first call that needs its programs, naming two, and a call
 whose program or point-to-point step moves bytes between two members not joined fails at that call
 (`ncclInvalidUsage`). A node a route would cross between two members takes part only as a member of the
-communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`).
+communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`). The
+structural collectives and `ncclAlltoAll`, `ncclGather` and `ncclScatter` cross such members by construction (the
+latter forwarding each block along the trees: All-to-all with host counts, above); the uneven
+all-to-alls, whose counts no member between a pair holds, run where every two members are linked and are refused at
+every rank alike elsewhere.
 
 ## Rules a program keeps
 

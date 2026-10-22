@@ -459,9 +459,38 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
   return result;
 }
 
+/* the trees the communicator's programs and messages follow (*along): the caller's paths, checked against its map, else
+   the map's shortest-path trees (mesh_trees_shortest), made where it has none (`trees`, which routes_free lets go); a map
+   whose links do not join its members fails it, naming two (every member alike: the map is one), as do paths that are no
+   trees of its links.  Under group_lock */
+static ncclResult_t comm_along(struct ncclComm *comm, const struct mesh_trees **along) {
+  const uint32_t n = (uint32_t)comm->nranks;
+  uint32_t apart[2] = {0, 0};
+  const int joined = mesh_link_map_joined(&comm->map, apart);
+  if (joined == ENOTCONN)
+    return fail(ncclInvalidUsage, "rank %u (node %u) and rank %u (node %u) of %s are joined by no path of links between its members: the "
+                "bridges forward nothing, so a route through a node outside the communicator is refused", apart[0], comm->members[apart[0]],
+                apart[1], comm->members[apart[1]], comm->name);
+  if (joined) return fail(ncclInternalError, "the members' map of %s: %s", comm->name, strerror(joined));
+  *along = &comm->paths;
+  if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
+    return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
+  if (comm->paths.count) return ncclSuccess;
+  *along = &comm->trees;
+  if (comm->trees.count) return ncclSuccess;
+  trees_free(&comm->trees);
+  uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
+  double *weight = calloc(n + 1, sizeof *weight);
+  comm->trees = (struct mesh_trees){n, 0, root, parent, weight};
+  if (!root || !parent || !weight) return fail(ncclSystemError, "out of memory");
+  if (!(comm->trees.count = mesh_trees_shortest(&comm->map, root, parent, weight)))
+    return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
+  return ncclSuccess;
+}
+
 /* the communicator's structural table on its map, where the caller listed no programs: its configured forms first, in
    their order (compile_form), then, along the caller's paths (checked against the map) or else the map's shortest-path
-   trees (mesh_trees_shortest: each member's in-tree of the routes over the links between members), the single-phase
+   trees (comm_along; mesh_trees_shortest: each member's in-tree of the routes over the links between members), the single-phase
    all-reduce (each member's sum up its own tree; the direct exchange where every two members are linked), the
    reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, uncut and
    of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a call takes the first
@@ -471,25 +500,9 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
   if (comm->listed || n < 2) return ncclSuccess;
-  uint32_t apart[2] = {0, 0};
-  const int joined = mesh_link_map_joined(&comm->map, apart);
-  if (joined == ENOTCONN)
-    return fail(ncclInvalidUsage, "rank %u (node %u) and rank %u (node %u) of %s are joined by no path of links between its members: the "
-                "bridges forward nothing, so a route through a node outside the communicator is refused", apart[0], comm->members[apart[0]],
-                apart[1], comm->members[apart[1]], comm->name);
-  if (joined) return fail(ncclInternalError, "the members' map of %s: %s", comm->name, strerror(joined));
-  const struct mesh_trees *along = &comm->paths;
-  if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
-    return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
-  if (!comm->paths.count) {
-    uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
-    double *weight = calloc(n + 1, sizeof *weight);
-    comm->trees = (struct mesh_trees){n, 0, root, parent, weight};
-    if (!root || !parent || !weight) return fail(ncclSystemError, "out of memory");
-    if (!(comm->trees.count = mesh_trees_shortest(&comm->map, root, parent, weight)))
-      return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
-    along = &comm->trees;
-  }
+  const struct mesh_trees *along = NULL;
+  const ncclResult_t tree = comm_along(comm, &along);
+  if (tree) return tree;
   size_t room = 3 + 2 * (size_t)n;
   for (uint32_t f = 0; f < comm->form_count; f++) room += has_root(comm->forms[f].collective) && comm->forms[f].root < 0 ? n : 1;
   if (!(comm->entries = calloc(room, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
@@ -1758,7 +1771,10 @@ struct steps {
 /* a call: its collective (or point-to-point direction), root, peer, buffers, count, type, operator and communicator;
    `segments`, an uneven reduce-scatter's or all-gather's count a rank (ncclMeshReduceScatterV, ncclMeshAllGatherV: the
    call's own copy, `total` their sum; NULL: `count` each), a counted all-to-all's sendsegs then recvsegs (one whose
-   counts are the host's, hosted: the elements to each rank then from each, `count` those crossing); a counted
+   counts are the host's, hosted: the elements rank a sends rank b at a x nranks + b, `count` those crossing; `along`
+   where its blocks are forwarded along the communicator's trees by the members between their ends, from tree `root`,
+   or the destination's at -1, mesh-plan.h mesh_routed_steps, and `relay` the host path's buffer of the blocks this
+   rank forwards); a counted
    all-to-all's (WHAT_COUNTED, ncclMeshAlltoAllCounted) counts, the host's copy of the landed counts and its word, the
    GPU's copy, its rows, the most it receives and a row's elements, its landed counts (`got`: the host path's own, the
    Metal path's a scratch, `got_at`), the counts receives not yet consumed (`counting`) and whether its end is encoded;
@@ -1777,7 +1793,8 @@ struct call {
   int64_t *got;
   struct where counts_at, received_at, landed_at, arrived_at, got_at;
   uint32_t counting;
-  int ended;
+  int ended, along;
+  void *relay;
   /* a call reading its send buffer in place (plan_direct): the ranges of its result no step writes, copied from it after
      its publications are encoded (`complement`, triples: the result's byte offset, the send buffer's, the bytes) */
   uint64_t *complement;
@@ -1876,9 +1893,10 @@ static void steps_free(struct steps *s) {
   free(s);
 }
 
-/* a counted all-to-all's steps, all of round 0: one whose counts are the host's, to each other rank q its elements for q
-   (buffer 0, the send buffer at q's segment) and from each its elements (buffer 1, the receive buffer at q's segment),
-   the sends and receives of NCCL's lowering (classifyCollToP2pTasks) as one call; else (mesh 3981ca80^ run_counted's one
+/* a counted all-to-all's steps: one whose counts are the host's (hosted), its blocks' (mesh-plan.h mesh_routed_steps: buffer
+   0 the send buffer, 1 the receive buffer, 2 the blocks this rank forwards), each along `along`, the communicator's trees,
+   where the call forwards (ncclAlltoAll, ncclGather, ncclScatter), else in one hop (ncclMeshAlltoAllV, every two ranks
+   linked), the sends and receives of NCCL's lowering (classifyCollToP2pTasks) as one call; else, all of round 0 (mesh 3981ca80^ run_counted's one
    exchange: to each rank its segment of the counts and then its rows, both at once, so no rows wait for the counts to
    cross first) to each other rank q it has counts for, its counts (buffer 0, from the call's counts at q's first entry)
    and then its rows (buffer 1, the send rows; room for the pair's bound, the place read from the counts where it
@@ -1886,17 +1904,13 @@ static void steps_free(struct steps *s) {
    landed counts at q's place in rank order), and then from each its rows (buffer 3, the receive buffer, at the place the
    landed counts give), each after every counts receive (mesh_steps_before: a receive's first piece after the one
    before it), so a rank's k-th SEND to a peer is that peer's k-th receive from it; *counting the counts receives */
-static uint32_t counted_steps(ncclComm_t comm, struct call *c, struct mesh_step *steps) {
+static uint32_t counted_steps(ncclComm_t comm, struct call *c, const struct mesh_trees *along, struct mesh_step *steps) {
   const int n = comm->nranks, me = comm->rank;
   const uint64_t *sseg = c->segments, *rseg = c->segments + n, bound = counted_bound(c);
   const struct mesh_operand counts = {(uint32_t)ncclInt64 + 1, 8, 0}, rows = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], bound * c->row};
   uint32_t k = 0;
   c->counting = 0;
-  for (int q = 0; hosted(c) && q < 2 * n; q++)
-    if (q % n != me && c->segments[q])
-      steps[k++] = (struct mesh_step){q < n ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)(q % n), 0, q >= n, seg_first(c->segments + (q < n ? 0 : n), q % n),
-                                      {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->segments[q]}};
-  if (hosted(c)) return k;
+  if (hosted(c)) return mesh_routed_steps((uint32_t)n, along, c->root, (uint32_t)me, c->segments, rows, steps);
   for (int q = 0; q < n; q++) {
     if (q == me || !sseg[q]) continue;
     steps[k++] = (struct mesh_step){MESH_STEP_SEND, (uint32_t)q, 0, 0, seg_first(sseg, q), {counts.type, counts.element_bytes, sseg[q]}};
@@ -1916,13 +1930,15 @@ static size_t piece_bytes(const struct mesh_step *step) { return step->piece.ele
 
 /* every call that crosses a link planned: a collective along the communicator's table (comm_compile; an uneven one's
    segments its counts, mesh_program_steps_cut: its program's segments must be the ranks), its operand's element a
-   merge's row where it merges, a point-to-point call one SEND or COPY step; a step that moves bytes toward or from a
-   rank no link of this node joins refused (the bridges forward nothing) */
+   merge's row where it merges, a point-to-point call one SEND or COPY step, an all-to-all that forwards its blocks
+   along the communicator's trees (comm_along); a step that moves bytes toward or from a rank no link of this node joins
+   refused (the bridges forward nothing) */
 static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
-    const ncclResult_t compiled = p2p(c) || counted(c) ? ncclSuccess : comm_compile(comm);
+    const struct mesh_trees *along = NULL;
+    const ncclResult_t compiled = c->along ? comm_along(comm, &along) : p2p(c) || counted(c) ? ncclSuccess : comm_compile(comm);
     if (compiled) return compiled;
     const struct mesh_program *program = p2p(c) || counted(c) ? NULL : program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
     if (!p2p(c) && !counted(c) && !program)
@@ -1934,7 +1950,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
         return fail(ncclInvalidUsage, "an uneven collective's program cuts %u segments, not one a rank of %d", segments, comm->nranks);
     }
     struct steps *s = calloc(1, sizeof *s);
-    const size_t most = (program ? program->first[program->nodes] : counted(c) ? 4 * (size_t)comm->nranks : 1) + 1;
+    const size_t most = (program ? program->first[program->nodes] : hosted(c) ? 2 * (size_t)comm->nranks * comm->nranks
+                         : counted(c) ? 4 * (size_t)comm->nranks : 1) + 1;
     if (s) s->buffers = counted(c) ? 4 : 1 + (program ? program->scratch : 0);
     if (!s || !(s->steps = calloc(most, sizeof *s->steps)) || !(s->done = calloc(most, 1)) || !(s->channel = calloc(most, sizeof *s->channel)) ||
         !(s->first = calloc(most, sizeof *s->first)) || !(s->pieces = calloc(most, sizeof *s->pieces)) || !(s->before = calloc(most, sizeof *s->before)) ||
@@ -1957,7 +1974,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1;
     } else if (counted(c)) {
-      s->count = counted_steps(comm, c, s->steps);
+      s->count = counted_steps(comm, c, along, s->steps);
       s->borrowed = 1;
     } else s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->segments, s->steps);
     for (uint32_t k = 0; k < s->count; k++)
@@ -2313,11 +2330,23 @@ static int64_t *counted_got(const struct call *c) {
   return got;
 }
 
-/* a hosted all-to-all's own segment: its byte offsets in the send and the receive buffer, and its bytes */
+/* a hosted all-to-all's own segment: its byte offsets in the send and the receive buffer (the elements before it in
+   its row and in its column), and its bytes */
 static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
   const int n = c->comm->nranks, me = c->comm->rank;
-  *sent = seg_first(c->segments, me) * SIZE[c->type]; *landed = seg_first(c->segments + n, me) * SIZE[c->type];
-  return c->segments[me] * SIZE[c->type];
+  uint64_t before = 0, above = 0;
+  for (int q = 0; q < me; q++) { before += c->segments[(size_t)me * n + q]; above += c->segments[(size_t)q * n + me]; }
+  *sent = before * SIZE[c->type]; *landed = above * SIZE[c->type];
+  return c->segments[(size_t)me * n + me] * SIZE[c->type];
+}
+/* the bytes of the blocks a hosted all-to-all's rank forwards (its buffer 2: mesh-plan.h mesh_routed_steps) */
+static size_t forwarded_bytes(const struct call *c) {
+  uint64_t end = 0;
+  for (uint32_t k = 0; c->bound && k < c->bound->count; k++) {
+    const struct mesh_step *step = c->bound->steps + k;
+    if (step->buffer == 2 && step->first + step->piece.elements > end) end = step->first + step->piece.elements;
+  }
+  return end * SIZE[c->type];
 }
 
 /* a counted all-to-all's end on the host path, once its counts landed: its own rows into their place, the landed counts
@@ -2396,7 +2425,11 @@ static ncclResult_t launch(struct call *list, size_t n) {
       else memcpy(c->copy, c->send, bytes);
     } else if (c->what == WHAT_SEND) { if (s) s->host[0] = (unsigned char *)(uintptr_t)c->send; }
     else if (c->what == WHAT_RECV) { if (s) s->host[0] = c->recv; }
-    else if (hosted(c)) { if (s) { s->host[0] = (unsigned char *)(uintptr_t)c->send; s->host[1] = c->recv; } }
+    else if (hosted(c)) {
+      const size_t forwarded = forwarded_bytes(c);
+      if (s) { s->host[0] = (unsigned char *)(uintptr_t)c->send; s->host[1] = c->recv; }
+      if (s && forwarded && !(s->host[2] = c->relay = malloc(forwarded))) result = fail(ncclSystemError, "out of memory");
+    }
     else if (counted(c)) {
       if (!(c->got = counted_got(c))) result = fail(ncclSystemError, "out of memory");
       else if (s) {
@@ -2490,6 +2523,7 @@ static void calls_free(struct call *list, size_t n) {
     free(list[i].copy);
     free(list[i].segments);
     free(list[i].got);
+    free(list[i].relay);
     free(list[i].complement);
   }
   free(list);
@@ -2610,11 +2644,14 @@ static ncclResult_t counted_end(struct metal_program *program, struct call *c, v
 /* a counted all-to-all's staging on the GPU: its landed counts a scratch of the group's (every rank's segment for this
    rank in rank order, then the tail), its own segment and tail written there (METAL_COUNTED_START), its buffers the steps'
    (0 its counts, 1 its rows, 2 the landed counts, 3 the receive buffer); its end at once where no counts land.  A hosted
-   one's buffers are its send and receive buffers, and its own segment is copied */
+   one's buffers are its send and receive buffers and a scratch of the group's for the blocks it forwards (buffer 2,
+   forwarded_bytes), and its own segment is copied */
 static void *workspace(struct metal_program *program, const struct call *c, size_t bytes);
 static ncclResult_t counted_stage(struct metal_program *program, struct call *c, void *violation) {
   size_t sent, landed, own = hosted(c) ? own_segment(c, &sent, &landed) : 0;
+  const size_t forwarded = hosted(c) ? forwarded_bytes(c) : 0;
   if (hosted(c) && c->bound) { c->bound->gpu[0] = c->send_at; c->bound->gpu[1] = c->recv_at; }
+  if (forwarded && !(c->bound->gpu[2] = (struct where){workspace(program, c, forwarded), 0}).buffer) return fail(ncclSystemError, "out of GPU memory");
   if (own && !same((struct where){c->send_at.buffer, c->send_at.offset + sent}, (struct where){c->recv_at.buffer, c->recv_at.offset + landed}))
     return gpu(metal_copy(program, METAL_PLAIN, c->recv_at.buffer, c->recv_at.offset + landed, c->send_at.buffer, c->send_at.offset + sent, own),
                "an all-to-all's own segment");
@@ -2729,7 +2766,7 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
     }
     if (!result && at + 1 == m->first + m->pieces) {
       st->done[m->step] = 1; p->in_at++;
-      if (counted(m->c) && st->steps[m->step].buffer == 2) result = counted_landed(program, m->c, q, m->step, comm->violation);
+      if (counted(m->c) && !hosted(m->c) && st->steps[m->step].buffer == 2) result = counted_landed(program, m->c, q, m->step, comm->violation);
     }
   }
   if (!result && !m && ch->waited <= at) result = arrive(program, comm, ch, at + 1);
@@ -3629,9 +3666,21 @@ ncclResult_t ncclMeshReduceScatterV(const void *sendbuff, void *recvbuff, const 
                                       .stream = stream}, counts);
 }
 
+/* whether the communicator's map leaves two of its members unlinked, *a and *b the first two in rank order: every member
+   reads the same answer from the one map (map_of) */
+static int comm_unlinked(const struct ncclComm *comm, uint32_t *a, uint32_t *b) {
+  for (uint32_t x = 0; x < (uint32_t)comm->nranks; x++)
+    for (uint32_t y = x + 1; y < (uint32_t)comm->nranks; y++)
+      if (!mesh_link_between(&comm->map, x, y)) { *a = x; *b = y; return 1; }
+  return 0;
+}
+
 /* nccl.h ncclMeshAlltoAllCounted (mesh 3981ca80^'s, its signature): the call's own copy of the segments, its word 0 now
    (the GPU, or the host path's end, sets it once the counts landed; a failure 2), and on the Metal path the Metal
-   buffers of the leases holding `received` and `arrived` (lease_buffer), which the GPU writes */
+   buffers of the leases holding `received` and `arrived` (lease_buffer), which the GPU writes.  Each pair's counts and
+   rows move in one hop between its two ends (counted_steps): a member between two unlinked ones would have to lay their
+   counts segment, whose size only its two ends pass (sendsegs, recvsegs), so on a map that leaves two members unlinked
+   every rank refuses the call alike, from the one map, its word 2 */
 ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff, size_t sendrows, const int64_t *counts, const size_t *sendsegs, void *recvbuff,
                                      size_t capacity, int64_t *received, int64_t *landed, const size_t *recvsegs, uint64_t *arrived, size_t row,
                                      ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
@@ -3653,6 +3702,13 @@ ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff, size_t sendrows, cons
                   "this process's leases (ncclMemAlloc), which the GPU writes as the counts land");
   }
   const int n = comm->nranks;
+  uint32_t a = 0, b = 0;
+  if (comm_unlinked(comm, &a, &b)) {
+    __atomic_store_n(arrived, 2, __ATOMIC_RELEASE);
+    return fail(ncclInvalidUsage, "ncclMeshAlltoAllCounted on %s: ranks %u and %u (nodes %u and %u) are joined by no link, so their counts would be "
+                "forwarded by members between them, which must hold each segment's size to lay it, and only a pair's two ends pass it "
+                "(sendsegs, recvsegs): every rank refuses the call alike", comm->name, a, b, comm->members[a], comm->members[b]);
+  }
   if (!(c.segments = malloc(2 * (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
   for (int r = 0; r < n; r++) { c.segments[r] = sendsegs[r]; c.segments[n + r] = recvsegs[r]; }
   __atomic_store_n(arrived, 0, __ATOMIC_RELEASE);
@@ -3666,25 +3722,39 @@ ncclResult_t ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int
   return enqueue((struct call){.what = WHAT_RECV, .peer = peer, .recv = recvbuff, .count = count, .type = datatype, .comm = comm, .stream = stream});
 }
 
-/* nccl.h ncclMeshAlltoAllV, and NCCL's ncclAlltoAll, ncclGather and ncclScatter as its forms: a counted all-to-all whose
-   counts are the host's (hosted), the call's own copy of them (the elements to each rank, then from each: sendcounts
-   and recvcounts where given, else `count` from rank `from` to rank `to`, -1 every rank), its `count` those crossing */
+/* nccl.h ncclMeshAlltoAllV, and NCCL's ncclAlltoAll, ncclGather and ncclScatter as its forms: an all-to-all whose counts
+   are the host's (hosted), the call's own copy of them, the elements rank a sends rank b at a x nranks + b.  With
+   sendcounts and recvcounts, this rank's row and column alone, so each block moves in one hop between its two ends, the
+   only ranks that hold its size (mesh-plan.h mesh_routed_steps with no trees): on a map that leaves two members
+   unlinked, a block between them would be laid by members that do not hold its size, so every rank refuses the call
+   alike, from the one map, before anything is laid.  Else `count` from rank `from` to rank `to` (-1 every rank) at every
+   entry, which every rank holds: each block forwarded along the communicator's trees by the members between its ends
+   (`along`), in the tree of the root (a gather's `to`, a scatter's `from`), else of its destination.  Its `count` the
+   elements crossing: this rank's, or, forwarded, every rank's, so a member that only forwards takes part */
 static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *sendcounts, const size_t *recvcounts, size_t count, int from, int to,
                            ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
   const int n = comm->nranks, me = comm->rank, root = from < 0 ? to : from;
   if (root < -1 || root >= n) return fail(ncclInvalidArgument, "root %d of %d ranks", root, n);
-  struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream};
-  if (!(c.segments = malloc(2 * (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
-  for (int q = 0; q < n; q++) {
-    c.segments[q] = sendcounts ? sendcounts[q] : (from < 0 || from == me) && (to < 0 || to == q) ? count : 0;
-    c.segments[n + q] = recvcounts ? recvcounts[q] : (from < 0 || from == q) && (to < 0 || to == me) ? count : 0;
-    if (q != me) c.count += c.segments[q] + c.segments[n + q];
-  }
-  const unsigned long long sent = c.segments[me], received = c.segments[n + me];
-  if (sent == received) return enqueue(c);
-  free(c.segments);
-  return fail(ncclInvalidArgument, "an all-to-all's own segment, sent (%llu) and received (%llu), differ", sent, received);
+  if (sendcounts && sendcounts[me] != recvcounts[me])
+    return fail(ncclInvalidArgument, "an all-to-all's own segment, sent (%zu) and received (%zu), differ", sendcounts[me], recvcounts[me]);
+  uint32_t a = 0, b = 0;
+  if (sendcounts && comm_unlinked(comm, &a, &b))
+    return fail(ncclInvalidUsage, "ncclMeshAlltoAllV on %s: ranks %u and %u (nodes %u and %u) are joined by no link, so a block between them would "
+                "be forwarded by members between them, which must hold its size to lay it, and each rank passes its own counts alone: every "
+                "rank refuses the call alike (ncclAlltoAll, ncclGather and ncclScatter, whose counts every rank holds, are forwarded)",
+                comm->name, a, b, comm->members[a], comm->members[b]);
+  struct call c = {.what = WHAT_COUNTED, .root = root, .along = !sendcounts, .send = sendbuff, .recv = recvbuff, .type = datatype,
+                   .op = ncclSum, .comm = comm, .stream = stream};
+  if (!(c.segments = calloc((size_t)n * n, sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
+  for (int x = 0; x < n; x++)
+    for (int y = 0; y < n; y++) {
+      const uint64_t elements = sendcounts ? (x == me ? sendcounts[y] : y == me ? recvcounts[x] : 0)
+                                           : (from < 0 || from == x) && (to < 0 || to == y) ? count : 0;
+      c.segments[(size_t)x * n + y] = elements;
+      if (x != y && (!sendcounts || x == me || y == me)) c.count += elements;
+    }
+  return enqueue(c);
 }
 ncclResult_t ncclMeshAlltoAllV(const void *sendbuff, const size_t *sendcounts, void *recvbuff, const size_t *recvcounts, ncclDataType_t datatype,
                                ncclComm_t comm, cudaStream_t stream) {
