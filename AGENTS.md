@@ -84,7 +84,7 @@ in-band repair — only hand-editing every node, which is unbounded manual work 
 therefore does not scale. That is the paradox of the unpatchables, and it is
 forbidden anywhere, in any code.
 
-This is also a demotion under the contract above, and the worst kind: the keeper can
+This is also a demotion under the contract above, and the worst kind: a rerun of `install.sh` can
 turn a firewall back off, but nothing on a pinned node has the authority to unpin it.
 
 Caches and propagation delays are not a reason to reach for a hash. They resolve

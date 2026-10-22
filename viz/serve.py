@@ -4,7 +4,7 @@ import concurrent.futures, http.server, json, math, os, socketserver, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path[:0] = [os.path.join(ROOT, "bin"), os.path.join(ROOT, "rdma")]
-import mesh_restart, peers
+import peers
 STAT = os.path.join(ROOT, "bin", "mesh-stat")
 CONFIGURATION = sys.argv[1] if len(sys.argv) > 1 else None
 try:
@@ -324,7 +324,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             del http_events[:-16]
 
 if __name__ == "__main__":
-    mesh_restart.on_change(__file__, CONFIGURATION, os.path.join(ROOT, "etc", "mesh-capacity.json"), os.environ.get("MESH_NODES", os.path.join(ROOT, "etc", "mesh-nodes.json")))
     if PERIOD is not None: threading.Thread(target=poll, daemon=True).start()
     else: print(CONFIGURED, file=sys.stderr, flush=True)
     port = int(os.environ.get("MESH_PORT", "8787"))

@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path[:0] = [HERE, os.path.join(ROOT, "bin"), os.path.join(ROOT, "rdma")]
-import mesh_restart, peers
+import peers
 RATE = int(os.environ.get("MESH_TELEMETRY_RATE", "1000"))
 BANDWIDTH_RATE = int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE)))
 PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
@@ -260,14 +260,7 @@ def fabric_services():
             found.setdefault(match.group(3), []).append({"domain": domain, "pid": int(match.group(1)) if match.group(1).isdigit() else 0, "status": match.group(2)})
         for match in re.finditer(r'"(io\.mesh\.[^"]+)" => disabled', text):
             found.setdefault(match.group(1), []).append({"domain": domain, "disabled": True})
-    keeper = {"path": "/usr/local/mesh/log/keeper.log"}
-    try:
-        with open(keeper["path"], "rb") as stream:
-            stream.seek(max(0, os.fstat(stream.fileno()).st_size - 4096))
-            lines = [line for line in stream.read().decode(errors="replace").splitlines() if line.strip()]
-        keeper.update({"last": lines[-1] if lines else None, "alarms": [line for line in lines if re.search(r"DEGRADED|ALARM", line)][-3:], "modified": os.path.getmtime(keeper["path"])})
-    except Exception as error: keeper["error"] = f"{type(error).__name__}: {error}"
-    return {"services": found, "keeper": keeper, "booted_at": number(output(["/usr/sbin/sysctl", "-n", "kern.boottime"]), r"sec = (\d+)")}
+    return {"services": found, "booted_at": number(output(["/usr/sbin/sysctl", "-n", "kern.boottime"]), r"sec = (\d+)")}
 
 def fabric(now):
     return {"bridges": fabric_bridges(now), "ports": fabric_ports(), **fabric_services()}
@@ -711,7 +704,6 @@ def stop(*_):
 
 def serve():
     store = TelemetryRing()
-    mesh_restart.on_change(__file__, os.environ.get("MESH_CAPACITY"), os.path.join(ROOT, "etc", "mesh-capacity.json"), "/usr/local/mesh/etc/mesh-capacity.json")
     threading.Thread(target=store.exited, daemon=True).start()
     for target in (power_loop, bandwidth_loop, sample_loop, ingest_loop): threading.Thread(target=target, args=(store,), daemon=True).start()
     host = os.environ.get("MESH_TELEMETRY_HOST", "127.0.0.1")

@@ -194,7 +194,7 @@ header size, rings and capacity remain unchanged. `up` means the region exists;
 `paired` means a fresh, living bridge reports pairing. Older bridges produce
 `null` health verdicts. A stale heartbeat proves overdue progress, not its cause.
 
-Node-info, keeper, startup and status use interface state without opening verbs contexts. They label link state separately from the RDMA peer's presence, which the fabric init reads from the IORegistry (README.md, node info). Node-info
+Node-info, startup and status use interface state without opening verbs contexts. They label link state separately from the RDMA peer's presence, which the fabric init reads from the IORegistry (README.md, node info). Node-info
 has one sampler and serves its last or partial sample while work is pending.
 
 Safe observations for the next incident:

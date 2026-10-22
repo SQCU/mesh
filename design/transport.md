@@ -256,7 +256,7 @@ steady.
 
 Nothing of the node's brings a fabric port down: a port whose cable link is up with no RDMA peer is logged and held
 (`bin/mesh-fabric-init.sh`), since a port taken down under the bridge's open device terminates the device beneath its
-objects. A job an operator disables (`launchctl disable`) stays off: the keeper and the installers load no disabled job
+objects. A job an operator disables (`launchctl disable`) stays off: the installers load no disabled job
 (`bin/mesh-agent.sh`).
 
 A fault the bridge's start or its pairing meets would recur at every boot, since launchd and the keeper start the

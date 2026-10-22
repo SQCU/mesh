@@ -31,12 +31,15 @@ provide_http(){
   fi
 }
 mkdir -p "$D/bin" "$D/etc" "$D/log" "$D/viz" "$A" "$HOME/.local/bin"
+kick=
+launchctl print "gui/$UID/io.mesh.telemetry" >/dev/null 2>&1 && ! { cmp -s "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py" && cmp -s "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json"; } && kick=io.mesh.telemetry
+launchctl print "gui/$UID/io.mesh.observer" >/dev/null 2>&1 && ! { cmp -s "$R/viz/serve.py" "$D/viz/serve.py" && cmp -s "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json" && cmp -s "$R/etc/mesh-nodes.json" "$D/etc/mesh-nodes.json"; } && kick="$kick io.mesh.observer"
 install -C -m 755 "$R/bin/mesh-nodeinfo.sh" "$D/bin/mesh-nodeinfo.sh"
 install -C -m 755 "$R/user/mesh-telemetry.py" "$D/bin/mesh-telemetry.py"
 install -C -m 755 "$R/bin/mesh-peers.sh" "$R/bin/mesh-rdma.sh" "$D/bin/"
 install -C -m 755 "$R/bin/mesh-observe.py" "$D/bin/mesh-observe.py"
 install -C -m 755 "$R/bin/mesh-top.py" "$D/bin/mesh-top.py"
-install -C -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$R/bin/mesh_restart.py" "$D/bin/"
+install -C -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$D/bin/"
 install -C -m 644 "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json"
 install -C -m 644 "$R/etc/mesh-nodes.json" "$D/etc/mesh-nodes.json"
 install -C -m 644 "$R/keys/authorized_keys" "$D/etc/authorized_keys"
@@ -64,8 +67,6 @@ cat > "$A/io.mesh.telemetry.plist.new" <<PL
     <key>MESH_STAT</key><string>$D/bin/mesh-stat</string>
   </dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>
   <key>StandardOutPath</key><string>$D/log/io.mesh.telemetry.out.log</string>
   <key>StandardErrorPath</key><string>$D/log/io.mesh.telemetry.err.log</string>
 </dict></plist>
@@ -78,15 +79,14 @@ cat > "$A/io.mesh.observer.plist.new" <<PL
   <key>ProgramArguments</key><array><string>$PY</string><string>$D/viz/serve.py</string><string>$D/etc/observer.json</string></array>
   <key>WorkingDirectory</key><string>$D</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>1</integer>
   <key>StandardOutPath</key><string>$D/log/io.mesh.observer.out.log</string>
   <key>StandardErrorPath</key><string>$D/log/io.mesh.observer.err.log</string>
 </dict></plist>
 PL
 provide_http io.mesh.telemetry 8788
 provide_http io.mesh.observer 8787
-try "complete cartlane application realized" "$PY" "$R/bin/mesh-application.py" deploy --source "$R" --target "$D/applications/cartlane"
+for L in $kick; do launchctl kickstart -k "gui/$UID/$L" >/dev/null 2>&1 && ok "$L restarted on its new program (kickstart -k)" || bad "$L not restarted"; done
+for L in io.mesh.telemetry io.mesh.observer; do launchctl kickstart "gui/$UID/$L" >/dev/null 2>&1; done
 ok "mesh-peers: $D/bin/mesh-peers.sh"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$D/revision"
 printf 'reported_failures=%s retained_jobs=%s replaced_jobs=%s\n' "$failures" "$retained" "$replaced" > "$D/install-status"

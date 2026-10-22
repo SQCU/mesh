@@ -5,7 +5,7 @@ b "NODE"; printf "  branch %s converged %s\n" "$(awk '{print $1}' /usr/local/mes
 echo "  $(plutil -extract "nodes.$_id.name" raw -o - "$HERE/../etc/mesh-nodes.json" 2>/dev/null || echo unnamed) / host UUID $_id  up $(uptime | sed 's/.*up //;s/,.*users.*//')"
 b "POWER"; pmset -g custom | awk '/^ (sleep|displaysleep|disksleep|standby|autorestart|womp|powermode)/{printf "  %-22s %s\n",$1,$2}'
 b "ASSERTIONS"; pmset -g assertions | awk '/UserIsActive|PreventUserIdleDisplaySleep|PreventUserIdleSystemSleep|PreventSystemSleep/ && NF==2 {printf "  %-30s %s\n",$1,$2}'
-b "HEALTH"; [ -f /var/run/mesh-health ] && sed -e 's/^warn=/WARN /' -e 's/^/  /' /var/run/mesh-health || echo "  no report: /var/run/mesh-health is written by the keeper (mesh-health.sh)"
+b "HEALTH"; [ -f /var/run/mesh-health ] && sed -e 's/^warn=/WARN /' -e 's/^/  /' /var/run/mesh-health || echo "  no report: /var/run/mesh-health is written by mesh-health.sh, which install.sh runs"
 b "REMOTE"; for p in 22:ssh 5900:screensharing; do
   nc -z 127.0.0.1 "${p%%:*}" >/dev/null 2>&1 && echo "  ${p##*:} (${p%%:*}): OPEN" || echo "  ${p##*:} (${p%%:*}): CLOSED"
 done
@@ -35,7 +35,7 @@ for d in $(printf '%s\n' "$rdma" | awk 'NF{sub(/^device=/,"",$2); print $2}'); d
     "$([ -f /var/run/mesh-link.${d#rdma_} ] && read -r t0 _ < /var/run/mesh-link.${d#rdma_} && echo " (no peer for $(( $(date +%s) - t0 )) s)")"
 done
 b "THUNDERBOLT"; system_profiler SPThunderboltDataType 2>/dev/null | awk '/Device Name:|Speed:|Status:/{gsub(/^ +/,"");print "  "$0}' | head -12
-b "DAEMONS"; for spec in io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh.fabric:oneshot io.mesh.router:resident io.mesh.rdma-init:oneshot io.mesh.update:periodic; do
+b "DAEMONS"; for spec in io.mesh.beacon:resident io.mesh.fabric:oneshot io.mesh.router:resident io.mesh.rdma-init:oneshot; do
   L=${spec%%:*}; kind=${spec##*:}
   info=$(launchctl print "system/$L" 2>/dev/null)
   pid=$(printf '%s' "$info" | awk -F'= ' '/^\tpid /{gsub(/ /,"",$2);print $2;exit}')
