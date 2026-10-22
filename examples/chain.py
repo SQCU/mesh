@@ -59,8 +59,13 @@ def form(K, S, rows, held):
         groups = rt // rg
         return min(most, _floor2(max(-(-st // G) * groups * kt, -(-kt // G) * groups * st)))
 
+    def splits(rg, sg):
+        groups = rt // rg
+        return _ksplit(-(-st // G) * groups, kt, sg), _ksplit(-(-kt // G) * groups, st, sg)
+
     SG = simdgroups(1)
-    RG = max(rg for rg in (1 << i for i in range(rt.bit_length())) if rt % rg == 0 and simdgroups(rg) == SG)
+    RG = max(rg for rg in (1 << i for i in range(rt.bit_length()))
+             if rt % rg == 0 and simdgroups(rg) == SG and splits(rg, SG) == splits(1, SG))
     while True:
         RB = RG
         while SG * RB * tile * tile * 4 + 2 * held['threadgroup_memory_alignment_bytes'] > held['threadgroup_memory_bytes']:
@@ -80,8 +85,7 @@ def form(K, S, rows, held):
             raise RuntimeError(f'chain step {args}: its pipeline holds {threads} threads a threadgroup, fewer than its '
                                f'{SG} simdgroups')
         RG //= 2
-    groups = rt // RG
-    return handle, args, [rows, _ksplit(-(-st // G) * groups, kt, SG), _ksplit(-(-kt // G) * groups, st, SG)]
+    return handle, args, [rows, *splits(RG, SG)]
 
 
 # docs/writing-a-service.md#the-step-kernel

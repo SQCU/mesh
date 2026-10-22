@@ -150,8 +150,11 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
   simdgroups as the busier stage can keep working, each on one K tile at least, up to the device's limit, rounded
   down to a power of two. The SIMD width is the compiled pipeline's (`threadExecutionWidth`), since no document states
   it.
-- **Row groups.** RG is the largest power of two that divides the row tiles and keeps that many simdgroups working. A
-  larger RG loads each weight tile once for more rows. If the compiled pipeline then holds fewer threads than the
+- **Row groups.** RG is the largest power of two that divides the row tiles, keeps that many simdgroups working, and
+  leaves each stage's K split as it is at RG = 1. A larger RG loads each weight tile once for more rows. But with the
+  simdgroups fixed, it halves the work items, so the K split doubles: each simdgroup's chain of multiply-adds stays as
+  long, and the sum gains a tree round. Where the split is already 1 (weights streamed from memory, wide layers), the
+  reuse is all gain; where it would deepen the tree, RG stays. If the compiled pipeline holds fewer threads than the
   simdgroups need (`maxTotalThreadsPerThreadgroup`, which its registers set), RG halves.
 - **The K split.** Where a worker has fewer items than simdgroups, a product is split along K, ks ways, a power of two.
   The ks partials of an item are summed as a tree in threadgroup memory: log2(ks) rounds, one barrier each, a batch of
