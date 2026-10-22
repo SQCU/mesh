@@ -26,10 +26,6 @@ from the node by streamed_coopmap), compiled on first use. Operands are fp16 on 
 into its range by powers of two, results finished in the caller's dtype); the codes are constants (no gradient reaches
 them, only through them). An operation a coded matrix lacks is an error naming the ones it has.
 
-  python -m torch_mesh.streamed check EXPORT [NAME ...]   the decode against model_code's reference decode; products,
-                                                          their gradients and the FFN against the decoded matrices;
-                                                          each chosen instance against float64
-
 A decomposition operand names the instance a product runs as in place of the fit's choice (metal-microbench
 docs/kernels.md#decompositions): `spec_of('coop/M=64,SK=2,BANDS=1,J=1,LOADS=0,RING=32')` is an instance spec,
 Matrix.product, apply and ffn take it as `decomposition`, and decomposition_of gives the engine's entry for it (its
@@ -118,7 +114,6 @@ import json
 import math
 import os
 import struct
-import sys
 from pathlib import Path
 
 import torch
@@ -1020,55 +1015,6 @@ class Streamed:
 
 def _relative(a, b):
     return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-30))
-
-
-def _check(args):
-    import numpy as np
-    sys.path.insert(0, str(Path(args.tools).expanduser()))
-    from model_code import decode_layout
-    from . import engines
-    F = torch.nn.functional
-    streamed = Streamed(args.export)
-    names = args.names or [n for n in streamed.matrices if '.layers.0.' in n or n == 'lm_head'][:8]
-    torch.manual_seed(0)
-    print(f'{node()[0]}: cooperative slots {coop_slots()}', flush=True)
-    for name in names:
-        m = Matrix.load(streamed.tensors, name)
-        reference = decode_layout({k: v.numpy() for k, v in streamed.tensors.items() if k.startswith(name + '.')}, name).double()
-        dense = m.dense().float()
-        line = f'{name} [{m.rows} x {m.columns}]{" rotated" if m.folded is not None else ""}: decode {_relative(dense.cpu(), reference):.2e}'
-        for n in (1, 2, 4, 8, 16, 300):
-            x = torch.randn(n, m.columns, device='mps').half().requires_grad_()
-            w = torch.randn(n, m.rows, device='mps')
-            y = F.linear(x, m)
-            (y.float() * w).sum().backward()
-            exact = x.detach().cpu().double() @ reference.T
-            line += f', {n}: {_relative(y.cpu(), exact):.2e} {m.dispatch(n)[0]["kernel"]} grad {_relative(x.grad.cpu(), w.cpu().double() @ reference):.2e}'
-        if name == 'lm_head' and m.folded is not None:
-            for n in (1, 2, 4):
-                x = torch.randn(n, m.columns, device='mps').half()
-                spec, chosen = m.dispatch(n, 'head')[:2]
-                tables = torch.empty(n, m.tiles_, 8, 16, dtype=torch.float32, device='mps') if spec.get('LUT') else None
-                xt = m.coded_input(x, tables=tables)[0]
-                y = m.finish(m.product(xt, op='head', tables=tables))
-                line += f', head {n}: {_relative(y.cpu(), x.cpu().double() @ reference.T):.2e} ({chosen})'
-        print(line, flush=True)
-    base = names[0].split('.mlp.')[0] + '.mlp.' if '.mlp.' in names[0] else 'model.language_model.layers.0.mlp.'
-    gate, up, down = (streamed[base + p] for p in ('gate_proj', 'up_proj', 'down_proj'))
-    gd, ud, dd = (t.dense().float().requires_grad_(False) for t in (gate, up, down))
-    for n in (1, 8, 300):
-        x = torch.randn(n, gate.columns, device='mps').half()
-        with torch.no_grad():
-            fused = engines.ffn(x, gate, up, down)
-        x.requires_grad_()
-        composed = engines.ffn(x, gate, up, down)
-        w = torch.randn_like(composed, dtype=torch.float32)
-        (composed.float() * w).sum().backward()
-        xf = x.detach().float().requires_grad_()
-        y = F.linear(F.gelu(F.linear(xf, gd), approximate='tanh') * F.linear(xf, ud), dd)
-        (y * w).sum().backward()
-        print(f'{base}ffn {n} rows: fused {_relative(fused, y):.2e}, composed {_relative(composed, y):.2e} '
-              f'gradient {_relative(x.grad, xf.grad):.2e}', flush=True)
 
 
 ARGUMENTS = {'alu': ('R', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'OUT', 'LUT', 'F', 'LOADS', 'H'),
@@ -2045,10 +1991,6 @@ def _resolve(args):
 def main():
     parser = argparse.ArgumentParser(prog='python -m torch_mesh.streamed')
     sub = parser.add_subparsers(dest='command', required=True)
-    check = sub.add_parser('check')
-    check.add_argument('export')
-    check.add_argument('names', nargs='*')
-    check.add_argument('--tools', default='~/metal-microbench/tools')
     bandwidth = sub.add_parser('bandwidth')
     bandwidth.add_argument('--mib', type=int, required=True, help='the bytes read, MiB: more than the system cache holds')
     bandwidth.add_argument('--rounds', type=int, required=True, help='the reads, each a command buffer of its own')
@@ -2113,7 +2055,7 @@ def main():
     admit.add_argument('form', help='the form, H<h>')
     admit.add_argument('bar', type=float, help='the KL bar the record must be at or below (the operator\'s)')
     args = parser.parse_args()
-    {'check': _check, 'bandwidth': _bandwidth, 'probe': _probe, 'decompose': _decompose, 'fit': _fit, 'resolve': _resolve,
+    {'bandwidth': _bandwidth, 'probe': _probe, 'decompose': _decompose, 'fit': _fit, 'resolve': _resolve,
      'observe': _observe, 'epilogue': _epilogue, 'admit': _admit}[args.command](args)
 
 

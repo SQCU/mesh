@@ -58,26 +58,6 @@ kernel void input_grad(device half* dY [[buffer(0)]], device half* W [[buffer(1)
   }
 }
 
-// dW[K, N] = M (.) (X^T . dY): a block of a kept tile over every row, X read transposed; a dropped tile's blocks return
-kernel void weight_grad(device half* X [[buffer(0)]], device half* dY [[buffer(1)]], device OUT* dW [[buffer(2)]],
-                        constant dims& s [[buffer(3)]], device const uint* bits [[buffer(4)]],
-                        uint3 tg [[threadgroup_position_in_grid]], ushort sg [[simdgroup_index_in_threadgroup]]) {
-  const int M = s.M, K = s.K, N = s.N, T = s.T, KB = K / T, NB = N / T;
-  const int kr = int(tg.x) * 64 + (sg / 2) * RM, col = int(tg.y) * 64 + (sg % 2) * CN, k = kr / T, n = col / T;
-  if (!KEPT(k, n)) return;
-  auto A = tensor(X, dextents<int, 2>{K, M}, array<int, 2>{1, K});
-  auto B = tensor(dY, dextents<int, 2>{N, M}, array<int, 2>{1, N});
-  constexpr auto desc = matmul2d_descriptor(RM, CN, KT, true, false, false, matmul2d_descriptor::mode::multiply_accumulate);
-  matmul2d<desc, execution_simdgroup> op;
-  auto acc = op.get_destination_cooperative_tensor<decltype(A), decltype(B), float>();
-  for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
-  for (int at = 0; at < M; at += KT) { auto a = A.slice<RM, KT>(kr, at); auto b = B.slice<CN, KT>(col, at); op.run(a, b, acc); }
-  for (uint i = 0; i < acc.get_capacity(); ++i) if (acc.is_valid_element(i)) {
-    auto e = acc.get_multidimensional_index(i);
-    dW[(kr + e[1]) * N + col + e[0]] = OUT(acc[i]);
-  }
-}
-
 // the closure over the tile grid as a bitmap (bit n * KB + k), one 32-bit word a thread: FlexAttention's
 // create_block_mask, the closure evaluated once at its granule
 kernel void evaluate(device uint* out [[buffer(2)]], constant dims& s [[buffer(3)]], device const uint* bits [[buffer(4)]],

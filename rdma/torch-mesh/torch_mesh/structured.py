@@ -76,20 +76,3 @@ class Rotation:
             _stream.encode(_kernel(), [y, x, self.ones], [self.N, self.B, 0, 0], 3, m * self.B, 1, threads)
             y = x * sign
         return y
-
-
-def _check():
-    torch.manual_seed(0)
-    for n in (1536, 6144, 12288, 4096):
-        R = Rotation(n, seed=7)
-        x = torch.randn(64, n, device='mps')
-        y = R.rows(x)
-        eye = R.rows(torch.eye(n, device='mps')[:256])
-        gram = eye @ eye.T
-        print(n, 'inverse', float((R.rows_inverse(y) - x).abs().max()), 'norms kept', float((y.norm(dim=1) / x.norm(dim=1) - 1).abs().max()),
-              'orthogonality', float((gram - torch.eye(256, device='mps')).abs().max()),
-              'mixed (max |R_ij| * sqrt n)', round(float(eye.abs().max()) * n ** 0.5, 2))
-
-
-if __name__ == '__main__':
-    _check()

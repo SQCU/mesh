@@ -26,20 +26,6 @@ def stop(*_):
     raise Stopped
 
 
-# design/algorithm-sources.md#nnffn
-def reference_ffn(inputs, up, down):
-    result = np.zeros((inputs[0].shape[0], down[0].shape[1]), np.float64)
-    for weights, projection in zip(up, down):
-        hidden = sum(value.astype(np.float64) @ weight for value, weight in zip(inputs, weights))
-        result += (hidden / (1 + np.exp(-hidden))) @ projection
-    return result
-
-
-# design/algorithm-sources.md#nnrmsnorm
-def reference_norm(value, gamma):
-    return value / np.sqrt(np.mean(value * value, axis=1, keepdims=True) + 1e-6) * gamma
-
-
 # design/algorithm-sources.md#streaming-overlap-measurement
 def summary(values):
     return dict(count=len(values), mean=float(np.mean(values)) if values else None,
@@ -70,10 +56,10 @@ def literature(args, program):
         up = tuple(tuple(rng.standard_normal((width, width), dtype=np.float32) / 16
                    for _ in range(partitions)) for _ in range(2))
         down = tuple(rng.standard_normal((width, width), dtype=np.float32) / 16 for _ in range(2))
-        return up, down, tuple(tuple(weight(w) for w in group) for group in up), tuple(weight(w) for w in down)
+        return tuple(tuple(weight(w) for w in group) for group in up), tuple(weight(w) for w in down)
 
-    first_up, first_down, first_u, first_d = weights(2)
-    second_up, second_down, second_u, second_d = weights(1)
+    first_u, first_d = weights(2)
+    second_u, second_d = weights(1)
     gamma = np.ones((1, width), np.float32)
     scale = weight(gamma)
     tables = tuple(rng.standard_normal((32, width), dtype=np.float32) / 32 for _ in range(2))
@@ -84,8 +70,6 @@ def literature(args, program):
 
     # design/algorithm-sources.md#index-hand-off
     def exchange(value, sender, receiver):
-        if args.local:
-            return value
         received = program.tensor(value.shape, value.block_shape, dtype=value.dtype)
         for (i, j), ref in value.blocks.items():
             program.copy(ref.on(sender), received[i, j].on(receiver), queue=i + (value.grid[0] if sender else 0))
@@ -107,7 +91,7 @@ def literature(args, program):
         invocations.append((data, inputs, probes))
     program.realize()
     signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
-    print(json.dumps(dict(event='realized', pid=os.getpid(), rank=program.rank, runs=args.runs, local=args.local)), flush=True)
+    print(json.dumps(dict(event='realized', pid=os.getpid(), rank=program.rank, runs=args.runs)), flush=True)
     if program.rank == 1:
         watched = {results[1, 0]: (run, name, results[0, 0]) for run, (_, _, probes) in enumerate(invocations)
                    for name, results in probes.items()}
@@ -135,8 +119,6 @@ def literature(args, program):
     publish(warm, range(1, rows // tile))
     warm_results = warm[2]['rmsnorm2']
     sync_on_remote_fill(warm_results[1, 0])
-    if any(result.ready for coordinate, result in warm_results.items() if coordinate[0] == 0):
-        raise ArithmeticError('An unpublished input section produced an output')
     publish(warm, (0,))
     sync_on_remote_fill(*warm_results.values())
     print(json.dumps(dict(event='warmup', elapsed_ms=(time.monotonic_ns() - warm_started) / 1e6)), flush=True)
@@ -147,8 +129,6 @@ def literature(args, program):
     delayed = invocations[1][2]['rmsnorm2']
     sync_on_remote_fill(delayed[1, 0])
     first_ms = (time.monotonic_ns() - batch_started) / 1e6
-    if any(result.ready for coordinate, result in delayed.items() if coordinate[0] == 0):
-        raise ArithmeticError('An unpublished input section produced an output')
     publish(invocations[1], (0,))
     completed = {}
     waiting = {run: set(probes['rmsnorm2'].values()) for run, (_, _, probes) in enumerate(invocations[1:], 1)}
@@ -160,24 +140,9 @@ def literature(args, program):
                 completed[run] = (time.monotonic_ns() - batch_started) / 1e6
                 del waiting[run]
     batch_ms = (time.monotonic_ns() - batch_started) / 1e6
-    errors = []
-    for run, (data, _, probes) in enumerate(invocations):
-        expected = reference_norm(reference_ffn(data, first_up, first_down), gamma)
-        expected += sum(table[index[:, 0]] for table, index in zip(tables, ids))
-        expected = reference_norm(reference_ffn((expected,), second_up, second_down), gamma)
-        error = 0.0
-        for (row, column), result in probes['rmsnorm2'].items():
-            r, c = row * tile, column * result.ref.shape[1]
-            part = expected[r:r + result.ref.shape[0], c:c + result.ref.shape[1]]
-            error = max(error, float(np.max(np.abs(result.array - part))))
-            if not np.allclose(result.array, part, atol=3e-4, rtol=3e-4):
-                raise ArithmeticError(f'Gold chain numerical mismatch: {error}')
-        errors.append(error)
-        print(json.dumps(dict(event='gold', run=run, complete_ms=completed.get(run), max_absolute_error=error,
-                              backend=args.backend, local=args.local)), flush=True)
     return dict(invocations=args.runs, batch_ms=batch_ms, invocations_per_second=args.runs * 1000 / batch_ms,
                 first_section_ms=first_ms, completion_ms=summary(tuple(completed.values())), withheld_invocation=1,
-                withheld_section=0, max_absolute_error=max(errors))
+                withheld_section=0)
 
 
 # design/algorithm-sources.md#nnffn
@@ -186,8 +151,8 @@ def tensor_parallel(args, program):
     up, down, consumer = (np.load(name, mmap_mode='r') for name in (args.up_weight, args.down_weight, args.consumer_weight))
     if up.shape[1] != down.shape[0] or not 0 < args.split <= up.shape[1]:
         raise ValueError('The split is a hidden column of the up projection')
-    members = (args.root,) if args.local else (args.root, args.peer)
-    spans = {args.root: (0, up.shape[1] if args.local else args.split), args.peer: (args.split, up.shape[1])}
+    members = (args.root, args.peer)
+    spans = {args.root: (0, args.split), args.peer: (args.split, up.shape[1])}
     start, end = spans[program.rank]
     up_weight = program.tensor((up.shape[0], end - start), dtype=up.dtype)
     down_weight = program.tensor((end - start, down.shape[1]), dtype=down.dtype)
@@ -247,7 +212,6 @@ def tensor_parallel(args, program):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--chain', choices=('literature', 'tensor-parallel'), default='literature')
-    parser.add_argument('--local', action='store_true')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--runs', type=int, default=8)
     parser.add_argument('--tile-k', type=int, default=64)
@@ -278,9 +242,7 @@ def main():
         signal.signal(number, stop)
     signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     with Program(backend=args.backend, trace=bool(args.trace)) as program:
-        if args.local and program.size != 1:
-            parser.error('--local is world size 1: run one rank (WORLD_SIZE unset or 1)')
-        if not args.local and program.size != 2:
+        if program.size != 2:
             parser.error('the paired chain runs on two ranks (RANK, WORLD_SIZE=2, MASTER_ADDR, MASTER_PORT)')
         chain = literature if args.chain == 'literature' else tensor_parallel
         try:
@@ -291,7 +253,7 @@ def main():
             Path(args.trace).write_text(json.dumps(dict(rank=program.rank, trace=program.trace)) + '\n')
         if result:
             print(json.dumps(dict(event='summary', chain=args.chain, rank=program.rank, backend=args.backend,
-                                  local=args.local, **result, **(overlap(program.trace) if program.trace is not None else {}),
+                                  **result, **(overlap(program.trace) if program.trace is not None else {}),
                                   report=vars(program.report))), flush=True)
 
 

@@ -13,10 +13,10 @@ recorded or compiled once is replayed across parts with no shape change, recompi
 writes a sharded tensor's local buffer from its logical value under the current parts (a program's weights, after each
 write).  On raw tensors split(mesh, "tp", N) gives the valid blocks in rank order, the ones the list collectives take
 (dist.all_gather into a list of unequal outputs, dist.reduce_scatter of a list of unequal inputs: MPI's v-collectives
-in torch's spelling), and sizes(mesh, "tp", N) the buffers'.
+in torch's spelling).
 
 On DTensor the partition is a placement, RaggedShard(dim, key) [veScale's RaggedShard(local_units), pytorch#169320],
-held by the tensors it splits; shard(mesh, "tp", dim) is the attached dimension's.  A DTensor holding one is a
+held by the tensors it splits.  A DTensor holding one is a
 RaggedTensor, a DTensor subclass whose own dispatch keeps it ragged through every op.  distribute_tensor, from_local and
 redistribute below are torch's, with a Shard on an attached mesh dimension that dimension's RaggedShard; from_local
 without shape= means "a capacity block" (global = local P / c_r).  ColwiseParallel, RowwiseParallel and
@@ -473,18 +473,6 @@ def split(mesh, name, N):
     """The valid blocks of an extent N along partitioned mesh dimension `name` under the current parts, in rank order."""
     o = operand(mesh, name)
     return [_units(o, N) * p for p in o.parts.tolist()]
-
-
-def sizes(mesh, name, N):
-    """The local buffers' sizes of an extent N along partitioned mesh dimension `name` (its capacities')."""
-    return tuple(_blocks(operand(mesh, name), N)[0])
-
-
-def shard(mesh, name, dim):
-    """The placement of tensor dimension `dim` split along mesh dimension `name`: its RaggedShard where `name` is
-    attached, else torch's Shard."""
-    key = _NAMED.get((mesh, name))
-    return RaggedShard(dim, key) if key else Shard(dim)
 
 
 @torch.no_grad()

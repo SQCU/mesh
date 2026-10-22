@@ -626,22 +626,6 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
 #undef FRAGMENT_DENSE
 }
 
-// A read of byte ranges (16-byte units: ranges[2i] the first, ranges[2i + 1] the count, d.count ranges of the buffer
-// at 0) by the grid's threads, folded into one word stored only where it equals d.flags: a prefetch into the system
-// cache, no spin.
-kernel void streamed_touch(device const uint4 *data [[buffer(0)]], device const uint *ranges [[buffer(1)]],
-                           device uint *sink [[buffer(2)]], constant streamed_dims &dims [[buffer(15)]],
-                           uint i [[thread_position_in_grid]], uint threads [[threads_per_grid]]) {
-    const streamed_dims d = dims_of(dims);
-    uint4 folded = uint4(0u);
-    for (uint r = 0; r < d.count; r++) {
-        const uint first = ranges[2 * r], count = ranges[2 * r + 1];
-        for (uint u = i; u < count; u += threads) folded ^= data[first + u];
-    }
-    const uint word = folded.x ^ folded.y ^ folded.z ^ folded.w;
-    if (word == d.flags) sink[0] = word;
-}
-
 // A product's outputs finished into plain values of T: y[n * stride + order[r]], over the row's factor (inputs > 0: its
 // input row scaled by streamed_scale_rows), capped (cap > 0).
 template <typename T>

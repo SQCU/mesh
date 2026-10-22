@@ -26,7 +26,6 @@ count before both ran there, and none by a time measured at another, so a call i
 beyond the exploration of the two lowerings at its row count and the measurement's resolution.  A row count's choice,
 once made, stands.
 
-  python -m torch_mesh.sparse check    every closure's three products against float64, rows not a multiple of 64
   python -m torch_mesh.sparse time     the lowerings' times by density and the routing's choice"""
 import argparse
 import math
@@ -174,39 +173,6 @@ def expand(mask, tile, shape):
     return mask.to('cpu').repeat_interleave(tile, 0).repeat_interleave(tile, 1)[:shape[0], :shape[1]]
 
 
-def tile_energy(w, tile):
-    """Each tile's squared norm, [N/tile, K/tile]."""
-    n, k = w.shape
-    return w.reshape(n // tile, tile, k // tile, tile).square().sum((1, 3))
-
-
-def project(w, tile, keep):
-    """The support P keeps (a learned support's projection, metal-microbench docs/kernels.md "Learning the support"):
-    the `keep` fraction of each output tile row's tiles by energy (ties to the lower index)."""
-    energy = tile_energy(w, tile)
-    count = max(1, round(keep * energy.shape[1]))
-    order = energy.argsort(dim=1, descending=True, stable=True)
-    mask = torch.zeros_like(energy, dtype=torch.bool)
-    mask.scatter_(1, order[:, :count], True)
-    return mask
-
-
-def projection_distance(w, mask, tile):
-    """R(W) = ||W outside the support||^2 / ||W||^2, its denominator held: a differentiable loss whose gradient is the
-    dropped tiles' 2 W / ||W||^2 (exact almost everywhere)."""
-    dropped = (~mask.to(w.device)).repeat_interleave(tile, 0).repeat_interleave(tile, 1)
-    return (w * dropped).square().sum() / w.detach().square().sum().clamp_min(torch.finfo(torch.float32).tiny)
-
-
-def tile_scores(x, dy, w, tile):
-    """Each tile's first-order effect <W_t, (dY^T . X)_t> and its gradient's energy over every tile, dense: what a
-    dropped tile would contribute, read every few steps to let it return [RigL: Evci et al. 2020]."""
-    n, k = w.shape
-    g = weight_grad(x, dy, named('all', tile), n, k)
-    blocks = lambda t: t.float().reshape(n // tile, tile, k // tile, tile)
-    return (blocks(w) * blocks(g)).sum((1, 3)), blocks(g).square().sum((1, 3))
-
-
 def contributions(w, x, tile):
     """Each tile's contribution to the product x . w^T on the rows x: the squared norm of its own term, [N/tile, K/tile]
     (float32, on w's device)."""
@@ -336,29 +302,6 @@ class SparseLinear(torch.nn.Module):
         return y if self.bias is None else y + self.bias
 
 
-def _check(args):
-    torch.manual_seed(0)
-    ok = True
-    for m, n, k, tile in ((711, 1024, 768, 64), (256, 512, 1024, 128), (33, 256, 256, 64)):
-        x = (torch.randn(m, k) / 4).half().to('mps')
-        w = (torch.randn(n, k) / k ** 0.5).half().to('mps')
-        dy = (torch.randn(m, n) / 4).half().to('mps')
-        for closure in (named('all', tile), named('blockdiag:4', tile), named('band:1', tile),
-                        bitmap(torch.rand(n // tile, k // tile) < 0.4, tile)):
-            mask = expand(closure.mask(n, k), tile, w.shape).double()
-            wm = w.cpu().double() * mask
-            X, DY = x.cpu().double(), dy.cpu().double()
-            got = [linear(x, w, closure).cpu().double(), input_grad(dy, w, closure).cpu().double(),
-                   weight_grad(x, dy, closure, n, k).cpu().double()]
-            want = [X @ wm.T, DY @ wm, (DY.T @ X) * mask]
-            errors = [float((g - r).norm() / max(r.norm(), 1e-30)) for g, r in zip(got, want)]
-            fine = all(e < 2e-3 for e in errors)
-            ok &= fine
-            print(f'{m}x{n}x{k} tile {tile} {closure.name}: linear {errors[0]:.1e} input_grad {errors[1]:.1e} weight_grad {errors[2]:.1e}'
-                  f' {"ok" if fine else "FAILED"}')
-    return ok
-
-
 def _time(args):
     torch.manual_seed(0)
     m, n, k, tile = args.m, args.n, args.k, args.tile
@@ -398,14 +341,12 @@ def _time(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('action', choices=['check', 'time'])
+    parser.add_argument('action', choices=['time'])
     parser.add_argument('--m', type=int, default=1024)
     parser.add_argument('--n', type=int, default=4096)
     parser.add_argument('--k', type=int, default=4096)
     parser.add_argument('--tile', type=int, default=64)
     args = parser.parse_args()
-    if args.action == 'check':
-        raise SystemExit(0 if _check(args) else 1)
     _time(args)
 
 

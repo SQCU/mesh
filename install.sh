@@ -45,7 +45,7 @@ sed "s|__MESH_OWNER__|$(id -u "${ADMIN_USER:-root}"):$(id -g "${ADMIN_USER:-root
 chmod 644 /etc/newsyslog.d/io.mesh.conf
 install -C -m 755 -o root -g wheel "$REPO"/user/mesh-telemetry.py "$MESH_ROOT/bin/mesh-telemetry.py"
 install -C -m 644 -o root -g wheel "$REPO"/etc/mesh-capacity.json "$MESH_ROOT/etc/mesh-capacity.json"
-install -C -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$REPO"/etc/mesh-store.json "$MESH_ROOT/etc/"
+install -C -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$MESH_ROOT/etc/"
 [ -f "$MESH_ROOT/etc/observer.json" ] || install -m 644 -o root -g wheel "$REPO"/etc/observer.json "$MESH_ROOT/etc/observer.json"
 install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist "$MESH_ROOT/jobs/io.mesh.telemetry.plist.new"
 install -m 644 -o root -g wheel "$REPO"/keys/authorized_keys "$MESH_ROOT/etc/authorized_keys"

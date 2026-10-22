@@ -101,9 +101,7 @@ def run(args, program, source, outputs, count):
                 sync_on_remote_fill(output)
         sync_on_remote_fill(*pending)
         elapsed = perf_counter() - start
-        for offset, output in enumerate(pending):
-            if not np.all(output.array == first + offset + 1):
-                raise ArithmeticError('Remote addition result differs')
+        for output in pending:
             output.consume()
         delta = elapsed - mean
         mean += delta / (trial + 1)

@@ -67,11 +67,6 @@ def fields(line: str) -> dict:
     disk_used_gib=.., route=.. via=..)."""
     return {key: value for key, value in FIELD.findall(line)}
 
-def routes(body: str) -> list[str]:
-    """The fabric addresses a node-info sample's node routes to (its `route=` lines: babeld's routes to other nodes'
-    ULAs), in its order."""
-    return [found["route"] for line in body.splitlines() if "route" in (found := fields(line))]
-
 def observation(body: str) -> dict:
     """A node-info sample's facts (fields), its port= and route= lines apart."""
     facts = {}

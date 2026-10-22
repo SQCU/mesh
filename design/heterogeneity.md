@@ -3,7 +3,7 @@
 Orientation for anyone, developer or agent, who splits work over nodes of different speeds or
 moves it over links of different costs: `rdma/torch-mesh/torch_mesh/partition.py` (the partition
 operand), `rdma/allocate.py` (the shares), `rdma/mesh-plan.h` and `mesh-collective.c` (the compiled
-collectives), metal-microbench `tools/mesh/calibrate.py` (the rates) and the programs that use them. The operator:
+collectives) and the programs that use them. The operator:
 
 > "it'll take a little bit of orientation for developers (agents as well) to handle heterogenous
 > links ontologically (since this is so different) and without lots of clumsy erratic
@@ -18,12 +18,11 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 ## 1. Vocabulary
 
 - **Rate**: a node's time model for one operator class at one dtype, a function of the call's
-  shape. It is the node's record in the mesh's store (rdma/store.py) as that class's constants:
-  `proj=u,v`, u ns per weight byte plus v ns per weight element per row, for the engine's fp16
-  projections; `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs.
-  metal-microbench `calibrate.py node` writes a node's record from its probes. A class the store does not carry (a program's fp32 MPS matmul,
-  its attention) is measured on each node and added as its own class (R3). A node has one rate per
-  class and dtype, never one speed.
+  shape, as that class's constants: `proj=u,v`, u ns per weight byte plus v ns per weight element
+  per row, for the engine's fp16 projections; `attn=u,v`, u + v·bs ns per byte of one cached
+  position read at batch bs. Another class (a program's fp32 MPS matmul, its attention) is measured
+  on each node and added as its own class (R3). A node has one rate per class and dtype, never one
+  speed.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte. The bridges'
   map joins two nodes by one link where each one's bridge reaches the other, at the lesser of the two ends' stream
   bandwidths (mesh-plan.h `mesh_map`: β 8e9 over that bandwidth, mesh-dataflow.c `mesh_joined`).
@@ -80,8 +79,8 @@ The module docstring (`torch_mesh/partition.py`) is the API. This section is onl
 program uses its functions where a partitioned dimension is meant, and torch's own run as torch runs them.
 - On MPS the mesh is formed from the process groups, `DeviceMesh.from_group(dist.group.WORLD, "mps",
   mesh_dim_names=("tp",))` (torch 2.14's `init_device_mesh("mps")` needs device calls its MPS module lacks).
-- The partition is a placement, `RaggedShard(dim, key)` (a subclass of torch's `Shard`; `partition.shard(mesh, "tp",
-  dim)` gives the attached dimension's), and a DTensor holding one is a `RaggedTensor`, whose own dispatch keeps it
+- The partition is a placement, `RaggedShard(dim, key)` (a subclass of torch's `Shard`, which the functions below take
+  for it on an attached dimension), and a DTensor holding one is a `RaggedTensor`, whose own dispatch keeps it
   ragged through every op, re-masks the padding before each sum, max or min over a ragged dimension and gathers the
   dimension whole where an op needs it so (the module docstring lists every torch entry point it uses).
 - `partition.distribute_tensor`, `partition.from_local` and `partition.redistribute`, `partition.ColwiseParallel`,
@@ -91,10 +90,8 @@ program uses its functions where a partitioned dimension is meant, and torch's o
 **Operand.**
 - `partition.attach(mesh, tp=(capacity, parts))`, before the mesh is first used, the same on every
   rank; a sub-mesh keeps its root's. `partition.write(mesh, tp=parts)` changes the parts between calls.
-- `partition.sizes(mesh, "tp", N)` gives the local buffers' sizes of N (R14).
-- A program takes its own splits from
-  `partition.distribute_tensor(x, mesh, [partition.shard(mesh, "tp", d)], src_data_rank=None).to_local()` or from
-  `sizes()`, never from `x.chunk(world)`.
+- A program takes its own splits from `partition.distribute_tensor(x, mesh, [Shard(d)], src_data_rank=None).to_local()`
+  or from `partition.split(mesh, "tp", N)`, never from `x.chunk(world)`.
 - `partition.from_local` without `shape=` means "a capacity block" (global = local·P/c_r).
 - Every extent split along a partitioned dimension is a multiple of P; any other raises
   `ValueError`, on every rank alike. No mesh dimension of more than one coordinate precedes a
@@ -124,8 +121,7 @@ program uses its functions where a partitioned dimension is meant, and torch's o
 5. Give every rank the parts and the capacities to attach (`partition.attach(mesh, tp=(capacity,
    parts))`); metal-microbench `tools/torch_parallel/tp.py` takes them as `PARTITION`.
 
-Node rates are the store's records (`calibrate.py node`, else the records of the node's model), and links and their
-costs are the bridges' map. They give the first parts only.
+Links and their costs are the bridges' map. They and the rates give the first parts only.
 
 **Parts from the run's evidence (R3, R10, R11).** `allocate.Balancer` balances any program of collectives: its
 decisions are partitioned dimensions, its stretches each rank's own work between two consecutive collectives

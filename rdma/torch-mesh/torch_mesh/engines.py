@@ -27,16 +27,16 @@ time move.
 
 Engines never time-share a physical unit.  Each states what it occupies (`Engine.occupies`: the GPU; the CPU's cores;
 the Neural Engine, and whatever units Core ML places a Neural Engine share's operations on, read from its compute
-plan through rdma/mesh-coreml.m mesh_coreml_placement), the configuration's `occupies` option stating it in place of
-the engine's own ("ane:occupies=ane+gpu"), and two engines occupying one unit never hold units of a decision together
+plan through rdma/mesh-coreml.m mesh_coreml_placement), the engine's `occupies` option stating it in place of the
+engine's own (ane={'occupies': 'ane+gpu'}), and two engines occupying one unit never hold units of a decision together
 (allocate.Coupled.forbid), applied when the decision is made and when a share's load reads its placement, before any
 of its calls is measured: running both at once would time-share the unit (two APIs on the same arithmetic units,
 contending for registers and switching between them) rather than add capacity.  The rule is the hardware's, data of
 the engines, never a measurement's or a model's conclusion.
 
-Nothing is implicit.  An operation takes its engines as an operand (`Engines`), from the program or from the
-configuration the program names (`Engines.configured()`: MESH_ENGINES, e.g. "mps,cpu,ane:tile=128"); without
-one it is torch's own operation on its input's device.  An engine the configuration names and the node lacks is an
+Nothing is implicit.  An operation takes its engines as an operand (`Engines`, from the program: its engines' names
+and each one's options); without one it is torch's own operation on its input's device.  An engine the program names
+and the node lacks is an
 error (design/rubrics.md D2, the operator 10-19: "functions should throw ... before they try to guess parametric
 values"; a resolver's fallback path ranks below none).  An engine's limits are data (`Engine.limits`): its operand dtypes and whether its
 weights must be constants (the Neural Engine's: a share there is compiled); an operand an engine cannot take gives it
@@ -48,7 +48,7 @@ the Neural Engine's graph reads it row-major as it is) and write their outputs i
 combines the shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted
 in its time).
 
-  pool = engines.Engines.configured()
+  pool = engines.Engines(['mps', 'cpu', 'ane'], ane={'tile': 128})
   ffn = engines.FFN(gate, up, down, engines=pool, name='layer3.ffn')
   y = ffn(x)                # x [..., H] on MPS: every configured engine its share of the neurons
   engines.rebalance(pool)   # each (operation, rows)'s search on the calls since the last: its next allocation"""
@@ -443,21 +443,8 @@ class Engines:
         self.names, self.window, self.sample = names, int(window), int(sample)
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
-        self.operations, self.decisions, self.evidence, self.solvers, self.last, self.excluded = [], {}, {}, {}, {}, {}
+        self.operations, self.decisions, self.evidence, self.solvers, self.last = [], {}, {}, {}, {}
         self.errors, self.separated = {}, {}
-
-    @classmethod
-    def configured(cls, variable='MESH_ENGINES'):
-        """The engines the configuration names ("mps,cpu,ane:tile=128"), or None where it names none."""
-        given = os.environ.get(variable, '').strip()
-        if not given:
-            return None
-        names, options = [], {}
-        for item in given.split(','):
-            name, *rest = item.strip().split(':')
-            names.append(name)
-            options[name] = dict(kv.split('=', 1) for kv in rest[0].split(';')) if rest else {}
-        return cls(names, **options)
 
 
 class Operation:
@@ -468,7 +455,7 @@ class Operation:
     the shared axis contracted); `constant` states that its weights do not change (an engine whose weights are
     constants takes a share only then); `tolerance` (relative), where given, is measured on each allocation's first
     call: every share an engine other than the GPU computes against the same share on the GPU, its error recorded
-    (`Engines.errors`; past the tolerance also `excluded`, by name), never a routing input: the allocation follows
+    (`Engines.errors`), never a routing input: the allocation follows
     the times alone."""
     kind = combine = None
 
@@ -593,8 +580,8 @@ class Operation:
     def _verify(self, key, held, bounds, shards, x2, prologue, outs):
         """An allocation's first call, where the operation names a `tolerance`: each share an engine other than the GPU
         computed, against the same share on the GPU (torch's MPS, its own products), its relative error recorded
-        (`Engines.errors`, those past the tolerance in `excluded` by name).  A measurement, not a routing input: an
-        engine's numerics are conditioned where they matter (scaling, a normalization), not excluded."""
+        (`Engines.errors`).  A measurement, not a routing input: an engine's numerics are conditioned where they matter
+        (scaling, a normalization), not excluded."""
         engines = self.engines.engines
         gpu = next((e for e in engines if e.name == 'mps'), None) or Mps()
         for i in held:
@@ -605,8 +592,6 @@ class Operation:
             got, want = outs[i].float(), reference.float()
             error = float((got - want).norm() / want.norm().clamp_min(1e-30))
             self.engines.errors.setdefault(key, {})[engines[i].name] = round(error, 6)
-            if error > self.tolerance:
-                self.engines.excluded.setdefault(key, {})[engines[i].name] = round(error, 6)
 
 
 class Linear(Operation):
@@ -675,7 +660,3 @@ def rebalance(engines):
         out[key] = list(d['parts'])
     return out
 
-
-def balancing(engines):
-    """Each decision's parts, whether they stand, and the last window's share and call times."""
-    return {k: {'parts': list(s.parts), 'stands': s.stands, **engines.last.get(k, {})} for k, s in engines.solvers.items()}

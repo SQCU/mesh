@@ -254,7 +254,7 @@ measured faster beyond the measurement's resolution, the step halving down to a 
 
 ```python
 from torch_mesh import engines
-pool = engines.Engines.configured()                       # MESH_ENGINES="mps,cpu,ane"; None where none is named
+pool = engines.Engines(["mps", "cpu", "ane"])             # the program's engines, an operand
 ffn = engines.FFN(gate, up, down, engines=pool, name="ffn", tolerance=1e-2)   # without engines: torch's own
 y = ffn(x)
 engines.rebalance(pool)                                    # every few steps
@@ -267,12 +267,12 @@ engines.rebalance(pool)                                    # every few steps
   is an (operation name, row count): a stack's layers of one name share it and pool their evidence, measured where
   the program runs them, between its other operations.
 - An operation's `tolerance` is measured on each allocation's first call (every non-GPU share against the same share
-  on the GPU), recorded in `Engines.errors` and `Engines.excluded`, never a routing input. The Neural Engine's outputs carry an absolute error
+  on the GPU), recorded in `Engines.errors`, never a routing input. The Neural Engine's outputs carry an absolute error
   floor (about 3e-4 RMS for a 3840-wide contraction): accurate on normalized activations (an FFN 1.5e-3), not on small
   ones.
 - Engines never time-share a physical unit: each states what it occupies (`Engine.occupies`: `mps` the GPU, `cpu` the
   CPU's cores, `ane` the Neural Engine and whatever units Core ML's compute plan places a share's operations on, read
-  at the share's load through `mesh_coreml_placement`; the configuration's `occupies` option, `"ane:occupies=ane+gpu"`,
+  at the share's load through `mesh_coreml_placement`; the engine's `occupies` option, `ane={"occupies": "ane+gpu"}`,
   states it in place of the engine's own), and two engines occupying one unit never hold units of a decision together
   (`allocate.Coupled.forbid`), applied when the decision is made and when a load reads its placement, before any of its
   calls is measured; the search then also tries the whole share moved between the two. Reproduction target
@@ -301,7 +301,7 @@ producer's tile by r rows of their own), `streamed_panel` and `streamed_panel_t`
 into threadgroup memory, one operation a 256-wide panel); and the finish, the input gather, rotation (writing the 1-bit
 tables) and Hadamard butterfly (`streamed_hadamard`, a threadgroup a row: H_N by structured.metal's stages on every
 block at once, H_K mixing the blocks as each coordinate is put, the RMS norm foldable), the GELU of gate and up, the
-dense decode and a range prefetch (`streamed_touch`). `streamed_value` and `streamed_rows` read a product's output (its
+dense decode. `streamed_value` and `streamed_rows` read a product's output (its
 K shares summed and scaled, or the plain values a crossing summed), and `streamed_gather` writes a product's input in its
 column order and scale; the constants are one `streamed_dims` block at buffer 15. Which instance a slice takes at its
 rows on a node (its kernel, simdgroups, bands, K shares, tiles in flight, tables; the couple or the products apart) is

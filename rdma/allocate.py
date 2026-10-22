@@ -872,15 +872,6 @@ class Coupled:
         c.step = int(state.get('step') or c._widest())
         return c
 
-    def entries(self):
-        """This decision's measured allocations: each its parts, its members' medians and the call's median."""
-        return [{'parts': list(p), 'members': [self._median(m) if m else None for m in e['members']],
-                 'call': self._median(e['calls'])} for p, e in self._measured().items()]
-
-    def prior(self):
-        """The parts the decision starts at: its own (nothing but its measured allocations moves them)."""
-        return list(self.parts)
-
     def resize(self, total):
         """The total moved to `total` units (a multiple of the grain): each bound that was the whole total becomes the
         new one, and the search starts again at the parts moved to it (class docstring, The total)."""

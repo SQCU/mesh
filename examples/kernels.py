@@ -2,10 +2,8 @@
 section 5, program type C: the library, python/mesh, holds none): a function `kernel(program, inputs, outputs,
 coordinate)` over Refs, or an expression of the inputs evaluated by torch over each output block (no source is
 generated, no second executor: the values, indices and masks of Pallas's indexing).  `matmul` and `dot` contract by
-torch's own product, `on_engines(engines)` by torch_mesh.engines' Linear over an MPS program's Engines operand (bound
-as Program(functions={matmul: on_engines(engines)})); `add` declares itself a combine, so it takes Partial operands
-and is a supplied combine of mesh.collective's reductions, whose SUM, MAX and MIN are libnccl-mesh's own."""
-import math
+torch's own product; `add` declares itself a combine, so it takes Partial operands and is a supplied combine of
+mesh.collective's reductions, whose SUM, MAX and MIN are libnccl-mesh's own."""
 from dataclasses import dataclass
 
 import numpy as np
@@ -271,23 +269,6 @@ def matmul(program, inputs, outputs, coordinate=()):
     output.tensor.copy_(_contract(_dense(x), _dense(w)))
 
 
-# design/algorithm-sources.md#kernelsdot
-def on_engines(engines):
-    from torch_mesh import engines as shared
-    operations = {}
-
-    # design/algorithm-sources.md#kernelsdot
-    def contract(program, inputs, outputs, coordinate=()):
-        x, w = inputs
-        if hasattr(w, 'blocks') or not program.is_constant(w):
-            return matmul(program, inputs, outputs, coordinate)
-        left, right = _operands(_dense(x), _dense(w))
-        if w.key not in operations:
-            operations[w.key] = shared.Linear(right.T, engines=engines, name=f'mesh{w.key}', grain=math.gcd(right.shape[1], 64))
-        outputs[0].tensor.copy_(operations[w.key](left))
-    return contract
-
-
 # design/algorithm-sources.md#nnembedding
 def gather(program, inputs, outputs, coordinate=()):
     table, selected = inputs
@@ -299,8 +280,6 @@ def gather(program, inputs, outputs, coordinate=()):
 
 _left, _right = arguments(2)
 add = expression(_left + _right, combine=True)
-maximum = expression(select(_left.equal(_left), select(_right.equal(_right), select(_left >= _right, _left, _right), _right), _left))
-minimum = expression(select(_left.equal(_left), select(_right.equal(_right), select(_left <= _right, _left, _right), _right), _left))
 swish = expression(_left / (1 + (0 - _left).exp()))
 identity = expression(_left)
 del _left, _right

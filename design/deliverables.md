@@ -278,8 +278,8 @@ Program.constant(ref, value) / Program.is_constant(ref) / Program.write(ref) / R
 mesh.collective: SUM, MAX, MIN, PARTIALS; send, recv, recv_like, broadcast, scatter, gather, all_gather, all_to_all,
                  reduce, reduce_scatter, sum_scatter, all_reduce, all_sum, all_max, all_min, sync_on_remote_fill
                  // a block row one call: AllGatherV, all-to-all, ReduceScatterV, all-reduce, the partials merge; op= a supplied combine
-examples/kernels.py (type C): arguments, indices, program_id, select, expression, dot; add (a combine), maximum, minimum,
-                 swish, identity, matmul, gather, on_engines(engines)
+examples/kernels.py (type C): arguments, indices, program_id, select, expression, dot; add (a combine), swish, identity,
+                 matmul, gather
 examples/nn.py (type C): linear, ffn, rmsnorm, embedding, summed_embedding    // K-split partials published tile by tile
 Program.report / MeshError(kind busy|link|function, code)
 ```
@@ -288,8 +288,8 @@ Frontier, stated as measured: the module restored in 71bced9e has not been measu
 12B cooperative FFN's 1.145-1.31x over the M5 alone (metal-microbench 43724cb, b6efa23, 11a4a7a); those runs
 (2026-09-11/12) went through metal-microbench `tools/mesh/nfe.sh` on the mesh transport before `swift/Mesh.swift`
 existed. The partial-tensor library's own frontier is the deleted native executor's (mesh 57628982): the literature
-chain paired CPU 675.0 invocations/s against 558.3 at world size 1 (+21%), Metal 172.6 against 155.5; streamed
-1,429.2 results/s against 962.9 whole (+48.6%). The Python surface's harnesses reproduce both comparisons
+chain paired CPU 675.0 invocations/s, Metal 172.6; streamed 1,429.2 results/s against 962.9 whole (+48.6%). The
+Python surface's harnesses reproduce both, paired
 ([algorithm-sources.md#streaming-overlap-measurement](algorithm-sources.md#streaming-overlap-measurement)).
 
 ## 3. References to cross-implement from

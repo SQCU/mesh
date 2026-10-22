@@ -30,7 +30,7 @@ is no rotation, and a block of the whole width is the full Hadamard. A Hadamard 
 so rot₀(x) Aᵀ = x (A H)ᵀ and rot₁(y) B = y (H B). Rank 0 holds the whole weights before it sends each rank its part, so
 it folds each rotation into them there, once (`rotated` in examples/chain-service.py). rot₁ spans every rank's columns
 of y, and it folds all the same: each rank's rows of H B are the rows its part of y meets. The step kernel never rotates
-anything, and a rotation costs no time a step. The float64 check rotates the operands themselves, so it checks the fold.
+anything, and a rotation costs no time a step.
 An operand would have to be rotated as it is made only where its parameters are stored rotated and quantized, so that
 H cannot be folded into them; this example's parameters are float16.
 
@@ -211,7 +211,7 @@ read from the compiled pipeline.
 
 The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
 width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
-two rings. It also says how many first steps to check, gives the two rotations' blocks, and names `capabilities`, the
+two rings. It also gives the two rotations' blocks, and names `capabilities`, the
 directory of capability files, from which each rank takes its own GPU's. Its paths are read from the directory the
 service runs in, the checkout's root in the sample. The kernel's form follows from the shape and the capability file,
 and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and
@@ -249,9 +249,7 @@ seconds. It gives the rows a second of all streams together and the steps a seco
 step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and a plain
 all-reduce alone (the library's own kernels, not fused), the crossing the fused step no longer pays. It gives the bytes
 a rank's crossing moves a step (its part out to each of the n - 1 peers, and each peer's part in), and those bytes a
-second. Rank 0 also checks two windows of steps against a plain float64 run of the same rule: the first steps, and the
-first steps of the last block, which start from rank 0's own output. The second window reads slots the ring has used
-before.
+second.
 
 The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling its
 kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the first

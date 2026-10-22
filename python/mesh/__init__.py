@@ -61,12 +61,6 @@ def __getattr__(name):
     raise AttributeError(f'module mesh has no attribute {name}')
 
 
-# design/algorithm-sources.md#program
-def check(code):
-    if code:
-        raise OSError(code, os.strerror(code))
-
-
 # design/algorithm-sources.md#mesherror
 class MeshError(Exception):
     """swift/Mesh.swift's MeshError as an exception: `kind` busy, link (`peer` the member across it) or function

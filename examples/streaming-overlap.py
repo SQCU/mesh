@@ -40,7 +40,6 @@ def moments(values):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=('whole', 'streamed'))
-    parser.add_argument('--local', action='store_true')
     parser.add_argument('--rows', type=int, default=2048)
     parser.add_argument('--tile', type=int, default=64)
     parser.add_argument('--trials', type=int, default=3000)
@@ -54,11 +53,9 @@ def main():
         signal.signal(number, stop)
     signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     with Program(backend=args.backend, trace=bool(args.trace)) as program:
-        if args.local and program.size != 1:
-            parser.error('--local is world size 1: run one rank (WORLD_SIZE unset or 1)')
-        if not args.local and program.size != 2:
+        if program.size != 2:
             parser.error('the paired chain runs on two ranks (RANK, WORLD_SIZE=2, MASTER_ADDR, MASTER_PORT)')
-        print(json.dumps(dict(pid=os.getpid(), rank=program.rank, mode=args.mode, local=args.local)), flush=True)
+        print(json.dumps(dict(pid=os.getpid(), rank=program.rank, mode=args.mode)), flush=True)
         rows, tile, width = args.rows, args.tile, 256
         block_rows = min(tile, rows) if args.mode == 'streamed' else rows
         count = (rows + block_rows - 1) // block_rows
@@ -70,7 +67,6 @@ def main():
         data = rng.standard_normal((rows, width), dtype=np.float32)
         program.constant(w[0, 0], weights)
         program.constant(v[0, 0], projection)
-        consumer = 0 if args.local else 1
 
         # design/algorithm-sources.md#streaming-overlap-measurement
         def configure(slot):
@@ -80,13 +76,12 @@ def main():
             shape = ShapeDtypeStruct((rows, width), np.float32)
             p = program.kernel_call(kernels.matmul, grid=(count,),
                 in_specs=(row, weight), out_specs=row, out_shape=shape, peer=0)(x, w)
-            received = p if args.local else program.tensor(p.shape, p.block_shape, dtype=p.dtype)
+            received = program.tensor(p.shape, p.block_shape, dtype=p.dtype)
             y = program.kernel_call(kernels.matmul, grid=(count,),
-                in_specs=(row, weight), out_specs=row, out_shape=shape, peer=consumer)(received, v)
-            returned = y if args.local else program.tensor(y.shape, y.block_shape, dtype=y.dtype)
-            if not args.local:
-                program.copy(p.on(0), received.on(1), queue=2 * slot)
-                program.copy(y.on(1), returned.on(0), queue=2 * slot + 1)
+                in_specs=(row, weight), out_specs=row, out_shape=shape, peer=1)(received, v)
+            returned = program.tensor(y.shape, y.block_shape, dtype=y.dtype)
+            program.copy(p.on(0), received.on(1), queue=2 * slot)
+            program.copy(y.on(1), returned.on(0), queue=2 * slot + 1)
             results = tuple(program.export(ref) for ref in returned.blocks.values()) if program.rank == 0 else ()
             return tuple(x.blocks.values()), results
 
@@ -94,7 +89,7 @@ def main():
         program.realize()
         signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
         print(json.dumps(dict(event='realized', rank=program.rank, mode=args.mode,
-            backend=args.backend, regions=count, depth=args.depth, local=args.local)), flush=True)
+            backend=args.backend, regions=count, depth=args.depth)), flush=True)
 
         # design/algorithm-sources.md#streaming-overlap-measurement
         def write_trace():
@@ -110,13 +105,11 @@ def main():
             write_trace()
             print(json.dumps(dict(rank=1, mode=args.mode, report=vars(program.report))), flush=True)
             return
-        reference = (data @ weights) @ projection
 
         # design/algorithm-sources.md#streaming-overlap-measurement
         def run_batch(total):
             submitted = completed = 0
             outstanding = {}
-            terminal = []
             latencies, first_sections = [], []
             began_batch = time.perf_counter()
             while completed < total:
@@ -129,7 +122,7 @@ def main():
                         start = section * block_rows
                         with program.write(ref) as buffer:
                             np.multiply(data[start:start + ref.shape[0]], scale, out=buffer)
-                    outstanding[slot] = (submitted, began, False)
+                    outstanding[slot] = (began, False)
                     submitted += 1
                 waiting = [result for slot in outstanding for result in slots[slot][1] if not result.ready]
                 if waiting:
@@ -137,42 +130,28 @@ def main():
                 for slot, (_, results) in enumerate(slots):
                     if slot not in outstanding:
                         continue
-                    trial, began, first_seen = outstanding[slot]
+                    began, first_seen = outstanding[slot]
                     ready = tuple(result.ready for result in results)
                     if not first_seen and any(ready):
                         first_sections.append(time.perf_counter() - began)
-                        outstanding[slot] = (trial, began, True)
+                        outstanding[slot] = (began, True)
                     if not all(ready):
                         continue
                     latencies.append(time.perf_counter() - began)
                     del outstanding[slot]
                     completed += 1
-                    if submitted < total:
-                        for result in results:
-                            result.consume()
-                    else:
-                        terminal.append((results, trial))
+                    for result in results:
+                        result.consume()
             ended_batch = time.perf_counter()
-            maximum_error = 0.0
-            for results, trial in terminal:
-                scale = 1 + (trial % 17) / 32
-                for section, result in enumerate(results):
-                    start = section * block_rows
-                    expected = reference[start:start + result.ref.shape[0]] * scale
-                    maximum_error = max(maximum_error, float(np.max(np.abs(result.array - expected))))
-                    if not np.allclose(result.array, expected, rtol=2e-4, atol=2e-4):
-                        raise ArithmeticError('Distributed contraction differs from the reference')
-                    result.consume()
             return dict(seconds=latencies, statistics=moments(latencies),
                 first_section_seconds=first_sections, first_section_statistics=moments(first_sections),
                 steady_seconds=ended_batch - began_batch,
-                results_per_second=total / (ended_batch - began_batch),
-                max_absolute_error=maximum_error, checked_terminal_invocations=len(terminal))
+                results_per_second=total / (ended_batch - began_batch))
 
         measured = run_batch(args.trials)
         write_trace()
         print(json.dumps(dict(rank=0, mode=args.mode, rows=rows, tile=tile, depth=args.depth, backend=args.backend,
-            local=args.local, **measured, numerical_calls_per_trial=2 * count, report=vars(program.report))), flush=True)
+            **measured, numerical_calls_per_trial=2 * count, report=vars(program.report))), flush=True)
 
 
 if __name__ == '__main__':

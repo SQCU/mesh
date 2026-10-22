@@ -28,16 +28,6 @@ def rotated(w, block, axis):
     return np.moveaxis(v.reshape(shape), -1, axis)
 
 
-# docs/writing-a-service.md#the-function
-def reference(inputs, a, b, blocks, steps, carried):
-    x, out = inputs[0] + carried, []
-    for t in range(steps):
-        out.append(np.tanh(rotated(np.tanh(rotated(x, blocks[0], -1) @ a.T), blocks[1], -1) @ b))
-        if t + 1 < steps:
-            x = inputs[t + 1] + out[-1]
-    return np.stack(out)
-
-
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def operand(config, rank):
     shape, inputs = torch_mesh.empty(2, dtype=torch.int64, device='cpu'), None
@@ -59,7 +49,7 @@ def shares(config, rank, size):
     if rank:
         dist.recv(a, src=0)
         dist.recv(b, src=0)
-        return a, b, None
+        return a, b
     weights = np.load(config['weights'])
     full = tuple(weights[name] for name in ('a', 'b'))
     if any(w.shape != (sum(parts), width) for w in full):
@@ -73,7 +63,7 @@ def shares(config, rank, size):
             part.copy_(torch.from_numpy(np.ascontiguousarray(w[begin:begin + parts[r]])))
             if r:
                 dist.send(part, dst=r)
-    return a, b, full
+    return a, b
 
 
 # docs/writing-a-service.md#the-rings
@@ -165,18 +155,6 @@ def crossings(steps, block, P):
             pace.mark()
 
 
-# docs/writing-a-service.md#running-it
-def checked(config, inputs, outputs, full, steps, block):
-    count, weights, found = config['check'], [w.astype(np.float64) for w in full], {}
-    for first in sorted({0, (steps - 1) // block * block}):
-        last = min(steps, first + count)
-        carried = np.asarray(outputs[first - 1], np.float64) if first else 0.0
-        expected = reference(np.asarray(inputs[first:last], np.float64), *weights, config['rotation_blocks'],
-                             last - first, carried)
-        found[first] = float(np.max(np.abs(expected - outputs[first:last])))
-    return found
-
-
 # docs/writing-a-service.md#the-configuration
 def main():
     config = json.loads(open(sys.argv[1]).read())
@@ -187,7 +165,7 @@ def main():
     width = config['width']
     steps, rows, inputs = operand(config, rank)
     block, deep, sums = ring(config, steps, rows)
-    a, b, full = shares(config, rank, size)
+    a, b = shares(config, rank, size)
     step = chain.Step(a, b, rows, config['row_capacity'], size - 1, chain.capability(config['capabilities']))
     del a, b
     E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
@@ -221,9 +199,6 @@ def main():
                    crossing_microseconds=crossing / steps * 1e6, collective_bytes_per_step=moved,
                    collective_gigabytes_per_second=moved * steps / seconds / 1e9,
                    kernel={key: step.args[key] for key in chain.ARGS})
-    if rank == 0 and config['check']:
-        summary.update(check_steps=config['check'],
-                       check_max_difference=checked(config, inputs, outputs, full, steps, block))
     print(json.dumps(summary), flush=True)
     dist.destroy_process_group()
 

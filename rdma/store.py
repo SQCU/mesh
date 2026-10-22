@@ -1,25 +1,17 @@
-"""The mesh's store of what it measures about its nodes and calls (design/heterogeneity.md), kept across calls in one
-JSON file on the node that drives them (~/.local/share/mesh/store.json: a driver uses its own node's store): 'nodes',
-each node's rates (RATES) with the model (node-info's) and GPU cores they were measured on, keyed by its bridge's node
-number (decimal: metal-microbench tools/mesh/grid.py mesh_map reads a node's record under its number, else under its
-name, else its model's start, and calibrate.py nodes writes under the number; the first records, etc/mesh-store.json,
-stay keyed by name, as model starts); 'configurations', each call configuration's state (allocate.py's Balancer and the
-evidence it moves on), named by its members' node numbers (metal-microbench tools/mesh/rates.py configuration).  Every
-change is one read, change and write of the whole file under an exclusive lock on the file beside it
-(`changing`), so drivers and tools on one node never lose each other's records.  Its first records are the mesh's own
-(etc/mesh-store.json, installed beside the library).  A node with no record starts from the records of its model's
-nodes, else of every node.  A link's cost is the bridges' map's (mesh-plan.h mesh_map), never a record here."""
+"""The mesh's store of what it measures about its calls (design/heterogeneity.md), kept across calls in one JSON file
+on the node that drives them (~/.local/share/mesh/store.json: a driver uses its own node's store): 'configurations',
+each call configuration's state (allocate.py's Balancer and the evidence it moves on), named by its members' node
+numbers (metal-microbench tools/mesh/rates.py configuration).  Every change is one read, change and write of the whole
+file under an exclusive lock on the file beside it (`changing`), so drivers and tools on one node never lose each
+other's records.  A link's cost is the bridges' map's (mesh-plan.h mesh_map), never a record here."""
 import contextlib
 import fcntl
 import json
 import os
-import statistics
 import tempfile
 from pathlib import Path
 
 PATH = Path.home() / '.local/share/mesh/store.json'
-FIRST = Path(__file__).resolve().parent.parent / 'etc/mesh-store.json'
-RATES = ('proj', 'attn', 'prim', 'edge')
 
 
 def load(path=None):
@@ -44,26 +36,5 @@ def changing():
 
 
 def records(section):
-    """A section's records: the first records, under this node's."""
-    return {**load(FIRST).get(section, {}), **load().get(section, {})}
-
-
-def record(section, key, value):
-    """A record of `section` ('nodes' or 'configurations') written."""
-    with changing() as state:
-        state.setdefault(section, {})[key] = value
-
-
-def node(key, model=None):
-    """The record under `key` (a node's bridge node number, or a first record's name), else a start: its model (`model`,
-    node-info's) and each rate the mean of the records of that model's nodes, else of every node's."""
-    known = records('nodes')
-    if key in known:
-        return known[key]
-    alike = [r for r in known.values() if r.get('model') == model] or list(known.values())
-    start = {'model': model}
-    for key in RATES:
-        if alike and all(key in r for r in alike):
-            start[key] = [statistics.mean(values) for values in zip(*(r[key] for r in alike))]
-    return start
-
+    """A section's records."""
+    return load().get(section, {})

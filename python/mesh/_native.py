@@ -33,11 +33,6 @@ def numpy_dtype(value):
     return _NUMPY[value]
 
 
-# design/algorithm-sources.md#programtensor
-def floating(value):
-    return value.is_floating_point if isinstance(value, torch.dtype) else value.dtype.is_floating_point
-
-
 # design/algorithm-sources.md#program
 class World:
     """This process's rank among the program's: `group` (a torch.distributed group of the mesh backend), else the
