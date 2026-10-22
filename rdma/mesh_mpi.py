@@ -20,7 +20,7 @@ a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shif
 each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
 nonblocking calls, Alltoallv, Gatherv and Scatterv, object (pickled) collectives; separately issued Send and Recv that do not pair
 are reported (rdma/NCCL.md "Rules").  A message to a rank the
-map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node whose bridge runs (a communicator, a lone rank's too, is a client of its node's bridge: rdma/NCCL.md "Communicators"); it is not the measured path (GPU tensors take the Metal
+map does not link is forwarded by the members between (rdma/NCCL.md "Forwarding"); every rank calls each Send, Recv and Sendrecv, a rank with nothing to move one of an empty array, where the communicator's routing table has a member between two others (a group's point-to-point calls are the whole communicator's).  The host path works on any node whose bridge runs (a communicator, a lone rank's too, is a client of its node's bridge: rdma/NCCL.md "Communicators"); it is not the measured path (GPU tensors take the Metal
 path through torch-mesh).  Memory: empty(shape, dtype) is an array in this node's bridge's region (ncclMemAlloc, the
 role mpi4py's MPI.Alloc_mem plays), the memory a program hands the collectives (rdma/NCCL.md "Memory"); the module's
 own temporaries are such arrays."""

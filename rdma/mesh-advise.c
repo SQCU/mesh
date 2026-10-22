@@ -3,11 +3,13 @@
    shortest-path trees and its packed trees (as libnccl-mesh makes them, nccl-mesh.c comm_routes, compile_form), at
    chunks 1 to 4, every root of a rooted collective, the all-reduce whole and two-phase, every node or the even nodes
    contributing, over operands of 1, 4,096 and 1,000,003 float32 and 2^20 half, on mesh_wire_of's wire at a 16 KiB
-   block; mesh_group_advise over a group on each map and tree set (collectives, both counted all-to-alls, point-to-point
-   calls each way at two sizes, and the all-to-all, a gather and a scatter forwarded along the trees, mesh_routed_steps,
-   with the count of their steps between ranks the map does not link).  It prints each one's advisories and a summary line, then the totals; it refuses
-   nothing, exits 0.  `mesh-advise mutate`: programs and groups broken on purpose, each named with the check it must
-   fire and whether it did. */
+   block; mesh_group_advise over a group on each map and tree set (collectives along the trees, and the exchanges
+   libnccl-mesh forwards along a routing table, mesh_forward_steps: an all-to-all, a gather, a scatter, a counted
+   all-to-all and two groups' point exchanges, along the solver's table, mesh_routing_pack, or the shortest trees' one
+   route a pair, with the count of their steps between ranks the map does not link and of the SENDs members between a
+   block's ends forward).  It prints each one's advisories and a summary line, then the totals; it refuses nothing,
+   exits 0.  `mesh-advise mutate`: programs and groups broken on purpose, each named with the check it must fire and
+   whether it did. */
 #include "mesh-plan.h"
 #include "nccl.h"
 #include <stdio.h>
@@ -89,39 +91,77 @@ static int rows_collective(struct rows *c, const struct mesh_trees *trees, uint3
   free(segment); free(first); free(log_weight); free(move);
   return failed;
 }
-/* ragged sizes, each pair's alike at both ends: a hosted all-to-all's elements from a to b, a counted one's entries */
-static uint64_t ragged(int hosted, uint32_t a, uint32_t b) { return a == b ? 0 : hosted ? 1 + (a * 5 + b * 3) % 7 * 700 : 1 + (a + 2 * b) % 3; }
-static int rows_counted(struct rows *c, uint32_t n, int hosted, uint32_t skew) {
-  const struct mesh_operand element = {1, 4, hosted ? 0 : 64 * 8}, counts = {8, 8, 0};
+/* a map's routing table (libnccl-mesh's exchanges' operand, nccl.h ncclMeshCommSetRouting): the solver's, its packed
+   trees (mesh_routing_pack at the members' count of trees a root, as libnccl-mesh's routing_solve makes it), or its
+   shortest-path trees' (mesh_routing_trees: one route a pair) */
+struct table { struct mesh_routing routing; uint32_t *pair, *start, *node; double *share; };
+static void table_free(struct table *t) { free(t->pair); free(t->start); free(t->node); free(t->share); memset(t, 0, sizeof *t); }
+static int table_of(size_t m, int packed, const struct mesh_trees *shortest, uint32_t (*link)[2], struct table *t) {
+  const uint32_t n = maps[m].n;
+  struct mesh_link_map map = {MESH_LINKS_GRAPH, n, family_cables(maps[m].family, n, link), link, NULL, 0, NULL, NULL, NULL};
+  uint32_t routes, hops;
+  mesh_routing_room(n, n, &routes, &hops);
+  t->pair = calloc((size_t)n * n + 1, sizeof *t->pair); t->start = calloc((size_t)routes + 1, sizeof *t->start);
+  t->node = calloc((size_t)hops + 1, sizeof *t->node); t->share = calloc((size_t)routes + 1, sizeof *t->share);
+  if (!t->pair || !t->start || !t->node || !t->share) return 1;
+  const uint32_t made = packed ? mesh_routing_pack(&map, 0, n, &t->routing, t->pair, t->start, t->node, t->share)
+                               : mesh_routing_trees(shortest, &t->routing, t->pair, t->start, t->node, t->share);
+  return made == UINT32_MAX || mesh_routing_check(&map, &t->routing);
+}
+/* an exchange of `count` blocks at every rank along a routing table (mesh_forward_steps), its relay buffer `relay` */
+static int rows_exchange(struct rows *c, const struct mesh_routing *routing, uint32_t n, const struct mesh_block *blocks, uint32_t count,
+                         uint32_t relay) {
+  const uint32_t room = mesh_forward_room(routing, blocks, count) + 1;
   for (uint32_t r = 0; r < n; r++) {
-    uint64_t segments[2 * MOST];
-    for (uint32_t q = 0; q < n; q++) { segments[q] = ragged(hosted, r, q); segments[n + q] = ragged(hosted, q, r) + (r == 1 && q == 0 ? skew : 0); }
-    if (!(c->steps[r] = malloc(4 * (size_t)n * sizeof **c->steps))) return 1;
-    c->count[r] = mesh_counted_steps(n, r, segments, hosted, element, counts, c->steps[r]);
+    if (!(c->steps[r] = malloc(room * sizeof **c->steps))) return 1;
+    c->count[r] = mesh_forward_steps(routing, r, blocks, count, relay, c->steps[r], NULL, NULL);
+    if (c->count[r] == UINT32_MAX) return 1;
   }
   return 0;
 }
-/* an all-to-all forwarded along the trees (mesh_routed_steps) at every rank, of ragged sizes every rank holds: the
-   all-to-all (root -1), or a gather to `root` or a scatter from it (`scatter`) */
-static int rows_routed(struct rows *c, const struct mesh_trees *trees, uint32_t n, int32_t root, int scatter) {
+/* ragged sizes, each pair's alike at both ends: an all-to-all's elements from a to b, a counted one's entries */
+static uint64_t ragged(int hosted, uint32_t a, uint32_t b) { return a == b ? 0 : hosted ? 1 + (a * 5 + b * 3) % 7 * 700 : 1 + (a + 2 * b) % 3; }
+/* an all-to-all's blocks (libnccl-mesh exchange_blocks: buffer 0 to buffer 1, the relay 2) of ragged sizes: the all-to-all
+   (root -1), or a gather to `root`, or a scatter from it (`scatter`) */
+static uint32_t blocks_all(uint32_t n, int32_t root, int scatter, struct mesh_block *blocks) {
   uint64_t sizes[MOST * MOST];
+  uint32_t k = 0;
+  for (uint32_t a = 0; a < n; a++)
+    for (uint32_t b = 0; b < n; b++) sizes[a * n + b] = root < 0 || (int32_t)(scatter ? a : b) == root ? ragged(1, a, b) : 0;
+  for (uint32_t a = 0; a < n; a++)
+    for (uint32_t b = 0; b < n; b++) {
+      if (a == b || !sizes[a * n + b]) continue;
+      uint64_t row = 0, column = 0;
+      for (uint32_t q = 0; q < b; q++) row += sizes[a * n + q];
+      for (uint32_t q = 0; q < a; q++) column += sizes[q * n + b];
+      blocks[k++] = (struct mesh_block){a, b, 0, 1, 1, 4, row, column, sizes[a * n + b]};
+    }
+  return k;
+}
+/* a counted all-to-all's blocks (exchange_blocks: each pair's counts, buffer 0 to 2, then its rows' room, buffer 1 to 3,
+   64 rows of 8 float32; the relay 4) */
+static uint32_t blocks_counted(uint32_t n, struct mesh_block *blocks) {
+  const uint64_t room = 64 * 8;
+  uint32_t k = 0;
+  for (uint32_t pass = 0; pass < 2; pass++)
+    for (uint32_t a = 0; a < n; a++)
+      for (uint32_t b = 0; b < n; b++) {
+        if (a == b) continue;
+        uint64_t row = 0, column = 0, apart = 0;
+        for (uint32_t q = 0; q < b; q++) row += ragged(0, a, q);
+        for (uint32_t q = 0; q < a; q++) { column += ragged(0, q, b); apart += q != b ? room : 0; }
+        blocks[k++] = pass ? (struct mesh_block){a, b, 1, 3, 1, 4, 0, apart, room} : (struct mesh_block){a, b, 0, 2, 8, 8, row, column, ragged(0, a, b)};
+      }
+  return k;
+}
+/* the point exchange of a group of point-to-point calls at every rank (libnccl-mesh group_lower: of bytes, what a sends
+   b from buffer 1 + b to buffer 1 + n + a, the relay 0): each rank sends the rank `shift` on `bytes` */
+static uint32_t blocks_point(uint32_t n, uint32_t shift, uint64_t bytes, struct mesh_block *blocks) {
+  uint32_t k = 0;
   for (uint32_t a = 0; a < n; a++)
     for (uint32_t b = 0; b < n; b++)
-      sizes[a * n + b] = root < 0 || (int32_t)(scatter ? a : b) == root ? 1 + (a * 5 + b * 3) % 7 * 700 : 0;
-  for (uint32_t r = 0; r < n; r++) {
-    if (!(c->steps[r] = malloc((2 * (size_t)n * n + 1) * sizeof **c->steps))) return 1;
-    c->count[r] = mesh_routed_steps(n, trees, root, r, sizes, (struct mesh_operand){1, 4, 0}, c->steps[r]);
-  }
-  return 0;
-}
-/* a point-to-point call at every rank: a SEND to the rank `shift` on, or a receive from the rank `shift` back */
-static int rows_point(struct rows *c, uint32_t n, int send, uint32_t shift, struct mesh_operand operand) {
-  for (uint32_t r = 0; r < n; r++) {
-    if (!(c->steps[r] = malloc(sizeof **c->steps))) return 1;
-    c->steps[r][0] = (struct mesh_step){send ? MESH_STEP_SEND : MESH_STEP_COPY, send ? (r + shift) % n : (r + n - shift % n) % n, 0, 0, 0, operand};
-    c->count[r] = 1;
-  }
-  return 0;
+      if (a != b && b == (a + shift) % n) blocks[k++] = (struct mesh_block){a, b, 1 + b, 1 + n + a, 1, 1, 0, 0, bytes};
+  return k;
 }
 static uint32_t group_advise(const char *label, struct rows *rows, const uint32_t *kind, uint32_t calls, uint32_t n, uint32_t polls,
                              uint32_t bound, const struct mesh_wire *wire, uint64_t *total) {
@@ -199,12 +239,16 @@ static int programs(const struct mesh_wire *wire) {
   return 0;
 }
 
+/* a group on each map: its collectives along the map's trees (shortest or packed), its exchanges (an all-to-all, a gather
+   to rank 0, a scatter from rank n - 1, a counted all-to-all, and two groups' point exchanges: each rank to the next at
+   3,000 float32 and to the one before at 1,000,003) along the map's routing table (the solver's from the packed trees,
+   or the shortest trees' one route a pair), every step's peer checked against the map's links, and the group's
+   advisories (mesh_group_advise: projection, causality with each forwarded SEND piece after its own landing, hazards) */
 static void groups(const struct mesh_wire *wire) {
-  static const uint32_t kind[] = {MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_HOSTED, MESH_GROUP_COUNTED,
-                                  MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_POINT, MESH_GROUP_HOSTED, MESH_GROUP_HOSTED,
-                                  MESH_GROUP_HOSTED};
+  static const uint32_t kind[] = {MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_COLLECTIVE, MESH_GROUP_EXCHANGE, MESH_GROUP_EXCHANGE,
+                                  MESH_GROUP_EXCHANGE, MESH_GROUP_EXCHANGE, MESH_GROUP_EXCHANGE, MESH_GROUP_EXCHANGE};
   enum { CALLS = sizeof kind / sizeof *kind };
-  uint64_t count = 0, total[CHECKS] = {0};
+  uint64_t count = 0, total[CHECKS] = {0}, steps = 0, relayed = 0;
   for (size_t m = 0; m < sizeof maps / sizeof *maps; m++)
     for (int packed = 0; packed < 2; packed++) {
       const uint32_t n = maps[m].n;
@@ -213,36 +257,47 @@ static void groups(const struct mesh_wire *wire) {
       const uint32_t trees_count = map_trees(m, packed, link, &root, &parent, &weight);
       const struct mesh_trees trees = {n, trees_count, root, parent, weight};
       struct rows rows[CALLS];
+      struct table table = {0};
+      struct mesh_block blocks[2 * MOST * MOST];
       memset(rows, 0, sizeof rows);
-      const int failed = !trees_count || rows_collective(rows + 0, &trees, MESH_ALLREDUCE, 0, 0, 2, (struct mesh_operand){0, 4, 4096}) ||
-                         rows_collective(rows + 1, &trees, MESH_ALLGATHER, 0, 0, 1, (struct mesh_operand){0, 4, 1000003}) ||
-                         rows_collective(rows + 2, &trees, MESH_BROADCAST, n - 1, 0, 3, (struct mesh_operand){1, 2, 1u << 20}) ||
-                         rows_counted(rows + 3, n, 1, 0) || rows_counted(rows + 4, n, 0, 0) ||
-                         rows_point(rows + 5, n, 1, 1, (struct mesh_operand){0, 4, 3000}) || rows_point(rows + 6, n, 0, 1, (struct mesh_operand){0, 4, 3000}) ||
-                         rows_point(rows + 7, n, 1, n - 1, (struct mesh_operand){0, 4, 1000003}) ||
-                         rows_point(rows + 8, n, 0, n - 1, (struct mesh_operand){0, 4, 1000003}) ||
-                         rows_routed(rows + 9, &trees, n, -1, 0) || rows_routed(rows + 10, &trees, n, 0, 0) ||
-                         rows_routed(rows + 11, &trees, n, (int32_t)n - 1, 1);
-      /* every step of the forwarded calls between two ranks the map links */
+      int failed = !trees_count || table_of(m, packed, &trees, link, &table) ||
+                   rows_collective(rows + 0, &trees, MESH_ALLREDUCE, 0, 0, 2, (struct mesh_operand){0, 4, 4096}) ||
+                   rows_collective(rows + 1, &trees, MESH_ALLGATHER, 0, 0, 1, (struct mesh_operand){0, 4, 1000003}) ||
+                   rows_collective(rows + 2, &trees, MESH_BROADCAST, n - 1, 0, 3, (struct mesh_operand){1, 2, 1u << 20});
+      failed = failed || rows_exchange(rows + 3, &table.routing, n, blocks, blocks_all(n, -1, 0, blocks), 2) ||
+               rows_exchange(rows + 4, &table.routing, n, blocks, blocks_all(n, 0, 0, blocks), 2) ||
+               rows_exchange(rows + 5, &table.routing, n, blocks, blocks_all(n, (int32_t)n - 1, 1, blocks), 2) ||
+               rows_exchange(rows + 6, &table.routing, n, blocks, blocks_counted(n, blocks), 4) ||
+               rows_exchange(rows + 7, &table.routing, n, blocks, blocks_point(n, 1, 3000 * 4, blocks), 0) ||
+               rows_exchange(rows + 8, &table.routing, n, blocks, blocks_point(n, n - 1, 1000003 * 4, blocks), 0);
+      /* every step of the exchanges between two ranks the map links, and how many a member between a block's ends makes */
       struct mesh_link_map map = {MESH_LINKS_GRAPH, n, family_cables(maps[m].family, n, link), link, NULL, 0, NULL, NULL, NULL};
-      uint32_t unlinked = 0;
-      for (int i = 9; !failed && i < CALLS; i++)
+      uint32_t unlinked = 0, forwarded = 0, routes = 0;
+      for (int i = 3; !failed && i < CALLS; i++)
         for (uint32_t r = 0; r < n; r++)
-          for (uint32_t k = 0; k < rows[i].count[r]; k++) unlinked += !mesh_link_between(&map, r, rows[i].steps[r][k].peer);
-      if (!failed) printf("group %s %s: forwarded all-to-all, gather and scatter steps between unlinked ranks: %u\n", maps[m].name,
-                          packed ? "packed" : "shortest", unlinked);
+          for (uint32_t k = 0; k < rows[i].count[r]; k++) {
+            unlinked += !mesh_link_between(&map, r, rows[i].steps[r][k].peer);
+            forwarded += rows[i].steps[r][k].op == MESH_STEP_SEND && rows[i].steps[r][k].buffer == (i == 6 ? 4u : i >= 7 ? 0u : 2u);
+            steps++;
+          }
+      for (uint32_t k = 0; !failed && k < table.routing.routes; k++) routes += table.routing.start[k + 1] - table.routing.start[k] > 2;
+      relayed += forwarded;
+      if (!failed) printf("group %s %s: routes %u (%u through a member), exchange steps between unlinked ranks %u, forwarded SENDs %u\n",
+                          maps[m].name, packed ? "packed" : "shortest", table.routing.routes, routes, unlinked, forwarded);
       for (int gpu = 0; gpu < 2; gpu++) {
         char label[192];
-        snprintf(label, sizeof label, "group %s %s (allreduce, allgather, broadcast, all-to-all hosted and counted, 4 point-to-point, all-to-all, "
-                 "gather and scatter forwarded) %s", maps[m].name, packed ? "packed" : "shortest", gpu ? "GPU polls NCCL_MESH_POLLS" : "host");
+        snprintf(label, sizeof label, "group %s %s (allreduce, allgather, broadcast; all-to-all, gather, scatter, counted and two point "
+                 "exchanges routed) %s", maps[m].name, packed ? "packed" : "shortest", gpu ? "GPU polls NCCL_MESH_POLLS" : "host");
         if (failed) { printf("%s: does not compile\n", label); break; }
         group_advise(label, rows, kind, CALLS, n, gpu ? NCCL_MESH_POLLS : 0, gpu ? NCCL_MESH_POLLS : 0, wire, total);
         count++;
       }
       for (int i = 0; i < CALLS; i++) rows_free(rows + i);
+      table_free(&table);
       free(root); free(parent); free(weight);
     }
-  printf("\ngroups %llu, warnings:", (unsigned long long)count);
+  printf("\ngroups %llu, exchange steps %llu, forwarded SENDs %llu, warnings:", (unsigned long long)count, (unsigned long long)steps,
+         (unsigned long long)relayed);
   for (int c = 0; c < CHECKS; c++) printf(" %s %llu", checks[c], (unsigned long long)total[c]);
   printf("\n");
 }
@@ -301,29 +356,45 @@ static int mutate(const struct mesh_wire *wire) {
       if (rows[i].steps[r]) memcpy(rows[i].steps[r], from->steps[r], from->count[r] * sizeof **rows[i].steps);
     }
   GROUP("G1 rank 1 calls the all-gather before the all-reduce, rank 0 after", 2, 2, NCCL_MESH_POLLS, 0);
-  kind[0] = kind[1] = MESH_GROUP_POINT;
-  if (rows_point(rows + 0, 2, 1, 1, small) || rows_point(rows + 1, 2, 1, 1, small)) return 1;
-  rows[1].count[1] = 0;
-  for (int r = 0; r < 2; r++) rows[0].steps[r][0].op = r ? MESH_STEP_COPY : MESH_STEP_SEND;
-  GROUP("G2 rank 0 sends rank 1 two messages, rank 1 receives one", 2, 2, NCCL_MESH_POLLS, 0);
-  kind[0] = MESH_GROUP_HOSTED;
-  if (rows_counted(rows + 0, 3, 1, 1)) return 1;
-  GROUP("G3 rank 1 counts one element more from rank 0 than rank 0 sends it", 1, 3, NCCL_MESH_POLLS, 0);
+  struct table pair = {0};
+  struct mesh_block blocks[2 * MOST * MOST];
+  kind[0] = MESH_GROUP_EXCHANGE;
+  if (table_of(0, 0, &trees, link, &pair) || rows_exchange(rows + 0, &pair.routing, 2, blocks, blocks_point(2, 1, 4096, blocks), 0)) return 1;
+  for (uint32_t k = 0; k < rows[0].count[1]; k++)
+    if (rows[0].steps[1][k].op != MESH_STEP_SEND) { rows[0].steps[1][k] = rows[0].steps[1][--rows[0].count[1]]; break; }
+  GROUP("G2 rank 0 sends rank 1 a point exchange's block, rank 1 receives none", 1, 2, NCCL_MESH_POLLS, 0);
+  uint32_t three_link[64][2], *three_root, *three_parent;
+  double *three_weight;
+  const uint32_t three_count = map_trees(1, 0, three_link, &three_root, &three_parent, &three_weight);
+  const struct mesh_trees three = {4, three_count, three_root, three_parent, three_weight};
+  struct table line_table = {0};
+  if (!three_count || table_of(1, 0, &three, three_link, &line_table)) return 1;
+  const uint32_t made = blocks_all(4, -1, 0, blocks);
+  for (uint32_t r = 0; r < 4; r++) {
+    struct mesh_block skewed[2 * MOST * MOST];
+    memcpy(skewed, blocks, made * sizeof *skewed);
+    for (uint32_t i = 0; r == 1 && i < made; i++) skewed[i].elements += skewed[i].from == 0 && skewed[i].to == 1;
+    if (!(rows[0].steps[r] = malloc((mesh_forward_room(&line_table.routing, skewed, made) + 1) * sizeof **rows[0].steps))) return 1;
+    rows[0].count[r] = mesh_forward_steps(&line_table.routing, r, skewed, made, 2, rows[0].steps[r], NULL, NULL);
+  }
+  GROUP("G3 rank 1 counts one element more from rank 0 than rank 0 sends it", 1, 4, NCCL_MESH_POLLS, 0);
   kind[0] = MESH_GROUP_COLLECTIVE;
   if (rows_collective(rows + 0, &trees, MESH_ALLREDUCE, 0, 0, 1, small)) return 1;
   GROUP("G4 a GPU group of polls 0", 1, 2, 0, 6);
   if (rows_collective(rows + 0, &trees, MESH_ALLREDUCE, 0, 0, 1, small)) return 1;
   GROUP("G5 a GPU group of polls past NCCL_MESH_POLLS", 1, 2, NCCL_MESH_POLLS + 1, 6);
-  uint32_t line_link[64][2], *line_root, *line_parent;
-  double *line_weight;
-  const uint32_t line_count = map_trees(1, 0, line_link, &line_root, &line_parent, &line_weight);
-  const struct mesh_trees line = {4, line_count, line_root, line_parent, line_weight};
-  kind[0] = MESH_GROUP_HOSTED;
-  if (!line_count || rows_routed(rows + 0, &line, 4, -1, 0)) return 1;
+  kind[0] = MESH_GROUP_EXCHANGE;
+  if (rows_exchange(rows + 0, &line_table.routing, 4, blocks, blocks_all(4, -1, 0, blocks), 2)) return 1;
   for (uint32_t r = 0; r < 4; r++)
     for (uint32_t k = 0; k < rows[0].count[r]; k++) rows[0].steps[r][k].round -= rows[0].steps[r][k].round > 0;
-  GROUP("G6 line4's all-to-all, each forwarded block sent on in the round it lands", 1, 4, NCCL_MESH_POLLS, 4);
-  free(line_root); free(line_parent); free(line_weight);
+  GROUP("G6 line4's all-to-all, each forwarded part sent on in the round it lands", 1, 4, NCCL_MESH_POLLS, 4);
+  if (rows_exchange(rows + 0, &line_table.routing, 4, blocks, blocks_all(4, -1, 0, blocks), 2)) return 1;
+  for (uint32_t r = 0; r < 4; r++)
+    for (uint32_t k = 0; k < rows[0].count[r]; k++)
+      if (rows[0].steps[r][k].op == MESH_STEP_SEND && rows[0].steps[r][k].buffer == 2) rows[0].steps[r][k].first++;
+  GROUP("G7 line4's all-to-all, each forwarded part sent on from an element past what landed", 1, 4, NCCL_MESH_POLLS, 4);
+  table_free(&line_table); table_free(&pair);
+  free(three_root); free(three_parent); free(three_weight);
 #undef GROUP
   rows_free(&reduce); rows_free(&gather);
   free(root); free(parent); free(weight);

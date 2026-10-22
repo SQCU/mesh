@@ -33,9 +33,10 @@
    gone, or a peer is silent past that bound; what it held is then let go and the next init reads the streams as they
    stand.  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
    every member from the same reports and kept for its life: no node outside the communicator is on it, since the
-   bridges forward nothing, so two members no path between members joins fail a collective, and a call between two
-   members not joined fails, as values (ncclInvalidUsage); a collective crosses the members between two others on its
-   trees (ncclAlltoAll, ncclGather and ncclScatter forwarding each block: ncclMeshAlltoAllV, below).  ncclMeshCommInitRank (below) is the same init for a program
+   bridges forward nothing; the members between two others forward their bytes as steps of the communicator's groups,
+   along its routing table (made at its creation by every member alike: ncclMeshCommSetRouting, below), so any two
+   members exchange bytes on any map that joins its members, and two members no path between members joins fail a
+   collective or an exchange between them, every rank alike, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
    Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
    two ranks or more holds none and is refused (ncclInvalidUsage, ENOLCK).  ncclCommGrow meets at the bootstrap of the
@@ -63,8 +64,9 @@
    bound its operand is under; nothing about it is decided where it runs, no price chooses it, and
    ncclCollConfig_t.algSelection is not read.  Every member compiles the same programs from the same map and the same
    operands (every rank passes the same paths, programs and forms), so nothing is compared at run time.  A group
-   (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps; a
-   point-to-point call one step) on its communicator's channels: toward each member it is joined to, each class of the
+   (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps; an
+   exchange's steps along the routing table, mesh_forward_steps; a group's point-to-point calls one exchange of the
+   whole communicator, every rank issuing the group: ncclMeshGroupPattern, below) on its communicator's channels: toward each member it is joined to, each class of the
    stream its init held toward the member's node, each position of a channel a run of the stream's units both ends lay
    alike (mesh-plan.h mesh_group_lay, mesh_wire), declared to the bridge as the group is issued (mesh-call.h
    mesh_stream_declare, with no deadline while its member lives: no dud reaches the peer of a producer still at
@@ -183,6 +185,8 @@ extern "C" {
 #include <stddef.h>
 struct mesh_program;
 struct mesh_trees;
+struct mesh_routing;
+struct mesh_link_map;
 
 /* design/transport.md: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
    above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
@@ -942,10 +946,10 @@ typedef struct {
 } ncclMeshForm;
 /* A communicator's configuration operand: its forms, in order, compiled ahead of its structural table at each map read
    (Programs, above), so a call runs the first form of its collective (and root) whose bound its bytes are under, else
-   the default; no entry, no form (the default for every collective and size).  Set before the communicator's first
-   group that crosses a link (ncclInvalidUsage after it, or for a communicator over the caller's programs,
+   the default; no entry, no form (the default for every collective and size).  Taken by the communicator's next group
+   (a group in flight keeps its steps; ncclInvalidUsage for a communicator over the caller's programs,
    ncclMeshCommInitRank's, whose table they are), copied with their shares; count 0 clears them.  Every rank passes the
-   same forms (its members compile its table alike from them); its splits and shrinks keep them (a form at a root past a
+   same forms between the same two groups (its members compile its table alike from them); its splits and shrinks keep them (a form at a root past a
    split's ranks makes no entry there).  The forms of mesh cc8a6f8e^'s default table (its tree sets, single-phase or two-phase, 1 to 64 chunks,
    by size class), named by the caller's configuration where a price chose them: the caller's configuration document
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
@@ -1076,51 +1080,86 @@ ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const 
                                     ncclComm_t comm, cudaStream_t stream);
 /* MPI_Alltoallv with counts on the host: rank r sends sendcounts[q] elements to rank q, its segments packed in rank order
    in sendbuff, and receives recvcounts[q] elements from rank q into recvbuff, packed in rank order (rank r's
-   sendcounts[q] is rank q's recvcounts[r], else the calls do not pair, the caller's error, not detected, as
-   ncclMeshAllGatherV's unequal counts are not (above); sendcounts[rank] is recvcounts[rank], its own segment copied,
-   ncclInvalidArgument where they differ).  The counted all-to-all's call (below) with its counts known to both
-   ends: no count crosses, and each pair's elements move as one message of their size, in one hop, in one group.  Each
-   rank passes its own row and column of the counts alone, so the call runs where the communicator's map links every
-   two members; on a map that leaves two unlinked, a block between them would be laid by the members between them,
-   which do not hold its size, and every rank refuses the call alike from the one map (ncclInvalidUsage, naming two),
-   before anything is laid.  ncclAlltoAll is it with every count `count`, and ncclGather and ncclScatter its rooted
-   forms (every count 0 but toward or from the root), so recvbuff off a gather's root and sendbuff off a scatter's are
-   not read and may be NULL; their counts every rank holds, so they run on any map that joins the members, each block
-   forwarded by the members between its ends along the communicator's trees (the paths of ncclMeshCommInitRank, else
-   the map's shortest-path trees: a gather's up the root's tree, a scatter's down it, an all-to-all's along its
-   destination's; mesh-plan.h mesh_routed_steps), hop i in round i, a member sending a block on once it has landed
-   there and waiting on nothing else.  Both paths. */
+   sendcounts[q] is rank q's recvcounts[r]; sendcounts[rank] is recvcounts[rank], its own segment copied,
+   ncclInvalidArgument where they differ).  An exchange (below): each block (a, b), the elements rank a sends rank b,
+   crosses the communicator's routing table (ncclMeshCommSetRouting), cut among the pair's routes by their shares and
+   forwarded piece by piece by the members between its ends, on any map that joins the members (a block of a pair in
+   parts no path joins fails the call, every rank alike, before anything is laid).  Each rank passes its own row and
+   column of the counts, so where the routing table has a member between two others (or a pair it does not join) the
+   call's first stage all-gathers every rank's counts (a fixed table of nranks x nranks counts each way, on the
+   communicator's bootstrap sockets: metadata to metadata) and lays the data stage from them, every member alike, a
+   pair whose sends and receives differ failing the call at every rank before it lays anything (ncclInvalidUsage);
+   where every route is one hop, each rank lays its own row and column, the calls not pairing there the caller's error,
+   not detected (as ncclMeshAllGatherV's unequal counts are not, above).  ncclMeshAlltoAllPattern is the call with the
+   whole pattern, `counts` rank a's count for rank b at a x nranks + b (every rank the same), which needs no first
+   stage.  ncclAlltoAll is it with every count `count`, and ncclGather and ncclScatter its rooted forms (every count 0
+   but toward or from the root), so recvbuff off a gather's root and sendbuff off a scatter's are not read and may be
+   NULL; every rank holds their counts, so they need no first stage.  Both paths. */
 ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, void* recvbuff, const size_t* recvcounts, ncclDataType_t datatype,
                                ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshAlltoAllPattern(const void* sendbuff, const size_t* counts, void* recvbuff, ncclDataType_t datatype, ncclComm_t comm,
+                                     cudaStream_t stream);
 /* MPI_Alltoallv with counts the GPU wrote (mesh 3981ca80^'s, its signature; expert-parallel dispatch and combine with no
    host count and no host wait on the GPU): rank r sends each rank q the rows of sendbuff (grouped by destination in rank
    order: sendrows rows of `row` elements of datatype) that segment q of `counts` sums to (int64, sendsegs[q] entries for
    rank q, in rank order; a negative count none), and receives each rank's rows into recvbuff packed in rank order, rank
    q's after the rows of the ranks before it, at most `capacity` rows.  Each rank's segment of counts for this rank
-   (recvsegs[q] entries; recvsegs[rank] = sendsegs[rank]) moves with its rows in one exchange (the segment, then its
-   rows, sent together, no rows waiting for counts to cross), is written to `received` (int64, rank order) and `*arrived`
-   set to 1 once every count has landed, while the rows may still be on the wire, so the caller reads the counts on the
-   host with no wait on the GPU; this rank's own rows are copied, and where `landed` is not NULL the same counts are
-   written there for the caller's GPU work after the call.  *arrived is 0 from the call until then, and 2 where the
-   call failed first (its communicator failed, or its counts passed its layout, below; the failure also the group's result or
-   the communicator's asynchronous error, ncclCommGetAsyncError).  The layout every rank makes alike: each pair whose
-   sender has counts for its receiver (sendsegs[q] > 0 on the sender, recvsegs[r] > 0 on the receiver: the two agree)
-   moves its counts and room for min(sendrows, capacity) rows (the pair's bound), so every rank passes the same
-   sendrows, capacity, row and datatype; a sender's rows past its counts' sum within that room are the slots' (never
-   read).  Counts that pass the layout (a rank's rows past sendrows, a pair's past its bound, the rows a rank receives
-   past capacity) move the rows within it, set *arrived to 2 and fail as a value (ncclInvalidUsage: the host path's
-   group, the Metal path's communicator).  Host path: every pointer a host pointer.  Metal path: sendbuff, counts, recvbuff
-   and landed are ncclMeshBuffers (counts read on the GPU, every row's place computed there from them: no host reads a
-   count), and received and arrived host pointers in this process's leases (ncclMemAlloc), which the GPU writes
-   (system-coherent, the word last); its waits are in-stream waits on the streams' landed words (rdma/mesh.metal
-   mesh_wait_bounded, ended by a lost link or the stream's bound), as every Metal-path group's.  Each pair's counts and
-   rows move in one hop between its two ends, so the call runs where the communicator's map links every two members; on
-   a map that leaves two unlinked, the members between them would lay their counts segment, whose size only the pair's
-   ends pass, so every rank refuses the call alike from the one map (ncclInvalidUsage, naming two; *arrived 2).  A word a call
-   in flight. */
+   (recvsegs[q] entries; recvsegs[rank] = sendsegs[rank]) moves with room for its rows in one exchange (the segment and
+   the rows sent together, no rows waiting for counts to cross), each pair's counts and rows' room crossing the
+   communicator's routing table as an exchange's blocks do (ncclMeshAlltoAllV, above), the members between its ends
+   forwarding them piece by piece, on any map that joins the members; the rows land apart, each rank's in its room, and
+   once every receive of the call has landed they are placed by the landed counts, the counts written to `received`
+   (int64, rank order) and `*arrived` set to 1, so the caller reads the counts on the host with no wait on the GPU; this
+   rank's own rows are copied, and where `landed` is not NULL the same counts are written there for the caller's GPU
+   work after the call.  *arrived is 0 from the call until then, and 2 where the call failed first (its communicator
+   failed, or its counts passed its layout, below; the failure also the group's result or the communicator's
+   asynchronous error, ncclCommGetAsyncError).  The layout every rank makes alike: each pair whose sender has counts
+   for its receiver (sendsegs[q] > 0 on the sender, recvsegs[r] > 0 on the receiver: the two agree) moves its counts and
+   room for min(sendrows, capacity) rows (the pair's bound), so every rank passes the same sendrows, capacity, row and
+   datatype; a sender's rows past its counts' sum within that room are the slots' (never read).  Each rank passes its
+   own segments' sizes (sendsegs, recvsegs), so where the routing table has a member between two others the call's
+   first stage all-gathers every rank's (ncclMeshAlltoAllV's, above: a pair whose sendsegs and recvsegs differ fails
+   every rank alike); ncclMeshAlltoAllCountedPattern is the call with the whole table of them, `segs` the entries rank
+   a's counts hold for rank b at a x nranks + b (every rank the same), which needs no first stage.  Counts that pass the
+   layout (a rank's rows past sendrows, a pair's past its bound, the rows a rank receives past capacity) move the rows
+   within it, set *arrived to 2 and fail as a value (ncclInvalidUsage: the host path's group, the Metal path's
+   communicator).  Host path: every pointer a host pointer.  Metal path: sendbuff, counts, recvbuff and landed are
+   ncclMeshBuffers (counts read on the GPU, every row's place computed there from them: no host reads a count), and
+   received and arrived host pointers in this process's leases (ncclMemAlloc), which the GPU writes (system-coherent,
+   the word last); its waits are in-stream waits on the streams' landed words (rdma/mesh.metal mesh_wait_bounded, ended
+   by a lost link or the stream's bound), as every Metal-path group's.  A word a call in flight. */
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
                                      size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,
                                      ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshAlltoAllCountedPattern(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* segs, void* recvbuff,
+                                            size_t capacity, int64_t* received, int64_t* landed, uint64_t* arrived, size_t row, ncclDataType_t datatype,
+                                            ncclComm_t comm, cudaStream_t stream);
+/* A group's point-to-point calls (ncclSend, ncclRecv) are the whole communicator's: every member issues each such group
+   (every rank runs the same program from the same inputs, design/rubrics.md "Megatron TP is its semantics"), each with
+   its own sends and receives, a member with none a send or receive of count 0, or this call alone.  The group's sends
+   and receives are one exchange, of bytes: block (a, b) every byte rank a sends rank b in the group, in call order (a
+   receive's count in call order the same), crossing the communicator's routing table (ncclMeshCommSetRouting) and
+   forwarded piece by piece by the members between a block's ends, so any two members exchange bytes on any map that
+   joins them; a self-addressed send and receive are a copy.  Each rank passes its own sends and receives, so where the
+   routing table has a member between two others the group's first stage all-gathers every rank's (its bytes toward each
+   rank and from each: ncclMeshAlltoAllV's stage, above).  ncclMeshGroupPattern gives the group the whole pattern,
+   `bytes` the bytes rank a sends rank b at a x nranks + b (every rank the same; this rank's row and column must be its
+   own calls', ncclInvalidArgument else), so the group needs no first stage; with `bytes` NULL it gives nothing but its
+   rank's part in the group (a rank with no send or receive of its own).  Inside a group; `stream` the group's. */
+ncclResult_t ncclMeshGroupPattern(const size_t* bytes, ncclComm_t comm, cudaStream_t stream);
+/* A communicator's routing table, an operand of its every exchange (mesh-plan.h struct mesh_routing: each ordered pair of
+   ranks' routes over hops of its map and each one's share of a block between them; design/rubrics.md C3).  At its
+   creation (an init, a split, a grow) every member makes it alike from its map by the routing solver, mesh-plan.h
+   mesh_routing_pack (the map's packed trees over the links' bandwidths, at mesh_trees_pack's own eps and at most one
+   tree a root for each rank: each pair's bytes split over the paths the packing loads).  ncclMeshCommSetRouting
+   replaces it between groups, every rank the same table between the same two groups (a solver of the caller's, a
+   learned optimizer's: the same interface), checked against the communicator's map (mesh_routing_check:
+   ncclInvalidArgument), and NULL makes the solver's again; a group in flight keeps the routes it was laid on.
+   ncclMeshCommGetRouting gives the table in effect and the communicator's map (*map; NULL not written), the solver's
+   input: the communicator's own, valid until its next ncclMeshCommSetRouting or its destroy.  A communicator of one
+   rank routes nothing (its table of no routes, its map empty). */
+ncclResult_t ncclMeshCommSetRouting(ncclComm_t comm, const struct mesh_routing* routing);
+ncclResult_t ncclMeshCommGetRouting(ncclComm_t comm, struct mesh_routing* routing, struct mesh_link_map* map);
 /* The partials merge, a reduction operator made as ncclRedOpCreatePreMulSum makes one (an operator of comm's, freed by
    ncclRedOpDestroy): split-KV attention partials merged by their log-sum-exp [Dao et al. 2023, Flash-Decoding;
    FlashInfer's state merge].  Its operand is rows of 2 + `dim` elements of `datatype` (ncclFloat32), a row [m, l, O:

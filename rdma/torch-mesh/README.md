@@ -11,11 +11,10 @@ segments as its equal program). `all_to_all`, `all_to_all_single`, `gather` and 
 MPI_Alltoallv with its counts on the host (a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
 `Scatterv`: every count 0 but toward or from the root, as NCCL's gather and scatter are its forms); a list that is not
 the pieces of one tensor goes through one flat tensor. `send` and `recv` are the library's point to point. The counted
-all-to-all is the library's call of its own; the partials merge is a reduction by the library's partials operator. The
-V and the counted all-to-all move each pair's block in one hop, so they run where the group's map links every two
-members, and on any other map (a line of three or more, a star, a ring of four or more) every rank's call fails alike
-with `ncclInvalidUsage` ([NCCL.md](../NCCL.md), All-to-all with host counts); the library's `ncclAlltoAll`,
-`ncclGather` and `ncclScatter`, whose counts every rank holds, forward each block through the members between.
+all-to-all is the library's call of its own; the partials merge is a reduction by the library's partials operator.
+Every one of them is an exchange the library forwards through the members between two ranks no cable joins, along the
+group's routing table, on any map that joins the group; the V and the counted all-to-all, whose counts each rank passes
+its own, first gather every rank's where a member relays ([NCCL.md](../NCCL.md#forwarding)).
 
 ## Install
 
@@ -45,10 +44,15 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   map's `streams` says: [NCCL.md](../NCCL.md#rules-a-program-keeps)), so the world group and three subgroups use a node pair at once;
   one more is refused (EBUSY) until a group is destroyed ([NCCL.md](../NCCL.md#rules-a-program-keeps)).
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing (a dud's too) or a lost
-  link; a GPU wait also at its bound, and a host-path wait at a revoke.
-- A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
-  next one's node: the bridges forward nothing, and a group whose ranks no such path joins fails at its first
-  collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
+  link; a GPU wait also at its bound, and a host-path wait at a revoke or the platform's deadline (nothing landed or
+  published for 5 s).
+- A group's collectives and exchanges run where a path between its ranks joins every two of them, each rank's bridge
+  reaching the next one's node: the bridges forward nothing, the members between two others relay their bytes along
+  the group's routing table, and a group whose ranks no such path joins fails at its first call that crosses a link
+  ([NCCL.md](../NCCL.md#forwarding)).
+- `send`, `recv` and `batch_isend_irecv` are point-to-point groups, which are the whole group's: where the group's
+  routing table has a member between two others, every rank issues each such group in the same order, a rank with
+  nothing to move one of an empty tensor ([NCCL.md](../NCCL.md#forwarding)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
   bridge's region (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the region is

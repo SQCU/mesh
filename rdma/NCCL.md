@@ -104,7 +104,9 @@ torch-mesh's `_stream`) compiles them in its own process, as before. Only the li
 - A rank's connect to its root gives up `MESH_PLATFORM_NS` after its first try: an init toward a root that does not
   listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
 - `ncclCommSplit` takes the ranks of a color and holds the child's streams over comm (NCCL's bootstrapSplit, with the
-  init's two gathers), streams of its own, as every init takes. `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
+  init's two gathers), streams of its own, as every init takes, and gives the child bootstrap sockets of its own (each
+  colored rank's gathered row names a listener on comm's bootstrap network, the child's root keeps its own, the others
+  connect to it), the sockets its groups' pattern stages meet on ([Forwarding](#forwarding)). `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
   exchange among the rest, so it holds no stream: a shrink to one rank is made, and one to two ranks or more is refused
   (`ncclInvalidUsage`, ENOLCK).
 - Making a communicator, a lone rank's too, attaches the process's client of its node's bridge ([Memory](#memory)),
@@ -117,9 +119,11 @@ where each one's bridge reaches the other's node, at the lesser of the two ends'
 equals the least hash of its mark, its parent's and the root's, so routes of equal length spread rather than pile onto
 the lowest-numbered node, and a route moves only where the shortest routes between its ends change, never for a link
 lost elsewhere or a node joining; a route between two nodes the higher-marked one's in-tree path, one path both ways).
-No node outside the communicator is on it: the bridges forward nothing. Two ranks are linked where a link joins them; a
-communicator has a channel of each class toward each member it is joined to, and none toward another ([Routes between
-unlinked ranks](#routes-between-unlinked-ranks)). A later communicator reads the reports again, so a node that joins,
+No node outside the communicator is on it: the bridges forward nothing, and the members between two others forward
+their bytes as steps of the communicator's own programs ([Forwarding](#forwarding)). Two ranks are linked where a link
+joins them; a communicator has a channel of each class toward each member it is joined to, and none toward another.
+At its creation (an init, a split, a grow) every member also makes its routing table for exchanges from this map, alike
+(the routing solver, `mesh_routing_pack`: [Forwarding](#forwarding)). A later communicator reads the reports again, so a node that joins,
 a node gone or a link lost (down until its ports' next agents pair it again, with nobody acting: design/transport.md
 section 14) reaches the next communicator with no edit and no restart. libmesh's whole map of every node's record (`mesh_map` over no members, Python `mesh.current()`) joins two
 nodes by the same rule.
@@ -153,54 +157,36 @@ where a call runs.
 **Counted all-to-all.** `ncclMeshAlltoAllCounted(send, sendrows, counts, sendsegs, recv, capacity, received, landed,
 recvsegs, arrived, row, type, comm, stream)` is MPI_Alltoallv whose counts the GPU wrote (int64, a segment a destination
 rank: an MoE router's per-expert counts grouped by the rank holding each expert): each rank's segment for a peer moves
-with its rows in one exchange, the receiver's rows are packed in rank order, and the landed counts reach `received`
-and `landed` with `*arrived` set to 1 while the rows may still be on the wire (2: the call failed). On the Metal path
-no host reads a count: every row's place is computed on the GPU from the counts (`nccl-mesh-metal.m` `counted_*`), its
-waits are in-stream waits on the landed words its bridge raises, and `received` and `arrived` are host memory
-in leases, which the GPU writes. The positions are laid without the counts: each pair carries room for
-`min(sendrows, capacity)` rows (every rank passes the same `sendrows`, `capacity`, `row` and type), and counts that pass
-that layout fail as a value with `*arrived` 2. Reproduction target (metal-microbench docs/measurement.md 2026-09-30,
-part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
-473-480 us, the host idle 7.4-7.9 ms. A crossing counted call had failed since its restoration (mesh 598cb6cf: a NULL
-program read where the uneven collectives check their segments) and, on a reused region, could read a pair's position
-with no rows as a filler; both are fixed.
-
-Each pair's counts and rows move in one hop, between the pair's two ends, so the call runs where the communicator's map
-links every two members (two members, a fully cabled map). The bridges forward nothing, so a pair no link joins would
-cross members between them, and each would have to lay that pair's counts segment, whose size only the pair's two ends
-pass (`sendsegs` at the sender, `recvsegs` at the receiver). On a map that leaves two members unlinked (a line, a
-ring of four or more, a star), every rank therefore refuses the call alike, from the one map, before anything is
-laid: `ncclInvalidUsage` naming the first two unlinked members, `*arrived` 2, and the communicator's next call runs as
-if the refused one had not been made (2026-10-21, on the loopback fabric: refused at every rank of a line of 3, an
-all-reduce after it exact; exact on a fully cabled 3, `*arrived` 1).
+with room for its rows in one exchange ([Forwarding](#forwarding)), the receiver's rows are packed in rank order, and
+once every receive of the call has landed the landed counts reach `received` and `landed` with `*arrived` set to 1 (2:
+the call failed). On the Metal path no host reads a count: every row's place is computed on the GPU from the counts
+(`nccl-mesh-metal.m` `counted_*`), its waits are in-stream waits on the landed words its bridge raises, and `received`
+and `arrived` are host memory in leases, which the GPU writes. The positions are laid without the counts: each pair
+carries room for `min(sendrows, capacity)` rows (every rank passes the same `sendrows`, `capacity`, `row` and type),
+the rows land apart, each pair's in its room (a member between the pair's ends forwarding the room as any block),
+and at the call's end they are placed by the landed counts; counts that pass that layout fail as a value with
+`*arrived` 2. Each rank passes its own segments' sizes (`sendsegs`, `recvsegs`); where the communicator's routing table
+has a member between two others the call's first stage gathers every rank's ([Forwarding](#forwarding)), and
+`ncclMeshAlltoAllCountedPattern` takes the whole table of them (`segs`, the entries rank a's counts hold for rank b at a
+x nranks + b), with no first stage. `*arrived` is set once the call's rows have landed too, where before forwarding it
+was set with the counts while the rows could still be on the wire: the rows land apart in their rooms and are placed
+by every rank's counts at the end, so no landing waits on a count's. Reproduction target (metal-microbench
+docs/measurement.md 2026-09-30, part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read
+39.3-40.1), the counted call's overhead 473-480 us, the host idle 7.4-7.9 ms (measured before forwarding; not measured
+since). A crossing counted call had failed since its restoration (mesh 598cb6cf: a NULL program read where the uneven
+collectives check their segments) and, on a reused region, could read a pair's position with no rows as a filler; both
+are fixed.
 
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, sendcounts, recv, recvcounts, type, comm, stream)` is
 MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
-`recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`). It is the
-counted all-to-all's call with its counts known to both ends: no count crosses, each pair's elements move as one
-message of their own size, one call a group, NCCL's sends and receives of it (NCCL's own lowering,
-`classifyCollToP2pTasks`). Each rank passes its own row and column of the counts alone, so, as the counted call, it
-runs where the map links every two members and every rank refuses it alike on any other map (`ncclInvalidUsage`,
-naming two): a block between two unlinked members would be laid by the members between them, which do not hold its
-size.
+`recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`). It is an
+exchange of its blocks ([Forwarding](#forwarding)), each pair's elements one block. Each rank passes its own row and
+column of the counts, so where the communicator's routing table has a member between two others the call's first stage
+gathers every rank's; `ncclMeshAlltoAllPattern(send, counts, recv, type, comm, stream)` takes the whole table (`counts`
+rank a's for rank b at a x nranks + b, every rank the same), with no first stage.
 
 NCCL's `ncclAlltoAll` (every count `count`), `ncclGather` and `ncclScatter` (every count 0 but toward or from the root)
-are the same call with counts every rank holds, so they run on any map that joins the members: each block (a, b) is
-forwarded by the members between a and b along the communicator's trees (`mesh-plan.h` `mesh_routed_steps`; the
-caller's `paths`, else the map's shortest-path trees), a gather's up the root's tree, a scatter's down it, an
-all-to-all's along the path in its destination's tree (`mesh_trees_path`). Hop i of a block is in round i: a member
-between its ends receives it into a scratch of the group's (its blocks in (a, b) order) and sends it on in the next
-round, its first position waiting until the block landed there (`mesh_group_before`); every other step waits on
-nothing. Every wait is then on a receive of a strictly earlier round, and a channel lays its rounds in order, so no
-wait closes a cycle at any lag and any size (an event waits only on events at earlier or equal positions of its own
-channel, and on another channel's only at an earlier round). Where every two members are linked each block takes
-one hop, the direct exchange as before. `mesh-advise` checks these calls on the loopback families (pair, line of 4,
-ring of 5, star of 8, tori of 6 and 8; shortest and packed trees) with every other call in one group: no projection,
-priority, depth, causality or hazard warning, and no step between ranks the map does not link. On the loopback fabric
-(2026-10-21) every element lands exact, host path and walk, at 1,000 and 300,007 float32 a block: the all-to-all and
-every root's gather and scatter on a line of 3 and of 4, a star of 4, a ring of 5, a fully cabled 3 and a line of 4
-whose two first links hold one stream and its last four (`LOOPVERBS_MAX_QP`); the uneven all-to-all exact on the fully
-cabled 3 and refused at every rank alike on the others, an all-reduce after it exact.
+are the same exchange with counts every rank holds, so they never need a first stage.
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -235,9 +221,9 @@ structural table at each map read, so a call takes the first form that fits it a
 These are the forms mesh cc8a6f8e^'s default table chose among by a price (its `sets[1]`, single-phase or not, 1 to 64
 chunks, by size class); the price is gone and the caller's configuration document names the form (metal-microbench
 docs/principles.md section 6: a decision is structure, a measurement the calls make, or an algorithm restored from
-history). With no forms nothing changes: the structural table as above. Every rank passes the same forms, set before
-the communicator's first group that crosses a link; splits and shrinks keep them; a communicator over the caller's own
-programs refuses them. A form that cuts the operand (two-phase, chunked) is not fusable (`ncclMeshFusableRooted`
+history). With no forms nothing changes: the structural table as above. Every rank passes the same forms between the
+same two groups, taken by the communicator's next group (a group in flight keeps its steps); splits and shrinks keep
+them; a communicator over the caller's own programs has no structural table to put them ahead of (`ncclInvalidUsage`). A form that cuts the operand (two-phase, chunked) is not fusable (`ncclMeshFusableRooted`
 answers 0 for both steps). Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
 16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench
 output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 57.4 to 31.2-36.2 us
@@ -480,26 +466,86 @@ Porting:
   host-path group reading or writing that lease waits for (until the GPU's work reaches the value). `ncclCommRegister`
   refuses a buffer outside the region.
 
-## Routes between unlinked ranks
+## Forwarding
 
-The bridges forward nothing (design/transport.md). A communicator's init holds a stream only toward the members whose
-nodes its bridge reaches and whose bridges reach its node, and its channels go only toward those members. A collective
-whose members no path between members joins fails at its first call that needs its programs, naming two, and a call
-whose program or point-to-point step moves bytes between two members not joined fails at that call
-(`ncclInvalidUsage`). A node a route would cross between two members takes part only as a member of the
-communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`). The
-structural collectives and `ncclAlltoAll`, `ncclGather` and `ncclScatter` cross such members by construction (the
-latter forwarding each block along the trees: All-to-all with host counts, above); the uneven
-all-to-alls, whose counts no member between a pair holds, run where every two members are linked and are refused at
-every rank alike elsewhere.
+Any two members of a communicator exchange bytes on any map that joins its members, whatever the cables. The bridges
+forward nothing (design/transport.md): a bridge reaches only the nodes its cables pair, knows no route, call or
+position, and copies no payload. The library forwards: a member between two others receives their bytes on its stream
+from one and sends them on along its stream toward the next, as steps of the group every member compiles alike
+(design/rubrics.md: a route, a position and a call are the collective layer's, C, never the bridge's, M; and a data
+program knows no topology, D7). A direct exchange is a route of one hop: one mechanism on every cabling (C2), and no
+code path asks whether two members share a cable.
+
+**The routing table** (`mesh-plan.h` `struct mesh_routing`) is an operand of every exchange, made between calls and
+passed to each, never chosen inside one (C3): for each ordered pair of ranks, the routes a block between them takes,
+each a path over hops of the communicator's map, and each one's share. A block is cut among its pair's routes by
+their shares (each the floor of its share of the elements, the first ones one more for the remainder, as a segment is
+cut among its trees), so a pair's bytes cross several paths at once and every link carries load: a Thunderbolt 5 link
+(about 80 Gb/s) is far slower than the memory of the node that relays through it. At a communicator's creation (an
+init, a split, a grow) every member makes the table alike from the map by the routing solver, `mesh_routing_pack`: the
+map's packed trees (`mesh_trees_pack`, Garg and Konemann's concurrent flow over the links' bandwidths, at its own eps
+and at most one tree a root for each rank), each pair's routes the paths from its source up each of its destination's
+trees, each share that tree's flow (`mesh_routing_trees`: equal paths merged, a pair's routes ordered by their nodes,
+so the table is a function of the trees alone); on a map that leaves two members in parts no path joins, each pair its
+route on the map's own table, and none for a pair in two parts. `ncclMeshCommSetRouting(comm, routing)` replaces the
+table between groups, every rank the same table between the same two groups (a solver of the caller's, a learned
+optimizer's, behind the same interface; checked against the map, `mesh_routing_check`), and NULL makes the solver's
+again; `ncclMeshCommGetRouting(comm, &routing, &map)` gives the table in effect and the map it routes over. A group
+in flight keeps the routes it was laid on.
+
+**An exchange** is a pattern's blocks (`struct mesh_block`: who sends how many elements to whom, the same at every
+rank) forwarded along the table (`mesh_forward_steps`): each part goes along its route, hop i in round i; its first
+rank sends it from its own buffer, its last receives it into its own, and a rank between them receives it into a relay
+scratch of the group's and sends it on in the next round, piece by piece: a forwarded position waits on its own
+landing at the relay alone, never on the whole part's (`mesh_group_before`, C4), so a long line's far end receives as
+soon as each piece has crossed, rather than after each relay has held the whole block. A round's sends, then its
+receives, each in block, then route order, so a hop's sends at one end and its receives at the other are the same
+parts in the same order. Every wait of an exchange is on a position of a strictly earlier round, and a channel lays
+its rounds in order, so no wait closes a cycle at any lag and any size: an event waits only on events at earlier or
+equal positions of its own channel, and on another channel's only at an earlier round. The exchanges are
+`ncclAlltoAll`, `ncclGather`, `ncclScatter`, `ncclMeshAlltoAllV` and `ncclMeshAlltoAllPattern`, the counted all-to-all
+(its counts and its rows' rooms its blocks), and every group's point-to-point calls (one exchange of bytes, below).
+
+**Every member knows every position before the call** (C7). A relay lays the parts it forwards, so it needs their
+sizes. `ncclAlltoAll`, `ncclGather`, `ncclScatter` and the `Pattern` forms give every rank the whole pattern.
+`ncclSend`/`ncclRecv`, `ncclMeshAlltoAllV` and `ncclMeshAlltoAllCounted` give each rank its own sends and receives
+alone, so where the table has a member between two others (or leaves a pair unjoined) the group runs a first stage:
+every rank's sends toward each rank and receives from each, a record of fixed size (2 x nranks counts a call, every
+member knowing how many), all-gathered before anything of the group is laid; then the data stage, laid from that whole
+pattern by every member alike. A pair whose sends and receives differ, or ranks whose groups differ in such calls,
+fail the group at every rank alike before it lays anything (`ncclInvalidUsage`). Where every route is one hop, every
+block's two ends are the only ranks that lay it, and the group needs no first stage. The stage's records cross the
+communicator's bootstrap sockets (NCCL's bootstrapAllGather, the init's and a split's own), within the platform's
+deadline: on the Metal path a group's positions are laid on the host as it is encoded, ahead of the GPU work before it,
+whose consumptions free the rings' slots, so a metadata position on the fast path could be read only once that work
+had run (and a caller may commit its command buffer after several groups); a group's path is each rank's own, so one
+mechanism serves both. A stage that its peers' sockets do not complete within the deadline fails the communicator
+(NCCL's error state: their streams no longer meet alike). A caller that holds the pattern passes it
+(`ncclMeshGroupPattern`, `ncclMeshAlltoAllPattern`, `ncclMeshAlltoAllCountedPattern`) and the group skips the stage.
+
+**A group's point-to-point calls are the whole communicator's**: every member issues each such group, as every rank of
+a program runs the same program from the same inputs (design/rubrics.md "Megatron TP is its semantics"), each with its
+own sends and receives (a send or receive of count 0 where it has none, or `ncclMeshGroupPattern(NULL, comm, stream)`
+alone). The group's sends and receives are one exchange of bytes: block (a, b) every byte rank a sends rank b in the
+group, in call order, received in call order (a peer's several sends or receives copied together and apart on the
+rank, the one of a single call read and written in place); a self-addressed send and receive are a copy. Where every
+route is one hop (two ranks; a map whose table routes every pair direct), only a group's ranks that send or receive
+need issue it; elsewhere a member that does not issue it leaves its peers' stage to end at the platform's deadline.
+Two members in parts of the communicator's map no path joins (its members alone: a node outside it relays nothing)
+exchange nothing: a block between them fails the call at every rank alike before anything is laid (`ncclInvalidUsage`),
+as a collective over them does. A caller's own program (`ncclMeshCommInitRank`'s `programs`) whose move is no hop of the
+communicator's map was compiled along another map's trees and fails as an argument (`ncclInvalidArgument`); the
+structural programs are compiled along the map's own trees. Not yet run on the mesh's machines.
 
 ## Rules a program keeps
 
 - One rank a node.
+- A group's point-to-point calls are the whole communicator's: every rank issues each such group ([Forwarding](#forwarding)).
 - A bidirectional exchange with one peer is one group (`ncclGroupStart`/`End`; torch's `batch_isend_irecv`).
   Separate send then receive calls in the same order on both sides do not pair: a channel has one position axis for
-  both directions. The library does not detect it, nor unequal counts or different collectives on two ranks: no landed
-  payload is checked, so these are the caller's error.
+  both directions. The library does not detect it, nor unequal counts or different collectives on two ranks where
+  each lays its own row and column: no landed payload is checked, so these are the caller's error (a group whose
+  pattern is gathered fails as a value where a pair's sends and receives differ).
 - Communicators know nothing of one another, and no two hold one stream. A link has as many streams as its plan has
   lane pairs for (four where both its ends hold ten queue pairs, one on the M5 Ultra's macOS 27 links: `mesh_map`'s
   `streams`), and two cables between two nodes have their streams together; as many communicators as that use a node
@@ -507,14 +553,18 @@ every rank alike elsewhere.
 
 ## Failures
 
-The library keeps no clock that fails a group. A host-path group's waits end at their landings, at a landed word's
-`~0` (its bridge's, where the link is lost or the bridge stops), or at a revoke; a GPU wait at its landing, at a
-landed word's `~0` or at its bound ([Bounded waits](#bounded-waits)). A group declares its units to its bridge as it is issued, with no deadline while its
+Within a call, the only thing that ends a wait is the data or the platform's deadline (design/rubrics.md C5). A
+host-path group's waits end at their landings, at a landed word's `~0` (its bridge's, where the link is lost or the
+bridge stops), at a revoke, or where nothing has landed and nothing could be published on any of its communicator's
+channels for `MESH_PLATFORM_NS` (`nccl-mesh.c` `run`: `ncclRemoteError`, naming the channel it waits on, and the
+communicator fails with it, `ncclCommGetAsyncError`); a GPU wait at its landing, at a landed word's `~0` or at its bound ([Bounded waits](#bounded-waits)); a
+group's pattern stage ([Forwarding](#forwarding)) within the same deadline. Nothing detects a peer: no dud is sent for
+a live producer's units, and the deadline only ends this rank's wait. A group declares its units to its bridge as it is issued, with no deadline while its
 member lives. A member that fails, is revoked or ends has the units it declared and did not supply sent at once as
 duds: all ones, placed where a send must happen and its producer is gone (design/transport.md section 10). Its peers
 land them as bytes like any other. A dud is no signal and fails nothing at the consumer; the failure is the
 producer's own (design/rubrics.md M4: "nothing else changes"; M10). A peer that has not yet issued its group is waited
-for, a host-path group's wait on it until a landing or a revoke. The failure is returned:
+for, a host-path group's wait on it until a landing, a revoke or the platform's deadline. The failure is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
