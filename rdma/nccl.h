@@ -34,11 +34,12 @@
    silent past that bound; what it held is then let go and the next init reads the streams as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the
    next (one that sends nothing holds the root's read until the phase ends).  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
-   every member from the same reports and kept for its life: no node outside the communicator is on it, since the
-   bridges forward nothing, so two members no path between members joins fail a collective, and a call between two
-   members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
+   every member from the same reports and kept until a refresh makes its next epoch (ncclMeshCommRefresh, below): no
+   node outside the communicator is on it, since the bridges forward nothing, so two members no path between members
+   joins fail a collective, and a call between two members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
-   Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
+   Split holds its children's streams over comm and gives each child bootstrap sockets of its own (NCCL's
+   bootstrapSplit), and Shrink makes no exchange, so a shrink to
    two ranks or more holds none: it is made with no channel, and its first call that crosses a link fails as a value
    (a rank among those excluded gets NULL, as NCCL_SPLIT_NOCOLOR's).  Inside a group, Split and Grow run their own
    collectives at once, the group's calls set aside, and Shrink makes none.  ncclCommGrow meets at the bootstrap of the
@@ -218,6 +219,7 @@ extern "C" {
 #include <stddef.h>
 struct mesh_program;
 struct mesh_trees;
+struct mesh_routing;
 
 /* design/transport.md: the most loads any GPU wait makes, and the bound of a stream whose polls is 0 or
    above it: MESH_PLATFORM_NS over the slowest load period read on a node's GPU (the M4 Pro's 1.1 us while its clock
@@ -986,6 +988,34 @@ typedef struct {
    by size class), named by the caller's configuration where a price chose them: the caller's configuration document
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
+/* A communicator's epoch made again (rdma/NCCL.md "Epochs"): every member calls it at the same point between its
+   groups, as NCCL's ncclCommSplit is called, and the members gather once on the communicator's bootstrap sockets (its
+   init's rendezvous, each wait bounded by mesh.h MESH_PLATFORM_NS) each one's reach and whether its epoch cannot go on
+   (its communicator failed, or a stream it holds is no longer its own: a link lost and paired again).  Where none
+   cannot and the map they make is the epoch's, nothing else is done; otherwise every member gives back its streams and
+   makes the next epoch as its init made the first (its map from the reports gathered again, the streams toward the
+   members its bridge then reaches held, its channels made, its programs and routing table made again on the new map
+   at the next call that needs them), and the communicator's failure is cleared.  The GPU work the library committed
+   for comm is awaited first (at most MESH_PLATFORM_NS, as ncclCommDestroy awaits it); groups it issued and did not
+   complete are lost; work in a caller's encoder is the caller's to finish first, as before ncclCommDestroy.  Its
+   operands (paths, programs, forms, routing table) and its pool of leases are kept.  ncclCommGetAsyncError reads
+   ncclInProgress while it runs.  A failure is returned as a value: a gather's (comm as it was), or the next epoch's
+   (comm failed, its later groups failing, until a refresh makes an epoch).  A lone rank's refresh does nothing; a
+   shrink of two ranks or more keeps no bootstrap, and its refresh fails (ncclInvalidUsage). */
+ncclResult_t ncclMeshCommRefresh(ncclComm_t comm);
+/* A communicator's routing table (mesh-plan.h struct mesh_routing, an operand: design/rubrics.md C3), copied:
+   `table` NULL is none.  Every member passes the same table at the same point between its groups (its members make
+   their tables alike from it, nothing exchanged), and its next call or query reads it: the communicator's table is the
+   caller's where it fits the communicator's map (mesh_routing_check: its nodes the communicator's ranks, each hop a
+   link of the map), else the routing solver's on the map (mesh_routing_pack: its packed trees, each pair's bytes over
+   the paths they load, by their flows), read again at each epoch (ncclMeshCommRefresh). */
+ncclResult_t ncclMeshCommSetRouting(ncclComm_t comm, const struct mesh_routing* table);
+/* The communicator's routing table as its calls read it now, copied into *table (its arrays the library's, freed by
+   ncclMeshRoutingFree); *given (may be NULL) 1 where it is the caller's (ncclMeshCommSetRouting) and 0 where it is the
+   solver's; *epoch (may be NULL) the communicator's epoch (0 its init's, one more at each refresh that made one).  A
+   communicator with no map (a lone rank's, a shrink's) has a table of its ranks and no route. */
+ncclResult_t ncclMeshCommGetRouting(ncclComm_t comm, struct mesh_routing* table, int* given, uint64_t* epoch);
+ncclResult_t ncclMeshRoutingFree(struct mesh_routing* table);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns

@@ -108,7 +108,10 @@ torch-mesh's `_stream`) compiles them in its own process, as before. Only the li
 - A rank's connect to its root gives up `MESH_PLATFORM_NS` after its first try: an init toward a root that does not
   listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
 - `ncclCommSplit` takes the ranks of a color and holds the child's streams over comm (NCCL's bootstrapSplit, with the
-  init's two gathers), streams of its own, as every init takes. `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
+  init's two gathers), streams of its own, as every init takes, and gives the child bootstrap sockets of its own, as
+  NCCL's bootstrapSplit gives the child its own network: each colored rank's row names a listener on comm's bootstrap
+  network, the child's root keeps its own and the child's other ranks connect to it (its refreshes gather there:
+  [Epochs](#epochs)). `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
   exchange among the rest, so it holds no stream: a shrink to one rank is a lone rank's communicator, and one to two
   ranks or more is made with no channel and no map, its first call that crosses a link failing as a value (no map of
   its members, or no link toward the peer). A rank among those it excludes gets `NULL`, as `NCCL_SPLIT_NOCOLOR`'s.
@@ -119,7 +122,7 @@ torch-mesh's `_stream`) compiles them in its own process, as before. Only the li
   so the node's bridge runs; it fails where `ncclMemAlloc` would.
 
 Each communicator makes its map at its init from its members' reports (`nccl-mesh.c` `map_of`), alike on every member,
-and keeps it for its life: its members its nodes, each marked by its bridge's node number, two joined by one link
+and keeps it until a refresh makes its next epoch ([Epochs](#epochs)): its members its nodes, each marked by its bridge's node number, two joined by one link
 where each one's bridge reaches the other's node, at the lesser of the two ends' bandwidths, and the routing table
 (`mesh_routes`: each node's in-tree of shortest routes, by fewest links and then over the faster hops, a parent among
 equals the least hash of its mark, its parent's and the root's, so routes of equal length spread rather than pile onto
@@ -127,9 +130,9 @@ the lowest-numbered node, and a route moves only where the shortest routes betwe
 lost elsewhere or a node joining; a route between two nodes the higher-marked one's in-tree path, one path both ways).
 No node outside the communicator is on it: the bridges forward nothing. Two ranks are linked where a link joins them; a
 communicator has a channel of each class toward each member it is joined to, and none toward another ([Routes between
-unlinked ranks](#routes-between-unlinked-ranks)). A later communicator reads the reports again, so a node that joins,
-a node gone or a link lost (down until its ports' next children pair it again, with nobody acting: design/transport.md
-section 14) reaches the next communicator with no edit and no restart. libmesh's whole map of every node's record (`mesh_map` over no members, Python `mesh.current()`) joins two
+unlinked ranks](#routes-between-unlinked-ranks)). A later communicator, or the next epoch of this one, reads the reports
+again, so a node that joins, a node gone or a link lost (down until its ports' next children pair it again, with nobody
+acting: design/transport.md section 14) reaches it with no edit and no restart. libmesh's whole map of every node's record (`mesh_map` over no members, Python `mesh.current()`) joins two
 nodes by the same rule.
 
 The bridges' records are a map whatever reaches what: a node that still has a record may be reached by no bridge,
@@ -486,6 +489,51 @@ Porting:
   host-path group reading or writing that lease waits for (until the GPU's work reaches the value). `ncclCommRegister`
   refuses a buffer outside the region.
 
+## Epochs
+
+Cabling changes while programs run, and every cabling is served (design/rubrics.md C2). A communicator's map, its
+streams, its channels, the programs compiled on its map and its routing table are its epoch's. `ncclMeshCommRefresh(comm)`
+makes the next epoch between calls: every member calls it at the same point between its groups, as NCCL's
+`ncclCommSplit` is called, and nothing else in the library starts one (no thread watches the links, no timer decides,
+and no group waits for one: design/rubrics.md C4, C5, C6).
+
+- The GPU work the library committed for the communicator is awaited, at most `MESH_PLATFORM_NS`, as
+  `ncclCommDestroy` awaits it; groups it issued and did not complete are lost. Work in a caller's encoder is the
+  caller's to finish first, as before a destroy.
+- The members gather once on the communicator's bootstrap sockets (its init's rendezvous, bounded alike; the slow
+  channel paid once a refresh, never a call: design/rubrics.md "Two channels"): each one's reach, and whether its epoch
+  cannot go on (its communicator failed, or a stream it holds is no longer its own: a link lost and paired again).
+- Every member makes the same map from the same reports and the same decision. Where no member's epoch is stale and
+  the map is the epoch's, the refresh is done: one gather, its holdings untouched.
+- Otherwise every member gives its streams back (the bridge sends what was presented and published nothing as duds)
+  and makes the next epoch as its init made the first: the reports gathered again, the streams toward the members its
+  bridge then reaches held, the start words exchanged, its channels made. Its programs and routing table are made again
+  on the new map at the next call or query that needs them; its operands (paths, programs, forms, routing table) and its
+  pool of leases are kept; its failure is cleared and its epoch counted (`ncclMeshCommGetRouting`'s `epoch`).
+- `ncclCommGetAsyncError` reads `ncclInProgress` while it runs, as NCCL's non-blocking split's does.
+- A refresh fails as a value: a gather's failure leaves the communicator as it was; a failure making the next epoch
+  leaves it failed, holding no stream, until a refresh makes an epoch or `ncclCommDestroy`.
+- A lone rank's refresh does nothing. A shrink of two ranks or more keeps no bootstrap, so its refresh fails
+  (`ncclInvalidUsage`); it is made by a split or an init.
+
+A call in flight when a link it crosses is lost fails ([Failures](#failures)); the caller refreshes the communicator
+(or makes it again) and runs the call on the map as it is then. A link that joins, or one lost that no call was
+crossing, reaches the communicator at its next refresh.
+
+**Routing table.** A communicator's routing table (`mesh-plan.h` `struct mesh_routing`: each ordered pair's routes, the
+nodes each crosses, and each route's share of the pair's bytes) is an operand (design/rubrics.md C3). It is the
+caller's (`ncclMeshCommSetRouting(comm, table)`, every member passing the same table at the same point between its
+groups, as forms are passed; NULL is none) where that table fits the epoch's map (`mesh_routing_check`: its nodes the
+communicator's ranks, each hop a link), and else the routing solver's on the map (`mesh_routing_pack`: the map's
+packed trees, Garg and Könemann's concurrent flow over its links' bandwidths, each pair's bytes over the paths the
+packing loads, by their flows; where the map does not join its members, each pair its route on the map's table). Every
+member makes the same table from the same map and the same operand, so nothing is exchanged, and a caller's table
+that does not fit the cabling of an epoch is used again at the next epoch it fits. `ncclMeshCommGetRouting(comm,
+&table, &given, &epoch)` copies the table the calls read now (freed by `ncclMeshRoutingFree`), `given` 1 where it is
+the caller's. The plan-level forwarding steps (`mesh_exchange_steps`: an exchange's blocks cut in page quanta among a
+pair's routes, a member between a part's ends relaying it, `MESH_PLAN_VERSION` 9) are in libmesh; libnccl-mesh's
+exchanges run along the table once the transport lands the page-table relay (design/pages-and-functions.md).
+
 ## Routes between unlinked ranks
 
 The bridges forward nothing (design/transport.md). A communicator's init holds a stream only toward the members whose
@@ -499,7 +547,8 @@ communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_comp
 
 - One rank a node.
 - Each direction between two ranks is its own list, so a rank's k-th send to a peer pairs with the peer's k-th receive
-  from it, as NCCL's do. A blocking exchange with one peer is still one group (`ncclGroupStart`/`End`; torch's
+  from it, as NCCL's do. A point-to-point call is its two ranks' alone: no other member calls anything for it or learns
+  of it, and its pairing is the two ends' order of their calls toward each other, nothing gathered. A blocking exchange with one peer is still one group (`ncclGroupStart`/`End`; torch's
   `batch_isend_irecv`): two blocking sends before the receives would wait on each other's group. The library does not
   detect unequal counts or different collectives on two ranks: no landed payload is checked, so these are the
   caller's error.
@@ -525,11 +574,12 @@ for, a host-path group's wait on it until a landing or a revoke. The failure is 
 
 and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
 fails the group (nothing resumes it), and a member whose group failed is replaced at its peers by duds, which they
-land and complete with: the failure stays with the member that failed. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
-init) on the map as it is then (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of
-returning if the link topo changed mid function execution"). A communicator keeps the map its init made, so a change
-that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator
-(metal-microbench makes each call's communicators at the call's start). A rank that departed is left out with
+land and complete with: the failure stays with the member that failed. A communicator whose group failed fails its later groups: the caller refreshes it
+(`ncclMeshCommRefresh`, every member at the same point: [Epochs](#epochs)) or makes it again (`ncclCommDestroy`, then
+an init) on the map as it is then (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of
+returning if the link topo changed mid function execution"). A communicator keeps its epoch's map, so a change that
+leaves its links working (a link lost elsewhere, a node that joins) reaches its next refresh, or the next
+communicator. A rank that departed is left out with
 `ncclCommShrink` ([Communicators](#communicators)), and a joining one taken in with `ncclCommGetUniqueId`
 and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding streams of its own as every init does. `ncclCommRevoke` is NCCL's, from any thread and under the communicator's own lock
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and the bytes its groups
