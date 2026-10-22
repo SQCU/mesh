@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""mesh-lint: deductive checks of the bridge, the collective and their clients for waits, syncs, guards, races and
-coined terms (design/lint.md: each rule, the operator's ruling or the literature behind it, and its wrong and right
-forms).  A rule that a pattern decides runs always; one that needs reading a function (--semantic) asks a language model
-about that one function, given the rule cards and the vocabulary (design/lint.md "Vocabulary").
+"""mesh-lint: forms in the bridge, the collective and their clients that design/rubrics.md ranks below another form,
+each printed as the rubric's ranked pair with the operator's words that make it the operator's judgement.  A form a
+pattern finds is reported on every run; --semantic gives a language model the rubric's text and one function at a time.
+A file is ranked by its kind's dimensions only (design/rubrics.md, "Three kinds of source": KINDS below).
 
-  bin/mesh-lint [--semantic] [--strict] [paths...]    findings as path:line: RULE: message [source]
+  bin/mesh-lint [--semantic] [--strict] [paths...]
+    path:line: <dimension> (design/rubrics.md:<line>): <found form> ≺ <higher form>
+        <the operator's words, dated>
 """
 import argparse
 import ast
@@ -21,8 +23,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RDMA = ROOT / 'rdma'
+RUBRIC = ROOT / 'design' / 'rubrics.md'
+RUBRIC_TEXT = RUBRIC.read_text()
+RUBRIC_LINES = RUBRIC_TEXT.split('\n')
+RUBRIC_FLAT = re.sub(r'\s+', ' ', RUBRIC_TEXT)
 
-# design/lint.md "Data path": functions a step's critical path runs through, per file
+# design/rubrics.md "Three kinds of source", its table: the first pattern a file's path matches names its kind
+KINDS = (('C', r'rdma/(nccl[\w.-]*|mesh-collective\.c|mesh-plan\.h|mesh\.metal|mesh_mpi\.py|'
+               r'torch-mesh/torch_mesh/(backend\.py|fused\.py|__init__\.py|_stream\.mm))'),
+         ('D', r'examples/.*|rdma/torch-mesh/.*|rdma/mesh-coreml\.m'),
+         ('M', r'rdma/.*'))
+KIND_NAMES = {'M': 'mesh', 'C': 'collective', 'D': 'data'}
+
+# functions a step's critical path runs through, per file
 DATA_PATH = {
     'rdma/mesh-link.c': r'lane_send|lane_post|link_receive|link_send|stream_turn_one|stream_send|stream_post|'
                         r'stream_receive_turn|walk_\w+|unit_told|holding_kept|port_pass|page_span|row_at|stream_time',
@@ -34,10 +47,10 @@ PER_UNIT = r'lane_send|lane_post|unit_told|link_receive|link_send|stream_send|st
 CLOCK = r'\b(mach_absolute_time|clock_gettime_nsec_np|clock_gettime|CFAbsoluteTimeGetCurrent)\s*\('
 TIMED_WAIT = r'\b(nanosleep|usleep|sleep|os_sync_wait_on_address_with_timeout|dispatch_semaphore_wait|' \
              r'pthread_cond_timedwait)\s*\('
-# rdma/mesh.metal and nccl-mesh-kernels.h STEPS: the landing wait the operator kept (10-21)
-SANCTIONED_WAITS = {'mesh_wait_bounded', 'mesh_wait', 'mesh_remote_wait', 'mesh_step_wait', 'mesh_step_counts',
-                    'mesh_step_await', 'mesh_step_sent'}
-# design/lint.md "Lines": shared words, the one writer each, checked against the cache line (hw.cachelinesize)
+# the library's landing waits (rdma/mesh.metal, nccl-mesh-kernels.h STEPS)
+LANDING_WAITS = {'mesh_wait_bounded', 'mesh_wait', 'mesh_remote_wait', 'mesh_step_wait', 'mesh_step_counts',
+                 'mesh_step_await', 'mesh_step_sent'}
+# shared words and the one writer of each, against the cache line (hw.cachelinesize)
 WRITERS = {
     'mesh_stream': {'owner': 'client', 'sends': 'client', 'lands': 'client', 'ready': 'gpu', 'sent': 'send',
                     'taken[0]': 'send', 'landed': 'receive', 'taken[1]': 'receive', 'posts[0]': 'send',
@@ -45,11 +58,140 @@ WRITERS = {
     'lane_state': {'sent': 'send', 'done': 'send', 'posted': 'receive', 'got': 'receive'},
 }
 
+C4_PAIR = ('the operator\'s pair: lower, "innocent sounding barriers" (2026-10-17); upper, "earlier waitless '
+           'implementatinos which did not need to be made waitful" (2026-10-16)')
+OVERHEAD = ('the operator, 2026-10-20: "if there is 10ns of reducible overhead anywhere in our code we reduce it to '
+            '0ns."')
+TIMING = ('the operator, 2026-10-22: "we don\'t introduce race conditions or use timing anywhere"; "using timing is '
+          'always slower than not using timing"')
+ONE_FORM_D = ('the operator\'s pair: lower, "23 different rmsnorm implementations in random places" (2026-10-14); '
+              'upper, "a header import and oneliner for two sorts of modules" (2026-10-19)')
+ONE_FORM_C = ('the operator\'s pair: lower, "a mandate to write a template 20 to 40 times"; upper, "a header or '
+              'abstract function / higher order function which takes other functions (consumers in a general sense) '
+              'as operands" (2026-10-08)')
+
+# each form found: per kind, (dimension, the rubric text it is ranked at, the found form, the higher form, the words)
+EVIDENCE = {
+    'qp': {'M': ('M3', 'a queue pair moved to RESET or ERR, or destroyed, inside the running process ≺',
+                 'a queue pair moved to RESET or ERR, or destroyed, inside the running process',
+                 'queue pairs made and connected once and released only by the process\'s exit',
+                 'the operator, 2026-10-20: "why do you think you\'re \'allowed\' to do \'teardowns\' in the '
+                 'operation of any code we are discussing?"')},
+    'gate': {'C': ('C4', 'Lower pole: barriers, pauses, syncs, guards',
+                   'a landing entry presented with a word: the transport holds its receives until a reader releases '
+                   'the pages', 'the entry presented without a word, the program guarding the pages it names again in '
+                   'its own source', 'the operator, 2026-10-22: "data procesisng code gets to write their own guards in '
+                   'their own source. if source says to write continuously into ab uffer, the nic must write '
+                   'continuously into that buffer even if this means that dat aprocessing code can race or lose parts '
+                   'of a stream."'),
+             'M': ('M1', 'Upper pole: a transport that behaves like a system call',
+                   'a landing entry presented with a word: the transport holds its receives until a reader releases '
+                   'the pages', 'a transport that writes landings as presented, the program guarding its own pages',
+                   'the operator, 2026-10-22: "data procesisng code gets to write their own guards in their own '
+                   'source. if source says to write continuously into ab uffer, the nic must write continuously into '
+                   'that buffer even if this means that dat aprocessing code can race or lose parts of a stream."')},
+    'residency': {'C': ('C4', 'innocent sounding barriers',
+                        '{}: a dispatch declaring every allocation of a residency set (useResource over '
+                        'allAllocations), its pass ordered against every pass that names any of them',
+                        'a dispatch declaring the buffers its records name', C4_PAIR)},
+    'claim': {'M': ('M4', 'them as overwritable at the moment it is known they have no further consumers',
+                    '{}: a claim by compare-and-swap on a word that takes its value again (`{}` stored back): a stale '
+                    'claimer\'s swap succeeds on a later holder\'s state and releases what that holder still uses '
+                    '(rubric review 2026-10-22, finding 4: mesh_retired_release)',
+                    'rows released at the moment it is known they have no further consumers (a word that never '
+                    'repeats a value, or a bit taken by fetch-and)',
+                    'the operator, 2026-10-19: "marking them as overwritable at the moment it is known they have no '
+                    'further consumers"')},
+    'clock': {'C': ('C5', 'The operator\'s pair: lower, "synchronic temporal logic',
+                    '{}: a clock reading or a *_NS bound deciding a branch within a call',
+                    'within a call, the data or the platform deadline the only thing that ends a wait',
+                    'the operator\'s pair, 2026-10-18: lower, "synchronic temporal logic (e.g. mutating somethin during '
+                    'a call based on a timing estimate or measurement)"; upper, "diachronic temporal logic: allowed, '
+                    'uses known buffer depth, effectively free if you pipeline it"; and ' + TIMING[14:]),
+              'M': ('M8', 'Ranks higher: the form with fewer steps between',
+                    '{}: a clock reading or a *_NS bound deciding a branch on the bridge\'s data path',
+                    'the branch decided by the data', TIMING)},
+    'sleep': {'C': ('C4', 'poll-then-park ≺ none', '{}: a sleep or a timed wait on the call\'s data path',
+                    'the wait only on landed data', C4_PAIR),
+              'M': ('M8', 'host groups that poll for 1 ms and then park ≺ no parking',
+                    '{}: a sleep or a timed wait on the bridge\'s data path', 'no parking',
+                    'the operator, 2026-10-18: the queues "spinqueried as FAST AS HARDWARE THREADS ALLOW on both sides '
+                    'of each bridge"')},
+    'seqcst': {'M': ('M8', '10ns of reducible overhead',
+                     '{}: a sequentially consistent atomic on the per-unit path (a store then a load: the core waits '
+                     'for the store to be seen; bridge audit 2026-10-22, item 4)', 'release and acquire', OVERHEAD)},
+    'page': {'M': ('M8', '10ns of reducible overhead',
+                   '{}: a unit\'s length the whole page (TN3205 matches frames, 4 KiB; bridge audit 2026-10-22, '
+                   'item 1)', 'a unit of the plan\'s bytes', OVERHEAD)},
+    'line': {'M': ('M8', '10ns of reducible overhead',
+                   'struct {}: `{}` ({}) and `{}` ({}) on one {}-byte line, each writer\'s store taking the line from '
+                   'the other (bridge audit 2026-10-22, item 3)', 'one writer a line', OVERHEAD)},
+    'spin': {'C': ('C4', 'Lower pole: barriers, pauses, syncs', '{}: a spin inside a kernel other than the landing wait',
+                   'the landing wait alone', 'the operator, 2026-10-21: "keep only the landing wait, one acquire '
+                   'fence, a poll bound for the node"')},
+    'error': {'C': ('C6', 'rejection filters ≺ none', '{}: an error word or a patience bound inside a kernel', 'none',
+                    'the operator, 2026-10-20: "you are afaict lapsing into defensive programming and adding positive '
+                    'features which induce waits, stalls, guards, hangs, and have no data flow or specification '
+                    'articulating why these states must exist or how they will with 100% certainty exit a guarding or '
+                    'waiting state."; 2026-10-22: "error states can be made unreachable and proven to be unreachable"'),
+              'D': ('D3', 'Lower pole: escape hatches', '{}: an error word or a patience bound inside a kernel, a path '
+                    'the kernel chooses on its own', 'control flow that differs only where a configuration says so',
+                    'the operator, 2026-10-17: "why should control flow ever be different for any reason but \'a config '
+                    'object asserting a different control flow was submitted\'?"; 2026-10-22: "error states can be '
+                    'made unreachable and proven to be unreachable"')},
+    'store': {k: (d, a, '{}: a plain store (`simdgroup_store`) into device memory in a publishing kernel, a second form '
+                  'of the header\'s system-coherent write (the NIC reads a plain store only once its command buffer has '
+                  'ended: metal-microbench docs/measurement.md, 2026-09-29)', 'the header\'s `mesh_step_write`', w)
+              for k, d, a, w in (('D', 'D4', '23 different rmsnorm', ONE_FORM_D),
+                                 ('C', 'C9', 'a mandate to write a template 20 to 40 times', ONE_FORM_C))},
+    'land': {k: (d, a, '{}: landed bytes read by the kernel\'s own address arithmetic, a second form of the header\'s '
+                 'system-coherent read', 'the header\'s `mesh_step_read`', w)
+             for k, d, a, w in (('D', 'D4', '23 different rmsnorm', ONE_FORM_D),
+                                ('C', 'C9', 'a mandate to write a template 20 to 40 times', ONE_FORM_C))},
+    'operand': {'D': ('D10', 'justifying something running slower',
+                      '{}: a product\'s k-loop reading landed bytes system-coherent, once per column tile (GPU audit '
+                      '2026-10-22: 30-45 us of an 89 us LSTM tick)', 'the operand staged once into threadgroup memory '
+                      'and read there by every column tile (examples/lstm.metal Segments::fill; CUTLASS; Volkov and '
+                      'Demmel, SC 2008)', 'the operator\'s pair: lower, "justifying something running slower than it '
+                      'should"; upper, "no part of any model or eval we study may ever be slow" (2026-10-19)')},
+    'sync': {'C': ('C4', 'Lower pole: barriers, pauses, syncs', '`{}` on the step loop\'s path: the host waits for the '
+                   'GPU', 'nothing waited on between a submission\'s crossings',
+                   'the operator, 2026-10-22: "algorithmically unjustified halts, waits"; ' + C4_PAIR)},
+    'replan': {'D': ('D8', 'recomputing what a cache would hold', 'a crossing planned again every step (the library '
+                     'plans, places and records it each call; host audit 2026-10-22, A.1)', 'the crossing presented '
+                     'once and started each step, as MPI_Allreduce_init and MPI_Start',
+                     'the operator, 2026-10-16: "caching and memoization are required"')},
+    'pages': {'D': ('D7', 'Ranks higher: the form that knows less about links',
+                    'data code reading a collective backend\'s page facts (page size, page rounding)',
+                    'the buffer the collective\'s allocation gives',
+                    'the operator, 2026-10-22: "data processing code may never discover these abstracted features"; '
+                    '"information hiding from data processing code authors on some level must exist for performance '
+                    'reasons and for decoupling backend complexity from linear algebraic function complexity rather '
+                    'than for \'security\' or \'memory safety\'"')},
+}
+
 findings = []
 
 
-def find(path, line, rule, message, source):
-    findings.append((str(path), line, rule, message, source))
+def kind_of(path):
+    try:
+        rel = Path(path).resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return None
+    return next((k for k, pattern in KINDS if re.fullmatch(pattern, rel)), None)
+
+
+def rubric_line(dimension, anchor):
+    heading = next((i for i, s in enumerate(RUBRIC_LINES) if s.startswith(f'**{dimension}.')), 0)
+    return next((i + 1 for i in range(heading, len(RUBRIC_LINES)) if anchor in RUBRIC_LINES[i]), heading + 1)
+
+
+def find(path, line, form, *details):
+    pair = EVIDENCE[form].get(kind_of(path))
+    if pair:
+        dimension, anchor, found, higher, words = pair
+        findings.append((str(path), line, dimension, rubric_line(dimension, anchor), found.format(*details), higher,
+                         words))
 
 
 def strip_c(text):
@@ -118,38 +260,35 @@ def top_level(text):
     return fields + [text[start:].strip()]
 
 
+def conditions(ln):
+    """The text of each if, while or for condition that opens on a line."""
+    out = []
+    for m in re.finditer(r'\b(?:if|while|for)\s*\(', ln):
+        depth, j = 1, m.end()
+        while j < len(ln) and depth:
+            depth += {'(': 1, ')': -1}.get(ln[j], 0)
+            j += 1
+        out.append(ln[m.end():j])
+    return ' '.join(out)
+
+
 def check_c(path, text):
     clean = strip_c(text)
     rel = path.relative_to(ROOT).as_posix()
     path_re = DATA_PATH.get(rel)
-    for m in re.finditer(r'\b(?:_Alignas|alignas)\s*\((?:[^()]|\([^()]*\))*\)', clean):
-        end = clean.find(';', m.end())
-        declaration = clean[m.end():end]
-        if end > 0 and '{' not in declaration and ',' in re.sub(r'\([^()]*\)|\[[^\]]*\]', '', declaration):
-            find(path, line_of(clean, m.start()), 'L2-ALIGNAS', 'an alignment specifier on a declaration of several '
-                 'members aligns each of them (C11 6.7.5), so words meant to share a line start lines of their own: '
-                 'one declarator an aligned declaration', 'bridge audit 2026-10-22, item 3 (struct lane_state)')
     for m in re.finditer(r'mesh_stream_present\s*\([^;]*?,\s*1\s*,\s*\(struct mesh_entry\)\{([^;]*?)\}\s*\)', clean):
         fields = top_level(m.group(1))
         if len(fields) > 2 and fields[2] != '0':
-            find(path, line_of(clean, m.start()), 'G1-GATE', 'a landing entry presented with a word: the transport would '
-                 'hold its receives until a reader released the pages; a program guards the pages it names again in its '
-                 'own source', 'operator 2026-10-22: "data procesisng code gets to write their own guards in their own source"')
+            find(path, line_of(clean, m.start()), 'gate')
     for name, _, body, at in functions(clean):
         if 'allAllocations' in body and 'useResource' in body:
-            find(path, line_of(clean, at + body.index('allAllocations')), 'R1-USE', f'{name}: a dispatch declares every '
-                 'allocation of a residency set, so its pass is ordered against every pass that names any of them: declare '
-                 'the buffers its records name', 'GPU audit 2026-10-22, item 12')
+            find(path, line_of(clean, at + body.index('allAllocations')), 'residency', name)
         for m in re.finditer(r'atomic_compare_exchange_\w+\(\s*&\s*([\w\[\]\.\->]+?)\s*,\s*&\s*(\w+)\s*,', body):
             word, expected = m.group(1), m.group(2)
             if re.search(r'atomic_store\w*\(\s*&\s*' + re.escape(word) + r'\s*,\s*' + re.escape(expected) + r'\s*[,)]', body[m.end():]):
-                find(path, line_of(clean, at + m.start()), 'A1-ABA', f'{name}: a claim by compare-and-swap on `{word}`, '
-                     f'then `{expected}` stored back: the word takes that value again, so a stale claimer\'s swap succeeds '
-                     'on a later holder\'s state; claim a word that never repeats a value (a generation), or a bit by '
-                     'fetch-and', 'rubric review 2026-10-22, finding 4 (mesh_retired_release)')
+                find(path, line_of(clean, at + m.start()), 'claim', name, expected)
     for m in re.finditer(r'IBV_QPS_RESET|IBV_QPS_ERR|ibv_destroy_qp|\bdestroy_qp\b', clean):
-        find(path, line_of(clean, m.start()), 'M3-QP', 'a queue pair moved to RESET or ERR, or destroyed, inside the '
-             'running process', 'design/rubrics.md M3; operator 2026-10-22: the documented flush only, unused')
+        find(path, line_of(clean, m.start()), 'qp')
     for name, _, body, at in functions(clean):
         on_path = path_re and re.fullmatch(path_re, name)
         per_unit = re.fullmatch(PER_UNIT, name)
@@ -158,32 +297,21 @@ def check_c(path, text):
         lines = body.split('\n')
         deadlines = set()
         for k, ln in enumerate(lines):
-            if re.search(r'meshlint:\s*measure', text.split('\n')[line_of(clean, at) + k - 1]):
-                continue
             if re.search(CLOCK, ln) or re.search(r'\b\w+_NS\b', ln):
                 assigned = re.match(r'\s*(?:const\s+)?(?:uint64_t|uint32_t|int64_t|double|auto)?\s*(\w+)\s*=', ln)
                 if re.search(r'[^<>\-]([<>]=?)[^<>]', ln) and not re.search(r'#include|->', ln.split('?')[0] if '?' in ln else ''):
-                    find(path, line_of(clean, at) + k, 'T1-CLOCK', f'{name}: a clock or *_NS bound in a condition on the '
-                         'data path', 'operator 2026-10-22: "we don\'t introduce race conditions or use timing anywhere"')
+                    find(path, line_of(clean, at) + k, 'clock', name)
                 elif assigned:
                     deadlines.add(assigned.group(1))
             for d in deadlines:
-                if re.search(rf'\b(if|while|for)\b.*\b{d}\b', ln):
-                    find(path, line_of(clean, at) + k, 'T1-CLOCK', f'{name}: `{d}`, a clock reading, decides a branch',
-                         'operator 2026-10-22: no timing in a transaction')
+                if re.search(rf'\b{d}\b', conditions(ln)):
+                    find(path, line_of(clean, at) + k, 'clock', f'{name}, `{d}`')
             if re.search(TIMED_WAIT, ln):
-                find(path, line_of(clean, at) + k, 'T2-SLEEP', f'{name}: a sleep or a timed wait on the data path',
-                     'operator 2026-10-22: "using timing is always slower than not using timing"')
+                find(path, line_of(clean, at) + k, 'sleep', name)
             if per_unit and re.search(r'memory_order_seq_cst|__ATOMIC_SEQ_CST', ln):
-                find(path, line_of(clean, at) + k, 'S1-SEQCST', f'{name}: a sequentially consistent atomic on the per-unit '
-                     'path (a store then a load: the core waits for the store to be seen)', 'bridge audit 2026-10-22, item 4')
+                find(path, line_of(clean, at) + k, 'seqcst', name)
             if name in ('lane_send', 'lane_post', 'page_span') and 'page_bytes()' in ln:
-                find(path, line_of(clean, at) + k, 'U1-PAGE', f'{name}: a unit\'s length is the whole page, not the '
-                     'plan\'s bytes (TN3205 matches frames, 4 KiB)', 'bridge audit 2026-10-22, item 1')
-
-
-def metal_functions(clean):
-    return list(functions(clean))
+                find(path, line_of(clean, at) + k, 'page', name)
 
 
 LANDED = r'\b(?:mesh_step_read|mesh_payload)\b'
@@ -191,7 +319,7 @@ LANDED = r'\b(?:mesh_step_read|mesh_payload)\b'
 
 def readers_of(paths):
     """Names of the Metal functions that read landed bytes (mesh_step_read, mesh_payload), over every .metal file of the
-    run: a product in one file reaches a loader in another by name (design/lint.md K5-OPERAND)."""
+    run: a product in one file reaches a loader in another by name."""
     return {name for p in paths if p.suffix == '.metal'
             for name, _, body, _ in functions(strip_c(p.read_text(errors='replace'))) if re.search(LANDED, body)}
 
@@ -201,42 +329,23 @@ def check_metal(path, text, readers=frozenset()):
     publishing = 'mesh_step_release' in clean
     threadgroup_names = set(re.findall(r'threadgroup\s+[\w:<>\s]+?\b(\w+)\s*\[', clean))
     reads = re.compile(r'\b(?:mesh_step_read|mesh_payload' + ''.join('|' + re.escape(r) for r in sorted(readers)) + r')\s*[<(]')
-    for name, _, body, at in metal_functions(clean):
+    for name, _, body, at in functions(clean):
         lines = body.split('\n')
         if 'simdgroup_multiply_accumulate' in body:
             for k, ln in enumerate(lines):
                 if reads.search(ln):
-                    find(path, line_of(clean, at) + k, 'K5-OPERAND', f'{name}: a product\'s k-loop reads landed bytes '
-                         'system-coherent, once per column tile: stage the operand once into threadgroup memory',
-                         'GPU audit 2026-10-22 (30-45 us of an 89 us LSTM tick); CUTLASS; Volkov and Demmel 2008')
-        for k, ln in enumerate(lines):
-            if 'mesh_last_arrival' not in ln:
-                continue
-            before = next((b for b in reversed(lines[:k]) if b.strip()), '')
-            if 'threadgroup_barrier' in before:
-                find(path, line_of(clean, at) + k - 1, 'K6-RELEASE', f'{name}: a barrier before mesh_last_arrival, which '
-                     'fences and barriers itself', 'GPU audit 2026-10-22: the release path\'s order, no more')
-            if 'mesh_step_release' in '\n'.join(lines[k:]):
-                find(path, line_of(clean, at) + k, 'K6-RELEASE', f'{name}: mesh_last_arrival\'s acquire fence, then '
-                     'mesh_step_release\'s seq_cst fence: two system fences back to back; count the arrival after the '
-                     'worker\'s fence and let the release\'s one fence order it', 'GPU audit 2026-10-22: the release '
-                     'path\'s order, no more')
+                    find(path, line_of(clean, at) + k, 'operand', name)
         spin_at = next((i for i, ln in enumerate(lines) if re.search(r'\bfor\s*\([^;]*;\s*;|\bwhile\s*\(', ln)), None)
-        if spin_at is not None and re.search(r'atomic_load_explicit|coherent\(system\)', body) and name not in SANCTIONED_WAITS:
-            k = spin_at
-            find(path, line_of(clean, at) + k, 'K1-SPIN', f'{name}: a spin inside a kernel other than the landing wait',
-                 'operator 2026-10-21: "keep only the landing wait, one acquire fence, a poll bound for the node"')
+        if spin_at is not None and re.search(r'atomic_load_explicit|coherent\(system\)', body) and name not in LANDING_WAITS:
+            find(path, line_of(clean, at) + spin_at, 'spin', name)
         for k, ln in enumerate(lines):
             if re.search(r'\bPATIENCE\b|atomic_fetch_or_explicit\(\s*err\b|\b(stop|err)\s*,\s*1u\b', ln):
-                find(path, line_of(clean, at) + k, 'K2-ERR', f'{name}: an error word or patience bound inside a kernel',
-                     'operator 2026-10-22: error states are made unreachable, not handled in the callgraph')
+                find(path, line_of(clean, at) + k, 'error', name)
             m = re.search(r'simdgroup_store\(\s*\w+\s*,\s*(\w+)', ln)
             if publishing and m and m.group(1) not in threadgroup_names:
-                find(path, line_of(clean, at) + k, 'K3-STORE', f'{name}: a plain store to device memory in a publishing '
-                     'kernel (the NIC reads only system-coherent stores)', 'docs/measurement.md 2026-09-29 (metal-microbench)')
+                find(path, line_of(clean, at) + k, 'store', name)
             if re.search(r'\.d\s*\+', ln) and 'mesh_step_read' not in ln:
-                find(path, line_of(clean, at) + k, 'K4-LAND', f'{name}: a landed buffer read without mesh_step_read',
-                     'nccl-mesh-kernels.h STEPS: landed bytes are read system-coherent')
+                find(path, line_of(clean, at) + k, 'land', name)
 
 
 def check_python(path, text):
@@ -268,37 +377,22 @@ def check_python(path, text):
                 yield from syncs(defs[name], seen)
 
     for loop in [n for n in ast.walk(tree) if isinstance(n, (ast.For, ast.While))]:
-        if not is_step_loop(loop):
-            continue
-        for c in calls(loop):
-            if callee(c) in ('perf_counter', 'monotonic', 'time') and not re.search(r'meshlint:\s*measure', text.split('\n')[c.lineno - 1]):
-                find(path, c.lineno, 'P5-CLOCK', 'a clock read in the step loop', 'operator 2026-10-22: no timing')
-        for c, name in syncs(loop, set()):
-            if re.search(r'meshlint:\s*guard', text.split('\n')[c.lineno - 1]):
-                continue
-            find(path, c.lineno, 'P1-SYNC', f'`{name}` on the step loop\'s path: the host waits for the GPU',
-                 'operator 2026-10-22: "algorithmically unjustified halts, waits"')
+        if is_step_loop(loop):
+            for c, name in syncs(loop, set()):
+                find(path, c.lineno, 'sync', name)
     for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in ('__call__', 'step', 'tick')]:
         for c in calls(fn):
             if callee(c) == 'exchange':
-                find(path, c.lineno, 'P3-REPLAN', 'a crossing planned again every step (the library plans, places and '
-                     'records it each call): present it once and start it each step, as MPI_Allreduce_init',
-                     'host audit 2026-10-22, A.1; design/extents-and-liveness.md a')
+                find(path, c.lineno, 'replan')
     if '/examples/' in str(path) or path.name in ('chain.py', 'lstm.py'):
         for node in ast.walk(tree):
-            hit = (isinstance(node, ast.Attribute) and node.attr in ('getpagesize', 'PAGE', 'paged')) or \
-                  (isinstance(node, ast.Name) and node.id in ('PAGE', 'paged'))
-            if hit:
-                find(path, node.lineno, 'D1-PAGE', 'data code reads a collective backend\'s page facts (page size, page '
-                     'rounding): only collective code may, so it can choose placement and movement for performance and '
-                     'keep backend complexity out of the linear algebra; ask the collective for the buffer',
-                     'operator 2026-10-22: "data processing code may never discover these abstracted features"; '
-                     '"for performance reasons and for decoupling backend complexity from linear algebraic function '
-                     'complexity rather than for \'security\'"')
+            if (isinstance(node, ast.Attribute) and node.attr in ('getpagesize', 'PAGE', 'paged')) or \
+                    (isinstance(node, ast.Name) and node.id in ('PAGE', 'paged')):
+                find(path, node.lineno, 'pages')
 
 
 def check_lines():
-    """Shared words with different writers on one cache line (design/lint.md "Lines"), from a compiled offsetof probe."""
+    """Shared words with different writers on one cache line, from a compiled offsetof probe."""
     line = int(subprocess.run(['sysctl', '-n', 'hw.cachelinesize'], capture_output=True, text=True).stdout or 128)
     probe = ['#include <stdio.h>', '#include <stddef.h>', '#include "mesh-bridge.h"', 'int main(void){']
     for struct, fields in WRITERS.items():
@@ -310,7 +404,7 @@ def check_lines():
         src.write_text('\n'.join(probe))
         made = subprocess.run(['cc', '-I', str(RDMA), '-o', str(exe), str(src)], capture_output=True, text=True)
         if made.returncode:
-            find(RDMA / 'mesh-bridge.h', 1, 'L1-LINE', 'the offsetof probe did not compile: ' + made.stderr.strip()[:200], 'bin/mesh-lint')
+            print('mesh-lint: the offsetof probe did not compile: ' + made.stderr.strip()[:200], file=sys.stderr)
             return
         out = subprocess.run([str(exe)], capture_output=True, text=True).stdout.split('\n')
     at = {}
@@ -324,59 +418,79 @@ def check_lines():
         for i, a in enumerate(names):
             for b in names[i + 1:]:
                 if fields[a] != fields[b] and at[(struct, a)] // line == at[(struct, b)] // line:
-                    find(header, number, 'L1-LINE', f'struct {struct}: `{a}` ({fields[a]}) and `{b}` ({fields[b]}) share a '
-                         f'{line}-byte line', 'bridge audit 2026-10-22, item 3: one writer a line')
+                    find(header, number, 'line', struct, a, fields[a], b, fields[b], line)
 
 
-CARDS = (ROOT / 'design' / 'lint.md')
+def cited(dimension, words):
+    """The rubric line of the first of the operator's words a finding quotes; 0 where any quoted words are not the
+    rubric's."""
+    quotes = [re.sub(r'\s+', ' ', q).strip() for q in re.findall(r'"([^"]{8,})"', words)]
+    if not quotes or any(q not in RUBRIC_FLAT for q in quotes):
+        return 0
+    head = ' '.join(quotes[0].split()[:4])
+    return next((i + 1 for i, s in enumerate(RUBRIC_LINES) if head in s), rubric_line(dimension, '\0'))
 
 
 def semantic(units):
-    """Each unit read by a model against the rule cards and the vocabulary: findings of rules a pattern cannot decide."""
+    """Each unit read by a model against design/rubrics.md, by its file's kind's dimensions."""
     claude = shutil.which('claude')
     if not claude:
-        find(ROOT / 'bin' / 'mesh-lint', 1, 'SEM', 'no `claude` command: the semantic rules did not run', 'bin/mesh-lint')
+        print('mesh-lint: no `claude` command: --semantic did not run', file=sys.stderr)
         return
-    cards = CARDS.read_text()
     cache_path = RDMA / '.build' / 'mesh-lint-cache.json'
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     schema = json.dumps({'type': 'object', 'properties': {'findings': {'type': 'array', 'items': {
-        'type': 'object', 'properties': {'line': {'type': 'integer'}, 'rule': {'type': 'string'},
-                                         'message': {'type': 'string'}}, 'required': ['line', 'rule', 'message']}}},
-        'required': ['findings']})
+        'type': 'object', 'properties': {'line': {'type': 'integer'}, 'dimension': {'type': 'string'},
+                                         'found': {'type': 'string'}, 'higher': {'type': 'string'},
+                                         'words': {'type': 'string'}},
+        'required': ['line', 'dimension', 'found', 'higher', 'words']}}}, 'required': ['findings']})
+
+    def key(unit):
+        path, first, name, code = unit
+        return hashlib.sha256((RUBRIC_TEXT + str(kind_of(path)) + code).encode()).hexdigest()
 
     def ask(unit):
         path, first, name, code = unit
-        key = hashlib.sha256((cards + code).encode()).hexdigest()
-        if key in cache:
-            return unit, cache[key]
+        if key(unit) in cache:
+            return unit, cache[key(unit)]
+        kind = kind_of(path)
         numbered = '\n'.join(f'{first + i}: {ln}' for i, ln in enumerate(code.split('\n')))
-        prompt = (f'{cards}\n\nApply only the rules marked "semantic" above to this one function, `{name}` from {path}. '
-                  f'Each line is prefixed with its line number in the file; report that number. Report only deductive '
-                  f'violations you can point to by line; report nothing you are unsure of. `rule` is the rule\'s id '
-                  f'without the SEM- prefix.\n\n```\n{numbered}\n```')
+        prompt = (f'{RUBRIC_TEXT}\n\nAbove is design/rubrics.md. The function `{name}` below, from '
+                  f'{os.path.relpath(path, ROOT)}, is {KIND_NAMES[kind]} code ({kind}); each line is prefixed with its '
+                  f'line number in the file. Rank its forms by the {kind} dimensions and the Quantities only. Report a '
+                  f'line only where a dimension ranks the form written there below another form and the rubric quotes '
+                  f'the operator\'s words that make that pair the operator\'s judgement. `line` is the line number, '
+                  f'`dimension` the dimension\'s id (such as {kind}4), `found` the form written at that line, `higher` '
+                  f'the form the dimension ranks above it, and `words` the operator\'s words, copied verbatim from the '
+                  f'rubric in double quotes, with their date. Report nothing the rubric does not rank, and nothing you '
+                  f'cannot point to by line.\n\n```\n{numbered}\n```')
         run = subprocess.run([claude, '-p', '--model', 'haiku', '--output-format', 'json', '--json-schema', schema, prompt],
                              capture_output=True, text=True, timeout=600, stdin=subprocess.DEVNULL)
         try:
             out = json.loads(run.stdout)
-            result = out.get('structured_output') or json.loads(out.get('result') or '{}')
+            return unit, out.get('structured_output') or json.loads(out.get('result') or '{}')
         except (ValueError, TypeError):
-            result = {'findings': [{'line': first, 'rule': 'UNREAD', 'message': 'the model call failed: ' + run.stderr[:200]}]}
-        return unit, result
+            print(f'mesh-lint: {path}:{first}: the model call failed: ' + run.stderr[:200], file=sys.stderr)
+            return unit, None
 
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
         for unit, result in pool.map(ask, units):
+            if result is None:
+                continue
             path, first, name, code = unit
-            cache[hashlib.sha256((cards + code).encode()).hexdigest()] = result
+            cache[key(unit)] = result
             for f in result.get('findings', []):
-                find(path, int(f['line']), 'SEM-' + f['rule'], f'{name}: ' + f['message'], 'design/lint.md (semantic)')
+                at = cited(f['dimension'], f['words'])
+                if at:
+                    findings.append((str(path), int(f['line']), f['dimension'], at, f'{name}: ' + f['found'],
+                                     f['higher'], f['words']))
     cache_path.parent.mkdir(exist_ok=True)
     cache_path.write_text(json.dumps(cache))
 
 
 def units_of(paths):
     for path in paths:
-        if path.suffix in ('.c', '.m', '.mm', '.metal', '.h'):
+        if path.suffix in ('.c', '.m', '.mm', '.metal', '.h') and kind_of(path):
             text = path.read_text(errors='replace')
             clean = strip_c(text)
             rel = path.relative_to(ROOT).as_posix()
@@ -418,9 +532,9 @@ def main():
         check_lines()
     if args.semantic:
         semantic(list(units_of(paths)))
-    for path, line, rule, message, source in sorted(set(findings)):
-        rel = os.path.relpath(path, Path.cwd())
-        print(f'{rel}:{line}: {rule}: {message} [{source}]')
+    for path, line, dimension, at, found, higher, words in sorted(set(findings)):
+        print(f'{os.path.relpath(path, Path.cwd())}:{line}: {dimension} (design/rubrics.md:{at}): {found} ≺ {higher}')
+        print(f'    {words}')
     print(f'mesh-lint: {len(set(findings))} findings', file=sys.stderr)
     sys.exit(1 if args.strict and findings else 0)
 

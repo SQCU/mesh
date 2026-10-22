@@ -95,7 +95,7 @@ METAL = xcrun metal -std=metal4.0 -fmetal-math-mode=safe -mmacosx-version-min=26
 XCODE = DEVELOPER_DIR=$(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer))) \
   SDKROOT=macosx
 VENDOR = ../vendor
-# design/lint.md: the rules a review found, kept as checks
+# bin/mesh-lint: forms design/rubrics.md ranks below another, as ranked pairs with the operator's words
 lint:
 	@../bin/mesh-lint
 

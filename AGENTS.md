@@ -1,24 +1,37 @@
-# Contract for anyone — human or agent — changing this repo
+# AGENTS.md: the operator's words for this repo
 
-Read `THREAT-MODEL.md` first. This file is the operational rule that follows from it.
+`THREAT-MODEL.md` holds the operator's words on access, verbatim (2026-08-27). Code is ranked by `design/rubrics.md`.
+The operator, 2026-10-22: "rubric supersedes rules. rubric lines addressed this topic. attempts to write rules must now
+be compeltely removed. no more rules anywhere in the documentation, memoryfiles, anywhere. anything not expressible in
+the rubric's constrained dialect is not evidence, is not a rule, is not justification, and does not reflect a sanctioned
+action supported by the user or by literature."
 
-**Recovery is critical priority.** The transport, how it fails and how it recovers: `design/transport.md`.
+## Recovery
 
-## The hardware and the discipline it requires (read first)
+The operator, 2026-10-06, of reconnection and resumption: "lets split out reconnection and resumption logic into a
+completely different module which has never been fully defined in terms of the rubric of all requirements and all
+mandates. there are many different kinds of network problems which can happen in differnt link topologies, some which
+are not testable in the live sense until certain other real life conditions come to pass; we should treat this as a
+critical level priority which is unfinished, unsettled, improperly reviewed, but nevertheless is allowed to operate
+unchanged in the interim"; 2026-10-14: "connection recovery on spotty hardware (rdma over thunderbolt is NOT
+trustworthy at the physical substrate level) is required, rather than optional". The transport, how it fails and how it
+recovers: `design/transport.md`.
 
-The operator, 2026-10-22; each point explained, with its measurements, in `design/hardware-and-discipline.md`:
-1. The hardware is unusual: not like arm64 CPUs or older Apple silicon. It has one cache level fewer than sm90/sm100,
-   very low FLOPs and bandwidth against a large memory, and one memory shared by CPU, GPU and the RDMA engine.
-2. DMA is fundamental. Useful collectives from weak silicon need exceptional practice: zero copy, movement compiled from
-   declared extents, completions as the only signal.
-3. Weak silicon is programmed at the level of a streaming multiprocessor, not through abstractions wrapping whole GPUs
-   or nodes. Collective ops and kernels write their own guards.
-4. We economize on different trade-offs from NCCL: a more constrained, still universally expressive memory model (the
-   page table) for strictly fewer waits, copies and protocol dependency depth. This is baseline performance, not a
-   nice-to-have.
-5. Bridges and collectives never prevent what might be a data bug under some semantics of data. A client may be a
-   real-time guitar pedal or a deferred cron job. Programmers write their own syncs and guards, or get the fastest
-   results possible.
+## The hardware
+
+The operator, 2026-10-22; the measurements, literature and mechanisms behind each are in
+`design/hardware-and-discipline.md`:
+1. "the hardware is weird and not like arm64 cpus or older apple silicon."
+2. "dma is fundamental and requires exceptional programming practices to make useful collectives from weak silicon."
+3. "weak silicon is programmed at a similar level of abstraction to streaming multiprocessors, not abstractions
+   attempting to wrap entire gpus or nodes."
+4. "we economize on different tradeoffs from nccl, and use a more constrained (but still universally expressive and easy
+   to use) memory model in exchange for strictly fewer waits, copies, and protocol dependency relation depths. this is
+   not 'nice-to-have' but is needed for baseline performance."
+5. "bridges and collectives are expressive enough to allow data corruption wrt a data producing or consuming program. we
+   never do anything to prevent what might be a data bug for some semantics of data. data processing lcients might be a
+   guitar pedal with a realtime guarantee or they might be a deferred data processing cron job. programmers have to
+   write their own syncs and guards or they get the fastest resutls possible."
 
 ## Contiguous and non-contiguous tensors (final)
 
@@ -36,214 +49,118 @@ layout is. Contiguity is made only at the one consumer that requires it, in the 
 SPECIFICATION.md, the operator 2026-09-14: "copy pages into a literal contiguous span and expose views to that
 contiguous view if an allocator or user says 'this one has to be contiguous'").
 
-## The contract
+## Access
 
-**Accessibility is required. Inaccessibility is contractually forbidden.**
+The operator (THREAT-MODEL.md, 2026-08-27):
 
-No configuration, script, daemon, or operation in this repo may demote the
-reachability, accessibility, or workload capacity of a node, or of an edge between
-nodes. Not temporarily, not conditionally, not as a side effect, and not for a
-reason that sounds locally sensible.
+> rejection filtering and defensive programming are broadly forbidden by our security model. accessibility is required;
+> inaccessibility is *contractually forbidden*. no configuration or operation of any software in our mesh repo can
+> demote the reachability, accessibility, and workload of a node or edge between nodes
 
-A node that is powered but not reachable, or reachable but not working, is the
-failure this fleet exists to prevent. Anything that causes that state is an outage
-regardless of intent.
+> the most important class of compromise is the false negative: the computer should be on and receiving work and doing
+> work, but isn't, for any reason, no matter how sensible the 'reason' might sound
 
-## Rejection filtering and defensive programming are forbidden
+> are you inventing fictional reasons for machines to become solipsistic and inaccessible? this is an attack surface and
+> must be removed categorically as it violates our security model.
 
-Do not write code that declines to act. Specifically banned:
+Rejection filters in collective and data code, design/rubrics.md C6: rejection filters ≺ none (2026-10-20: "count every
+rejection filter everywhere in client and data processing code. then delete absolutely all of them."). The operator,
+2026-10-21: "rejection filter removal. categorical. all of them without sanction in rubric".
 
-- **Refusing to run.** No exit because a machine is "the wrong kind", because a
-  setting looks unusual, or because the author imagined a scenario in which acting
-  would be unwise. If an operator asks a node for a capability, the node provides it.
-- **Withholding a capability by class.** No feature may be gated on node type,
-  location, network, or hardware. Every node gets every accessibility feature.
-- **Guards that protect confidentiality at the cost of availability.** This fleet
-  does not make that trade. A machine someone has physically taken is answered by
-  replacing it, never by making it harder to reach or harder to boot.
-- **Silent skips.** A branch that quietly does less is worse than one that fails
-  loudly, because it produces a node that looks provisioned and is not.
+facb7cf9 (2026-08-27) deleted the `appliance` and `portable` node profiles, which withheld screen sharing, the firewall
+posture and the power policy from a class of machine; no requirement stood behind them.
 
-A reason a node should not get something is a bug in the reasoning, not a
-safety feature.
+`enable-autologin.sh` checks an auto-login password with `dscl -authonly` before it writes `/etc/kcpassword` (facb7cf9).
+A wrong password written there leaves a node that boots to a login it cannot pass. No operator quote stands behind the
+check.
 
-## No node types
+## Version control
 
-There is one kind of node. Every machine on the fabric gets the same power policy,
-the same firewall posture, the same remote-access surface, the same auto-login
-availability, and the same beacon.
+The operator (THREAT-MODEL.md, 2026-08-27):
 
-A configuration or "type" that leaves a machine deliberately less reachable is
-itself the forbidden thing, because it demotes a machine that would otherwise be
-accessible. This is not a matter of degree — such a type is forbidden in all
-situations, including ones where it seems locally reasonable.
+> index only these two choices for selection of version controlled repos in code or configuration: 1:`main` 2:`{any
+> named branch}` [...] you can *never* index by commit *ever* unless you register that commit as a branch. once you do,
+> code which indexes against version control must *always* use the most up to date commit on whatever branch is chosen.
 
-An earlier revision introduced `appliance` and `portable` profiles. Nothing
-required them; they were invented, and their only function was to justify
-withholding screen sharing, the firewall posture, and the power policy from a class
-of machine. Removing them made the codebase smaller, flatter, and easier to audit.
-That is the expected result of deleting a rejection filter, and it is the reason to
-look for the next one.
+> you may *never* induce a paradox of the unpatchables *anywhere* in *any* code
 
-## A check before an irreversible write
+`bootstrap.sh` fetches `$MESH_REPO` at `$MESH_BRANCH` (`main` where unset). A node pinned at a commit would fetch its
+bootstrap at that commit too, so no rerun of `install.sh` would bring it the change that unpins it.
 
-This section comes from commit facb7cf9 (2026-08-27). No operator quote stands behind it, and it used to be titled
-"The one guard that is allowed", which no operator said. It describes one script: `enable-autologin.sh` checks an
-auto-login password with `dscl -authonly` before it writes `/etc/kcpassword`. A wrong password written there leaves a
-node that boots to a login it cannot pass.
+## Node identity and names
 
-A check whose only effect is to withhold is a rejection filter, and those go (the operator, 2026-10-21: "rejection
-filter removal. categorical. all of them without sanction in rubric"). The rubric (design/rubrics.md) is where a check
-is sanctioned; this file sanctions none.
+The operator, 2026-10-21: "from this point onwards, we never rely on something like a localhostname as a name or
+identifier for something which we are programming. localhostnames are apparently a legacy thing, can be named
+automatically, collide, etc. undignifed, and we almost certainly do not need them for anything algorithmic", and "we
+should be able to use any kind of virtualization of 'names' such that we never rely on anything like, again, that
+localhostname thing, which makes no promises of selectivity or unique identifiability or anything of the sort".
 
-## Never index version control by commit
+A node's identity is its host UUID (`IOPlatformUUID`, `gethostuuid()`). The bridge's node id, the fabric ULA
+(`mesh-router-init.sh`) and node-info's `node_id` are all drawn from it; the hardware serial number is the same
+machine's other fixed identifier. The name table is `etc/mesh-nodes.json`, entries keyed by host UUID, read through
+`rdma/peers.py` (`host`, `table`, `label`): a node it does not list is `node <number>`. The beacon announces the host
+UUID; `mesh-peers`, node-info, `mesh-top`, the observer and telemetry key on the node number and take names from the
+table. The bridge's record carries no name (`rdma/mesh.h` `struct mesh_record`: its node and boot), and `mesh-stat`
+prints none. The bootstrap still reads `gethostname()` where no host is configured (`rdma/nccl-mesh.c`).
 
-Two selectors exist for fetching this repo: `main`, or a named branch. Nothing else.
-Code that indexes against version control must always take the newest commit on the
-branch it was given. If you need a specific state, register it as a branch — then it
-is both reachable and still patchable.
-
-A commit hash is a fixed point, and pinning one destroys the property everything here
-rests on: that re-running `install.sh` moves a node toward current intent. Under a
-pin, re-running moves it toward past intent, permanently, and the drift fix stops
-being a fix.
-
-Worse, the pin is self-sealing. A node pinned at commit X fetches the *bootstrap* at
-commit X too, so it can never receive the change that would unpin it. There is no
-in-band repair — only hand-editing every node, which is unbounded manual work and
-therefore does not scale. That is the paradox of the unpatchables, and it is
-forbidden anywhere, in any code.
-
-This is also a demotion under the contract above, and the worst kind: a rerun of `install.sh` can
-turn a firewall back off, but nothing on a pinned node has the authority to unpin it.
-
-Caches and propagation delays are not a reason to reach for a hash. They resolve
-themselves; a pin does not. Trading a transient for a permanent is always the wrong
-trade, and a stale node can simply be reached and re-run.
-
-## A node is its hardware; names are virtual
-
-The operator, 2026-10-21: "from this point onwards, we never rely on something like a
-localhostname as a name or identifier for something which we are programming.
-localhostnames are apparently a legacy thing, can be named automatically, collide,
-etc. undignifed, and we almost certainly do not need them for anything algorithmic",
-and "we should be able to use any kind of virtualization of 'names' such that we never
-rely on anything like, again, that localhostname thing, which makes no promises of
-selectivity or unique identifiability or anything of the sort".
-
-A node's identity is its host UUID (`IOPlatformUUID`, `gethostuuid()`). The bridge's
-node id, the fabric ULA (`mesh-router-init.sh`) and node-info's `node_id` are all drawn
-from it; the hardware serial number is the same machine's other fixed identifier. Code
-that selects, matches, deduplicates, addresses or labels a node keys on that identity or
-on something derived from it. A name a person uses is a virtual layer over the identity:
-a table keyed by identity, resolved by the code, never the other way round.
-
-Never read `LocalHostName`, `ComputerName`, `HostName`, `hostname`, `gethostname()`,
-`socket.gethostname()` or `platform.node()` to identify, select, match or label a node,
-and never write one into anything a program reads back (a beacon's instance name, a
-map's name field, a tailnet label). macOS assigns them in Setup Assistant and renames a
-running machine on its own when another claims the same name. On 2026-10-21 the second
-M5 Ultra Studio came up as `mdots-Mac-Studio`, macOS renamed the first, an hour into its
-service, to `mdots-Mac-Studio-2`, and `mdots-Mac-Studio.local`, its beacon and
+macOS assigns `LocalHostName`, `ComputerName` and `HostName` in Setup Assistant and renames a running machine on its own
+when another claims the same name. On 2026-10-21 the second M5 Ultra Studio came up as `mdots-Mac-Studio`, macOS
+renamed the first, an hour into its service, to `mdots-Mac-Studio-2`, and `mdots-Mac-Studio.local`, its beacon and
 `mesh-peers` all pointed at the other machine.
 
-The name table is `etc/mesh-nodes.json`, entries keyed by host UUID, read through
-`rdma/peers.py` (`host`, `table`, `label`): a node it does not list is `node <number>`.
-The beacon announces the host UUID; `mesh-peers`, node-info, `mesh-top`, the observer
-and telemetry key on the node number and take names from the table. The bridge's
-record carries no name (`rdma/mesh.h` `struct mesh_record`: its node and boot), and `mesh-stat` prints none. Reliance that predates this rule and remains is
-debt to remove, not precedent: `mesh_map`'s `name` operand and `struct
-mesh_node_health`'s `name` (`rdma/mesh-plan.h`; libmesh writes `""` there), the
-name selection of metal-microbench's `tools/mesh/grid.py`, and the bootstrap's
-`gethostname()` (`rdma/nccl-mesh.c`).
+## The provisioning scripts on a failure
 
-## Fail toward access
+- Not root: `bootstrap.sh` and `install.sh` re-exec themselves under `sudo`.
+- No named user: `install.sh` takes the first set of `MESH_USER`, the recorded admin user and `SUDO_USER`, the console
+  owner where none is set or the one taken does not exist, and the first admin where that is root or does not exist;
+  `enable-autologin.sh` takes `SUDO_USER`, then the console owner.
+- `bootstrap.sh` enables and starts sshd before it fetches anything, so a node whose later steps fail is still reachable.
 
-When something goes wrong, the fallback must be the *more* accessible state:
+## Outside a script's reach
 
-- Named user missing → fall back to the console owner, then the first admin.
-- Not running as root → re-exec under `sudo`. Never merely refuse.
-- A step fails → report it and continue. One failure must not prevent the other
-  twenty from landing.
-- Unknown input → pick the more capable interpretation and keep going.
+- `rdma_ctl enable` runs only in Recovery OS (exit 77 under a booted system): one physical 1TR visit per machine.
+- `systemsetup -setremotelogin` needs Full Disk Access, which cannot be granted headlessly; `bootstrap.sh` and
+  `install.sh` start sshd with `launchctl bootstrap`, which needs only root.
 
-Open the SSH lifeline **first**, before anything that can fail. `bootstrap.sh` does
-this deliberately: if every later step dies, the machine is still recoverable.
-
-## Style
-
-This section and the review checklist govern the provisioning scripts (bootstrap and
-node access). They do not govern the RDMA collective or TP code.
-
-- **No comments in code.** Rationale belongs in this file, `README.md`, and
-  `THREAT-MODEL.md`, where it can be read without paging through shell. Code carries
-  no prose.
-- **Keep it compact.** Fewer lines, fewer helpers, fewer moving parts.
-- **New control flow requires justification.** Every added branch, case, or
-  conditional is a place a node can take the less accessible path. Adding one is an
-  auditable event: prove it cannot withhold anything before you commit it. Prefer a
-  straight line that always acts.
-
-## Review checklist
-
-- Run `make -C rdma lint` (bin/mesh-lint; design/lint.md) before committing to rdma/, examples/ or torch-mesh, and
-  read every finding on the lines you changed. A review that finds a new class of defect adds its rule to design/lint.md
-  and bin/mesh-lint in the same commit as the fix (the operator, 2026-10-22: no fix may leave "no guidance or
-  corrective or example in the repo").
-
-- [ ] No new exit, return, or continue that leaves a node less reachable.
-- [ ] No capability gated on type, model, location, or network.
-- [ ] No new branch that can skip a capability.
-- [ ] No comments added to code.
-- [ ] No host name (`LocalHostName`, `ComputerName`, `HostName`, `gethostname()`) read
-      to identify, select, match or label a node; identity is the host UUID.
-- [ ] Every failure path ends in the more accessible state.
-- [ ] Nothing writes `authorized_keys`, network order, firewall, or power policy in
-      a way that could reduce access. Merge, never truncate.
-- [ ] Tested on a machine that does **not** resemble the one you wrote it on. Two of
-      this repo's worst bugs — a hardcoded `Ethernet` service and a roster overwrite
-      — were invisible on the author's machine and would have stranded the next node.
-
-## Things that genuinely cannot be automated
-
-State them as facts, never as refusals, and never let one block the rest of a run:
-
-- `rdma_ctl enable` is Recovery-OS-only (exit 77 under a booted system). One
-  physical 1TR visit per machine, forever. Verify and report; never pretend to
-  remediate.
-- `systemsetup -setremotelogin` needs Full Disk Access, which cannot be granted
-  headlessly. Use `launchctl bootstrap`, which needs only root. Never let a TCC gate
-  become the reason a node has no SSH.
-
-## Idle-node restart authorization
+## Restarting an idle node
 
 Operator instruction, 2026-09-05:
 
 > a priori you're allowed to restart any mesh machine without a userspace or active service running without any consideration
 
-Verify actual user sessions and workloads, then perform the ordinary restart
-without another approval request when the node is idle.
-This authorization applies to every mesh machine.
+## Review and the linter
+
+The operator, 2026-10-20 (design/rubrics.md, "How the operator reviews"): "the thing called a rubric is not
+metaphorical. all code needs to be reviewed in terms of the rubric before being built and compiled from this point
+onwards"; "use a subagent to review code which has been newly written within a session wtih the rubric file".
+
+`make -C rdma lint` runs `bin/mesh-lint`, which prints each form in the bridge, the collective and their clients that
+design/rubrics.md ranks below another, as the rubric's ranked pair with the operator's words; `--semantic` gives a
+language model the rubric's text and one function at a time. The operator, 2026-10-22: "the result of this 'audit'
+should be a linter/typechecker/parser which evaluates source and writes logged warnings of deductively determinable
+errors related to waits, syncs, guards, etc. i'm tired of this runaround where one agent writes extremely incorrect
+collective code then another agent 'notices' what was extremely incorrect, 'fixes' the code, then stops existing and
+leaves no guidance or corrective or example in the repo"; and "a parser can use language model calls on compact units
+of text or source if it reduces implementation complexity and delivery speed by an order of magnitude".
 
 ## Collectives and tensor parallelism
 
-Read `design/pages-and-functions.md` first: the algorithm on two peers and on infinitely many Minis, and why
-waiting on anything but stamped pages fails on both (its analysis: metal-microbench
-`docs/mesh_distributed_reduction_analysis.md`). Then `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
-`~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. A collective is a compiled program
-made ahead of time along trees of an explicit link map (`rdma/mesh-plan.h`, `rdma/mesh-collective.c`). Using
-the library: `rdma/NCCL.md`; PyTorch programs: `rdma/torch-mesh/README.md`; NumPy: `rdma/mesh_mpi.py`; where
-nodes or links differ: `design/heterogeneity.md`; the transport: `design/transport.md`; review: `design/rubrics.md`
-(rubric M for the bridge, C for the collectives, D for programs that use them); adding a node: metal-microbench
-`docs/nodes.md`.
+The algorithm on two peers and on infinitely many Minis, and why waiting on anything but stamped pages fails on both:
+`design/pages-and-functions.md` (its analysis: metal-microbench `docs/mesh_distributed_reduction_analysis.md`). The
+operator's statements of scope and the literature: `../../metal-microbench/docs/principles.md` (from this repo's root;
+on the Mini, `~/metal-microbench/docs/principles.md`); how methods are compared: its `docs/measurement.md`. A
+collective is a compiled program made ahead of time along trees of an explicit link map (`rdma/mesh-plan.h`,
+`rdma/mesh-collective.c`). Using the library: `rdma/NCCL.md`; PyTorch programs: `rdma/torch-mesh/README.md`; NumPy:
+`rdma/mesh_mpi.py`; where nodes or links differ: `design/heterogeneity.md`; the transport: `design/transport.md`; the
+rubrics: `design/rubrics.md` (M for the bridge, C for the collectives, D for programs that use them); adding a node:
+metal-microbench `docs/nodes.md`.
 
 ## Tests and specification
 
 The operator instructed on September 6, 2026: "delete all tests. tests aren't
 specification". The complete instruction is preserved in
 [design/SPECIFICATION.md §24](design/SPECIFICATION.md#24-whole-program-review-and-deletion-of-tests-september-6-2026).
-Repository-owned tests and verification harnesses have been removed. Review the complete data and execution flow
-against the user instructions and explicit algebra.
+Repository-owned tests and verification harnesses have been removed.
 
 On 2026-10-14 the operator stopped all runtime tests of code (T9). The stop holds until each item of metal-microbench `docs/acceptance-20261014.md` is met in source. Its `docs/principles.md` section 5 has the quote. The checklist records all 20 items attained on 2026-10-14.
 

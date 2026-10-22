@@ -1,15 +1,16 @@
 # Writing a service on the mesh
 
 The mesh is not a language model server. Its library is for any linear algebra, or any SIMD-style function you give
-it. Transformers are one user, and they must be fast on it because all code must be fast on it. Its bridge moves
-bytes between Macs, and it does not care what the bytes mean.
+it, and transformers are one user. The operator, 2026-10-17 (design/rubrics.md D1): "the universal comes before the
+particular and we use the particular ot show off that the universal is correct"; 2026-10-19 (D10): "no part of any model
+or eval we study may ever be slow". Its bridge moves bytes between Macs, and it does not care what the bytes mean.
 This page shows a program that uses the mesh and has nothing to do with language. The program is
 [examples/chain-service.py](../examples/chain-service.py). It names three kinds of program. For each one, it says what
 the program does and what it never does.
 
 ## The function
 
-The service runs one rule over a stream of inputs. Call the inputs e₀, e₁, e₂ and so on, where each input is a block
+The service runs one recurrence over a stream of inputs. Call the inputs e₀, e₁, e₂ and so on, where each input is a block
 of rows, one row for each independent stream. At each step t:
 
 ```
@@ -124,8 +125,8 @@ service stops with an error. It never picks a depth of its own.
 
 The host may run ahead of the GPU, but never by more than the input ring. After each block's outputs are copied, one
 step into the next block, it puts a mark on the GPU's queue. At the start of a block, it waits for the newest mark, the
-one two blocks back, so one block is still queued. This wait is the program's own guard on its lead (`Pace.wait`,
-marked `meshlint: guard`). Every step the host has encoded and the GPU has not begun holds records in the library's
+one two blocks back, so one block is still queued. This wait is the program's own guard on its lead (`Pace.wait`).
+Every step the host has encoded and the GPU has not begun holds records in the library's
 argument ring, and a caller that encodes ahead bounds those records itself (nccl.h `ncclMeshMetal4Records`). The wait
 reads no clock. The marks are timing events, which the service reads after the run (below).
 
@@ -162,8 +163,8 @@ pages down each link. That is the order the release needs and no more: each work
 fence, the stores. `arrivals` is made zeroed, and the last worker zeroes it again, so no kernel resets it at its
 start. Nothing is copied. Within
 a block, no kernel of the library's runs between two steps. The wait and the release are the library's own steps
-(`ncclMeshMetalPrelude`), which the kernel calls. A step's publication follows torch-mesh's one
-commit rule, the same for every caller (torch-mesh README, Performance). While the GPU still holds enough of the
+(`ncclMeshMetalPrelude`), which the kernel calls. A step's publication is committed as
+torch-mesh commits every caller's (torch-mesh README, Performance). While the GPU still holds enough of the
 stream's buffers, it joins the open command buffer instead of paying for a commit of its own. The next step's
 publication, or the host's next wait, commits that buffer.
 
@@ -178,10 +179,10 @@ zero.
 The kernel is compiled for its shape: the width K, the rank's share S and the row count. Each row count the service
 plans gets its own three instances (`chain.form`). Every choice in it follows from three inputs: the shape, the capability
 file (below), and what Metal reports of the device and of the compiled kernel. Nothing is timed, and no choice is made
-by speed. A measurement of the sampled shapes checks the rules; it is never read back by the code.
+by speed. A measurement of the sampled shapes checks the choices; it is never read back by the code.
 
 - **Tiles.** Columns and rows come in tiles of the matrix unit's edge (8 on Apple7 and later), so the width, the share
-  and the row count must be positive multiples of it.
+  and the row count are positive multiples of it; `chain.form` stops with an error on any other.
 - **Workers.** G is the GPU's cores, or the larger stage's column tiles where there are fewer. Each worker takes a fair
   share of a stage's tiles: n/G rounded down, the first few one more. y's columns over the share are split this way,
   and so are z's columns over the width. Where a stage has fewer tiles than workers, the workers without one have nothing
@@ -241,11 +242,12 @@ two rings. It also gives the two rotations' blocks, and names `capabilities`, th
 directory of capability files, from which each rank takes its own GPU's. Its paths are read from the directory the
 service runs in, the checkout's root in the sample. The kernel's form follows from the shape and the capability file,
 and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and
-rows there are, so the configuration does not. Every value must be there. The service has no defaults, and a missing
-value is an error.
+rows there are, so the configuration does not. The service has no defaults, and a missing value is an
+error.
 
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
-measures the calls writes the parts. Every Mac is always loaded fully.
+measures the calls writes the parts. The operator's pair, 2026-10-17 (design/rubrics.md D5): lower, "refusing to use it
+at all is never correct"; upper, "the *second entire computer* is a resource".
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
 sample. Its `ring_bytes` holds three blocks of 512 steps, so the sample's rings wrap many times.
 
@@ -332,6 +334,6 @@ memory has.
 ## What to read next
 
 - [design/transport.md](../design/transport.md): the bridge, its region, its links and how they fail.
-- [rdma/NCCL.md](../rdma/NCCL.md): the collective client, its groups and the rules a program keeps.
+- [rdma/NCCL.md](../rdma/NCCL.md): the collective client, its groups and a program's part in them.
 - [rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md): the same client from PyTorch, and region tensors.
 - [design/heterogeneity.md](../design/heterogeneity.md): nodes of different speeds and links of different costs.

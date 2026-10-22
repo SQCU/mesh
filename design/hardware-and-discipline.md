@@ -1,12 +1,8 @@
-# The hardware, and the discipline it requires
+# The hardware, in the operator's words and in measurements
 
-Five points every agent must understand before changing the bridge, the collective or a program that uses them. The
-operator stated them on 2026-10-22; each section gives the operator's words, then the measured facts behind them.
-
-The operator's framing: "developing for this kind of backend feels only like restoring bad hardware to surprising
-mediocrity rather than something qualitatively different to tuning dot cuh designs". Good compute graphs are good
-everywhere. Placing data well across shared memory, SRAM and registers is good discipline on every CUDA device where
-the trade can be made. This hardware only makes the price of doing it badly higher.
+The operator's five statements of 2026-10-22, each followed by the measured facts, the literature and the mechanisms
+behind it. The operator's framing, the same day: "developing for this kind of backend feels only like restoring bad
+hardware to surprising mediocrity rather than something qualitatively different to tuning dot cuh designs".
 
 ## 1. The hardware is unusual
 "the hardware is weird and not like arm64 cpus or older apple silicon."
@@ -29,8 +25,9 @@ Measured on these machines:
   buffer after about 5 s.
 - An M5 Ultra device holds 2 usable queue pairs a link.
 
-The consequence: a small step's compute is short, so a step is mostly fixed overhead. Every nanosecond left in a hot
-loop is a direct share of utilization.
+With a dispatch boundary at 1–2 µs and a command buffer's start at 13–19 µs, a step whose compute is short is mostly
+fixed overhead. The operator, 2026-10-20 (design/rubrics.md M8): "if there is 10ns of reducible overhead anywhere in our
+code we reduce it to 0ns."
 
 ## 2. DMA is fundamental
 "dma is fundamental and requires exceptional programming practices to make useful collectives from weak silicon."
@@ -42,55 +39,50 @@ The RDMA engine's contract (Apple TN3205):
 - Every work request ends with a completion and a status. That completion is the only statement that bytes moved, and
   its error status is the only statement that they did not.
 
-Useful collectives come from:
-- zero copy;
-- data movement compiled from declared extents (design/extents-and-liveness.md);
-- receives posted ahead of their SENDs;
-- system-coherent stores wherever a SEND reads;
-- completions as the only signal.
+The operator's words on the practices, with their rubric dimensions:
+- 2026-10-21: "zero copy methods must always be used over access by copy because memory bandwidth and flops are too
+  scarce on this hardware api."
+- M2 (2026-10-19): "if you have successfully 'asked permission' to send data" ≺ "you could have sent the data instead";
+  receives on shared lanes driven by a header ≺ a pre-posted exclusive receive (2026-10-17).
+- M9 (2026-10-18): "an in-order recieve protocol" ≺ "multiple concurrent streams which get written into the right
+  expected output slots in mapped memory". Data movement is compiled from declared extents
+  (design/extents-and-liveness.md).
 
-## 3. Program at the level of a streaming multiprocessor
+## 3. The level of a streaming multiprocessor
 "weak silicon is programmed at a similar level of abstraction to streaming multiprocessors, not abstractions attempting
 to wrap entire gpus or nodes."
 
-- The bridge is a thin layer of hardware facts and posts.
-- Collective ops and the kernels that use them write their own guards, explicitly, in their own code, as SM code does
-  with barriers, fences and flags.
-- Nothing below a kernel makes up for a guard its author left out.
+- M1: "the 'bridge' is not a grab bag of arbitrary ontologies anyone wants to put anywhere" (2026-10-19) ≺ "the bridge
+  is there to behave like a system call all operating systems should have always been giving us" (2026-10-15).
+- The operator, 2026-10-22: "data procesisng code gets to write their own guards in their own source. if source says to
+  write continuously into ab uffer, the nic must write continuously into that buffer even if this means that dat
+  aprocessing code can race or lose parts of a stream."
 
 ## 4. Different trade-offs from NCCL
 "we economize on different tradeoffs from nccl, and use a more constrained (but still universally expressive and easy to
 use) memory model in exchange for strictly fewer waits, copies, and protocol dependency relation depths. this is not
 'nice-to-have' but is needed for baseline performance."
 
-**What NCCL is built for.** NCCL owns staging buffers, runs a proxy, and copies through reduce-copy kernels in stream
-order. That is right for a CUDA GPU with another vendor's NIC: device memory sits behind PCIe, registering arbitrary
-buffers is costly, and NIC writes need flushes.
+**NCCL.** NCCL owns staging buffers, runs a proxy, and copies through reduce-copy kernels in stream order, on CUDA GPUs
+with another vendor's NIC: device memory sits behind PCIe, registering arbitrary buffers is costly, and NIC writes need
+flushes.
 
 **Here.**
 - The memory model is a page table of rows, stamps and use counts (design/pages-and-functions.md), with extents
   declared when a program is called and plans compiled from them.
 - A not-in-place reduction's extra pages are rows chosen in the plan and landed into in place. There is no staging pool
   and no ring with copies.
-- Data code does not see the collective's page facts. That hiding exists for performance and to keep backend
-  complexity out of linear algebra, not for safety.
+- On the collective's page facts, the operator, 2026-10-22: "data processing code may never discover these abstracted
+  features"; "information hiding from data processing code authors on some level must exist for performance reasons and
+  for decoupling backend complexity from linear algebraic function complexity rather than for 'security' or 'memory
+  safety'".
 
-## 5. The transport never protects a program's data semantics
+## 5. Data semantics and the transport
 "bridges and collectives are expressive enough to allow data corruption wrt a data producing or consuming program. we
 never do anything to prevent what might be a data bug for some semantics of data. data processing lcients might be a
 guitar pedal with a realtime guarantee or they might be a deferred data processing cron job. programmers have to write
 their own syncs and guards or they get the fastest resutls possible."
 
 - The transport writes landings as the plan presents them (design/transport.md section 14).
-- A program that reuses a buffer guards it in its own source, or races.
-- No gate, sync, retry, deadline or error correction in the bridge or the collective stands in for a program's own
-  guard.
-- Performance is the requirement. The operator: "performance is harder than safety and produces safety anyways most of
-  the time".
-
-## Before changing the bridge, the collective or a program that uses them
-- Read design/pages-and-functions.md, design/extents-and-liveness.md, design/transport.md section 14, and design/lint.md.
-- Run `make -C rdma lint`. A new class of defect gets its rule in the same commit as its fix.
-- Use the literature's terms (design/lint.md, "Vocabulary"). A coined term usually marks a misunderstood API.
-- Where a method strictly dominates by the literature, it is required. Only a real trade-off is chosen by measurement
-  (design/extents-and-liveness.md, "Dominating methods and choices").
+- The operator, 2026-10-22: "performance is harder than safety and produces safety anyways most of the time, and we're
+  requiring performance rather than safety."

@@ -204,7 +204,7 @@ class Pace:
     # docs/writing-a-service.md#the-rings
     def wait(self):
         if len(self.marks) == RING_BLOCKS - 1:
-            self.marks.popleft().synchronize()  # meshlint: guard
+            self.marks.popleft().synchronize()
 
     # docs/writing-a-service.md#the-rings
     def mark(self):
