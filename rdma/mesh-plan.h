@@ -35,10 +35,10 @@ struct mesh_move { uint32_t op,peer,round,buffer,part,parts,way,padding; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
 
-void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts,uint32_t *moves);
+void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);
 
-int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,uint32_t chunks,const uint64_t *contributors,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
+int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,struct mesh_program *program,uint32_t *segment,double *log_weight,
+                 uint32_t *first,struct mesh_move *move);
 
 uint32_t mesh_program_steps_cut(const struct mesh_program *,uint32_t rank,struct mesh_operand,const uint64_t *segments,uint64_t page,
                                 struct mesh_step *steps);

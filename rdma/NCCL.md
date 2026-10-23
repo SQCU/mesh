@@ -78,16 +78,12 @@ landed in place (a COPY earlier in the group), and the landed bytes are the NIC'
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
   (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens, on the node's fabric address where it holds one), where
   each rank's node meets the others'. The root listens on that host alone where it is an IPv6 address.
-- `ncclMeshCommInitRank(comm, nranks, id, rank, programs, count, small, name, config)`: the same init and
-  bootstrap (`id` the root's `host:port`, which the caller hands every rank; each rank's node is its bridge's), with
-  the collectives as operands; the map is its members' (below).
-  - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means each plan compiles its own
-    along the solver's trees (below).
-  - `small`: not read.
+- `ncclMeshCommInitRank(comm, nranks, id, rank, name, config)`: the same init and bootstrap (`id` the root's
+  `host:port`, which the caller hands every rank; each rank's node is its bridge's); the map is its members' (below).
   - `name`: the communicator's, which its failures and its splits' names carry (NULL: the id).
   - `config`: NULL, or `blocking` not 0, is a blocking init; `blocking` 0 is NCCL's non-blocking init (below).
-  - The library compares none of these values across ranks. `ncclCommInitRank` is this call with no programs, small, name or config,
-    and `ncclCommInitRankConfig` the same with its config.
+  - The library compares neither across ranks. `ncclCommInitRank` is this call with no name or config, and
+    `ncclCommInitRankConfig` the same with its config.
 - Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
   cables its bridge reaches them by (one reach entry a cable: its node, its `cable` and its bandwidth); each rank then holds
   one stream on every cable that joins it to another member, the least `wire` free at both ends on that cable, so both
@@ -152,31 +148,32 @@ and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-
 trees and the collectives run only on a map that joins their members: a communicator's collective on a map that does not fails as a
 value naming two members no path between members joins (`ncclInvalidUsage`).
 
-Every member makes the map from the same gathered reports, so the members' maps are one. Programs, forms and the solver
-are each rank's caller's, and nothing compares them at run time.
+Every member makes the map from the same gathered reports, so the members' maps are one.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
-MSCCL-IR). The caller passes its own table (`ncclMeshCommInitRank`'s `programs`; `mesh_compile`, `chunks` its cut,
-`whole` the single-phase all-reduce); with none, a plan compiles each of its collectives when it is made, along the
-trees the solver gives the plan's traffic ([Routing](#routing)):
+MSCCL-IR). A plan compiles each of its collectives when it is made, along the trees the solver gives the plan's
+traffic ([Routing](#routing)):
 
 - the all-reduce single-phase (each member's sum up its own trees, the map's diameter in dependent crossings; at two
-  members, and wherever every two members are linked, the direct exchange) or two-phase;
+  members, and wherever every two members are linked, the direct exchange);
 - the reduce-scatter and the all-gather, segment s up and down s's trees;
 - each root's reduce and broadcast, up and down the root's trees.
 
 Each is uncut: a step's piece is one entry of its plan's table, any size, which the bridge alone cuts into SENDs. A
-program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) lie on the region's pages
-(`mesh_program_steps_cut`), so every piece starts on a page wherever its buffer does ([Memory](#memory)). A call runs
-the caller's first program of its collective (and root) whose size bound its operand is under, else its plan's. Nothing
-about a program is decided where a plan restarts.
+program's own cuts (a tree's shares, a segment) lie on the region's pages (`mesh_program_steps_cut`), so every piece
+starts on a page wherever its buffer does ([Memory](#memory)). Nothing about a program is decided where a plan
+restarts. The caller's program table (`ncclMeshProgram`), the forms operand (`ncclMeshCommForms`: two-phase all-reduce
+and chunked trees by size class) and the solver operand (`ncclMeshCommSetSolver`) had no caller in either repository
+and were deleted 2026-10-22 with the two-phase and chunked forms only they selected.
 
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, counts, recv, type, comm, stream)` is MPI_Alltoallv with
 its counts on the host, every member passing the same matrix: `counts[a x nranks + b]` elements go from rank a to rank
 b, packed in rank order in a's send buffer and in b's receive buffer (a rank's own block, `counts[r x nranks + r]`, is
 copied). MPI_Alltoallv takes each rank's own `sendcounts` and `recvcounts`, a row and a column of this matrix; here
-every member passes the whole n x n matrix, so that every member plans every block (design/rubrics.md C7, at a C1
-cost). A program ported from MPI holds its own row and column; an SPMD program holds the matrix; torch-mesh, which is
+every member passes the whole n x n matrix, a deviation argued from the hardware's interface (design/rubrics.md C1's
+upper pole: a member between two that no link joins relays a block, so it must know the block before its bytes
+arrive, and every member plans every block, C7). A porter passes the matrix its program's sizes give: a program ported
+from MPI holds its own row and column and gathers the rest once; an SPMD program holds the matrix; torch-mesh, which is
 given torch's per-rank splits, fails such a call as a value and takes the matrix in `torch_mesh.all_to_all`, from the
 compiled program (its configuration's shapes and shares, a program's maximum extents, how much of a block a step
 fills being data in its pages). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
@@ -202,26 +199,6 @@ lay their partials as these rows and call `ncclAllReduce`, or `ncclReduce` to th
 Reproduction target: never measured; the planner's pricing of the three-group form it replaces at 3, 4 and 6 members
 of a full mesh was 331, 331 and 226 us against the gather's 534 a chunk's layer (metal-microbench
 output_data/planner-20261015/pass2 engine2-after.json).
-
-**Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
-list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, so a plan compiles a
-call by the first form that fits it and else by the default (the all-reduce single-phase, every collective uncut):
-
-| field | form |
-|---|---|
-| `whole` | an all-reduce's: 1 single-phase, 0 two-phase (the reduce-scatter and then the all-gather along the same trees) |
-| `chunks` | each tree's part cut into chunks, pipelined down and up the trees (1: uncut) |
-| `below` | the bytes a call is under to take it (0: any size): the size classes |
-
-These are the forms mesh cc8a6f8e^'s default table chose among by a price (its `sets[1]`, single-phase or not, 1 to 64
-chunks, by size class); the price is gone and the caller's configuration document names the form (the operator,
-2026-10-17: "if there is an overriding operand that stops our code from running beacuse someone wanted ot put in a shim
-1 month ago and tried to justify it by calling the hardocde a 'model', we need to rip out all of the rleated tech debt,
-includnig notatinoal debt"). A rank's forms are taken at the communicator's next plan, and nothing compares them across
-ranks; splits and shrinks keep them. A form's cuts lie on pages. Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
-16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench
-output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 57.4 to 31.2-36.2 us
-(pair_programs.json): never measured on more than two nodes.
 
 **Uneven segments.** `ncclMeshAllGatherV(send, recv, counts, type, comm, stream)` and
 `ncclMeshReduceScatterV(send, recv, counts, type, op, comm, stream)` are MPI_Allgatherv and MPI_Reduce_scatter: rank
@@ -473,10 +450,9 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
   a page is written again only after release). The `stamp` dispatch is a system-scope fence, then the atomic add, so
   the pages' stores are visible before the count the host reads with acquire (design/hardware-and-discipline.md
   section 1); a stamp that cannot be encoded fails its program's call as a value.
-- A plan made before `ncclMeshCommForms` or `ncclMeshCommSetSolver` changed the communicator's forms or solver is
-  never started again. A plan whose group failed is started again as any other: the failed run retired its positions
-  (`run`), and nothing of the failure stays with it. A plan never started again is released between calls (`release`,
-  at each group's plan and each exchange's start): once it is idle and its tables' last stamps are in, each table is
+- A plan whose group failed is started again as any other: the failed run retired its positions (`run`), and nothing of
+  the failure stays with it. A freed persistent request's slot is released between calls (`release`, at each group's
+  plan and each exchange's start): once it is idle and its tables' last stamps are in, each table is
   unlinked from its stream (`mesh_stream_unlink`, the link's one-word edit undone), and once a call started on each of
   those streams after the unlink has its `sent` and `landed`, the plan's lease is returned (design/transport.md
   section 14, "The plans": every walk of the bridge's that could hold the table has then ended). A table whose stream
@@ -695,8 +671,8 @@ including unseen ones in fast finite time is preferred".
 - **Input.** The traffic as demands (`mesh-plan.h` `struct mesh_demand`): a root, the leaves it joins (a bit a rank;
   NULL every rank), and the bytes each edge of its tree carries toward the root (`up`) and away from it (`down`).
   - A plan's collective: a demand a segment's owner, every rank a leaf: a reduce-scatter's segment `up`, an
-    all-gather's `down`, a two-phase all-reduce's both, a single-phase all-reduce's whole operand `up` toward every
-    rank; a reduce's operand `up` toward its root, a broadcast's `down` from it.
+    all-gather's `down`, an all-reduce's whole operand `up` toward every rank; a reduce's operand `up` toward its
+    root, a broadcast's `down` from it.
   - A plan's all-to-all (the hosted family and `ncclMeshAlltoAllV`): a demand a block from a to b, root b, leaf a, `up`
     its bytes.
   - An exchange: a demand a rank's part, root its owner, the ranks that land it the leaves, `down` its bytes.
@@ -725,9 +701,6 @@ including unseen ones in fast finite time is preferred".
   programs. The solver is deterministic: every member computes the same trees from the same map and demands (its exp
   and log IEEE-exact, the planner compiled with `FP_CONTRACT OFF`). A map that leaves two members of a demand apart
   fails the call as a value.
-- **The operand.** `ncclMeshCommSetSolver(comm, solver, context)` sets a function of the solver's signature
-  (`ncclMeshSolver`) in its place, every member passing the same between its groups (NULL: `mesh_solve`); the
-  communicator's plans are made again. A learned optimizer passes its own (design/rubrics.md D6).
 
 ## Routes between unlinked ranks
 
@@ -787,10 +760,10 @@ rank `from[i]` to rank `to[i]`, `bytes[i]` bytes, the k-th message of a pair in 
 an all-to-all's blocks: each message a demand of the solver (root its receiver, leaf its sender), cut among its routes
 by their shares, a member between two that no link joins landing it in its plan's relay rows and sending those rows on
 (the hosted family's relay, a send gated on the step's receive). The group's `ncclSend` and `ncclRecv` calls then give
-only their buffers. This departs from NCCL's point-to-point semantics, where only the two ranks of a message call
-anything (design/rubrics.md C1): the members between two unlinked ones must know the message before its bytes arrive,
-and C2 (every cabling served without a branch) and C7 (every position known a priori) rank that over C1. Without the
-list, a message is its two ranks' alone, on the cables joining them, and one between two ranks no cable joins fails as a
+only their buffers. This is a deviation from NCCL's point-to-point semantics, where only the two ranks of a message
+call anything, argued from the hardware's interface (design/rubrics.md C1's upper pole): a member between two that no
+link joins relays the message, so it must know the message before its bytes arrive. A porter passes the list its
+program's sends and receives make, every member the same list. Without the list, a message is its two ranks' alone, on the cables joining them, and one between two ranks no cable joins fails as a
 value where it is planned. torch-mesh gives the list a caller passes from its
 compiled program (`torch_mesh.batch_isend_irecv(ops, pairs)`); torch's own `batch_isend_irecv` gives none.
 
@@ -928,16 +901,13 @@ gathers, parses or joins bridge records itself.
   elements by shares in quanta of the least multiple of the page and an element.
 - **Programs** (`struct mesh_program`, as MSCCL-IR is the program the MSCCL runtime interprets [Cowan et al., ASPLOS
   2023]): every rank's moves, its operand cut into parts, part p within segment `segment[p]` at its log weight.
-  `mesh_compile(trees, what, root, whole, chunks, contributors, ...)` (room from `mesh_compile_room`): a reduce up the
-  root's trees, a broadcast down them, a reduce-scatter's segment s up s's trees and an all-gather's down them; an
-  all-reduce two-phase (`whole` 0: the reduce-scatter and then the all-gather [Patarasuk and Yuan 2009; Blink]) or
-  single-phase (`whole` 1: the whole operand reduced toward every node up its heaviest tree, a forwarding node's partial
-  from scratch of its own; at two nodes the direct exchange, whose one SEND and one REDUCE meet in the operand, the
-  combine after the SEND's bytes are sent [Trivance 2026]). Each tree's part is cut into `chunks`, chunk j of every move
-  at its round + j, so a node forwards a chunk as it arrives (Blink; NCCL's chunked trees; MSCCLang's chunks). A
-  round's SENDs come before its receives; a message coalesces with the next between the same two nodes in the same
-  round where their parts adjoin. `contributors` (a bit a node) restricts whose operands an all-reduce combines and whose
-  segments an all-gather gathers.
+  `mesh_compile(trees, what, root, ...)` (room from `mesh_compile_room`): a reduce up the root's trees, a broadcast
+  down them, a reduce-scatter's segment s up s's trees and an all-gather's down them; an all-reduce single-phase (the
+  whole operand reduced toward every node up its heaviest tree, a forwarding node's partial from scratch of its own; at
+  two nodes the direct exchange, whose one SEND and one REDUCE meet in the operand, the combine after the SEND's bytes
+  are sent [Trivance 2026]). A round's SENDs come before its receives; a message coalesces with the next between the
+  same two nodes in the same round where their parts adjoin. The two-phase all-reduce, chunked trees and the
+  contributors set had no caller once the forms operand went, and were deleted with it.
 - `mesh_program_steps_cut(program, rank, operand, segments, quantum, steps)`: a rank's steps for an operand, its
   segments the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts) or the program's own cut, every cut the
   program makes on a multiple of the least common multiple of the quantum (the communicator's page) and an element, a

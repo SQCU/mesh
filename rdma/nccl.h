@@ -23,9 +23,6 @@ extern "C" {
 #include <limits.h>
 #include <stdint.h>
 #include <stddef.h>
-struct mesh_program;
-struct mesh_link_map;
-struct mesh_demand;
 
 /* rdma/NCCL.md#two-paths */
 typedef void *cudaStream_t;
@@ -42,7 +39,6 @@ typedef struct {
 typedef void *cudaEvent_t;
 
 typedef struct ncclComm* ncclComm_t;
-typedef struct ncclWindow_vidmem* ncclWindow_t;
 #define NCCL_COMM_NULL NULL
 
 #define NCCL_UNIQUE_ID_BYTES 128
@@ -65,16 +61,6 @@ typedef enum { ncclSuccess                 =  0,
 #define NCCL_UNDEF_FLOAT -1.0f
 
 #define NCCL_API_MAGIC 0xcafebeef
-
-#define NCCL_WIN_DEFAULT 0x00
-#define NCCL_WIN_COLL_SYMMETRIC 0x01
-#define NCCL_WIN_STRICT_ORDERING 0x02
-
-#define NCCL_WIN_GIN_ONLY 0x04
-
-#define NCCL_WIN_CFT_COUNTED 0x08
-
-#define NCCL_WIN_REQUIRED_ALIGNMENT 4096
 
 #define NCCL_CTA_POLICY_DEFAULT 0x00
 #define NCCL_CTA_POLICY_EFFICIENCY 0x01
@@ -211,84 +197,47 @@ typedef struct ncclCollConfig_v23200 {
   NCCL_CONFIG_UNDEF_PTR,                     \
 }
 
-typedef struct ncclSimInfo_v22200 {
-    size_t size;
-    unsigned int magic;
-    unsigned int version;
-    float estimatedTime;
-} ncclSimInfo_t;
+ncclResult_t ncclMemAlloc(void** ptr, size_t size);
 
-#define NCCL_SIM_INFO_INITIALIZER {                                  \
-  sizeof(ncclSimInfo_t),                                   \
-  0x74685283,                                             \
-  NCCL_VERSION_CODE,                                    \
-  NCCL_UNDEF_FLOAT                               \
-}
+ncclResult_t ncclMemFree(void *ptr);
 
-ncclResult_t  ncclMemAlloc(void** ptr, size_t size);
-ncclResult_t pncclMemAlloc(void** ptr, size_t size);
+ncclResult_t ncclGetVersion(int *version);
 
-ncclResult_t  ncclMemFree(void *ptr);
-ncclResult_t pncclMemFree(void *ptr);
+ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId);
 
-ncclResult_t  ncclGetVersion(int *version);
-ncclResult_t pncclGetVersion(int *version);
+ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t* config);
 
-ncclResult_t  ncclGetUniqueId(ncclUniqueId* uniqueId);
-ncclResult_t pncclGetUniqueId(ncclUniqueId* uniqueId);
+ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
 
-ncclResult_t  ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t* config);
-ncclResult_t pncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t* config);
+ncclResult_t ncclCommInitAll(ncclComm_t* comm, int ndev, const int* devlist);
 
-ncclResult_t  ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
-ncclResult_t pncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
+ncclResult_t ncclCommFinalize(ncclComm_t comm);
 
-ncclResult_t  ncclCommInitAll(ncclComm_t* comm, int ndev, const int* devlist);
-ncclResult_t pncclCommInitAll(ncclComm_t* comm, int ndev, const int* devlist);
+ncclResult_t ncclCommDestroy(ncclComm_t comm);
 
-ncclResult_t  ncclCommFinalize(ncclComm_t comm);
-ncclResult_t pncclCommFinalize(ncclComm_t comm);
+ncclResult_t ncclCommAbort(ncclComm_t comm);
 
-ncclResult_t  ncclCommDestroy(ncclComm_t comm);
-ncclResult_t pncclCommDestroy(ncclComm_t comm);
+ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t* config);
 
-ncclResult_t  ncclCommAbort(ncclComm_t comm);
-ncclResult_t pncclCommAbort(ncclComm_t comm);
+ncclResult_t ncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
 
-ncclResult_t  ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t* config);
-ncclResult_t pncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t* config);
+ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags);
 
-ncclResult_t  ncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
-ncclResult_t pncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
+ncclResult_t ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId* uniqueId);
+ncclResult_t ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId, int rank, ncclComm_t* newcomm, ncclConfig_t* config);
 
-ncclResult_t  ncclCommRevoke(ncclComm_t comm, int revokeFlags);
-ncclResult_t pncclCommRevoke(ncclComm_t comm, int revokeFlags);
+const char* ncclGetErrorString(ncclResult_t result);
 
-ncclResult_t  ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId* uniqueId);
-ncclResult_t pncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId* uniqueId);
-ncclResult_t  ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId, int rank, ncclComm_t* newcomm, ncclConfig_t* config);
-ncclResult_t pncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId, int rank, ncclComm_t* newcomm, ncclConfig_t* config);
-
-const char*  ncclGetErrorString(ncclResult_t result);
-const char* pncclGetErrorString(ncclResult_t result);
-
-const char*  ncclGetLastError(ncclComm_t comm);
-const char* pncclGetLastError(ncclComm_t comm);
+const char* ncclGetLastError(ncclComm_t comm);
 
 #define ncclResetDebugInit()
-#define pncclResetDebugInit()
+ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError);
 
-ncclResult_t  ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError);
-ncclResult_t pncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError);
+ncclResult_t ncclCommCount(const ncclComm_t comm, int* count);
 
-ncclResult_t  ncclCommCount(const ncclComm_t comm, int* count);
-ncclResult_t pncclCommCount(const ncclComm_t comm, int* count);
+ncclResult_t ncclCommCuDevice(const ncclComm_t comm, int* device);
 
-ncclResult_t  ncclCommCuDevice(const ncclComm_t comm, int* device);
-ncclResult_t pncclCommCuDevice(const ncclComm_t comm, int* device);
-
-ncclResult_t  ncclCommUserRank(const ncclComm_t comm, int* rank);
-ncclResult_t pncclCommUserRank(const ncclComm_t comm, int* rank);
+ncclResult_t ncclCommUserRank(const ncclComm_t comm, int* rank);
 
 typedef enum { ncclNumOps_dummy = 5 } ncclRedOp_dummy_t;
 typedef enum { ncclSum        = 0,
@@ -324,132 +273,73 @@ typedef enum {
   ncclScalarHostImmediate = 1
 } ncclScalarResidence_t;
 
-ncclResult_t  ncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataType_t datatype, ncclScalarResidence_t residence, ncclComm_t comm);
-ncclResult_t pncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataType_t datatype, ncclScalarResidence_t residence, ncclComm_t comm);
+ncclResult_t ncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataType_t datatype, ncclScalarResidence_t residence, ncclComm_t comm);
 
 ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm);
-ncclResult_t pncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm);
 
-ncclResult_t  ncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
+ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
     ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
-    ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
+ncclResult_t ncclBcast(void* buff, size_t count, ncclDataType_t datatype, int root,
     ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
-    ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
+ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root,
     ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
+ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclReduceScatter(const void* sendbuff, void* recvbuff,
-    size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
-    cudaStream_t stream);
-ncclResult_t pncclReduceScatter(const void* sendbuff, void* recvbuff,
+ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff,
     size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm,
     cudaStream_t stream);
 
-ncclResult_t  ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
-    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
+ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t sendcount,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
+ncclResult_t ncclAlltoAll(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclGather(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclGather(const void* sendbuff, void* recvbuff, size_t count,
+ncclResult_t ncclGather(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclScatter(const void* sendbuff, void* recvbuff, size_t count,
-    ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclScatter(const void* sendbuff, void* recvbuff, size_t count,
+ncclResult_t ncclScatter(const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclAllReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclAllReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
+ncclResult_t ncclAllReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
     ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclBroadcastConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclBroadcastConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
+ncclResult_t ncclBroadcastConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
     int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
+ncclResult_t ncclReduceConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
     ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclAllGatherConfig(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype,
-    ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclAllGatherConfig(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype,
+ncclResult_t ncclAllGatherConfig(const void* sendbuff, void* recvbuff, size_t sendcount, ncclDataType_t datatype,
     ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclReduceScatterConfig(const void* sendbuff, void* recvbuff, size_t recvcount, ncclDataType_t datatype,
-    ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclReduceScatterConfig(const void* sendbuff, void* recvbuff, size_t recvcount, ncclDataType_t datatype,
+ncclResult_t ncclReduceScatterConfig(const void* sendbuff, void* recvbuff, size_t recvcount, ncclDataType_t datatype,
     ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclAlltoAllConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclAlltoAllConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
+ncclResult_t ncclAlltoAllConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
     ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclGatherConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclGatherConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
+ncclResult_t ncclGatherConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
     int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclScatterConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
-    int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
-ncclResult_t pncclScatterConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
+ncclResult_t ncclScatterConfig(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype,
     int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
-ncclResult_t  ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer,
-    ncclComm_t comm, cudaStream_t stream);
-ncclResult_t pncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer,
+ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer,
     ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t pncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer,
-    ncclComm_t comm, cudaStream_t stream);
-ncclResult_t  ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer,
+ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer,
     ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t  ncclGroupStart(void);
-ncclResult_t pncclGroupStart(void);
+ncclResult_t ncclGroupStart(void);
 
-ncclResult_t  ncclGroupEnd(void);
-ncclResult_t pncclGroupEnd(void);
+ncclResult_t ncclGroupEnd(void);
 
-typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
-ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, const ncclMeshProgram* programs, int count,
-                                  uint64_t small, const char* name, ncclConfig_t* config);
-
-typedef struct {
-  int collective;
-  int root;
-  uint64_t below;
-  int whole;
-  uint32_t chunks;
-} ncclMeshForm;
-
-ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
-
-typedef uint32_t (*ncclMeshSolver)(const struct mesh_link_map* map, const struct mesh_demand* demands, uint32_t count, uint32_t room,
-                                   uint32_t* demand, uint32_t* parent, uint32_t* way, double* share, void* context);
-ncclResult_t ncclMeshCommSetSolver(ncclComm_t comm, ncclMeshSolver solver, void* context);
+ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, const char* name, ncclConfig_t* config);
 
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
 

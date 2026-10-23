@@ -176,10 +176,10 @@ static uint32_t mesh_trees_heaviest(const struct mesh_trees *trees,uint32_t r){
   return best;
 }
 
-struct mesh_shape { uint32_t height,depth; int live,inner; };
-static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,const uint64_t *contributors,struct mesh_shape *shape){
+struct mesh_shape { uint32_t height,depth; int inner; };
+static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,struct mesh_shape *shape){
   const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
-  for(uint32_t v=0;v<n;v++)shape[v]=(struct mesh_shape){0,0,0,0};
+  for(uint32_t v=0;v<n;v++)shape[v]=(struct mesh_shape){0,0,0};
   for(uint32_t v=0;v<n;v++){
     uint32_t at=v,k=0;
     for(;at!=r && k<n;k++){
@@ -189,17 +189,7 @@ static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,const uint
     }
     shape[v].depth=k;
   }
-  for(uint32_t v=0;v<n;v++)
-    if(mesh_member(contributors,v))for(uint32_t at=v,k=0;k<=n;at=parent[at],k++){shape[at].live=1;if(at==r)break;}
-  for(uint32_t v=0;v<n;v++)if(v!=r && shape[v].live)shape[parent[v]].inner=1;
-}
-
-static int mesh_first_child(const struct mesh_trees *trees,uint32_t t,const struct mesh_shape *shape,uint32_t w,uint32_t u){
-  const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
-  for(uint32_t c=0;c<n;c++)
-    if(c!=r && c!=u && parent[c]==w && shape[c].live &&
-       (shape[c].height<shape[u].height || (shape[c].height==shape[u].height && c<u)))return 0;
-  return 1;
+  for(uint32_t v=0;v<n;v++)if(v!=r)shape[parent[v]].inner=1;
 }
 
 struct mesh_message { uint32_t from,to,round,part,parts,out,in,op,key,way; };
@@ -218,39 +208,35 @@ static int mesh_move_order(const void *a,const void *b){
   return 0;
 }
 
-void mesh_compile_room(const struct mesh_trees *trees,uint32_t chunks,uint32_t *parts,uint32_t *moves){
-  const uint32_t n=trees->nodes,T=trees->count,c=chunks?chunks:1;
-  *parts=(T>1?T:1)*c;
-  *moves=(4*T*n+2*n*n+2)*c;
+void mesh_compile_room(const struct mesh_trees *trees,uint32_t *parts,uint32_t *moves){
+  const uint32_t n=trees->nodes,T=trees->count;
+  *parts=T>1?T:1;
+  *moves=4*T*n+2*n*n+2;
 }
 
-int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,uint32_t chunks,const uint64_t *contributors,
-                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move){
-  const uint32_t n=trees->nodes,T=trees->count,c=chunks;
-  if(!n || !c || what>MESH_ALLGATHER || ((what==MESH_REDUCE || what==MESH_BROADCAST) && root>=n))return EINVAL;
+int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,struct mesh_program *program,uint32_t *segment,double *log_weight,
+                 uint32_t *first,struct mesh_move *move){
+  const uint32_t n=trees->nodes,T=trees->count;
+  if(!n || what>MESH_ALLGATHER || ((what==MESH_REDUCE || what==MESH_BROADCAST) && root>=n))return EINVAL;
   uint32_t room_parts,room;
-  mesh_compile_room(trees,c,&room_parts,&room);
-  const uint64_t *mine=what==MESH_ALLREDUCE?contributors:NULL;
+  mesh_compile_room(trees,&room_parts,&room);
   struct mesh_shape *shape=malloc(((size_t)T*n+1)*sizeof *shape);
   struct mesh_message *message=malloc((room+1)*sizeof *message);
   struct mesh_ordered *ordered=malloc((2*(size_t)room+1)*sizeof *ordered);
-
-  uint32_t *part_of=malloc(((size_t)T*c+1)*sizeof *part_of),*buffer=calloc((size_t)n*n+1,sizeof *buffer);
+  uint32_t *part_of=malloc(((size_t)T+1)*sizeof *part_of),*buffer=calloc((size_t)n*n+1,sizeof *buffer);
   uint32_t messages=0,parts=0,scratch=0;
   int status=EINVAL;
   if(!shape || !message || !ordered || !part_of || !buffer)goto done;
-  for(uint32_t t=0;t<T;t++)mesh_tree_shape(trees,t,mine,shape+(size_t)t*n);
-  for(size_t k=0;k<(size_t)T*c;k++)part_of[k]=UINT32_MAX;
-  if(what==MESH_ALLREDUCE && whole){
-
-    parts=c;
-    for(uint32_t j=0;j<c;j++){segment[j]=0;log_weight[j]=0;}
+  for(uint32_t t=0;t<T;t++)mesh_tree_shape(trees,t,shape+(size_t)t*n);
+  for(size_t k=0;k<T;k++)part_of[k]=UINT32_MAX;
+  if(what==MESH_ALLREDUCE){
+    parts=1;segment[0]=0;log_weight[0]=0;
     for(uint32_t u=0;u<n;u++){
       uint32_t next=2,own=0;
       for(uint32_t v=0;v<n;v++){
         const uint32_t t=mesh_trees_heaviest(trees,v);
         if(t==T)goto done;
-        if(u==v || !shape[(size_t)t*n+u].live)continue;
+        if(u==v)continue;
         if(shape[(size_t)t*n+u].inner)buffer[(size_t)u*n+v]=next++;
         else own++;
       }
@@ -262,43 +248,27 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int 
       const uint32_t t=mesh_trees_heaviest(trees,v),*parent=trees->parent+(size_t)t*n;
       const struct mesh_shape *s=shape+(size_t)t*n;
       for(uint32_t u=0;u<n;u++){
-        if(u==v || !s[u].live)continue;
-        const uint32_t w=parent[u],op=!mesh_member(mine,w) && mesh_first_child(trees,t,s,w,u)?MESH_STEP_COPY:MESH_STEP_REDUCE;
-        for(uint32_t j=0;j<c;j++)
-          message[messages++]=(struct mesh_message){u,w,s[u].height+j,j,1,s[u].inner?buffer[(size_t)u*n+v]:buffer[(size_t)u*n+u],w==v?0:buffer[(size_t)w*n+v],op,v,
-                                                    trees->way?trees->way[(size_t)t*n+u]:0};
+        if(u==v)continue;
+        const uint32_t w=parent[u];
+        message[messages++]=(struct mesh_message){u,w,s[u].height,0,1,s[u].inner?buffer[(size_t)u*n+v]:buffer[(size_t)u*n+u],w==v?0:buffer[(size_t)w*n+v],
+                                                  MESH_STEP_REDUCE,v,trees->way?trees->way[(size_t)t*n+u]:0};
       }
     }
   }else{
-
     const int rooted=what==MESH_REDUCE || what==MESH_BROADCAST;
-    for(uint32_t g=0,index=0;g<(rooted?1:n);g++){
-      if(what==MESH_ALLGATHER && !mesh_member(contributors,g))continue;
-      for(uint32_t j=0;j<c;j++)for(uint32_t t=0;t<T;t++)
-        if(trees->root[t]==(rooted?root:g)){
-          part_of[(size_t)t*c+j]=parts;segment[parts]=rooted?0:index;log_weight[parts]=trees->log_weight[t];parts++;
-        }
-      index++;
-    }
+    for(uint32_t g=0;g<(rooted?1:n);g++)
+      for(uint32_t t=0;t<T;t++)
+        if(trees->root[t]==(rooted?root:g)){part_of[t]=parts;segment[parts]=rooted?0:g;log_weight[parts]=trees->log_weight[t];parts++;}
     if(!parts)goto done;
-    const int up=what==MESH_ALLREDUCE || what==MESH_REDUCE || what==MESH_REDUCE_SCATTER;
-    const int down=what==MESH_ALLREDUCE || what==MESH_BROADCAST || what==MESH_ALLGATHER;
-    uint32_t base=0;
-    for(uint32_t t=0;up && down && t<T;t++)
-      if(part_of[(size_t)t*c]!=UINT32_MAX && shape[(size_t)t*n+trees->root[t]].height>base)base=shape[(size_t)t*n+trees->root[t]].height;
+    const int up=what==MESH_REDUCE || what==MESH_REDUCE_SCATTER;
     for(uint32_t t=0;t<T;t++){
-      if(part_of[(size_t)t*c]==UINT32_MAX)continue;
-      const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n;
+      if(part_of[t]==UINT32_MAX)continue;
+      const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n,p=part_of[t];
       const struct mesh_shape *s=shape+(size_t)t*n;
-      for(uint32_t j=0;j<c;j++){
-        const uint32_t p=part_of[(size_t)t*c+j];
-        for(uint32_t u=0;up && u<n;u++){
-          if(u==r || !s[u].live)continue;
-          const uint32_t w=parent[u],op=!mesh_member(mine,w) && mesh_first_child(trees,t,s,w,u)?MESH_STEP_COPY:MESH_STEP_REDUCE;
-          message[messages++]=(struct mesh_message){u,w,s[u].height+j,p,1,0,0,op,p,trees->way?trees->way[(size_t)t*n+u]:0};
-        }
-        for(uint32_t u=0;down && u<n;u++)
-          if(u!=r)message[messages++]=(struct mesh_message){parent[u],u,base+s[u].depth-1+j,p,1,0,0,MESH_STEP_COPY,p,trees->way?trees->way[(size_t)t*n+u]:0};
+      for(uint32_t u=0;u<n;u++){
+        if(u==r)continue;
+        message[messages++]=up?(struct mesh_message){u,parent[u],s[u].height,p,1,0,0,MESH_STEP_REDUCE,p,trees->way?trees->way[(size_t)t*n+u]:0}
+                              :(struct mesh_message){parent[u],u,s[u].depth-1,p,1,0,0,MESH_STEP_COPY,p,trees->way?trees->way[(size_t)t*n+u]:0};
       }
     }
   }

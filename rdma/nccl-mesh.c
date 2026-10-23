@@ -199,8 +199,6 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
 
 struct redop { int used; ncclDataType_t type; unsigned char value[8]; uint32_t unit; const void *at; };
 
-struct entry { uint64_t below; struct mesh_program program; };
-
 struct channel {
   int peer;
   uint32_t node, stream;
@@ -214,12 +212,8 @@ struct plan;
 struct ncclComm {
   struct mesh_link_map map;
   uint64_t page;
-  struct entry *given;
-  ncclMeshForm *forms;
-  ncclMeshSolver solver;
-  void *solver_context;
-  uint32_t splits, *members, form_count, count, nops;
-  int nranks, rank, listed, binding, touched, unpublished;
+  uint32_t splits, *members, count, nops;
+  int nranks, rank, binding, touched, unpublished;
   char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
   struct redop *ops;
   ncclResult_t async;
@@ -251,7 +245,7 @@ struct plan {
   struct where base;
   size_t word;
   uint32_t reader;
-  int flight, leaving, stale, unlinked;
+  int flight, leaving;
   ncclResult_t refused;
   struct plan *next;
 };
@@ -269,12 +263,6 @@ static void map_free(struct mesh_link_map *map) {
   *map = (struct mesh_link_map){0};
 }
 
-static void routes_free(struct ncclComm *comm) {
-  map_free(&comm->map);
-  for (int e = 0; e < comm->listed; e++) program_free(&comm->given[e].program);
-  free(comm->given);
-  comm->given = NULL; comm->listed = 0;
-}
 
 static void bootstrap_close(struct ncclComm *comm) {
   pthread_mutex_lock(&comm->guard);
@@ -291,37 +279,19 @@ static void release(struct ncclComm *comm);
 
 static void comm_free(struct ncclComm *comm) {
   bootstrap_close(comm);
-  routes_free(comm);
+  map_free(&comm->map);
   metal_release(comm->command);
   comm_leave(comm);
   free(comm->channels); free(comm->toward);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
-  free(comm->members); free(comm->forms);
+  free(comm->members);
   free(comm);
-}
-
-static int program_copy(struct mesh_program *made, const struct mesh_program *from) {
-  const uint32_t moves = from->first[from->nodes];
-  uint32_t *segment = malloc((from->parts + 1) * sizeof *segment), *first = malloc((from->nodes + 1) * sizeof *first);
-  double *weight = malloc((from->parts + 1) * sizeof *weight);
-  struct mesh_move *move = malloc((moves + 1) * sizeof *move);
-  if (!segment || !first || !weight || !move) { free(segment); free(first); free(weight); free(move); return ENOMEM; }
-  memcpy(segment, from->segment, from->parts * sizeof *segment); memcpy(weight, from->log_weight, from->parts * sizeof *weight);
-  memcpy(first, from->first, (from->nodes + 1) * sizeof *first); memcpy(move, from->move, moves * sizeof *move);
-  *made = *from;
-  made->segment = segment; made->log_weight = weight; made->first = first; made->move = move;
-  return 0;
 }
 
 static int has_root(int what) { return what == MESH_REDUCE || what == MESH_BROADCAST; }
 
 #define MESH_SOLVE_EPS 0.1
-static uint32_t solve_default(const struct mesh_link_map *map, const struct mesh_demand *demands, uint32_t count, uint32_t room, uint32_t *demand,
-                              uint32_t *parent, uint32_t *way, double *share, void *context) {
-  (void)context;
-  return mesh_solve(map, MESH_SOLVE_EPS, 0, demands, count, room, demand, parent, way, share);
-}
 
 struct flow { uint32_t count, *demand, *parent, *way; double *share; };
 static void flow_free(struct flow *f) {
@@ -333,60 +303,13 @@ static ncclResult_t flow_solve(ncclComm_t comm, const struct mesh_demand *demand
   *f = (struct flow){0, calloc((size_t)room + 1, sizeof *f->demand), calloc((size_t)room * n + 1, sizeof *f->parent),
                      calloc((size_t)room * n + 1, sizeof *f->way), calloc((size_t)room + 1, sizeof *f->share)};
   if (!f->demand || !f->parent || !f->way || !f->share) { flow_free(f); return fail(ncclSystemError, "out of memory"); }
-  const uint32_t made = count ? (comm->solver ? comm->solver : solve_default)(&comm->map, demands, count, room, f->demand, f->parent, f->way, f->share,
-                                                                               comm->solver_context) : 0;
+  const uint32_t made = count ? mesh_solve(&comm->map, MESH_SOLVE_EPS, 0, demands, count, room, f->demand, f->parent, f->way, f->share) : 0;
   if (made == UINT32_MAX) {
     flow_free(f);
     return fail(ncclInvalidUsage, "communicator %s: its map joins no route between two members its calls cross between", comm->name);
   }
   f->count = made;
   return ncclSuccess;
-}
-
-static ncclMeshForm *forms_copy(const ncclMeshForm *forms, uint32_t count) {
-  ncclMeshForm *made = malloc(count * sizeof *made + 1);
-  if (made && count) memcpy(made, forms, count * sizeof *made);
-  return made;
-}
-
-ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int count) {
-  if (!comm || count < 0 || (count && !forms)) return fail(ncclInvalidArgument, "ncclMeshCommForms's arguments");
-  ncclMeshForm *made = count ? forms_copy(forms, (uint32_t)count) : NULL;
-  if (count && !made) return fail(ncclSystemError, "out of memory");
-  pthread_mutex_lock(&group_lock);
-  free(comm->forms);
-  comm->forms = made; comm->form_count = (uint32_t)count;
-  for (struct plan *p = comm->plans; p; p = p->next) p->stale = 1;
-  pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
-}
-
-ncclResult_t ncclMeshCommSetSolver(ncclComm_t comm, ncclMeshSolver solver, void *context) {
-  if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
-  pthread_mutex_lock(&group_lock);
-  comm->solver = solver; comm->solver_context = context;
-  for (struct plan *p = comm->plans; p; p = p->next) p->stale = 1;
-  pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
-}
-
-static void form_of(const struct ncclComm *comm, int what, int root, uint64_t bytes, int *whole, uint32_t *chunks) {
-  *whole = what == MESH_ALLREDUCE; *chunks = 1;
-  for (uint32_t f = 0; f < comm->form_count; f++) {
-    const ncclMeshForm *x = comm->forms + f;
-    if (x->collective != what || (has_root(what) && x->root >= 0 && x->root != root) || (x->below && bytes >= x->below)) continue;
-    *whole = x->whole; *chunks = x->chunks ? x->chunks : 1;
-    return;
-  }
-}
-
-static const struct mesh_program *program_of(ncclComm_t comm, int what, int root, uint64_t bytes) {
-  for (int e = 0; e < comm->listed; e++) {
-    const struct entry *x = comm->given + e;
-    if ((int)x->program.what != what || ((what == MESH_REDUCE || what == MESH_BROADCAST) && (int)x->program.root != root)) continue;
-    if (!x->below || bytes < x->below) return &x->program;
-  }
-  return NULL;
 }
 
 struct lease { void *address; uint32_t row; size_t bytes; void *buffer; };
@@ -770,15 +693,6 @@ static ncclResult_t hold_fail(const char *name, int rank, int status) {
               "reads the streams as they then stand", name, rank, strerror(status));
 }
 
-static int comm_table(struct ncclComm *made, const ncclMeshProgram *programs, int count) {
-  if (count && !(made->given = calloc((size_t)count, sizeof *made->given))) return ENOMEM;
-  for (int e = 0; e < count; e++) {
-    if (program_copy(&made->given[e].program, programs[e].program)) return ENOMEM;
-    made->given[made->listed++].below = programs[e].below;
-  }
-  return 0;
-}
-
 static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node, uint32_t cable) {
   for (uint32_t k = 0; k < MESH_STREAMS; k++)
     if ((comm->held >> k & 1) && comm->attach->holds[k].node == node && comm->attach->holds[k].cable == cable) return comm->attach->holds + k;
@@ -879,21 +793,13 @@ static void *init_run(void *argument) {
   return NULL;
 }
 
-ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank, const ncclMeshProgram *programs, int count,
-                                  uint64_t small, const char *name, ncclConfig_t *config) {
-  if (!comm || nranks < 1 || rank < 0 || rank >= nranks || count < 0 || (count && !programs))
-    return fail(ncclInvalidArgument, "the init's arguments: rank %d of %d, %d programs", rank, nranks, count);
-  for (int e = 0; e < count; e++)
-    if (!programs[e].program || programs[e].program->nodes != (uint32_t)nranks) return fail(ncclInvalidArgument, "program %d is not of %d ranks", e, nranks);
+ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank, const char *name, ncclConfig_t *config) {
+  if (!comm || nranks < 1 || rank < 0 || rank >= nranks) return fail(ncclInvalidArgument, "the init's arguments: rank %d of %d", rank, nranks);
   char id[sizeof commId.internal + 1];
   memcpy(id, commId.internal, sizeof commId.internal);
   id[sizeof commId.internal] = 0;
   struct ncclComm *made = comm_new(nranks, rank, name && *name ? name : id);
-  (void)small;
-  if (!made || comm_table(made, programs, count)) {
-    if (made) comm_free(made);
-    return fail(ncclSystemError, "out of memory");
-  }
+  if (!made) return fail(ncclSystemError, "out of memory");
   memcpy(made->id, id, sizeof made->id);
   if (config && !config->blocking) {
     made->async = ncclInProgress;
@@ -909,11 +815,11 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId com
 }
 
 ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank) {
-  return ncclMeshCommInitRank(comm, nranks, commId, rank, NULL, 0, 0, NULL, NULL);
+  return ncclMeshCommInitRank(comm, nranks, commId, rank, NULL, NULL);
 }
 
 ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t *config) {
-  return ncclMeshCommInitRank(comm, nranks, commId, rank, NULL, 0, 0, NULL, config);
+  return ncclMeshCommInitRank(comm, nranks, commId, rank, NULL, config);
 }
 
 ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
@@ -1335,17 +1241,14 @@ static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, st
     return made;
   }
   const uint64_t bytes = elements(c) * z;
-  int whole;
-  uint32_t chunks;
-  form_of(comm, c->what, c->root, bytes, &whole, &chunks);
   if (has_root(c->what)) {
     d[made++] = (struct mesh_demand){(uint32_t)c->root, 0, c->what == MESH_REDUCE ? bytes : 0, c->what == MESH_BROADCAST ? bytes : 0, NULL};
     return made;
   }
   for (uint32_t r = 0; r < n; r++) {
     const uint64_t part = (c->segments ? c->segments[r] : c->what == MESH_ALLREDUCE ? (c->count + n - 1) / n : c->count) * z;
-    const uint64_t up = c->what == MESH_ALLGATHER ? 0 : c->what == MESH_ALLREDUCE && whole ? bytes : part;
-    const uint64_t down = c->what == MESH_REDUCE_SCATTER || (c->what == MESH_ALLREDUCE && whole) ? 0 : part;
+    const uint64_t up = c->what == MESH_ALLGATHER ? 0 : c->what == MESH_ALLREDUCE ? bytes : part;
+    const uint64_t down = c->what == MESH_REDUCE_SCATTER || c->what == MESH_ALLREDUCE ? 0 : part;
     d[made++] = (struct mesh_demand){r, 0, up, down, NULL};
   }
   return made;
@@ -1360,16 +1263,13 @@ static ncclResult_t compiled_of(ncclComm_t comm, const struct call *c, const str
   ncclResult_t result = root && parent && way && weight ? ncclSuccess : fail(ncclSystemError, "out of memory");
   const struct mesh_trees trees = {n, result ? 0 : mesh_flow_trees(n, d, f->demand, f->parent, f->way, f->share, f->count, first, last, root, parent, way,
                                                                    weight), root, parent, weight, way};
-  int whole;
-  uint32_t chunks, parts = 0, moves = 0;
-  form_of(comm, c->what, c->root, elements(c) * SIZE[c->type], &whole, &chunks);
-  if (!result) mesh_compile_room(&trees, chunks, &parts, &moves);
+  uint32_t parts = 0, moves = 0;
+  if (!result) mesh_compile_room(&trees, &parts, &moves);
   uint32_t *segment = result ? NULL : malloc((parts + 1) * sizeof *segment), *at = result ? NULL : malloc((n + 1) * sizeof *at);
   double *log_weight = result ? NULL : malloc((parts + 1) * sizeof *log_weight);
   struct mesh_move *move = result ? NULL : malloc((moves + 1) * sizeof *move);
   if (!result && (!segment || !at || !log_weight || !move)) result = fail(ncclSystemError, "out of memory");
-  if (!result && mesh_compile(&trees, (uint32_t)c->what, has_root(c->what) ? (uint32_t)c->root : 0, whole, chunks, NULL, &s->program, segment,
-                              log_weight, at, move))
+  if (!result && mesh_compile(&trees, (uint32_t)c->what, has_root(c->what) ? (uint32_t)c->root : 0, &s->program, segment, log_weight, at, move))
     result = fail(ncclInternalError, "%s on %s: the solver's trees do not compile", call_name(c), comm->name);
   if (result) { free(segment); free(at); free(log_weight); free(move); }
   else s->compiled = 1;
@@ -1403,7 +1303,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; !result && i < n; i++) {
     struct call *c = list + i;
     lo[i] = hi[i] = demands;
-    if (!crosses(c) || p2p(c) || (!counted(c) && program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]))) continue;
+    if (!crosses(c) || p2p(c)) continue;
     hi[i] = demands += demands_of(comm, c, d + demands, leaves + (size_t)demands * words);
   }
   if (!result) result = flow_solve(comm, d, demands, &f);
@@ -1415,9 +1315,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     struct steps *s = calloc(1, sizeof *s);
     if (!s) { result = fail(ncclSystemError, "out of memory"); break; }
     c->bound = s;
-    const struct mesh_program *given = p2p(c) || counted(c) ? NULL : program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
-    if (!p2p(c) && !counted(c) && !given && (result = compiled_of(comm, c, d, &f, lo[i], hi[i], s))) break;
-    const struct mesh_program *program = p2p(c) || counted(c) ? NULL : given ? given : &s->program;
+    if (!p2p(c) && !counted(c) && (result = compiled_of(comm, c, d, &f, lo[i], hi[i], s))) break;
+    const struct mesh_program *program = p2p(c) || counted(c) ? NULL : &s->program;
     const int nccl = c->what == MESH_REDUCE_SCATTER || c->what == MESH_ALLGATHER;
     if (nccl) {
       uint32_t segments = 1;
@@ -1477,7 +1376,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
 struct message { struct call *c; uint32_t step; int32_t war; uint64_t entry, need, rel_entry, rel_need; mesh_pages pages;
                  size_t offset, bytes, area; struct where data; uint64_t row; };
 
-struct schedule { struct message *out, *in; size_t outs, ins, table; uint64_t first[2], k, after; struct mesh_plan *t; int awaited; };
+struct schedule { struct message *out, *in; size_t outs, ins, table; uint64_t first[2], k; struct mesh_plan *t; };
 
 static uint32_t group_kind(const struct call *c) { return p2p(c) ? MESH_GROUP_POINT : counted(c) ? MESH_GROUP_HOSTED : MESH_GROUP_COLLECTIVE; }
 static void group_of(const struct call *list, size_t n, uint32_t N, const struct mesh_step **steps, uint32_t *count,
@@ -1725,7 +1624,7 @@ static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n
   for (size_t i = 0; i < n; i++) list[i].direct_ok = direct_ok(list + i);
   struct plan *p = comm->plans;
   for (int same = 0; p && !same; p = same ? p : p->next) {
-    same = !p->stale && p->n == n && plan_idle(p) && plan_quiet(comm, p);
+    same = p->n == n && plan_idle(p) && plan_quiet(comm, p);
     for (size_t i = 0; same && i < n; i++) same = call_same(p->list + i, list + i);
   }
   const ncclResult_t result = p ? ncclSuccess : plan_make(comm, list, n, &p);
@@ -1789,7 +1688,6 @@ static void tables_start(struct ncclComm *comm, struct schedule *plans) {
     if (!p->t) continue;
     p->k = ++comm->channels[h].calls;
     comm->channels[h].last = p->t;
-    p->awaited = 0;
     for (size_t k = 0; k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry *e = p->t->entry + m->rel_entry;
@@ -2059,20 +1957,10 @@ struct inflight {
   size_t n;
   struct schedule *plans;
   uint64_t (*start)[2], (*end)[2];
-  uint32_t lone;
   int composed;
   struct inflight *next_group;
 };
 
-static uint32_t lone_of(const struct inflight *g) {
-  uint32_t lone = g->comm->count;
-  for (uint32_t h = 0; h < g->comm->count; h++)
-    if (g->end[h][0] > g->start[h][0] || g->end[h][1] > g->start[h][1]) {
-      if (lone != g->comm->count) return METAL_NONE;
-      lone = h;
-    }
-  return lone;
-}
 static struct inflight *inflight, *inflight_last;
 static uint64_t tickets;
 static _Atomic uint64_t retired;
@@ -2156,20 +2044,19 @@ static uint64_t consumed_past(struct ncclComm *comm, uint32_t h, uint64_t at) {
   return at;
 }
 
-static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t at, uint32_t base, int fold) {
+static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t at, uint32_t base) {
   struct channel *ch = comm->channels + h;
   struct inflight *g = inflight_at(comm, h, 1, at);
   const struct message *m = in_at(g, h, at);
   struct steps *st = m->c->bound;
   const struct mesh_step *step = st->steps + m->step;
   ncclResult_t result = ncclSuccess;
-  if (base != METAL_NONE && st->before[m->step] >= 0) {
+  if (st->before[m->step] >= 0) {
     const int32_t j = st->before[m->step];
     result = gpu(metal_depend(program, base + st->channel[j], st->entry[j] + 1), "a receive's dependency");
   }
   struct schedule *s = g->plans + h;
-  const int folded = fold && at + 1 == g->end[h][1] && s->outs && ch->published >= g->end[h][0];
-  const _Atomic uint64_t *sent = folded ? &s->t->sent : m->war >= 0 ? &s->t->entry[m->war].done : NULL;
+  const _Atomic uint64_t *sent = m->war >= 0 ? &s->t->entry[m->war].done : NULL;
   const struct metal_wait wait = {g->plan->buffer, m->data.buffer, table_word(g, &s->t->entry[s->outs + m->rel_entry].done),
                                   sent ? table_word(g, sent) : 0, m->data.offset, s->k, sent ? s->k : 0};
   if (!result && step->op == MESH_STEP_REDUCE) {
@@ -2183,38 +2070,9 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
     } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, kcount(m->c, m->bytes), &wait), "a landing");
   } else if (!result) result = gpu(metal_spin(program, &wait), "a wait");
   if (result) return result;
-  s->awaited |= folded;
   st->done[m->step] = 1;
   if (at == ch->consumed) ch->consumed = consumed_past(comm, h, at + 1);
   return ncclSuccess;
-}
-
-static uint32_t one_track(const struct inflight *through) {
-  uint32_t h = METAL_NONE;
-  for (const struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group) {
-    if (g->composed) continue;
-    if (g->comm != through->comm || g->lone == METAL_NONE) return METAL_NONE;
-    if (g->lone == g->comm->count) continue;
-    if (h != METAL_NONE && h != g->lone) return METAL_NONE;
-    h = g->lone;
-  }
-  return h;
-}
-
-static ncclResult_t complete_track(struct metal_program *program, struct inflight *through, uint32_t h, int *published) {
-  struct ncclComm *const comm = through->comm;
-  struct channel *ch = comm->channels + h;
-  const uint64_t out = through->end[h][0], in = through->end[h][1];
-  ncclResult_t result = ncclSuccess;
-  touch(comm);
-  metal_rows(program, &through->plan->rows);
-  while (!result && (ch->published < out || ch->consumed < in)) {
-    uint64_t upto = ch->published;
-    while (upto < out && publishable(comm, h, upto)) upto++;
-    if (upto > ch->published) result = publish(program, comm, h, upto, published);
-    else result = consume(program, comm, h, ch->consumed, METAL_NONE, 1);
-  }
-  return result;
 }
 
 static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
@@ -2223,8 +2081,6 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
     if (!g->composed) last = g;
   if (!last) return ncclSuccess;
   through = last;
-  const uint32_t lone = one_track(through);
-  if (lone != METAL_NONE) return complete_track(program, through, lone, published);
   size_t comms = 0, room = 0;
   struct ncclComm **comm = NULL;
   uint32_t *base = NULL, tracks = 0;
@@ -2274,7 +2130,7 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
       while (!result && ch->consumed < end[h][1]) {
         const uint64_t at = ch->consumed;
         result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(inflight_at(c, h, 1, at), h, at)->need), "a consumption's record");
-        if (!result) result = consume(program, c, h, at, base[k], 0);
+        if (!result) result = consume(program, c, h, at, base[k]);
       }
     }
   }
@@ -2457,9 +2313,9 @@ static ncclResult_t retire(struct metal_program *program) {
     if (program && g->plan) metal_rows(program, &g->plan->rows);
     for (uint32_t h = 0; h < comm->count && !result && !g->composed; h++) {
       struct schedule *s = g->plans + h;
-      if (!s->outs || s->awaited) continue;
+      if (!s->outs) continue;
       const struct metal_wait wait = {g->plan->buffer, NULL, table_word(g, &s->t->sent), 0, 0, s->k, 0};
-      if (!(result = gpu(metal_spin(program, &wait), "a wait for the group's SENDs"))) s->awaited = 1;
+      result = gpu(metal_spin(program, &wait), "a wait for the group's SENDs");
     }
     if (!result && g->n) result = epilogue(program, g->list, g->n);
     inflight = g->next_group;
@@ -2553,7 +2409,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (result && g) { free(g->start); free(g); g = NULL; }
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
-      g->lone = lone_of(g);
       g->ticket = ticket = ++tickets;
       if (inflight_last) inflight_last->next_group = g; else inflight = g;
       inflight_last = g;
@@ -2745,18 +2600,6 @@ static void sweep(struct ncclComm *comm) {
   comm->freed = NULL;
 }
 
-static int plan_released(struct ncclComm *comm, struct plan *p) {
-  int all = 1;
-  if (!p->unlinked && plan_idle(p) && plan_quiet(comm, p)) {
-    for (uint32_t h = 0; h < comm->count; h++)
-      if (p->plans[h].t) all &= unlinked(comm, h, p->plans[h].t, &p->plans[h].after);
-    p->unlinked = all ? 1 : -1;
-  }
-  for (uint32_t h = 0; p->unlinked > 0 && h < comm->count; h++)
-    if (p->plans[h].t && !walked(comm, h, p->plans[h].after)) return 0;
-  return p->unlinked > 0;
-}
-
 static int slot_released(struct ncclMeshRequest *r, struct slot *s) {
   struct ncclComm *const comm = r->comm;
   int all = 1;
@@ -2776,11 +2619,6 @@ static int slot_released(struct ncclMeshRequest *r, struct slot *s) {
 }
 
 static void release(struct ncclComm *comm) {
-  for (struct plan **at = &comm->plans; *at;) {
-    struct plan *p = *at;
-    if (p->stale && plan_released(comm, p)) { *at = p->next; plan_free(comm, p); }
-    else at = &p->next;
-  }
   for (struct ncclMeshRequest **at = &comm->freed; *at;) {
     struct ncclMeshRequest *r = *at;
     uint32_t kept = 0;
@@ -3325,11 +3163,6 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
   const int making = (*made = comm_new(count, rank, name)) ? comm_attach(*made, members) : ENOMEM;
   ncclResult_t result = making ? comm_refused(making, name) : ncclSuccess;
   if (making && *made) { comm_free(*made); *made = NULL; }
-  if (!result && *made) { (*made)->solver = comm->solver; (*made)->solver_context = comm->solver_context; }
-  if (!result && comm->form_count && !((*made)->forms = forms_copy(comm->forms, comm->form_count))) {
-    comm_free(*made); *made = NULL;
-    result = fail(ncclSystemError, "out of memory");
-  } else if (!result) (*made)->form_count = comm->form_count;
   free(members);
   return result;
 }
