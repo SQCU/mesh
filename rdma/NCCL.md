@@ -163,15 +163,6 @@ program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) 
 its table's first program of its collective (and root) whose size bound its operand is under. Nothing about a program
 is decided where a call runs.
 
-**Counted all-to-all.** `ncclMeshAlltoAllCounted(send, sendrows, counts, sendsegs, recv, capacity, received, landed,
-recvsegs, arrived, row, type, comm, stream)`, MPI_Alltoallv whose counts the GPU wrote, is refused as a value
-(`ncclInvalidUsage`, `*arrived` 2). Its rows' places in the send and receive buffers are computed on the GPU from its
-counts, and a crossing's bytes are entries the host presents (a range of page-table rows, counted in pages), so its
-rows could cross only through a copy into pages the host knows, which the library never makes (the operator, 2026-10-21: "zero
-copy methods must always be used over access by copy"; "code which can't perform well can fail instead of being run").
-It last ran on the rings (mesh fba2af36^: ep at 27.5-27.7 ms a step, metal-microbench docs/measurement.md 2026-09-30
-part B). Rows whose counts the host holds move with `ncclMeshAlltoAllV`.
-
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, sendcounts, recv, recvcounts, type, comm, stream)` is
 MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
 `recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`; its own

@@ -1137,14 +1137,6 @@ ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const 
    root), so recvbuff off a gather's root and sendbuff off a scatter's are not read and may be NULL.  Both paths. */
 ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, void* recvbuff, const size_t* recvcounts, ncclDataType_t datatype,
                                ncclComm_t comm, cudaStream_t stream);
-/* MPI_Alltoallv with counts the GPU wrote (mesh 3981ca80^'s signature; expert-parallel dispatch and combine with no
-   host count): refused as a value (ncclInvalidUsage, *arrived set to 2).  Its rows' places in sendbuff and recvbuff
-   are computed on the GPU from its counts, so none of them can be an entry the host presents (a page's first byte and
-   its bytes: Memory, above); its rows could cross only through a copy, which this library never makes.  Its rows move
-   with ncclMeshAlltoAllV, from counts the host holds. */
-ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
-                                     size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,
-                                     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 /* The partials merge, a reduction operator made as ncclRedOpCreatePreMulSum makes one (an operator of comm's, freed by
    ncclRedOpDestroy): split-KV attention partials merged by their log-sum-exp [Dao et al. 2023, Flash-Decoding;
    FlashInfer's state merge].  Its operand is rows of 2 + `dim` elements of `datatype` (ncclFloat32), a row [m, l, O:

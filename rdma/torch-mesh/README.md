@@ -10,8 +10,8 @@ reduce-scatter are always the V calls (`ncclMeshAllGatherV`, `ncclMeshReduceScat
 segments as its equal program). `all_to_all`, `all_to_all_single`, `gather` and `scatter` are `ncclMeshAlltoAllV`,
 MPI_Alltoallv with its counts on the host (a gather or scatter of any sizes is the rooted V, MPI's `Gatherv` and
 `Scatterv`: every count 0 but toward or from the root, as NCCL's gather and scatter are its forms); a list that is not
-the pieces of one tensor goes through one flat tensor. `send` and `recv` are the library's point to point. The counted
-all-to-all is the library's call of its own; the partials merge is a reduction by the library's partials operator.
+the pieces of one tensor goes through one flat tensor. `send` and `recv` are the library's point to point; the
+partials merge is a reduction by the library's partials operator.
 
 ## Install
 
@@ -65,9 +65,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
   tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a staged
   copy of a non-contiguous operand, a functional collective's result, `backend.blank`) are region tensors.
-  metal-microbench's callers: `tools/torch_parallel/ep.py` `COUNTED=1` gathers its dispatched rows into one region
-  tensor and writes its experts' outputs into another (its two send buffers, made once at their fixed shapes), and
-  `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
+  metal-microbench's callers: `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
 ## What works
 
@@ -87,29 +85,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
-| expert parallelism | all_to_all_single; `torch_mesh.all_to_all_counted` with counts the GPU wrote, and `partition.routed`, the experts a partition's units (below) |
+| expert parallelism | all_to_all_single (below) |
 
-### Counted all-to-all
-
-`all_to_all_single` takes its splits as host lists, so a mixture of experts' dispatch reads the router's counts on the
-host first (a sync). `torch_mesh.all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group)` is
-MPI_Alltoallv whose counts the GPU wrote (the operator `torch_mesh::all_to_all_counted` over libnccl-mesh's
-`ncclMeshAlltoAllCounted`, [NCCL.md](../NCCL.md)): `input`'s rows grouped by destination, as many to rank q as segment
-q of `counts` (int64 on the input's device, `send_segments[q]` entries) sums to; each rank's segment for this rank moves
-with its rows in one exchange, received packed in rank order into `capacity` rows. It returns `(rows, landed, handle,
-work)`: `landed` the received counts on the GPU once `work.wait()` has ordered the call on torch's stream, and
-`torch_mesh.counted(handle)` the same counts on the host as they land (a region CPU tensor the library writes), its wait
-ending at their arrival or the call's failure, never at a time. Its caller is metal-microbench
-`tools/torch_parallel/ep.py` with `COUNTED=1` (the 09-30 dispatch and combine: the experts' slots on `partition`'s "ep"
-dimension, the counts made on the GPU and unpacked to each rank's slots, no `.tolist()` of the splits). Reproduction
-target (metal-microbench docs/measurement.md 2026-09-30, part B, mesh ab98765 and metal-microbench 31fed26): `ep.py`
-`COUNTED=1 PARTS="1,7 2,6" CAPACITY=2,7` on the pair, 27.5-27.7 ms a step, the counted call's overhead 473-480 us.
-
-`partition.routed(mesh, "ep", x, experts, slots)` is that dispatch and combine as a routed range partition: the
-partitioned mesh dimension's units are experts (rank r's capacity[r] slots, the first parts[r] of them its experts and
-the rest receiving no rows), each (token, k) row crosses to its expert's rank and back by the counted all-to-all, its
-send buffers region tensors made once, and it returns each row's expert output for the caller to weight and sum. Equal
-parts are the even split, so one form serves both of `ep.py`'s.
+An indexed scatter into the blocks of `all_to_all_single` at a program's maximum extents, written in the program's own
+code, is any dispatch by index (an expert dispatch among them); how much of a block a step fills is data in its pages.
 
 ### Partials merge
 
@@ -397,7 +376,7 @@ w = s["lm_head"].to("cpu")                        # decoded
     Otherwise it joins torch's open command buffer. In flight counts the library's buffers, not torch's own. The depth
     is the rule's structure, not a setting: nothing is read from a file or the environment, and no node is configured.
   - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
-    library's: the host path, `counted`, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
+    library's: the host path, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
   - A host that blocks outside torch while a publication waits in the open buffer stalls its peer. Avoiding that is

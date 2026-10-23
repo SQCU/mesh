@@ -1859,8 +1859,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1;
     } else if (counted(c))
-      s->count = mesh_counted_steps((uint32_t)comm->nranks, (uint32_t)comm->rank, c->segments, 1, (struct mesh_operand){operand.type, operand.element_bytes, 0},
-                                    (struct mesh_operand){0, 0, 0}, s->steps);
+      s->count = mesh_counted_steps((uint32_t)comm->nranks, (uint32_t)comm->rank, c->segments, (struct mesh_operand){operand.type, operand.element_bytes, 0},
+                                    s->steps);
     else s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->segments, comm->page, s->steps);
     for (uint32_t k = 0; k < s->count; k++)
       if (piece_bytes(s->steps + k) && comm->toward[s->steps[k].peer] < 0)
@@ -3773,24 +3773,6 @@ ncclResult_t ncclMeshReduceScatterV(const void *sendbuff, void *recvbuff, const 
                                     ncclComm_t comm, cudaStream_t stream) {
   return enqueue_counts((struct call){.what = MESH_REDUCE_SCATTER, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = op, .comm = comm,
                                       .stream = stream}, counts);
-}
-
-/* nccl.h ncclMeshAlltoAllCounted (mesh 3981ca80^'s signature): refused as a value.  Its rows' places in the send and
-   receive buffers are computed on the GPU from its counts, and a crossing's bytes are entries the host presents (a
-   page's first byte and its bytes, design/transport.md section 14), so its rows could cross only through a copy into
-   pages the host knows, which this library never makes (the operator, 2026-10-21: "zero copy methods must always be
-   used over access by copy"; "code which can't perform well can fail instead of being run").  *arrived 2, as a failed
-   call's */
-ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff, size_t sendrows, const int64_t *counts, const size_t *sendsegs, void *recvbuff,
-                                     size_t capacity, int64_t *received, int64_t *landed, const size_t *recvsegs, uint64_t *arrived, size_t row,
-                                     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
-  (void)sendbuff; (void)sendrows; (void)counts; (void)sendsegs; (void)recvbuff; (void)capacity; (void)received; (void)landed; (void)recvsegs;
-  (void)row; (void)datatype; (void)stream;
-  if (arrived) __atomic_store_n(arrived, 2, __ATOMIC_RELEASE);
-  return fail(ncclInvalidUsage, "ncclMeshAlltoAllCounted%s%s: its rows' places are computed on the GPU from its counts, so none of them can be an "
-              "entry the host presents (a page's first byte and its bytes): they would cross only through a copy, which this library never "
-              "makes; ncclMeshAlltoAllV moves rows whose counts the host holds, each pair's segment from a page", comm ? " on communicator " : "",
-              comm ? comm->name : "");
 }
 
 ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {

@@ -968,24 +968,12 @@ static uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){
   for(uint32_t r=0;r<q;r++)at+=segment[r];
   return at;
 }
-uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,int hosted,struct mesh_operand element,
-                            struct mesh_operand counts,struct mesh_step *steps){
-  const uint64_t *sent=segments,*got=segments+nodes;
+uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps){
   uint32_t k=0;
-  for(uint32_t q=0;hosted && q<2*nodes;q++)
+  for(uint32_t q=0;q<2*nodes;q++)
     if(q%nodes!=rank && segments[q])
       steps[k++]=(struct mesh_step){q<nodes?MESH_STEP_SEND:MESH_STEP_COPY,q%nodes,0,q>=nodes,mesh_segment_first(segments+(q<nodes?0:nodes),q%nodes),
                                     {element.type,element.element_bytes,segments[q]}};
-  if(hosted)return k;
-  for(uint32_t q=0;q<nodes;q++){
-    if(q==rank || !sent[q])continue;
-    steps[k++]=(struct mesh_step){MESH_STEP_SEND,q,0,0,mesh_segment_first(sent,q),{counts.type,counts.element_bytes,sent[q]}};
-    if(element.elements)steps[k++]=(struct mesh_step){MESH_STEP_SEND,q,0,1,0,element};
-  }
-  for(uint32_t q=0;q<nodes;q++)
-    if(q!=rank && got[q])steps[k++]=(struct mesh_step){MESH_STEP_COPY,q,0,2,mesh_segment_first(got,q),{counts.type,counts.element_bytes,got[q]}};
-  for(uint32_t q=0;element.elements && q<nodes;q++)
-    if(q!=rank && got[q])steps[k++]=(struct mesh_step){MESH_STEP_COPY,q,0,3,0,element};
   return k;
 }
 uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
@@ -993,7 +981,7 @@ uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,i
   *placed=0;
   for(uint32_t pass=0;pass<2;pass++)for(uint32_t i=0;i<g->calls;i++){
     const struct mesh_group_call *c=g->call+i;
-    if(c->kind==MESH_GROUP_POINT || (c->kind==MESH_GROUP_COUNTED || c->kind==MESH_GROUP_HOSTED)!=pass)continue;
+    if(c->kind==MESH_GROUP_POINT || (c->kind==MESH_GROUP_HOSTED)!=pass)continue;
     uint32_t laid=0;
     at=mesh_lay(c->steps[rank],c->count[rank],peer,send,at,scratch,&laid);
     for(uint32_t k=0;k<laid;k++)made[(*placed)++]=(struct mesh_group_place){i,0,scratch[k]};

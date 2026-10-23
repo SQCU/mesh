@@ -12,20 +12,18 @@ program): an all-gather and a reduce-scatter are ncclMeshAllGatherV and ncclMesh
 all_to_all_single, gather and scatter are ncclMeshAlltoAllV, MPI_Alltoallv with its counts on the host (a gather and a
 scatter of any sizes the rooted V, MPI's Gatherv and Scatterv: every count 0 but toward or from the root, as NCCL's
 gather and scatter are its forms); a list that is not the pieces of one tensor is staged through one flat tensor
-(packed).  send and recv are the library's point to point.  The counted all-to-all (all_to_all_counted) is the
-library's own call; the partials merge (merge_partials) is an all-reduce, reduce or V reduce-scatter by the library's
-partials operator.
+(packed).  send and recv are the library's point to point.  The partials merge (merge_partials) is an all-reduce,
+reduce or V reduce-scatter by the library's partials operator.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
 store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; its pg_options are not
 read.
 The silent-link bound is the library's (nccl.h)."""
 import math
-import os
 
 import torch
 import torch.distributed as dist
-from torch._C._distributed_c10d import ReduceOp, _create_work_from_future, _register_work
+from torch._C._distributed_c10d import ReduceOp, _create_work_from_future
 from torch.futures import Future
 
 from . import _stream, evidence  # _stream's kernels for torch's functional collectives on MPS register as it loads
@@ -36,7 +34,7 @@ ffi, LIB = mesh.ffi, mesh.lib
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
 # a call's kind (_stream.mm Kind)
-ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, COUNTED = range(9)
+ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV = range(8)
 
 
 def check(result):
@@ -181,12 +179,11 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     pg_name = group_name
 
-    def _issue(self, calls, result, split=False, backs=(), registered=None):
+    def _issue(self, calls, result, split=False, backs=()):
         """One NCCL group of `calls` (_stream.mm issue), `result` what its Work holds: issued and not completed where
-        `split` (an async op) and nothing is to be written back after it, else complete; `backs` then run, and its
-        Work is registered for `registered` (torch's wait_tensor waits for it).  Between start_coalescing and
-        end_coalescing the calls join the coalesced group instead.  The evidence's marks of a host-path group are taken
-        here (a Metal-path group's on torch's stream, by _stream.mm)."""
+        `split` (an async op) and nothing is to be written back after it, else complete; `backs` then run.  Between
+        start_coalescing and end_coalescing the calls join the coalesced group instead.  The evidence's marks of a
+        host-path group are taken here (a Metal-path group's on torch's stream, by _stream.mm)."""
         if self._pending is not None:
             self._pending.append((calls, result, backs))
             return done(result)
@@ -200,8 +197,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
             evidence.mark(self, False)
         if work is None:
             return done(result)
-        if registered is not None:
-            _register_work(registered, work)
         return work
 
     def _alltoall(self, sends, receives, result, opts):
@@ -294,14 +289,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def recv(self, tensors, src, tag):
         return self._issue([(RECV, [], [t], [], 0, src) for t in tensors], tensors, True)
 
-    def all_to_all_counted(self, out, input, counts, sends, receives, host, landed):
-        """MPI_Alltoallv whose counts the GPU wrote (nccl.h ncclMeshAlltoAllCounted; torch_mesh.all_to_all_counted):
-        `input`'s rows grouped by destination, as many to rank q as segment q of `counts` sums to, received packed in
-        rank order into `out`, the received counts into host[1:] (host[0] set once they landed) and `landed`.  On MPS
-        issued: its rows and `landed` complete on torch's stream where wait_tensor(out) waits; on the host path at once."""
-        return self._issue([(COUNTED, [input, counts], [out, landed, host], [*sends, *receives], 0, 0)], [out, landed], True,
-                           registered=out)
-
     def merge_partials(self, out, partials, rows=None, root=-1, async_op=False):
         """Split-KV attention partials merged by their log-sum-exp, by the library's partials operator (nccl.h
         ncclMeshRedOpCreatePartials, one an operand width, made at its first use): `partials` this member's float32 rows
@@ -343,24 +330,6 @@ def _mesh(group_name, what):
     return group
 
 
-@torch.library.custom_op('torch_mesh::all_to_all_counted', mutates_args=('host',))
-def all_to_all_counted(input: torch.Tensor, counts: torch.Tensor, send_segments: list[int], recv_segments: list[int], capacity: int,
-                       host: torch.Tensor, group_name: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """The counted all-to-all on the mesh group named `group_name` as a torch operator (torch_mesh.all_to_all_counted):
-    (the rows received, `capacity` of them; the received counts on the input's device), host[1:] the received counts
-    on the host once host[0] is set (counted)."""
-    group = _mesh(group_name, 'all_to_all_counted')
-    out = torch.empty((capacity,) + tuple(input.shape[1:]), dtype=input.dtype, device=input.device)
-    landed = torch.empty(sum(recv_segments), dtype=torch.int64, device=input.device)
-    group.all_to_all_counted(out, input.contiguous(), counts.contiguous(), send_segments, recv_segments, host, landed)
-    return out, landed
-
-
-@all_to_all_counted.register_fake
-def _(input, counts, send_segments, recv_segments, capacity, host, group_name):
-    return input.new_empty((capacity,) + tuple(input.shape[1:])), counts.new_empty(sum(recv_segments))
-
-
 @torch.library.custom_op('torch_mesh::merge_partials', mutates_args=())
 def merge_partials(partials: torch.Tensor, root: int, group_name: str) -> torch.Tensor:
     """The partials merge on the mesh group named `group_name` as a torch operator (torch_mesh.merge_partials):
@@ -373,24 +342,6 @@ def merge_partials(partials: torch.Tensor, root: int, group_name: str) -> torch.
 @merge_partials.register_fake
 def _(partials, root, group_name):
     return torch.empty_like(partials)
-
-
-def counted(host, group):
-    """A counted all-to-all's received counts once they have landed (host[0] set), read on the host with no wait on
-    the GPU: the wait ends at their arrival or at the call's failure (host[0] 2, or the communicator's asynchronous
-    error: a lost, silent or revoked link's cancellation, nccl.h), never at a time.  It is a host wait, so a
-    publication waiting in torch's open buffer is committed first (_stream.mm commit)."""
-    _stream.commit()
-    word, error = ffi.cast('uint64_t *', host.data_ptr()), ffi.new('ncclResult_t *')
-    while not word[0]:
-        check(LIB.ncclCommGetAsyncError(group.comm, error))
-        check(error[0])
-        os.sched_yield()
-    if word[0] != 1:
-        check(LIB.ncclCommGetAsyncError(group.comm, error))
-        check(error[0])
-        raise RuntimeError('libnccl-mesh: all_to_all_counted failed before its counts arrived (its wait raises why)')
-    return host[1:].tolist()
 
 
 def create(opts, options):

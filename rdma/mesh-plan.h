@@ -233,13 +233,13 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
    all-to-alls in one call order, and `page` the bytes an entry starts on (0: not read).  mesh_group_lay: the entries
    rank `rank`'s calls take on its list toward `peer` (send 1: its send list; 0: its landing list) from `at`, each
    collective's in call order (mesh_lay), then each counted all-to-all's
-   (COUNTED and HOSTED), then its point-to-point calls in call order; each placement its call and mesh_lay's place (a
+   (HOSTED), then its point-to-point calls in call order; each placement its call and mesh_lay's place (a
    point-to-point call's step 0) in made[*placed ..], scratch the room of the most steps a call has at the rank; the end.
    So separate send and receive calls pair as NCCL's do: a rank's j-th point-to-point SEND to a peer is the peer's j-th
    point-to-point receive from it.  HOSTED: a counted all-to-all whose counts both ends hold (ncclAlltoAll, ncclGather,
    ncclScatter, ncclMeshAlltoAllV), NCCL's sends and receives of it (classifyCollToP2pTasks), each receive into its own
    segment. */
-enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_COUNTED, MESH_GROUP_POINT, MESH_GROUP_HOSTED };
+enum { MESH_GROUP_COLLECTIVE, MESH_GROUP_POINT, MESH_GROUP_HOSTED };
 /* The receive before each step of a call of kind `kind` (mesh_steps_before; the walk's rule, a step's first event
    waiting until that receive is consumed): none before a HOSTED call's, whose receives each progress alone, as NCCL's
    per-peer sends and receives do, so no event of it waits on another channel's.  0, or ENOMEM. */
@@ -250,14 +250,10 @@ struct mesh_group_place { uint32_t call,padding; struct mesh_place place; };
 uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
                         struct mesh_group_place *made,uint32_t *placed);
 /* A counted all-to-all's steps at `rank` of `nodes`, all of round 0 (libnccl-mesh ncclMeshAlltoAllV, nccl-mesh.c
-   counted_steps; the GPU-counted form's, which libnccl-mesh does not run: nccl.h ncclMeshAlltoAllCounted): segments[q] the entries toward rank q, segments[nodes + q] those from
-   it.  `hosted` (both ends hold the counts): to each other rank q one SEND of its entries of `element` (buffer 0 at q's
-   segment) and from each one COPY (buffer 1 at q's); else (mesh 3981ca80^ run_counted's one exchange) to each q it has
-   counts for, its counts (of `counts`' type, buffer 0 at q's first entry) and, where element.elements (the rows' room
-   each pair's message carries) is not 0, those elements (buffer 1), and from each its counts (buffer 2 at q's place) and
-   then, after every counts receive, its rows (buffer 3).  Their count, at most 4 (nodes - 1). */
-uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,int hosted,struct mesh_operand element,
-                            struct mesh_operand counts,struct mesh_step *steps);
+   counted_steps; both ends hold the counts): segments[q] the entries toward rank q, segments[nodes + q] those from it;
+   to each other rank q one SEND of its entries of `element` (buffer 0 at q's segment) and from each one COPY (buffer 1
+   at q's).  Their count, at most 2 (nodes - 1). */
+uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps);
 
 /* design/transport.md: what a node's record carries of its health to every bridge: `booted`, the wall
    clock of the node's boot (ns since the epoch), and its `available` memory as its bridge last sampled it (the bytes

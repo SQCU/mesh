@@ -63,10 +63,6 @@ place; the reduce-scatter's input (where it does not lie in the region already, 
 gathered queries and its partials; so the library reads what they send where it lies.  Elsewhere, and where the region
 refuses a lease, torch's own memory.
 
-A routed partition (routed): a mixture of experts' experts as a partition's units, each token's rows sent to the ranks
-holding their experts and back by the counted all-to-all (torch_mesh.all_to_all_counted: the counts the GPU wrote move
-with the rows), the slots past a rank's part receiving none.
-
 Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
 - torch.library.custom_op with register_fake and register_autograd: torch_mesh::remask, pack, unpack, allgatherv,
   reduce_scatterv.
@@ -1245,49 +1241,6 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     group.merge_partials(merged, packed, rows)
     out, lse = attention(merged.view(lead + (lengths[rank], width)))
     return out.to(query.dtype), lse
-
-
-def routed(mesh, name, x, experts, slots):
-    """A routed range partition (a mixture of experts' expert parallelism): partitioned mesh dimension `name`'s units are
-    experts, rank r holding capacity[r] slots, the first parts[r] of them experts off_r.. (off_r the parts before it)
-    and the rest receiving no rows; `x` this rank's rows (T x D), `experts` each row's experts (T x K, int64), `slots`
-    this rank's capacity[r] callables, slot j's rows to it.  Each (row, k) crosses to its expert's rank and back by the
-    counted all-to-all (torch_mesh.all_to_all_counted: the counts the GPU wrote move with the rows, the received counts
-    read on the host as they land, no host read of the splits), every rank passing the same T K.  Returns each (row,
-    k)'s expert output (T x K x D), to be weighted and summed by the caller.  The rows it sends lie in region tensors
-    (torch_mesh.empty), made at their first use and kept (their shapes the capacities' and T K's)."""
-    from . import all_to_all_counted, counted
-    o, group = operand(mesh, name), mesh.get_group(name)
-    rank, world, capacity = mesh.get_local_rank(name), len(o.capacity), list(o.capacity)
-    n, flat = capacity[rank], experts.flatten()
-    order = flat.argsort(stable=True)
-    counts = torch.zeros(o.units, dtype=torch.int64, device=x.device).scatter_add_(0, flat, torch.ones_like(flat))
-    sent = torch.index_select(x, 0, order // experts.shape[1], out=_routing(o.key, 'dispatched', flat.numel(), x))
-    received, landed, handle, work = all_to_all_counted(sent, unpack(counts, 0, o.key, 0.0), capacity, [n] * world, world * flat.numel(), group)
-    theirs = counted(handle)
-    work.wait()
-    sizes = [sum(theirs[r * n + e] for r in range(world)) for e in range(n)]
-    regroup = torch.repeat_interleave(torch.arange(n, device=x.device).repeat(world), landed, output_size=sum(theirs)).argsort(stable=True)
-    results = _routing(o.key, 'results', received.shape[0], received)
-    for slot, rows in zip(slots, regroup.split(sizes)):
-        results[rows] = slot(received[rows])
-    back, _, _, work = all_to_all_counted(results, theirs, [n] * world, capacity, flat.numel(), group)
-    work.wait()
-    out = torch.empty_like(back)
-    out[order] = back
-    return out.view(*experts.shape, -1)
-
-
-_ROUTING = {}
-
-
-def _routing(key, what, rows, like):
-    """A routed partition's region tensor of `rows` rows like `like`, made at its first use (torch_mesh.empty)."""
-    from . import empty
-    at = (key, what, rows, like.shape[1:], like.dtype, like.device.type)
-    if at not in _ROUTING:
-        _ROUTING[at] = empty(rows, *like.shape[1:], dtype=like.dtype, device=like.device.type)
-    return _ROUTING[at]
 
 
 _BALANCING = {}
