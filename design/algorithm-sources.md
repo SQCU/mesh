@@ -23,8 +23,8 @@ realization. The [execution description](transport.md)
 separates shared function metadata from each value's operands and uses.
 
 **The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
-type B, the library, its kernels and layers `examples/kernels.py` and `examples/nn.py` type C, design/deliverables.md
-section 5): a program surface spelled as Pallas spells it (the Swift module of the same contract, swift/Mesh.swift,
+type B, design/deliverables.md section 5; its type C kernels and layers, examples/kernels.py and examples/nn.py, were
+deleted 2026-10-22 with the examples that exercised it): a program surface spelled as Pallas spells it (the Swift module of the same contract, swift/Mesh.swift,
 was deleted in a8952de9). A `Program(backend, *, functions,
 group, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
 collective's members place the work. Recording builds the graph; `realize()` (also `start`, python/mesh/__init__.py:795) prepares it;
@@ -490,7 +490,7 @@ whole operand), outputs are fresh tensors of the out specs' blocks, and the call
 where None). A kernel is any callable `kernel(program, inputs, outputs, coordinate)` over Refs and its grid coordinate
 (a program's `functions` maps a kernel to another binding); the library calls it and computes nothing itself. An input
 carrying a `Partial` (an unfinished sum: some of its contribution set) is refused (TypeError) by a kernel that does not
-declare `combine` (an attribute true of the sum's combine, examples/kernels.py `add`): a nonlinear function of a sum
+declare `combine` (an attribute true of the sum's combine): a nonlinear function of a sum
 waits for the sum (design/deliverables.md, Definition, consequence 3); `Partial.merge` refuses a contribution counted
 twice.
 
@@ -922,11 +922,8 @@ its read-only values, `Result.consume()` releases it, so its writers may run aga
 The JAX authors' [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs):
 values, indices and masks.
 
-The Python surface's examples' expressions (`examples/kernels.py`, program type C: `arguments`, `indices`,
-`program_id`, `select`, `.at(row, column, mask, other)`, `.astype`, `.sum(axis)`, `.T`, `.exp`, `.rsqrt`, the
-arithmetic and comparison operators) are kernels evaluated by torch over each output block: no source is generated.
-`row` and `column` are the output block's own indices, `program_id(axis)` the grid coordinate; floating values are
-computed in FP32 and stored in the output's type.
+The Python surface's examples' expressions (examples/kernels.py, program type C: kernels evaluated by torch over each
+output block) were deleted 2026-10-22.
 
 ## kernels.dot
 
@@ -1085,13 +1082,9 @@ mechanism; a timestamp alone is not evidence that payload stores
 are visible. Mesh has not yet integrated this mechanism, and its latency is not
 established by the engine's direct-send graph.
 
-The Python surface's examples' `nn.linear(program, x, w, *, tile_rows, tile_k, tile_columns, peer, output_dtype)`
-(`examples/nn.py`, program type C) cuts K into panels at `tile_k` (and at the operands' block edges): each panel a
-grid of `kernels.matmul` calls whose products are `Partial`s of one contribution set, summed by a tree of
-`kernels.add` calls tile by tile, so a tile's sum is published as its panels finish (SUMMA's K-panel rank-k updates, van de Geijn and Watts 1997). `nn.ffn(program, inputs,
-up_weights, down_weights, *, tile_rows, tile_k, tile_columns, exchange=None, peer=None)` sums each hidden section's
-input partitions, applies swish to the completed hidden tiles, hands each to `exchange` (a caller's crossing) and
-contracts it with the section's down projection, the sections' products summed.
+The Python surface's examples' layers (examples/nn.py, program type C: `nn.linear`'s K panels summed by a tree of
+partial adds tile by tile, SUMMA's K-panel rank-k updates, van de Geijn and Watts 1997; `nn.ffn`'s hidden sections)
+were deleted 2026-10-22.
 
 ## nn.rmsnorm
 
@@ -1137,35 +1130,12 @@ within its program's `timeout` (TimeoutError past it; MeshError where the progra
 
 ## Streaming overlap measurement
 
-The Python surface's reproduction harnesses (restored from mesh `57628982^:examples/streaming-chain.py`,
-`82be91f:examples/streaming-algebra.py` and `4540397d^:examples/streaming-overlap.py`). Each runs paired (two ranks,
-launched as torchrun launches them: `RANK`, `WORLD_SIZE=2`, `MASTER_ADDR`, `MASTER_PORT`, one a node, each node's
-bridge resident), on `--backend cpu` or `metal`, and states the comparison it reproduces; the frontier records stay
-where they are. None runs on one rank. The operator, 2026-10-21 (design/rubrics.md, Quantities): "if no work is split
-across devices (tuple len == 1) for the tp ratio, then the run is not qualified for any sort of comparison for the mesh
-lib at all".
-
-- `examples/streaming-chain.py --chain literature`: `FFN → RMSNorm → summed learned embedding → FFN → RMSNorm` on
-  256 x 128 FP32 inputs in 64-row, 64-K, 64-column tiles (`nn.ffn`, `nn.rmsnorm`, `nn.summed_embedding`), the first
-  FFN's hidden tiles crossing from rank 0 to rank 1 and the second's back, each tile as it finishes (a queue per row
-  section and direction); one warm instance, then eight supplied together, row section 0 of the first withheld until
-  its output's section 1 is seen. Frontier (measurements/literature-pipeline-2026-09-13, mesh 82be91f, the deleted
-  native executor): paired CPU **675.0** invocations/s, first section 4.9 ms; paired Metal **172.6**.
-- `examples/streaming-chain.py --chain tensor-parallel --input X.npy --up-weight U.npy --down-weight D.npy
-  --consumer-weight C.npy --split S`: the 09-14 chain, each member's FFN over its hidden columns, `collective.reduce`
-  to the root, optional `--normalize` (`--residual`), swish, the consumer's contraction
-  (measurements/tensor-parallel-chain-2026-09-14.txt records its outputs, no timing).
-- `examples/streaming-overlap.py streamed|whole`: `Y = (X @ W) @ V`, rank 0 producing `X @ W` tile by tile, rank 1
-  consuming each tile as it lands and returning `Y`'s tiles (a queue per input slot and direction); streamed in
-  64-row tiles against whole (one tile), the same arithmetic. Frontier (measurements/streaming-overlap-2026-09-13.json,
-  mesh fb7828b: `--rows 4096 --depth 2`, 10 warm then 3,000 measured): **1,429.2** results/s streamed against
-  **962.9** whole (+48.6% paired), 1.326 ms against 2.007 ms a result.
-- `examples/sync-on-remote-fill.py --mode stream|sync|deadlock|independent`: the explicit wait and its counterexample
-  (`deadlock` ends in the program's bound, TimeoutError, rather than waiting forever); section 0 rides queues of its
-  own, so `independent` (section 0 never written) completes every other.
-
-`--trace FILE` keeps each call's (kind, record, row, begin and end ns, thread); the literature summary counts the
-crossings that overlap a kernel on the same member.
+The Python surface's reproduction harnesses (examples/streaming-chain.py, streaming-overlap.py and
+sync-on-remote-fill.py, restored from mesh `57628982^`, `82be91f` and `4540397d^`) were deleted 2026-10-22 with the
+other test code. The frontiers they reproduced stay as records: the literature chain paired CPU **675.0**
+invocations/s, Metal **172.6** (measurements/literature-pipeline-2026-09-13, mesh 82be91f, the deleted native
+executor); `Y = (X @ W) @ V` streamed in 64-row tiles **1,429.2** results/s against **962.9** whole, +48.6% paired
+(measurements/streaming-overlap-2026-09-13.json, mesh fb7828b).
 
 ## report statistics
 

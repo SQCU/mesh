@@ -272,8 +272,8 @@ measured faster beyond the measurement's resolution, the step halving down to a 
 
 ```python
 from torch_mesh import engines
-pool = engines.Engines(["mps", "cpu", "ane"])             # the program's engines, an operand
-ffn = engines.FFN(gate, up, down, engines=pool, name="ffn", tolerance=1e-2)   # without engines: torch's own
+pool = engines.Engines(["mps", "cpu", "ane"], ane={"block": 4096})   # the program's engines, an operand
+ffn = engines.FFN(gate, up, down, engines=pool, name="ffn")          # without engines: torch's own
 y = ffn(x)
 engines.rebalance(pool)                                    # every few steps
 ```
@@ -284,10 +284,13 @@ engines.rebalance(pool)                                    # every few steps
   run by `engines.ffn` (an operand type's fused couple where no gradient is due), another engine's decoded by its copy. A decision
   is an (operation name, row count): a stack's layers of one name share it and pool their evidence, measured where
   the program runs them, between its other operations.
-- An operation's `tolerance` is measured on each allocation's first call (every non-GPU share against the same share
-  on the GPU), recorded in `Engines.errors`, never a routing input. The Neural Engine's outputs carry an absolute error
-  floor (about 3e-4 RMS for a 3840-wide contraction): accurate on normalized activations (an FFN 1.5e-3), not on small
-  ones.
+- The Neural Engine's outputs carry an absolute error floor (about 3e-4 RMS for a 3840-wide contraction): accurate on
+  normalized activations (an FFN 1.5e-3), not on small ones. An operation's `tolerance`, which checked each
+  allocation's first call against the GPU's share (`Engines.errors`), was deleted 2026-10-22 with the other test code.
+- The Neural Engine's `block` option is the units one convolution of a share's graph takes, the configuration's: its
+  compiler refuses a convolution past a weight size (on an M4 Pro 22.5 to 24 MiB) and Core ML then runs the share on
+  the CPU, which the share's placement (`devices`) shows; the search that halved the block and built again until it
+  placed, and its store of a node's largest block, were deleted 2026-10-22 (no retry).
 - Engines never time-share a physical unit: each states what it occupies (`Engine.occupies`: `mps` the GPU, `cpu` the
   CPU's cores, `ane` the Neural Engine and whatever units Core ML's compute plan places a share's operations on, read
   at the share's load through `mesh_coreml_placement`; the engine's `occupies` option, `ane={"occupies": "ane+gpu"}`,
@@ -336,11 +339,11 @@ place of the fit's choice: `streamed.spec_of('coop/M=64,SK=2,BANDS=1,J=1,LOADS=0
 the rows at most M), and `decomposition_of` gives metal-microbench's engine its decompositions entry (kernel, args,
 grid, threads, shares; metal-microbench docs/kernels.md#decompositions). The role split by rows (RING r >= 8, mesh
 99a9e70a, restored from metal-microbench a9d17c7^ tools/streamed_gemv.metal `streamed_gemm`) is reached this way only:
-no candidate of the fit lists it and nothing prices it. `python -m torch_mesh.streamed decompose EXPORT NAME... --form
-ROWS=SPEC...` reads named instances beside torch's fp16 product of the same matrix decoded and the fit's choice, each
-against float64, over copies past `--cold` MiB. Reproduction target (the E2B FFN gate on the M5, cold): at 64 rows at
-least 1.41-1.49x torch's fp16 product (the study's 752 us against 1128.6), at 128 rows at or under torch's, at 256 rows
-against the 128-row panel's 0.123 ms and torch's 0.086 (metal-microbench docs/kernels.md#fragment-tiles).
+no candidate of the fit lists it and nothing prices it. Reproduction target (the E2B FFN gate on the M5, cold): at 64
+rows at least 1.41-1.49x torch's fp16 product (the study's 752 us against 1128.6), at 128 rows at or under torch's, at
+256 rows against the 128-row panel's 0.123 ms and torch's 0.086 (metal-microbench docs/kernels.md#fragment-tiles). The
+`decompose` command that read named instances on random inputs beside torch's product, and the `probe` command that
+read every candidate so, each checked against float64, were deleted 2026-10-22 with the other test code.
 
 `torch_mesh/attention.metal` is decode attention as one algorithm over a KV type (`mesh_attention<A>`): a task's chunks
 (the KV type's scores of each lane's positions, the chunk's online softmax of R rows, the KV type's value product), the
