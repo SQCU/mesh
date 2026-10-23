@@ -94,7 +94,7 @@ static uint64_t plan_find(const struct mesh_stream *x,uint64_t k){
 static void plans_lost(const struct mesh_stream *x){
   uint32_t tables=mesh_rows(M);
   for(struct mesh_plan *t=mesh_plan_at(M,atomic_load_explicit(&x->plans,memory_order_seq_cst));t && tables--;
-      t=mesh_plan_at(M,atomic_load_explicit(&t->next,memory_order_relaxed)))
+      t=mesh_plan_at(M,atomic_load_explicit(&t->next,memory_order_seq_cst)))
     mesh_plan_lost(t);
 }
 static uint32_t way_entries(const struct mesh_plan *t,int way){ return way?t->lands:t->sends; }
@@ -134,7 +134,8 @@ static void page_done(const struct mesh_stream *x,int way,struct cursor *d){
   struct mesh_entry *e=way_entry(t,way,d->entry);
   if(++e->count==e->pages)entry_complete(t,way,e,d->k);
   cursor_step(d,t,way);
-  d->owed=1;
+  for(d->owed=1;d->owed && (t=cursor_at(x,way,d,0));d->owed--)cursor_step(d,t,way);
+  cursor_at(x,way,d,0);
 }
 static void cursors_begin(struct cursor *posting,struct cursor *lanes,struct mesh_pages page,uint64_t units0,uint64_t units1){
   *posting=(struct cursor){.k=1,.page=page};

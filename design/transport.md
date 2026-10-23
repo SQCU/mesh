@@ -449,7 +449,21 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
     entry (`count`). Once every page of the entry has completed it stores the entry's `done` = k, and once every entry
     of a way has, the table's `sent` or `landed` = k. A reader reads completion per entry from its stamp, not from a
     running count: an entry is complete when its own pages are, whatever an earlier entry's lanes do, and no count
-    restarts at a pairing.
+    restarts at a pairing. Each lane's completions are counted by a cursor of that lane's own over the same entries
+    (a stream's pages alternate between its two lanes); a cursor that completes a page steps past the other lane's
+    next page at once, and past the table where that was its last, so a cursor stands in a table only while the table
+    holds a page of its lane not yet completed.
+  - A table is released as it was linked. A plan the holder will not start again (made before its solver or forms
+    changed, or a freed persistent request's slot) is unlinked by the holder between calls, once its last call's
+    stamps are in: `mesh_stream_unlink` stores the predecessor's `next` (or the stream's `plans`) = the table's `next`,
+    the same one-word edit as the link, and returns 0 where the stream is still live. A walk that holds the table goes
+    on along its `next`, which still points into the plans. The holder returns the table's pages once a call it started
+    after the unlink has its `sent` and `landed` on the stream: each of the stream's two threads has then ended every
+    walk it began before the unlink (it walks, then posts, then stamps, in one thread a way). A cancel stores `live` =
+    0 before it walks the plans, sequentially consistent against the unlink's store and its read of `live`, so where the
+    unlink read the stream live no cancel walk reaches the table; where it did not, or a stamp is ~0, the table is kept
+    until the holding ends (design/pages-and-functions.md, Freeing 6 and 7: the proof that the page may be freed is a
+    later stamp).
   - A stamp ~0 is a lost link. A cancelled stream stamps every table presented on it ~0 (`streams_cancel`); a
     presentation on a stream not live, or not the caller's, stamps its table ~0 and returns the error.
   - Each end lays its own pages where its plan put them, a scattered buffer being several entries: scattered pages in

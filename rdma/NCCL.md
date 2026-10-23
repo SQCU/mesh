@@ -247,7 +247,8 @@ at each call (`MPI_Start`) [MPI 4.1 sections 3.9 and 6.13].
   (`mesh.h` `struct mesh_plan`): its send entries and then its landing entries, each step one entry (`struct
   mesh_entry {row, pages, word, need, done, count}`: a range of page-table rows, each row a page), in the order the
   group's program lays them at both ends (`mesh_group_lay`). The table is presented on the channel's stream once, when
-  the plan or slot is made (`mesh_stream_present`).
+  the plan or slot is made (`mesh_stream_present`), and unlinked once, between calls, when the plan or slot will not
+  be started again (`mesh_stream_unlink`, [Plans](#plans)).
 - **A call is a stamp.** The communicator numbers its calls on each channel 1, 2, 3 and on, in the order it issues
   them, counting the calls with an entry on the channel (`channel.calls`); both ends number alike, because both lay the
   same calls and a send at one end is a landing at the other. A call's start writes its entries' rows for this call
@@ -476,11 +477,13 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
   section 1); a stamp that cannot be encoded fails its program's call as a value.
 - A plan made before `ncclMeshCommForms` or `ncclMeshCommSetSolver` changed the communicator's forms or solver is
   never started again. A plan whose group failed is started again as any other: the failed run retired its positions
-  (`run`), and nothing of the failure stays with it. Every plan's tables stay presented while the communicator holds
-  its streams, since the bridge reads a presented table for the holding's life, so a plan's lease is returned with the
-  communicator's (`ncclCommDestroy`: after its last GPU program has ended and its streams are given back; the bridge's
-  reclaim then keeps the rows a started call still names, design/transport.md section 14, "Rows"). A lease the region
-  cannot meet fails the call as a value.
+  (`run`), and nothing of the failure stays with it. A plan never started again is released between calls (`release`,
+  at each group's plan and each exchange's start): once it is idle and its tables' last stamps are in, each table is
+  unlinked from its stream (`mesh_stream_unlink`, the link's one-word edit undone), and once a call started on each of
+  those streams after the unlink has its `sent` and `landed`, the plan's lease is returned (design/transport.md
+  section 14, "The plans": every walk of the bridge's that could hold the table has then ended). A table whose stream
+  was not live at its unlink, or whose stamps are ~0, is returned with the communicator's leases (`ncclCommDestroy`,
+  after its streams are given back). A lease the region cannot meet fails the call as a value.
 - The host path takes plans as the Metal path does; its group has ended when it returns, so its plan is idle at once.
 
 **Page lengths.** A link pairs only two nodes of one page length (`block x pgsz`): the bridge ends a pairing whose
@@ -543,13 +546,13 @@ them.
 - `ncclMeshBind(request, start, lands, publishes, stream, index, groups)` binds the crossing record (`struct
   mesh_crossing`) at buffer `index` of the caller's next dispatch on the stream's encoder: with `lands`, start − 1's
   landings and this rank's part of it; with `publishes`, start's send part and publication; `groups` the dispatch's
-  threadgroups. On the classic form the record is `setBytes`, and its slots and the holdings' counts are declared
-  (`useResource`); on Metal 4 it is a record in rows of the slot it publishes, else the slot it lands (released by
+  threadgroups. On the classic form the record is `setBytes`, and its slots are declared (`useResource`); on Metal 4 it is a record in rows of the slot it publishes, else the slot it lands (released by
   that slot's use count; a binding that names neither binds the library's one record of zeros), at the table's
   `index`, and its buffers join the residency set.
-- `ncclMeshRequestFree(request)` is `MPI_Request_free`: the request is ended, and its slots' leases return with the
-  communicator's (`ncclCommDestroy`, after its streams are given back), since their tables stay presented while the
-  streams are held. A request not freed when its communicator is destroyed keeps its slots' leases until the process
+- `ncclMeshRequestFree(request)` is `MPI_Request_free`: the request is ended, and each slot is released as a plan
+  never started again is ([Plans](#plans)): unlinked once its last start's stamps are in and every kernel bound to it
+  has ended, its lease returned once a later call on each of its streams has its stamps. A request not freed when its
+  communicator is destroyed keeps its slots' leases until the process
   ends, and a later free of it reads the destroyed communicator (MPI frees a request before its communicator,
   `MPI_Request_free` before `MPI_Comm_free`).
 

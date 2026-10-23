@@ -402,3 +402,17 @@ int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,struct mesh_pla
   mesh_plan_lost(table);
   return ENOLINK;
 }
+int mesh_stream_unlink(struct mesh_ctx *context,uint32_t stream,struct mesh_plan *table){
+  struct mesh_stream *x=context && context->client && table?stream_held(context->M,stream):NULL;
+  if(!x || atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client)return EPERM;
+  const uint64_t at=(uint64_t)((char *)table-(char *)context->M);
+  _Atomic uint64_t *link=&x->plans;
+  for(uint32_t tables=mesh_rows(context->M);tables-- && atomic_load_explicit(link,memory_order_relaxed)!=at;){
+    struct mesh_plan *t=mesh_plan_at(context->M,atomic_load_explicit(link,memory_order_relaxed));
+    if(!t)return ENOENT;
+    link=&t->next;
+  }
+  if(atomic_load_explicit(link,memory_order_relaxed)!=at)return ENOENT;
+  atomic_store_explicit(link,atomic_load_explicit(&table->next,memory_order_relaxed),memory_order_seq_cst);
+  return atomic_load_explicit(&x->live,memory_order_seq_cst)?0:ENOLINK;
+}

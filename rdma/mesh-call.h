@@ -31,4 +31,5 @@ int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
 int mesh_stream_present(struct mesh_ctx *,uint32_t stream,struct mesh_plan *table);
+int mesh_stream_unlink(struct mesh_ctx *,uint32_t stream,struct mesh_plan *table);
 #endif

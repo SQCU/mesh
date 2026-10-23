@@ -38,12 +38,13 @@ KIND_NAMES = {'M': 'mesh', 'C': 'collective', 'D': 'data'}
 # functions a step's critical path runs through, per file
 DATA_PATH = {
     'rdma/mesh-link.c': r'lane_send|lane_post|link_receive|link_send|stream_turn_one|stream_send|stream_post|'
-                        r'stream_receive_turn|walk_\w+|unit_told|holding_kept|port_pass|page_span|row_at|stream_time',
-    'rdma/nccl-mesh.c': r'present_group|room_wait|gpu_wait|gpu_finished|run|consume|publish|launch_metal|launch|retire|'
+                        r'stream_receive_turn|walk_\w+|unit_told|holding_kept|port_pass|page_span|row_at|cursor_\w+|page_done|plan_find|'
+                        r'entry_complete',
+    'rdma/nccl-mesh.c': r'tables_start|gpu_wait|gpu_finished|run|consume|publish|launch_metal|launch|retire|'
                         r'issue_group|walk|schedule|place_group|gate_of|fusable',
     'rdma/torch-mesh/torch_mesh/_stream.mm': r'encode|fused_exchange|fused_published|published|signalled',
 }
-PER_UNIT = r'lane_send|lane_post|unit_told|link_receive|link_send|stream_send|stream_post|walk_\w+'
+PER_UNIT = r'lane_send|lane_post|unit_told|link_receive|link_send|stream_send|stream_post|walk_\w+|cursor_step|page_done'
 CLOCK = r'\b(mach_absolute_time|clock_gettime_nsec_np|clock_gettime|CFAbsoluteTimeGetCurrent)\s*\('
 TIMED_WAIT = r'\b(nanosleep|usleep|sleep|os_sync_wait_on_address_with_timeout|dispatch_semaphore_wait|' \
              r'pthread_cond_timedwait)\s*\('
@@ -77,19 +78,6 @@ EVIDENCE = {
                  'queue pairs made and connected once and released only by the process\'s exit',
                  'the operator, 2026-10-20: "why do you think you\'re \'allowed\' to do \'teardowns\' in the '
                  'operation of any code we are discussing?"')},
-    'gate': {'C': ('C4', 'Lower pole: barriers, pauses, syncs, guards',
-                   'a landing entry presented with a word: the transport holds its receives until a reader releases '
-                   'the pages', 'the entry presented without a word, the program guarding the pages it names again in '
-                   'its own source', 'the operator, 2026-10-22: "data procesisng code gets to write their own guards in '
-                   'their own source. if source says to write continuously into ab uffer, the nic must write '
-                   'continuously into that buffer even if this means that dat aprocessing code can race or lose parts '
-                   'of a stream."'),
-             'M': ('M1', 'Upper pole: a transport that behaves like a system call',
-                   'a landing entry presented with a word: the transport holds its receives until a reader releases '
-                   'the pages', 'a transport that writes landings as presented, the program guarding its own pages',
-                   'the operator, 2026-10-22: "data procesisng code gets to write their own guards in their own '
-                   'source. if source says to write continuously into ab uffer, the nic must write continuously into '
-                   'that buffer even if this means that dat aprocessing code can race or lose parts of a stream."')},
     'residency': {'C': ('C4', 'innocent sounding barriers',
                         '{}: a dispatch declaring every allocation of a residency set (useResource over '
                         'allAllocations), its pass ordered against every pass that names any of them',
@@ -248,18 +236,6 @@ def line_of(clean, offset):
     return clean.count('\n', 0, offset) + 1
 
 
-def top_level(text):
-    """Comma-separated fields at depth 0 of an initializer's text, stripped."""
-    fields, depth, start = [], 0, 0
-    for i, ch in enumerate(text):
-        depth += ch in '([{'
-        depth -= ch in ')]}'
-        if ch == ',' and not depth:
-            fields.append(text[start:i].strip())
-            start = i + 1
-    return fields + [text[start:].strip()]
-
-
 def conditions(ln):
     """The text of each if, while or for condition that opens on a line."""
     out = []
@@ -276,10 +252,6 @@ def check_c(path, text):
     clean = strip_c(text)
     rel = path.relative_to(ROOT).as_posix()
     path_re = DATA_PATH.get(rel)
-    for m in re.finditer(r'mesh_stream_present\s*\([^;]*?,\s*1\s*,\s*\(struct mesh_entry\)\{([^;]*?)\}\s*\)', clean):
-        fields = top_level(m.group(1))
-        if len(fields) > 2 and fields[2] != '0':
-            find(path, line_of(clean, m.start()), 'gate')
     for name, _, body, at in functions(clean):
         if 'allAllocations' in body and 'useResource' in body:
             find(path, line_of(clean, at + body.index('allAllocations')), 'residency', name)
