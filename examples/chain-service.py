@@ -65,7 +65,7 @@ def main():
     step = chain.Step(a, b, rows, config['row_capacity'], size - 1, chain.capability(config['capabilities']))
     del a, b
     P = torch_mesh.empty(rows, width, dtype=torch.half)
-    O = torch_mesh.empty(steps, rows, width, dtype=torch.half) if rank == 0 else None
+    O = torch.empty(steps, rows, width, dtype=torch.half, device='mps') if rank == 0 else None
     E = chain.landed(rank, inputs, steps, rows, width)
     start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()

@@ -24,11 +24,14 @@ class LinkMap:
     node b, cable, capacity in bytes a second), the hardware fact the routes and the packed trees read, with `relays`
     more nodes (numbered from `nodes`, holding no rank), each node's `mark` (None: its number; the bridges mark a node
     by its node number) and the routing table `next` (each node b's in-tree, next[v * N + b] v's parent in it, for N =
-    nodes + relays; None: none), the storage held here.  A graph need not join its nodes (the bridges' records while a
-    cable is out)."""
+    nodes + relays; None: none), the storage held here.  An edge whose capacity is not stated (0) is refused
+    (ValueError).  A graph need not join its nodes (the bridges' records while a cable is out)."""
 
     def __init__(self, nodes, edges, mark, relays=0, next=None):
         edges = [tuple(int(v) for v in e) for e in edges]
+        if any(len(e) != 4 or e[3] <= 0 for e in edges):
+            raise ValueError('a link map\'s edge is (a, b, cable, capacity in bytes a second), its capacity stated '
+                             '(rdma/NCCL.md, A link map)')
         self.nodes, self.edges, self.relays = nodes, edges, relays
         self.mark, self.next = [int(v) for v in mark], None if next is None else [int(v) for v in next]
         self._edge = ffi.new('struct mesh_edge[]', [{'a': a, 'b': b, 'cable': c, 'capacity': k} for a, b, c, k in edges] or 1)

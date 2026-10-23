@@ -30,18 +30,19 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   takes its index (`mps:0`).
 - One rank a node, launched as torchrun launches one (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); each node's
   bridge is its resident service, so a launch starts no bridge.
-- A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): each rank
-  registers (the id, its rank) with its node's bridge and reads its members' nodes from the bridges' map, and the group
-  keeps the map its init made of them ([NCCL.md](../NCCL.md#communicators)).
+- A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
+  exchange their nodes, the nodes their bridges reach and their streams' pages posted (kept as a statistic: equal on a
+  live stream), and the group keeps the map its init made of them.
 - A bidirectional exchange with one peer pairs as one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   `torch_mesh.batch_isend_irecv(ops, pairs)` is the batch with the group's whole message list from the caller's compiled
-  program (`ncclMeshGroupPairs`), every rank passing the same, so the solver may route a message through a member.
+  program (`ncclMeshGroupPairs`), every rank passing the same, so a member between two that no link joins relays them.
   An uneven `all_to_all` fails as a value; `torch_mesh.all_to_all(output, input, matrix)` takes every rank's counts.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
-  ([NCCL.md](../NCCL.md#ranks-and-lists)).
-- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; every
-  communicator shares every link, its traffic named by its own keys, and none is refused for the links others use
-  ([NCCL.md](../NCCL.md#ranks-and-lists)).
+  ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
+- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
+  communicators hold one stream, and a link has up to four (one for each lane pair its plan holds), so the world group
+  and three subgroups use a node pair at once; one more is refused (EBUSY) until a group is destroyed
+  ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing or a lost link; a GPU
   wait also at its bound, and a host-path wait at a revoke. No clock ends a wait on a peer's data.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
@@ -92,9 +93,9 @@ result is a region tensor, issued and not completed where it is its own operand 
 | `fused.header()` | the Metal text a kernel source is compiled after (`ncclMeshMetalPrelude`): `mesh.metal` as the loaded library was built with it, then the device header ([NCCL.md](../NCCL.md#persistent-exchanges)) |
 | `fused.pipeline(source, name)`, `fused.facts(handle)`, `fused.device()` | a kernel compiled from its source at Metal 4.0; its pipeline's `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth` and static threadgroup memory; the device's Apple GPU family (the newest `MTLGPUFamilyApple<n>` it supports, asked from Apple1 up), its threads a threadgroup and its threadgroup memory |
 | `fused.Exchange(sizes, dtype, group=None)` | a persistent exchange ([NCCL.md](../NCCL.md#persistent-exchanges)) among the group's ranks: rank q's part is `sizes[q]` elements of `dtype`, each rank's part goes to every other rank, and the library allocates every start's send part and landing areas |
-| `exchange.start(sizes=None)` | the next start on torch's stream (`ncclMeshStart`), its number, torch's open buffer committed first where it holds a publication (the start waits for its slot's last kernels); `sizes` fewer elements than declared |
+| `exchange.start(sizes=None)` | the next start on torch's stream (`ncclMeshStart`), its number; `sizes` fewer elements than declared |
 | `exchange.encode(handle, buffers, constants, at, gx, gy, threads, start, lands=False, publishes=False, crossing=14)` | one dispatch in torch's open compute encoder on its queue, ordered with torch's work (buffers by index, a tensor's storage at its offset; 32-bit constants at index `at`; the grid in threadgroups), with the crossing record bound at buffer `crossing` (`ncclMeshBind`): with `lands` the kernel lands start − 1, with `publishes` it publishes `start`, under the stream's one commit rule (Performance) |
-| `exchange.free()` | the request freed (`ncclMeshRequestFree`): its two slots' lease returned once no kernel or SEND holds them |
+| `exchange.free()` | the request freed (`ncclMeshRequestFree`): each slot's pages returned once no kernel or SEND holds them |
 
 The kernel calls `mesh_enter` and `mesh_leave` and reads and writes the views the header gives; it is shown no page,
 record, word or bound. examples/chain.py and lstm.py are the callers ([docs/writing-a-service.md](../../docs/writing-a-service.md)).
@@ -396,12 +397,6 @@ w = s["lm_head"].to("cpu")                        # decoded
   writes that dtype).
 - The codes are constants: no gradient reaches them, only through them.
 
-## Memory outside the region
-
-`torch_mesh.memory()` is a process's GPU memory outside its node's region, and `torch_mesh.check_memory(budget)` warns
-(`OutsideRegionWarning`) where it is more than the budget the program's configuration gives it. Why a program keeps its
-large tensors in the region: [docs/writing-a-service.md](../../docs/writing-a-service.md#memory-outside-the-region).
-
 ## Performance
 
 - The MPS path is the measured path; async ops hide the crossing behind compute.
@@ -419,12 +414,7 @@ large tensors in the region: [docs/writing-a-service.md](../../docs/writing-a-se
     Otherwise it joins torch's open command buffer. In flight counts the library's buffers, not torch's own. The depth
     is the rule's structure, not a setting: nothing is read from a file or the environment, and no node is configured.
   - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
-    library's: the host path, a recording's compile meeting, and every call into the library that can wait (a
-    collective's, whose plan may wait for its shape's oldest program, and an exchange's start, which waits for start
-    k−3's slot): before it, the open buffer is committed where what the call can wait on lies in it
-    (`MeshStream::called`, one rule for both callers): for a start, a publication waiting there or start k−3's kernels;
-    for a collective, an exchange's publication waiting there, or four of the library's programs, since a group shape
-    keeps four plans and the fifth call of a shape waits for the oldest's program (NCCL.md, Plans). torch's own: `torch.mps.synchronize()`,
+    library's: the host path, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
   - A host that blocks outside torch while a publication waits in the open buffer stalls its peer: nothing else

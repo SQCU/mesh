@@ -83,7 +83,7 @@ the step's entries and writes the slot's table, and its kernel's three dispatche
 chain.
 
 Each step's kernel lands the step before's sum, and on rank 0 it also writes tanh of that sum, the step before's output,
-into its row of the output, a region tensor of every step's rows. After the last step, one more dispatch, the kernel's
+into its row of the output, an MPS tensor of every step's rows. After the last step, one more dispatch, the kernel's
 first stage alone, lands the last sum and writes the last output. After the run rank 0 copies the outputs into the
 output file's memory, once. No step waits for the host, and the next section says when the host waits for the GPU.
 
@@ -104,34 +104,6 @@ The host may run ahead of the GPU. Metal's queue holds at most 64 command buffer
 wait when it is full. A publication ends a command buffer under the commit rule, so the host gets as many steps ahead
 as the queue holds the library's buffers, and the exchange holds a slot for each start the GPU has not finished. The host's time a step includes that wait. After the first step
 the service records a timing event, which it reads after the run (below).
-
-## Memory outside the region
-
-The region is the node's memory for mesh programs. The bridge holds it and the devices read and write it, so every
-lease of it (`torch_mesh.empty`, `ncclMemAlloc`) is wired already, and a collective reads and writes a tensor there
-where it lies.
-
-Memory a program allocates for itself outside the region gains it nothing:
-
-- A collective given such a tensor stages it through the library's own pages: one copy in and one copy out, with those
-  pages leased while its plan lives ([rdma/NCCL.md](../rdma/NCCL.md), Memory). Zero copy is lost and the bytes moved
-  double.
-- When the GPU runs on it, macOS wires it beside the region. On an M5, one kernel writing a 4 GiB MPS tensor moved
-  4.2 GiB from free to wired (2026-10-23).
-- A node whose region leaves little beside it has nowhere to put it. On 2026-10-23 at 03:08, both Studios ran the
-  chain with an 86 GiB region of their 96 GiB, and the chain's process wired 3.64 GiB outside it. Wired memory reached
-  92.6 GiB with 915 pages free. watchdogd, launchd and the chain's threads waited on the file system for 90 seconds,
-  and the watchdog reset both nodes. The region is now sized from those readings (82 GiB,
-  [etc/bridge/m5ultra-headless.toml](../etc/bridge/m5ultra-headless.toml)), which still leaves a rank about 3.6 GiB.
-
-So allocate every large tensor with `torch_mesh.empty`: operands, outputs, shares of weights, and any scratch of more
-than a few MiB. Only a kernel's few rows of scratch belong outside. Read inputs from files into region tensors through
-`torch_mesh.cpu_view`, as the example does.
-
-`torch_mesh.memory()` gives this process's GPU memory outside the region (`outside`) and its region tensors' leases
-(`region`), both the process's own figures. `torch_mesh.check_memory(budget)` warns, with an `OutsideRegionWarning`,
-where `outside` is more than `budget`, the bytes the program's own configuration gives it beside the region. A program
-calls it once, after it has made its tensors. It reads nothing of the bridge's, and knows no node.
 
 ## The step kernel
 

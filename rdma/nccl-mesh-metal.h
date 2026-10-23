@@ -16,8 +16,8 @@ static inline int stamp_lost(uint64_t stamp) { return stamp == MESH_STAMP_LOST; 
 #define MESH_PEER(P) struct mesh_peer { P landing; }
 #define MESH_WAIT(P, U64) struct mesh_wait { P landed; U64 target; }
 #define MESH_RELAY(P, U64) struct mesh_relay { P landed; U64 landed_target, published, ready; }
-#define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers, relays, waits; U64 published, ready; }
-#define MESH_CROSSING(T, W, U32, U64, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; W end; U64 target, stamp; U32 groups, polls; }
+#define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; ATOMIC ended; U32 relays, waits, pad; U64 published, ready; }
+#define MESH_CROSSING(T, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; U32 groups, polls; }
 MESH_PEER(uint64_t);
 MESH_WAIT(uint64_t, uint64_t);
 MESH_RELAY(uint64_t, uint64_t);
@@ -78,8 +78,8 @@ struct metal_result metal_spin(struct metal_program *, const struct metal_wait *
 
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
 
-struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, uint64_t target,
-                               uint64_t end, uint64_t stamp, uint32_t groups, uint32_t index, void *const *buffers, size_t n);
+struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, uint32_t groups,
+                               uint32_t index, void *const *buffers, size_t n);
 
 void *metal_contents(void *buffer);
 

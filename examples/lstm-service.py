@@ -61,7 +61,7 @@ def shares(config, rank, size, held):
         matrix = [every[q][k] if p == 0 else 0 for p in range(size) for q in range(size)]
         whole = torch_mesh.empty(sum(e[k] for e in every), dtype=dtype) if rank == 0 else None
         if whole is not None:
-            whole.copy_(torch.cat([held[q][k].reshape(-1) for q in range(size)]))
+            torch.cat([held[q][k].reshape(-1) for q in range(size)], out=whole)
         torch_mesh.all_to_all(out[k], whole, matrix).wait()
     return out[0], out[1]
 
@@ -92,7 +92,7 @@ def main():
     del held
     tick = lstm.Tick(W, bias, rows, config['shares'], rank, L, KIN, chain.capability(config['capabilities']))
     del W, bias
-    O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
+    O = torch.empty(steps, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
     E = chain.landed(rank, inputs, steps, rows, KIN)
     start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()

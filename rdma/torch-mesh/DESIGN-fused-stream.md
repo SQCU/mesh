@@ -9,10 +9,9 @@ own for it. This replaced the fused records of 2026-10-21 and 2026-10-22 (mesh 1
 
 **The library** (rdma/).
 - `ncclMeshExchangeInit` compiles the exchange every member passes (each rank's part and where it lands) into this
-  rank's legs, a member between two unlinked ones relaying ([NCCL.md](../NCCL.md), Persistent exchanges), and makes its
-  two slots in one lease: each this rank's part, a landing area a landing leg and the slot's table. `ncclMeshStart`
-  takes the slot of its number modulo 2 once it is released (every kernel bound to it ended, its entries done), after
-  `exchange.start` has committed torch's open buffer, presents its legs' entries and writes its table: each
+  rank's legs, a member between two unlinked ones relaying ([NCCL.md](../NCCL.md), Persistent exchanges). A slot is one
+  lease: this rank's part, a landing area a landing leg and the slot's table. `ncclMeshStart` takes a free slot (every
+  kernel bound to it ended, its entries done), else makes one, presents its legs' entries and writes its table: each
   landed part's area, `landed` word and target, the word its own send entries wait on and the value its publication
   stores, and each relayed part's record.
 - `ncclMeshBind` binds one record at the kernel's crossing index: the landed start's table and the publishing start's,

@@ -21,15 +21,11 @@
 #include "nccl.h"
 
 struct MeshStream {
-  struct Exchanged { void *bound[3] = {nullptr, nullptr, nullptr}; int64_t last = 0; };
   at::mps::MPSStream *const mps;
   id<MTLSharedEvent> const progress;
   uint64_t committed = 0;
   id<MTLCommandBuffer> open = nil;
   bool streamed = false;
-  void *programmed = nullptr;
-  uint32_t programs = 0;
-  std::unordered_map<int64_t, Exchanged> exchanged;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
 
@@ -46,13 +42,6 @@ struct MeshStream {
     mps->synchronize(wait ? at::mps::SyncType::COMMIT_AND_WAIT : at::mps::SyncType::COMMIT);
     [open release];
     open = nil;
-  }
-
-  void called(void *held, bool any) {
-    void *root = (__bridge void *)mps->commandBuffer().rootCommandBuffer;
-    bool exchange = any;
-    for (const auto &e : exchanged) exchange |= e.second.last > 0 && e.second.bound[e.second.last % 3] == root;
-    if ((exchange && waiting()) || (held && held == root)) signalled(false);
   }
 
   void published() {
@@ -138,11 +127,7 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   __block ncclMeshIssue issue = {0, 0};
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      s->called(s->programs >= 4 ? s->programmed : nullptr, false);
-      void *root = (__bridge void *)stream->commandBuffer().rootCommandBuffer;
-      if (root != s->programmed) { s->programmed = root; s->programs = 0; }
-      s->programs++;
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)stream->commandEncoder(), split ? &issue : nullptr};
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), split ? &issue : nullptr};
       result = (*encode)(&on);
       if (!split || issue.published) s->published();
     }
@@ -510,17 +495,11 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
       for (size_t i = 0; i < bound.size(); i++)
         if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
       [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)encoder};
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)encoder};
       if (request)
         result = ncclMeshBind((ncclMeshRequest_t)(uintptr_t)request, (uint64_t)start, lands, publishes, &on, (uint32_t)crossing, (uint32_t)(gx * gy));
       if (result) return;
       [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
-      if (request && (lands || publishes)) {
-        MeshStream::Exchanged &x = s->exchanged[request];
-        void *root = (__bridge void *)stream->commandBuffer().rootCommandBuffer;
-        if (lands) x.bound[(start - 1) % 3] = root;
-        if (publishes) x.bound[start % 3] = root;
-      }
       if (request && publishes) s->published();
     }
   });
@@ -705,20 +684,15 @@ static int64_t exchange_start(int64_t request, const std::vector<int64_t> &sizes
   std::vector<size_t> counts(sizes.begin(), sizes.end());
   const size_t *given = counts.empty() ? nullptr : counts.data();
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  MeshStream *s = &stream_of(stream);
   __block ncclResult_t result = ncclSuccess;
   __block uint64_t start = 0;
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      MeshStream::Exchanged &x = s->exchanged[request];
-      const int64_t held = x.last - 2;
-      s->called(held > 0 ? x.bound[held % 3] : nullptr, true);
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)stream->commandEncoder()};
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
       result = ncclMeshStart((ncclMeshRequest_t)(uintptr_t)request, given, &on, &start);
-      if (result == ncclSuccess) x.last = (int64_t)start;
     }
   });
-  s->streamed = true;
+  stream_of(stream).streamed = true;
   checked(result);
   return (int64_t)start;
 }
@@ -752,10 +726,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("metal_prelude", &metal_prelude);
   module.def("exchange_init", &exchange_init);
   module.def("exchange_start", &exchange_start);
-  module.def("exchange_free", [](int64_t request) {
-    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-    MeshStream *s = &stream_of(stream);
-    dispatch_sync(stream->queue(), ^{ s->exchanged.erase(request); });
-    checked(ncclMeshRequestFree((ncclMeshRequest_t)(uintptr_t)request));
-  });
+  module.def("exchange_free", [](int64_t request) { checked(ncclMeshRequestFree((ncclMeshRequest_t)(uintptr_t)request)); });
 }
