@@ -1,7 +1,7 @@
 #!/bin/bash
 # A launchd job's definition NEW put in place as PLIST (default NEW without .new) and the job loaded in DOMAIN (default
 # user/<uid>) where it is not loaded; a loaded job is left running, its new definition taking effect at its next load
-# (README.md, launchd).   mesh-agent.sh NEW [DOMAIN [PLIST]]
+# (README.md, launchd).   mesh-launchd-agent.sh NEW [DOMAIN [PLIST]]
 set -u
 new=$1; domain=${2:-user/$(id -u)}; plist=${3:-${new%.new}}; label=$(basename "$plist" .plist)
 loaded(){ launchctl print "$domain/$label" >/dev/null 2>&1 && return 0
