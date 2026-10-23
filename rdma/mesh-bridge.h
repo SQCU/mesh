@@ -286,9 +286,9 @@ struct port {
   size_t held,in_room,out_length,out_sent,out_room;
   dispatch_queue_t work;
   struct link link;
-  _Atomic uint64_t epoch,seen[1];
+  _Atomic uint64_t epoch,seen;
   _Atomic(pthread_t) thread[2];
-  _Atomic uint64_t guard,guarded[1];
+  _Atomic uint64_t guard,guarded;
   /* the parent's: the port's child (design/transport.md section 14, "A process a port"): its process (0 none) and
      socket, the hold a spawn that failed sets before the next (`hold_to`), whether the port's link, lost once its lanes
      were asked for, waits to end its child (`recycle`) and whether that end was asked (`ending`), the part of its

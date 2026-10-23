@@ -236,7 +236,7 @@ own watchdog (the M5's 65 s panic) or a restart ends it. The second of warning c
 nothing starts it. Since the bridge makes no call that waits on a termination (section 5), nothing does:
 
 1. **The node going down** (the power button: macOS sends SIGTERM to launchd's agents). The bridge sets its stop flag,
-   its two threads a port see it at their next pass and post nothing more, it sends FAREWELL on every paired port, and
+   each port's progress thread sees it at its next pass and posts nothing more, it sends FAREWELL on every paired port, and
    it exits. It makes no verbs call. Whether the Mini finishes shutting down within the second does not matter: if
    power goes first, its kernel state goes with it, and a machine that is off cannot hang.
 2. **The node staying up** (the M5). It reads FAREWELL, or the link-off event, or the peer interface's termination.

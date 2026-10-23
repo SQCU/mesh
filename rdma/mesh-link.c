@@ -21,7 +21,7 @@ static dispatch_queue_t finder;
    on the event loop's turn once no window stands and no call is stuck (ports_find) */
 static int find_wanted;
 /* design/transport.md B12: a port's job out past MESH_PLATFORM_NS, during which the devices are not read
-   (ports_stalled's, each event-loop turn); and the ports whose progress threads did
+   (ports_stalled's, each event-loop turn); and the ports whose progress thread did
    not hold for a settle or a guarded change within MESH_PLATFORM_NS (`unguarded`, a bit a port: port_wait), concluded
    alike */
 static _Atomic int stalled;
@@ -591,7 +591,7 @@ static void port_pass(struct port *port,uint64_t *told){
     stream_turn(port,t);posted|=stream_send(port,t,served);stream_post(port,t,served);
   }
   if(served){link_receive(port,served);link_send(port,served,posted);}
-  if(epoch!=*told){port_tell(port->seen,epoch);*told=epoch;}
+  if(epoch!=*told){port_tell(&port->seen,epoch);*told=epoch;}
 }
 /* design/transport.md section 14: a port's progress thread, its SENDs' and its receives': it passes without pause while
    its link serves a lane (rubric M8: the queues read as fast as a hardware thread allows), and waits on the port's
@@ -603,7 +603,7 @@ static void *port_progress(void *argument){
   stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
   if(alternate.ss_sp)sigaltstack(&alternate,NULL);
   atomic_store_explicit(&port->thread[0],pthread_self(),memory_order_release);
-  uint64_t told=atomic_load_explicit(&port->seen[0],memory_order_relaxed);
+  uint64_t told=atomic_load_explicit(&port->seen,memory_order_relaxed);
   while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
     /* while the port's guard stands, or its link serves no lane, no pass (no post on any queue pair of its device) and
        no lane read: the thread waits on the guard word (design/transport.md B13: a guarded call in the driver costs no
@@ -615,9 +615,9 @@ static void *port_progress(void *argument){
       /* a fault absorbed on the port (fault_heard: the handler, which may make no call but mmap, munmap and sigaction,
          halted the port) wakes its child's loop, which tells its parent at once, not at its next tick */
       if(atomic_load_explicit(&faulted,memory_order_relaxed))wake();
-      if(guard&1)port_tell(port->guarded,guard);
+      if(guard&1)port_tell(&port->guarded,guard);
       const uint64_t epoch=atomic_load_explicit(&port->epoch,memory_order_acquire);
-      if(epoch!=told){port_tell(port->seen,epoch);told=epoch;}
+      if(epoch!=told){port_tell(&port->seen,epoch);told=epoch;}
       /* the wait on the word that holds the thread: the guard while it stands, else the lanes served while they are
          none, so a change of that word between the read above and the wait ends the wait at once (a wait on the guard
          for a link's coming up slept MESH_PAUSE_NS where the lanes were served between the two) */
@@ -642,27 +642,25 @@ static int port_threads(struct port *port){
   pthread_attr_t attributes;
   pthread_attr_init(&attributes);
   pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
-  atomic_store(&port->seen[0],atomic_load(&port->epoch));
+  atomic_store(&port->seen,atomic_load(&port->epoch));
   pthread_t created;
   const int error=pthread_create(&created,&attributes,port_progress,port);
   if(!error)port->threads=1;
   pthread_attr_destroy(&attributes);
   return error;
 }
-/* design/transport.md: the raiser of a settle or a guard parked, never spinning, until each started
-   progress thread's word (`told`: the epoch it has seen, or the guard it holds at) reaches `value`, woken by the
+/* design/transport.md: the raiser of a settle or a guard parked, never spinning, until the port's progress thread,
+   where started, has its word (`told`: the epoch it has seen, or the guard it holds at) at `value`, woken by the
    thread's tell (port_tell), its guard's waiters woken as it begins and at each waking; at most
    MESH_PLATFORM_NS: a thread that has not told by then is in a call that has not returned, and the port is halted for
    the event loop to conclude as around a stuck call (`unguarded`, ports_stalled).  0, or ETIMEDOUT */
 static int port_wait(struct port *port,_Atomic uint64_t *told,uint64_t value){
   const uint64_t until=clock_ns()+MESH_PLATFORM_NS;
-  for(int side=0;side<port->threads;side++)
-    for(uint64_t seen,at;(seen=atomic_load_explicit(told+side,memory_order_acquire))<value;){
-      if((at=clock_ns())>=until){port_halt(port,&unguarded);return ETIMEDOUT;}
-      guard_wake(port);
-      os_sync_wait_on_address_with_timeout(told+side,seen,sizeof *told,OS_SYNC_WAIT_ON_ADDRESS_NONE,OS_CLOCK_MACH_ABSOLUTE_TIME,
-        until-at);
-    }
+  for(uint64_t seen,at;port->threads && (seen=atomic_load_explicit(told,memory_order_acquire))<value;){
+    if((at=clock_ns())>=until){port_halt(port,&unguarded);return ETIMEDOUT;}
+    guard_wake(port);
+    os_sync_wait_on_address_with_timeout(told,seen,sizeof *told,OS_SYNC_WAIT_ON_ADDRESS_NONE,OS_CLOCK_MACH_ABSOLUTE_TIME,until-at);
+  }
   return 0;
 }
 /* design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1": the guard of a port's device, on the port's queue,
@@ -679,7 +677,7 @@ static void guard_lower(struct port *port,int raised){
 }
 static int guard_raise(struct port *port){
   if(!port->threads)return 0;
-  if(!port_wait(port,port->guarded,atomic_fetch_add_explicit(&port->guard,1,memory_order_acq_rel)+1))return 1;
+  if(!port_wait(port,&port->guarded,atomic_fetch_add_explicit(&port->guard,1,memory_order_acq_rel)+1))return 1;
   guard_lower(port,1);
   return -1;
 }
@@ -782,7 +780,7 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
    completion queues the plan's streams' lanes alone dividing them, lanes 0 and 1 posting nothing:
    design/HETEROGENEOUS-LINKS.md; EALREADY for a make asked
    again); or connected to the peer's (LINK_JOB_CONNECT, the plan's lanes alone: RTR, then RTS, each lane's number and
-   gate set, every lane's progress made new, and the port's progress threads started).  No queue pair is moved to
+   gate set, every lane's progress made new, and the port's progress thread started).  No queue pair is moved to
    another state, destroyed or forgotten after it: the in-place RESET of 127 panicked the M5 in AppleThunderboltRDMA on its
    first run (2026-10-19, design/RDMA-KERNEL-RECOVERY.md), and the kernel releases every object at the child's exit, its
    one end */
@@ -845,7 +843,7 @@ static int link_connect(struct port *port,const struct link_numbers *numbers){
    child its poster (`child`, `child_start`: its exit ends every unit it posted, mesh-dataflow.c mesh_pinned), its peer
    node, its share of the link's bandwidth and its cable's identity told (`cable`; its group, its `wire` and its being
    live are the parent's, groups_turn), no holding served and no pages before its next; and its time rings' addresses the link's
-   own (`posted_at`, `landed_at`: the progress threads read no line of the region a client writes for them).  None is
+   own (`posted_at`, `landed_at`: the progress thread reads no line of the region a client writes for it).  None is
    kept for a holder of a lost pairing: no holder can, by letting go or by never letting go, keep a stream of the link
    from its next pairing (design/rubrics.md M4).  Nothing of the lost pairing is sent on it: that pairing's groups
    ended at their next look at a landed word ~0 (streams_cancel), this connect comes MESH_PLATFORM_NS and a child's exit
@@ -1129,7 +1127,7 @@ static void link_turn(struct port *port){
    be ended.  While any port's job is so out the devices are not read (`stalled`: ports_find, the parent's own driver
    entry), and the port itself takes no job until the call returns (`stuck`, its job's word); each port's calls are its
    own child's, a process of its own (section 14), so one port's stuck call holds no other port's (a hold of every
-   port's was 10-18's, when one process made every port's calls).  A port whose progress threads did not hold for a settle or a
+   port's was 10-18's, when one process made every port's calls).  A port whose progress thread did not hold for a settle or a
    guarded change within MESH_PLATFORM_NS (`unguarded`, port_wait: the change not made) is concluded alike, once, unless
    already concluded around a call.  Each conclusion moves the port's epoch and wakes its threads; the port stays
    `stuck` until the call returns and each progress thread has told the conclusion's epoch (a thread tells it on its
@@ -1147,9 +1145,7 @@ static void ports_stalled(void){
     const int out=opening||linking,held=unheld>>p&1;
     any|=out;
     if(port->stuck){
-      int returned=!out;
-      for(int side=0;returned && side<port->threads;side++)
-        returned=atomic_load_explicit(port->seen+side,memory_order_acquire)>=atomic_load(&port->epoch);
+      const int returned=!out && (!port->threads || atomic_load_explicit(&port->seen,memory_order_acquire)>=atomic_load(&port->epoch));
       if(returned){port->stuck=0;if(!port->job)port->opening=1;}
       continue;
     }
@@ -1683,7 +1679,7 @@ static void arrivals_turn(void){
 
 /* design/transport.md section 14, "A process a port": the parent's side of a port's child.  The bridge is a parent
    (the region, the map and records, the clients, discovery, hellos and the control sockets) and a child a port (its
-   device, its link's queue pairs and completion queues, its progress threads): mesh-flow spawned again, the same image
+   device, its link's queue pairs and completion queues, its progress thread): mesh-flow spawned again, the same image
    (`self_path`), told the contract's version it is spawned for (mesh-bridge.h MESH_CHILD_VERSION), in a process group of its own (a job's group signalled at its end reaches no verbs owner), with
    the parent's socket at descriptor 3, the parent's stderr, and nothing else.  The child's exit is the one release of
    its port's verbs objects (the kernel's), and a link once connected and then lost pairs again with the port's next

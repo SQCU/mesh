@@ -710,7 +710,7 @@ queue pairs once a pairing, as many as the link's plan names
 ([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 5), and every client
 shares them (design/transport.md section 2). A client holds a stream of the link
 (`mesh_stream_take`, rdma/mesh-call.h:30) and presents its own rows on it, and holds
-no queue pair; the port's send and receive threads serve every stream of the link
+no queue pair; the port's one progress thread serves every stream of the link
 (rdma/mesh-link.c `port_progress`). Several ports register the same region through
 their own devices; they do not create operand copies.
 
