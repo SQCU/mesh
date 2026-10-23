@@ -842,14 +842,18 @@ through nodes 0 and 1, and the round's first pass's global search on link loads,
 ring of six's busiest link 5 routes in every numbering, 5 or 6 by the hash) but moved a membership's routes for a link
 lost elsewhere in up to 35 % of cases and for a node joining by one cable in up to 45 % (metal-microbench
 output_data/library-20261015/pass2/sims/routes_after.json: none by the hash). The balance the collectives need is
-their tree sets' own: `mesh_trees_shortest` builds each member's in-tree over the members' hops, a parent among equals
-chosen by a local search on the congestion game's potential, the sum of the squares of the physical links' loads,
-each the tree edges whose hops cross it child to parent [Rosenthal, Int. J. Game Theory 1973], which every move
-lowers, ties to the hash; a communicator's tree sets are its own (its members' digest carries them), so balancing
-them moves no route of the bridges'.
+their tree sets' own: a communicator's default trees are its members' links packed by Garg and Konemann's maximum
+concurrent flow (`mesh_trees_pack`), every member's trees at once for the all-reduce, the reduce-scatter and the
+all-gather, and each root's alone for its reduce and broadcast, every link in use and each tree's part its flow's
+share, so the routes end together. Fewest-hop trees left links idle: a broadcast's star uses only its root's links, and
+over 2026-10-23's members' map (m5ult1-m5ult2 one cable, m5ult1-Mini one, m5ult2-Mini two) the busiest pair carries
+S/B of a broadcast from any root on the stars and S/2B on the packing, the root's min cut; the all-reduce two-phase
+over the packing 0.55 S/B, single-phase on the stars S/B, the bound S/2B (m5ult1's two cables); on a ring of six 3 S/B
+single-phase against 0.83 (rdma/mesh-collective.c, mesh_compile and mesh_program_steps_cut at 64 MiB, each pair's
+bytes over its capacity). A communicator's tree sets are its own, so packing them moves no route of the bridges'.
 
 The collectives (mesh-collective.c): along the packed trees [Garg & Konemann, FOCS 1998; Blink, Wang et al. MLSys
-2020], the shortest-path trees, and the single-phase all-reduce [Trivance, SIGCOMM 2026]; each tree's part cut into
+2020], and the single-phase all-reduce [Trivance, SIGCOMM 2026]; each tree's part cut into
 chunks, chunk j of every move at its round + j, so a node forwards a chunk as it arrives (the pipelined trees of
 NCCL's tree algorithm and of MSCCLang's chunks [Cowan et al., ASPLOS 2023]); and the program a call runs chosen by its
 time as libnccl-mesh runs it (`mesh_choose`: every collective, root and size class, over both tree sets and every chunk

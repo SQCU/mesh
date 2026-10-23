@@ -293,7 +293,7 @@ struct attach;
 struct ncclComm {
   struct mesh_link_map map;
   uint64_t page;
-  struct mesh_trees paths, trees;
+  struct mesh_trees paths, trees, rooted;
   struct entry *entries, *given;
   ncclMeshForm *forms;
   uint32_t programs, splits, *members, form_count, count, nops;
@@ -360,6 +360,7 @@ static void map_free(struct mesh_link_map *map) {
 /* the trees and the table compiled on the map; with `all`, the map, the caller's paths and programs too */
 static void routes_free(struct ncclComm *comm, int all) {
   trees_free(&comm->trees);
+  comm->rooted = (struct mesh_trees){0};
   comm->compiled = 0;
   for (uint32_t e = 0; e < comm->programs; e++) program_free(&comm->entries[e].program);
   free(comm->entries);
@@ -452,8 +453,8 @@ static int root_carried(const struct mesh_trees *trees, uint32_t r) {
 
 /* a configured form's entries (ncclMeshCommForms): its collective along the communicator's trees (`along`) or the map's
    packed trees (mesh_trees_pack at the form's eps and most, made here: mesh cc8a6f8e^ comm_routes' sets[1]; a segment
-   cut among a root's trees by the form's shares, else equally, never by the flows the packing infers from the map's
-   links; a tree of share 0 carries none of it; the shortest trees cut alike where the form gives shares), whole or two-phase, at its chunks, below its bound; a rooted one at
+   cut among a root's trees by the form's shares, else by the packing's flows; a tree of share 0 carries none of it; the
+   communicator's trees cut alike where the form gives shares), whole or two-phase, at its chunks, below its bound; a rooted one at
    its root, or at each root (-1), none where its root is past the communicator's ranks (a split's).  A root every one
    of whose trees takes share 0 has no tree to carry its segment: the form fails there as a value */
 static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees *along, const ncclMeshForm *x) {
@@ -461,8 +462,8 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
   struct mesh_trees packed = {n, 0, NULL, NULL, NULL}, weighed = {n, 0, NULL, NULL, NULL};
   const struct mesh_trees *trees = along;
   ncclResult_t result = ncclSuccess;
-  /* the shortest trees (the caller's paths, else one a root) cut by the form's shares: root r's k-th tree in their
-     order shares[r x most + k], a tree past `most` none */
+  /* the communicator's trees cut by the form's shares: root r's k-th tree in their order shares[r x most + k], a tree
+     past `most` none */
   if (x->trees != ncclMeshTreesPacked && x->shares) {
     if (trees_copy(&weighed, along)) result = fail(ncclSystemError, "out of memory");
     for (uint32_t t = 0; !result && t < weighed.count; t++) {
@@ -477,11 +478,11 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
     double *weight = calloc((size_t)n * x->most + 1, sizeof *weight);
     packed = (struct mesh_trees){n, 0, root, parent, weight};
     if (!root || !parent || !weight) result = fail(ncclSystemError, "out of memory");
-    else if (!(packed.count = mesh_trees_pack(&comm->map, x->eps, x->most, root, parent, weight)))
+    else if (!(packed.count = mesh_trees_pack(&comm->map, NULL, x->eps, x->most, root, parent, weight)))
       result = fail(ncclInvalidArgument, "the map's links pack no trees (mesh_trees_pack)");
-    for (uint32_t t = 0, k = 0; t < packed.count; t++) {
+    for (uint32_t t = 0, k = 0; x->shares && t < packed.count; t++) {
       k = t && root[t] == root[t - 1] ? k + 1 : 0;
-      weight[t] = x->shares ? log(x->shares[(size_t)root[t] * x->most + k]) : 0;
+      weight[t] = log(x->shares[(size_t)root[t] * x->most + k]);
     }
     trees = &packed;
   }
@@ -503,18 +504,23 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
 
 /* the communicator's table on its map: its configured forms first, in their order (compile_form), then the caller's
    programs where it listed some (ncclMeshCommInitRank), else, along the caller's paths (checked against the map) or
-   else the map's shortest-path trees (mesh_trees_shortest: each member's in-tree of the routes over the links between
-   members), the single-phase all-reduce (each member's sum up its own tree; the direct exchange where every two members
-   are linked), the reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and
-   broadcast, uncut and of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a
+   else the map's links packed (mesh_trees_pack: every member's trees at once for the all-reduce, the reduce-scatter and
+   the all-gather, each root's alone for its reduce and broadcast, every link in use and each tree's part its flow's
+   share, so a part crosses every route and the routes end together [Garg & Konemann 1998; Blink, Wang et al. 2020]),
+   the all-reduce two-phase (the reduce-scatter and then the all-gather over every pair [Patarasuk & Yuan 2009]), the
+   reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, each tree's
+   part in CHUNKS chunks, so a member forwards a chunk as it lands and the all-gather's chunk follows the reduce-scatter's,
+   a chunk never under a page (mesh_program_steps_cut), of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table,
+   its entries along the routes): a
    call takes the first entry that fits it (program_of), so a collective no form names, or a size past every form's
    bound, runs the caller's program or the default.  Where trees are compiled (a form, or no programs listed), a map
    whose links do not join its members fails it, naming two: the bridges forward nothing, so no route crosses a node
    outside the communicator */
+#define CHUNKS 4
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
   if (n < 2) return ncclSuccess;
-  const struct mesh_trees *along = &comm->paths;
+  const struct mesh_trees *along = &comm->paths, *rooted = &comm->paths;
   if (!comm->listed || comm->form_count) {
     uint32_t apart[2] = {0, 0};
     const int joined = mesh_link_map_joined(&comm->map, apart);
@@ -526,13 +532,22 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
       return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
     if (!comm->paths.count) {
-      uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
-      double *weight = calloc(n + 1, sizeof *weight);
+      uint32_t *root = calloc((size_t)n * n * 2 + 1, sizeof *root), *parent = calloc((size_t)n * n * n * 2 + 1, sizeof *parent);
+      double *weight = calloc((size_t)n * n * 2 + 1, sizeof *weight);
+      uint64_t *only = calloc(n / 64 + 1, sizeof *only);
       comm->trees = (struct mesh_trees){n, 0, root, parent, weight};
-      if (!root || !parent || !weight) return fail(ncclSystemError, "out of memory");
-      if (!(comm->trees.count = mesh_trees_shortest(&comm->map, root, parent, weight)))
-        return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
+      comm->rooted = (struct mesh_trees){n, 0, root + (size_t)n * n, parent + (size_t)n * n * n, weight + (size_t)n * n};
+      if (!root || !parent || !weight || !only) { free(only); return fail(ncclSystemError, "out of memory"); }
+      comm->trees.count = mesh_trees_pack(&comm->map, NULL, 0, n, root, parent, weight);
+      for (uint32_t r = 0; r < n; only[r / 64] = 0, r++) {
+        only[r / 64] = 1ull << r % 64;
+        const struct mesh_trees *at = &comm->rooted;
+        comm->rooted.count += mesh_trees_pack(&comm->map, only, 0, n, (uint32_t *)at->root + at->count, (uint32_t *)at->parent + (size_t)at->count * n,
+                                              (double *)at->log_weight + at->count);
+      }
+      free(only);
       along = &comm->trees;
+      rooted = &comm->rooted;
     }
   }
   size_t room = comm->listed ? (size_t)comm->listed : 3 + 2 * (size_t)n;
@@ -547,11 +562,11 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     comm->entries[comm->programs++].below = comm->given[e].below;
   }
   if (comm->listed) return ncclSuccess;
-  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 1, 1, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 1, 0) ||
-      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 1, 0))
+  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, CHUNKS, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, CHUNKS, 0) ||
+      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, CHUNKS, 0))
     return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
   for (uint32_t r = 0; r < n; r++)
-    if (compile_entry(comm, along, MESH_REDUCE, r, 0, 1, 0) || compile_entry(comm, along, MESH_BROADCAST, r, 0, 1, 0))
+    if (compile_entry(comm, rooted, MESH_REDUCE, r, 0, CHUNKS, 0) || compile_entry(comm, rooted, MESH_BROADCAST, r, 0, CHUNKS, 0))
       return fail(ncclInternalError, "the reduce or broadcast of root %u along the communicator's trees does not compile", r);
   return ncclSuccess;
 }
@@ -602,7 +617,7 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int c
     int shared = !x->shares || x->most;
     for (size_t k = 0; x->shares && shared && k < (size_t)comm->nranks * x->most; k++) shared = x->shares[k] >= 0 && isfinite(x->shares[k]);
     if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !x->chunks || !shared ||
-        (x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesPacked) || (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
+        (x->trees != ncclMeshTreesOwn && x->trees != ncclMeshTreesPacked) || (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
       return fail(ncclInvalidArgument, "form %d: a collective (mesh-plan.h MESH_*), a rooted one's root (-1 every root), its trees "
                   "(shortest, or packed with eps > 0 and most > 0), shares of 0 or more (most of them a root) or none, and chunks > 0", f);
   }

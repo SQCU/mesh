@@ -352,140 +352,6 @@ static uint32_t mesh_trees_heaviest(const struct mesh_trees *trees,uint32_t r){
   return best;
 }
 
-/* The tree set's members' hops: each linked pair's route on the map's table, its physical links (u N + x, the sender's
-   way) at hop[(a n + b) N ..] (count[a n + b]), and its length (its links, then its pairs' striped inverse
-   bandwidths, as mesh_routes measures) */
-struct mesh_hops { uint32_t n,N,*count,*hop; struct mesh_length *length; };
-/* a tree edge, member v's hop to its parent u, put on (sign 1) or taken off (-1) every physical link it crosses the way
-   from v to u: a reduction's part goes up each edge once and a broadcast's comes down it, so the loads down mirror the
-   loads up and balancing one balances the other */
-static void mesh_carry(const struct mesh_hops *h,uint64_t *load,uint32_t v,uint32_t u,int sign){
-  const size_t pair=(size_t)v*h->n+u;
-  for(uint32_t i=0;i<h->count[pair];i++){
-    if(sign>0)load[h->hop[pair*h->N+i]]++;
-    else load[h->hop[pair*h->N+i]]--;
-  }
-}
-/* the members farthest first from a root (its tree's lengths), then by mark */
-struct mesh_far { struct mesh_length length; uint32_t mark,node; };
-static int mesh_farther(const void *x,const void *y){
-  const struct mesh_far *a=x,*b=y;
-  if(!mesh_equal(a->length,b->length))return mesh_shorter(a->length,b->length)?1:-1;
-  return (a->mark>b->mark)-(a->mark<b->mark);
-}
-/* Each member's in-tree of shortest paths over the members' hops (two members linked where the table's route between
-   them crosses relays alone, a hop as long as that route), a member's parent among those one equal hop nearer the root:
-   first the least hash of its mark, the parent's and the root's; then MESH_TREE_PASSES passes of local search on the
-   sum of the squares of the physical links' loads, a load the tree edges (every tree's) whose hops cross the link one
-   way from child to parent, as each edge carries its tree's part once (the potential of the congestion game [Rosenthal
-   1973], which every move lowers), each root in mark order, each member farthest first: its edge taken off, then put on to the
-   parent whose hop adds least to the potential (then the least hash); the set of the pass whose most loaded link
-   carries fewest edges kept (then the least potential, then the earliest).  The tree set is the communicator's alone
-   (its members agree on it: nccl-mesh.c map_digest), so balancing it moves no route of the bridges'.  Integers
-   throughout. */
-#define MESH_TREE_PASSES 4
-uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint32_t *parent,double *log_weight){
-  const uint32_t n=map->nodes,N=mesh_all(map);
-  if(!n || (!map->next && map->relays))return 0;
-  struct mesh_link_map with=*map;
-  uint32_t *made=map->next?NULL:malloc((size_t)N*N*sizeof *made),count=n;
-  if(made && !mesh_routes(map,made))with.next=made;
-  const size_t pairs=(size_t)n*n;
-  struct mesh_hops h={n,N,calloc(pairs+1,sizeof *h.count),malloc((pairs*N+1)*sizeof *h.hop),malloc((pairs+1)*sizeof *h.length)};
-  uint32_t *path=malloc(((size_t)N+1)*sizeof *path),*trial=malloc((pairs+1)*sizeof *trial),*reached=calloc((size_t)n+1,sizeof *reached);
-  uint64_t *load=calloc((size_t)N*N+1,sizeof *load);
-  struct mesh_length *length=malloc((pairs+1)*sizeof *length);
-  struct mesh_far *far=malloc((pairs+1)*sizeof *far),*roots=malloc(((size_t)n+1)*sizeof *roots);
-  unsigned char *done=malloc((size_t)n+1),*linked=calloc(pairs+1,1);
-  uint64_t *inverse=calloc(pairs+1,sizeof *inverse);
-  if(!with.next || !h.count || !h.hop || !h.length || !path || !trial || !reached || !load || !length || !far || !roots || !done ||
-     !linked || !inverse)count=0;
-  /* the hops: a linked pair's route, its physical links and its length */
-  for(uint32_t a=0;count && a<n;a++)for(uint32_t b=0;b<n;b++){
-    if(a==b || !mesh_link_between(&with,a,b))continue;
-    const uint32_t hops=mesh_route_nodes(&with,a,b,path);
-    uint64_t sum=0;
-    for(uint32_t i=0;i+1<hops;i++){
-      sum+=mesh_hop_inverse(map,path[i],path[i+1]);
-      h.hop[((size_t)a*n+b)*N+h.count[(size_t)a*n+b]++]=path[i]*N+path[i+1];
-    }
-    h.length[(size_t)a*n+b]=(struct mesh_length){hops-1,sum};
-    linked[(size_t)a*n+b]=1;
-    inverse[(size_t)a*n+b]=sum;
-  }
-  /* each root's lengths over the hops (Dijkstra, mesh_distances' dense form on the members), its members farthest
-     first, and each member's parent the least hash among its equals */
-  for(uint32_t v=0;count && v<n;v++)roots[v]=(struct mesh_far){{0,0},mesh_mark(map,v),v};
-  if(count)qsort(roots,n,sizeof *roots,mesh_farther);
-  for(uint32_t k=0;count && k<n;k++){
-    const uint32_t r=roots[k].node;
-    struct mesh_length *at=length+(size_t)r*n;
-    for(uint32_t v=0;v<n;v++){at[v]=(struct mesh_length){UINT64_MAX,0};done[v]=0;}
-    at[r]=(struct mesh_length){0,0};
-    for(;;){
-      uint32_t x=n;
-      for(uint32_t v=0;v<n;v++)if(!done[v] && at[v].hops!=UINT64_MAX && (x==n || mesh_shorter(at[v],at[x])))x=v;
-      if(x==n)break;
-      done[x]=1;
-      for(uint32_t w=0;w<n;w++){
-        if(done[w] || !linked[(size_t)w*n+x])continue;
-        const struct mesh_length d={at[x].hops+h.length[(size_t)w*n+x].hops,at[x].inverse+inverse[(size_t)w*n+x]};
-        if(at[w].hops==UINT64_MAX || mesh_shorter(d,at[w]))at[w]=d;
-      }
-    }
-    for(uint32_t v=0;v<n;v++){
-      if(at[v].hops==UINT64_MAX){count=0;break;}
-      if(v!=r)far[(size_t)r*n+reached[r]++]=(struct mesh_far){at[v],mesh_mark(map,v),v};
-    }
-    if(!count)break;
-    qsort(far+(size_t)r*n,reached[r],sizeof *far,mesh_farther);
-    trial[(size_t)r*n+r]=r;
-    for(uint32_t i=0;i<reached[r];i++){
-      const uint32_t v=far[(size_t)r*n+i].node;
-      uint32_t up=v;
-      for(uint32_t u=0;u<n;u++)
-        if(linked[(size_t)v*n+u] && mesh_equal((struct mesh_length){at[u].hops+h.length[(size_t)v*n+u].hops,at[u].inverse+inverse[(size_t)v*n+u]},at[v]) &&
-           (up==v || mesh_hash(mesh_mark(map,v),mesh_mark(map,u),roots[k].mark)<mesh_hash(mesh_mark(map,v),mesh_mark(map,up),roots[k].mark)))
-          up=u;
-      trial[(size_t)r*n+v]=up;
-    }
-  }
-  for(uint32_t r=0;count && r<n;r++)for(uint32_t v=0;v<n;v++)if(v!=r)mesh_carry(&h,load,v,trial[(size_t)r*n+v],1);
-  uint64_t least=UINT64_MAX,least_potential=UINT64_MAX;
-  for(uint32_t pass=0;count && pass<=MESH_TREE_PASSES;pass++){
-    for(uint32_t k=0;pass && k<n;k++){
-      const uint32_t r=roots[k].node;
-      uint32_t *tree=trial+(size_t)r*n;
-      const struct mesh_length *at=length+(size_t)r*n;
-      for(uint32_t i=0;i<reached[r];i++){
-        const uint32_t v=far[(size_t)r*n+i].node;
-        uint32_t up=tree[v];
-        mesh_carry(&h,load,v,up,-1);
-        uint64_t best=UINT64_MAX;
-        for(uint32_t u=0;u<n;u++){
-          if(!linked[(size_t)v*n+u] ||
-             !mesh_equal((struct mesh_length){at[u].hops+h.length[(size_t)v*n+u].hops,at[u].inverse+inverse[(size_t)v*n+u]},at[v]))continue;
-          uint64_t added=0;
-          for(uint32_t i2=0;i2<h.count[(size_t)v*n+u];i2++)added+=2*load[h.hop[((size_t)v*n+u)*N+i2]]+1;
-          if(best==UINT64_MAX || added<best ||
-             (added==best && mesh_hash(mesh_mark(map,v),mesh_mark(map,u),roots[k].mark)<mesh_hash(mesh_mark(map,v),mesh_mark(map,up),roots[k].mark))){
-            best=added;up=u;
-          }
-        }
-        tree[v]=up;
-        mesh_carry(&h,load,v,up,1);
-      }
-    }
-    uint64_t most=0,potential=0;
-    for(size_t x=0;x<(size_t)N*N;x++){if(load[x]>most)most=load[x];potential+=load[x]*load[x];}
-    if(most<least || (most==least && potential<least_potential)){least=most;least_potential=potential;memcpy(parent,trial,pairs*sizeof *parent);}
-  }
-  for(uint32_t r=0;count && r<n;r++){root[r]=r;log_weight[r]=0;}
-  free(made);free(h.count);free(h.hop);free(h.length);free(path);free(trial);free(reached);free(load);free(length);free(far);free(roots);
-  free(done);free(linked);free(inverse);
-  return count;
-}
-
 /* A tree's shape: each node's height (its longest path up from a leaf below it), depth, whether its subtree holds a
    contributor (`live`) and whether a child's does (`inner`) */
 struct mesh_shape { uint32_t height,depth; int live,inner; };
@@ -802,10 +668,13 @@ static int mesh_packed_heavier(const void *a,const void *b){
   return x->flow>y->flow?-1:x->flow<y->flow;
 }
 
-uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight){
+uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
+                         double *log_weight){
   const uint32_t n=map->nodes,N=mesh_all(map);
+  uint32_t rooted=0;
+  for(uint32_t r=0;r<n;r++)rooted+=mesh_member(roots,r);
   if(n==1){root[0]=0;parent[0]=0;log_weight[0]=0;return 1;}
-  if(n<2 || !most || mesh_link_map_joined(map,NULL))return 0;
+  if(n<2 || !most || !rooted || mesh_link_map_joined(map,NULL))return 0;
   if(!(eps>0 && eps<1))eps=0.1;
   uint32_t m=0,P=0;
   for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)m+=mesh_link_between(map,a,b);
@@ -849,7 +718,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
   const double delta=mesh_exp(-mesh_log(P/(1-eps))/eps);
   double D=0;
   for(uint32_t k=0;k<P;k++){length[k]=delta/capacity[k];D+=length[k]*capacity[k];}
-  while(D<1)for(uint32_t r=0;r<n && D<1;r++)for(double demand=1;demand>0 && D<1;){
+  while(D<1)for(uint32_t r=0;r<n && D<1;r++)for(double demand=mesh_member(roots,r);demand>0 && D<1;){
     for(uint32_t e=0;e<m;e++){weight[e]=0;for(uint32_t i=through[e];i<through[e+1];i++)weight[e]+=length[crossing[i]];}
     if(mesh_arborescence(n,r,m,from,to,weight,chosen))goto done;
     /* the tree's flow: its demand, at most each directed hop's capacity over the tree's edges crossing it */

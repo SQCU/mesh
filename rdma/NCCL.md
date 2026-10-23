@@ -65,7 +65,7 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
   bootstrap (`id` the root's `host:port`, which the caller hands every rank; each rank's node is its bridge's), with
   the collectives as operands; the map is its members' (below).
   - `paths`: the routing tables every collective of the structural table (below) is compiled along, each member's
-    trees, checked against the communicator's map. NULL means the map's shortest-path trees.
+    trees, checked against the communicator's map. NULL means the map's packed trees (below).
   - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the structural table
     (below).
   - `small`: not read.
@@ -149,16 +149,17 @@ paths, programs and forms; nothing is compared at run time.
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR), the communicator's table of them. The caller passes its own table (`ncclMeshCommInitRank`'s `programs`;
 `mesh_compile`, `chunks` its cut, `whole` the single-phase all-reduce); with none, the communicator compiles
-the structural table at its first call that needs it, along the caller's `paths` or else the map's shortest-path trees
-(each member's in-tree of the map's routes, its parents among equals spread over the links):
+the structural table at its first call that needs it, along the caller's `paths` or else the map's links packed
+(`mesh_trees_pack`, Garg and Konemann's maximum concurrent flow: every member's trees at once, and each root's alone
+for its reduce and broadcast; every link in use, each tree's part its flow's share, so the routes end together):
 
-- the all-reduce single-phase (Trivance: each member's sum up its own tree, the map's diameter in dependent crossings;
-  at two members, and wherever every two members are linked, the direct exchange);
+- the all-reduce two-phase: the reduce-scatter and then the all-gather over every pair;
 - the reduce-scatter and the all-gather, segment s up and down s's trees;
-- each root's reduce and broadcast, up and down the root's trees.
+- each root's reduce and broadcast, up and down the root's own packed trees, toward its min cut.
 
-Each is uncut: a step's piece is one entry of its holding's list, any size, which the bridge alone cuts into SENDs. A
-program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) lie on the region's pages
+Each tree's part is cut into 4 chunks, so a member forwards a chunk as it lands and an all-reduce's all-gather of a
+chunk follows its reduce-scatter; a step's piece is one entry of its holding's list, which the bridge alone cuts into
+SENDs. A program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) lie on the region's pages
 (`mesh_program_steps_cut`), so every piece starts on a page wherever its buffer does ([Memory](#memory)). A call runs
 its table's first program of its collective (and root) whose size bound its operand is under. Nothing about a program
 is decided where a call runs.
@@ -194,8 +195,8 @@ structural table at each map read, so a call takes the first form that fits it a
 
 | field | form |
 |---|---|
-| `trees` | `ncclMeshTreesShortest` (the communicator's paths, else the shortest-path trees) or `ncclMeshTreesPacked` (`mesh_trees_pack` at the entry's `eps` and `most` trees a root: Blink's packed spanning trees, every link a share) |
-| `shares` | a form's cut of each segment among its root's trees (root r's k-th tree, the packing's heaviest first or the shortest trees' order, `shares[r x most + k]`, a tree of share 0 or past `most` carrying none; NULL: equally): the configuration's allocation, never the flows the packing infers from the map's links |
+| `trees` | `ncclMeshTreesOwn` (the communicator's paths, else its packed trees) or `ncclMeshTreesPacked` (`mesh_trees_pack` at the entry's `eps` and `most` trees a root: Blink's packed spanning trees, every link a share) |
+| `shares` | a form's cut of each segment among its root's trees (root r's k-th tree, the packing's heaviest first or the communicator's trees' order, `shares[r x most + k]`, a tree of share 0 or past `most` carrying none; NULL: the packing's flows) |
 | `whole` | an all-reduce's: 1 single-phase, 0 two-phase (the reduce-scatter and then the all-gather along the same trees) |
 | `chunks` | each tree's part cut into chunks, pipelined down and up the trees (1: uncut) |
 | `below` | the bytes a call is under to take it (0: any size): the size classes |

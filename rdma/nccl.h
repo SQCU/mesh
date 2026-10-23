@@ -970,15 +970,15 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId com
 /* A collective's form, an entry of a communicator's configuration (ncclMeshCommForms): `collective` (mesh-plan.h
    MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER) at `root` (a reduce's or a
    broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
-   (mesh-plan.h mesh_compile) along `trees`: ncclMeshTreesShortest the communicator's own (its paths, else the map's
-   shortest-path trees), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
+   (mesh-plan.h mesh_compile) along `trees`: ncclMeshTreesOwn the communicator's own (its paths, else the map's packed
+   trees, the default's), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
    both the caller's: Blink's packing [Wang et al. 2020], every link a share), a segment cut among its root's trees by
-   `shares` (root r's k-th tree in the packing's order, heaviest first, or the shortest trees' order, shares[r x most +
-   k], each 0 or more, a tree of 0 or past `most` carrying none, for the communicator's ranks; NULL: equally), the
-   configuration's allocation, not the flows the packing infers from the map's links; an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
+   `shares` (root r's k-th tree in the packing's order, heaviest first, or the communicator's trees' order, shares[r x
+   most + k], each 0 or more, a tree of 0 or past `most` carrying none, for the communicator's ranks; NULL: the
+   packing's flows); an all-reduce `whole` (1: single-phase, each member's sum up its own tree, its heaviest share's; 0: the
    reduce-scatter and then the all-gather [Patarasuk & Yuan 2009; Rabenseifner 2004]); each tree's part cut into
    `chunks` (1: uncut), pipelined down and up the trees [Blink; NCCL's chunked trees]. */
-typedef enum { ncclMeshTreesShortest = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
+typedef enum { ncclMeshTreesOwn = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
 typedef struct {
   int collective;
   int root;

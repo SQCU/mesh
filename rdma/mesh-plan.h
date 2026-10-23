@@ -60,8 +60,8 @@ int mesh_link_map_check(const struct mesh_link_map *);
 /* 0 where a map (one mesh_link_map_check takes) joins every two of its nodes, else ENOTCONN, apart[0] and apart[1]
    (apart NULL: none) the first two it does not join, the first the lower (EINVAL where it is no map): a graph's links
    connect them, and with a table every route between two of them reaches its end; a ring, a tree and a mesh join
-   theirs by their form.  The maps a collective's trees and a communicator's collectives run on (mesh_trees_pack,
-   mesh_trees_shortest; nccl-mesh.c comm_routes fails a collective on a map that does not join its members, naming
+   theirs by their form.  The maps a collective's trees and a communicator's collectives run on (mesh_trees_pack;
+   nccl-mesh.c comm_routes fails a collective on a map that does not join its members, naming
    two). */
 int mesh_link_map_joined(const struct mesh_link_map *,uint32_t *apart);
 /* The routing table of a map's links (into next, N x N as struct mesh_link_map's; map->next is not read): each node
@@ -121,18 +121,20 @@ struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const do
 /* 0 where the trees fit the map: each spans every node over the map's links and reaches its root, and every node
    roots at least one (a collective reduces toward and broadcasts from every node); else EINVAL. */
 int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
-/* Each node's spanning in-arborescences packed fractionally into the map's links, each way: Garg and Konemann's maximum
+/* Each root's spanning in-arborescences packed fractionally into the map's links, each way, the roots the nodes of
+   `roots` (a bit a node, 64 a word; NULL: every node): Garg and Konemann's maximum
    concurrent flow [FOCS 1998], every root's trees together carrying one unit, each phase sending every root's unit
    along minimum-length arborescences [Chu & Liu 1965; Edmonds 1967] of the map's hops, a hop's length the sum of the
    lengths of the links it crosses, each one way: with a table every link a hop's route crosses, so the hops of a tree
    that cross one link charge it each (hops through relays share the links they cross); a link's length one way grows by
    (1 + eps x flow/capacity) and its capacity is its pair's parallel links' count times the slowest one's bandwidth
    (where the map gives some pair no bandwidth, its parallel links' count: every link alike).  A root's equal trees
-   merged, its `most` heaviest kept and their flows' shares their log weights (the packing's description: libnccl-mesh cuts a configured form's segments among
-   them by the form's shares, nccl.h ncclMeshForm, never by these).  Writes root, parent (nodes a tree) and log_weight
+   merged, its `most` heaviest kept and their flows' shares their log weights, so a part cut by them crosses every
+   route and the routes end together.  Writes root, parent (nodes a tree) and log_weight
    for at most nodes x most trees, each root's heaviest first; returns the count, 0 where the map does not join its
-   nodes (mesh_link_map_joined).  At two nodes, each node's one tree. */
-uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight);
+   nodes (mesh_link_map_joined) or `roots` holds none.  At two nodes, each node's one tree. */
+uint32_t mesh_trees_pack(const struct mesh_link_map *,const uint64_t *roots,double eps,uint32_t most,uint32_t *root,uint32_t *parent,
+                         double *log_weight);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
@@ -160,14 +162,6 @@ struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
 
-/* Shortest-path trees: each node's in-tree over the map's hops (two of its nodes linked where the route between them on
-   its table, mesh_routes' where it has none, crosses relays alone, the hop as long as that route), a node's parent one
-   hop nearer the root on a shortest path, chosen among equals so the tree set's edges spread over the physical links
-   (a local search on the sum of the squares of the links' loads, each the tree edges whose hops cross it [Rosenthal
-   1973], then the least hash of the marks), the parents climbing to the root; the set is a communicator's own and
-   moves no route; one tree a node at log weight 0; writes nodes trees, returns their count (0 where a hop path does not
-   reach). */
-uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
 /* The room mesh_compile needs at `chunks`: parts and moves. */
 void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts,uint32_t *moves);
 /* A collective compiled along `trees` into `program` (arrays of mesh_compile_room's room: segment and log_weight a
@@ -183,8 +177,8 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts
                            nodes, the direct exchange), from the operand itself: its one SEND and its one REDUCE of
                            each chunk then meet in the operand on one channel, and the executors combine into it only
                            once the bridge has sent the SEND's bytes (libnccl-mesh, the holding's `sent`), so the SEND
-                           reads the operand before the sum is made in it (its dependent crossings the trees' height: the graph's eccentricity
-                           along shortest-path trees, 1 where every pair is linked, the direct exchange; each node
+                           reads the operand before the sum is made in it (its dependent crossings the heaviest trees'
+                           height, 1 where they are stars, the direct exchange; each node
                            sends the whole operand once for every other) [single-phase all-reduce: Trivance 2026].
    Each tree's part is cut into `chunks` parts (at least 1), chunk j of every move at its round + j, so a node forwards
    a part's chunk as it arrives rather than the whole part once all of it has: the trees pipelined [Blink; NCCL's
