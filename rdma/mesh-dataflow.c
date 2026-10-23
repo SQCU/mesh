@@ -59,13 +59,13 @@ static int mesh_records_read(struct mesh_record **out){
   return copy?(int)n:-ENOMEM;
 }
 /* design/transport.md section 3, RECORD; section 15, "The library" */
-uint32_t mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint64_t *bandwidth,uint32_t room){
+uint32_t mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint32_t *cable,uint64_t *bandwidth,uint32_t room){
   uint32_t count=0;
   for(uint32_t i=0;i<a->reached && i<MESH_STREAMS;i++)
     for(uint32_t j=0;a->reach[i].node==b->node && j<b->reached && j<MESH_STREAMS;j++){
       const struct mesh_reach *x=a->reach+i,*y=b->reach+j;
       if(y->node!=a->node || x->cable!=y->cable)continue;
-      if(count<room)bandwidth[count]=!x->bandwidth || (y->bandwidth && y->bandwidth<x->bandwidth)?y->bandwidth:x->bandwidth;
+      if(count<room){cable[count]=x->cable;bandwidth[count]=x->bandwidth && y->bandwidth?(y->bandwidth<x->bandwidth?y->bandwidth:x->bandwidth):0;}
       count++;
     }
   return count;
@@ -75,20 +75,24 @@ static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
 }
-static void mesh_whole_free(struct mesh_whole *w){free(w->map.link);free(w->map.bandwidth);free(w->map.mark);free(w->next);}
+static void mesh_whole_free(struct mesh_whole *w){free(w->map.edge);free(w->map.mark);free(w->next);}
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
   size_t joins=1;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=mesh_joined(r+a,r+b,NULL,0);
-  *w=(struct mesh_whole){.map={.kind=MESH_LINKS_GRAPH,.nodes=n,.link=malloc(joins*sizeof *w->map.link),.bandwidth=malloc(joins*sizeof *w->map.bandwidth),
-    .mark=malloc(((size_t)n+1)*sizeof *w->map.mark)},.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
-  if(!w->map.link || !w->map.bandwidth || !w->map.mark || !w->next)return ENOMEM;
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=mesh_joined(r+a,r+b,NULL,NULL,0);
+  *w=(struct mesh_whole){.map={.nodes=n,.edge=malloc(joins*sizeof *w->map.edge),.mark=malloc(((size_t)n+1)*sizeof *w->map.mark)},
+    .next=malloc(((size_t)n*n+1)*sizeof *w->next)};
+  if(!w->map.edge || !w->map.mark || !w->next)return ENOMEM;
   for(uint32_t a=0;a<n;a++){
     w->map.mark[a]=r[a].node;
-    for(uint32_t b=a+1;b<n;b++)
-      for(uint32_t k=mesh_joined(r+a,r+b,w->map.bandwidth+w->map.links,(uint32_t)(joins-w->map.links));k--;w->map.links++){
-        w->map.link[w->map.links][0]=a;w->map.link[w->map.links][1]=b;
+    for(uint32_t b=a+1;b<n;b++){
+      uint32_t cable[MESH_STREAMS];
+      uint64_t bandwidth[MESH_STREAMS];
+      for(uint32_t c=0,cables=mesh_joined(r+a,r+b,cable,bandwidth,MESH_STREAMS);c<cables && c<MESH_STREAMS;c++){
+        if(!bandwidth[c])return EINVAL;
+        w->map.edge[w->map.edges++]=(struct mesh_edge){a,b,cable[c],bandwidth[c]/8};
       }
+    }
   }
   const int error=n?mesh_routes(&w->map,w->next):0;
   if(!error)w->map.next=w->next;

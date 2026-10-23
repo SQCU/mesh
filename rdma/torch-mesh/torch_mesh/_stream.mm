@@ -577,10 +577,14 @@ static double sequence(int64_t handle, const std::vector<std::vector<std::option
 static std::mutex region_tensors_lock_;
 static std::map<uintptr_t, size_t> region_tensors_;
 
-static void returned(void *memory) {
-  ncclMemFree(memory);
+static void forgotten(void *memory) {
   std::lock_guard<std::mutex> guard(region_tensors_lock_);
   region_tensors_.erase((uintptr_t)memory);
+}
+
+static void returned(void *memory) {
+  ncclMemFree(memory);
+  forgotten(memory);
 }
 
 struct RegionShape {
@@ -590,8 +594,10 @@ struct RegionShape {
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps) {
   const at::ScalarType dtype = like.scalar_type();
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
+  const size_t word = (bytes + sizeof(uint32_t) - 1) / sizeof(uint32_t) * sizeof(uint32_t);
   void *memory = nullptr;
-  checked(ncclMemAlloc(&memory, bytes));
+  checked(ncclMemAlloc(&memory, mps ? word + sizeof(uint32_t) : bytes));
+  if (mps) *(volatile uint32_t *)((char *)memory + word) = 0;
   {
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
     region_tensors_[(uintptr_t)memory] = bytes;
@@ -619,9 +625,13 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
     delete (RegionShape *)self->manager_ctx;
     delete self;
   };
-  return at::fromDLPack(managed, [managed, memory](void *) {
+  return at::fromDLPack(managed, [managed, memory, word](void *) {
     managed->deleter(managed);
-    at::mps::getCurrentMPSStream()->addCompletedHandler(^(id<MTLCommandBuffer>) { returned(memory); });
+    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+    dispatch_sync(stream->queue(), ^{
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
+      if (ncclMeshMemFreeAfter(memory, word, &on) == ncclSuccess) forgotten(memory);
+    });
   });
 }
 

@@ -803,10 +803,14 @@ function, consumer stamp or payload copy. For the distinct realized legs E and a
 
 ## Topology
 
-`struct mesh_link_map` (mesh-plan.h): MLX authors' [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh) supplies the full-mesh special case; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
-A map is an operand: its kind (mesh, ring, tree, graph), its nodes, its links and each link's cost (α, β; Hockney
-1994). Trees, rings with spurs, tori and full meshes are graphs of one representation, and `mesh_link_map_check`
-admits any of them, joined or not: the bridges' records while a cable is out are a map with a node no link joins.
+`struct mesh_link_map` (mesh-plan.h): an edge list, one edge a cable (`struct mesh_edge {a, b, cable, capacity}`, the
+capacity in bytes a second), the multigraph of the bridges' records; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
+A map is an operand: its nodes and its edges, each with its capacity (the β of Hockney 1994's α, β). Trees, rings
+with spurs, tori and complete graphs are edge lists of one representation, parallel cables each an edge of its own;
+the map kinds (mesh, ring, tree, graph, from 761223a8; the full-mesh case MLX's [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh)
+names) were deleted 2026-10-22 (the operator: "let us suppose that fully connected grpahs never exist in any situation
+where there are physical or measurable quantities about graphs"). A map may leave a node unjoined: the bridges'
+records while a cable is out are a map with a node no edge joins.
 Whether a map joins its nodes is `mesh_link_map_joined`, and the trees, collectives and sessions run only on one that
 joins its members (the tree-connectivity the paper's sufficiency needs). Neither source establishes that this runtime
 achieves the paper's bandwidth bound.

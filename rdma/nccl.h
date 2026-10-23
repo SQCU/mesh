@@ -467,6 +467,8 @@ const char* ncclMeshMetalPrelude(void);
 
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
 
+ncclResult_t ncclMeshMemFreeAfter(void* ptr, size_t word, cudaStream_t stream);
+
 ncclResult_t ncclMeshRegionExpired(int* expired);
 
 ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,

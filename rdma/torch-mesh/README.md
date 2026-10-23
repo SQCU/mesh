@@ -53,9 +53,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   `torch.frombuffer(mesh.lease(nbytes), dtype=...)`, or `torch_mesh.empty(shape, dtype=..., device="cpu")`.
 - Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
   Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
-  data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release returns the lease
-  once the stream's command buffer open at the release has completed (torch's MPS allocator's own rule for a buffer in
-  flight). Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
+  data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its lease holds one 32-bit
+  word past the tensor's bytes; its release encodes the library's stamp on the current MPS stream
+  (`ncclMeshMemFreeAfter`), and the lease is returned once that stamp has landed, after the work the stream held at the
+  release. Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
   it reads or writes region operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the region
   tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the region (0: outside it).
 - `torch_mesh.cpu_view(t)` is a CPU tensor over region tensor `t`'s own pages (MPS or CPU), with its sizes, strides and

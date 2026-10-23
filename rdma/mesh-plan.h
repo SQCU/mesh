@@ -10,10 +10,8 @@ int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node);
 
 int mesh_region(uint64_t *bytes,uint64_t *unleased);
 
-enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
-struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark; };
-
-int mesh_link_map_joined(const struct mesh_link_map *,uint32_t *apart);
+struct mesh_edge { uint32_t a,b,cable; uint64_t capacity; };
+struct mesh_link_map { uint32_t nodes,edges; struct mesh_edge *edge; uint32_t relays; uint32_t *next,*mark; };
 
 int mesh_routes(const struct mesh_link_map *,uint32_t *next);
 

@@ -7,39 +7,33 @@
 
 #pragma STDC FP_CONTRACT OFF
 
-static uint32_t mesh_all(const struct mesh_link_map *map){ return map->nodes+(map->next?map->relays:0); }
+static uint32_t mesh_all(const struct mesh_link_map *map){ return map->nodes+map->relays; }
+
+static int mesh_edge_joins(const struct mesh_edge *e,uint32_t u,uint32_t x){ return (e->a==u && e->b==x) || (e->a==x && e->b==u); }
 
 static int mesh_joins(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   const uint32_t N=mesh_all(map);
   if(u==x || u>=N || x>=N)return 0;
-  if(map->kind==MESH_LINKS_MESH && u<map->nodes && x<map->nodes)return 1;
-  for(uint32_t l=0;l<map->links;l++)
-    if((map->link[l][0]==u && map->link[l][1]==x) || (map->link[l][0]==x && map->link[l][1]==u))return 1;
+  for(uint32_t l=0;l<map->edges;l++)if(mesh_edge_joins(map->edge+l,u,x))return 1;
   return 0;
 }
 
 static uint64_t mesh_capacity(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   uint64_t sum=0;
-  for(uint32_t l=0;l<map->links;l++)
-    if((map->link[l][0]==u && map->link[l][1]==x) || (map->link[l][0]==x && map->link[l][1]==u))sum+=map->bandwidth?map->bandwidth[l]:0;
+  for(uint32_t l=0;l<map->edges;l++)if(mesh_edge_joins(map->edge+l,u,x))sum+=map->edge[l].capacity;
   return sum;
 }
 
 static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   const uint64_t capacity=mesh_capacity(map,u,x);
-  return capacity?(uint64_t)llround(8e9/(double)capacity*1e6):0;
+  return capacity?(uint64_t)llround(1e9/(double)capacity*1e6):0;
 }
 
-static uint32_t mesh_mark(const struct mesh_link_map *map,uint32_t v){ return map->mark?map->mark[v]:v; }
+static uint32_t mesh_mark(const struct mesh_link_map *map,uint32_t v){ return map->mark[v]; }
 
 uint32_t mesh_route_path(const struct mesh_link_map *map,uint32_t a,uint32_t b,uint32_t *path){
   const uint32_t N=mesh_all(map);
-  if(a==b || a>=N || b>=N)return 0;
-  if(!map->next){
-    if(!mesh_joins(map,a,b))return 0;
-    path[0]=a;path[1]=b;
-    return 2;
-  }
+  if(a==b || a>=N || b>=N || !map->next)return 0;
   const int up=mesh_mark(map,a)<mesh_mark(map,b);
   const uint32_t from=up?a:b,to=up?b:a;
   uint32_t count=0;
@@ -55,38 +49,10 @@ uint32_t mesh_route_path(const struct mesh_link_map *map,uint32_t a,uint32_t b,u
   return count;
 }
 
-int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
-  const uint32_t n=map->nodes;
-  if(map->next){
-    uint32_t path[mesh_all(map)+1];
-    for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)
-      if(!mesh_route_path(map,a,b,path)){
-        if(apart){apart[0]=a;apart[1]=b;}
-        return ENOTCONN;
-      }
-    return 0;
-  }
-  if(map->kind!=MESH_LINKS_GRAPH)return 0;
-
-  uint32_t *order=malloc((size_t)n*sizeof *order),reached=1;
-  unsigned char *seen=calloc(n,1);
-  if(!order || !seen){free(order);free(seen);return ENOMEM;}
-  order[0]=0;seen[0]=1;
-  for(uint32_t head=0;head<reached;head++)for(uint32_t l=0;l<map->links;l++)for(uint32_t e=0;e<2;e++)
-    if(map->link[l][e]==order[head] && !seen[map->link[l][1-e]]){seen[map->link[l][1-e]]=1;order[reached++]=map->link[l][1-e];}
-  uint32_t first=0;
-  while(first<n && seen[first])first++;
-  free(order);free(seen);
-  if(first==n)return 0;
-  if(apart){apart[0]=0;apart[1]=first;}
-  return ENOTCONN;
-}
-
 static int mesh_member(const uint64_t *set,uint32_t v){ return !set || (set[v/64]>>(v%64)&1); }
 
 int mesh_link_between(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   if(a==b || a>=map->nodes || b>=map->nodes)return 0;
-  if(!map->next)return mesh_joins(map,a,b);
   uint32_t path[mesh_all(map)+1];
   const uint32_t count=mesh_route_path(map,a,b,path);
   for(uint32_t i=1;i+1<count;i++)if(path[i]<map->nodes)return 0;
@@ -122,17 +88,16 @@ static void mesh_distances(uint32_t N,const unsigned char *joined,const uint64_t
 
 int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
   const uint32_t N=map->nodes+map->relays;
-  if(!N || map->kind>MESH_LINKS_GRAPH || (map->links && !map->link) || (map->relays && map->kind==MESH_LINKS_MESH))return EINVAL;
-  for(uint32_t l=0;l<map->links;l++)if(map->link[l][0]>=N || map->link[l][1]>=N || map->link[l][0]==map->link[l][1])return EINVAL;
+  if(!N || (map->edges && !map->edge) || !map->mark)return EINVAL;
+  for(uint32_t l=0;l<map->edges;l++)if(map->edge[l].a>=N || map->edge[l].b>=N || map->edge[l].a==map->edge[l].b)return EINVAL;
   const size_t pairs=(size_t)N*N;
   uint64_t *inverse=calloc(pairs,sizeof *inverse);
   unsigned char *joined=calloc(pairs,1),*done=malloc(N);
   struct mesh_length *length=malloc(N*sizeof *length);
   const int status=inverse && joined && done && length?0:ENOMEM;
 
-  for(uint32_t u=0;!status && map->kind==MESH_LINKS_MESH && u<N;u++)for(uint32_t x=0;x<N;x++)joined[(size_t)u*N+x]=u!=x;
-  for(uint32_t l=0;!status && l<map->links;l++){
-    const uint32_t u=map->link[l][0],x=map->link[l][1];
+  for(uint32_t l=0;!status && l<map->edges;l++){
+    const uint32_t u=map->edge[l].a,x=map->edge[l].b;
     inverse[(size_t)u*N+x]=inverse[(size_t)x*N+u]=mesh_hop_inverse(map,u,x);
     joined[(size_t)u*N+x]=joined[(size_t)x*N+u]=1;
   }
@@ -155,17 +120,10 @@ int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
 
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map){
   const uint32_t W=whole->nodes,N=n?n:W;
-  if(whole->relays || (whole->links && !whole->link) || whole->kind>MESH_LINKS_GRAPH)return -EINVAL;
-
-  const int every=whole->kind==MESH_LINKS_MESH;
-  uint32_t L=every?W*(W?W-1:0)/2:whole->links;
-  for(uint32_t a=0;every && a<W;a++)for(uint32_t b=a+1;b<W;b++){
-    uint32_t listed=0;
-    for(uint32_t k=0;k<whole->links;k++)
-      listed+=(whole->link[k][0]==a && whole->link[k][1]==b) || (whole->link[k][0]==b && whole->link[k][1]==a);
-    if(listed>1)L+=listed-1;
-  }
-  uint32_t *place=malloc(((size_t)W+1)*sizeof *place),*at=malloc(((size_t)N+W+1)*sizeof *at),*made=NULL,relays=0;
+  if(whole->relays || (whole->edges && !whole->edge) || !whole->next || !whole->mark)return -EINVAL;
+  const uint32_t L=whole->edges;
+  for(uint32_t k=0;k<L;k++)if(whole->edge[k].a>=W || whole->edge[k].b>=W || !whole->edge[k].capacity)return -EINVAL;
+  uint32_t *place=malloc(((size_t)W+1)*sizeof *place),*at=malloc(((size_t)N+W+1)*sizeof *at),relays=0;
   int error=place && at?0:ENOMEM;
   for(uint32_t k=0;!error && k<W;k++)place[k]=n?UINT32_MAX:k;
   for(uint32_t i=0;!error && i<N;i++){
@@ -177,44 +135,19 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
   }
   for(uint32_t k=0;!error && k<W;k++)if(place[k]==UINT32_MAX){place[k]=N+relays;at[N+relays]=k;relays++;}
   const uint32_t T=N+relays;
-  if(!error && (map->nodes<T || map->links<L)){map->nodes=T;map->links=L;error=ENOSPC;}
+  if(!error && (map->nodes<T || map->edges<L)){map->nodes=T;map->edges=L;error=ENOSPC;}
   else if(!error && relays && (!map->next || !map->mark))error=EINVAL;
   const uint32_t *table=whole->next;
-  if(!error && map->next && !table && W){
-    if(!(made=malloc((size_t)W*W*sizeof *made)))error=ENOMEM;
-    else error=mesh_routes(whole,made);
-    table=made;
-  }
   if(!error){
-    uint32_t l=0;
-    for(uint32_t a=0;every && a<W;a++)for(uint32_t b=a+1;b<W;b++){
-      const uint32_t from=l;
-      for(uint32_t k=0;k<whole->links;k++)
-        if((whole->link[k][0]==a && whole->link[k][1]==b) || (whole->link[k][0]==b && whole->link[k][1]==a)){
-          map->link[l][0]=place[a];map->link[l][1]=place[b];
-          if(map->bandwidth)map->bandwidth[l]=whole->bandwidth?whole->bandwidth[k]:0;
-          l++;
-        }
-      if(l==from){
-        map->link[l][0]=place[a];map->link[l][1]=place[b];
-        if(map->bandwidth)map->bandwidth[l]=0;
-        l++;
-      }
-    }
-    for(uint32_t k=0;!every && k<L;k++){
-      map->link[k][0]=place[whole->link[k][0]];map->link[k][1]=place[whole->link[k][1]];
-      if(map->bandwidth)map->bandwidth[k]=whole->bandwidth?whole->bandwidth[k]:0;
-    }
+    for(uint32_t k=0;k<L;k++)
+      map->edge[k]=(struct mesh_edge){place[whole->edge[k].a],place[whole->edge[k].b],whole->edge[k].cable,whole->edge[k].capacity};
     for(uint32_t i=0;map->next && i<T;i++)for(uint32_t j=0;j<T;j++)
       map->next[(size_t)i*T+j]=at[i]<W && at[j]<W?place[table[(size_t)at[i]*W+at[j]]]:i;
     for(uint32_t i=0;whole_node && i<T;i++)whole_node[i]=at[i];
     for(uint32_t i=0;map->mark && i<T;i++)map->mark[i]=at[i]<W?mesh_mark(whole,at[i]):UINT32_MAX-i;
-    map->nodes=N;map->links=L;map->relays=relays;map->kind=MESH_LINKS_GRAPH;
-    uint64_t linked=0;
-    for(uint32_t a=0;!relays && a<N;a++)for(uint32_t b=a+1;b<N;b++)linked+=mesh_joins(map,a,b);
-    map->kind=!relays && linked*2==(uint64_t)N*(N?N-1:0)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
+    map->nodes=N;map->edges=L;map->relays=relays;
   }
-  free(place);free(at);free(made);
+  free(place);free(at);
   return error?-error:(int)N;
 }
 
@@ -478,21 +411,14 @@ uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank
 static uint32_t mesh_edges(const struct mesh_link_map *map,uint32_t *from,uint32_t *to,double *cap,uint32_t *way){
   const uint32_t n=map->nodes;
   uint32_t E=0;
-  for(uint32_t l=0;l<map->links;l++){
-    const uint32_t a=map->link[l][0],b=map->link[l][1];
+  for(uint32_t l=0;l<map->edges;l++){
+    const uint32_t a=map->edge[l].a,b=map->edge[l].b;
     if(a>=n || b>=n || a==b)continue;
     if(from){
       uint32_t w=0;
       for(uint32_t e=0;e<E;e++)w+=(from[e]==a && to[e]==b) || (from[e]==b && to[e]==a);
-      from[E]=a;to[E]=b;way[E]=w;cap[E]=map->bandwidth && map->bandwidth[l]?(double)map->bandwidth[l]/8:1;
+      from[E]=a;to[E]=b;way[E]=w;cap[E]=(double)map->edge[l].capacity;
     }
-    E++;
-  }
-  for(uint32_t a=0;map->kind==MESH_LINKS_MESH && a<n;a++)for(uint32_t b=a+1;b<n;b++){
-    int linked=0;
-    for(uint32_t l=0;l<map->links;l++)linked|=(map->link[l][0]==a && map->link[l][1]==b) || (map->link[l][0]==b && map->link[l][1]==a);
-    if(linked)continue;
-    if(from){from[E]=a;to[E]=b;way[E]=0;cap[E]=1;}
     E++;
   }
   return E;

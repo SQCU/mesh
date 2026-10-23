@@ -86,7 +86,7 @@ class Top:
             now = mesh.current()
             self.names, self.unmapped = {number: peers.label(number, TABLE) for number in now.nodes}, None
             labels = [peers.label(number, TABLE) for number in now.nodes]
-            self.paired = {frozenset((labels[a], labels[b])) for a, b in now.map.pairs}
+            self.paired = {frozenset((labels[a], labels[b])) for a, b, _, _ in now.map.edges}
             records = {record["node"]: record for record in mesh.nodes()}
         except (OSError, ValueError) as error: self.paired, self.unmapped = set(), str(error)
         for number, name in [(own, self.me)] + list(self.names.items()):

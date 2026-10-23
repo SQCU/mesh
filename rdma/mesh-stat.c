@@ -37,19 +37,19 @@ static void hang_say(const uint64_t hang[3]){
 }
 int main(void){
   struct port_view port[MESH_PORTS];
-  uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
-  uint64_t *bandwidth=NULL;
+  uint32_t node=0,*nodes=NULL,room=64,edges=64;
+  struct mesh_edge *edge=NULL;
   uint64_t hang[3]={0};
   const int ports=ports_read(port,MESH_PORTS,&node,hang);
   if(ports<0){printf("{\"up\":false,\"errno\":%d,",-ports);hang_say(hang);printf("}\n");return 0;}
   struct mesh_link_map map={0};
   int count=-ENOSPC;
   while(count==-ENOSPC){
-    nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);bandwidth=realloc(bandwidth,(links+1)*sizeof *bandwidth);
-    if(!nodes || !link || !bandwidth)return 1;
-    map=(struct mesh_link_map){.kind=MESH_LINKS_MESH,.nodes=room,.links=links,.link=link,.bandwidth=bandwidth};
+    nodes=realloc(nodes,(room+1)*sizeof *nodes);edge=realloc(edge,(edges+1)*sizeof *edge);
+    if(!nodes || !edge)return 1;
+    map=(struct mesh_link_map){.nodes=room,.edges=edges,.edge=edge};
     count=mesh_map(NULL,0,nodes,&map);
-    room=map.nodes;links=map.links;
+    room=map.nodes;edges=map.edges;
   }
   uint64_t region=0,unleased=0;
   if(mesh_region(&region,&unleased))region=unleased=0;
@@ -64,12 +64,9 @@ int main(void){
   else{
     printf("],\"map\":{\"nodes\":[");
     for(int i=0;i<count;i++)printf("%s%u",i?",":"",nodes[i]);
-    printf("],\"links\":[");
-    for(uint32_t l=0;l<map.links;l++){
-      printf("%s[%u,%u",l?",":"",nodes[map.link[l][0]],nodes[map.link[l][1]]);
-      if(map.bandwidth[l])printf(",%llu]",(unsigned long long)map.bandwidth[l]);
-      else printf(",null]");
-    }
+    printf("],\"edges\":[");
+    for(uint32_t l=0;l<map.edges;l++)
+      printf("%s[%u,%u,%u,%llu]",l?",":"",nodes[map.edge[l].a],nodes[map.edge[l].b],map.edge[l].cable,(unsigned long long)map.edge[l].capacity);
     printf("]}");
   }
   struct mesh_node_health health[64];
@@ -82,6 +79,6 @@ int main(void){
     printf("\",\"booted\":%llu,\"available\":%llu}",(unsigned long long)h->booted,(unsigned long long)h->available);
   }
   printf("]}\n");
-  free(nodes);free(link);free(bandwidth);
+  free(nodes);free(edge);
   return 0;
 }

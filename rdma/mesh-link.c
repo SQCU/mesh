@@ -383,7 +383,7 @@ static void map_publish(void){
   for(uint32_t k=0;k<known_count;k++)if(known[k].node==M->node){reached[k]=1;order[tail++]=k;}
   while(head<tail){
     const uint32_t a=order[head++];
-    for(uint32_t b=0;b<known_count;b++)if(!reached[b] && mesh_joined(known+a,known+b,NULL,0)){reached[b]=1;order[tail++]=b;}
+    for(uint32_t b=0;b<known_count;b++)if(!reached[b] && mesh_joined(known+a,known+b,NULL,NULL,0)){reached[b]=1;order[tail++]=b;}
   }
   uint64_t kept=0;
   for(uint32_t k=0;k<known_count;k++){

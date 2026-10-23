@@ -265,7 +265,7 @@ static void program_free(struct mesh_program *program) {
 }
 
 static void map_free(struct mesh_link_map *map) {
-  free(map->link); free(map->bandwidth); free(map->next); free(map->mark);
+  free(map->edge); free(map->next); free(map->mark);
   *map = (struct mesh_link_map){0};
 }
 
@@ -542,20 +542,19 @@ static uint32_t joined(const struct report *reports, uint32_t a, uint32_t b, uin
 
 static int map_of(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
-  uint32_t links = 0, cable[MESH_STREAMS];
+  uint32_t edges = 0, cable[MESH_STREAMS];
   uint64_t bandwidth[MESH_STREAMS];
   for (uint32_t a = 0; a < n; a++)
-    for (uint32_t b = a + 1; b < n; b++) links += joined(reports, a, b, cable, bandwidth);
+    for (uint32_t b = a + 1; b < n; b++) edges += joined(reports, a, b, cable, bandwidth);
   struct mesh_link_map *map = &comm->map;
-  *map = (struct mesh_link_map){MESH_LINKS_GRAPH, n, links, calloc(links + 1, sizeof *map->link), calloc(links + 1, sizeof *map->bandwidth), 0,
-                                NULL, calloc(n + 1, sizeof *map->mark)};
-  if (!map->link || !map->bandwidth || !map->mark) { map_free(map); return ENOMEM; }
-  uint32_t l = 0;
+  *map = (struct mesh_link_map){n, 0, calloc(edges + 1, sizeof *map->edge), 0, NULL, calloc(n + 1, sizeof *map->mark)};
+  if (!map->edge || !map->mark) { map_free(map); return ENOMEM; }
   for (uint32_t a = 0; a < n; a++) {
     map->mark[a] = reports[a].node;
     for (uint32_t b = a + 1; b < n; b++)
       for (uint32_t c = 0, cables = joined(reports, a, b, cable, bandwidth); c < cables; c++) {
-        map->link[l][0] = a; map->link[l][1] = b; map->bandwidth[l] = bandwidth[c]; l++;
+        if (!bandwidth[c]) { map_free(map); return EINVAL; }
+        map->edge[map->edges++] = (struct mesh_edge){a, b, cable[c], bandwidth[c] / 8};
       }
   }
   return 0;
@@ -990,8 +989,24 @@ ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank) {
   return ncclSuccess;
 }
 
+struct after { void *ptr; const _Atomic uint32_t *word; struct after *next; };
+static struct after *afters;
+
+static void afters_return(void) {
+  pthread_mutex_lock(&attach_lock);
+  struct after *done = NULL;
+  for (struct after **at = &afters; *at;) {
+    struct after *a = *at;
+    if (atomic_load_explicit(a->word, memory_order_acquire)) { *at = a->next; a->next = done; done = a; }
+    else at = &a->next;
+  }
+  pthread_mutex_unlock(&attach_lock);
+  for (struct after *a = done, *next; a; a = next) { next = a->next; ncclMemFree(a->ptr); free(a); }
+}
+
 ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   if (!ptr) return fail(ncclInvalidArgument, "ptr is NULL");
+  afters_return();
   pthread_mutex_lock(&attach_lock);
   struct attach *a = NULL;
   struct mesh_section lease = {0};
@@ -1044,6 +1059,31 @@ ncclResult_t ncclMemFree(void *ptr) {
   pthread_mutex_unlock(&attach_lock);
   if (!found) return fail(ncclInvalidArgument, "ncclMemFree of %p: no lease of this process (ncclMemAlloc)", ptr);
   if (status) return fail(ncclInternalError, "ncclMemFree of %p: row %u of this node's region heads no lease of this process", ptr, row);
+  return ncclSuccess;
+}
+
+static int lease_buffer(const void *ptr, void **buffer, size_t *offset);
+static ncclResult_t gpu(struct metal_result step, const char *what);
+
+ncclResult_t ncclMeshMemFreeAfter(void *ptr, size_t word, cudaStream_t stream) {
+  const ncclMeshStream *on = stream;
+  void *buffer = NULL;
+  size_t offset = 0;
+  if (!ptr || !on || !on->commandBuffer || !on->commandEncoder || word % sizeof(uint32_t))
+    return fail(ncclInvalidArgument, "ncclMeshMemFreeAfter without its lease, a 4-byte aligned word, or a command buffer and its encoder");
+  if (lease_buffer(ptr, &buffer, &offset)) return fail(ncclInvalidArgument, "ncclMeshMemFreeAfter of %p: no lease of this process", ptr);
+  afters_return();
+  struct after *made = malloc(sizeof *made);
+  const char *message = NULL;
+  struct metal_program *program = made ? metal_begin(on->commandBuffer, on->commandEncoder, &message) : NULL;
+  if (!program) { free(made); return fail(ncclSystemError, "ncclMeshMemFreeAfter: %s", made ? message : "out of memory"); }
+  const ncclResult_t result = gpu(metal_stamp(program, buffer, offset + word), "a lease's stamp");
+  metal_end(program, NULL, 0);
+  if (result) { free(made); return result; }
+  pthread_mutex_lock(&attach_lock);
+  *made = (struct after){ptr, (const _Atomic uint32_t *)((const char *)ptr + word), afters};
+  afters = made;
+  pthread_mutex_unlock(&attach_lock);
   return ncclSuccess;
 }
 

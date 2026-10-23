@@ -105,8 +105,8 @@ landed in place (a COPY earlier in the group), and the landed bytes are the NIC'
 - Every wait of a bootstrap, blocking init or not, is a 100 ms slice after which the revoke and the phase's end are read
   again (design/rubrics.md M3, C5). A phase ends `MESH_PLATFORM_NS` after the init began where no rank was met, and
   `MESH_PLATFORM_NS` after its first rank met (the root's first accept, a non-root's connect) for the rest of it; the
-  second gather has its own `MESH_PLATFORM_NS`. A root that no rank meets therefore fails as a value and is made again
-  by its caller; nothing waits on a peer that never comes.
+  second gather has its own `MESH_PLATFORM_NS`. A root that no rank meets therefore fails as a value, for its caller to
+  run again (C6); nothing in the library or its callers retries it.
 - While the process holds a lease of a bridge that stopped, its next lease (`ncclRemoteError`) and communicator
   (`ncclInvalidUsage`: the process's own leases, which only it can free) are refused naming it,
   until it has freed every such lease: a process never holds leases of two regions. A node's region is most of its
@@ -148,10 +148,8 @@ section 14) reaches the next communicator with no edit and no restart. libmesh's
 nodes the same way.
 
 The bridges' records are a map whatever reaches what: a node that still has a record may be reached by no bridge,
-and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it is.
-Whether a map joins every two of its nodes is
-`mesh_link_map_joined`, which names the first two it leaves apart. The trees and the
-collectives run only on a map that joins their members: a communicator's collective on a map that does not fails as a
+and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it is. The
+trees and the collectives run only on a map that joins their members: a communicator's collective on a map that does not fails as a
 value naming two members no path between members joins (`ncclInvalidUsage`).
 
 Every member makes the map from the same gathered reports, so the members' maps are one. Programs, forms and the solver
@@ -647,6 +645,11 @@ Porting:
 - `ncclMeshMemBuffer(ptr, &buffer, &offset)` is the Metal buffer over the whole lease holding `ptr` (any byte of it)
   and ptr's offset in it, made once and released by `ncclMemFree`: the buffer a tensor allocator makes MPS tensors over
   (torch-mesh's region tensors).
+- `ncclMeshMemFreeAfter(ptr, word, stream)` returns ptr's lease once the work the stream holds before the call has
+  ended: it encodes one `stamp` dispatch on the stream (its command buffer and encoder), which adds one to the 32-bit
+  word at byte `word` of the lease (the caller's, zero when the lease was taken), and the lease is returned at the
+  library's next lease taken or deferred after the word reads one (design/pages-and-functions.md, Freeing 6: the use
+  count goes down when the reading program's stamp lands; no completion handler stands in for it).
 - **Zero copy.** The operator, 2026-10-21: "zero copy methods must always be used over access by copy because
   memory bandwidth and flops are too scarce on this hardware api"; "good performance cannot be opt-in ... code which
   can't perform well can fail instead of being run". The bridge sends a crossing's bytes from the pages they lie in and
@@ -886,19 +889,24 @@ gathers, parses or joins bridge records itself.
   the region's arena and the bytes no lease holds. `mesh_nodes_health`: every node's record the bridge holds (its
   bridge's node, its region's bytes, the node's memory and `hw.model`, its boot and the memory available as its bridge
   last sampled it).
-- **A link map** (`struct mesh_link_map`), an operand: `nodes` nodes and `links` links of a kind. `MESH_LINKS_MESH`
-  every pair linked; `MESH_LINKS_RING` link i's second node follows its first around one cycle through every node;
-  `MESH_LINKS_TREE` link i's first node is its second's parent; `MESH_LINKS_GRAPH` the links as given, any connected
-  graph. `bandwidth` (NULL: none) is each link's, a hardware fact: the solver's capacity of a pair is its parallel links'
-  bandwidths summed, and `mesh_routes` takes of routes of equally few links the one over the faster hops.
+- **A link map** (`struct mesh_link_map`), an operand: `nodes` nodes and an edge list, one edge a cable (`struct
+  mesh_edge {a, b, cable, capacity}`, the capacity in bytes a second), built from the bridges' records of each cable
+  (`mesh_map`, a communicator's `map_of`: each cable's bandwidth the lesser of its two ends', over 8). The capacity is a
+  hardware fact: the solver's capacity of a pair is its parallel cables' summed, and `mesh_routes` takes of routes of
+  equally few edges the one over the faster hops. A construction given an edge with no capacity fails (EINVAL; the
+  communicator's init, `mesh_map`, `mesh_map_members`, Python's `LinkMap`): no capacity is defaulted. There are no map
+  kinds (the MESH, RING, TREE and GRAPH of 761223a8 to this revision kept a second store of which pairs are joined,
+  beside the edges, which no parallel cable fit, and a complete map's unlisted pairs were edges of capacity 1 byte a
+  second).
   `relays` are nodes numbered from `nodes` that a route may cross and that hold no rank (a communicator's map has none:
-  the bridges forward nothing). `mark` is each node's and relay's mark (its bridge's node number). `next` is the
-  routing table, of N = nodes + relays: each node b's in-tree, `next[v x N + b]` v's parent in it. The route between a
-  and b is the path up the in-tree of the one of the higher mark from the other, so a route and its reverse are one
-  path. `mesh_link_map_joined` names the first two nodes a map does
-  not join (ENOTCONN); `mesh_link_between` is whether the map links two of its nodes (with a table, their route crossing
-  relays alone); `mesh_route_path` writes a route: up the map's own table, or, where it has none, the direct link
-  alone; no table is derived where a route is read.
+  the bridges forward nothing). `mark` is each node's and relay's mark (its bridge's node number), which every map
+  carries. `next` is the routing table, of N = nodes + relays: each node b's in-tree, `next[v x N + b]` v's parent in
+  it. The route between a and b is the path up the in-tree of the one of the higher mark from the other, so a route
+  and its reverse are one path. `mesh_link_between` is whether the map links two of its nodes (their route crossing
+  relays alone); `mesh_route_path` writes a route up the map's own table (none where the map has no table); no table
+  is derived where a route is read, and `mesh_map_members` takes the whole map's table and marks (EINVAL without
+  them). The table-less forms (a route as the direct link alone, a join check by search, a members' map whose
+  table it derived, default marks) served synthetic maps alone and are deleted.
 - `mesh_routes(map, next)`: each node's in-tree of shortest routes toward it, by fewest links, then the least sum of its
   hops' inverse bandwidths in whole fs a byte (Dijkstra [1959] in its dense form, every length an exact integer), each
   node's parent among its equals the one of the least hash of its mark, the parent's and the root's (48 bits of
@@ -906,7 +914,8 @@ gathers, parses or joins bridge records itself.
   [RFC 2992]). So routes of equal length spread over the links, every bridge and member that holds the same records
   makes the same table, and a route moves only where the shortest routes between its ends change.
 - `mesh_map_members(whole, members, n, whole_node, map)`: the members' map of a whole map, its other nodes relays,
-  two members linked where their route crosses no other member; `mesh_map` is it over the bridge's records as they
+  every edge of the whole map kept with its cable and capacity, two members linked where their route crosses no other
+  member; `mesh_map` is it over the bridge's records as they
   are when it is read.
 - **Trees** (`struct mesh_trees`): tree t rooted at `root[t]`, node v's parent `parent[t x nodes + v]`, `log_weight[t]`
   its unnormalised log share of what its root gathers and sends; a root's trees split its elements by exp(weight), each

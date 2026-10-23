@@ -16,7 +16,7 @@ static inline uint64_t mesh_started(pid_t process){
 }
 static inline int mesh_holds(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_gone(pid); }
 void mesh_retire(struct hdr *,uint64_t client);
-uint32_t mesh_joined(const struct mesh_record *,const struct mesh_record *,uint64_t *bandwidth,uint32_t room);
+uint32_t mesh_joined(const struct mesh_record *,const struct mesh_record *,uint32_t *cable,uint64_t *bandwidth,uint32_t room);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
 uint32_t mesh_arena_free(struct hdr *);
 int mesh_lease_return(struct mesh_ctx *,uint32_t row);
