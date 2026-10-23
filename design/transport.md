@@ -165,7 +165,7 @@ down, and connects failing with EIO from its own stale addressing after the Mini
 ## 5. Every loop of ours can stop; only a kernel call cannot
 
 Every loop the transport needs polls memory without blocking:
-- the bridge's receive thread (`ibv_poll_cq`, which returns at once) and send thread (reads supplied words);
+- a port's progress thread (`ibv_poll_cq`, which returns at once, and reads of supplied words);
 - a host wait and a GPU wait on a landed word.
 
 Any of them stops when a flag says so: the bridge's stop, a watchdog or heartbeat process's semaphore, a revoke (a
@@ -409,7 +409,7 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   and such a landing entry's pages land in the spare page (the port's link page). So a SEND always fills its receive
   exactly (TN3205), ends whose lists differ garble their own pages and never fail the link, and neither end knows the
   other's addresses.
-- The send thread posts a unit from its page once the entry's word says the page is ready; the receive thread posts
+- A port's one progress thread posts a unit from its page once the entry's word says the page is ready, posts
   each receive straight into its page (at most a window ahead) once the entry's word says the page's reader released
   it (a page is written again only after release), and raises `landed` once every page before has landed, whichever
   lane carried it. A SEND whose receive is not yet posted waits in the hardware's credit (TN3205): posting a receive is
@@ -437,9 +437,9 @@ statistic, not a data dependent control flow for a collective verb or a bridge t
   Posting in order keeps both lanes' counts a function of one number, the stream's pages posted: two lanes posted
   apart could leave a holding that ended at counts that no sequence of pages fills.
 - A process holds a stream as it holds rows: it takes the owner word from 0 to its own by one compare-and-swap
-  (`mesh_stream_take`), nothing awaited. The send thread then begins the holding, its walk at the stream's pages sent
-  so far, and the receive thread its landing walk at the stream's pages posted so far: no unit of an earlier holding
-  is outstanding then (a holding's end, below).
+  (`mesh_stream_take`), nothing awaited. The port's progress thread then begins the holding, its send walk at the
+  stream's pages sent so far and its landing walk at the stream's pages posted so far, in one pass: no unit of an
+  earlier holding is outstanding then (a holding's end, below).
 - The facts. The bridge tells each of a stream's two lanes' units over its pairing, each way, posted and completed
   (`posts`), and the row each unit names (`rows`). By (1) nothing is posted on a stream between holdings, so `posted`
   is a constant while no holder presents: the taker reads it as it takes the stream, and nothing is read while it moves.
@@ -465,14 +465,14 @@ excess and must be corrected"). The analysis, with its literature, is design/ext
 D(P) the extents a program declares, U(P, t) those it uses, L(P, t) those some later event of it may still use, and
 W(t) those requests already handed to the hardware reference, the plan's window in flight.
 - The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`), and the event loop does so for
-  a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The send thread ends the
-  holding at once at the give, or at its client's retirement: nothing more of it is posted, its entries taken and not
-  posted are dropped, and the receive thread is told. Each unit is told before it is posted (its row in its lane's
+  a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The progress thread ends the
+  holding at once at the give, or at its client's retirement: nothing more of it is posted, and its entries taken and
+  not posted are dropped. Each unit is told before it is posted (its row in its lane's
   ring, then its lane's count, sequentially consistent) and posted only while its holding is still its holder's (its
   owner word not given, its client's slot its own: mesh-link.c `unit_told`). A client that gives or retires and then
   reads the lanes' units therefore sees every unit that will ever be posted for the holding. Nothing in the bridge
   closes a holding with its peer: no message, no totals, no clock.
-- Once the receive thread has stopped too, the send thread reads the stream's two lanes. Where every SEND posted has
+- On its next pass, that pass's completions taken, the progress thread reads the stream's two lanes. Where every SEND posted has
   completed and every receive posted has landed, the holding's words are made new and the owner word goes to 0: the
   stream is free.
 - Where anything is outstanding, the holding's words are made new, its owner word is `MESH_STREAM_GIVEN` alone (it
@@ -517,7 +517,7 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   different machines), in a
   process group of its own, its parent's socket at descriptor 3. It opens the port's device, registers the region,
   makes and connects the link's queue pairs (its plan's, from the queue pairs both ends' devices hold, each end's told
-  in its HELLO: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)) and runs the port's progress threads. The parent asks it to open,
+  in its HELLO: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)) and runs the port's progress thread (one: its SENDs and receives in one pass). The parent asks it to open,
   make, connect, halt and end; it answers each, naming the pairing it was asked for, and tells failed lanes, absorbed
   faults, guards not held and terminations it heard. Queue pairs exist only in a child, and a child is the bridge
   ("the bridge and only the bridge may ever have access to that exact data structure", 10-20).
