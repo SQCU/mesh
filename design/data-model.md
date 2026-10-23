@@ -3,6 +3,10 @@
 These sections say what the hardware is. Each number names its source. The files measurement.md and facts.md and the
 folder output_data/ are in the metal-microbench repo. The papers are listed at the end.
 
+Code here only loses waits, syncs, barriers, guards, data-dependent control flow, globals and side effects. None of
+them is ever added to code that did not have it. Section 6 works out why, from what sections 1-5 measure. It also says
+when one is ever added, and why data code never reads the driver's state.
+
 ## 1. The M-series accelerator
 
 An M-series chip's CPU, GPU, Neural Engine and Thunderbolt RDMA engines share one DRAM. There is no device memory
@@ -154,7 +158,132 @@ node a partial passes through can spend its own FLOPs and bandwidth on it. It ca
 the sum on. A collective here is a set of nodes that compute while they forward, not a set of endpoints joined by a
 fabric.
 
-## 6. What the bridge must have
+**What these leave out of code.** Sections 1-5 count each crossing, each wait and each pass over the bytes, and they
+price each one. A wait, a sync, a barrier or a guard is always one more of these, or a fixed cost on every step.
+Nothing in sections 1-3 makes one cheaper. So code here only loses them, and with them data-dependent control flow,
+globals and side effects. None of them is added to code that did not have it. Section 6 works this out.
+
+## 6. Why code here only loses waits and guards
+
+This section works out, from sections 1-5, why no choice here ends in adding a wait, a sync, a barrier or a guard. It
+says when one is ever added. Then it says why data code never reads the driver's state.
+
+**What each one costs.**
+
+- A wait holds a step until a word lands. A poll sees a store 0.58 µs after it is made, at the soonest (section 1).
+  If the word comes from another node, it first crosses, in about 3.6 µs (section 2). Each wait is one more in the
+  "Waits" column of section 5's table.
+- A sync makes the host wait until the GPU's work ends. The next work then starts in a new command buffer, 13.7-18.7
+  µs. Without the sync it could have been a dispatch in an open one, 0.9-1.4 µs (section 1).
+- A barrier makes each party wait until every other one has arrived. Between nodes that is at least one more crossing
+  and one more wait, and no data moves in it (sections 2 and 5). Between processes on one node, it is a poll of another
+  process's word. That takes 0.58 µs at the soonest, and then as long as the other process takes.
+- A guard checks at run time something that could have been fixed before the call. So it is a choice at run time.
+  Data-dependent control flow is the same kind of choice. In section 5's table, each choice at run time came with more
+  of the rest. Asking first has 3 crossings and 3 waits. Landing with a header has 2 waits and 3 passes over the bytes.
+- A global or a side effect is state that one call leaves for another to find. The other call reads it and checks it
+  before it acts. That read is a wait, and that check is a guard.
+
+Section 4 measured some of these together. A 3 KB crossing took 11.7 µs as plain dispatches in a fixed order. It took
+24.1 µs when each completion ran a scheduling kernel, the operand was copied to scratch, and the waits read gate words
+(measurement.md:3230-3238).
+
+**Nothing in the hardware makes them cheaper.** The driver has no remote write, no remote read and no atomics. It
+sends no acknowledgement (section 3). So a node learns what another node did only when a SEND lands, and that is a
+crossing every time. On the GPU, no threadgroup reads another's threadgroup memory. Threadgroups see each other's writes
+only through device memory, and within one dispatch only in coherent memory (section 1). So a wait between threadgroups
+is a poll of device memory. Faster parts make each crossing and each pass cheaper. They don't change how many there are
+(section 5).
+
+**So adding one can only slow a program.** A step with one more wait, crossing or pass can't end sooner than it did
+without it. A write posted ahead takes about 4.2 µs (section 5). One more poll, 0.58 µs, adds about a seventh to that.
+One more crossing and its poll double it. A new command buffer, 13.7-18.7 µs, is three to four and a half times it.
+The chain's whole step takes 27.2-28.8 µs (section 4), and a new command buffer in each step would add about half to
+two thirds again. Every hop of every step pays it again (section 5).
+
+The operator, 2026-10-21: "we are here to REMOVE fences, REMOVE guards, REMOVE waits. it is the responsibility of DATA
+PROCESSING FUNCTIONS to not overwrite each other's buffers." The operator, 2026-10-18: "all of these sound like attempts
+to add statefulness to functions that don't need it, and in so doing create contagious brittleness"
+(design/rubrics.md M4). Of one cable waiting on another's word before it begins, the operator, 2026-10-23: "i do not
+want an ipc barrier happening inside of networking code" (design/transport.md section 14).
+
+**When one is ever added.** The operator, 2026-10-23: "the user will appear and demand the minimum amount of
+statefulness, side effects, globals, and guards b presenting algorithmic problems that cannot be handled in any way
+wtihout them". So a wait, a sync, a barrier, a guard, a global or a side effect comes in only when the operator
+presents an algorithmic problem that can't be solved any other way. Then exactly the minimum comes in, at the
+operator's demand. None comes in as a precaution.
+
+**Data code and the driver's state.** The bridge turns fast. The driver's completions are a ring that the controller
+writes, and the bridge's thread reads it in user space. That thread saw each completion within about 0.04 µs
+(measurement.md:3169-3170). Data code turns slower. Its step goes through a dispatch, 0.9-1.4 µs, or a command buffer,
+13.7-18.7 µs (section 1). Its host loop runs in the program's own language. A dispatch alone is more than 20 times the
+bridge's turn, and a command buffer is more than 300 times it. So data code can't return as fast as bridge code.
+
+Say data code had synchronous access to some driver state. The driver would hold that state until data code had read
+it. Then the driver would wait at data code's pace, not its own. So data code never has synchronous access to any
+driver state.
+
+Now say data code reads driver state while the driver goes on. The bridge moves on within about 0.04 µs. Data code acts
+a dispatch or more later. By then the state it read has moved on, so the read can't inform any action. For the read to
+inform one, the state would have to hold still until data code acts. That is synchronous access again. So asynchronous
+access to driver state is a contradiction. It is either synchronous, or it informs nothing.
+
+The operator, 2026-10-23: "data processing code cannot return as fast as bridge code returns, so data processing code
+can never be permitted to have synchronous access to any driver state", and asynchronous access "is tautological,
+contradictory, or otherwise is algorithmically impossible".
+
+**The coupling that is left.** The data model already has the one coupling that works. Data code names its pages, and
+their order, before the call (section 3; section 5, position 1). The bridge posts receives into those pages, and words
+land in them (sections 2 and 3). Data code reads its own pages. It never reads the driver. The operator, 2026-10-23:
+"it is the bridge's job to transact as fast as possible, it is the collective's job to use every rank to the maximum
+extent possible and measure the residual in completion time between ranks to allow for cross-function-evaluation
+rebalancings, and it is the data processing job's code to declare enormous tensors or workloads and let the collective
+and bridge api backend converge on the fastest possible solving time the hardware can ever support no matter what the
+mesh graph is" (the whole passage is in section 8).
+
+**Proposals that keep coming back.** Some proposals came up again and again on 2026-10-23. Each one adds a thing this
+section has priced. Each is answered by what the document already shows.
+
+- **A trait of today's code, taken for a limit of the hardware.** "A relay isn't a member, so it can't know." "A
+  call's counts exist only at the callers." "One lane can't carry two flows." "Relays need lanes of their own." Each
+  names how today's code is laid out, not what the hardware does. Where each page lands, and in what order, is fixed
+  before the call (sections 3 and 5). The callgraph and the tensors' shapes are fixed when the program is compiled (the
+  operator, 2026-10-22; design/rubrics.md D2). So every node on a path can know the same facts ahead of time. The shape
+  of today's code limits nothing.
+- **A check against the program's own error.** Examples are a check of each call against its declared plan, and a
+  pass/fail test against a reference. Each is a guard: a choice at run time, with its read and its wait. The operator,
+  2026-09-10: "there are to be no parity mechanisms or syncs, guards, waits, checks, or inferences in the mesh
+  computation transport and reduction layer" (design/pages-and-functions.md). Of a reference, the operator,
+  2026-10-23: "what is a reference and why are you running anything related to it?"
+- **One shape tested, then a threshold or a fixed rule to protect it.** One example is a piece under 8 pages sent whole
+  on the first cable (design/transport.md section 14). Another is half the GPU's cores for the chain's workers, chosen
+  at width 1,024 (docs/writing-a-service.md, Workers). At width 16,384 on two nodes, the chain with it took 1,539 µs a
+  step, where its record took 865, about 78% slower (output_data/hourly/log.jsonl, run 20261023T2305Z). A threshold on
+  size is a choice at run time, and the bridge does not care how big a write is (section 8). The demo is judged across shapes. The operator, 2026-10-23: "we don't care about artifacts tah only appear at one
+  tensor shape ever ... this is why the lstm-chain-demo demands that multiple shapes be run".
+- **A wait or a handshake between processes or threads.** Examples are other cables waiting on the first cable's count
+  before they begin, and two threads in one port handing each holding between them. Each is a barrier inside
+  networking code, in the operator's words above. The count is deleted, and a port has one progress thread
+  (design/transport.md sections 5 and 14).
+- **State kept from one holding to the next.** An example is a standing ring of relays kept for a pairing's whole life.
+  That is state one call leaves for the next, a global with side effects. The next call reads it and checks it, which
+  is a wait and a guard (above).
+- **A message, a header or a descriptor on each call.** Each is a crossing, a wait or a pass that a write posted ahead
+  does not have. Asking first has 3 crossings and 3 waits. Landing with a header has 2 waits and 3 passes (section 5's
+  table).
+- **Large buffers outside the region.** Examples are private float64 copies, contiguous copies of the weights, and
+  evaluation in private memory. Every page a program uses lies in the registered region, so nothing is pinned at a call
+  (section 2). The page table both ends hold is the program's memory (section 5, position 1). A buffer outside it
+  reaches a cable only by a copy into it, which is one more pass over the bytes.
+- **"Busy links", and "a relay takes capacity from another pair".** These are guesses made in place of a measurement.
+  The collective measures the residual, how far apart the ranks finish, and work moves by it (section 8). The operator,
+  2026-10-23: "there is no such thing as link business if there is a transfer backend mediated schedule of
+  transactions" (section 8).
+- **One more resident process.** The heartbeat is the one process launchd keeps on a node (the operator, 2026-10-21).
+  The bridge it opens is the one writer on each device (section 7). Another resident process is one more party whose
+  state the others would read and wait on.
+
+## 7. What the bridge must have
 
 Each requirement below follows from a section above, which it names.
 
@@ -188,7 +317,7 @@ poll sees a store 0.58 µs after it is made, and a dispatch costs 0.9-1.4 µs (s
 3.6 µs after its post (section 4). So a write posted ahead takes about 4.2 µs (section 5). Each µs the bridge adds is
 a large share of that, about a quarter.
 
-## 7. Writes over many hops and many paths
+## 8. Writes over many hops and many paths
 
 This section works out what a write costs when it takes more than one path. It uses three figures. B is one cable's
 rate, about 9.2 GB/s each way with both ways in use (9.21 and 9.25 GB/s on 2026-10-01, measurement.md:364). P is a

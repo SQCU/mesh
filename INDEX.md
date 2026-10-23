@@ -22,8 +22,14 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 - [design/data-model.md](design/data-model.md): the hardware preliminaries of the data model: the M-series
   accelerator and its caches beside sm90's, memory to NIC to memory on InfiniBand and here, the Thunderbolt RDMA
-  driver's SEND and RECV, and what the chain and the LSTM cost. Section 6 gives what the bridge must have, each
-  requirement tied to the section it follows from. Section 7 works out writes over many hops and many paths: the cut
+  driver's SEND and RECV, and what the chain and the LSTM cost. Section 6 works out from them why code here only loses
+  waits, syncs, barriers, guards, data-dependent control flow, globals and side effects (each is one more crossing,
+  wait or pass, or a fixed cost per step, and nothing in the hardware makes it cheaper), that one comes in only at the
+  operator's demand for an algorithmic problem nothing else solves, and why data code has neither synchronous access
+  to driver state (the driver would wait at its pace) nor asynchronous access (a contradiction), only pages declared
+  before the call and words that land; then the proposals that kept coming back on 2026-10-23, each answered from
+  the sections before it. Section 7 gives what the bridge must have, each
+  requirement tied to the section it follows from. Section 8 works out writes over many hops and many paths: the cut
   that bounds a transfer, the DMA a receiving node and a relay spend, and the sizes past which more paths win, as facts
   of the hardware rather than rules the bridge applies; then who balances the load, and the operator's position that
   the bridge does not care how big a write is.
