@@ -10,25 +10,6 @@
 #pragma METAL internals : enable
 #include <metal_stdlib>
 
-// The word at `word` once it holds at least `target`, with a fence before each load and no bound: no wait takes it, and it and mesh_remote_wait are kept only for a libnccl-mesh.dylib built before 4efbec2f, whose STEPS
-// call mesh_remote_wait (metal-microbench metal_runtime.swift joins a dylib's STEPS to this file); both go once no
-// node's dylib is older (design/transport.md).
-template <typename W>
-__attribute__((always_inline)) static inline W mesh_wait(volatile coherent(system) device const W *word, ulong target) {
-    W seen;
-    do {
-        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
-        seen = *word;
-    } while (seen < target);
-    return seen;
-}
-
-// A landing's completion word (M07) once it holds 1 plus the invocation's cycle (M30; 0 in a one-pass program), or
-// UINT64_MAX once its link was cancelled (M12); the word returned tells the two apart.
-__attribute__((always_inline)) static inline ulong mesh_remote_wait(volatile coherent(system) device const ulong *completion, ulong cycle) {
-    return mesh_wait(completion, 1 + cycle);
-}
-
 // The word at `word` once it holds at least `target`, or as it is after `polls` loads (0 or 1: one load), each after a
 // system-scope fence: without it a running kernel sees a store of the NIC's or the host's late, on the M4 Pro about
 // 3.2 ms in nearly every wait and on the M5 Max 2.3 ms at the 99th percentile, while the fence costs at most 0.13 us a

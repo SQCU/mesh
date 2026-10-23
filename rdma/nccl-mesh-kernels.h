@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 #include <stdint.h>
 #include "nccl-mesh-metal.h"
+#include "nccl.h"
 
 #define STR(...) #__VA_ARGS__
 #define XSTR(...) STR(__VA_ARGS__)
@@ -73,6 +74,8 @@ static NSString *const STEPS =
   "(void)vb; if (p.sequence && first) *progress = p.sequence; return true; }\n"
   "static inline ulong mesh_step_wait(constant mesh_args &p, device uchar *word, ulong target) { "
   "return mesh_wait_bounded((volatile coherent(system) device const ulong *)word, target, p.polls); }\n"
+  "template <typename W> inline W mesh_wait(volatile coherent(system) device const W *word, ulong target) { "
+  "return mesh_wait_bounded(word, target, " XSTR(NCCL_MESH_POLLS) "); }\n"
   "static inline bool mesh_step_claim(device uchar *vb) { "
   "return atomic_exchange_explicit((device atomic_uint *)(vb + 8), 1u, memory_order_relaxed) == 0u; }\n"
   "static inline bool mesh_step_failed(constant mesh_args &p, device uchar *vb) { "
