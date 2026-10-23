@@ -45,8 +45,7 @@ no units for that decision.
 The data path is zero-copy where the memory allows: torch's MPS tensors live in shared Metal memory, so the CPU and
 Neural Engine shares read their inputs in place (the GPU's prologue converts the input to fp32 for the CPU's products;
 the Neural Engine's graph reads it row-major as it is) and write their outputs into MPS tensors in place; the GPU
-combines the shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted
-in its time).
+combines the shares.
 
   pool = engines.Engines(['mps', 'cpu', 'ane'], ane={'tile': 128})
   ffn = engines.FFN(gate, up, down, engines=pool, name='layer3.ffn')
@@ -94,7 +93,7 @@ _CORE_ML = None
 
 def _coreml():
     """The native Core ML binding (rdma/mesh-coreml.m: predictions on caller memory, no copies on the CPU), the mesh's
-    installed library beside mesh.py; None where it cannot load."""
+    installed library beside mesh.py; None where it cannot load (the Neural Engine engine is then missing)."""
     global _CORE_ML
     if _CORE_ML is None:
         from mesh import RDMA
@@ -228,8 +227,8 @@ class Ane(Engine):
     row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms against 5.9 with them
     on the GPU), compiled and loaded once a share and row count, its package kept in ~/.cache/mesh-engines; its
     predictions through rdma/mesh-coreml.m on the operands' own memory (no CPU copy on its critical path: through
-    coremltools' copies a 3 ms prediction took 9 once the CPU clocked down beside a busy GPU), coremltools' own where
-    that binding cannot load; fp16 operands and activation.  Its outputs carry an
+    coremltools' copies a 3 ms prediction took 9 once the CPU clocked down beside a busy GPU); fp16 operands and
+    activation.  Its outputs carry an
     absolute error floor (on an M4 Pro and an M5 Max about 3e-4 RMS for a 3840-wide contraction, whatever the input's
     scale; above unit-scale activations its error is fp16's relative 2e-4): accurate on normalized activations,
     inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which an operation's `tolerance`
@@ -247,7 +246,7 @@ class Ane(Engine):
             import coremltools  # noqa: F401
         except ImportError:
             return 'coremltools is not installed (rdma/requirements.txt)'
-        return None
+        return None if _coreml() else 'rdma/libmesh-coreml.dylib does not load'
 
     def prepare_linear(self, op, start, end):
         return _Compiled('linear', (op.weight[start:end].detach().to('cpu', torch.float16).numpy(),))
@@ -260,45 +259,25 @@ class Ane(Engine):
         return rows in shard.models
 
     def load(self, shard, rows):
-        import numpy as np
-        tile = self.tile
-        width = shard.arrays[0].shape[1]
-        n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
         native = _coreml()
-        handle, model = None, None
-        if native:
-            compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, tile)
-            inputs, outputs = '', ''
-            handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
-            if handle < 0:
-                raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-            placed = ctypes.create_string_buffer(1 << 20)
-            if native.mesh_coreml_placement(handle, placed, len(placed)) >= 0:
-                devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
-                shard.placement = sorted(devices - {'unknown'})
-                self.occupies = self.occupies | frozenset(devices - {'unknown'})
-        else:
-            model = neural_engine_model(shard.kind, shard.arrays, rows, tile)
-            spec = model.get_spec().description
-            inputs, outputs = spec.input[0].name, spec.output[0].name
-        shard.models[rows] = (model, inputs, outputs, handle, n)
-        warm = torch.zeros(rows, width, dtype=torch.float16)
-        self._predict(shard, warm, torch.empty(rows, n, dtype=torch.float16))
+        compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile)
+        handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
+        if handle < 0:
+            raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+        placed = ctypes.create_string_buffer(1 << 20)
+        if native.mesh_coreml_placement(handle, placed, len(placed)) >= 0:
+            devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
+            shard.placement = sorted(devices - {'unknown'})
+            self.occupies = self.occupies | frozenset(devices - {'unknown'})
+        shard.models[rows] = handle
 
     def _predict(self, shard, source, target):
-        """One prediction from `source` into `target` (CPU tensors over the operands' memory): natively on that memory
-        where the binding loads, else through coremltools (a copy each way)."""
-        model, name, output, handle, n = shard.models[source.shape[0]]
-        if handle is None:
-            target.copy_(torch.from_numpy(model.predict({name: source.numpy()})[output]))
-            return
+        """One prediction from `source` into `target` (CPU tensors over the operands' memory), on that memory."""
         shape_in = (ctypes.c_int64 * 2)(*source.shape)
         shape_out = (ctypes.c_int64 * 2)(*target.shape)
         native = _coreml()
-        backed = native.mesh_coreml_predict(handle, source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2)
-        if backed < 0:
+        if native.mesh_coreml_predict(shard.models[source.shape[0]], source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2) < 0:
             raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-        self.backed = backed
 
     def _run(self, shard, x, out):
         began = time.perf_counter()

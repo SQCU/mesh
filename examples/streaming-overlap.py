@@ -117,11 +117,10 @@ def main():
                     if slot in outstanding or submitted == total:
                         continue
                     began = time.perf_counter()
-                    scale = 1 + (submitted % 17) / 32
                     for section, ref in enumerate(inputs):
                         start = section * block_rows
                         with program.write(ref) as buffer:
-                            np.multiply(data[start:start + ref.shape[0]], scale, out=buffer)
+                            buffer[...] = data[start:start + ref.shape[0]]
                     outstanding[slot] = (began, False)
                     submitted += 1
                 waiting = [result for slot in outstanding for result in slots[slot][1] if not result.ready]

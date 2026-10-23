@@ -120,9 +120,10 @@ class Recording:
         self.compiled = torch.compile(step, backend=self._backend, fullgraph=True, dynamic=False)
 
     def _backend(self, gm, example_inputs):
-        """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
-        outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
-        timeout.  The meeting is a host wait, so a publication waiting in torch's open buffer is committed first."""
+        """compiler's graph, then every rank's compilation of it met at the default group's store, once a graph on the
+        slow channel (a peer's first crossings would otherwise wait out a long compile on the GPU, past the library's
+        poll bound): bounded by the store's timeout.  The meeting is a host wait, so a publication waiting in torch's open
+        buffer is committed first."""
         import torch.distributed as dist
 
         from . import _stream

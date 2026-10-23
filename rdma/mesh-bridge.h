@@ -40,7 +40,6 @@
 _Static_assert(MESH_STREAM_PAIRS==1 && MESH_LANE_FIRST+2*MESH_LINK_STREAMS==MESH_LINK_LANES,"a stream one lane pair");
 _Static_assert(MESH_LINK_LANES<32,"a bit a lane");
 static inline struct mesh_pages stream_pages(uint64_t a,uint64_t b){ return (struct mesh_pages){a+b}; }
-static inline struct mesh_pages stream_through(uint64_t a,uint64_t b){ return (struct mesh_pages){2*a<2*b+1?2*a:2*b+1}; }
 static inline uint32_t page_lane(struct mesh_pages p){ return (uint32_t)(p.n&1); }
 #define MESH_FRAME 4096u
 struct frames { uint64_t n; };
@@ -72,7 +71,7 @@ struct lane_state {
 _Static_assert(offsetof(struct lane_state,posted)==MESH_LINE && sizeof(struct lane_state)==2*MESH_LINE,"a thread's words a line of their own");
 static inline uint64_t *lane_posts(struct lane_state *s,int way){ return way?&s->posted:&s->sent; }
 static inline uint64_t *lane_done(struct lane_state *s,int way){ return way?&s->got:&s->done; }
-struct walk { uint64_t at,done,presented; struct mesh_pages at_page,done_page,base,count; };
+struct cursor { uint64_t k,table,units; struct mesh_pages page; uint32_t entry,at,owed; };
 enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
 /* design/transport.md section 3; section 14, "A process a port" */
 enum { HELLO=1, RECORD=3, LINK };
@@ -105,17 +104,17 @@ struct link {
   int state,heard,lanes;
   _Atomic int lost;
   _Atomic uint32_t served,broken,pairing;
-  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,lists,psn;
+  uint32_t plan,peer[MESH_LINK_LANES][2],qpn[MESH_LINK_LANES],page,pages,psn;
   struct frames share;
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t held[MESH_LINK_STREAMS],number[MESH_LINK_STREAMS];
   uint32_t hold[MESH_LINK_STREAMS];
-  struct walk sending[MESH_LINK_STREAMS];
+  struct cursor sending[MESH_LINK_STREAMS],sent[MESH_LINK_STREAMS][2];
   _Atomic uint64_t begun[MESH_LINK_STREAMS],ended[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
   _Alignas(MESH_LINE) _Atomic uint64_t stopped[MESH_LINK_STREAMS];
   uint64_t rnumber[MESH_LINK_STREAMS];
-  struct walk landing[MESH_LINK_STREAMS];
+  struct cursor landing[MESH_LINK_STREAMS],landed[MESH_LINK_STREAMS][2];
 };
 _Static_assert(offsetof(struct link,stopped)%MESH_LINE==0,"the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port"; section 15, "The children"; section 16 */

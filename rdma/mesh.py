@@ -1,6 +1,6 @@
 """The mesh from Python: mesh-plan.h through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
-node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait); link maps,
+node's bridge's: current() is the map it keeps (mesh_map); link maps,
 their routes and a communicator's members' map are the header's own.
 Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the
 memory they move taken from the node's bridge's region (rdma/NCCL.md "Memory")."""
@@ -122,20 +122,8 @@ def members(whole, among, marks=None):
     return lmap
 
 
-def wait(serial=0, seconds=None):
-    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), waited
-    for on the serial's word, which the bridge wakes as it moves the map; `seconds` None waits with no bound (8e716999's
-    form), a number bounds it, `serial` returned where it passes first.  OSError naming the bridge where it is
-    unreachable, ESRCH where it exits while waited on."""
-    made = ffi.new('uint64_t *', serial)
-    status = lib.mesh_map_wait(made, (1 << 64) - 1 if seconds is None else max(0, min(int(seconds * 1e9), (1 << 64) - 1)))
-    if status and status != errno.ETIMEDOUT:
-        raise OSError(status, f"this node's bridge is unreachable: {os.strerror(status)}")
-    return made[0]
-
-
 def current(members=None):
-    """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
+    """mesh_map: the map this node's bridge keeps, over `members` (bridge node numbers, map
     node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
     `map` the members' map as libnccl-mesh reads it (its relays, a link where two nodes' bridges reach each other, at its bandwidth, `mark` each node's
     bridge node number, `next` the routing table; members(map, ...) of the whole map is the
@@ -143,12 +131,12 @@ def current(members=None):
     a name a person reads is peers.label's, from the name table), `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
     a node no bridge reaches among its nodes, and the members' map as it is, joined or not (mesh_link_map_joined names
     two it leaves apart).  OSError naming the bridge where it is unreachable."""
-    serial, own = wait(), ffi.new('uint32_t *')
+    own = ffi.new('uint32_t *')
     lib.mesh_reached(ffi.NULL, 0, own)
     count, lmap, nodes = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0], serial=serial)
+    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0])
 
 
 def nodes():

@@ -34,7 +34,7 @@ waits for each peer's `landed` (one `volatile coherent(system)` load after a fen
 then the worker passes a barrier and one system-scope fence. The worker's threads read their own part of start t − 1
 (`mesh_own`) and each peer's (`mesh_landing`), add them in float32, own part first and the peers in rank order, round
 to float16 once, and use z for x = e + tanh(z); on rank 0 they also write tanh(z), step t − 1's output, into its
-staging buffer. `mesh_leave` stores the landed slot's stamp once the last worker has read.
+row of the output. `mesh_leave` stores the landed slot's stamp once the last worker has read.
 
 **Stage 2 of step t publishes start t.** The `Summand` epilogue stores the part through `mesh_send` (system-coherent),
 each worker its own columns, into the slot's own pages: the bridge sends those pages, nothing copied. `mesh_leave`:
@@ -45,13 +45,12 @@ kernel's end in the slot's table, and zeroes the count of arrivals for the slot'
 Start t + 1 lands in other pages than start t whenever start t's are still held: no landing tensor is reused while a
 kernel may read it, and no send part while the NIC may read it. The kernel carries no guard and no binding of its own.
 
-**chain-service.py.** The input ring is a region tensor a block (each a lease, so a block starts on a page without the
-service knowing the page), filled and broadcast a block ahead. The plain all-reduce timing (`crossing_microseconds`)
-keeps its sum ring, a region tensor a slot.
+**chain-service.py.** The inputs are one region tensor of every step's rows (a lease, so it starts on a page without
+the service knowing the page), landed once by a broadcast before the first step. The plain all-reduce timing
+(`crossing_microseconds`) sums one region tensor of a step's rows.
 
 ## Readings
 
 Nothing has run in this form. The readings of the fused form on main, for comparison when it runs: the chain's float64
 check 1.37e-3 at step 0 and 1.19e-3 at step 3,584; a steady step of 35.4 µs; the plain crossing 17.2 µs, about 12 µs
-bare. The harness logs aggregate rows/s, steps/s per stream, the host and paced times and the parts tuple, and
-`ncclMeshTimes` gives the crossings' groups' times.
+bare. The harness logs aggregate rows/s, steps/s per stream, the host and paced times and the parts tuple.

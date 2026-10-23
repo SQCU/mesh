@@ -67,24 +67,14 @@ def shares(config, rank, size, held):
 
 
 # docs/writing-a-service.md#the-lstm
-def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
-    e, first, L = [s for b in E for s in b.unbind(0)], None, tick.L
-    o = (None,) * block if O is None else O.unbind(0)
-    landing = chain.fill(E, rank, inputs, 0, steps, block)
+def lstm_stream(tick, steps, E, O):
+    first, L = torch.mps.Event(enable_timing=True), tick.L
     for s in range(steps + L - 1):
-        if s < steps and s % block == 0:
-            ahead = chain.fill(E, rank, inputs, s + block, steps, block) if s + block < steps else None
-            landing.wait()
-            landing = ahead
         t = s - L
-        tick(steps, e[min(s, steps - 1) % len(e)], o[t % block] if t >= 0 else None)
-        if O is not None and t >= 0 and (t + 1) % block == 0:
-            chain.drain(t + 1 - block, steps, block, O, outputs)
-        if s == block and s < steps:
-            first = torch.mps.Event(enable_timing=True)
+        tick(steps, E[min(s, steps - 1)], O[t] if O is not None and t >= 0 else None)
+        if s == 0:
             first.record()
-    tick.land(e[(steps - 1) % len(e)], o[(steps - 1) % block])
-    chain.drain((steps - 1) // block * block, steps, block, O, outputs)
+    tick.land(E[steps - 1], O[steps - 1] if O is not None else None)
     return first
 
 
@@ -98,29 +88,27 @@ def main():
         raise ValueError('The configuration gives each rank a share')
     KIN, H, L = config['input_width'], sum(config['shares']), config['layers']
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
-    block, blocks, _ = chain.ring(config['ring_bytes'], steps, rows * KIN * torch.half.itemsize)
     W, bias = shares(config, rank, size, held)
     del held
     tick = lstm.Tick(W, bias, rows, config['shares'], rank, L, KIN, chain.capability(config['capabilities']))
     del W, bias
-    E = [torch_mesh.empty(block, rows, KIN, dtype=torch.half) for _ in range(blocks)]
-    O = torch.empty(block, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
-    outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H)) if rank == 0 else None
+    O = torch.empty(steps, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
+    E = chain.landed(rank, inputs, steps, rows, KIN)
     start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
-    torch.mps.synchronize()
-    dist.barrier()
     began = time.perf_counter()
     start.record()
-    first = lstm_stream(tick, rank, steps, block, E, O, inputs, outputs)
+    first = lstm_stream(tick, steps, E, O)
     end.record()
     hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
     ticks = steps + L - 1
-    steady = first.elapsed_time(end) / 1e3 / (ticks - block - 1) if first is not None else None
+    steady = first.elapsed_time(end) / 1e3 / (ticks - 1) if ticks > 1 else None
+    if O is not None:
+        torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
     moved = (size - 1) * rows * L * config['shares'][rank] * torch.half.itemsize
     summary = dict(rank=rank, size=size, shares=config['shares'], layers=L, rows=rows, input_width=KIN, width=H,
-                   steps=steps, ticks=ticks, block=block, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
+                   steps=steps, ticks=ticks, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, tick_microseconds=seconds / ticks * 1e6,
                    latency_ticks=L, host_microseconds=hosted / ticks * 1e6,
                    steady_tick_microseconds=steady * 1e6 if steady else None,

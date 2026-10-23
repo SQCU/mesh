@@ -1,6 +1,5 @@
 """Tile-sparse linear products in the mesh library (metal-microbench docs/kernels.md "Tile sparsity"), operand gated: a
-weight carries a closure over its tiles, and its products route between the dense reference and the closure's kernels
-by their measured times.
+weight carries a closure over its tiles, and its products run on the closure's kernels.
 
 The mask is a closure: a predicate KEPT(k, n) over a weight's tiles (k its output tile, n its input tile in torch's
 [out, in] layout), compiled into every kernel (sparse.metal), its environment captured as constants (an arithmetic
@@ -14,22 +13,7 @@ multiplies, each tile's contribution to the product and the product's error at e
 closure as a quantizer induces a lattice, the fewest tiles whose product on held-out rows stays within a tolerance
 (None where none fewer than all does).  A trained model's dense weights are dense at tile granularity (E2B's FFN:
 docs/kernels.md); a model trained toward a tile support (a projection distance, metal-microbench docs/kernels.md
-"Learning the support") is not.
-
-Routing.  `SparseLinear` holds one copy of the masked weight; each row count's calls run on the lowering measured
-faster at that row count: `dense` (torch's product of the masked weight, the reference) or `tiles` (the closure's
-kernel).  A row count's first calls run the two in alternation (each its first call untimed, then `window` timed, so a
-GPU's clocks ramping weigh on neither); then the closure's kernel runs where its median is below the reference's by
-more than the resolution (twice the larger relative standard error, at least 2 %), and where it leads within the
-resolution the alternation runs on (up to four windows) before the reference is kept.  No lowering is chosen at a row
-count before both ran there, and none by a time measured at another, so a call is never slower than the reference
-beyond the exploration of the two lowerings at its row count and the measurement's resolution.  A row count's choice,
-once made, stands.
-
-  python -m torch_mesh.sparse time     the lowerings' times by density and the routing's choice"""
-import argparse
-import math
-import statistics
+"Learning the support") is not."""
 from pathlib import Path
 
 import torch
@@ -231,124 +215,3 @@ def sparsify(w, x, tolerance, tile=64, held=0.4):
         else:
             low = mid + 1
     return bitmap(_keep(scores, low), tile), low / total, error(low)
-
-
-class SparseLinear(torch.nn.Module):
-    """y = x . (W (.) M)^T + b, W [out, in] fp16 on MPS and its closure (or a tile mask [out/tile, in/tile]), each row
-    count's calls on the lowering measured faster there (module docstring)."""
-
-    def __init__(self, weight, closure, bias=None, tile=64, window=5):
-        super().__init__()
-        n, k = weight.shape
-        if n % tile or k % tile:
-            raise ValueError(f'SparseLinear: [{n}, {k}] is not in whole {tile}-tiles (pad the weight)')
-        self.closure = closure if isinstance(closure, Closure) else bitmap(closure, tile)
-        mask = self.closure.mask(n, k)
-        self.weight = torch.nn.Parameter((weight.float() * expand(mask, tile, weight.shape).to(weight.device)).half(), requires_grad=False)
-        self.bias = bias
-        self.tile, self.window = tile, window
-        self.seen, self.calls, self.pending, self.decided, self.rounds, self.rounds_most = {}, {}, [], {}, {}, 4
-
-    def route(self, rows):
-        """The lowering of a call of `rows` rows: the two in alternation (each its first call untimed, then `window`
-        timed), then the measured faster beyond the resolution, ties to the reference."""
-        issued = {l: self.calls.get((rows, l), 0) for l in ('dense', 'tiles')}
-        rounds = self.rounds.get(rows, 1)
-        if min(issued.values()) <= self.window * rounds:
-            return 'dense' if issued['dense'] <= issued['tiles'] else 'tiles'
-        if self.pending:
-            torch.mps.synchronize()
-            self._settle()
-        seen = self.seen.get(rows, {})
-        latest = {l: seen.get(l, [])[1 - self.window * rounds - 1:] for l in ('dense', 'tiles')}
-        if any(len(v) < 2 for v in latest.values()):
-            return 'dense'
-        median = {l: statistics.median(v) for l, v in latest.items()}
-        error = lambda v: statistics.stdev(v) / math.sqrt(len(v)) / statistics.mean(v)
-        resolution = max(0.02, 2 * max(error(latest['dense']), error(latest['tiles'])))
-        if median['tiles'] < median['dense'] * (1 - resolution):
-            self.decided[rows] = 'tiles'
-        elif median['tiles'] < median['dense'] and rounds < self.rounds_most:
-            self.rounds[rows] = rounds + 1
-            return 'dense' if issued['dense'] <= issued['tiles'] else 'tiles'
-        else:
-            self.decided[rows] = 'dense'
-        return self.decided[rows]
-
-    def _settle(self):
-        still = []
-        for rows, lowering, begin, end in self.pending:
-            if end.query():
-                self.seen.setdefault(rows, {}).setdefault(lowering, []).append(begin.elapsed_time(end) / 1e3)
-            else:
-                still.append((rows, lowering, begin, end))
-        self.pending = still
-
-    def forward(self, x):
-        rows = x.numel() // x.shape[-1]
-        lowering = self.decided.get(rows)
-        if lowering is None:
-            lowering = self.route(rows)
-        count = self.calls[rows, lowering] = self.calls.get((rows, lowering), 0) + 1
-        timed = count > 1 and rows not in self.decided
-        if timed:
-            begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
-            begin.record()
-        x16 = x.to(torch.float16)
-        y = torch.nn.functional.linear(x16, self.weight) if lowering == 'dense' else linear(x16, self.weight, self.closure)
-        if timed:
-            end.record()
-            self.pending.append((rows, lowering, begin, end))
-        return y if self.bias is None else y + self.bias
-
-
-def _time(args):
-    torch.manual_seed(0)
-    m, n, k, tile = args.m, args.n, args.k, args.tile
-    x = (torch.randn(m, k) / 4).half().to('mps')
-    w = (torch.randn(n, k) / k ** 0.5).half().to('mps')
-
-    def ms(fn, reps=20):
-        for _ in range(3):
-            fn()
-        torch.mps.synchronize()
-        times = []
-        for _ in range(reps):
-            b, e = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
-            b.record()
-            fn()
-            e.record()
-            torch.mps.synchronize()
-            times.append(b.elapsed_time(e))
-        return statistics.median(times)
-
-    ms(lambda: torch.nn.functional.linear(x, w), reps=100)
-    reference = ms(lambda: torch.nn.functional.linear(x, w))
-    print(f'{m} x {n} x {k}, tile {tile}: the dense reference (the unmasked weight, after a warm-up) {reference:.3f} ms')
-    for density in (1.0, 0.9, 0.75, 0.5, 0.25, 0.125):
-        mask = torch.rand(n // tile, k // tile) < density if density < 1 else torch.ones(n // tile, k // tile, dtype=torch.bool)
-        layer = SparseLinear(w, mask, tile=tile)
-        tiles = ms(lambda: linear(x, layer.weight, layer.closure))
-        dense = ms(lambda: torch.nn.functional.linear(x, layer.weight))
-        for _ in range(12):
-            layer(x)
-        torch.mps.synchronize()
-        layer._settle()
-        routed = ms(lambda: layer(x))
-        print(f'density {float(mask.float().mean()):.3f}: tiles {tiles:.3f} ms, dense {dense:.3f}, routed {routed:.3f} '
-              f'({layer.route(m)}), against the reference {reference / routed:.2f}x')
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('action', choices=['time'])
-    parser.add_argument('--m', type=int, default=1024)
-    parser.add_argument('--n', type=int, default=4096)
-    parser.add_argument('--k', type=int, default=4096)
-    parser.add_argument('--tile', type=int, default=64)
-    args = parser.parse_args()
-    _time(args)
-
-
-if __name__ == '__main__':
-    main()

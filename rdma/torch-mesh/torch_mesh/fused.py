@@ -7,20 +7,7 @@ def header():
     return HEADER
 
 
-def pipeline(source, name):
-    return _stream.pipeline(source, name)
-
-
-def facts(handle):
-    return _stream.pipeline_facts(handle)
-
-
-def device():
-    return _stream.device_facts()
-
-
-def dispatch(handle, buffers, constants, at, gx, gy, threads):
-    _stream.encode(handle, buffers, constants, at, gx, gy, threads)
+pipeline, facts, device = _stream.pipeline, _stream.pipeline_facts, _stream.device_facts
 
 
 class Exchange:

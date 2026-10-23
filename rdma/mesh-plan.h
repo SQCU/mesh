@@ -23,8 +23,6 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
 
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map);
 
-int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
-
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
 
 struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const double *log_weight; const uint32_t *way; };

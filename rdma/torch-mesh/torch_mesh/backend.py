@@ -29,36 +29,10 @@ def op(reduce_op):
 
 
 def blank(shape, dtype, device):
-    kind = torch.device(device).type
-    if kind == 'mps':
+    if torch.device(device).type == 'mps':
         return _stream.region_empty(list(shape), torch.empty(0, dtype=dtype), True)
-    if kind != 'cpu':
-        return torch.empty(shape, dtype=dtype, device=device)
     count, element = math.prod(shape), torch.empty(0, dtype=dtype).element_size()
     return torch.frombuffer(mesh.lease(max(count, 1) * element), dtype=dtype, count=max(count, 1))[:count].view(shape)
-
-
-def span(tensors):
-    first, at = tensors[0], tensors[0].storage_offset()
-    for t in tensors:
-        if (t.dtype != first.dtype or t.device != first.device or not t.is_contiguous() or t.storage_offset() != at
-                or t.untyped_storage().data_ptr() != first.untyped_storage().data_ptr()):
-            return None
-        at += t.numel()
-    return first.as_strided((at - first.storage_offset(),), (1,))
-
-
-def packed(tensors, read):
-    tensors = [t for t in tensors if t is not None]
-    if not tensors:
-        return None, None
-    whole = span(tensors)
-    if whole is not None:
-        return whole, None
-    whole = blank((sum(t.numel() for t in tensors),), tensors[0].dtype, tensors[0].device)
-    if read:
-        return torch.cat([t.detach().reshape(-1) for t in tensors], out=whole), None
-    return whole, lambda: [t.copy_(p.view(t.shape)) for t, p in zip(tensors, whole.split([t.numel() for t in tensors]))]
 
 
 def asynchronous(opts):
@@ -138,16 +112,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     pg_name = group_name
 
-    def _issue(self, calls, result, split=False, backs=(), registered=None):
+    def _issue(self, calls, result, split=False, registered=None):
         if self._pending is not None:
-            self._pending.append((calls, result, backs))
+            self._pending.append((calls, result))
             return done(result)
         host = not any(t is not None and t.device.type == 'mps' for call in calls for t in (*call[1], *call[2]))
         if host:
             evidence.mark(self, True)
-        work = _stream.issue(calls, self.handle, bool(split) and not backs, _flat(result))
-        for back in backs:
-            back()
+        work = _stream.issue(calls, self.handle, bool(split), _flat(result))
         if host:
             evidence.mark(self, False)
         if work is None:
@@ -156,9 +128,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
             _register_work(registered, work)
         return work
 
-    def _alltoall(self, sends, receives, result, opts, matrix):
-        (send, _), (receive, back) = packed(sends, True), packed(receives, False)
-        return self._issue([(ALLTOALL, [send], [receive], matrix, 0, 0)], result, asynchronous(opts), [back] if back else ())
+    def _messages(self, sends, receives, result, opts, matrix):
+        n = self._size
+        size = next(t for t in (*sends, *receives) if t is not None).element_size()
+        pairs = [x for a in range(n) for b in range(n) if a != b and matrix[a * n + b] for x in (a, b, matrix[a * n + b] * size)]
+        calls = ([(SEND, [t], [], [], 0, b) for b, t in enumerate(sends) if t is not None] +
+                 [(RECV, [], [t], [], 0, a) for a, t in enumerate(receives) if t is not None] + [(PAIRS, [], [], pairs, 0, 0)])
+        return self._issue(calls, result, asynchronous(opts))
 
     def _rooted(self, root, tensor):
         return [tensor if q == root else None for q in range(self._size)]
@@ -168,20 +144,16 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def end_coalescing(self, device):
         pending, self._pending = self._pending, None
-        return self._issue([c for calls, _, _ in pending for c in calls], [r for _, r, _ in pending],
-                           backs=[b for _, _, backs in pending for b in backs])
+        return self._issue([c for calls, _ in pending for c in calls], [r for _, r in pending])
 
     def all_to_all_matrix(self, output, input, matrix):
-        n, me = self._size, self._rank
-        row, column = matrix[me * n:(me + 1) * n], matrix[me::n]
-        sends = list(input.reshape(-1).split(row)) if input is not None else [None] * n
-        return self._alltoall(sends, list(output.reshape(-1).split(column)), output, None, list(matrix))
+        return self._issue([(ALLTOALL, [input], [output], list(matrix), 0, 0)], output)
 
     def pairs(self, ops, pairs):
         self.start_coalescing(None)
         for op in ops:
             op.op(op.tensor, op.peer, op.group, op.tag)
-        self._pending.append(([(PAIRS, [], [], [x for p in pairs for x in p], 0, 0)], [], ()))
+        self._pending.append(([(PAIRS, [], [], [x for p in pairs for x in p], 0, 0)], []))
         return self.end_coalescing(None)
 
     def allreduce(self, tensors, opts=dist.AllreduceOptions()):
@@ -196,9 +168,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def broadcast(self, tensors, opts=dist.BroadcastOptions()):
         return self._issue([(BROADCAST, [t], [], [], 0, opts.rootRank) for t in tensors], tensors, asynchronous(opts))
 
-    def barrier(self, opts=None):
-        return self.allreduce([blank((1,), torch.float32, 'cpu').fill_(1)])
-
     def all_gather_single_coalesced(self, outputs, inputs, opts=None):
         return self._issue([(ALLGATHER, [i], [o], [i.numel()] * self._size, 0, 0) for o, i in zip(outputs, inputs)], outputs,
                            asynchronous(opts))
@@ -209,9 +178,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
     allgather_into_tensor_coalesced = all_gather_single_coalesced
 
     def allgather(self, outputs, inputs, opts=None):
-        wholes = [packed(out, False) for out in outputs]
-        return self._issue([(ALLGATHER, [i], [whole], [t.numel() for t in out], 0, 0) for (whole, _), out, i in zip(wholes, outputs, inputs)],
-                           outputs, asynchronous(opts), [back for _, back in wholes if back])
+        return self._issue([(BROADCAST, [i if r == self._rank else out[r]], [out[r]], [], 0, r) for out, i in zip(outputs, inputs)
+                            for r in range(self._size)], outputs, asynchronous(opts))
 
     def reduce_scatter_single_coalesced(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
         return self._issue([(REDUCE_SCATTER, [i], [o], [o.numel()] * self._size, op(opts.reduceOp), 0) for o, i in zip(outputs, inputs)],
@@ -223,35 +191,32 @@ class ProcessGroupMesh(dist.ProcessGroup):
     reduce_scatter_tensor_coalesced = reduce_scatter_single_coalesced
 
     def reduce_scatter(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
-        return self._issue([(REDUCE_SCATTER, [packed(parts, True)[0]], [o], [x.numel() for x in parts], op(opts.reduceOp), 0)
-                            for o, parts in zip(outputs, inputs)], outputs, asynchronous(opts))
+        return self._issue([(REDUCE, [parts[r]], [o] if r == self._rank else [], [], op(opts.reduceOp), r) for o, parts in zip(outputs, inputs)
+                            for r in range(self._size)], outputs, asynchronous(opts))
 
     def alltoall(self, outputs, inputs, opts=None):
         if len({t.numel() for t in (*inputs, *outputs)}) != 1:
             raise RuntimeError('libnccl-mesh: an all_to_all of uneven sizes gives only this rank\'s row; torch_mesh.all_to_all takes the '
                                'whole count matrix every rank holds')
-        return self._alltoall(inputs, outputs, outputs, opts, [inputs[0].numel()] * self._size ** 2)
+        return self._messages(inputs, outputs, outputs, opts, [inputs[0].numel()] * self._size ** 2)
 
     def all_to_all_single(self, output, input, output_split_sizes, input_split_sizes, opts=None):
-        def pieces(t, sizes):
-            return list(t.split(list(sizes) or [t.shape[0] // self._size] * self._size))
         if input_split_sizes or output_split_sizes:
             raise RuntimeError('libnccl-mesh: an all_to_all_single of uneven splits gives only this rank\'s row; torch_mesh.all_to_all '
                                'takes the whole count matrix every rank holds')
-        sends = pieces(input, input_split_sizes)
-        return self._alltoall(sends, pieces(output, output_split_sizes), output, opts, [sends[0].numel()] * self._size ** 2)
+        return self._issue([(ALLTOALL, [input], [output], [input.numel() // self._size] * self._size ** 2, 0, 0)], output, asynchronous(opts))
 
     def gather(self, outputs, inputs, opts=dist.GatherOptions()):
         receives = list(outputs[0]) if self._rank == opts.rootRank else [None] * self._size
         n, root = self._size, opts.rootRank
         matrix = [inputs[0].numel() if b == root else 0 for a in range(n) for b in range(n)]
-        return self._alltoall(self._rooted(root, inputs[0]), receives, outputs, opts, matrix)
+        return self._messages(self._rooted(root, inputs[0]), receives, outputs, opts, matrix)
 
     def scatter(self, outputs, inputs, opts=dist.ScatterOptions()):
         sends = list(inputs[0]) if self._rank == opts.rootRank else [None] * self._size
         n, root = self._size, opts.rootRank
         matrix = [outputs[0].numel() if a == root else 0 for a in range(n) for b in range(n)]
-        return self._alltoall(sends, self._rooted(root, outputs[0]), outputs, opts, matrix)
+        return self._messages(sends, self._rooted(root, outputs[0]), outputs, opts, matrix)
 
     def send(self, tensors, dst, tag):
         return self._issue([(SEND, [t], [], [], 0, dst) for t in tensors], tensors, True)

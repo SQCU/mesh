@@ -48,9 +48,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
   next one's node: the bridges forward nothing, and a group whose ranks no such path joins fails at its first
   collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
-- Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
-  barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
-  bridge's region (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the region is
+- Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors are leases of the node's bridge's region
+  (`backend.blank`, over `mesh.lease`); the list collectives read and write each tensor of the list where it lies. A program's CPU tensor in the region is
   `torch.frombuffer(mesh.lease(nbytes), dtype=...)`, or `torch_mesh.empty(shape, dtype=..., device="cpu")`.
 - Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
   Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
@@ -72,8 +71,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   allocator's, and a collective that sends from one, or lands in one, across a link fails as a value
   (`ncclInvalidUsage`: the library copies nothing into the region). torch's MPS factories take their allocator from a
   fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
-  tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a staged
-  copy of a non-contiguous operand, a functional collective's result, `backend.blank`) are region tensors.
+  tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a functional
+  collective's result, `backend.blank`) are region tensors.
   metal-microbench's callers: `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
 Dtypes follow ProcessGroupNCCL's: a collective that moves data moves any dtype (one NCCL lacks as its bytes); a
@@ -92,10 +91,9 @@ result is a region tensor, issued and not completed where it is its own operand 
 |---|---|
 | `fused.header()` | the Metal text a kernel source is compiled after (`ncclMeshMetalPrelude`): `mesh.metal` as the loaded library was built with it, then the device header ([NCCL.md](../NCCL.md#persistent-exchanges)) |
 | `fused.pipeline(source, name)`, `fused.facts(handle)`, `fused.device()` | a kernel compiled from its source at Metal 4.0; its pipeline's `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth` and static threadgroup memory; the device's Apple GPU family (the newest `MTLGPUFamilyApple<n>` it supports, asked from Apple1 up), its threads a threadgroup and its threadgroup memory |
-| `fused.dispatch(handle, buffers, constants, at, gx, gy, threads)` | one dispatch in torch's open compute encoder on its queue, ordered with torch's work: buffers by index (a tensor's storage at its offset), 32-bit constants at index `at`, the grid in threadgroups |
 | `fused.Exchange(sizes, dtype, group=None)` | a persistent exchange ([NCCL.md](../NCCL.md#persistent-exchanges)) among the group's ranks: rank q's part is `sizes[q]` elements of `dtype`, each rank's part goes to every other rank, and the library allocates every start's send part and landing areas |
 | `exchange.start(sizes=None)` | the next start on torch's stream (`ncclMeshStart`), its number; `sizes` fewer elements than declared |
-| `exchange.encode(handle, buffers, constants, at, gx, gy, threads, start, lands=False, publishes=False, crossing=14)` | `dispatch` with the crossing record bound at buffer `crossing` (`ncclMeshBind`): with `lands` the kernel lands start − 1, with `publishes` it publishes `start`, under the stream's one commit rule (Performance) |
+| `exchange.encode(handle, buffers, constants, at, gx, gy, threads, start, lands=False, publishes=False, crossing=14)` | one dispatch in torch's open compute encoder on its queue, ordered with torch's work (buffers by index, a tensor's storage at its offset; 32-bit constants at index `at`; the grid in threadgroups), with the crossing record bound at buffer `crossing` (`ncclMeshBind`): with `lands` the kernel lands start − 1, with `publishes` it publishes `start`, under the stream's one commit rule (Performance) |
 | `exchange.free()` | the request freed (`ncclMeshRequestFree`): each slot's pages returned once no kernel or SEND holds them |
 
 The kernel calls `mesh_enter` and `mesh_leave` and reads and writes the views the header gives; it is shown no page,
@@ -109,14 +107,14 @@ has synchronized torch's stream.
 | works | notes |
 |---|---|
 | all_reduce | sum, prod, max, min, avg on int8, uint8, int32, int64, float16, bfloat16 and float32; a non-contiguous view |
-| all_gather_object, all_to_all of lists, blocking send/recv | |
+| all_gather_object, all_to_all of lists, blocking send/recv | a list: each tensor a message of the group's pair list (`ncclMeshGroupPairs`), read and written where it lies |
 | broadcast, reduce | |
-| all_gather (list and into a tensor) | a list of unequal sizes: one MPI_Allgatherv (Uneven nodes) |
-| reduce_scatter (list and tensor) | a list of unequal sizes: one MPI_Reduce_scatter (Uneven nodes) |
-| gather, scatter | any per-rank sizes: the rooted V (`ncclMeshAlltoAllV`) |
+| all_gather (list and into a tensor) | a list: a broadcast rooted at each rank, in one group, any sizes (Uneven nodes) |
+| reduce_scatter (list and tensor) | a list: a reduce rooted at each rank, in one group, any sizes (Uneven nodes) |
+| gather, scatter | each tensor a message of the group's pair list (`ncclMeshGroupPairs`) |
 | all_to_all, all_to_all_single | uneven splits, empty inputs (`ncclMeshAlltoAllV`) |
 | send, recv, isend, irecv, batch_isend_irecv | |
-| barrier, async_op works, coalescing | |
+| async_op works, coalescing | |
 | functional collectives under torch.compile | one graph; `backend="mesh"` is Inductor with the library's collectives, under the one commit rule (Performance) |
 | DDP | |
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
@@ -197,11 +195,10 @@ autograd, is compiled and committed by the same rule.
 
 Stock PyTorch splits every sharded extent equally. `torch_mesh.partition` is a partition operand on raw tensors: a
 mesh dimension's extents split among its ranks by parts proportional to each node's speed, the program holding its
-share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`,
-`all_to_all_single` with splits: MPI's v-collectives). An unequal list is one program over unequal segments, the
-library's MPI_Allgatherv and MPI_Reduce_scatter (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`, [NCCL.md](../NCCL.md)),
-not a broadcast or reduce rooted at each rank; where the list is the pieces of one contiguous tensor (`out.split(sizes)`,
-as `partition`'s collectives pass it) the call reads or writes that tensor in place. Its callers are metal-microbench
+share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`: MPI's
+v-collectives). A list is a broadcast (`all_gather`) or a reduce (`reduce_scatter`) rooted at each rank, in one group,
+each tensor of the list read or written where it lies, whatever its size and wherever it lies (the pieces of one tensor,
+`out.split(sizes)` as `partition`'s collectives pass them, or tensors of their own); nothing is packed or copied. Its callers are metal-microbench
 `tools/torch_parallel/tp.py` and `cp.py`, at `PARTITION` (parts that are their own capacity) or at `PARTS` checked in
 turn within `CAPACITY` in one process (the 09-30 form). Reproduction target (metal-microbench docs/measurement.md,
 2026-09-30): `tp.py` `SP=1 PARTS="5,11 4,12" CAPACITY=5,12`, 255-256 ms a step on the pair, an SP=1 all-gather

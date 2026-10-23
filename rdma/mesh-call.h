@@ -30,11 +30,5 @@ uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t *
 int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream);
 void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
-struct mesh_stream_view {
-  struct mesh_entry *list[2];
-  _Atomic uint64_t *presented[2],*ready,*sent,*landed;
-  const struct mesh_posts *posts;
-};
-int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
-int mesh_stream_present(struct mesh_ctx *,uint32_t stream,int land,struct mesh_entry entry);
+int mesh_stream_present(struct mesh_ctx *,uint32_t stream,struct mesh_plan *table);
 #endif

@@ -270,22 +270,17 @@ def _region_backed(like, group):
 def _lease(shape, like):
     """An MPS region tensor like `like` (torch_mesh.empty: a lease of the node's bridge's region, which the library reads
     and writes where it lies: rdma/NCCL.md "Memory"), made by name as 5ff5d699 made it (DTensor's dispatch runs no
-    factory mode, and torch documents no MPS allocator to place it: mesh 7e6f0335); None where the region refuses the
-    lease (full, or its bridge stopped: the library's error, the collective's own to raise), where aee2829b's region
-    allocator took the device's own buffer."""
+    factory mode, and torch documents no MPS allocator to place it: mesh 7e6f0335); a lease the region refuses is the
+    library's error, raised."""
     from . import empty
-    try:
-        return empty(tuple(shape), dtype=like.dtype, device='mps')
-    except RuntimeError:
-        return None
+    return empty(tuple(shape), dtype=like.dtype, device='mps')
 
 
 def _empty(shape, like, group=None, dtype=None):
-    """A region tensor (_lease) where the buffer is _region_backed and the region holds it, else torch.empty; like `like`,
-    of `dtype` where given."""
+    """A region tensor (_lease) where the buffer is _region_backed, else torch.empty; like `like`, of `dtype` where
+    given."""
     like = like if dtype is None else like.new_empty(0, dtype=dtype)
-    made = _lease(shape, like) if _region_backed(like, group) else None
-    return made if made is not None else torch.empty(shape, dtype=like.dtype, device=like.device)
+    return _lease(shape, like) if _region_backed(like, group) else torch.empty(shape, dtype=like.dtype, device=like.device)
 
 
 def _in_region(y):
@@ -324,8 +319,7 @@ def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: 
     output a region tensor of its own, so what it sends lies in the region and the output holds no lease of the input."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     y = x.movedim(dim, 0)
-    held = _lease(y.shape, y) if _region_backed(x, group) and not _in_region(y) else None
-    y = held.copy_(y) if held is not None else y.contiguous()
+    y = _lease(y.shape, y).copy_(y) if _region_backed(x, group) and not _in_region(y) else y.contiguous()
     out = _empty((sizes[rank],) + y.shape[1:], y, group)
     dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
     return out.movedim(0, dim).contiguous()

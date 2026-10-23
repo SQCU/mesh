@@ -10,12 +10,8 @@
 #define MESH_POLLS 4500000u
 typedef struct mesh_pages mesh_pages;
 static inline mesh_pages pages_of(uint64_t bytes, uint64_t page) { return (mesh_pages){(bytes + page - 1) / page}; }
-static inline mesh_pages pages_add(mesh_pages a, mesh_pages b) { return (mesh_pages){a.n + b.n}; }
-static inline mesh_pages pages_sub(mesh_pages a, mesh_pages b) { return (mesh_pages){a.n - b.n}; }
-static inline int pages_below(mesh_pages a, mesh_pages b) { return a.n < b.n; }
-static inline int pages_lost(mesh_pages a) { return a.n == UINT64_MAX; }
-static inline uint64_t pages_to_word(mesh_pages a) { return a.n; }
-static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){word}; }
+static inline uint64_t pages_count(mesh_pages a) { return a.n; }
+static inline int stamp_lost(uint64_t stamp) { return stamp == MESH_STAMP_LOST; }
 
 #define MESH_PEER(P) struct mesh_peer { P landing; }
 #define MESH_WAIT(P, U64) struct mesh_wait { P landed; U64 target; }
@@ -69,9 +65,9 @@ struct metal_result metal_premultiply(struct metal_program *, int type, void *ds
 struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                    uint64_t divisor);
 
-struct metal_wait { void *words, *data; size_t word, sent_word, data_offset; mesh_pages target, sent_target; };
+struct metal_wait { void *words, *data; size_t word, sent_word, data_offset; uint64_t target, sent_target; };
 
-struct metal_release { void *words; size_t word; mesh_pages value; };
+struct metal_release { void *words; size_t word; uint64_t value; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
 
 void metal_uses(struct metal_program *, void *const *buffers, size_t n, int write);

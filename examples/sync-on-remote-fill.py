@@ -27,7 +27,7 @@ def stop(*_):
 # design/algorithm-sources.md#collectivesync_on_remote_fill
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=('stream', 'sync', 'deadlock', 'independent'), default='stream')
+    parser.add_argument('--mode', choices=('stream', 'sync', 'independent'), default='stream')
     parser.add_argument('--root', type=int, default=0)
     parser.add_argument('--peer', type=int, default=1)
     parser.add_argument('--blocks', type=int, default=32)
@@ -82,9 +82,6 @@ def run(args, program, source, outputs, count):
                 print(f'published={pending.pop(output)} retained={output.array[0, :4].tolist()}', flush=True)
         print(f'unpublished_source=0 reply_ready={outputs[0].ready} retained_results={count - 1}', flush=True)
         return
-    if args.mode == 'deadlock':
-        print('WAIT reply[0] -> peer add -> source[0] -> write after this wait', flush=True)
-        sync_on_remote_fill(outputs[0])
     with program.write(source[0, 0]) as target:
         target[...] = 0
     sync_on_remote_fill(outputs[0])

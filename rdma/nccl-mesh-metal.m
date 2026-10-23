@@ -260,11 +260,11 @@ struct metal_result metal_truncdiv(struct metal_program *program, int type, void
 }
 
 static struct args wait_args(const struct metal_wait *w, size_t dst_offset, size_t n, int op) {
-  return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = pages_to_word(w->target), .aux = w->word, .op = (uint32_t)op,
-                       .first = w->sent_word, .sent = pages_to_word(w->sent_target)};
+  return (struct args){.dst = dst_offset, .src = w->data_offset, .n = n, .scalar = w->target, .aux = w->word, .op = (uint32_t)op,
+                       .first = w->sent_word, .sent = w->sent_target};
 }
 
-static struct args release_args(const struct metal_release *r) { return (struct args){.scalar = pages_to_word(r->value), .aux = r->word}; }
+static struct args release_args(const struct metal_release *r) { return (struct args){.scalar = r->value, .aux = r->word}; }
 
 void metal_uses(struct metal_program *program, void *const *buffers, size_t n, int write) {
   if (!n || recording_on(program) || program->encoder4) return;

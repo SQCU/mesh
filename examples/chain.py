@@ -12,7 +12,6 @@ from torch_mesh.streamed import instance, node
 SOURCE = fused.header() + Path(__file__).with_name('chain.metal').read_text()
 ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PEERS')
 STAGES = 3
-RING_BLOCKS = 2
 _PIPELINES = {}
 
 
@@ -153,30 +152,11 @@ def operand(path, rank, width):
     return steps, rows, inputs
 
 
-# docs/writing-a-service.md#the-rings
-def ring(ring_bytes, steps, slot):
-    slots = ring_bytes // slot
-    if slots >= 2 * steps:
-        return steps, 1, steps
-    block = slots // (RING_BLOCKS + 1)
-    if block < 1:
-        raise ValueError(f'ring_bytes {ring_bytes} holds {slots} slots of {slot} bytes; the input ring of '
-                         f'{RING_BLOCKS} blocks and the crossing ring of one take {RING_BLOCKS + 1} slots at least, '
-                         f'{(RING_BLOCKS + 1) * slot} bytes')
-    return block, RING_BLOCKS, block
-
-
-
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def fill(E, rank, inputs, first, steps, block):
-    held = E[first // block % len(E)][:min(steps, first + block) - first]
+def landed(rank, inputs, steps, rows, width):
+    E = torch_mesh.empty(steps, rows, width, dtype=torch.half)
+    held = torch_mesh.cpu_view(E)
     if rank == 0:
-        held.copy_(torch.from_numpy(inputs[first:first + len(held)]))
-    return dist.broadcast(held, src=0, async_op=True)
-
-
-# docs/writing-a-service.md#how-the-example-moves-its-data
-def drain(first, steps, block, O, outputs):
-    if O is not None:
-        last = min(steps, first + block)
-        torch.from_numpy(outputs[first:last]).copy_(O[:last - first], non_blocking=True)
+        held.numpy()[...] = inputs
+    dist.broadcast(held, src=0)
+    return E

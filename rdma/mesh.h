@@ -11,14 +11,13 @@
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
 #define MESH_VERSION 135u
-#define MESH_LAYOUT 144u
+#define MESH_LAYOUT 145u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_STREAMS 32
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
-#define MESH_STREAM_ENTRIES 4096u
 #define MESH_STREAM_GIVEN (UINT64_C(1)<<63)
 _Static_assert(38+25<=63,"an owner word");
 #define MESH_PAUSE_NS UINT64_C(3000000000)
@@ -47,8 +46,26 @@ struct mesh_page_entry {
 };
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
-/* design/transport.md section 14, "The stream"; design/pages-and-functions.md */
-struct mesh_entry { uint64_t row,pages,word,base; };
+/* design/transport.md section 14, "The plans"; design/pages-and-functions.md */
+struct mesh_entry { uint64_t row,pages,word,need; _Atomic uint64_t done; uint64_t count; };
+struct mesh_plan {
+  _Alignas(MESH_LINE) _Atomic uint64_t next;
+  _Atomic uint64_t start,ready;
+  uint32_t sends,lands;
+  _Alignas(MESH_LINE) _Atomic uint64_t sent;
+  _Atomic uint64_t landed;
+  uint64_t completed[2];
+  _Alignas(MESH_LINE) struct mesh_entry entry[];
+};
+_Static_assert(sizeof(struct mesh_entry)==48 && offsetof(struct mesh_plan,sent)==MESH_LINE && offsetof(struct mesh_plan,entry)==2*MESH_LINE,
+  "a table's writers a line each");
+#define MESH_STAMP_LOST UINT64_MAX
+static inline uint64_t mesh_plan_bytes(uint32_t sends,uint32_t lands){ return sizeof(struct mesh_plan)+((uint64_t)sends+lands)*sizeof(struct mesh_entry); }
+static inline void mesh_plan_lost(struct mesh_plan *t){
+  for(uint32_t e=0;e<t->sends+t->lands;e++)atomic_store_explicit(&t->entry[e].done,MESH_STAMP_LOST,memory_order_release);
+  atomic_store_explicit(&t->sent,MESH_STAMP_LOST,memory_order_release);
+  atomic_store_explicit(&t->landed,MESH_STAMP_LOST,memory_order_release);
+}
 struct mesh_pages { uint64_t n; };
 struct mesh_row { uint64_t r; };
 static inline struct mesh_pages mesh_pages_add(struct mesh_pages a,struct mesh_pages b){ return (struct mesh_pages){a.n+b.n}; }
@@ -57,35 +74,20 @@ static inline int mesh_pages_lt(struct mesh_pages a,struct mesh_pages b){ return
 static inline struct mesh_row mesh_row_after(struct mesh_row row,struct mesh_pages i){ return (struct mesh_row){row.r+i.n}; }
 static inline struct mesh_row mesh_entry_row(const struct mesh_entry *e){ return (struct mesh_row){e->row}; }
 static inline struct mesh_pages mesh_entry_pages(const struct mesh_entry *e){ return (struct mesh_pages){e->pages}; }
-static inline struct mesh_pages mesh_entry_base(const struct mesh_entry *e){ return (struct mesh_pages){e->base}; }
-static inline struct mesh_pages mesh_pages_load(const _Atomic uint64_t *word){ return (struct mesh_pages){atomic_load_explicit(word,memory_order_acquire)}; }
-static inline void mesh_pages_store(_Atomic uint64_t *word,struct mesh_pages p){ atomic_store_explicit(word,p.n,memory_order_release); }
-#define MESH_PAGES_LOST ((struct mesh_pages){UINT64_MAX})
 struct mesh_posts { _Alignas(MESH_LINE) _Atomic uint64_t posted[2]; _Atomic uint64_t done[2]; };
-#define MESH_LANE_UNITS 4096u
-_Static_assert(!(MESH_LANE_UNITS&(MESH_LANE_UNITS-1)),"a ring a power of two");
-static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int lane,uint64_t u){
-  return (_Atomic uint32_t *)((char *)m+rows)+((uint64_t)(2*way+lane)*MESH_LANE_UNITS+u%MESH_LANE_UNITS);
-}
 struct mesh_stream {
   _Alignas(MESH_LINE) _Atomic uint32_t peer;
   _Atomic uint32_t live;
-  uint64_t lists,rows;
   _Atomic uint64_t bandwidth,wire;
   _Atomic uint32_t child,cable;
   uint64_t child_start;
   _Alignas(MESH_LINE) _Atomic uint64_t owner;
-  _Atomic uint64_t sends,lands;
-  _Alignas(MESH_LINE) _Atomic uint64_t ready;
-  _Alignas(MESH_LINE) _Atomic uint64_t sent;
-  _Alignas(MESH_LINE) _Atomic uint64_t landed;
+  _Atomic uint64_t plans;
   struct mesh_posts posts[2];
 };
-_Static_assert(sizeof(struct mesh_stream)==7*MESH_LINE && _Alignof(struct mesh_stream)==MESH_LINE,"mesh_stream");
-_Static_assert(offsetof(struct mesh_stream,owner)==1*MESH_LINE && offsetof(struct mesh_stream,ready)==2*MESH_LINE &&
-  offsetof(struct mesh_stream,sent)==3*MESH_LINE && offsetof(struct mesh_stream,landed)==4*MESH_LINE &&
-  offsetof(struct mesh_stream,posts[0])==5*MESH_LINE && offsetof(struct mesh_stream,posts[1])==6*MESH_LINE,
-  "a writer's words a line of their own");
+_Static_assert(sizeof(struct mesh_stream)==4*MESH_LINE && _Alignof(struct mesh_stream)==MESH_LINE,"mesh_stream");
+_Static_assert(offsetof(struct mesh_stream,owner)==1*MESH_LINE && offsetof(struct mesh_stream,posts[0])==2*MESH_LINE &&
+  offsetof(struct mesh_stream,posts[1])==3*MESH_LINE,"a writer's words a line of their own");
 /* design/transport.md section 3, RECORD */
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_STREAMS]; struct mesh_health health; };
@@ -108,6 +110,11 @@ static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline int mesh_rows_hold(const struct hdr *m,struct mesh_row row,struct mesh_pages pages){
   return row.r<mesh_rows(m) && pages.n<=mesh_rows(m)-row.r;
+}
+static inline struct mesh_plan *mesh_plan_at(struct hdr *m,uint64_t offset){
+  if(offset<m->data_off || offset%MESH_LINE || offset>m->length || m->length-offset<sizeof(struct mesh_plan))return NULL;
+  struct mesh_plan *t=(struct mesh_plan *)((char *)m+offset);
+  return mesh_plan_bytes(t->sends,t->lands)<=m->length-offset?t:NULL;
 }
 static inline uint32_t mesh_arena_pages(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz))*m->block; }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }

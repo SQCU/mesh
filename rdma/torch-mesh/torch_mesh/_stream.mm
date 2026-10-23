@@ -251,7 +251,10 @@ static Issue prepare(const Call &call, Group &g) {
     i.sends = {g.reducing(tensor(sends, 0), i.op)};
     if (!receives.empty()) i.receives = {g.reducing(tensor(receives, 0), i.op)};
     break;
-  case BROADCAST: i.sends = {g.moving(tensor(sends, 0))}; break;
+  case BROADCAST:
+    i.sends = {g.moving(tensor(sends, 0))};
+    if (!receives.empty()) i.receives = {g.moving(tensor(receives, 0))};
+    break;
   case ALLGATHER: case REDUCE_SCATTER: {
     const bool reduces = what == REDUCE_SCATTER;
     const at::Tensor &whole = reduces ? tensor(sends, 0) : tensor(receives, 0);

@@ -80,33 +80,69 @@ static struct ibv_sge page_span(const struct port *port,uint64_t at){
 static const _Atomic uint64_t *region_word(uint64_t offset){
   return offset && offset<=M->length-8 && !(offset%8)?(const _Atomic uint64_t *)((char *)M+offset):NULL;
 }
-static struct mesh_entry list_entry(const struct mesh_stream *x,int land,uint64_t e){
-  return ((const struct mesh_entry *)((const char *)M+x->lists))[(land?MESH_STREAM_ENTRIES:0)+e%MESH_STREAM_ENTRIES];
-}
-static int list_holds(struct walk *w,const struct mesh_stream *x,int land,uint64_t e){
-  return e<w->presented || e<(w->presented=atomic_load_explicit(land?&x->lands:&x->sends,memory_order_acquire));
-}
-static int walk_page(struct walk *w,const struct mesh_stream *x,int land,struct mesh_pages q,struct mesh_entry *e){
-  if(w->at<w->done){w->at=w->done;w->at_page=w->done_page;}
-  for(;list_holds(w,x,land,w->at);w->at++){
-    *e=list_entry(x,land,w->at);
-    if(mesh_pages_lt(q,mesh_pages_add(w->at_page,mesh_entry_pages(e))))return 1;
-    w->at_page=mesh_pages_add(w->at_page,mesh_entry_pages(e));
+/* design/transport.md section 14, "The plans"; section 15, "The data path" */
+static uint64_t plan_find(const struct mesh_stream *x,uint64_t k){
+  uint32_t tables=mesh_rows(M);
+  for(uint64_t at=atomic_load_explicit(&x->plans,memory_order_acquire);tables--;){
+    const struct mesh_plan *t=mesh_plan_at(M,at);
+    if(!t)return 0;
+    if(atomic_load_explicit(&t->start,memory_order_acquire)==k)return at;
+    at=atomic_load_explicit(&t->next,memory_order_relaxed);
   }
   return 0;
 }
-static void walk_count(struct walk *w,const struct mesh_stream *x,int land,struct mesh_pages through,_Atomic uint64_t *count){
-  for(;list_holds(w,x,land,w->done);w->done++){
-    const struct mesh_entry e=list_entry(x,land,w->done);
-    const struct mesh_pages end=mesh_pages_add(w->done_page,mesh_entry_pages(&e));
-    if(mesh_pages_lt(through,end))break;
-    w->done_page=end;
+static void plans_lost(const struct mesh_stream *x){
+  uint32_t tables=mesh_rows(M);
+  for(struct mesh_plan *t=mesh_plan_at(M,atomic_load_explicit(&x->plans,memory_order_seq_cst));t && tables--;
+      t=mesh_plan_at(M,atomic_load_explicit(&t->next,memory_order_relaxed)))
+    mesh_plan_lost(t);
+}
+static uint32_t way_entries(const struct mesh_plan *t,int way){ return way?t->lands:t->sends; }
+static struct mesh_entry *way_entry(struct mesh_plan *t,int way,uint32_t e){ return t->entry+(way?t->sends:0)+e; }
+static void entry_complete(struct mesh_plan *t,int way,struct mesh_entry *e,uint64_t k){
+  atomic_store_explicit(&e->done,k,memory_order_release);
+  if(++t->completed[way]==way_entries(t,way))atomic_store_explicit(way?&t->landed:&t->sent,k,memory_order_release);
+}
+static void plan_begin(struct mesh_plan *t,int way,uint64_t k){
+  t->completed[way]=0;
+  for(uint32_t e=0;e<way_entries(t,way);e++)way_entry(t,way,e)->count=0;
+  if(!way_entries(t,way))atomic_store_explicit(way?&t->landed:&t->sent,k,memory_order_release);
+}
+static struct mesh_plan *cursor_at(const struct mesh_stream *x,int way,struct cursor *c,int posting){
+  for(;;){
+    if(!c->table){
+      if(!(c->table=plan_find(x,c->k)))return NULL;
+      c->entry=c->at=0;
+      if(posting)plan_begin(mesh_plan_at(M,c->table),way,c->k);
+    }
+    struct mesh_plan *t=mesh_plan_at(M,c->table);
+    if(!t){c->table=0;return NULL;}
+    for(;c->entry<way_entries(t,way) && !way_entry(t,way,c->entry)->pages;c->entry++)
+      if(posting)entry_complete(t,way,way_entry(t,way,c->entry),c->k);
+    if(c->entry<way_entries(t,way))return t;
+    c->k++;c->table=0;
   }
-  if(through.n!=w->count.n){w->count=through;mesh_pages_store(count,through);}
+}
+static void cursor_step(struct cursor *c,struct mesh_plan *t,int way){
+  c->page.n++;
+  if(++c->at==way_entry(t,way,c->entry)->pages){c->entry++;c->at=0;}
+}
+static void page_done(const struct mesh_stream *x,int way,struct cursor *d){
+  struct mesh_plan *t;
+  while((t=cursor_at(x,way,d,0)) && d->owed){cursor_step(d,t,way);d->owed--;}
+  if(!t)return;
+  struct mesh_entry *e=way_entry(t,way,d->entry);
+  if(++e->count==e->pages)entry_complete(t,way,e,d->k);
+  cursor_step(d,t,way);
+  d->owed=1;
+}
+static void cursors_begin(struct cursor *posting,struct cursor *lanes,struct mesh_pages page,uint64_t units0,uint64_t units1){
+  *posting=(struct cursor){.k=1,.page=page};
+  lanes[0]=(struct cursor){.k=1,.page=page,.units=units0,.owed=page_lane(page)!=0};
+  lanes[1]=(struct cursor){.k=1,.page=page,.units=units1,.owed=page_lane(page)!=1};
 }
 static void stream_zero(struct mesh_stream *x,int posts){
-  _Atomic uint64_t *words[]={&x->sends,&x->lands,&x->ready,&x->sent,&x->landed};
-  for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
+  atomic_store_explicit(&x->plans,0,memory_order_relaxed);
   for(int way=0;posts && way<2;way++)
     for(int c=0;c<2;c++){atomic_store_explicit(&x->posts[way].posted[c],0,memory_order_relaxed);atomic_store_explicit(&x->posts[way].done[c],0,memory_order_relaxed);}
 }
@@ -114,8 +150,7 @@ static void stream_free(struct mesh_stream *x,uint64_t owner){
   stream_zero(x,0);
   atomic_store_explicit(&x->owner,owner,memory_order_release);
 }
-static inline void unit_told(struct mesh_stream *x,int way,uint32_t c,uint64_t u,uint32_t row){
-  atomic_store_explicit(mesh_unit_row(M,x->rows,way,(int)c,u),row,memory_order_relaxed);
+static inline void unit_told(struct mesh_stream *x,int way,uint32_t c,uint64_t u){
   atomic_store_explicit(&x->posts[way].posted[c],u+1,memory_order_release);
 }
 /* design/transport.md section 14, "Holding it" and "A holding's end" */
@@ -129,7 +164,7 @@ static void stream_turn_one(struct port *port,uint32_t t){
     if(!owner)return;
     if(owner&MESH_STREAM_GIVEN){stream_free(x,0);return;}
     l->held[t]=owner;l->number[t]++;l->hold[t]=HOLD_SERVE;
-    l->sending[t]=(struct walk){.base=stream_pages(l->lane[k].sent,l->lane[k+1].sent)};
+    cursors_begin(l->sending+t,l->sent[t],stream_pages(l->lane[k].sent,l->lane[k+1].sent),l->lane[k].done,l->lane[k+1].done);
     atomic_store_explicit(&l->begun[t],l->number[t],memory_order_release);
   }
   if(l->hold[t]==HOLD_SERVE && owner==l->held[t] && owned(owner))return;
@@ -163,33 +198,28 @@ static void stream_receive_turn(struct port *port,uint32_t t){
   if(l->rnumber[t] || begun==atomic_load_explicit(&l->stopped[t],memory_order_relaxed))return;
   if(ended==begun){atomic_store_explicit(&l->stopped[t],begun,memory_order_release);return;}
   l->rnumber[t]=begun;
-  l->landing[t]=(struct walk){.base=stream_pages(s[0].posted,s[1].posted)};
+  cursors_begin(l->landing+t,l->landed[t],stream_pages(s[0].posted,s[1].posted),s[0].got,s[1].got);
 }
 static void stream_post(struct port *port,uint32_t t,uint32_t served,int way){
   struct link *l=&port->link;
   const uint32_t k=MESH_LANE_FIRST+2*t;
   struct mesh_stream *x=stream_of(port,t);
   if((served>>k&3)!=3 || (way?!l->rnumber[t]:l->hold[t]!=HOLD_SERVE))return;
-  struct walk *w=way?l->landing+t:l->sending+t;
-  for(;;){
-    const struct mesh_pages p=stream_pages(*lane_posts(l->lane+k,way),*lane_posts(l->lane+k+1,way)),q=mesh_pages_sub(p,w->base);
-    const uint32_t lane=k+page_lane(p);
+  struct cursor *c=way?l->landing+t:l->sending+t;
+  for(struct mesh_plan *plan;(plan=cursor_at(x,way,c,1));cursor_step(c,plan,way)){
+    const uint32_t lane=k+page_lane(c->page);
     struct lane_state *s=l->lane+lane;
     if(*lane_posts(s,way)-*lane_done(s,way)>=(way?s->window:s->sends))break;
-    struct mesh_entry e;
-    if(!walk_page(w,x,way,q,&e))break;
-    const struct mesh_pages i=mesh_pages_sub(q,w->at_page);
-    const _Atomic uint64_t *word=way?NULL:e.word?region_word(e.word):&x->ready;
+    const struct mesh_entry *e=way_entry(plan,way,c->entry);
+    const _Atomic uint64_t *word=way?NULL:region_word(e->word);
     uint64_t at=(uint64_t)(way?l->page:ones)*M->pgsz;
-    uint32_t row=MESH_ABSENT;
-    if(mesh_rows_hold(M,mesh_entry_row(&e),mesh_entry_pages(&e)) && (way || word)){
-      if(!way && !mesh_pages_lt(mesh_pages_add(mesh_entry_base(&e),i),mesh_pages_load(word)))break;
-      const struct mesh_row r=mesh_row_after(mesh_entry_row(&e),i);
-      if(row_at(r,&at))row=(uint32_t)r.r;
+    if(mesh_rows_hold(M,mesh_entry_row(e),mesh_entry_pages(e)) && (way || word)){
+      if(!way && atomic_load_explicit(word,memory_order_acquire)<e->need)break;
+      row_at(mesh_row_after(mesh_entry_row(e),(struct mesh_pages){c->at}),&at);
     }
     struct ibv_sge span=page_span(port,at);
     const struct mesh_queue *queue=l->provider.queues+lane;
-    unit_told(x,way,page_lane(p),*lane_posts(s,way),row);
+    unit_told(x,way,page_lane(c->page),*lane_posts(s,way));
     int error;
     if(way){struct ibv_recv_wr request={.wr_id=lane,.sg_list=&span,.num_sge=1},*bad;error=queue->receive(queue->pair,&request,&bad);}
     else{
@@ -213,9 +243,9 @@ static void walk_complete(struct port *port,int way,uint32_t moved){
     const uint32_t k=MESH_LANE_FIRST+2*t;
     if(!(moved>>k&3))continue;
     struct mesh_stream *x=stream_of(port,t);
-    struct walk *w=way?l->landing+t:l->sending+t;
-    if(way?l->rnumber[t]!=0:l->hold[t]==HOLD_SERVE)
-      walk_count(w,x,way,mesh_pages_sub(stream_through(*lane_done(l->lane+k,way),*lane_done(l->lane+k+1,way)),w->base),way?&x->landed:&x->sent);
+    struct cursor *lanes=way?l->landed[t]:l->sent[t];
+    for(uint32_t c=0;(way?l->rnumber[t]!=0:l->hold[t]==HOLD_SERVE) && c<2;c++)
+      for(;lanes[c].units<*lane_done(l->lane+k+c,way);lanes[c].units++)page_done(x,way,lanes+c);
     for(uint32_t c=0;c<2;c++)if(moved>>(k+c)&1)atomic_store_explicit(&x->posts[way].done[c],*lane_done(l->lane+k+c,way),memory_order_release);
   }
 }
@@ -553,7 +583,7 @@ static int link_connect(struct port *port){
   for(uint32_t k=MESH_LANE_FIRST;k<MESH_LINK_LANES && !error;k++)if(plan>>k&1){
     const struct frames room=frames_min(l->share,(struct frames){p->queues[k].receive_capacity});
     const struct frames sends=frames_min((struct frames){p->queues[k].send_capacity},(struct frames){MAX(l->share.n,1)});
-    l->lane[k]=(struct lane_state){.window=(uint32_t)MIN(MESH_LANE_UNITS,MAX(1,room.n/unit.n)),.sends=(uint32_t)MIN(MESH_LANE_UNITS,sends.n/unit.n)};
+    l->lane[k]=(struct lane_state){.window=(uint32_t)MAX(1,room.n/unit.n),.sends=(uint32_t)(sends.n/unit.n)};
     atomic_thread_fence(memory_order_release);
   }
   for(uint32_t s=0;s<plan_streams(plan) && !error;s++)l->wire[s]=stream_wire(port,s);
@@ -570,7 +600,7 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
     l->held[s]=l->number[s]=l->rnumber[s]=0;l->hold[s]=HOLD_NONE;
     atomic_store_explicit(&l->begun[s],0,memory_order_relaxed);atomic_store_explicit(&l->ended[s],0,memory_order_relaxed);
     atomic_store_explicit(&l->stopped[s],0,memory_order_relaxed);
-    l->sending[s]=l->landing[s]=(struct walk){0};
+    l->sending[s]=l->landing[s]=(struct cursor){0};
     x->child_start=mesh_started(getpid());
     atomic_store_explicit(&x->child,(uint32_t)getpid(),memory_order_release);
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
@@ -601,7 +631,6 @@ static void job_run(struct port *port,int job){
 }
 
 /* design/transport.md section 14, "A process a port" */
-static int stream_lists(struct port *port);
 static uint32_t own_lease(uint32_t *recorded,uint32_t pages){
   if(*recorded==MESH_ABSENT)*recorded=mesh_arena_alloc(&bridge,pages,M->block);
   if(*recorded!=MESH_ABSENT)held_pages+=pages;
@@ -683,8 +712,8 @@ static void link_turn(struct port *port){
   if(port->job || held)return;
   if(l->state==LINK_DOWN){
     if(l->page==MESH_ABSENT)l->page=own_lease(mesh_bridge_pages(M)->link+port->index,l->pages);
-    if(l->page==MESH_ABSENT || (l->lists==MESH_ABSENT && stream_lists(port))){
-      port_log(port,"lanes not made: the region holds no room for their blocks and rings; paired again on hearing the peer\n");
+    if(l->page==MESH_ABSENT){
+      port_log(port,"lanes not made: the region holds no room for its link page; paired again on hearing the peer\n");
       port_lost(port,ENOMEM);
       return;
     }
@@ -747,12 +776,11 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
 }
 static void streams_cancel(const struct port *port){
   for(uint32_t p=0;p<port_count;p++){
-    if((port && ports+p!=port) || ports[p].link.lists==MESH_ABSENT)continue;
+    if(port && ports+p!=port)continue;
     for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
       struct mesh_stream *x=stream_of(ports+p,s);
-      atomic_store_explicit(&x->live,0,memory_order_release);
-      mesh_pages_store(&x->sent,MESH_PAGES_LOST);
-      mesh_pages_store(&x->landed,MESH_PAGES_LOST);
+      atomic_store_explicit(&x->live,0,memory_order_seq_cst);
+      plans_lost(x);
     }
   }
 }
@@ -866,21 +894,6 @@ static void control_heard(struct port *port){
   }
 }
 /* design/transport.md section 2, the bridge's own pages; section 10, duds */
-static uint64_t page_round(uint64_t bytes){ return (bytes+page_bytes()-1)/page_bytes()*page_bytes(); }
-static int stream_lists(struct port *port){
-  const uint64_t lists=page_round(2*(uint64_t)MESH_STREAM_ENTRIES*sizeof(struct mesh_entry)),rows=page_round(4*(uint64_t)MESH_LANE_UNITS*sizeof(uint32_t));
-  const uint32_t page=own_lease(mesh_bridge_pages(M)->lists+port->index,(uint32_t)(MESH_LINK_STREAMS*(lists+rows)/M->pgsz));
-  if(page==MESH_ABSENT)return ENOMEM;
-  record_changed();
-  uint64_t at=M->data_off+(uint64_t)page*M->pgsz;
-  for(uint32_t s=0;s<MESH_LINK_STREAMS;s++){
-    struct mesh_stream *x=stream_of(port,s);
-    x->lists=at;at+=lists;
-    x->rows=at;at+=rows;
-  }
-  port->link.lists=page;
-  return 0;
-}
 static void link_reserve(void){
   struct mesh_bridge_pages *own=mesh_bridge_pages(M);
   for(uint32_t p=0;p<MESH_PORTS;p++)link_page[p]=own_lease(own->link+p,M->block);
@@ -890,7 +903,7 @@ static void link_reserve(void){
 /* design/transport.md section 14, "Plug to link, at the hardware's pace" */
 static void port_named(struct port *port,uint32_t index,const char *device){
   *port=(struct port){.index=index,.control=-1,.child_fd=-1};
-  port->link.provider.device=&port->device;port->link.lists=MESH_ABSENT;port->link.pages=M->block;
+  port->link.provider.device=&port->device;port->link.pages=M->block;
   snprintf(port->device.name,sizeof port->device.name,"%s",device);snprintf(port->name,sizeof port->name,"%s",device+5);
 }
 static void ports_find(void){
@@ -1355,7 +1368,7 @@ static void region_adopt(void){
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_stream *x=mesh_stream_at(M,s);
     atomic_store(&x->live,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);atomic_store(&x->cable,0);
-    mesh_pages_store(&x->sent,MESH_PAGES_LOST);mesh_pages_store(&x->landed,MESH_PAGES_LOST);
+    plans_lost(x);
   }
   struct mesh_link_info *links=mesh_links(M);
   for(uint32_t p=0;p<MESH_PORTS;p++){

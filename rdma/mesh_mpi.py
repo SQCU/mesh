@@ -193,11 +193,6 @@ class Comm:
         t, k = kind(buf.dtype)
         check(lib.ncclRecv(at(buf), buf.size * k, t, source, self.comm, ffi.NULL))
 
-    def Barrier(self):
-        box = empty(1, np.int32)
-        box[0] = 0
-        self.Allreduce(IN_PLACE, box)
-
     def allreduce(self, value, op=SUM):
         box = empty(1, value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
         box[0] = value

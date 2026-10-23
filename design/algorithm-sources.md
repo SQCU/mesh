@@ -875,15 +875,15 @@ routing reads (`mesh_map`; `MESH_ALPHA_US` and `MESH_BETA_NS` were deleted in cc
 
 ### Mesh.observe
 
-`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_map_wait` and `mesh_nodes_health`, the bridge's map readers (mesh-plan.h, rdma/mesh-dataflow.c:26-150): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
+`mesh_reached`, `mesh_region`, `mesh_map` and `mesh_nodes_health`, the bridge's map readers (mesh-plan.h, rdma/mesh-dataflow.c:26-150): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
 `mesh_reached` returns this node and the nodes its streams reach, each with its bandwidth, and `mesh_region` the
 region's bytes and those not leased. `mesh_map` copies the bridge's map (design/transport.md), every node's newest
 record, as the seqlock's reader (Boehm, MSPC 2012): the serial read with acquire once it is even, the records copied,
 the copy kept where the serial is unchanged (`mesh_map_whole`), else copied again. From that copy it makes the whole
 map, two nodes linked where each one's record reaches the other, at the lesser bandwidth (`mesh_joined`), its table the
 shortest routes (`mesh_routes`), and over the members the members' map of it (#topology). `mesh_nodes_health` reads
-the same records for each node's region, memory, model and health. `mesh_map_wait` waits on the serial, within its
-bound, so a loop of executions takes the next map. The bridges keep their links paired with or without a client, so
+the same records for each node's region, memory, model and health (`mesh_map_wait`, a wait on the serial, was deleted
+2026-10-22 with the serial, mesh 5dcb4f69). The bridges keep their links paired with or without a client, so
 the map is current whether or not anything runs (design/transport.md). `mesh_observe`, which copied the port table,
 became `mesh_reached` in f4b363ad, and Swift's `Mesh.observe` was deleted with swift/ in a8952de9.
 

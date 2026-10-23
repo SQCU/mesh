@@ -418,7 +418,7 @@ watch cannot end (a thread inside a kernel call) leaves the heartbeat to launchd
 | `docs/` | the bring-up writeup. `./serve.sh` to read it locally. |
 | `rdma/` substrate | the node's bridge and what it publishes: `mesh.h`, `mesh-link.c`, `mesh-observe.h` and `mesh-bridge.h` (the bridge), `mesh-heartbeat.c` (its heartbeat), `mesh-dataflow.c` and `mesh-call.h`, `mesh.metal` (the GPU wait, payload read and publication), `mesh-disk.h`, `mesh_disk.py`, `mesh-stat.c`, `mesh.py`, `peers.py`, `store.py`, `mesh_c_build.py`, `mesh-coreml.m`, and torch-mesh's `_stream.mm` (torch's MPS stream as the library's stream) |
 | `rdma/` collectives | NCCL's API over the substrate: `nccl.h`, `nccl-mesh.c` (its communicators and groups), `nccl-mesh-metal.m`/`.h`, `nccl-mesh-kernels.h`/`.m` (its kernels), `mesh-collective.c`, `mesh_mpi.py`, `allocate.py`, and torch-mesh's `backend.py`, `partition.py`, `evidence.py`, `engines.py` and its kernels (`streamed.metal`, `attention.metal`, `argmax.metal`, `speculate.metal`, `drafter.metal`) |
-| `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_map_wait`, `mesh_nodes_health`, defined in `mesh-dataflow.c`) and the collectives' planning |
+| `rdma/mesh-plan.h` | the one header both publish: the substrate's read side (`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_nodes_health`, defined in `mesh-dataflow.c`) and the collectives' planning |
 | consumers | everything that calls them: metal-microbench, `xonotic/`, `rdma/workload.py` and `xonwire.def` |
 
 ## The toolchain, installed headlessly

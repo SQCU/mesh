@@ -277,25 +277,27 @@ static void mesh_lease_free(struct hdr *m,uint32_t row,uint32_t from){
   }
   mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),row,pages/m->block);
 }
-/* design/transport.md section 14, "A holding's end"; design/extents-and-liveness.md, d */
+/* design/transport.md section 14, "A holding's end" and "Rows"; design/extents-and-liveness.md, d */
+static int mesh_named(const struct mesh_plan *t,uint32_t first,uint32_t count){
+  const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire);
+  for(uint32_t e=0;k && e<t->sends+t->lands;e++){
+    const struct mesh_entry *x=t->entry+e;
+    const uint64_t done=atomic_load_explicit(&x->done,memory_order_acquire);
+    if((done<k || done==MESH_STAMP_LOST) && x->row<(uint64_t)first+count && first<x->row+x->pages)return 1;
+  }
+  return 0;
+}
 static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count,uint64_t client){
   const int gone=atomic_load_explicit(&mesh_client_at(m,client)->owner,memory_order_acquire)!=client;
   for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
     const struct mesh_stream *x=mesh_stream_at(m,s);
     const uint64_t owner=atomic_load_explicit(&x->owner,memory_order_acquire);
-    int live=-1;
-    if((owner&~MESH_STREAM_GIVEN)==client && ((owner&MESH_STREAM_GIVEN) || gone)){
-      live=mesh_holds((pid_t)atomic_load_explicit(&x->child,memory_order_acquire),x->child_start);
-      if(live)return 1;
-    }
-    for(int way=0;x->rows && way<2;way++)
-      for(int lane=0;lane<2;lane++){
-        const uint64_t done=atomic_load_explicit(&x->posts[way].done[lane],memory_order_acquire);
-        const uint64_t posted=atomic_load_explicit(&x->posts[way].posted[lane],memory_order_acquire);
-        if(done<posted && live<0)live=mesh_holds((pid_t)atomic_load_explicit(&x->child,memory_order_acquire),x->child_start);
-        for(uint64_t u=done;live>0 && u<posted && u-done<MESH_LANE_UNITS;u++)
-          if(atomic_load_explicit(mesh_unit_row(m,x->rows,way,lane,u),memory_order_relaxed)-first<count)return 1;
-      }
+    if(!mesh_holds((pid_t)atomic_load_explicit(&x->child,memory_order_acquire),x->child_start))continue;
+    if((owner&~MESH_STREAM_GIVEN)==client && ((owner&MESH_STREAM_GIVEN) || gone))return 1;
+    uint32_t tables=mesh_rows(m);
+    for(const struct mesh_plan *t=mesh_plan_at(m,atomic_load_explicit(&x->plans,memory_order_acquire));t && tables--;
+        t=mesh_plan_at(m,atomic_load_explicit(&t->next,memory_order_acquire)))
+      if(mesh_named(t,first,count))return 1;
   }
   return 0;
 }
@@ -387,30 +389,16 @@ int mesh_stream_held(struct mesh_ctx *context,uint32_t stream,uint64_t wire){
   return x && context->client && atomic_load_explicit(&x->live,memory_order_acquire) &&
          atomic_load_explicit(&x->owner,memory_order_acquire)==context->client && atomic_load_explicit(&x->wire,memory_order_relaxed)==wire;
 }
-static struct mesh_stream *stream_owned(struct mesh_ctx *context,uint32_t stream,int *error){
-  struct mesh_stream *x=context && context->client?stream_held(context->M,stream):NULL;
-  *error=!context || !context->client?EINVAL:!x || !atomic_load_explicit(&x->live,memory_order_acquire)?ENOLINK:
-         atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client?EPERM:0;
-  return *error?NULL:x;
-}
-int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,struct mesh_stream_view *view){
-  int error;
-  struct mesh_stream *x=view?stream_owned(context,stream,&error):NULL;
-  if(!view)return EINVAL;
-  if(!x)return error;
-  char *m=(char *)context->M;
-  struct mesh_entry *lists=(struct mesh_entry *)(m+x->lists);
-  *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},
-    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,.posts=x->posts};
-  return 0;
-}
-int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct mesh_entry entry){
-  int error;
-  struct mesh_stream *x=stream_owned(context,stream,&error);
-  if(!x)return error;
-  _Atomic uint64_t *presented=land?&x->lands:&x->sends;
-  const uint64_t e=atomic_load_explicit(presented,memory_order_relaxed);
-  ((struct mesh_entry *)((char *)context->M+x->lists))[(land?MESH_STREAM_ENTRIES:0)+e%MESH_STREAM_ENTRIES]=entry;
-  atomic_store_explicit(presented,e+1,memory_order_release);
-  return 0;
+/* design/transport.md section 14, "The plans" */
+int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,struct mesh_plan *table){
+  if(!context || !context->client || !table || mesh_plan_at(context->M,(uint64_t)((char *)table-(char *)context->M))!=table)return EINVAL;
+  struct mesh_stream *x=stream_held(context->M,stream);
+  const int error=!x || !atomic_load_explicit(&x->live,memory_order_acquire)?ENOLINK:
+                  atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client?EPERM:0;
+  if(error){mesh_plan_lost(table);return error;}
+  atomic_store_explicit(&table->next,atomic_load_explicit(&x->plans,memory_order_relaxed),memory_order_relaxed);
+  atomic_store_explicit(&x->plans,(uint64_t)((char *)table-(char *)context->M),memory_order_seq_cst);
+  if(atomic_load_explicit(&x->live,memory_order_seq_cst))return 0;
+  mesh_plan_lost(table);
+  return ENOLINK;
 }
