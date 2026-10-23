@@ -1282,7 +1282,7 @@ static struct port *port_at(uint32_t interface){
    within MESH_PLATFORM_NS: ETIMEDOUT, port_wait); a context that fails stays as it is, and the port with it, until its
    child ends (design/transport.md section 14: nothing made is forgotten or made again in a process).  The device is
    its child's: spawned here where the port has none (child_spawn: not while its last child's end is awaited, `recycle`,
-   nor before the hold a child that ended unbidden set, `hold_to`), and asked to open it (CHILD_OPEN), its answer the
+   nor before the hold a spawn that failed set, `hold_to`), and asked to open it (CHILD_OPEN), its answer the
    job's end (child_heard) */
 static int child_spawn(struct port *port);
 static void port_open(struct port *port){
@@ -1787,7 +1787,7 @@ static int child_spawn(struct port *port){
     port->hold_to=now+MESH_PAUSE_NS;
     return error;
   }
-  port->child=pid;port->child_fd=pair[0];port->child_at=now;port->child_held=0;port->ending=0;
+  port->child=pid;port->child_fd=pair[0];port->child_held=0;port->ending=0;
   holders[entry]=(struct mesh_holder){(uint32_t)pid,0,mesh_started(pid)};
   port->holder=entry;
   say("link %u (%s): its child %d spawned\n",port->index,port->name,(int)pid);
@@ -1864,9 +1864,9 @@ static void child_turn(struct port *port){
       port->index,port->name,(int)port->child);
 }
 /* the port's child ended: its last messages taken, its exit reaped, a job of it out ended (ECHILD); one that ended
-   unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, and the
-   k-th in a row within MESH_CHILD_SETTLE_NS of its spawn, k from 2, holds the port's next spawn 60 2^(k-2) s, at most an
-   hour (the boot ledger's rule, a port's: restarted, "not crashing again of course", the operator 10-20).  Its streams cancelled again,
+   unbidden loses the link (port_lost, ECHILD) and is spawned again once the port's quiet window has passed, at the
+   events that open any port, however often its children ended (the operator, 2026-10-23 01:03Z: "this is not a real feature.
+   delete it and anything like it").  Its streams cancelled again,
    the region's closed leases looked at again (`unreleased`: the rows its units named are held no more, its queue
    pairs gone with it, mesh-dataflow.c mesh_pinned), its link down with no lanes, and the port to be opened by its next
    child */
@@ -1882,13 +1882,10 @@ static void child_reaped(struct port *port){
     mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};
   const int asked=port->ending;
   port->ending=port->recycle=0;
-  if(asked){port->aborts=0;say("link %u (%s): its child %d ended\n",port->index,port->name,(int)pid);}
+  if(asked)say("link %u (%s): its child %d ended\n",port->index,port->name,(int)pid);
   else{
-    port->aborts=now-port->child_at<MESH_CHILD_SETTLE_NS?port->aborts+1:0;
-    const uint64_t hold=port->aborts>1?MIN(UINT64_C(60)<<MIN(port->aborts-2,6u),UINT64_C(3600)):0;
-    port->hold_to=now+hold*UINT64_C(1000000000);
-    say("link %u (%s): its child %d ended unbidden (%s %d); its next spawned in %llu s\n",port->index,port->name,(int)pid,
-        WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status),(unsigned long long)hold);
+    say("link %u (%s): its child %d ended unbidden (%s %d)\n",port->index,port->name,(int)pid,
+        WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status));
     port->open=0;
     port_lost(port,ECHILD);
   }

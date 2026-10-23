@@ -572,8 +572,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   parent asks the child to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
   Other ports' children and links, the clients and their leases are untouched.
 - A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
-  passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
-  most an hour (section 9's rule, a port's: "restarted, not crashing again of course"). A child whose parent is gone halts its
+  passed, at the events that open any port (its child's end is one). Nothing the bridge does next depends on how often
+  a child ended: the spawn backoff of 1f9be1d5 and 128d0e84 (the k-th unbidden end within 60 s of a spawn holding the
+  next 60·2^(k−2) s) is deleted (4dc9e98a; the operator, 2026-10-23 01:03Z: "this is not a real feature. delete it and
+  anything like it"). A child whose parent is gone halts its
   lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
   its device lives (one of the launch before, whose parent ended unbidden; one in its exit is not seen), so a device's
   queue pairs are one child's at a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
