@@ -26,7 +26,7 @@ import torch.distributed as dist
 from torch._C._distributed_c10d import ReduceOp, _create_work_from_future
 from torch.futures import Future
 
-from . import _stream, evidence  # _stream's kernels for torch's functional collectives on MPS register as it loads
+from . import _stream, empty, evidence  # _stream's kernels for torch's functional collectives on MPS register as it loads
 
 import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: its _mesh_c)
 
@@ -42,19 +42,6 @@ def op(reduce_op):
         if reduce_op == known:
             return code
     raise NotImplementedError(f'the mesh backend reduces by sum, product, max, min and avg, not {reduce_op}')
-
-
-def blank(shape, dtype, device):
-    """An uninitialized contiguous tensor the backend hands a collective, in this node's bridge's region (a lease:
-    rdma/NCCL.md "Memory"): a CPU one over mesh.lease, an MPS one a region tensor (_stream.region_empty).  The library
-    sends from and lands in leases alone, and copies nothing into the region."""
-    kind = torch.device(device).type
-    if kind == 'mps':
-        return _stream.region_empty(list(shape), torch.empty(0, dtype=dtype), True)
-    if kind != 'cpu':
-        return torch.empty(shape, dtype=dtype, device=device)
-    count, element = math.prod(shape), torch.empty(0, dtype=dtype).element_size()
-    return torch.frombuffer(mesh.lease(max(count, 1) * element), dtype=dtype, count=max(count, 1))[:count].view(shape)
 
 
 def span(tensors):
@@ -78,7 +65,7 @@ def packed(tensors, read):
     whole = span(tensors)
     if whole is not None:
         return whole, None
-    whole = blank((sum(t.numel() for t in tensors),), tensors[0].dtype, tensors[0].device)
+    whole = empty(sum(t.numel() for t in tensors), dtype=tensors[0].dtype, device=tensors[0].device)
     if read:
         return torch.cat([t.detach().reshape(-1) for t in tensors], out=whole), None
     return whole, lambda: [t.copy_(p.view(t.shape)) for t, p in zip(tensors, whole.split([t.numel() for t in tensors]))]
@@ -224,7 +211,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self._issue([(BROADCAST, [t], [], [], 0, opts.rootRank) for t in tensors], tensors, asynchronous(opts))
 
     def barrier(self, opts=None):
-        return self.allreduce([blank((1,), torch.float32, 'cpu').fill_(1)])
+        return self.allreduce([empty(1, dtype=torch.float32, device='cpu').fill_(1)])
 
     def all_gather_single_coalesced(self, outputs, inputs, opts=None):
         return self._issue([(ALLGATHER, [i], [o], [i.numel()] * self._size, 0, 0) for o, i in zip(outputs, inputs)], outputs,
@@ -328,7 +315,7 @@ def _mesh(group_name, what):
 def merge_partials(partials: torch.Tensor, root: int, group_name: str) -> torch.Tensor:
     """The partials merge on the mesh group named `group_name` as a torch operator (torch_mesh.merge_partials):
     float32 rows of [m, l, O] (partial) merged by their log-sum-exp, on every member (`root` -1) or at `root`."""
-    out = blank(partials.shape, partials.dtype, partials.device)
+    out = empty(partials.shape, dtype=partials.dtype, device=partials.device)
     _mesh(group_name, 'merge_partials').merge_partials(out, partials, root=root)
     return out
 

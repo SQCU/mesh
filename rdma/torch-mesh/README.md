@@ -48,8 +48,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
-  bridge's region (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the region is
-  `torch.frombuffer(mesh.lease(nbytes), dtype=...)`, or `torch_mesh.empty(shape, dtype=..., device="cpu")`.
+  bridge's region (`torch_mesh.empty`). A program's CPU tensor in the region is
+  `torch_mesh.empty(shape, dtype=..., device="cpu")`.
 - Region MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
   Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
   data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release returns the lease
@@ -65,7 +65,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   (`ncclInvalidUsage`: the library copies nothing into the region). torch's MPS factories take their allocator from a
   fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
   tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a
-  functional collective's result, `backend.blank`) are region tensors. A non-contiguous operand fails as a value.
+  functional collective's result) are region tensors (`torch_mesh.empty`). A non-contiguous operand fails as a value.
   metal-microbench's callers: `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
 ## What works
