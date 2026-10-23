@@ -361,21 +361,21 @@ static void stream_end(struct port *port,uint32_t t){
   atomic_fetch_or_explicit(&l->broken,l->plan>>MESH_LANE_FIRST<<MESH_LANE_FIRST,memory_order_release);
   wake();
 }
-/* design/transport.md section 14: stream t's holding at its port's progress thread, each pass.  On its group's first
-   cable, an owner word holding a client's while none is served begins a holding, told the group's other cables
-   (`begun`, a count); on another cable, the first's count moving past the last holding it served begins one, its owner
-   the first stream's (a cable whose group changed serves from the first's holding after the count as the group was
-   made, which the parent told in its own `begun`; one not of its first's group, or lost to it, none).  A cable tells the holding
-   it serves (`serving`) before it reads whether its group is being made again (`regroup`), and begins none while it is
-   (groups_turn: of the two, one sees the other's word).  Its walks begin at its lanes'
-   SENDs and receives posted so far and at the other cables' pages as their last holding ended (no unit of an earlier
-   holding is outstanding: each ended with none, or its stream serves no holding again in the pairing, stream_end); its
-   entries are then taken as presented.  The owner word given (MESH_STREAM_GIVEN: by its holder, or by the event loop for
-   a holder gone, streams_let_go), or its client retired, ends it at once: nothing more of it is posted (unit_told), its
-   entries taken and not posted are dropped, and on the next pass, its completions taken, it is stopped or ended
-   (stream_end).  A holding given before the first cable began it is freed at once, no cable having begun it.  The
-   bridge posts nothing of its own on a stream: no unit between holdings and none for a holding that ended (the
-   operator, 2026-10-22: "the bridge has as little code as possible and does as little as possible") */
+/* design/transport.md section 14: stream t's holding at its port's progress thread, each pass.  Each cable of the
+   group acts on what its holder declared and what it reads, and waits on no other cable (the operator, 2026-10-23:
+   "i do not want an ipc barrier happening inside of networking code"): an owner word holding a client's, while the cable
+   serves none and has not stopped it (its bit of `stops`), begins a holding there; one given before the cable began it
+   is stopped there at once, nothing of it posted (group_stop: the last cable to stop frees the stream).  A cable tells
+   the holding it serves (`serving`) before it reads whether its group is being made again (`regroup`), and begins
+   none while it is (groups_turn: of the two, one sees the other's word).  Its walks begin at its lanes' SENDs and
+   receives posted so far and at the other cables' pages as their last holding ended (no unit of an earlier holding is
+   outstanding: each ended with none, or its stream serves no holding again in the pairing, stream_end; and the stream
+   is freed only once every cable has stopped and told its pages); its entries are then taken as presented.  The owner
+   word given (MESH_STREAM_GIVEN: by its holder, or by the event loop for a holder gone, streams_let_go), or its client
+   retired, ends it at once: nothing more of it is posted (unit_told), its entries taken and not posted are dropped, and
+   on the next pass, its completions taken, it is stopped or ended (stream_end).  The bridge posts nothing of its own on
+   a stream: no unit between holdings and none for a holding that ended (the operator, 2026-10-22: "the bridge has as
+   little code as possible and does as little as possible") */
 static void stream_turn(struct port *port,uint32_t t){
   struct link *l=&port->link;
   struct mesh_stream *x=stream_of(port,t),*h=l->hold[t]==HOLD_NONE?stream_first(x):l->first[t];
@@ -384,19 +384,15 @@ static void stream_turn(struct port *port,uint32_t t){
   if(l->hold[t]==HOLD_END){stream_end(port,t);return;}
   const uint64_t owner=atomic_load_explicit(&h->owner,memory_order_acquire);
   if(l->hold[t]==HOLD_NONE){
-    const uint32_t lead=atomic_load_explicit(&x->lead,memory_order_relaxed);
-    uint64_t begun=atomic_load_explicit(&h->begun,memory_order_acquire);
-    if(lead!=l->lead[t]){l->lead[t]=lead;l->begun[t]=atomic_load(&x->begun);}
-    if(!lead && !owner)return;
-    if(!lead && owner&MESH_STREAM_GIVEN){stream_free(x,0);return;}
-    if(lead && begun==l->begun[t])return;
+    const uint32_t n=atomic_load(&h->cables);
     uint32_t c=0;
-    while(c<atomic_load(&h->cables) && mesh_stream_at(M,h->member[c])!=x)c++;
-    if(c==atomic_load(&h->cables) || atomic_load(&h->stops)>>32>>c&1)return;
+    while(c<n && mesh_stream_at(M,h->member[c])!=x)c++;
+    const uint64_t stops=atomic_load(&h->stops);
+    if(!owner || owner==MESH_STREAM_GIVEN || c==n || ((stops|stops>>32)>>c&1))return;
+    if(owner&MESH_STREAM_GIVEN){group_stop(h,UINT64_C(1)<<c);return;}
     atomic_store(&x->serving,1);
     if(atomic_load(&x->regroup)){atomic_store(&x->serving,0);return;}
-    if(!lead)atomic_store_explicit(&h->begun,++begun,memory_order_release);
-    l->begun[t]=begun;l->first[t]=h;l->held[t]=owner&~MESH_STREAM_GIVEN;l->hold[t]=HOLD_SERVE;
+    l->first[t]=h;l->held[t]=owner;l->hold[t]=HOLD_SERVE;
     walk_begin(l->sending+t,h,x,0,s[0].sent,s[1].sent);
     walk_begin(l->landing+t,h,x,1,s[0].posted,s[1].posted);
   }
@@ -864,7 +860,7 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
     for(size_t i=0;i<sizeof words/sizeof *words;i++)atomic_store_explicit(words[i],0,memory_order_relaxed);
     l->posted_at[s]=stream_words(x->posted_at);l->landed_at[s]=stream_words(x->landed_at);
     for(uint32_t e=0;e<2*MESH_STREAM_TIMES;e++){atomic_store_explicit(l->posted_at[s]+e,0,memory_order_relaxed);atomic_store_explicit(l->landed_at[s]+e,0,memory_order_relaxed);}
-    l->held[s]=0;l->hold[s]=HOLD_NONE;l->lead[s]=0;l->begun[s]=0;l->first[s]=x;
+    l->held[s]=0;l->hold[s]=HOLD_NONE;l->first[s]=x;
     l->sending[s]=(struct walk){.ring=l->sending[s].ring};l->landing[s]=(struct walk){.ring=l->landing[s].ring};
     x->child_start=mesh_started(getpid());
     atomic_store_explicit(&x->child,(uint32_t)getpid(),memory_order_release);
@@ -1021,7 +1017,6 @@ static void group_set(const uint32_t *at,uint32_t n,uint64_t bandwidth){
     const uint64_t id=atomic_load(&m->cable);
     for(int i=0;i<8;i++){wire^=id>>(8*i)&0xff;wire*=UINT64_C(1099511628211);}
     h->member[c]=(uint8_t)at[c];
-    if(c)atomic_store(&m->begun,atomic_load(&h->begun));
     atomic_store(&m->lead,c?at[0]+1:0);
   }
   atomic_store(&h->wire,n>1?(wire?wire:1):atomic_load(&h->cable));

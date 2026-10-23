@@ -153,8 +153,9 @@ struct mesh_stream {
      ends), the holding it serves (`serving`, 0 none), its pages over its pairing as its last holding ended, each way
      (`base`), and its entries taken in the holding, each list (`walked`).  Its group's, the parent's: the group's first
      stream (`lead`: 1 + its region index, 0 itself the first), a group being made again (`regroup`, set on each of its
-     streams) and, a first stream's, its cables (`cables`, their region streams in identity order in `member`), and the
-     holdings its first cable began (`begun`) and the cables stopped in the last (`stops`, a bit a cable) */
+     streams) and, a first stream's, its cables (`cables`, their region streams in identity order in `member`) and the
+     cables stopped in its holding (`stops`, a bit a cable).  `begun` is read by nothing: each cable begins a holding
+     from the owner word (mesh-link.c stream_turn), and the word keeps the layout */
   _Alignas(64) _Atomic uint64_t cable;
   _Atomic uint64_t serving,base[2],walked[2];
   _Alignas(64) _Atomic uint64_t begun;

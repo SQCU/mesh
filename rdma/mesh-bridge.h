@@ -193,8 +193,7 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    lane's SEND gate (`gate`: the frames posted and retired; its capacity, set as the lane connects), each data lane's
    progress (`lane`, struct lane_state), the arena page of the streams' lists and time rings (`lists`, leased as the
    port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream).  Each stream's holding at the progress thread: the
-   owner it serves (`held`), its state (`hold`), its group's first stream (`first`) and that stream's holdings begun as
-   this cable last served or joined it (`begun`), its own `lead` as it last read it, its send and landing walks
+   owner it serves (`held`), its state (`hold`), its group's first stream (`first`), its send and landing walks
    (`sending`, `landing`) and their time rings (`posted_at`, `landed_at`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
@@ -208,8 +207,8 @@ struct link {
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at;
-  uint64_t held[MESH_LINK_STREAMS],begun[MESH_LINK_STREAMS];
-  uint32_t hold[MESH_LINK_STREAMS],lead[MESH_LINK_STREAMS];
+  uint64_t held[MESH_LINK_STREAMS];
+  uint32_t hold[MESH_LINK_STREAMS];
   struct mesh_stream *first[MESH_LINK_STREAMS];
   struct walk sending[MESH_LINK_STREAMS];
   _Atomic uint64_t *posted_at[MESH_LINK_STREAMS];

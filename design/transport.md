@@ -446,8 +446,11 @@ So a piece is placed by its size, which both ends know before the call (data-mod
   by the greater of what the word holds (so of two cables completing at once, the later stores the whole, with no pass
   more). `taken` is the least of every cable's `walked`, stored alike. On one cable, `sent` and `landed` are its lanes'
   arithmetic, with no cursor.
-- **A holding's start and end.** The first cable begins a holding as one cable did, and counts it (`begun`); another
-  cable begins it as the count moves (a cable whose group changed serves from the next). Each cable's walk starts at its
+- **A holding's start and end.** Each cable begins a holding from the group's owner word, as one cable did: an owner
+  word naming a client, while the cable serves none and its bit of `stops` is clear, begins it there; one given before
+  the cable began it is stopped there at once, nothing of it posted. No cable waits on another's word to begin or end
+  (the operator, 2026-10-23: "i do not want an ipc barrier happening inside of networking code or whatever"; the
+  first cable's `begun` count, which the others followed, is deleted). Each cable's walk starts at its
   own lanes' units and at each other cable's pages as its last holding ended (`base`). Each cable ends it at its give or
   its client's retirement, as before, and tells its stop by its bit in the first stream's `stops`; the cable whose bit
   completes them makes every cable's `walked` new and frees the stream, unless the first cable ended it with units
