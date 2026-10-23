@@ -111,7 +111,7 @@ def main():
     del a, b
     E = torch_mesh.empty(deep, rows, width, dtype=torch.half)
     P = torch_mesh.empty(sums, chain.paged(rows * width), dtype=torch.half)[:, :rows * width].unflatten(1, (rows, width))
-    O = torch.empty(block, rows, width, dtype=torch.half, device='mps') if rank == 0 else None
+    O = torch_mesh.empty(block, rows, width, dtype=torch.half) if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width)) if rank == 0 else None
     torch_mesh.check_memory()
     torch.mps.synchronize()

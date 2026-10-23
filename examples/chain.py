@@ -113,20 +113,21 @@ class Step:
     def __init__(self, a, b, rows, capacity, peers, held):
         S, K = a.shape
         tile = held['simdgroup_matrix_edge']
-        tiled = lambda w: w.reshape(w.shape[0] // tile, tile, w.shape[1] // tile, tile).permute(2, 0, 1, 3).contiguous()
+        tiled = lambda w: torch_mesh.empty(w.shape[1] // tile, w.shape[0] // tile, tile, tile, dtype=w.dtype).copy_(
+            w.reshape(w.shape[0] // tile, tile, w.shape[1] // tile, tile).permute(2, 0, 1, 3))
         self.At, self.Bt = tiled(a.T), tiled(b)
         self.K, self.S, self.held, self.capacity, self.peers = K, S, held, capacity, peers
-        self.X = torch.empty(capacity, K, dtype=torch.half, device='mps')
-        self.Y = torch.empty(capacity, S, dtype=torch.half, device='mps')
+        self.X = torch_mesh.empty(capacity, K, dtype=torch.half)
+        self.Y = torch_mesh.empty(capacity, S, dtype=torch.half)
         self.slot = paged(capacity * K)
         self.landing = torch_mesh.empty(peers * self.slot, dtype=torch.half)
         self.sent = None
         self.forms = {}
         self.plan(rows)
         self.args = self.forms[rows][1]
-        self.stamps = torch.zeros(self.args['G'], dtype=torch.int32, device='mps')
-        self.err = torch.zeros(1, dtype=torch.int32, device='mps')
-        self.arrivals = torch.zeros(1, dtype=torch.int32, device='mps')
+        self.stamps = torch_mesh.empty(self.args['G'], dtype=torch.int32).zero_()
+        self.err = torch_mesh.empty(1, dtype=torch.int32).zero_()
+        self.arrivals = torch_mesh.empty(1, dtype=torch.int32).zero_()
         self.phase = 0
 
     # docs/writing-a-service.md#the-step-kernel
