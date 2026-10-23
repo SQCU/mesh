@@ -30,17 +30,11 @@ from . import _stream, evidence  # _stream's kernels for torch's functional coll
 
 import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: its _mesh_c)
 
-ffi, LIB = mesh.ffi, mesh.lib
+ffi, LIB, check = mesh.ffi, mesh.lib, mesh.check
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
 # a call's kind (_stream.mm Kind)
 ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV = range(8)
-
-
-def check(result):
-    if result:
-        raise RuntimeError(f'libnccl-mesh: {ffi.string(LIB.ncclGetErrorString(result)).decode()}: '
-                           f'{ffi.string(LIB.ncclGetLastError(ffi.NULL)).decode()}')
 
 
 def op(reduce_op):

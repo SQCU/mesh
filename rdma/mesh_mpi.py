@@ -32,7 +32,7 @@ import numpy as np
 
 import mesh
 
-ffi, lib = mesh.ffi, mesh.lib
+ffi, lib, check = mesh.ffi, mesh.lib, mesh.check
 SUM, PROD, MAX, MIN, AVG = lib.ncclSum, lib.ncclProd, lib.ncclMax, lib.ncclMin, lib.ncclAvg
 IN_PLACE, UNDEFINED = object(), -32766
 TYPES = {np.dtype(np.int8): lib.ncclInt8, np.dtype(np.uint8): lib.ncclUint8, np.dtype(np.int32): lib.ncclInt32,
@@ -44,12 +44,6 @@ try:
                   np.dtype(ml_dtypes.float8_e5m2): lib.ncclFloat8e5m2})
 except ImportError:
     pass
-
-
-def check(result):
-    if result:
-        raise RuntimeError(f'libnccl-mesh: {ffi.string(lib.ncclGetErrorString(result)).decode()}: '
-                           f'{ffi.string(lib.ncclGetLastError(ffi.NULL)).decode()}')
 
 
 def empty(shape, dtype=np.float64):

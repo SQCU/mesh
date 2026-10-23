@@ -182,6 +182,13 @@ def footprint(pid=0):
     return info[2 + 7]
 
 
+def check(result):
+    """A libnccl-mesh result: RuntimeError with the library's reason where it is not ncclSuccess."""
+    if result:
+        raise RuntimeError(f'libnccl-mesh: {ffi.string(lib.ncclGetErrorString(result)).decode()}: '
+                           f'{ffi.string(lib.ncclGetLastError(ffi.NULL)).decode()}')
+
+
 def lease(nbytes):
     """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's region, whole pages already registered on its
     devices (design/transport.md), as a writable buffer (numpy.frombuffer and torch.frombuffer take it),
@@ -189,8 +196,5 @@ def lease(nbytes):
     reason where the region cannot meet it (the bytes asked and the pages free), the node runs no bridge, or this
     process still holds a lease of a bridge that stopped (rdma/NCCL.md "Memory")."""
     held, size = ffi.new('void **'), max(1, nbytes)
-    result = lib.ncclMemAlloc(held, size)
-    if result:
-        raise RuntimeError(f'libnccl-mesh: {ffi.string(lib.ncclGetErrorString(result)).decode()}: '
-                           f'{ffi.string(lib.ncclGetLastError(ffi.NULL)).decode()}')
+    check(lib.ncclMemAlloc(held, size))
     return ffi.buffer(ffi.gc(ffi.cast('char *', held[0]), lib.ncclMemFree), size)

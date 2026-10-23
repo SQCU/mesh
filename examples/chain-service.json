@@ -3,9 +3,5 @@
   "weights": "chain-weights",
   "output": "chain-output.npy",
   "width": 1024,
-  "parts": [512, 512],
-  "row_capacity": 64,
-  "ring_bytes": 25165824,
-  "rotation_blocks": [1, 1],
-  "capabilities": "etc/compute"
+  "rotation_blocks": [1, 1]
 }
