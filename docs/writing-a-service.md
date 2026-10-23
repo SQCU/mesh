@@ -165,10 +165,19 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
 
 - **Tiles.** Columns and rows come in tiles of the matrix unit's edge (8 on Apple7 and later), so the width, the share
   and the row count must be positive multiples of it.
-- **Workers.** G is the GPU's cores, or the larger stage's column tiles where there are fewer. Each worker takes a fair
-  share of a stage's tiles: n/G rounded down, the first few one more. y's columns over the share are split this way,
-  and so are z's columns over the width. Where a stage has fewer tiles than workers, the workers without one wait at its
-  stamps.
+- **Workers.** G is half the GPU's cores, or the larger stage's column tiles where there are fewer. The workers wait
+  for each other at their stamps, so all G must be on the GPU at once. Measured on 2026-10-23 (metal-microbench
+  output_data/rank0-20261023), not explained:
+  - With G at all 16 of the Mini's cores, a step stopped for 15 to 90 ms several times a second. G at 15 and at 12
+    did the same, and G at 8 never did.
+  - A step's time was otherwise unchanged. The three-node chain's steady figure counts these stops: 31, 44 or 57 us a
+    step for none, one or two in its window. With half the cores on every node, six runs of the service read 28.3 to
+    30.0 us, against the record's 31.24, with outputs within the record's bound.
+  - On the Studios, 32 workers run the two-Studio chain as fast as 64 (28.6 to 30.1 us, against 29.0 to 29.9).
+
+  Each worker takes a fair share of a stage's tiles: n/G rounded down, the first few one more. y's columns over the
+  share are split this way, and so are z's columns over the width. Where a stage has fewer tiles than workers, the
+  workers without one wait at its stamps.
 - **Simdgroups.** A work item is a group of RG row tiles by one column tile, over K's tiles. A worker runs as many
   simdgroups as the busier stage can keep working, each on one K tile at least, up to the device's limit, rounded
   down to a power of two. The SIMD width is the compiled pipeline's (`threadExecutionWidth`), since no document states
