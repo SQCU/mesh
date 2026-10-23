@@ -22,13 +22,11 @@
    pages and nothing else (no keepalive, no spare, no dud of the bridge's own), page p of the stream's sequence over
    its pairing on its lane p mod 2, posted in that order (design/transport.md section 14).  134: a holding ends with
    nothing outstanding on its stream's lanes, or the stream is never live again in the pairing (a link none of whose
-   streams is live is lost and pairs again from 0); no communicator presents filler.  135: a stream toward a node spans
-   every cable joining the two (design/transport.md section 14, "A stream over several cables"): a holding's page q on
-   lane (sum + q) mod span of the lanes of its cables ordered by their identities, sum their units posted before it */
-#define MESH_VERSION 135u
+   streams is live is lost and pairs again from 0); no communicator presents filler */
+#define MESH_VERSION 134u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 139u
+#define MESH_LAYOUT 138u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
