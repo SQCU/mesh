@@ -868,26 +868,30 @@ before execution, so its lookup is not transport or numerical work.
 
 The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)
 and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
-associate QPs and registered memory with a protection domain. The bridge keeps
-those device resources once per port it found (design/transport.md) and
-realizes a separate flow, with its own queue pairs and progress threads, for every
-program on a paired port. A peer is the node a port found; a program's destination
-nodes, queues and operand row ranges are resolved at setup. Publication scatters its
-row index to those flows' queues through a precomputed membership bitset, independent
-of collective verb and peer count. Several ports register the same canonical
-payload backing through their own devices; they do not create operand copies.
+associate QPs and registered memory with a protection domain. Each port's child of
+the bridge holds that port's device context, protection domain, registration and
+completion queues; the port children are the only processes that hold a device's
+objects or post on them (design/transport.md section 2). A child makes its link's
+queue pairs once a pairing, as many as the link's plan names
+([HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) section 5), and every client
+shares them (design/transport.md section 2). A client holds a stream of the link
+(`mesh_stream_take`, rdma/mesh-call.h:30) and presents its own rows on it, and holds
+no queue pair; the port's send and receive threads serve every stream of the link
+(rdma/mesh-link.c `port_progress`). Several ports register the same region through
+their own devices; they do not create operand copies.
 
-A program's pairing on a port has one monotonic deadline, the pairing window
-(mesh.h `MESH_PAIR_NS`, 30 s from both programs' start), and its wait for its
-peer's start the peer window (`MESH_PEER_NS`). A port's control connection is dialed
-nonblocking to the link-local address its peer's hello came from, so pairing performs
-no host or service lookup. Apple's BSD [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
+A link pairs once per port child: HELLO and LINK on the control socket carry the
+queue-pair numbers, packet sequence numbers and GIDs the hardware assigns at each
+pairing (design/transport.md section 3). The parent dials the control connection
+nonblocking to the link-local address its peer's hello came from
+(rdma/mesh-link.c:922-923), so pairing performs no host or service lookup. Apple's BSD [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
 and [accept](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html)
-contracts supply the nonblocking socket mechanism. Expiry fails the flow with
-`ETIMEDOUT`; it does not end the bridge.
-The deadline is setup state only: TX, RX, numerical publication and consumer
-completion contain no clock check. As [design/transport.md](transport.md) explains,
-userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
+contracts supply the nonblocking socket mechanism. A program pairs nothing: its
+communicator takes streams of links already paired (design/transport.md section 14).
+Since 2026-10-22 no clock decides a transaction; the
+platform deadline bounds the bridge's own lifecycle (design/transport.md section 5).
+As [design/transport.md](transport.md) explains, userspace deadlines cannot unwind
+a driver call already blocked in kernel sleep.
 
 In the Python surface `Program.copy(source.on(sender), destination.on(receiver), *, queue=0)` (also `send`, `recv`)
 cuts tensors at both block grids into regions; a region whose two ends are one member is a local copy call, else a
@@ -1145,28 +1149,18 @@ identity), `all_reduce` the row's all-reduce; an update of each block, its reade
 merges each block by its log-sum-exp (nccl.h `ncclMeshRedOpCreatePartials`'s operator, a reduce toward its owner or an
 all-reduce toward every peer, through torch_mesh's ProcessGroupMesh.merge_partials on either path; the block read as
 rows of [m, l, O], a member off the peers an empty partial). Any other associative combine is a supplied
-kernel declaring `combine` (Swift's `using combine:`): each peer's term moved to the owner by one all-to-all a row
+kernel declaring `combine`: each peer's term moved to the owner by one all-to-all a row
 and combined there by a tree of the combine's kernel (`kernel_call(op, peer=owner)`), into fresh blocks; `all_reduce`
 of such a combine is that `reduce_scatter`, then `all_gather`.
 
-Swift's `reduce(_:to:using:worker:)`, `reduceScatter` and `allReduce` (swift/Mesh.swift) are mesh-collective.c's
-compiled programs, as the verbs' movement is: the members' trees (`mesh_trees_shortest` over the bridges' map of them,
-`mesh_map`, what libnccl-mesh uses for a communicator given no paths), `mesh_compile` of `MESH_REDUCE`,
-`MESH_REDUCE_SCATTER` or `MESH_ALLREDUCE` (each tree's part whole), and every member's steps
-(`mesh_program_steps_cut`) over an operand whose element is a part, index i in owners[i]'s segment: in round order a
-COPY step a `send` of the peer's part, a REDUCE step the same and the supplied combine's `call` into the member's (a
-member holding none takes it as it comes, the compile's COPY of a first child; a peer holding none sends none). A rank's
-own terms are combined first. Every rank records the same steps, so the transfers' identities pair; the trees of every
-member set are folded into the digest `start()` names (`mesh_transfers_digest`), so members that read other maps fail
-as values (ESTALE). The walk was checked offline against the compiled programs (every kind, on full-mesh, ring, line
-and star maps of 2 to 7 members, random contributors and segments: each member holds what the verb defines, each term
-once).
+Swift's `reduce(_:to:using:worker:)`, `reduceScatter` and `allReduce` (swift/Mesh.swift), which ran
+mesh-collective.c's compiled programs, were deleted with swift/ in a8952de9 (2026-10-19).
 
 ## Collective movement
 
 The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm)
 and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp):
-[distinct communication relations](collective-verbs.md).
+distinct communication relations, one for each verb.
 
 In the Python surface each verb is one libnccl-mesh call a block row over the communicator of its members (a row
 crosses once its own blocks are ready): `all_gather(program, value, *, peers, owners)` is MPI_Allgatherv
@@ -1176,10 +1170,8 @@ destinations)` is MPI_Alltoallv (`torch.distributed.all_to_all_single` on the "m
 `gather` the same with every block's sender or receiver `root`. Each defines the block on its receivers in place, its
 blocks packed into one region tensor and back.
 
-Swift's `broadcast` and `allGather` are mesh-collective.c's `MESH_ALLGATHER` among the parts' ranks and the
-destinations (a part an element, a contributor's segment its parts; the walk at
-[collective.reduce_scatter](#collectivereduce_scatter)), in place of a send of every part to every destination and
-of `size` gathers; `gather`, `scatter`, `allScatter` and `allToAll` stay sends, point to point as NCCL's are.
+Swift's `broadcast`, `allGather`, `gather`, `scatter`, `allScatter` and `allToAll` were deleted with swift/ in
+a8952de9.
 
 ## Vocabulary projection
 

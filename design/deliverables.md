@@ -348,7 +348,7 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 
 ### P — packaging
 
-**P3. Stable identity, fixed path, one listener.** `rdma/Makefile`: `codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge` (default identity `Mesh Bridge`, created once per node by `bin/mesh-codesign-identity.sh` in the System keychain; ad hoc as a fallback); `install.sh` installs `mesh-flow` to `/usr/local/mesh/bin` when it differs, and launchd's `io.mesh.bridge` runs it from there. Ref: Apple code signing (designated requirement stays constant across builds for a persistent identity); `socketfilterfw`.
+**P3. Stable identity.** `rdma/Makefile` (lines 15 and 20) signs the bridge (`mesh-flow`) and its heartbeat (`mesh-heartbeat`) with `codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge`: the identity `Mesh Bridge` by default, which `bin/mesh-codesign-identity.sh` makes in the System keychain where it is absent, and ad hoc where the signature with it fails. `make -C rdma install` renames each image that changed into the user's mesh checkout's `rdma/` (`install-images`). The bridge is the admin user's launchd agent `io.mesh.bridge`, which runs `rdma/mesh-heartbeat` from that checkout, and the heartbeat opens `rdma/mesh-flow` with the node's configuration (bin/mesh-user.sh; design/transport.md section 2). `install.sh` removes the former system daemon's `/Library/LaunchDaemons/io.mesh.bridge.plist` and `/usr/local/mesh/bin/mesh-flow` where they remain (install.sh:54), and turns the application firewall off (`socketfilterfw --setglobalstate off`, install.sh:84). Ref: Apple code signing (designated requirement stays constant across builds for a persistent identity).
 
 ## 5. Not part of the library
 
@@ -356,7 +356,7 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 - An expression compiler, kernel zoo, scalar DSL, or any numerics inside mesh (I7).
 - A caller's operators moved into mesh (I8), or a model/layer API in mesh.
 - The layering, the operator's (2026-10-17): "program type A in bridge, program type B in meshlib, program type C in
-  meshlib/examples". Type A is the node's resident bridge (rdma/mesh-flow.c), type B the library (the C runtime,
+  meshlib/examples". Type A is the node's resident bridge (rdma/mesh-link.c, built as rdma/mesh-flow), type B the library (the C runtime,
   libnccl-mesh and its Python surface `python/mesh`), type C its examples. The Python
   surface's kernels and layers (`examples/kernels.py`, `examples/nn.py`: compositions over torch, restored 2026-10-17
   from the 09-14 library on the operator's "1: SOME FUCKING HIGHER ORDER FUNCTIONS FOR PARTIAL TENSORS",

@@ -86,18 +86,23 @@ for a pagewise dependency.
 overlap. Stamps identify the value stored at an address; they do not create a
 second copy of it.
 
-A terminal consumer uses `mesh_pages_consume(p, slot, first, count, g)` after its
-last read of received pages. This queues retirement in the receive slot's
-existing indexed bitmaps. Mesh returns the pages through the bridge's local
-release queue. There is no additional peer message, page allocation, or blocking
-call. An intermediate consumer may use the same operation after a gather;
-its next numerical publication still supplies the peer's storage reuse proof.
+Received pages are the receiver's own rows: they land in the landing entries
+it presents on its stream (design/transport.md section 14, `struct mesh_entry`),
+and no page goes back to the bridge. No call retires them; the
+`mesh_pages_consume` this design named is in no source. A program reuses a
+landing buffer in its own order and guards that buffer in its own source
+(design/transport.md section 14, "What a landing writes"). Its rows return to
+the region when it returns its lease (`mesh_lease_return`, rdma/mesh-call.h:22)
+or its process ends; a row that a posted receive still names stays held until
+that receive lands or its port's child exits (design/transport.md section 10).
+There is no peer message, page allocation or blocking call.
 
 In the two-peer model graph, partial(g + V) depends on reduced(g). Receipt of
-that next partial proves that the peer has used the previous reduced result.
-Before transmitting the next partial, mesh retires that producer's received
-reduced pages. A new reduced value therefore cannot race its predecessor's
-consumer. The last parameter group retires its gathered input explicitly.
+that next partial proves that the peer has used the previous reduced result, so
+a program that sends reduced(g + V) into the buffer where reduced(g) landed
+writes it only after the peer's last read. A new reduced value therefore cannot
+race its predecessor's consumer. That proof is the program's own order, not a
+transport call.
 
 ## Streaming reductions are page-wise dependencies
 
@@ -220,14 +225,15 @@ sent the data instead" (10-19); ranked there, `READY`-style keyword states ≺ n
 
 A participant may vanish at any moment, and nothing inside the runtime
 reconciles it. There is no rendezvous, no nonce, no abort frame and no retry:
-the only words exchanged are pages. The bridge's port phase reports a lost
-link and the status word goes negative. A peer that restarts numbers its
-generations from the start; its pages are counted stale, and a page that
-carries another program's epoch is recorded as the foreign-epoch word for the
-consumer to read. Either way the evaluations in flight stop concluding, and
-the consumer decides, at its own discretion and by its own clock, that the
-job has failed: it returns a failure value, and whoever launched the job
-relaunches it on both participants under a fresh epoch. What the old
+the only words exchanged are pages. A lost link reads ~0 in the stream's `sent`
+and `landed` words, and a page whose data does not come lands as a dud, a page of
+all ones (design/transport.md sections 1 and 10). A restarted bridge sets every
+stream not live with its landed words ~0, so a communicator of the old pairing
+fails as a value and is made again (design/transport.md section 2). The
+transport exchanges no epoch, session or stamp (design/transport.md section 3).
+Either way the evaluations in flight stop concluding, and the consumer decides,
+at its own discretion, that the job has failed: it returns a failure value, and
+whoever launched the job relaunches it on both participants. What the old
 rendezvous carried — plan, page count, stride, incarnation — is configuration,
 fixed before numerical invocation, and is not exchanged.
 

@@ -4,7 +4,7 @@ A node's bridge (`rdma/mesh-flow`) starts from one operand, its configuration: a
 passes, in JSON, TOML or YAML. `bin/mesh-user.sh CONFIGURATION [CHECKOUT]` reads it with the mesh library's one
 loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and region
 in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's launchd agent
-definition, so the keeper's load at boot keeps it, and records the document's path beside it. A
+definition, so every load of the agent reads it, and records the document's path beside it. A
 changed configuration is renamed into place, and `mesh-user.sh` sends the heartbeat SIGHUP: the bridge restarts on
 it, its region kept (README.md, A new bridge on a node). Calls in flight across the restart fail as values, and the
 next communicator runs on the new bridge (design/transport.md section 2). There
@@ -29,15 +29,17 @@ A document has these keys:
 
 The region is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
 when the device comes up, before any queue pair exists. The bridge does not deregister it: the kernel releases the
-registration at the port's child's exit (design/transport.md section 5). The bridge registers the region in extents
-of MESH_EXTENT, 1 GiB (rdma/mesh-verbs.h). That size is the bridge's choice. The hardware fact is that
-`tbt_post_recv` keeps only the low 32 bits of an SGE address, and 1 GiB divides a 4 GiB bank, so no extent crosses a
-4 GiB boundary. Each device checks the region's extents against its own `max_mr` as it comes up, on its
-port's queue: a region of more extents than that device registers is refused for that port, logged with the extent,
-its bytes, the errno and the extents the device holds. After the k-th refusal in a row the port opens again at a
-hello heard on it from 60·2^(k−1) s on (at most an hour), or at its link's coming on, keeping its extents
-(rdma/mesh-link.c `port_opened`). The bridge starts and serves the node either way; the region is not clamped. Clients lease
-from it; a lease that does not fit fails at its start with an error naming the execution, and the region does not grow.
+registration at the port's child's exit (design/transport.md section 5). Each device registers the region in extents
+of 2^k bytes: the least power of two, from the arena's page up to the 4 GiB bank, at which the region's extents number
+no more than that device's `max_mr` (rdma/mesh-link.c:538-541, `device_up`; design/transport.md section 1). On the
+Studios' 86 GiB under `max_mr` 100 that is 1 GiB. The bank is the hardware's fact: `tbt_post_recv` keeps only the low
+32 bits of an SGE address, so no extent crosses a 4 GiB boundary. Every input is the node's own (the region's size,
+`max_mr`, the bank), so the count of extents fits `max_mr` by construction (02002590). A registration that fails
+returns its errno as the port's open's value: the port is not open, the extents already registered stay, and it opens
+again at the events that open any port, its link's coming on, a hello heard on it or its child's end (rdma/mesh-link.c
+`port_opened`, line 895; 02002590 deleted the refusal's backoff). The bridge starts and serves the node either way;
+the region is not clamped. Clients lease from it; a lease that does not fit fails at its start with an error naming
+the execution, and the region does not grow.
 
 ## The examples
 

@@ -156,38 +156,39 @@ affected: `device_up` reads the port active before it allocates.
   The child makes one queue pair per lane of the plan (`pair_up`), tells them in CHILD_MADE, connects only those, and
   serves `served = plan`. The LINK names the plan's lanes in `count` and is checked against this end's plan.
 
-| budget (the fewer of the two ends') | plan | lanes | streams | keepalive lane |
+| budget (the fewer of the two ends') | plan | lanes | streams | lane 0 |
 |---|---|---|---|---|
-| 0, 1 | 0 | 0 | 0 | off: the link pairs, records flow, no stream is live |
-| 2 | 0xc | 2 | 1 | off |
-| 3, 4 | 0xd | 3 | 1 | on |
-| 5, 6 | 0x3d | 5 | 2 | on |
-| 7, 8 | 0xfd | 7 | 3 | on |
-| 9 | 0x3fd | 9 | 4 | on (no reserved lane 1) |
-| 10 and more | 0x3ff | 10 | 4 | on, lane 1 made as before |
+| 0, 1 | 0 | 0 | 0 | not made: the link pairs, records flow, no stream is live |
+| 2 | 0xc | 2 | 1 | not made |
+| 3, 4 | 0xd | 3 | 1 | made |
+| 5, 6 | 0x3d | 5 | 2 | made |
+| 7, 8 | 0xfd | 7 | 3 | made |
+| 9 | 0x3fd | 9 | 4 | made (no reserved lane 1) |
+| 10 and more | 0x3ff | 10 | 4 | made, and lane 1 |
 
-The keepalive lane comes first once a stream fits beside it. The reserved lane 1 is made only in the full plan, so a
-full plan is lane for lane the layout of MESH_VERSION 131. The plan of a smaller budget is always a subset of a
-larger one's.
+Lane 0 comes first once a stream fits beside it (`rdma/mesh-bridge.h` `link_plan`: bit 0 where the budget is three or
+more). The reserved lane 1 is made only in the full plan, so a full plan is lane for lane the layout of MESH_VERSION
+131. The plan of a smaller budget is always a subset of a larger one's.
 
-Section 10 gives every plan the keepalive. The plans stay as in this table, so the two ends' LINKs still match. A
-plan with lane 0 sends it there; a plan without lane 0 sends it on its stream's first lane while no stream is held.
-Nothing is posted on lane 1.
+Lane 0 carried the keepalive in versions before 133 (section 10 has its history). Since version 133 there is no
+keepalive (section 10; design/transport.md section 5: "a link carries no keepalive"), and nothing is posted on lane 0
+or lane 1. The plans stay as in this table, so the two ends' LINKs still match.
 
 - **Streams.** Streams beyond the plan's are never opened: not live, not free, never offered to a client
   (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports
   `bandwidth / MESH_LINK_STREAMS` as before, so the map's per-link figure is comparable across plans.
-- **Completion queues.** Each lane's share of the two completion queues is `cqe / lanes`, so a two-lane link's lanes
-  get 2048 frames each, against 409 on a ten-lane link. A lane's receive window is its share counted in its units (a
-  page on a stream's lane, a frame on lane 0), at most the queue pair's receive capacity (mesh-link.c).
+- **Completion queues.** Each stream lane's share of the two completion queues is `cqe` over the plan's stream lanes
+  (mesh-link.c:603), so a two-lane link's lanes get 2048 frames each, against 512 on a ten-lane link's eight stream
+  lanes. A stream lane's receive window is its share counted in pages, at most the queue pair's receive capacity
+  (mesh-link.c:636-639). Lanes 0 and 1 have no window: nothing is posted on them.
 
 **What a two-lane link costs.** Node 521750041's link to node 1974797816 gets the 0xc plan: one stream and no
-keepalive lane.
+lane 0.
 - One communicator at a time between the two nodes. A second concurrent one is refused at its init with EBUSY as a
   value ("rank 0 could not hold its streams at its bridge"). The first runs exact.
-- No keepalive frames, so a controller that slows after a quiet stretch (etc/bridge/README.md, the Mac mini's 6-10 us
-  after 40 us of nothing) is not kept warm. This costs latency on the first frames after a pause, not correctness.
-  Section 10 gives such a link the keepalive while its stream serves no holding.
+- No keepalive frames, as on every link since version 133 (section 10), so a controller that slows after a quiet
+  stretch (the Mac mini's SEND 6.2 us after 40-50 us of nothing, section 10) is not kept warm. This costs latency on
+  the first frames after a pause, not correctness.
 
 **Version.** MESH_VERSION stays 131 and MESH_LAYOUT stays 133. The full plan is byte for byte the 131 wire (the
 HELLO's `count`, which 131 sends as 0 and never reads, is the only new information), and the region's layout is
@@ -232,7 +233,7 @@ all of them without sanction in rubric"). For versions to join one map:
   its link up, allocates a PD and two CQs and makes UC queue pairs until refused would read the count; a second
   context of the same device would tell a per-context count from a per-device one, and a second device with its link
   up (the second Studio, cabled) whether the count is pooled across a machine's devices. If 3 are usable, `max_pairs`
-  for this driver is `max_qp`, and the plan gains the keepalive lane (0xd).
+  for this driver is `max_qp`, and the plan gains lane 0 (0xd).
 - **P2. Making until refused (not done).** Each end could make its plan's
   queue pairs in the order 2, 3, 0, 4, 5, 6, 7, 8, 9, 1, so that the first c made always contain `link_plan(c)`.
   It would stop at the first refusal and name in LINK how many it made, and both ends would connect
@@ -247,8 +248,9 @@ all of them without sanction in rubric"). For versions to join one map:
 - **P4. The plan is not published.** `struct mesh_link_info` (the bridge's observation pages) has no room for the plan without a
   MESH_LAYOUT bump, so mesh-stat cannot show it yet; the log line does. A record's `reach` could carry each link's
   stream count so a planner knows how many communicators a node pair takes at once.
-- **P5. A keepalive on a two-lane link.** Done in section 10, on every link: lane 0's frame where the plan has lane 0,
-  else a page of all ones on the stream's first lane while no stream is held.
+- **P5. A keepalive on a two-lane link.** Done at version 132 on every link (lane 0's frame where the plan had lane 0,
+  else a page of all ones on the stream's first lane while no stream was held) and deleted at version 133 with every
+  keepalive (section 10).
 - **P6. A host-path sendrecv whose peers refused theirs.** On the loop fabric's 3-node line (deleted in 736ce24d),
   rank 1's sendrecv waited without bound on the host path, and returned "ok" with every value wrong on the walk path,
   once the ranks it pairs with had refused theirs. It predates this change and is a library issue, not the transport's.
