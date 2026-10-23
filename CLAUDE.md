@@ -1,3 +1,5 @@
-See [AGENTS.md](AGENTS.md), the operator's words for this repo, and [THREAT-MODEL.md](THREAT-MODEL.md), the operator's words on access. Code is ranked by [design/rubrics.md](design/rubrics.md).
-
-The operator, 2026-08-27 (THREAT-MODEL.md): "accessibility is required; inaccessibility is *contractually forbidden*", and "rejection filtering and defensive programming are broadly forbidden by our security model". In collective and data code, design/rubrics.md C6: rejection filters ≺ none (2026-10-20: "count every rejection filter everywhere in client and data processing code. then delete absolutely all of them.").
+Start with the rubric in `design/rubrics.md`.
+It ranks each change against the old form, one trait at a time.
+The user's own words are in `THREAT-MODEL.md`.
+Data moves by the page table in `design/pages-and-functions.md`.
+We build what the user asked for, and no more.
