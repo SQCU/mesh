@@ -93,6 +93,35 @@ code fits the hardware. A 3 KB crossing takes 11.7 µs as plain dispatches in a 
 completion runs a scheduling kernel, the operand is copied to scratch, and the waits read gate words
 (measurement.md:3230-3238).
 
+## 5. Three positions on moving memory
+
+These three hold on CUDA clusters and on Apple silicon alike.
+
+**1. Paging and a memory abstraction are a hard requirement.** Every byte a program moves lives in a page of a page table
+that both ends know before the call. A page lands in a free page, and its row says which page it is. Without the table,
+each move has to be asked for or described at run time. That costs a round trip or a header every time, and the cost
+grows with every hop and every step.
+
+**2. Copying memory to 20 other machines is faster than reading it from the same machine's NVMe, when the code is not
+written wrong.** One preposted hop here lands a page in about 2-4 µs (sections 2 and 3). A random NVMe read takes tens
+of µs to about 100 µs before the first byte can be used. One Thunderbolt 5 cable moves about 10 GB/s, as much as or more
+than a Mini's own SSD. On an InfiniBand fat tree a remote node is one NIC hop and a few switch hops away, so remote
+memory beats local NVMe there too (Infiniswap, NSDI 2017). On the Mac mesh each node is itself the switch. So each hop
+adds its own few µs, and 20 hops are still faster than one random NVMe read.
+
+**3. One-sided writes are faster than two-sided writes that run a protocol at run time.** A one-sided write puts bytes
+where the receiver already said they go, and nobody answers. A protocol adds a request, an answer, a header or a lookup
+to each move. Each of those is another trip or another pass over memory. The Thunderbolt driver only has SEND and RECV.
+But when every receive is posted ahead, in an order both ends fixed, a SEND lands like a one-sided write. Nothing on the
+receiving side decides anything at run time. That holds only while every hop stays preposted and one-way, whatever else
+changes.
+
+**What this makes of a collective here.** On sm90 a collective pays HBM transactions, PCIe and BAR hops, and the
+congested split L2 at every step (section 1). A Mac node has none of these between its memory and its cable. So every
+node a partial passes through can spend its own FLOPs and bandwidth on it. It can add partials as they pass, then send
+the sum on. A collective here is a set of nodes that compute while they forward, not a set of endpoints joined by a
+fabric.
+
 ## Sources
 
 - Apple. TN3205: Low-latency communication with RDMA over Thunderbolt. 2026.
@@ -109,3 +138,4 @@ completion runs a scheduling kernel, the operand is copied to scratch, and the w
 - C. Zhao et al. Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures. ISCA
   2025.
 - InfiniBand Trade Association. InfiniBand Architecture Specification, Volume 1.
+- J. Gu et al. Efficient Memory Disaggregation with Infiniswap. NSDI 2017.
