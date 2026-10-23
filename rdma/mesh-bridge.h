@@ -123,9 +123,9 @@ struct link {
   uint64_t pool_free[MESH_POOL_BLOCKS/64],order[MESH_LINK_LANES];
 };
 /* design/transport.md section 14, "A process a port"; section 15, "The children"; section 16 */
-#define MESH_CHILD_VERSION 8u
+#define MESH_CHILD_VERSION 9u
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
-       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED };
+       CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_NAMED };
 struct child_message {
   uint32_t kind,pairing;
   int32_t result;
@@ -140,9 +140,9 @@ struct port;
 struct named { uint64_t name[2]; uint32_t node,padding; };
 struct indexed { uint64_t key[3]; struct mesh_plan *table; struct mesh_entry *entry; uint64_t k; };
 struct walker {
-  uint64_t serial;
+  uint64_t serial,told;
   struct named *name;
-  uint32_t names,nodes,*node,*hop;
+  uint32_t names,nodes,*node,*hop,*least;
   struct indexed *index;
   uint32_t indexed,index_room,blocked[MESH_CLIENTS],blocks;
   struct mesh_plan **table;
@@ -151,6 +151,7 @@ struct walker {
 };
 struct progress { _Alignas(MESH_LINE) _Atomic uint64_t passes; struct port *port; int way; struct walker walker; };
 void mesh_tuples_lost(struct hdr *,uint64_t client);
+int mesh_map_copy(struct hdr *,struct mesh_record **,uint64_t (**names)[2]);
 
 struct port {
   struct mesh_device device;

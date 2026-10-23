@@ -30,19 +30,26 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
   *bytes=(uint64_t)mesh_arena_pages(m)*m->pgsz;*unleased=(uint64_t)mesh_arena_free(m)*m->pgsz;
   munmap(m,length);return 0;
 }
-static int mesh_records_copy(struct hdr *m,struct mesh_record **out){
+int mesh_map_copy(struct hdr *m,struct mesh_record **out,uint64_t (**names)[2]){
   struct mesh_record *copy=NULL;
+  uint64_t (*named)[2]=NULL;
   uint32_t n=0;
   for(;;){
     const uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire),at=atomic_load_explicit(&m->map_at,memory_order_acquire);
     n=(uint32_t)at;
-    free(copy);
+    free(copy);free(named);named=NULL;
     if(!(copy=malloc((n?n:1)*sizeof *copy)))break;
     memcpy(copy,mesh_records(m,at),n*sizeof *copy);
+    uint64_t total=0;
+    for(uint32_t i=0;i<n;i++)total+=copy[i].names;
+    const uint64_t room=m->length-((uint64_t)((char *)mesh_map_names(m,at)-(char *)m));
+    if(names && total*sizeof *named<=room && (named=malloc((total+1)*sizeof *named)))memcpy(named,mesh_map_names(m,at),total*sizeof *named);
     atomic_thread_fence(memory_order_acquire);
     if(atomic_load_explicit(&m->map,memory_order_relaxed)==before)break;
   }
   *out=copy;
+  if(names)*names=named;
+  else free(named);
   return copy?(int)n:-ENOMEM;
 }
 static int mesh_records_read(struct mesh_record **out,uint32_t *node){
@@ -50,7 +57,7 @@ static int mesh_records_read(struct mesh_record **out,uint32_t *node){
   const int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
   if(node)*node=m->node;
-  const int count=mesh_records_copy(m,out);
+  const int count=mesh_map_copy(m,out,NULL);
   munmap(m,length);
   return count;
 }
@@ -70,16 +77,17 @@ int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
 /* design/transport.md section 14, "A registration" */
 uint32_t mesh_names_find(struct hdr *m,const uint64_t (*name)[2],uint32_t count,uint32_t *node){
   struct mesh_record *r=NULL;
-  const int records=mesh_records_copy(m,&r);
+  uint64_t (*named)[2]=NULL;
+  const int records=mesh_map_copy(m,&r,&named);
   uint32_t found=0;
   for(uint32_t i=0;i<count;i++){
     node[i]=0;
-    for(int k=0;!node[i] && k<records;k++)
-      for(uint32_t j=0;j<r[k].names && j<MESH_NAMES;j++)
-        if(r[k].name[j][0]==name[i][0] && r[k].name[j][1]==name[i][1]){node[i]=r[k].node;break;}
+    for(int k=0,at=0;!node[i] && named && k<records;at+=(int)r[k].names,k++)
+      for(uint32_t j=0;j<r[k].names;j++)
+        if(named[at+(int)j][0]==name[i][0] && named[at+(int)j][1]==name[i][1]){node[i]=r[k].node;break;}
     found+=node[i]!=0;
   }
-  free(r);
+  free(r);free(named);
   return found;
 }
 /* design/transport.md section 3, RECORD; section 15, "The library" */

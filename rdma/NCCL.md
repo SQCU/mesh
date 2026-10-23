@@ -76,9 +76,10 @@ landed in place (a COPY earlier in the group), and the landed bytes are the NIC'
 
 ## Communicators
 
-- `ncclGetUniqueId(id)`: the id names the communicator: 128 bytes drawn at random (`arc4random_buf`), or the text of
-  `NCCL_COMM_ID` where it is set. The caller hands every rank the same id (torch's store, a file, an environment); the
-  library sends it nowhere. A communicator's id is the FNV-1a hash of its 128 bytes, 64 bits (1 where it is 0).
+- `ncclGetUniqueId(id)`: the id names the communicator and its incarnation: 128 bytes drawn at random
+  (`arc4random_buf`) at each call, so no two runs of a program share one. The caller hands every rank the same id
+  (torch's store, a file); the library sends it nowhere. A communicator's id is the FNV-1a hash of its 128 bytes, 64
+  bits (1 where it is 0); a split's or a shrink's is made from its parent's, so it carries the parent's incarnation.
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's signature and meaning, with no bootstrap of NCCL's: no root, socket,
   listener, address or gather. The rank attaches its node's bridge, registers (its communicator's id, its rank) there,
   and reads from the map which node holds each rank's registration.
@@ -92,7 +93,7 @@ landed in place (a COPY earlier in the group), and the landed bytes are the NIC'
 
 | Word | Written by | Read by |
 |---|---|---|
-| the communicator's name table: a table of no tuples whose `name` is (id, rank), linked into the process's queue | the init, once; the destroy takes it out | its node's bridge, which carries the name in its record |
+| the communicator's name table: a table of no tuples whose `name` is (id, rank), linked into the process's queue | the init, once; the destroy takes it out | its node's bridge, which carries the name in its record as soon as a port's child walks it |
 | a record's `names` and `name` | the bridge | every member, through the map (`mesh_names_find`) |
 | `members[r]`: the node that holds (id, r) | the init, from the map | the communicator's map and channels |
 
@@ -128,7 +129,8 @@ landed in place (a COPY earlier in the group), and the landed bytes are the NIC'
 
 Each communicator makes its map at its init (`nccl-mesh.c` `map_of`) and keeps it for its life: its members its nodes,
 each marked by its bridge's node number, two joined by one link wherever the whole map's route (`mesh_routes`) joins
-their nodes, at the least capacity of that route's hops (a hop's capacity the sum of its cables'). Every bridge relays,
+their nodes, and with it the cables that link uses (`struct mesh_uses`, the solver's graph: [Routing](#routing)).
+Every bridge relays,
 so two members are joined whatever nodes lie between them (design/transport.md section 14, "Relays"); two members on
 one node are joined by no link, and a call that crosses between them fails as a value where it is planned. A member reads
 its own bridge's map; members whose bridges hold the same records make the same map. A later communicator reads the map
@@ -144,7 +146,8 @@ not fails as a value naming two members no route joins (`ncclInvalidUsage`).
 lists (`sends`, `lands`: the entries laid on each since the init, so a rank's k-th send to a peer is the peer's k-th
 receive from it), `published` and `consumed`. A send entry on the channel toward rank q is a tuple whose key is (id, q,
 me × 2^40 + `sends` + i), and a landing entry from q one whose key is (id, me, q × 2^40 + `lands` + i), i the entry's
-place in this call's list: the two ends compose the same key for the same pages. The bridge compares keys as words.
+place in this call's list: the two ends compose the same key for the same pages. A tuple's `from` is (id, the sending
+rank), so its bridge can tell when the sender's route moves. The bridge compares keys and names as words.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR). A plan compiles each of its collectives when it is made, along the trees the solver gives the plan's
@@ -669,11 +672,14 @@ including unseen ones in fast finite time is preferred".
   - A plan's all-to-all (the hosted family and `ncclMeshAlltoAllV`): a demand a block from a to b, root b, leaf a, `up`
     its bytes.
   - An exchange: a demand a rank's part, root its owner, the ranks that land it the leaves, `down` its bytes.
-  - The capacities are the communicator's map, one link a pair of members: the least capacity of the hops of the route
-    between their nodes, a hop's the sum of its cables' ([Communicators](#communicators)); and a per-hop latency (`hop`,
-    seconds: 0, the bridges' records carrying no latency). A step names its peer alone: which cables carry its pages is
-    the bridge's (design/transport.md section 14, "Sending"). The per-cable `way` of trees, steps, routes and the
-    solver's output, and the point-to-point cut among a pair's cables, are deleted.
+  - The capacities are the physical cables of the whole map, one edge a cable with its capacity (`struct mesh_uses`):
+    a link of the communicator's map, a pair of members, is a weighted use of the cables along the bridges' route
+    between their nodes, every cable of the hop by its share of their capacities where the two are joined by cables,
+    and the least-numbered cable of each hop where the route crosses other nodes, as the bridges send them
+    (design/transport.md section 14, "Sending"). A pair's load is added to the cables it uses, so a cable that several
+    pairs' routes share is counted once; and a per-hop latency (`hop`, seconds: 0, the bridges' records carrying no
+    latency). A step names its peer alone. The per-cable `way` of trees, steps, routes and the solver's output, and the
+    point-to-point cut among a pair's cables, are deleted.
 - **Multiplicative weights** [Garg and Könemann, FOCS 1998; Fleischer, SIAM J. Discrete Math. 2000; the framework of
   Arora, Hazan and Kale, Theory of Computing 2012]: T = floor(ln m / ε²) + 1 rounds (m the directed links, ε
   `MESH_SOLVE_EPS`, 0.1). In each round a link's length is exp(ε (x_e − x_max) / ρ) / c_e, x_e its load so far over its
@@ -795,7 +801,8 @@ its group, or that failed, is waited for, a host-path group's wait on it until a
 and run again is the caller's (the operator, 2026-09-10, design/pages-and-functions.md: "recovery is something which is
 only sanctioned through the mechanism of a totally feed forward nfe computation callgraph being re-run by the calling
 process because they don't like the results they got"). A link lost stamps ~0 the sends with requests out on it and
-every started landing of its node, and the link is paired again from 0 (design/transport.md section 14, "Lost"). A
+the landings whose sender's route comes over it, and the link is paired again from 0; a call whose member's name
+leaves the map, or whose route to it moves, is stamped at that map (design/transport.md section 14, "Lost"). A
 failure is
 the value of the call it happened in, and `ncclGetLastError` names it (the node of the channel); nothing of it is kept,
 and no later call reads it (the operator, 2026-10-22: "the collective code does not detect mend, heal, or prevent any
@@ -889,7 +896,8 @@ gathers, parses or joins bridge records itself.
   its unnormalised log share of what its root gathers and sends; a root's trees split its elements by exp(weight), each
   the floor of its share and the first ones one element more. A reduction toward r runs up r's trees, a broadcast from
   r down them. `mesh_flow_trees` makes them from the solver's trees of a range of demands.
-- **The solver** (`mesh_solve(map, eps, hop, demands, count, room, demand, parent, share)`, `mesh_solve_room`):
+- **The solver** (`mesh_solve(map, uses, eps, hop, demands, count, room, demand, parent, share)`, `mesh_solve_room`; `uses`
+  NULL where each link is a cable of its own):
   [Routing](#routing). Its output holds `mesh_solve_room` trees, which no solve passes: each of its T rounds adds at
   most one tree a demand. `mesh_flow_routing` makes an all-to-all's routing table from its demands' trees (each a path
   from its leaf to its root); `mesh_cut_shares(elements, element_bytes, page, share, count, first, length)` cuts
@@ -934,7 +942,7 @@ gathers, parses or joins bridge records itself.
 
 | variable | read by | meaning |
 |---|---|---|
-| `NCCL_COMM_ID` | library (ncclGetUniqueId) | the communicator's id, as text; unset, the id is drawn at random |
+| `NCCL_COMM_ID` | `mesh_mpi.py` | the text its world's id is made of (the library reads no environment for an id) |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; `bin/mesh-user.sh` passes the checkout's) |
 
 ## NumPy

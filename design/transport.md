@@ -430,21 +430,21 @@ Every word below, with its one writer at a time and its readers:
 | | `queue`: the region offset of the client's first table, 0 for none | the client; the bridge stores 0 in a vacant slot once no tuple of it is outstanding | the bridge's walks, `mesh_pinned` |
 | a table (`struct mesh_plan`, in the client's own rows) | `next` | the client | the walks |
 | | `name[2]`: a registration, 0 0 for none | the client | the parent |
-| | `sends`, `lands`; each tuple's `row`, `pages`, `word`, `need`, `key[3]` | the client, before the start that uses them | the children |
+| | `sends`, `lands`; each tuple's `row`, `pages`, `word`, `need`, `key[3]`, and a landing tuple's `from[2]` (its sender's registration) | the client, before the start that uses them | the children; the parent reads `key` and `from` to fail a call whose route moved |
 | | `start`: k, the call's number | the client, with release, last | the children |
 | | `ready`: the word a send tuple names (the client's choice) | the client's program | the send threads |
 | | each tuple's `count` and `posted`: k in the high 32 bits, pages completed and pages taken in the low | the client sets k << 32 at a start; the children add | the children, `mesh_pinned` |
 | | each tuple's `done`: k once its pages have completed, ~0 lost | the client for a tuple of no pages; else the child whose add completes it, by compare-and-swap; ~0 by a child for the tuples it has requests out on as its lanes halt, by the parent for every started landing at a link's loss and for a reaped child's requests, at its stop and at its adoption of a region, by a client's retirement for its own | the client's waits, `mesh_pinned` |
 | | `completed[2]`: k high, tuples complete of each way low | the client sets k << 32 plus the way's tuples of no pages; the children add | the children |
 | | `sent`, `landed`: k once each tuple of the way has completed, ~0 lost | the client where the way has no tuple of pages; else the child whose add completes the way; ~0 as `done` | the client's waits |
-| a record (`struct mesh_record`, appended) | `names`, `name[MESH_NAMES][2]` | the parent, from its live clients' tables | every bridge's map, `mesh_names_find` |
+| a record (`struct mesh_record`) | `names`, and that many registrations after it, on the wire and in the published map | the parent, from its live clients' tables | every bridge's map, `mesh_names_find`, `mesh_map_copy` |
 | the bridge's own pages (`struct mesh_bridge_pages`, appended) | `walking[port][way]`, and `walking[MESH_PORTS][0]` the parent's | each child thread: odd through each pass (it reads clients' queues and counts completions), even between; the parent: odd while it reads or stamps clients' queues; the parent makes a reaped child's even | a client giving a table back |
 | a port's link pages | its relay entries (`struct relay`) | the port's child; `state` sending (with the sender's port) and `sent` by the child that sends them on; the parent counts `sent` up at that child's reap | the children |
 | | its lanes' records (`struct lane_record`): each lane's requests posted and completed each way, what each was (`ring`, region offsets), and its run in hand (`run`: its tuple, its count, the index of its first page) | the port's child | the parent, after the child's exit |
 
 - **A tuple.** A send tuple is (source rows `row`, `pages`; destination `key`; ready word `word`, `need`): its pages go
-  once the word at region offset `word` reads at least `need`. A landing tuple is (`key`; landing rows `row`, `pages`):
-  the receive the client expects. A key is three words: the first two its registration, the third its position. The
+  once the word at region offset `word` reads at least `need`. A landing tuple is (`key`; landing rows `row`, `pages`;
+  `from`, its sender's registration): the receive the client expects. A key is three words: the first two its registration, the third its position. The
   client library composes them (its communicator's id and the destination rank; the source rank and the place on that
   pair's list: rdma/NCCL.md, Keys), and the bridge compares keys as words and reads none as a number.
 - **A call.** The client starts call k on a table once the table's `sent` and `landed` have reached its last call: it
@@ -452,10 +452,13 @@ Every word below, with its one writer at a time and its readers:
   its tuples of no pages, stamps those tuples' `done` = k and a way with no tuple of pages `sent` or `landed` = k (the
   bridge has nothing to do for them), and stores `start` = k with release. A client numbers its calls across all its
   tables, so k orders its calls: the tables of one call take consecutive numbers, in the order the client issues them.
-- **A registration** is a table's `name`, which the client links into its queue (a table of no tuples). At each turn the
-  parent reads the names of its live clients' tables, and a change makes its record again, which floods as every change
-  of a record does (RECORD, section 3). A client reads which node holds a name from the map (`mesh_names_find`). A send
-  tuple whose key's registration no record of the map holds stays in its queue: no bridge sends it.
+- **A registration** is a table's `name`, which the client links into its queue (a table of no tuples). It is published
+  when it is written: a port's send thread, whose walk meets a live client's name that its node's record in the map
+  lacks, tells its parent (`CHILD_NAMED`, once a map), and the parent reads its clients' names (`names_read`) and makes
+  its record again at once, which floods as every change of a record does (RECORD, section 3); a node with no link
+  reads them at its turn. A record carries any number of names: they follow it on the wire and in the published map.
+  A client reads which node holds a name from the map (`mesh_names_find`). A send tuple whose key's registration no
+  record of the map has held stays in its queue: no bridge sends it.
 - **The wire.** Every queue pair of a link carries runs. A run is a key unit (64 bytes: the key, the offset of its first
   page within the tuple, its count of pages) and then those pages, each a SEND of one whole page; a run is at most
   `MESH_RUN` pages. The receiving child keeps one key unit's receive posted on each lane, after the receives of the run
@@ -467,30 +470,40 @@ Every word below, with its one writer at a time and its readers:
   taken, holds every later table of its client toward the same node, so a lane carries a client's calls toward a node in
   their order. The children of every port whose peer is the tuple's node take runs of the same tuple, each as its lanes
   have room, so the tuple's pages spread over every cable to that node by what each cable moves. A tuple for a node no
-  cable reaches goes to the next node of the map's route (`mesh_routes`), on the cable of the lowest port to it.
+  cable reaches goes to the next node of the map's route (`mesh_routes`), on the cable of least `cable` id to it
+  (`least_toward`), which the communicator's solver counts as the cable that hop uses (rdma/NCCL.md, Routing).
 - **The index.** Each port's receive thread, when a key unit it must place has landed, reads its node's live clients'
   started landing tuples into a sorted array (key → table, tuple, k), within one walk of the queues, and finds the key
   in it by binary search. A key unit that lands is placed:
   - a started landing tuple of the key: the run's receives go into the tuple's rows from the offset, each the page its
     row gives in the page table, and then the next key unit's receive;
   - a registration of this node with no such tuple yet: the run waits on its lane, and its pages in the sender's credit
-    (TN3205), until a table naming the key starts; the lane carries nothing past it meanwhile;
+    (TN3205), until a table naming the key starts; the lane carries nothing past it meanwhile. It is not landed in free
+    pages and bound to the landing's rows later, because a client reads a buffer at its address: a lease's pages are
+    fixed at its making (the arena pages under its rows, mapped once into the client), a Metal buffer made over a lease
+    with no copy has its pages mapped into the GPU when it is made, and an NCCL receive buffer must hold the bytes at
+    its own address. A row bound to another page changes the page table, which none of these reads; reading through
+    the rows would take every landing kernel a lookup a page and a GPU buffer over any arena page (the Studios' 86 GiB
+    region is past one buffer's length), and a receive buffer a copy. So an arrival is placed only where its landing
+    already is;
   - a registration another node holds: the run is relayed (below);
   - a registration no record holds: its pages land in the port's spare page.
 - **Relays.** A run whose registration another node holds lands in pages of the receiving port's pool (the bridge's own,
   `pool[port]` of its pages), and is a relay entry in that port's link pages: its key, offset and count, its pool pages,
-  its lane and its order on that lane. Once its pages have landed, the child of the lowest port to the route's next node
-  sends the same pages on, on the lane of the same index (modulo its lanes), each lane's entries in their order; the
+  its lane and its order on that lane. Once its pages have landed, the child of the port whose cable has the least id
+  toward the route's next node sends the same pages on, on the lane of the same index (modulo its lanes), each lane's entries in their order; the
   receiving child takes its pool pages back once they are sent. Nothing is copied, and the entry is all the accounting.
 - **Completion.** A completion adds one to its tuple's `count`. The child whose add completes the tuple stores `done` =
   k by compare-and-swap from what it read (never over ~0), and adds one to the table's `completed` of that way; the child
   whose add completes the way stores `sent` or `landed` = k the same way.
 - **Lost.** A port's threads, as its lanes halt (a link lost), stamp ~0 each tuple they have a request out on or a run
   taken and not yet posted (`done`, and the table's `sent` or `landed` below k: `lanes_halted`), and the parent stamps
-  every started landing of its clients (`landings_lost`: a landing does not name the node its pages come from, so
-  one whose pages had not begun to arrive on the lost link is stamped with the rest); the other sends go on. The
-  bridge's stop and its adoption of a region stamp every started tuple not yet complete, and a client's retirement its
-  own (`mesh_tuples_lost`). A stamp is stored
+  each started landing whose sender's node is the lost link's peer or routed through it (`landings_from`, by the
+  landing's `from` and the map before the loss). At each map it publishes, the parent stamps each started tuple whose
+  member's name has left the map, or whose route to that member has moved: a landing, and a send with pages already
+  taken (`tuples_rerouted`); a send with none taken goes the new way. So a call waiting on data that can no longer come
+  ends at the map that shows its member or its route gone. The bridge's stop and its adoption of a region stamp every
+  started tuple not yet complete, and a client's retirement its own (`mesh_tuples_lost`). A stamp is stored
   only over a value below k, so a call started since is not stamped. A child adds to `posted` (by compare-and-swap,
   the call checked) before it posts and then reads `done`: where it reads ~0 it posts nothing and counts what it took
   in `count`; where the call has moved on since its index was made, the run waits for the next index. A run whose key unit is out is sent whole while the lanes serve, and receives a run announced are posted
@@ -608,9 +621,10 @@ citations of this document; what each part does is stated here and in the sectio
   nothing else. 134: a holding ends with nothing outstanding, or its stream is not live again in the pairing. 135: no
   FAREWELL; a bridge's stop reaches its peers as its control sockets' end (RECORD and LINK keep their kinds, 3 and 4).
   136: no streams; every queue pair of a link's plan a lane (`link_plan`: the first min(budgets) of them); every lane
-  carries runs, a key unit and then its pages (section 14, "The wire"); a RECORD carries its node's registrations
-  (`names`, `name`, appended).
-- `MESH_LAYOUT` is the region's layout. 146 deletes the streams (`struct mesh_stream`, the region's stream area, the
+  carries runs, a key unit and then its pages (section 14, "The wire"); a RECORD carries its node's registrations.
+  137: a RECORD's registrations follow it, any number (`names`); a relayed run goes on the cable of least id.
+- `MESH_LAYOUT` is the region's layout. 147 gives a tuple its `from` and puts a map's registrations after its records.
+  146 deletes the streams (`struct mesh_stream`, the region's stream area, the
   header's `streams` and `stream_off`, kept in their places as `spare` and `spare_off`, 0), gives each client slot its
   `queue` (in its padding: `owner` and `start` keep their places), puts the tuple's `posted` and `key` in `struct
   mesh_entry` and a table's `name` and `completed` (atomic) in `struct mesh_plan`, renames the bridge's `lists` its
@@ -726,7 +740,8 @@ lanes' share; connected); the lanes found failed (`CHILD_BROKEN`); a fault absor
 with ECANCELED until the parent's halt (the parent hears the same termination from IOKit itself), and after a fault
 for the rest of its life. Each turn of its main loop at which each progress thread serving lanes has passed since the
 last such turn, it writes the clock to the region's `progress[port]` (section 16).
-- `MESH_CHILD_VERSION` 8 names the port's pool in a make (`pool`). Version 7 has no `refused` in a child message (the registration-refusal backoff deleted). Version 6
+- `MESH_CHILD_VERSION` 9 has a child tell its parent of an unpublished registration (`CHILD_NAMED`). Version 8 names
+  the port's pool in a make (`pool`). Version 7 has no `refused` in a child message (the registration-refusal backoff deleted). Version 6
   writes the child's progress, which its parent reads, and ends the child after the provider's
   fault absorbed in it, as a child whose parent is gone ends. Version 5 told an absorbed fault (`CHILD_FAULTED`, after `CHILD_BROKEN`) and has no
   `CHILD_TERMINATED`; its open names its pairing and its connect no bandwidth (the child keeps its own from its open).
@@ -896,7 +911,7 @@ A port's child (`child_main`):
 | wait or loop | waits on | ended by | why it ends |
 |---|---|---|---|
 | the main loop's `kevent64` | its parent's socket, `wake` | the event or the tick | MESH_PAUSE_NS |
-| sends to the parent (`message_send`, blocking) | room in the parent's socket | the send | the child sends one reply a job (a port has one job out), one CHILD_BROKEN and one CHILD_FAULTED a pairing: at most three of 192 bytes unread in 8,192; a socket that full is a parent that does not turn, which its heartbeat ends, and the send then fails (EPIPE) |
+| sends to the parent (`message_send`, blocking) | room in the parent's socket | the send | the child sends one reply a job (a port has one job out), one CHILD_BROKEN and one CHILD_FAULTED a pairing, and one CHILD_NAMED a map: a few of 192 bytes unread in 8,192; a socket that full is a parent that does not turn, which its heartbeat ends, and the send then fails (EPIPE) |
 | a job (`device_up`, `link_make`, `link_connect`, `getifaddrs`) | the kernel | its return | not ours to bound: the parent concludes the port around it at MESH_PLATFORM_NS (`ports_stalled`), and it counts as hung |
 | a progress thread's pass (`port_pass`) | nothing | its end | posts and polls return (section 6); `run_send` and `run_receive` end at the lane's window, a run held, or its last page; a walk of the queues passes at most a table a row a slot, and the index's search is binary |
 | a progress thread with no lane served | `served` | a change, or the bound | MESH_PAUSE_NS a wait |

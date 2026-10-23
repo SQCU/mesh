@@ -369,46 +369,66 @@ uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank
   return k;
 }
 
-static uint32_t mesh_edges(const struct mesh_link_map *map,uint32_t *from,uint32_t *to,double *cap){
+static uint32_t mesh_edges(const struct mesh_link_map *map,uint32_t *from,uint32_t *to,double *cap,uint32_t *index){
   const uint32_t n=map->nodes;
   uint32_t E=0;
   for(uint32_t l=0;l<map->edges;l++){
     const uint32_t a=map->edge[l].a,b=map->edge[l].b;
     if(a>=n || b>=n || a==b)continue;
-    if(from){from[E]=a;to[E]=b;cap[E]=(double)map->edge[l].capacity;}
+    if(from){from[E]=a;to[E]=b;cap[E]=(double)map->edge[l].capacity;index[E]=l;}
     E++;
   }
   return E;
 }
 
-uint32_t mesh_solve_room(const struct mesh_link_map *map,double eps,uint32_t count){
-  const uint32_t edges=2*mesh_edges(map,NULL,NULL,NULL);
+static uint32_t mesh_cables(const struct mesh_link_map *map,const struct mesh_uses *uses){ return uses?uses->cables:mesh_edges(map,NULL,NULL,NULL,NULL); }
+
+uint32_t mesh_solve_room(const struct mesh_link_map *map,const struct mesh_uses *uses,double eps,uint32_t count){
+  const uint32_t edges=2*mesh_cables(map,uses);
   const double e=eps>0?eps:1;
   const uint64_t rounds=(uint64_t)(mesh_log(edges>1?(double)edges:2.0)/(e*e))+1,room=rounds*count;
   return room>=UINT32_MAX?UINT32_MAX-1:(uint32_t)room;
 }
 
-uint32_t mesh_solve(const struct mesh_link_map *map,double eps,double hop,const struct mesh_demand *demands,uint32_t count,uint32_t room,
-                    uint32_t *demand,uint32_t *parent,double *share){
-  const uint32_t n=map->nodes,E=mesh_edges(map,NULL,NULL,NULL);
+static void mesh_spread(const struct mesh_uses *uses,uint32_t l,uint32_t e,uint32_t toward,double bytes,double *add){
+  for(uint32_t i=uses?uses->first[l]:0;uses && i<uses->first[l+1];i++)
+    add[2*(size_t)(uses->use[i]>>1)+(toward^(uses->use[i]&1))]+=uses->weight[i]*bytes;
+  if(!uses)add[2*(size_t)e+toward]+=bytes;
+}
+
+uint32_t mesh_solve(const struct mesh_link_map *map,const struct mesh_uses *uses,double eps,double hop,const struct mesh_demand *demands,
+                    uint32_t count,uint32_t room,uint32_t *demand,uint32_t *parent,double *share){
+  const uint32_t n=map->nodes,E=mesh_edges(map,NULL,NULL,NULL,NULL),P=mesh_cables(map,uses);
   if(!n || !count)return 0;
-  uint32_t *from=calloc((size_t)E+1,sizeof *from),*to=calloc((size_t)E+1,sizeof *to);
-  double *cap=calloc((size_t)E+1,sizeof *cap),*load=calloc(2*(size_t)E+1,sizeof *load),*add=calloc(2*(size_t)E+1,sizeof *add),
-         *len=calloc(2*(size_t)E+1,sizeof *len),*dist=calloc((size_t)n+1,sizeof *dist);
+  uint32_t *from=calloc((size_t)E+1,sizeof *from),*to=calloc((size_t)E+1,sizeof *to),*index=calloc((size_t)E+1,sizeof *index);
+  double *cap=calloc((size_t)E+1,sizeof *cap),*pcap=calloc((size_t)P+1,sizeof *pcap),*load=calloc(2*(size_t)P+1,sizeof *load),
+         *add=calloc(2*(size_t)P+1,sizeof *add),*plen=calloc(2*(size_t)P+1,sizeof *plen),*len=calloc(2*(size_t)E+1,sizeof *len),
+         *dist=calloc((size_t)n+1,sizeof *dist);
   uint32_t *up=calloc((size_t)n+1,sizeof *up),*upl=calloc((size_t)n+1,sizeof *upl),*tree=calloc((size_t)n+1,sizeof *tree),
            *treel=calloc((size_t)n+1,sizeof *treel),*links=calloc((size_t)room*n+1,sizeof *links),*hits=calloc((size_t)room+1,sizeof *hits),made=0;
   unsigned char *done=calloc((size_t)n+1,1);
-  int failed=!from || !to || !cap || !load || !add || !len || !dist || !up || !upl || !tree || !treel || !links || !hits || !done || !(eps>0);
-  if(!failed)mesh_edges(map,from,to,cap);
+  int failed=!from || !to || !index || !cap || !pcap || !load || !add || !plen || !len || !dist || !up || !upl || !tree || !treel || !links ||
+             !hits || !done || !(eps>0);
+  if(!failed)mesh_edges(map,from,to,cap,index);
   double least=0,total=0;
-  for(uint32_t e=0;!failed && e<E;e++)if(!least || cap[e]<least)least=cap[e];
+  for(uint32_t c=0;!failed && c<P;c++){
+    pcap[c]=uses?(double)uses->capacity[c]:cap[c];
+    if(!(pcap[c]>0))failed=1;
+    else if(!least || pcap[c]<least)least=pcap[c];
+  }
   for(uint32_t d=0;!failed && d<count;d++)total+=(double)demands[d].up+(double)demands[d].down;
-  const uint32_t rounds=failed?0:(uint32_t)(mesh_log(2*E>1?(double)(2*E):2.0)/(eps*eps))+1;
+  const uint32_t rounds=failed?0:(uint32_t)(mesh_log(2*P>1?(double)(2*P):2.0)/(eps*eps))+1;
   const double width=total>0 && least>0?total/rounds/least:1;
   for(uint32_t r=0;!failed && r<rounds;r++){
     double most=0;
-    for(size_t e=0;e<2*(size_t)E;e++)if(load[e]/cap[e/2]>most)most=load[e]/cap[e/2];
-    for(size_t e=0;e<2*(size_t)E;e++){len[e]=mesh_exp(eps*(load[e]/cap[e/2]-most)/width)/cap[e/2];add[e]=0;}
+    for(size_t c=0;c<2*(size_t)P;c++)if(load[c]/pcap[c/2]>most)most=load[c]/pcap[c/2];
+    for(size_t c=0;c<2*(size_t)P;c++){plen[c]=mesh_exp(eps*(load[c]/pcap[c/2]-most)/width)/pcap[c/2];add[c]=0;}
+    for(uint32_t e=0;e<E;e++)for(uint32_t toward=0;toward<2;toward++){
+      double sum=uses?0:plen[2*(size_t)e+toward];
+      for(uint32_t i=uses?uses->first[index[e]]:0;uses && i<uses->first[index[e]+1];i++)
+        sum+=uses->weight[i]*plen[2*(size_t)(uses->use[i]>>1)+(toward^(uses->use[i]&1))];
+      len[2*(size_t)e+toward]=sum;
+    }
     for(uint32_t d=0;!failed && d<count;d++){
       const struct mesh_demand *x=demands+d;
       const double u=(double)x->up,w=(double)x->down;
@@ -447,15 +467,15 @@ uint32_t mesh_solve(const struct mesh_link_map *map,double eps,double hop,const 
       for(uint32_t v=0;v<n;v++){
         if(v==x->root || tree[v]==UINT32_MAX)continue;
         const uint32_t e=treel[v],toward=from[e]==v?0:1;
-        add[2*(size_t)e+toward]+=u/rounds;
-        add[2*(size_t)e+(toward^1)]+=w/rounds;
+        mesh_spread(uses,index[e],e,toward,u/rounds,add);
+        mesh_spread(uses,index[e],e,toward^1,w/rounds,add);
       }
     }
-    for(size_t e=0;e<2*(size_t)E;e++)load[e]+=add[e];
+    for(size_t c=0;c<2*(size_t)P;c++)load[c]+=add[c];
   }
   for(uint32_t k=0;!failed && k<made;k++)share[k]=(double)hits[k]/rounds;
-  free(from);free(to);free(cap);free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(links);free(hits);
-  free(done);
+  free(from);free(to);free(index);free(cap);free(pcap);free(load);free(add);free(plen);free(len);free(dist);free(up);free(upl);free(tree);
+  free(treel);free(links);free(hits);free(done);
   return failed?UINT32_MAX:made;
 }
 

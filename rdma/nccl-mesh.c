@@ -200,6 +200,7 @@ struct plan;
 
 struct ncclComm {
   struct mesh_link_map map;
+  struct mesh_uses uses;
   uint64_t page, id;
   uint32_t splits, *members, count, nops;
   int nranks, rank, touched, unpublished;
@@ -244,6 +245,11 @@ static void program_free(struct mesh_program *program) {
   free((void *)program->segment); free((void *)program->log_weight); free((void *)program->first); free((void *)program->move);
 }
 
+static void uses_free(struct mesh_uses *uses) {
+  free((void *)uses->capacity); free((void *)uses->first); free((void *)uses->use); free((void *)uses->weight);
+  *uses = (struct mesh_uses){0};
+}
+
 static void map_free(struct mesh_link_map *map) {
   free(map->edge); free(map->next); free(map->mark);
   *map = (struct mesh_link_map){0};
@@ -256,6 +262,7 @@ static void release(struct ncclComm *comm);
 
 static void comm_free(struct ncclComm *comm) {
   map_free(&comm->map);
+  uses_free(&comm->uses);
   metal_release(comm->command);
   comm_leave(comm);
   free(comm->channels); free(comm->toward);
@@ -274,11 +281,11 @@ static void flow_free(struct flow *f) {
   *f = (struct flow){0, NULL, NULL, NULL};
 }
 static ncclResult_t flow_solve(ncclComm_t comm, const struct mesh_demand *demands, uint32_t count, struct flow *f) {
-  const uint32_t n = (uint32_t)comm->nranks, room = count ? mesh_solve_room(&comm->map, MESH_SOLVE_EPS, count) : 0;
+  const uint32_t n = (uint32_t)comm->nranks, room = count ? mesh_solve_room(&comm->map, &comm->uses, MESH_SOLVE_EPS, count) : 0;
   *f = (struct flow){0, calloc((size_t)room + 1, sizeof *f->demand), calloc((size_t)room * n + 1, sizeof *f->parent),
                      calloc((size_t)room + 1, sizeof *f->share)};
   if (!f->demand || !f->parent || !f->share) { flow_free(f); return fail(ncclSystemError, "out of memory"); }
-  const uint32_t made = count ? mesh_solve(&comm->map, MESH_SOLVE_EPS, 0, demands, count, room, f->demand, f->parent, f->share) : 0;
+  const uint32_t made = count ? mesh_solve(&comm->map, &comm->uses, MESH_SOLVE_EPS, 0, demands, count, room, f->demand, f->parent, f->share) : 0;
   if (made == UINT32_MAX) {
     flow_free(f);
     return fail(ncclInvalidUsage, "communicator %s: its map joins no route between two members its calls cross between", comm->name);
@@ -430,10 +437,14 @@ static void comm_leave(struct ncclComm *comm) {
   pthread_mutex_unlock(&attach_lock);
 }
 
-static uint64_t hop_capacity(const struct mesh_link_map *map, uint32_t u, uint32_t v) {
+static uint64_t hop_capacity(const struct mesh_link_map *map, uint32_t u, uint32_t v, uint32_t *least) {
   uint64_t sum = 0;
+  *least = UINT32_MAX;
   for (uint32_t l = 0; l < map->edges; l++)
-    if ((map->edge[l].a == u && map->edge[l].b == v) || (map->edge[l].a == v && map->edge[l].b == u)) sum += map->edge[l].capacity;
+    if ((map->edge[l].a == u && map->edge[l].b == v) || (map->edge[l].a == v && map->edge[l].b == u)) {
+      sum += map->edge[l].capacity;
+      if (*least == UINT32_MAX || map->edge[l].cable < map->edge[*least].cable) *least = l;
+    }
   return sum;
 }
 
@@ -453,10 +464,15 @@ static int map_of(struct ncclComm *comm) {
     room = whole.nodes; edges = whole.edges;
   }
   struct mesh_link_map *map = &comm->map;
-  const size_t pairs = (size_t)n * (n - 1) / 2 + 1;
+  const size_t pairs = (size_t)n * (n - 1) / 2 + 1, cables = count > 0 ? whole.edges : 0;
   *map = (struct mesh_link_map){n, 0, calloc(pairs, sizeof *map->edge), 0, NULL, calloc(n + 1, sizeof *map->mark)};
+  uint64_t *capacity = calloc(cables + 1, sizeof *capacity);
+  uint32_t *first = calloc(pairs + 1, sizeof *first), *use = calloc(pairs * (cables + 1) + 1, sizeof *use);
+  double *weight = calloc(pairs * (cables + 1) + 1, sizeof *weight);
   place = malloc((n + 1) * sizeof *place); path = malloc(((size_t)(count > 0 ? count : 0) + 1) * sizeof *path);
-  int status = count < 0 ? -count : !map->edge || !map->mark || !place || !path ? ENOMEM : 0;
+  int status = count < 0 ? -count : !map->edge || !map->mark || !place || !path || !capacity || !first || !use || !weight ? ENOMEM : 0;
+  uint32_t uses = 0;
+  for (size_t c = 0; !status && c < cables; c++) capacity[c] = whole.edge[c].capacity;
   for (uint32_t a = 0; !status && a < n; a++) {
     map->mark[a] = comm->members[a];
     place[a] = UINT32_MAX;
@@ -466,15 +482,26 @@ static int map_of(struct ncclComm *comm) {
     for (uint32_t b = a + 1; b < n; b++) {
       const uint32_t hops = place[a] == UINT32_MAX || place[b] == UINT32_MAX || place[a] == place[b] ? 0
                             : mesh_route_path(&whole, place[a], place[b], path);
-      uint64_t least = 0;
+      uint64_t bottleneck = 0;
+      const uint32_t at = uses;
       for (uint32_t h = 1; h < hops; h++) {
-        const uint64_t capacity = hop_capacity(&whole, path[h - 1], path[h]);
-        if (h == 1 || capacity < least) least = capacity;
+        uint32_t least = UINT32_MAX;
+        const uint64_t sum = hop_capacity(&whole, path[h - 1], path[h], &least), used = hops == 2 ? sum : least == UINT32_MAX ? 0 : whole.edge[least].capacity;
+        if (h == 1 || used < bottleneck) bottleneck = used;
+        for (uint32_t c = 0; hops == 2 && sum && c < whole.edges; c++)
+          if ((whole.edge[c].a == path[0] && whole.edge[c].b == path[1]) || (whole.edge[c].a == path[1] && whole.edge[c].b == path[0])) {
+            use[uses] = c << 1 | (whole.edge[c].a != path[0]); weight[uses++] = (double)whole.edge[c].capacity / (double)sum;
+          }
+        if (hops > 2 && least != UINT32_MAX) { use[uses] = least << 1 | (whole.edge[least].a != path[h - 1]); weight[uses++] = 1; }
       }
-      if (hops >= 2 && least) map->edge[map->edges++] = (struct mesh_edge){a, b, 0, least};
+      if (hops < 2 || !bottleneck) { uses = at; continue; }
+      first[map->edges] = at;
+      map->edge[map->edges++] = (struct mesh_edge){a, b, 0, bottleneck};
     }
+  if (!status) first[map->edges] = uses;
   free(node); free(edge); free(next); free(mark); free(place); free(path);
-  if (status) map_free(map);
+  if (status) { map_free(map); free(capacity); free(first); free(use); free(weight); }
+  else comm->uses = (struct mesh_uses){(uint32_t)cables, 0, capacity, first, use, weight};
   return status;
 }
 
@@ -495,10 +522,7 @@ const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last.text; }
 
 ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
   if (!id) return fail(ncclInvalidArgument, "uniqueId is NULL");
-  memset(id->internal, 0, sizeof id->internal);
-  const char *given = getenv("NCCL_COMM_ID");
-  if (given && *given) snprintf(id->internal, sizeof id->internal, "%s", given);
-  else arc4random_buf(id->internal, sizeof id->internal);
+  arc4random_buf(id->internal, sizeof id->internal);
   return ncclSuccess;
 }
 
@@ -1466,6 +1490,7 @@ static uint64_t region_offset(const struct ncclComm *comm, const void *at) { ret
 static uint64_t ready_need(uint64_t k, uint64_t index) { return (k << 32) + index + 1; }
 static void key_of(struct mesh_entry *e, uint64_t id, uint32_t to, uint32_t from, uint64_t position) {
   e->key[0] = id; e->key[1] = to; e->key[2] = ((uint64_t)from << 40) | position;
+  e->from[0] = id; e->from[1] = from;
 }
 static void table_begin(struct mesh_plan *t, uint64_t k) {
   uint32_t empty[2] = {0, 0};

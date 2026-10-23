@@ -9,13 +9,12 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 136u
-#define MESH_LAYOUT 146u
+#define MESH_VERSION 137u
+#define MESH_LAYOUT 147u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_PORTS 8u
 #define MESH_REACH 32
-#define MESH_NAMES 256
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES 1024u
 #define MESH_RETIRING (UINT64_C(1)<<63)
@@ -47,7 +46,7 @@ struct mesh_page_entry {
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
 /* design/transport.md section 14, "The queue"; design/pages-and-functions.md */
-struct mesh_entry { uint64_t row,pages,word,need; _Atomic uint64_t done,count,posted; uint64_t key[3]; };
+struct mesh_entry { uint64_t row,pages,word,need; _Atomic uint64_t done,count,posted; uint64_t key[3],from[2]; };
 struct mesh_plan {
   _Alignas(MESH_LINE) _Atomic uint64_t next;
   _Atomic uint64_t start,ready;
@@ -57,7 +56,7 @@ struct mesh_plan {
   _Atomic uint64_t landed,completed[2];
   _Alignas(MESH_LINE) struct mesh_entry entry[];
 };
-_Static_assert(sizeof(struct mesh_entry)==80 && offsetof(struct mesh_plan,sent)==MESH_LINE && offsetof(struct mesh_plan,entry)==2*MESH_LINE,
+_Static_assert(sizeof(struct mesh_entry)==96 && offsetof(struct mesh_plan,sent)==MESH_LINE && offsetof(struct mesh_plan,entry)==2*MESH_LINE,
   "a table's writers a line each");
 #define MESH_STAMP_LOST UINT64_MAX
 static inline uint64_t mesh_plan_bytes(uint32_t sends,uint32_t lands){ return sizeof(struct mesh_plan)+((uint64_t)sends+lands)*sizeof(struct mesh_entry); }
@@ -86,7 +85,7 @@ static inline struct mesh_pages mesh_entry_pages(const struct mesh_entry *e){ re
 /* design/transport.md section 3, RECORD */
 struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory;
   char model[MESH_MODEL_BYTES]; struct mesh_reach reach[MESH_REACH]; struct mesh_health health;
-  uint32_t names,padding; uint64_t name[MESH_NAMES][2]; };
+  uint32_t names,padding; };
 /* design/transport.md section 2, the client slots */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
@@ -103,6 +102,7 @@ struct hdr {
 _Static_assert(sizeof(struct hdr)<=4096,"struct hdr");
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
 static inline struct mesh_record *mesh_records(struct hdr *m,uint64_t at){ return (struct mesh_record *)((char *)m+m->data_off+(at>>32)*m->pgsz); }
+static inline uint64_t (*mesh_map_names(struct hdr *m,uint64_t at))[2]{ return (uint64_t (*)[2])(mesh_records(m,at)+(uint32_t)at); }
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }

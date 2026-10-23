@@ -62,10 +62,12 @@ struct mesh_routing { uint32_t nodes,routes; const uint32_t *pair,*start,*node; 
 
 struct mesh_demand { uint32_t root,padding; uint64_t up,down; const uint64_t *leaves; };
 
-uint32_t mesh_solve_room(const struct mesh_link_map *,double eps,uint32_t count);
+struct mesh_uses { uint32_t cables,padding; const uint64_t *capacity; const uint32_t *first,*use; const double *weight; };
 
-uint32_t mesh_solve(const struct mesh_link_map *,double eps,double hop,const struct mesh_demand *demands,uint32_t count,uint32_t room,
-                    uint32_t *demand,uint32_t *parent,double *share);
+uint32_t mesh_solve_room(const struct mesh_link_map *,const struct mesh_uses *,double eps,uint32_t count);
+
+uint32_t mesh_solve(const struct mesh_link_map *,const struct mesh_uses *,double eps,double hop,const struct mesh_demand *demands,uint32_t count,
+                    uint32_t room,uint32_t *demand,uint32_t *parent,double *share);
 
 uint32_t mesh_flow_trees(uint32_t nodes,const struct mesh_demand *demands,const uint32_t *demand,const uint32_t *parent,const double *share,
                          uint32_t count,uint32_t first,uint32_t last,uint32_t *root,uint32_t *tree,double *log_weight);
