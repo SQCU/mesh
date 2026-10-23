@@ -172,7 +172,7 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts
      MESH_REDUCE_SCATTER   segment s up s's trees;  MESH_ALLGATHER  segment s down s's trees;
      MESH_ALLREDUCE        whole 0: the reduce-scatter and then the all-gather (each link a share once each way; its
                            dependent crossings twice the trees' heights) [Patarasuk & Yuan 2009; Blink];
-                           whole 1: the whole operand reduced toward every node at once, up that node's heaviest tree,
+                           whole 1: the whole operand reduced toward every contributor at once, up its heaviest tree,
                            a node forwarding its partial for another from a scratch buffer of its own and its own
                            operand from a copy, or, where it sends that to one node only and forwards nothing (two
                            nodes, the direct exchange), from the operand itself: its one SEND and its one REDUCE of
@@ -189,9 +189,12 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts
    base + d - 1 + j and sends it at base + d + j, base the highest of the trees' heights (the reduce-scatter's first
    chunk's last round plus one); a round's SENDs come before its receives, so a SEND waits on lower rounds alone.  A
    message is coalesced with the next between the same two nodes in the same round where their parts adjoin and each
-   end's buffer and step are the same.  `contributors` (a bit a node, 64 a word; NULL: every node) are the nodes whose
-   operands an all-reduce combines, and the nodes whose segments an all-gather gathers: the operand is theirs in node
-   order, each down its node's trees to every node, the others holding none.  0, or EINVAL. */
+   end's buffer and step are the same.  `contributors` (a bit a node, 64 a word; NULL: every node) are the nodes with
+   work: those whose operands a reduction combines, whose segments a reduce-scatter, an all-reduce and an all-gather
+   cut (in node order: the operand is theirs, the others holding none), and toward which a result goes.  Every other
+   node runs the identity: up a tree it takes its first child's partial as it comes and combines the rest into it, and
+   sends it on; down a tree it is sent a piece only where a contributor lies below it, and sends it on.  0, or
+   EINVAL. */
 int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,uint32_t chunks,const uint64_t *contributors,
                  struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
 /* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
