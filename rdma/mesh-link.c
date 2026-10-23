@@ -140,18 +140,6 @@ static void lane_lost(struct port *port,uint32_t lane,int64_t code){
 /* design/transport.md section 14: port p's stream as the region tells it, and a word of the region */
 static inline struct mesh_stream *stream_of(const struct port *port,uint32_t s){ return mesh_stream_at(M,port->index*MESH_LINK_STREAMS+s); }
 static inline _Atomic uint64_t *stream_words(uint64_t offset){ return (_Atomic uint64_t *)((char *)M+offset); }
-/* design/transport.md section 14, "A stream over several cables": port p's stream s as the region numbers it, and a
-   region stream's group words (struct stream_group), in its port's lists pages after its port's streams' parts
-   (stream_lists) */
-static inline uint32_t slot_of(const struct port *port,uint32_t s){ return port->index*MESH_LINK_STREAMS+s; }
-static uint64_t streams_bytes(void);
-static inline struct stream_group *group_at(uint32_t slot){
-  static _Atomic uint64_t after;
-  uint64_t bytes=atomic_load_explicit(&after,memory_order_relaxed);
-  if(!bytes)atomic_store_explicit(&after,bytes=streams_bytes(),memory_order_relaxed);
-  const uint64_t page=mesh_bridge_pages(M)->lists[slot/MESH_LINK_STREAMS];
-  return (struct stream_group *)((char *)M+M->data_off+page*M->pgsz+bytes)+slot%MESH_LINK_STREAMS;
-}
 /* design/transport.md section 14: entry e's slot of a time ring (mesh.h struct mesh_stream `posted_at`, `landed_at`) given
    the ticks `at`: its first word 0, then `at`, then 1 + e, each store ordered after the one before */
 static inline void stream_time(_Atomic uint64_t *ring,uint64_t e,uint64_t at){
@@ -207,7 +195,7 @@ static void walk_take(struct walk *w,struct mesh_stream *x,int land){
     k->page=w->pages;
     w->pages=mesh_pages_add(w->pages,k->pages);
   }
-  if(t!=w->taken){w->taken=t;if(w->telling)atomic_store_explicit(w->telling,t,memory_order_release);}
+  if(t!=w->taken){w->taken=t;atomic_store_explicit(&x->taken[land],t,memory_order_release);}
 }
 /* the walk's entry holding page q of the holding, from the walk's place, which it moves past every entry done and
    every entry whose pages are all before q; NULL where no entry taken holds it */
