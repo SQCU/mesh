@@ -472,9 +472,12 @@ Every word below, with its one writer at a time and its readers:
   its `pages`; ~0 (`MESH_NEED_AHEAD`) where it is posted ahead with `pages` its room and its count not yet known; and
   else its count plus one, stored by compare-and-swap from ~0 by the client at the start that knows it or by the
   receiving child from the first run's key unit (`total`), the two alike. Its `done` is stamped when `count` reaches
-  that count (`tuple_total`). A key is three words: the first two its registration, the third its position. The
-  client library composes them (its communicator's id and the destination rank; the source rank and the place on that
-  pair's list: rdma/NCCL.md, Keys), and the bridge compares keys as words and reads none as a number.
+  that count (`tuple_total`). A key is five words (version 141, layout 149): the first two the
+  receiver's registration (its communicator's id and rank), then the sender's rank, the space (0 for a group's calls,
+  an exchange's number on its communicator otherwise) and the position in that space; the sender's registration is the
+  first and third. The client library composes them (rdma/NCCL.md, Keys). The bridge compares keys as words, and reads
+  a position only against another of the same first four words, by their signed difference (`index_later`), so a
+  position that wraps compares alike.
 - **A call.** The client starts call k on a table once the table's `sent` and `landed` have reached its last call: it
   writes the tuples for k, sets each tuple's `count` and `posted` to k << 32 and each way's `completed` to k << 32 plus
   its tuples of no pages, stamps those tuples' `done` = k and a way with no tuple of pages `sent` or `landed` = k (the
@@ -528,10 +531,10 @@ Every word below, with its one writer at a time and its readers:
   in it by binary search. A key unit that lands is placed:
   - a started landing tuple of the key: the run's receives go into the tuple's rows from the offset, each the page its
     row gives in the page table, and then the next key unit's receive where one is to come (What is posted);
-  - a registration of this node with no such tuple, where a started landing of the same channel (the key's
-    communicator, rank and sender) has a later position: the run is of a call already over, and lands in the spare
-    page (`index_later`; the key's position is the call's stamp on that channel, which both ends number alike, where k
-    is each process's own count);
+  - a registration of this node with no such tuple, where a started landing of the same communicator, receiver,
+    sender and space has a later position by their signed difference: the run is of a call already over, and lands
+    in the spare page (`index_later`; the position is the call's stamp in its space, which both ends number alike,
+    where k is each process's own count);
   - a registration of this node with no such tuple yet, and none later: the run waits on its lane, and its pages in the
     sender's credit (TN3205), until a table naming the key starts; the lane carries nothing past it meanwhile. It is not landed in free
     pages and bound to the landing's rows later, because a client reads a buffer at its address: a lease's pages are

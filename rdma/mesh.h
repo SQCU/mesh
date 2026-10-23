@@ -9,8 +9,8 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 140u
-#define MESH_LAYOUT 148u
+#define MESH_VERSION 141u
+#define MESH_LAYOUT 149u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_PORTS 8u
@@ -46,7 +46,7 @@ struct mesh_page_entry {
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
 /* design/transport.md section 14, "The queue"; design/pages-and-functions.md */
-struct mesh_entry { uint64_t row,pages,word,need; _Atomic uint64_t done,count,posted; uint64_t key[3],from[2]; };
+struct mesh_entry { uint64_t row,pages,word,need; _Atomic uint64_t done,count,posted; uint64_t key[5]; };
 struct mesh_plan {
   _Alignas(MESH_LINE) _Atomic uint64_t next;
   _Atomic uint64_t start,ready;

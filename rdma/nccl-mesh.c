@@ -202,7 +202,8 @@ struct ncclComm {
   struct mesh_link_map map;
   struct mesh_uses uses;
   uint64_t page, id;
-  uint32_t splits, exchanges, *members, count, nops;
+  uint64_t exchanges;
+  uint32_t splits, *members, count, nops;
   int nranks, rank, touched, unpublished;
   char name[NCCL_UNIQUE_ID_BYTES + 1];
   struct redop *ops;
@@ -1416,21 +1417,14 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
 }
 
 static int plan_quiet(struct ncclComm *comm, const struct plan *p);
-enum { PLAN_SETS = 3 };
 static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n, struct plan **out) {
   release(comm);
   for (size_t i = 0; i < n; i++) list[i].direct_ok = direct_ok(list + i);
   struct plan *p = comm->plans;
-  uint32_t held = 0;
-  for (; p; p = p->next) {
-    int same = p->n == n;
+  for (int same = 0; p && !same; p = same ? p : p->next) {
+    same = p->n == n && plan_idle(p) && plan_quiet(comm, p);
     for (size_t i = 0; same && i < n; i++) same = call_same(p->list + i, list + i);
-    if (same && plan_idle(p) && plan_quiet(comm, p)) break;
-    held += same;
   }
-  if (!p && held >= PLAN_SETS)
-    return fail(ncclInvalidUsage, "%s on communicator %s: the %u page sets of its shape are each held by a call not yet retired", call_name(list),
-                comm->name, (unsigned)PLAN_SETS);
   const ncclResult_t result = p ? ncclSuccess : plan_make(comm, list, n, &p);
   if (result) return result;
   p->rows.at = p->rows.used = 0;
@@ -1485,9 +1479,8 @@ static void touch(struct ncclComm *comm) {
 
 static uint64_t region_offset(const struct ncclComm *comm, const void *at) { return (uint64_t)((const char *)at - (const char *)comm->attach->context.M); }
 static uint64_t ready_need(uint64_t k, uint64_t index) { return (k << 32) + index + 1; }
-static void key_of(struct mesh_entry *e, uint64_t id, uint32_t to, uint32_t from, uint64_t position) {
-  e->key[0] = id; e->key[1] = to; e->key[2] = ((uint64_t)from << 40) | position;
-  e->from[0] = id; e->from[1] = from;
+static void key_of(struct mesh_entry *e, uint64_t id, uint32_t to, uint32_t from, uint64_t space, uint64_t position) {
+  e->key[0] = id; e->key[1] = to; e->key[2] = from; e->key[3] = space; e->key[4] = position;
 }
 static void table_begin(struct mesh_plan *t, uint64_t k) {
   uint32_t empty[2] = {0, 0};
@@ -1513,13 +1506,13 @@ static void tables_start(struct ncclComm *comm, struct schedule *plans) {
       const struct message *m = p->out + k;
       struct mesh_entry *e = p->t->entry + m->rel_entry;
       e->row = m->row; e->pages = pages_count(m->pages); e->word = region_offset(comm, &p->t->ready); e->need = ready_need(p->k, m->rel_entry);
-      key_of(e, comm->id, peer, me, m->entry);
+      key_of(e, comm->id, peer, me, 0, m->entry);
     }
     for (size_t k = 0; k < p->ins; k++) {
       const struct message *m = p->in + k;
       struct mesh_entry *e = p->t->entry + p->outs + m->rel_entry;
       e->row = m->row; e->pages = pages_count(m->pages); e->word = 0; e->need = 0;
-      key_of(e, comm->id, me, peer, m->entry);
+      key_of(e, comm->id, me, peer, 0, m->entry);
     }
     table_begin(p->t, p->k);
   }
@@ -2300,9 +2293,9 @@ struct ncclMeshRequest {
   uint32_t *sends, *lands;
   struct leg *in, *out;
   double *share;
-  uint32_t ins, outs, peers, waits, relays, pieces, seq, *own, *awaited, *first, *count;
+  uint32_t ins, outs, peers, waits, relays, pieces, *own, *awaited, *first, *count;
   void *pages, *buffer;
-  uint64_t starts, *cut;
+  uint64_t starts, seq, *cut;
   struct slot slots[SETS];
   struct ncclMeshRequest *next;
 };
@@ -2413,10 +2406,6 @@ static int32_t leg_in(const struct ncclMeshRequest *r, uint32_t x, uint32_t piec
   return -1;
 }
 
-static uint64_t exchange_at(const struct ncclMeshRequest *r, uint64_t start, uint32_t legs, uint32_t index) {
-  return UINT64_C(1) << 39 | (uint64_t)(r->seq & 0x7f) << 32 | (uint32_t)(start * legs + index);
-}
-
 static uint32_t piece_pages(const struct ncclMeshRequest *r, const size_t *counts, uint32_t x, uint32_t p) {
   const uint64_t first = r->cut[p], length = r->cut[r->pieces + p], count = counts ? counts[x] : r->parts[x];
   const uint64_t n = count <= first ? 0 : count - first < length ? count - first : length;
@@ -2440,7 +2429,7 @@ static void landings_post(struct ncclMeshRequest *r, struct slot *s, uint64_t m)
     struct mesh_entry *x = slot_entry(r, s, l->channel, 1, l->index);
     x->row = s->row + (r->area[l->x] + r->cut[p] * z) / comm->page; x->pages = piece_pages(r, NULL, l->x, p); x->word = 0;
     x->need = MESH_NEED_AHEAD;
-    key_of(x, comm->id, me, (uint32_t)comm->channels[l->channel].peer, exchange_at(r, m, r->lands[l->channel], l->index));
+    key_of(x, comm->id, me, (uint32_t)comm->channels[l->channel].peer, r->seq, m * r->lands[l->channel] + l->index);
   }
   for (uint32_t e = 0; e < r->peers; e++) peer[e] = (struct mesh_peer){metal_address(r->buffer) + s->offset + r->area[r->own[e]]};
   for (uint32_t e = 0; e < r->waits; e++) {
@@ -2490,7 +2479,7 @@ static void sends_write(struct ncclMeshRequest *r, struct slot *s, uint64_t m, c
     struct mesh_entry *y = slot_entry(r, s, l->channel, 0, l->index);
     y->row = s->row + ((l->from < 0 ? 0 : r->area[l->x]) + r->cut[p] * z) / comm->page; y->pages = pages;
     y->word = region_offset(comm, word); y->need = m;
-    key_of(y, comm->id, (uint32_t)comm->channels[l->channel].peer, me, exchange_at(r, m, r->sends[l->channel], l->index));
+    key_of(y, comm->id, (uint32_t)comm->channels[l->channel].peer, me, r->seq, m * r->sends[l->channel] + l->index);
   }
   t->ready = ready;
   for (uint32_t h = 0; h < comm->count; h++)
@@ -2602,7 +2591,7 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
       made = fail(ncclSystemError, "out of memory");
   if (!made) made = lease_take(SETS * stride, &r->pages, &r->buffer, &offset);
   pthread_mutex_lock(&group_lock);
-  r->seq = comm->exchanges++;
+  r->seq = ++comm->exchanges;
   pthread_mutex_unlock(&group_lock);
   pthread_mutex_lock(&attach_lock);
   const uint64_t row = made ? 0 : lease_at(r->pages)->row;

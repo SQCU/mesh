@@ -145,13 +145,14 @@ not fails as a value naming two members no route joins (`ncclInvalidUsage`).
 **Keys.** A communicator has a channel toward each member on another node: `peer`, `node`, and the counts of its two
 lists (`sends`, `lands`: the entries laid on each since the init, so a rank's k-th send to a peer is the peer's k-th
 receive from it), `published` and `consumed`. A send entry on the channel toward rank q is a tuple whose key is (id, q,
-me × 2^40 + `sends` + i), and a landing entry from q one whose key is (id, me, q × 2^40 + `lands` + i), i the entry's
-place in this call's list: the two ends compose the same key for the same pages. A persistent exchange's keys are its
-own: (id, the receiving rank, the sending rank × 2^40 + 2^39 + the request's number on the communicator modulo 128 ×
-2^32 + start × the channel's legs + the leg's place), so no group between two starts moves them. A tuple's `from` is
-(id, the sending rank), so its bridge can tell when the sender's route moves. The bridge compares keys and names as
-words; a run whose key no started landing holds while a started landing of the same sender and space has a later
-place is of a call already over (design/transport.md section 14, "The index").
+me, 0, `sends` + i), and a landing entry from q one whose key is (id, me, q, 0, `lands` + i), i the entry's place in
+this call's list: the two ends compose the same key for the same pages. A persistent exchange's keys are in a space of
+its own, its number on the communicator (counted from 1 at every member's `ncclMeshExchangeInit`, a whole word): (id,
+the receiving rank, the sending rank, the exchange's number, start × the channel's legs + the leg's place), so no group
+between two starts moves them, and no two exchanges share a key. The sender's registration is the key's first and
+third words, so its bridge can tell when the sender's route moves. The bridge compares keys and names as words; a run
+whose key no started landing holds, while a started landing of the same first four words has a later position by their
+signed difference, is of a call already over (design/transport.md section 14, "The index").
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR). A plan compiles each of its collectives when it is made, along the trees the solver gives the plan's
@@ -439,9 +440,7 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
   by the GPU, with no completion handler standing in for it), so the word equals `reader` once each of those programs has ended, in whatever order the caller
   commits them and on whatever queues, and once each of its tables' `sent` and `landed` has reached its last call
   (`plan_quiet`: the bridge has done with its pages and its table, ~0 stamps included once every tuple's `posted`
-  equals its `count`). Where every plan of these calls is held, a new one is made, up to three for one shape of calls
-  (its page sets, as an exchange's: two calls in flight and one beside them); where three are held by calls not yet
-  retired, the call fails as a value (`ncclInvalidUsage`) naming its shape, and nothing waits (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
+  equals its `count`). Where every plan of these calls is held, a new one is made (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
   a page is written again only after release). The `stamp` dispatch is a system-scope fence, then the atomic add, so
   the pages' stores are visible before the count the host reads with acquire (design/hardware-and-discipline.md
   section 1); a stamp that cannot be encoded fails its program's call as a value.

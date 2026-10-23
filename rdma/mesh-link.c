@@ -176,7 +176,7 @@ static int path_same(const struct walker *a,const struct walker *b,uint32_t node
 }
 /* design/transport.md section 14, "The wire"; SplitMix64's finalizer (Steele, Lea and Flood, OOPSLA 2014) */
 static uint64_t key_mix(const uint64_t *key){
-  uint64_t h=key[0]^key[1]*UINT64_C(0x9e3779b97f4a7c15)^key[2]*UINT64_C(0xbf58476d1ce4e5b9);
+  uint64_t h=key[0]^key[1]*UINT64_C(0x9e3779b97f4a7c15)^key[2]*UINT64_C(0xbf58476d1ce4e5b9)^key[3]*UINT64_C(0x94d049bb133111eb)^key[4];
   h=(h^h>>30)*UINT64_C(0xbf58476d1ce4e5b9);h=(h^h>>27)*UINT64_C(0x94d049bb133111eb);
   return h^h>>31;
 }
@@ -394,7 +394,7 @@ static void relays_send(struct port *port,struct walker *w,uint32_t served){
   }
 }
 /* design/transport.md section 14, "The index" */
-static int indexed_order(const void *a,const void *b){ return key_order(((const struct indexed *)a)->key,((const struct indexed *)b)->key,3); }
+static int indexed_order(const void *a,const void *b){ return key_order(((const struct indexed *)a)->key,((const struct indexed *)b)->key,5); }
 static void index_make(struct walker *w){
   w->fresh=1;
   w->indexed=0;
@@ -425,17 +425,19 @@ static uint32_t index_at(struct walker *w,const uint64_t *key){
   uint32_t lo=0,hi=w->indexed;
   while(lo<hi){
     const uint32_t mid=lo+(hi-lo)/2;
-    if(key_order(w->index[mid].key,key,3)<0)lo=mid+1;else hi=mid;
+    if(key_order(w->index[mid].key,key,5)<0)lo=mid+1;else hi=mid;
   }
   return lo;
 }
 static struct indexed *index_find(struct walker *w,const uint64_t *key){
   const uint32_t at=index_at(w,key);
-  return at<w->indexed && !key_order(w->index[at].key,key,3)?w->index+at:NULL;
+  return at<w->indexed && !key_order(w->index[at].key,key,5)?w->index+at:NULL;
 }
 static int index_later(struct walker *w,const uint64_t *key){
-  const uint32_t at=index_at(w,key);
-  return at<w->indexed && w->index[at].key[0]==key[0] && w->index[at].key[1]==key[1] && w->index[at].key[2]>>32==key[2]>>32;
+  const uint64_t channel[5]={key[0],key[1],key[2],key[3],0};
+  for(uint32_t at=index_at(w,channel);at<w->indexed && !key_order(w->index[at].key,key,4);at++)
+    if((int64_t)(w->index[at].key[4]-key[4])>0)return 1;
+  return 0;
 }
 static struct relay *relay_take(struct port *port,uint32_t lane,uint32_t node,const struct key_unit *unit){
   struct link *l=&port->link;
@@ -518,7 +520,8 @@ static int lane_expects(struct port *port,struct walker *w,uint32_t lane){
   for(uint32_t i=0;i<w->indexed;i++){
     const struct indexed *y=w->index+i;
     const uint64_t posted=atomic_load_explicit(&y->entry->posted,memory_order_acquire);
-    const uint32_t from=name_node(w,y->entry->from),*runs=arrival_runs(s,y->entry,y->k);
+    const uint64_t sender[2]={y->entry->key[0],y->entry->key[2]};
+    const uint32_t from=name_node(w,sender),*runs=arrival_runs(s,y->entry,y->k);
     const uint64_t total=tuple_total(y->entry,1);
     if(total==UINT64_MAX || (uint32_t)(posted>>32)!=k32(y->k) || mesh_called(posted)>=total || !from || hop_of(w,from)!=port->peer)continue;
     if(placed_runs(w,port,port->peer,y->key,(total+MESH_RUN-1)/MESH_RUN,lane)>(runs?*runs:0))return 1;
@@ -760,7 +763,7 @@ static void tuples_walk(const struct walker *now,uint32_t peer){
         struct mesh_entry *x=t->entry+e;
         const int landing=e>=t->sends;
         if(!x->pages || atomic_load_explicit(&x->done,memory_order_acquire)>=k)continue;
-        const uint64_t *name=landing?x->from:x->key;
+        const uint64_t sender[2]={x->key[0],x->key[2]},*name=landing?sender:x->key;
         const uint32_t was=name_node(&routes,name),is=now?name_node(now,name):was;
         if(!was || was==M->node)continue;
         if(!now){if(landing && hop_of(&routes,was)==peer)tuple_stamped(t,x,k,landing);continue;}

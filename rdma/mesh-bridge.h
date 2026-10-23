@@ -43,7 +43,7 @@ struct frames { uint64_t n; };
 static inline struct frames frames_of(uint64_t bytes){ return (struct frames){(bytes+MESH_FRAME-1)/MESH_FRAME}; }
 static inline struct frames frames_min(struct frames a,struct frames b){ return a.n<b.n?a:b; }
 #define MESH_RUN 32u
-struct key_unit { uint64_t key[3]; uint32_t offset,count,total,padding; uint64_t spare[3]; };
+struct key_unit { uint64_t key[5]; uint32_t offset,count,total,padding; uint64_t spare; };
 _Static_assert(sizeof(struct key_unit)==64 && sizeof(struct key_unit)<=MESH_FRAME,"a key unit one frame");
 #define MESH_KEY_SLOTS 128u
 /* design/transport.md section 14, "Relays" */
@@ -51,8 +51,8 @@ _Static_assert(sizeof(struct key_unit)==64 && sizeof(struct key_unit)<=MESH_FRAM
 #define MESH_POOL_BLOCKS 256u
 enum { RELAY_FREE, RELAY_LANDING, RELAY_READY, RELAY_SENDING };
 static inline uint32_t relay_sending(uint32_t port){ return RELAY_SENDING|(port+1)<<8; }
-struct relay { _Atomic uint32_t state; uint32_t lane,order,total; uint64_t key[3]; uint32_t offset,count,page,node; _Atomic uint32_t landed,sent; };
-_Static_assert(sizeof(struct relay)==64,"a relay entry");
+struct relay { _Atomic uint32_t state; uint32_t lane,order,total; uint64_t key[5]; uint32_t offset,count,page,node; _Atomic uint32_t landed,sent; };
+_Static_assert(sizeof(struct relay)==80,"a relay entry");
 /* design/transport.md section 14, "Plug to link, at the hardware's pace" */
 union mesh_network_event {
   struct kern_event_msg header;
@@ -142,7 +142,7 @@ struct port;
 struct named { uint64_t name[2]; uint32_t node,padding; };
 struct joined { uint32_t count,cable[MESH_REACH]; uint64_t weight[MESH_REACH],cycle; };
 struct arrival { struct mesh_entry *entry; uint64_t k; uint32_t runs,padding; };
-struct indexed { uint64_t key[3]; struct mesh_plan *table; struct mesh_entry *entry; uint64_t k; };
+struct indexed { uint64_t key[5]; struct mesh_plan *table; struct mesh_entry *entry; uint64_t k; };
 struct walker {
   uint64_t serial,told;
   struct named *name;
