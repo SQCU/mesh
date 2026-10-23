@@ -503,6 +503,15 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
   - argparse strings and hardcoded defaults ≺ configuration documents passed by consumers, with didactic defaults only
     (10-15);
   - configuration read as files on the hot path ≺ records from protocol, database or file alike (10-16).
+  - a callgraph or tensor shape changed partway through a tensor function's execution (source-level metaprogramming,
+    run-time shape polymorphism, sizes learned at run time) ≺ shapes, maximum extents and the callgraph fixed when the
+    program is compiled (10-22): "we do not intend to support any source level metaprogramming which tries to change
+    what the syntax of the callgraph is or the shapes of any tensors are partway through a tensor function execution;
+    this is barely a restriction or a dsl-like narrowing of programming strategy as there are no hardware abis that
+    exist in the real world which allow faster overall execution through the use of wacky runtime shape polymorphism
+    etc. ... if hardware existed that was faster under dynamism, we'd probably treat that as a strange compute
+    capability and compile those programs differently, holding the same restraints for cuda and cdna and metal
+    backends."
 
 **D3. Control flow.**
 - Ranks higher: the form with fewer branches. Its control flow differs only where a configuration says so.
