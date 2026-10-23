@@ -50,7 +50,8 @@ or out of order until a CUDA sync call (NVIDIA, GPUDirect RDMA).
 On the M-series there is no HBM, no BAR and no PCIe peer-to-peer path. The CPU, the GPU and the RDMA engine use one DRAM
 (design/hardware-and-discipline.md). Each Thunderbolt controller sees memory through its own IOMMU (TN3205). The bridge
 registers one region with each device once, when the port comes up. A Studio wires 82 of its 96 GiB this way, as 82
-extents of 1 GiB; 86 of them registered in 0.165 s (facts.md; design/HETEROGENEOUS-LINKS.md section 1; etc/bridge/README.md).
+extents of 1 GiB, registered in 0.44-0.48 s on 2026-10-23 (etc/bridge/m5ultra-headless.toml; the bridge's log). An
+86-extent region once registered in 0.165 s (design/HETEROGENEOUS-LINKS.md section 1).
 Every page a program uses lies in that region, so nothing is pinned at a call. A SEND lands in the peer's DRAM about
 3.6 µs after it is posted (measurement.md:3238). A GPU kernel that fences before each poll sees a store from outside
 the GPU 0.58 µs after it is made (section 1). The GPU's plain stores reach the NIC only when their command buffer ends.
