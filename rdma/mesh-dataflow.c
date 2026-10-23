@@ -102,13 +102,12 @@ uint32_t mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uin
     }
   return count;
 }
-struct mesh_whole { struct mesh_link_map map; uint32_t *next; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
 }
-static void mesh_whole_free(struct mesh_whole *w){free(w->map.edge);free(w->map.mark);free(w->next);}
-static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
+void mesh_whole_free(struct mesh_whole *w){free(w->map.edge);free(w->map.mark);free(w->next);}
+int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
   size_t joins=1;
   for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=mesh_joined(r+a,r+b,NULL,NULL,0);

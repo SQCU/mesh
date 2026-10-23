@@ -502,7 +502,7 @@ Every word below, with its one writer at a time and its readers:
   map before the loss). At each map it publishes, the parent stamps each started tuple whose member's name has left
   the map, and each whose route to that member has moved, comparing the whole path node by node: a landing, and a send
   with pages already taken (`tuples_rerouted`); a send with none taken goes the new way. Every bridge orders the map's
-  records by node before it routes (`routes_fresh`, as `mesh_map` does), so all compute one table and a route is one
+  records by node before it routes (`routes_fresh` builds the map with `mesh_whole_make`, as `mesh_map` does), so all compute one table and a route is one
   path both ways: the path a sender's data takes to this node is this node's path to the sender. So a call waiting on data that can no longer come
   ends at the map that shows its member or its route gone. The bridge's stop and its adoption of a region stamp every
   started tuple not yet complete, and a client's retirement its own (`mesh_tuples_lost`). A stamp is stored
@@ -694,7 +694,8 @@ up to a tick late.
 **The data path** (mesh-link.c, a child's progress threads). A child runs two threads, `way` 0 for its SENDs
 (mesh.rdma.send) and `way` 1 for its receives (mesh.rdma.receive), the index of `walking[port][way]`. A pass
 (`port_pass`) reads the lanes served once, refreshes its copy of the map's names and routes where the map's count has
-moved (`routes_fresh`: names sorted for binary search, the next node toward each node by `mesh_routes`), polls that
+moved (`routes_fresh`: names sorted for binary search, the next node toward each node on the map `mesh_whole_make` builds
+for `mesh_map`, each cable at its bandwidth / 8; a map with a cable of no bandwidth is EINVAL and has no route), polls that
 way's completion queue and counts each completion (`completed`), then serves each lane: the send thread goes on with
 its lane's run (`run_send`) and then takes new runs (`tables_send`, `relays_send`); the receive thread places or posts
 its lane's run (`run_receive`) and frees its sent relay entries (`relays_free`). A thread with no lane served waits on

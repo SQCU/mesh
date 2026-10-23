@@ -95,10 +95,6 @@ static int key_order(const uint64_t *x,const uint64_t *y,int words){
   return 0;
 }
 static int named_order(const void *a,const void *b){ return key_order(((const struct named *)a)->name,((const struct named *)b)->name,2); }
-static int record_order(const void *a,const void *b){
-  const uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
-  return (x>y)-(x<y);
-}
 static void routes_fresh(struct walker *w){
   const uint64_t serial=atomic_load_explicit(&M->map,memory_order_acquire);
   if(serial==w->serial)return;
@@ -110,42 +106,30 @@ static void routes_fresh(struct walker *w){
   uint32_t names=0;
   for(uint32_t i=0;named && i<n;i++)names+=r[i].names;
   struct named *name=malloc((names+1)*sizeof *name);
-  uint32_t *node=malloc((n+1)*sizeof *node),*hop=calloc(n+1,sizeof *hop),*least=calloc(n+1,sizeof *least),*next=malloc(((size_t)n*n+1)*sizeof *next),
-           *mark=malloc((n+1)*sizeof *mark);
-  uint32_t edges=0,cable[MESH_REACH],*path=malloc(((size_t)n*n+1)*sizeof *path),*paths=calloc(n+1,sizeof *paths);
-  uint64_t bandwidth[MESH_REACH];
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)edges+=mesh_joined(r+a,r+b,cable,bandwidth,MESH_REACH);
-  struct mesh_edge *edge=malloc((edges+1)*sizeof *edge);
-  if(!name || !node || !hop || !least || !next || !mark || !edge || !path || !paths){
-    free(r);free(named);free(name);free(node);free(hop);free(least);free(next);free(mark);free(edge);free(path);free(paths);return;
+  uint32_t *node=malloc((n+1)*sizeof *node),*hop=calloc(n+1,sizeof *hop),*least=calloc(n+1,sizeof *least),
+           *path=malloc(((size_t)n*n+1)*sizeof *path),*paths=calloc(n+1,sizeof *paths);
+  for(uint32_t a=0,at=0;name && a<n;a++)for(uint32_t j=0;named && j<r[a].names;j++,at++)name[at]=(struct named){{named[at][0],named[at][1]},r[a].node,0};
+  struct mesh_whole whole;
+  const int error=mesh_whole_make(r,n,&whole);
+  if(error==ENOMEM || !name || !node || !hop || !least || !path || !paths){
+    free(r);free(named);free(name);free(node);free(hop);free(least);free(path);free(paths);mesh_whole_free(&whole);return;
   }
-  edges=0;
   uint32_t self=n;
-  for(uint32_t a=0,at=0;a<n;a++)for(uint32_t j=0;named && j<r[a].names;j++,at++)name[at]=(struct named){{named[at][0],named[at][1]},r[a].node,0};
-  qsort(r,n,sizeof *r,record_order);
-  for(uint32_t a=0;a<n;a++){
-    node[a]=mark[a]=r[a].node;
-    if(r[a].node==M->node)self=a;
-    for(uint32_t b=a+1;b<n;b++)
-      for(uint32_t c=0,cables=MIN(mesh_joined(r+a,r+b,cable,bandwidth,MESH_REACH),(uint32_t)MESH_REACH);c<cables;c++)
-        edge[edges++]=(struct mesh_edge){a,b,cable[c],bandwidth[c]?bandwidth[c]:1};
-  }
+  for(uint32_t a=0;a<n;a++){node[a]=r[a].node;if(r[a].node==M->node)self=a;}
   qsort(name,names,sizeof *name,named_order);
-  struct mesh_link_map map={.nodes=n,.edges=edges,.edge=edge,.next=next,.mark=mark};
-  if(self<n && !mesh_routes(&map,next))
-    for(uint32_t b=0;b<n;b++){
-      uint32_t *to=path+(size_t)b*n;
-      paths[b]=b!=self?mesh_route_path(&map,self,b,to):0;
-      for(uint32_t i=0;i<paths[b];i++)to[i]=node[to[i]];
-      hop[b]=paths[b]>=2?to[1]:0;
-    }
+  for(uint32_t b=0;!error && self<n && b<n;b++){
+    uint32_t *to=path+(size_t)b*n;
+    paths[b]=b!=self?mesh_route_path(&whole.map,self,b,to):0;
+    for(uint32_t i=0;i<paths[b];i++)to[i]=node[to[i]];
+    hop[b]=paths[b]>=2?to[1]:0;
+  }
   for(uint32_t j=0;self<n && j<r[self].reached && j<MESH_REACH;j++)
     for(uint32_t b=0;b<n;b++)if(node[b]==r[self].reach[j].node && (!least[b] || r[self].reach[j].cable<least[b]))least[b]=r[self].reach[j].cable;
   free(w->name);free(w->node);free(w->hop);free(w->least);free(w->path);free(w->paths);
   *w=(struct walker){.serial=serial,.name=name,.names=names,.nodes=n,.node=node,.hop=hop,.least=least,.path=path,.paths=paths,
                      .index=w->index,.index_room=w->index_room,
                      .table=w->table,.table_room=w->table_room,.turn=w->turn,.fresh=w->fresh};
-  free(r);free(named);free(next);free(mark);free(edge);
+  free(r);free(named);mesh_whole_free(&whole);
 }
 static uint32_t name_node(const struct walker *w,const uint64_t *key){
   uint32_t lo=0,hi=w->names;
