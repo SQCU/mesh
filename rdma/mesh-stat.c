@@ -16,7 +16,7 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node,uin
   struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ,MAP_SHARED,file,0);
   close(file);
   if(m==MAP_FAILED)return -errno;
-  int count=m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT?-EINVAL:mesh_gone((pid_t)atomic_load(&m->bridge_pid))?-ESRCH:0;
+  int count=m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT?-EINVAL:!atomic_load(&m->bridge_pid)?-ESRCH:0;
   const struct mesh_bridge_pages *own=mesh_bridge_pages(m);
   if(count!=-EINVAL){hang[0]=atomic_load(&own->active);hang[1]=atomic_load(&own->hung);hang[2]=atomic_load(&own->hangs);}
   if(!count)*node=m->node;

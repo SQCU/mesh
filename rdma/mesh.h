@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
-#include <os/os_sync_wait_on_address.h>
 #include "mesh-plan.h"
 /* design/transport.md section 2; section 15, "The region" */
 #define MESH_MAGIC 0x4d455348u
@@ -12,7 +11,7 @@
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
 #define MESH_VERSION 135u
-#define MESH_LAYOUT 143u
+#define MESH_LAYOUT 144u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_STREAMS 32
@@ -20,10 +19,8 @@
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
 #define MESH_STREAM_ENTRIES 4096u
-#define MESH_STREAM_TIMES 16384u
 #define MESH_STREAM_GIVEN (UINT64_C(1)<<63)
 _Static_assert(38+25<=63,"an owner word");
-_Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)) && !(MESH_STREAM_TIMES&(MESH_STREAM_TIMES-1)),"a ring a power of two");
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 #define MESH_PLATFORM_NS UINT64_C(5000000000)
 /* design/transport.md section 1, the page table; section 14, "A holding's end" */
@@ -73,7 +70,7 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
 struct mesh_stream {
   _Alignas(MESH_LINE) _Atomic uint32_t peer;
   _Atomic uint32_t live;
-  uint64_t lists,posted_at,landed_at,rows;
+  uint64_t lists,rows;
   _Atomic uint64_t bandwidth,wire;
   _Atomic uint32_t child,cable;
   uint64_t child_start;
@@ -81,15 +78,12 @@ struct mesh_stream {
   _Atomic uint64_t sends,lands;
   _Alignas(MESH_LINE) _Atomic uint64_t ready;
   _Alignas(MESH_LINE) _Atomic uint64_t sent;
-  uint64_t sent_line[MESH_LINE/8-2];
-  _Atomic uint64_t taken[2];
-  _Atomic uint64_t landed;
+  _Alignas(MESH_LINE) _Atomic uint64_t landed;
   struct mesh_posts posts[2];
 };
 _Static_assert(sizeof(struct mesh_stream)==7*MESH_LINE && _Alignof(struct mesh_stream)==MESH_LINE,"mesh_stream");
 _Static_assert(offsetof(struct mesh_stream,owner)==1*MESH_LINE && offsetof(struct mesh_stream,ready)==2*MESH_LINE &&
-  offsetof(struct mesh_stream,sent)==3*MESH_LINE && offsetof(struct mesh_stream,taken[0])==4*MESH_LINE-8 &&
-  offsetof(struct mesh_stream,taken[1])==4*MESH_LINE && offsetof(struct mesh_stream,landed)==4*MESH_LINE+8 &&
+  offsetof(struct mesh_stream,sent)==3*MESH_LINE && offsetof(struct mesh_stream,landed)==4*MESH_LINE &&
   offsetof(struct mesh_stream,posts[0])==5*MESH_LINE && offsetof(struct mesh_stream,posts[1])==6*MESH_LINE,
   "a writer's words a line of their own");
 /* design/transport.md section 3, RECORD */
@@ -103,20 +97,11 @@ struct mesh_client {
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,streams,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,bridge_off,stream_off,client_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,map,map_off,map_nodes,health;
+  _Atomic uint64_t bridge_pid,serial,map,map_at;
 };
 _Static_assert(sizeof(struct hdr)<=4096,"struct hdr");
 _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
-static inline void mesh_notify(_Atomic uint64_t *word){
-  atomic_fetch_add_explicit(word,1,memory_order_release);
-  atomic_thread_fence(memory_order_release);
-  os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-}
-static inline struct mesh_record *mesh_records(struct hdr *m){ return (struct mesh_record *)((char *)m+atomic_load_explicit(&m->map_off,memory_order_relaxed)); }
-static inline int mesh_map_whole(struct hdr *m,uint64_t before){
-  atomic_thread_fence(memory_order_acquire);
-  return !(before&1) && atomic_load_explicit(&m->map,memory_order_relaxed)==before;
-}
+static inline struct mesh_record *mesh_records(struct hdr *m,uint64_t at){ return (struct mesh_record *)((char *)m+m->data_off+(at>>32)*m->pgsz); }
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
 static inline struct mesh_stream *mesh_stream_at(struct hdr *m,uint32_t p){return (struct mesh_stream *)((char *)m+m->stream_off)+p;}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }

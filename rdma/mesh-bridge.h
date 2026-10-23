@@ -18,6 +18,7 @@
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/net_kev.h>
+#include <os/os_sync_wait_on_address.h>
 #include <poll.h>
 #include <spawn.h>
 #include <stdlib.h>
@@ -71,8 +72,7 @@ struct lane_state {
 _Static_assert(offsetof(struct lane_state,posted)==MESH_LINE && sizeof(struct lane_state)==2*MESH_LINE,"a thread's words a line of their own");
 static inline uint64_t *lane_posts(struct lane_state *s,int way){ return way?&s->posted:&s->sent; }
 static inline uint64_t *lane_done(struct lane_state *s,int way){ return way?&s->got:&s->done; }
-struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _Atomic uint64_t *word; uint32_t whole; };
-struct walk { struct taken *ring; uint64_t taken,done,timed,at; struct mesh_pages pages,base,count; };
+struct walk { uint64_t at,done,presented; struct mesh_pages at_page,done_page,base,count; };
 enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
 /* design/transport.md section 3; section 14, "A process a port" */
 enum { HELLO=1, RECORD=3, LINK };
@@ -111,13 +111,11 @@ struct link {
   uint64_t held[MESH_LINK_STREAMS],number[MESH_LINK_STREAMS];
   uint32_t hold[MESH_LINK_STREAMS];
   struct walk sending[MESH_LINK_STREAMS];
-  _Atomic uint64_t *posted_at[MESH_LINK_STREAMS];
   _Atomic uint64_t begun[MESH_LINK_STREAMS],ended[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
   _Alignas(MESH_LINE) _Atomic uint64_t stopped[MESH_LINK_STREAMS];
   uint64_t rnumber[MESH_LINK_STREAMS];
   struct walk landing[MESH_LINK_STREAMS];
-  _Atomic uint64_t *landed_at[MESH_LINK_STREAMS];
 };
 _Static_assert(offsetof(struct link,stopped)%MESH_LINE==0,"the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port"; section 15, "The children"; section 16 */

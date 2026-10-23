@@ -5,7 +5,7 @@
 #include <libproc.h>
 #include <signal.h>
 /* design/transport.md section 15, "The library" */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t row_cursor,arena_cursor; int fd; };
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; int fd; };
 int mesh_attach(struct mesh_ctx *);
 int mesh_detach(struct mesh_ctx *);
 static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
@@ -32,7 +32,7 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
 struct mesh_stream_view {
   struct mesh_entry *list[2];
-  _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed,*posted_at,*landed_at;
+  _Atomic uint64_t *presented[2],*ready,*sent,*landed;
   const struct mesh_posts *posts;
 };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);

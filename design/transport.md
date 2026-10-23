@@ -53,7 +53,7 @@ bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash
 bridge adopts the region, the same memory, where its layout is that bridge's:
 - clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
 - the port children register the same pages again, so nothing is wired twice and nothing is reloaded;
-- the bridge's own pages (each port's link pages, its streams' lists and time rings, the duds' block, the map) are
+- the bridge's own pages (each port's link pages, its streams' lists and unit rows, the duds' block, the map) are
   recorded in the region and taken again;
 - every stream is set not live (so no take succeeds), its landed words ~0, so a communicator of the old pairing fails
   and is made again; its owner word is left as found, and the port's next child stores 0 there as it opens the stream
@@ -184,7 +184,7 @@ seconds without something happening/concluding."
 Since 2026-10-22 no wait of the bridge or the collective on a peer's data is bounded by a clock, and the bridge decides
 nothing by one (section 14: "we don't introduce race conditions or use timing anywhere"). The deadline bounds the
 bridge's own lifecycle (a driver call's job, a quiet window, a child's end) and the bootstrap's phases. A group's
-presentation waits for its bridge to take its entries (`taken`), and a host-path group's wait for its own GPU work, and
+presentation waits for no word of the bridge's (section 14, "The lists"), and a host-path group's wait for its own GPU work, and
 a destroy's, end at the command buffer's completion status, which the platform's watchdog ends with an error where the
 buffer overruns (a buffer not yet committed fails a group at once, as a value, and a destroy does not await it:
 nothing runs it while its committer waits). A group's waits re-read the revoke and its holding between looks (rubric
@@ -432,6 +432,23 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   bridge's: SENDs completed; landed). A send entry's page k is ready once the word at `word` (0: the holding's
   `ready`) reads at least `base` + k + 1. A landing entry names no word, and the bridge reads none: its receives are
   posted as the plan presents them (what a landing writes, below). The holder sees no lane, unit, frame or queue pair.
+- The lists, as data flow (layout 144; metal-microbench output_data/slice-20261022/INVENTORY.md M1, M10). Each list
+  is a table of `MESH_STREAM_ENTRIES` slots in the bridge's pages (`lists`); the holder's entry e of a list, counted
+  from 0 at the holding's start by its `sends` or `lands`, lies in slot e mod `MESH_STREAM_ENTRIES`. The holder writes
+  the slot, then stores its count one more with release (`mesh_stream_present`). The bridge reads each entry where it
+  lies, after an acquire of the count, and copies none: a pass reads the entry that holds the next page to post
+  (`walk_page`) and, as pages complete, the entries they complete (`walk_count`). An entry's use ends when every page
+  of it has completed: the bridge passes over a complete entry before it stores the count that reaches the entry's
+  last page (`sent` for the send list, `landed` for the landing list), and reads its slot no more. So a holder that
+  has read that count has read the slot's release, and it writes slot e mod `MESH_STREAM_ENTRIES` again only after the
+  release of entry e − `MESH_STREAM_ENTRIES` (design/pages-and-functions.md, Freeing 7: "A page is written again only
+  after release"). Keeping to it is the holder's, from its plan, as a program guards the buffers it reuses (the
+  operator, 2026-10-21: "it is the responsibility of DATA PROCESSING FUNCTIONS to not overwrite each other's
+  buffers"). Nothing refuses a presentation for room (no EAGAIN), no word of the bridge's counts the entries it has
+  read (no `taken`), and the bridge keeps no ring of its own: the flow control of layouts 127 to 143 (`taken`, EAGAIN,
+  the library's wait for room, the bridge's ring of copied entries) is deleted, and a holder waits on nothing but its
+  own pages' counts. An entry whose rows lie outside the page table is presented as any other and goes as duds
+  (section 10).
 - Every SEND and every receive is one whole page, the page its row names (the bridge reads the row's page as it posts
   it: one read a page). A send entry whose rows lie outside the page table, or a row that holds no page, goes as duds,
   and such a landing entry's pages land in the spare page (the port's link page). So each SEND fills its receive
@@ -449,20 +466,20 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   - a program that reuses a buffer guards that buffer in its own source, or races;
   - landings are not ordered after the stream's earlier work. Here the contract departs from NCCL's stream
     semantics, whose kernels copy out of NCCL's own buffers after the stream's earlier work.
-- The words only the bridge writes: `live`, `sent`, `landed`, `taken`, `posts` (each of the stream's two lanes' units
-  over its pairing each way, posted and completed), `rows` (the rings of the row each unit names, `MESH_LANE_UNITS` a
-  lane each way) and the two time rings (`posted_at`: an entry's first SEND posted;
-  `landed_at`: its last page landed; mach_absolute_time ticks read once in the pass, after its counts). The time
-  rings are measurement and decide nothing.
+- The words only the bridge writes: `live`, `sent`, `landed`, `posts` (each of the stream's two lanes' units over its
+  pairing each way, posted and completed) and `rows` (the rings of the row each unit names, `MESH_LANE_UNITS` a lane
+  each way). The time rings of layouts 132 to 143 (`posted_at`, an entry's first SEND posted, and `landed_at`, its
+  last page landed, in mach_absolute_time ticks) are deleted (INVENTORY.md M2; the operator, 2026-10-22: "using timing
+  is always slower than not using timing"): they decided nothing, and their stores and the clock's read sat in every
+  completion pass.
 - Lines (layout 139, the bridge audit of 2026-10-22). Each writer's words of a stream lie on a 128-byte line of their
   own (`hw.cachelinesize`; mesh.h `MESH_LINE`), so a store by one writer does not take a line from a reader of
-  another's: the holder's `owner`, `sends` and `lands`; `ready`, the GPU's or the holder's; the send thread's `sent`
-  and `taken[0]`; the receive thread's `taken[1]` and `landed`; and `posts`, a line each way. A lane's progress at the
+  another's: the holder's `owner`, `sends` and `lands`; `ready`, the GPU's or the holder's; the send thread's `sent`;
+  the receive thread's `landed`; and `posts`, a line each way. A lane's progress at the
   child is the same: the send thread's SENDs posted and done, and the receive thread's receives posted and landed, on
   lines of their own (`struct lane_state`).
-- The count first. A completion pass stores the count a GPU waits on (`sent` or `landed`, with release) before
-  anything else: the clock read, `posts`, and the time rings come after it, and the clock is read only where an entry
-  is to be timed.
+- The release, then the count. A completion pass passes over the entries its pages completed, then stores the count a
+  GPU waits on (`sent` or `landed`, with release), then `posts`. No clock is read.
 
 **Holding it** (version 133; the operator, 2026-10-22, on the holding's start of 129-132: "something is sampled
 diachronically four times then we do a funny little guess ... this entire code path needs to be remove and rewritten
@@ -666,7 +683,9 @@ citations of this document; what each part does is stated here and in the sectio
   page, sent from and landing in the page its row names. 133: a stream's lanes carry its holders' entries' pages and
   nothing else. 134: a holding ends with nothing outstanding, or its stream is not live again in the pairing. 135: no
   FAREWELL; a bridge's stop reaches its peers as its control sockets' end (RECORD and LINK keep their kinds, 3 and 4).
-- `MESH_LAYOUT` is the region's layout. 139 put each writer's words of a stream on a line of their own; 140 counted a
+- `MESH_LAYOUT` is the region's layout. 144 deletes each stream's time rings (`posted_at`, `landed_at`) and `taken`,
+  puts `landed` on a line of its own, and publishes the map by `map_at` in place of `map_off`, `map_nodes` and
+  `health`; `struct mesh_ctx` loses its allocation cursors. 139 put each writer's words of a stream on a line of their own; 140 counted a
   lease's closures; 141 holds a lease's state and generation in `closed`; 142 deletes the header's `control` (the word
   a client's retirement rang to wake the bridge's watcher thread), `busy` and `idle_since` (read by the converger
   alone, deleted with it in 5aafa852) and `stopping` (never read), and names each child's device in its holder entry;
@@ -685,9 +704,14 @@ citations of this document; what each part does is stated here and in the sectio
 - `struct mesh_pages` (a count of pages) and `struct mesh_row` (a page-table row) are types of their own, so the
   compiler keeps them apart from each other, from bytes and from a lane's units (8fc0d3d7). The region's words keep
   their integer storage and are typed where they are read and written (`mesh_entry_row`, `mesh_pages_load`).
-- The map is `map_nodes` records at `map_off`, in arena pages the bridge leases, and leases again larger as the mesh
-  grows. The bridge notifies `map` before and after each change (odd while it writes); a reader's copy is whole where
-  `map` was even before it and is unchanged after (`mesh_map_whole`). A record carries no host name: the name a
+- The map is published, never written in place (layout 144; INVENTORY.md M6, M56). Each change is written whole into
+  arena pages the bridge leases anew; then `map_at` (the first page shifted 32 bits, or'd with the records) is stored
+  with release; then `map`, the publication count, is moved one more with release; then the last map's pages are
+  freed. A reader's copy is whole where `map` reads the same before and after it, since a page it read is freed, and
+  written again, only after `map` has moved. No state is odd: a bridge ended at any instruction leaves a whole map
+  published, no reader waits, and no adoption mends a serial (layouts to 143 wrote the map in place between an odd
+  and an even `map`, kept the `health` serial for records whose links were unchanged, and had readers wait on an odd
+  serial and probe the bridge's process). A record carries no host name: the name a
   person reads is the name table's, by node number (etc/mesh-nodes.json, rdma/peers.py).
 - `MESH_PAUSE_NS` (3 s) is the pause between a port's hellos and between the bridge's liveness turns.
   `MESH_PLATFORM_NS` (5 s) is the operator's deadline of section 5.
@@ -726,10 +750,12 @@ A thread with no lane served waits on `served`, at most MESH_PAUSE_NS a wait, an
   at the first pass that reads its give or its client's retirement, and frees or ends the stream once the receive
   thread has stored `stopped` = n after its last post of it. The receive thread serves holding `rnumber` until the
   send thread's `ended` names it, and passes over a holding that ended before it began.
-- A walk (`struct walk`) takes a list's presented entries into a ring of its own (`walk_take`: each entry copied once
-  and typed as `struct taken`, `whole` 0 where its rows lie outside the page table or a send entry's word lies outside
-  the region), finds the entry holding a page (`walk_page`), stores its count (`walk_count`: `sent` or `landed`, with
-  release, first in the pass) and passes the entries whose pages have all completed.
+- A walk (`struct walk`) holds two positions in its list and the page at which each entry there begins: `at`, the
+  entry that holds the next page to post (`walk_page`), and `done`, the first entry not yet complete (`walk_count`,
+  which passes the entries whose pages have all completed, then stores the count, `sent` or `landed`, with release),
+  and the holder's count of entries presented as it last read it, read again only to go past it (`list_holds`). Each
+  reads the entry in its slot (section 14, "The lists"). As a page is posted its entry is read whole or not: an
+  entry whose rows lie outside the page table, or a send entry whose word lies outside the region, goes as duds.
 - Page p of a stream is unit p div 2 of its lane p mod 2 (`page_lane`). Its pages posted are its two lanes' units
   together (`stream_pages`), and its pages completed in order run to the first page either lane has not completed:
   lane 0's 2a or lane 1's 2b + 1 (`stream_through`).
@@ -737,10 +763,8 @@ A thread with no lane served waits on `served`, at most MESH_PAUSE_NS a wait, an
   rest of that page's block from the offset, its key its extent's. `row_at` reads a row's page from the page table, 0
   where the row holds no page of the arena (a row with no page reads address 0), so no entry names memory outside the
   registered arena.
-- After the completions, `walk_complete` stores each served holding's count first, then reads the clock once
-  (`mach_absolute_time`) where a SEND was posted or an entry landed whole, then tells each lane's units completed
-  (`posts`), then fills the time rings: a send entry at its first page's post, a landing entry at its last page's
-  landing (`stream_time`: the slot's first word 0, then the ticks, then 1 + e, each a release store).
+- After the completions, `walk_complete` passes each served holding's complete entries and stores its count, then tells
+  each lane's units completed (`posts`).
 - A lane's receives run at most `window` units ahead of its landings: the fewer frames of the lane's share of the
   completion queues and of its receive queue, over a unit's frames, at most MESH_LANE_UNITS; its SENDs at most `sends`
   units ahead of their completions: the fewer frames of its share and of its send queue, over a unit's frames, at most
@@ -827,9 +851,8 @@ again when its port table changes (its sequence one more) and told on every gree
 newly paired is told every record of the database. The map is the database's records whose nodes a paired path from
 this node reaches (RFC 2328 s16: a breadth-first walk over `mesh_joined`), made again from the whole database at each
 record kept, so a node a lost link cut off returns to the map when a link reaches it again, with nothing re-sent and
-nothing put back; a node leaving or entering the map is logged. Where the map's nodes and links are unchanged and only
-records' sequences and health moved, they are written under the `health` serial, not the map's, so the map serial moves
-only where the mesh changes. A record heard is copied up to this build's size, the rest 0
+nothing put back; a node leaving or entering the map is logged. A map that changed is published whole (section 15,
+"The region"). A record heard is copied up to this build's size, the rest 0
 (`struct mesh_record` is only appended to). A record's reach has one entry for each cable whose link is up with a
 stream in its plan: the peer node, the cable (its first stream's `cable`) and the link's bandwidth. So two nodes that
 several cables join are as many links of the map, one per cable. The entry's `cable` was 0 in every bridge before
@@ -855,7 +878,7 @@ ended at the fault would exit, and its kernel release its device's objects, insi
 size, block, rows, stream and client counts, every offset and its length) are this bridge's. Adopting it sets every
 stream not live, its peer and identity 0 and its `sent` and `landed` ~0; clears the port table; finishes a retirement a
 dead process left half done (`mesh_retire` of an owner with `MESH_RETIRING` set, the walk any party can repeat to the
-same end); releases closed leases; makes an odd map or health serial even; and takes the map's pages again. A shared
+same end); releases closed leases; and takes the published map's pages again, to free them at its first publication. A shared
 memory object without the magic (a bridge ended while making it) is unlinked and made anew. The bridge's node number is
 a 31-bit FNV hash of the host's UUID (drawn at random where none is read), 1 where the hash is 0.
 
@@ -865,22 +888,27 @@ a 31-bit FNV hash of the host's UUID (drawn at random where none is read), 1 whe
   expiry again after the swap, so a slot the heartbeat's read of the holders missed reads its region expired and lets
   it go.
 - `mesh_claim` claims a range found clear word by word, giving the words back where another client claimed first or a
-  row is still hot (released and not yet freed). The allocation cursor resumes where the last allocation ended (O(P)
-  over N allocations of P pages), and an allocation that finds no room releases its client's own closed leases and
-  scans again.
+  row is still hot (released and not yet freed). An allocation scans from the table's start (first fit) and returns
+  ENOMEM where it finds no room: the next-fit cursors of `struct mesh_ctx`, which wrapped to the start, are deleted
+  (INVENTORY.md M60), and so is the scan again after releasing the client's own closed leases (M61); a closed lease
+  whose units have completed is released at the bridge's turn (section 14, "Rows"), whoever closed it.
 - A lease is freed by its one freer: its rows' owner words 0, then its pages' arena bits, then its rows' hot bits, so
   no row or page of it is claimed before it is whole. `mesh_retired_release` releases the closed leases of one client,
   or of every client at the bridge's turn, where `mesh_pinned` finds no unit naming them, then frees each lease whose
   FREE bit its fetch-and took and whose `closed` it swaps from released to free. A retirement (`mesh_retire`, the
   client's detach or the bridge's for a client gone) ends with that release of its client's own.
-- The map's readers (`mesh_map`, `mesh_nodes_health`, `mesh_map_wait`) wait on an odd serial at most MESH_PAUSE_NS a
-  look, and return ESRCH where the bridge went meanwhile. `mesh_joined` is the one join of two records, the bridge's
+- The map's readers (`mesh_map`, `mesh_nodes_health`) read `map`, then `map_at` and the records it names, then `map`
+  again, and read again where it moved (The region, above); nothing waits and nothing probes the bridge's process.
+  `mesh_map_wait`, a wait for the map's serial to move, bounded by a clock and ended by a probe of the bridge's pid, is
+  deleted (INVENTORY.md M57). `mesh_joined` is the one join of two records, the bridge's
   map walk's and the readers' alike: a link for each pair of entries, one in each record toward the other's node,
-  that name the same cable or where either names 0 (an earlier bridge's). Each link is at the lesser bandwidth either
+  that name the same cable (a bridge before layout 143 names 0, and joins no cable of a later one: INVENTORY.md M58). Each link is at the lesser bandwidth either
   reports. It returns their count, and the map has one link per cable.
 - `mesh_stream_take` returns EBUSY where another client holds the stream or its last holding is still ending, and
-  ENOLINK where no live stream has the identity. `mesh_stream_present` returns EAGAIN where MESH_STREAM_ENTRIES entries
-  are presented and not taken, and EINVAL where an entry's rows leave the page table.
+  ENOLINK where no live stream has the identity. `mesh_stream_present` writes the entry's slot and moves its list's
+  count (section 14, "The lists"); it returns EINVAL for a context with no client, ENOLINK where the stream is not
+  live and EPERM where its owner word is not the caller's, and nothing for room or for the entry's rows (layouts to 143
+  returned EAGAIN for a full list and EINVAL for rows outside the page table, INVENTORY.md M1, M7).
 
 **The heartbeat** (rdma/mesh-heartbeat.c). Its signal set (`heard_set`) is built in one place for its mask, its spawn's
 defaults and its re-raise. Before it runs its image again it blocks its signals and raises again each
@@ -889,7 +917,7 @@ its holders, the slots are read every second for a client that lets go and lives
 TIMER_WATCH each WATCH_MS) reads the bridge's `turned` and `hung_from`, adds to the statistic and ends a bridge whose
 loop has stopped (section 16).
 
-**mesh-stat** prints one JSON line: `up` (else the errno), the node, its ports by index (peer, phase, bandwidth), the
+**mesh-stat** prints one JSON line: `up` (else the errno: ESRCH where the region names no bridge, `bridge_pid` 0), the node, its ports by index (peer, phase, bandwidth), the
 map (nodes by bridge number; links as [node, node, bandwidth or null], one per cable), the region and its unleased
 bytes, and each node's record (region, memory, model, boot, available memory), and the hang statistic (`hang`:
 `active` and `hung` in nanoseconds, `hangs`, and `share`, hung over active: section 16), printed beside `up` false too

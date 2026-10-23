@@ -5,7 +5,6 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <time.h>
 /* design/transport.md section 15, "The library" */
 static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
   int file=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
@@ -40,30 +39,24 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
   *bytes=(uint64_t)mesh_arena_pages(m)*m->pgsz;*unleased=(uint64_t)mesh_arena_free(m)*m->pgsz;
   munmap(m,length);return 0;
 }
-static int serial_even(struct hdr *m,_Atomic uint64_t *word,uint64_t *before){
-  while((*before=atomic_load_explicit(word,memory_order_acquire))&1)
-    if(os_sync_wait_on_address_with_timeout(word,*before,sizeof *word,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
-         MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return ESRCH;
-  return 0;
-}
-static int mesh_records_read(int health,struct mesh_record **out){
+static int mesh_records_read(struct mesh_record **out){
   struct hdr *m;size_t length;
   const int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
-  int count;
-  for(uint64_t before,held=0;;){
-    if((health && serial_even(m,&m->health,&held)) || serial_even(m,&m->map,&before)){count=-ESRCH;break;}
-    const uint64_t n=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
-    const int fits=at<=length && n<=(length-at)/sizeof(struct mesh_record);
-    struct mesh_record *copy=fits?malloc((n?n:1)*sizeof *copy):NULL;
-    if(copy)memcpy(copy,(char *)m+at,n*sizeof *copy);
-    if(mesh_map_whole(m,before) && (!health || atomic_load_explicit(&m->health,memory_order_acquire)==held)){
-      count=copy?(int)n:fits?-ENOMEM:-EINVAL;*out=copy;break;
-    }
+  struct mesh_record *copy=NULL;
+  uint32_t n=0;
+  for(;;){
+    const uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire),at=atomic_load_explicit(&m->map_at,memory_order_acquire);
+    n=(uint32_t)at;
     free(copy);
+    if(!(copy=malloc((n?n:1)*sizeof *copy)))break;
+    memcpy(copy,mesh_records(m,at),n*sizeof *copy);
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(&m->map,memory_order_relaxed)==before)break;
   }
   munmap(m,length);
-  return count;
+  *out=copy;
+  return copy?(int)n:-ENOMEM;
 }
 /* design/transport.md section 3, RECORD; section 15, "The library" */
 uint32_t mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint64_t *bandwidth,uint32_t room){
@@ -71,7 +64,7 @@ uint32_t mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uin
   for(uint32_t i=0;i<a->reached && i<MESH_STREAMS;i++)
     for(uint32_t j=0;a->reach[i].node==b->node && j<b->reached && j<MESH_STREAMS;j++){
       const struct mesh_reach *x=a->reach+i,*y=b->reach+j;
-      if(y->node!=a->node || (x->cable!=y->cable && x->cable && y->cable))continue;
+      if(y->node!=a->node || x->cable!=y->cable)continue;
       if(count<room)bandwidth[count]=!x->bandwidth || (y->bandwidth && y->bandwidth<x->bandwidth)?y->bandwidth:x->bandwidth;
       count++;
     }
@@ -118,14 +111,14 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
 }
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map){
   struct mesh_record *r=NULL;
-  const int count=mesh_records_read(0,&r);
+  const int count=mesh_records_read(&r);
   const int result=count<0?count:mesh_records_map(r,(uint32_t)count,members,n,node,map);
   free(r);
   return result;
 }
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   struct mesh_record *r=NULL;
-  const int count=mesh_records_read(1,&r);
+  const int count=mesh_records_read(&r);
   for(int i=0;i<count && (uint32_t)i<capacity;i++){
     out[i].node=r[i].node;
     out[i].region=r[i].region;out[i].memory=r[i].memory;
@@ -134,24 +127,6 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   }
   free(r);
   return count;
-}
-int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
-  struct hdr *m;size_t length;
-  int error=mesh_open(0,&m,&length,NULL);
-  if(error)return error;
-  const uint64_t bridge=atomic_load_explicit(&m->bridge_pid,memory_order_acquire),now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  const uint64_t until=bound_ns>UINT64_MAX-now?UINT64_MAX:now+bound_ns;
-  uint64_t seen=atomic_load_explicit(&m->map,memory_order_acquire);
-  for(uint64_t at=now;!error && seen==*serial && at<until;at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)){
-    os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
-                                         until-at<MESH_PAUSE_NS?until-at:MESH_PAUSE_NS);
-    seen=atomic_load_explicit(&m->map,memory_order_acquire);
-    if(seen==*serial && (atomic_load_explicit(&m->bridge_pid,memory_order_acquire)!=bridge || mesh_gone((pid_t)bridge)))error=ESRCH;
-  }
-  if(!error)error=seen!=*serial?0:ETIMEDOUT;
-  if(!error)*serial=seen;
-  munmap(m,length);
-  return error;
 }
 /* design/transport.md section 2, the client slots */
 void mesh_retire(struct hdr *m,uint64_t client){
@@ -226,19 +201,14 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
   }
   return MESH_ABSENT;
 }
-static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
-                              _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
-  uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
-  uint32_t first=mesh_scan(count,align,resume,end,own,hot);
-  if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,begin,end,own,hot);
-  if(first==MESH_ABSENT){ mesh_retired_release(c->M,c->client); first=mesh_scan(count,align,begin,end,own,hot); }
-  if(first==MESH_ABSENT){ errno=ENOMEM; return MESH_ABSENT; }
-  *cursor=first+count;
+static uint32_t mesh_allocate(uint32_t count,uint32_t align,uint32_t end,_Atomic uint64_t *own,_Atomic uint64_t *hot){
+  const uint32_t first=mesh_scan(count,align,0,end,own,hot);
+  if(first==MESH_ABSENT)errno=ENOMEM;
   return first;
 }
 static uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   if(!count){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT),&c->row_cursor);
+  uint32_t first=mesh_allocate(count,1,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT));
   if(first==MESH_ABSENT) return first;
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
@@ -252,7 +222,7 @@ static uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
-  return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
+  return mesh_allocate(pages,align,mesh_arena_pages(c->M),bits,bits);
 }
 uint32_t mesh_arena_free(struct hdr *m){
   const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);
@@ -430,21 +400,17 @@ int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,struct mesh_stream
   if(!x)return error;
   char *m=(char *)context->M;
   struct mesh_entry *lists=(struct mesh_entry *)(m+x->lists);
-  *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},.taken={&x->taken[0],&x->taken[1]},
-    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,
-    .posted_at=(_Atomic uint64_t *)(m+x->posted_at),.landed_at=(_Atomic uint64_t *)(m+x->landed_at),.posts=x->posts};
+  *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},
+    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,.posts=x->posts};
   return 0;
 }
 int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct mesh_entry entry){
   int error;
   struct mesh_stream *x=stream_owned(context,stream,&error);
   if(!x)return error;
-  const struct hdr *m=context->M;
-  if(land<0 || land>1 || !mesh_rows_hold(m,mesh_entry_row(&entry),mesh_entry_pages(&entry)))return EINVAL;
   _Atomic uint64_t *presented=land?&x->lands:&x->sends;
   const uint64_t e=atomic_load_explicit(presented,memory_order_relaxed);
-  if(e-atomic_load_explicit(&x->taken[land],memory_order_acquire)>=MESH_STREAM_ENTRIES)return EAGAIN;
-  ((struct mesh_entry *)((char *)m+x->lists))[(uint64_t)land*MESH_STREAM_ENTRIES+e%MESH_STREAM_ENTRIES]=entry;
+  ((struct mesh_entry *)((char *)context->M+x->lists))[(land?MESH_STREAM_ENTRIES:0)+e%MESH_STREAM_ENTRIES]=entry;
   atomic_store_explicit(presented,e+1,memory_order_release);
   return 0;
 }
