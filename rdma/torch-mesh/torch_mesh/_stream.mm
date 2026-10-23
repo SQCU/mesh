@@ -314,20 +314,19 @@ struct Group {
     buffers.push_back({(__bridge void *)at::native::mps::getMTLBufferStorage(t), (size_t)(t.storage_offset() * t.element_size())});
     return &buffers.back();
   }
-  at::Tensor contiguous(const at::Tensor &t, bool written) {
-    (void)written;
+  const at::Tensor &contiguous(const at::Tensor &t) {
     TORCH_CHECK(t.is_mps() == metal, "the mesh backend's group takes MPS tensors or CPU tensors, not both");
     TORCH_CHECK(t.is_contiguous(), "the mesh backend's operand is a contiguous region tensor (torch_mesh.empty); a non-contiguous "
                 "one is not copied into one (zero copy: nccl.h Memory)");
     return t;
   }
-  Operand moving(const at::Tensor &tensor, bool written) {
-    const at::Tensor t = contiguous(tensor, written);
+  Operand moving(const at::Tensor &tensor) {
+    const at::Tensor &t = contiguous(tensor);
     const ncclDataType_t type = kind(t.scalar_type());
     return type == ncclNumTypes ? Operand{where(t), (size_t)t.nbytes(), ncclUint8} : Operand{where(t), (size_t)t.numel(), type};
   }
-  Operand reducing(const at::Tensor &tensor, int64_t &op, bool written) {
-    const at::Tensor t = contiguous(tensor, written);
+  Operand reducing(const at::Tensor &tensor, int64_t &op) {
+    const at::Tensor &t = contiguous(tensor);
     if (t.scalar_type() == at::kBool) op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
     if (t.is_complex()) {
       TORCH_CHECK(op == ncclSum || op == ncclAvg, "a complex tensor reduces by sum and average alone");
@@ -354,18 +353,18 @@ static Issue prepare(const Call &call, Group &g) {
   };
   switch (what) {
   case ALLREDUCE: case REDUCE:
-    i.sends = {g.reducing(tensor(sends, 0), i.op, receives.empty())};
-    if (!receives.empty()) i.receives = {g.reducing(tensor(receives, 0), i.op, true)};
+    i.sends = {g.reducing(tensor(sends, 0), i.op)};
+    if (!receives.empty()) i.receives = {g.reducing(tensor(receives, 0), i.op)};
     break;
-  case BROADCAST: i.sends = {g.moving(tensor(sends, 0), true)}; break;
+  case BROADCAST: i.sends = {g.moving(tensor(sends, 0))}; break;
   case ALLGATHER: case REDUCE_SCATTER: {
     // MPI_Allgatherv and MPI_Reduce_scatter (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV): rank r's segment is
     // counts[r] elements, the segments packed in rank order in the whole operand (the receive's, the send's), counted
     // in the operand's NCCL elements; equal counts are the library's equal program
     const bool reduces = what == REDUCE_SCATTER;
     const at::Tensor &whole = reduces ? tensor(sends, 0) : tensor(receives, 0);
-    i.sends = {reduces ? g.reducing(tensor(sends, 0), i.op, false) : g.moving(tensor(sends, 0), false)};
-    i.receives = {reduces ? g.reducing(tensor(receives, 0), i.op, true) : g.moving(tensor(receives, 0), true)};
+    i.sends = {reduces ? g.reducing(tensor(sends, 0), i.op) : g.moving(tensor(sends, 0))};
+    i.receives = {reduces ? g.reducing(tensor(receives, 0), i.op) : g.moving(tensor(receives, 0))};
     const size_t per = whole.numel() ? (reduces ? i.sends : i.receives)[0].count / (size_t)whole.numel() : 1;
     for (auto c : counts) i.counts.push_back((size_t)c * per);
     break;
@@ -375,15 +374,15 @@ static Issue prepare(const Call &call, Group &g) {
     // forms, a gather and a scatter of any sizes the rooted V): segments packed in rank order, a buffer that moves none
     // absent
     TORCH_CHECK(sends.size() == 1 && receives.size() == 1 && (sends[0] || receives[0]), "an all-to-all names its send and receive buffers");
-    i.sends = {sends[0] ? g.moving(*sends[0], false) : Operand{}};
-    i.receives = {receives[0] ? g.moving(*receives[0], true) : Operand{}};
+    i.sends = {sends[0] ? g.moving(*sends[0]) : Operand{}};
+    i.receives = {receives[0] ? g.moving(*receives[0]) : Operand{}};
     const at::Tensor &whole = sends[0] ? *sends[0] : *receives[0];
     const size_t per = whole.numel() ? (sends[0] ? i.sends : i.receives)[0].count / (size_t)whole.numel() : 1;
     for (auto c : counts) i.counts.push_back((size_t)c * per);
     break;
   }
-  case SEND: i.sends = {g.moving(tensor(sends, 0), false)}; break;
-  case RECV: i.receives = {g.moving(tensor(receives, 0), true)}; break;
+  case SEND: i.sends = {g.moving(tensor(sends, 0))}; break;
+  case RECV: i.receives = {g.moving(tensor(receives, 0))}; break;
   default: TORCH_CHECK(false, "no collective of kind ", what);
   }
   return i;
@@ -487,8 +486,7 @@ static int group_argument(const std::string &name) {
 }
 
 // Issued and not completed (split) where the result is its own operand: torch's wait_tensor (its work registry) waits
-// for it; a non-contiguous result, written back from a contiguous copy, completes at once.  A result made here is a
-// region tensor (region_empty): the library sends from and lands in leases alone (nccl.h Memory).
+// for it.  A result made here is a region tensor (region_empty): the library sends from and lands in leases alone (nccl.h Memory).
 static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
   const std::string name = op.schema().name().substr(sizeof "_c10d_functional::" - 1) +
                            (op.schema().overload_name().empty() || op.schema().overload_name() == "default" ? "" : "." + op.schema().overload_name());

@@ -43,9 +43,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing or a lost link; a GPU
   wait also at its bound, and a host-path wait at a revoke. No clock ends a wait on a peer's data.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
-  next one's node: a route crosses ranks alone (a node it is to cross takes part as a rank, the identity where it has
-  no work), and a group whose ranks no such path joins fails at its first collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
-- Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
+  next one's node: the bridges forward nothing, and a group whose ranks no such path joins fails at its first
+  collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
+- Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
   bridge's region (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the region is
   `torch.frombuffer(mesh.lease(nbytes), dtype=...)`, or `torch_mesh.empty(shape, dtype=..., device="cpu")`.
@@ -63,15 +63,15 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   allocator's, and a collective that sends from one, or lands in one, across a link fails as a value
   (`ncclInvalidUsage`: the library copies nothing into the region). torch's MPS factories take their allocator from a
   fixed instance (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a
-  tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a staged
-  copy of a non-contiguous operand, a functional collective's result, `backend.blank`) are region tensors.
+  tensor in the region by making it with `empty`, never by default. The tensors the backend makes itself (a
+  functional collective's result, `backend.blank`) are region tensors. A non-contiguous operand fails as a value.
   metal-microbench's callers: `crossing.py` `REGION_TENSORS=1` all-reduces one in place.
 
 ## What works
 
 | works | notes |
 |---|---|
-| all_reduce | sum, prod, max, min, avg on int8, uint8, int32, int64, float16, bfloat16 and float32; a non-contiguous view |
+| all_reduce | sum, prod, max, min, avg on int8, uint8, int32, int64, float16, bfloat16 and float32 |
 | all_gather_object, all_to_all of lists, blocking send/recv | |
 | broadcast, reduce | |
 | all_gather (list and into a tensor) | a list of unequal sizes: one MPI_Allgatherv (Uneven nodes) |

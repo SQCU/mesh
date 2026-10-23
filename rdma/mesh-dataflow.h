@@ -33,9 +33,8 @@ static inline uint64_t mesh_started(pid_t process){
 static inline int mesh_holds(pid_t pid,uint64_t start){ return start?mesh_started(pid)==start:!mesh_gone(pid); }
 /* design/algorithm-sources.md#programtensor */
 void mesh_retire(struct hdr *,uint64_t client);
-/* design/transport.md section 14: the one join of two nodes' records: the cables each one's bridge reaches the other
-   over, the fewer of the two ends' counts (0: none); *beta 8e9 over the least bandwidth either reports of them (0 where
-   neither reports one) */
+/* design/transport.md section 14: the one join of two nodes' records: 1 where each one's bridge reaches the other,
+   else 0; *beta 8e9 over the lesser bandwidth either reports (0 where neither reports one) */
 int mesh_joined(struct mesh_record *,struct mesh_record *,double *beta);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);

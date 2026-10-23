@@ -5,7 +5,7 @@ of calls, each a kind, its tensors, counts, operator and root.  MPS tensors take
 encoded on torch's MPS stream, each tensor passed as its storage's MTLBuffer and byte offset (ncclMeshBuffer), so the
 work is ordered with torch's own and the call returns at once (an async op issued and not completed: a Work whose wait
 completes it on torch's stream).  CPU tensors take the host path, complete where the call returns.  A non-contiguous
-tensor is staged through a contiguous copy in the region.
+tensor fails as a value (_stream.mm Group): nothing is copied to make it one.
 
 One form a collective, the library's V call where it has one (the library takes equal segments as its equal
 program): an all-gather and a reduce-scatter are ncclMeshAllGatherV and ncclMeshReduceScatterV; all_to_all,
