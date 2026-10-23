@@ -507,7 +507,7 @@ heard of, so none is left for them.
   at start k−1) and posts start k+1's landings into slot k+1 mod 4 once start k−3's kernels have ended and its tables
   are done, waiting outside the groups' lock: it reads the slot's bind words and the bridge's stamps again after each
   yield of its thread, and the revoke at each (`ncclCommAbort` ends it); where those kernels are in a command buffer not yet committed, or one that ended in an error, it fails as
-  a value naming it (torch-mesh commits torch's open buffer before a start where start k−3's kernels are in it). A
+  a value naming it (torch-mesh commits torch's open buffer before a start where a publication or start k−3's kernels are in it). A
   kernel's wait reads the stamp of the start it lands from its crossing record (`mesh_crossing` `target`, every landing
   of a start one call), so a slot's views and waits are written once at the init and no start rewrites them. A slot is
   released by its binds: each kernel bound to it (`ncclMeshBind`, landing its start or publishing it) has a word of

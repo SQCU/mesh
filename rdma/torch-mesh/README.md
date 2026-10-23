@@ -422,7 +422,8 @@ large tensors in the region: [docs/writing-a-service.md](../../docs/writing-a-se
   - A buffer holding four of the library's programs is committed before a fifth is encoded into it, since a group
     shape keeps four plans and the fifth call of a shape waits for the oldest's program to end (NCCL.md, Plans).
   - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
-    library's: the host path, a recording's compile meeting. torch's own: `torch.mps.synchronize()`,
+    library's: the host path, a recording's compile meeting, and an exchange's start (which waits for start k−3's
+    slot): it commits a publication waiting in the open buffer, and the buffer holding start k−3's kernels. torch's own: `torch.mps.synchronize()`,
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
   - A host that blocks outside torch while a publication waits in the open buffer stalls its peer: nothing else
