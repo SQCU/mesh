@@ -479,27 +479,28 @@ NCCL's `ncclMemAlloc` do for buffers a library registers: a slot holds this rank
 receives any piece of (each piece at its offset), and the slot's table (`struct mesh_table`, then a `struct mesh_peer`
 for each part this rank lands, in rank order, then a `struct mesh_wait` for each landing leg of those parts, then a
 `struct mesh_relay` for each piece it sends on from its rows), then a table of its sends and a table of its landings
-for each channel its legs cross. The init makes the request's three slots in one lease with one Metal buffer over it,
-links their tables into the queue and takes their rows (a Metal 4 binding's records), once: start k uses slot k mod 3,
-two calls in flight and one posted ahead (design/pages-and-functions.md, Freeing 7: "rows for NFE k+1 point at other
-pages until the rows for NFE k are released"). No start or binding allocates.
+for each channel its legs cross. The init makes the request's four slots in one lease with one Metal buffer over it,
+links their tables into the queue and takes their rows (a Metal 4 binding's records), once: start k uses slot k mod 4
+(design/pages-and-functions.md, Freeing 7: "rows for NFE k+1 point at other pages until the rows for NFE k are
+released"). No start or binding allocates.
 
-Receives are posted ahead. Start k posts start k+1's landings into slot k+1 mod 3, once the call that last used it
-(k−2) is released: each landing at the piece's whole room, its count not yet known (`need` ~0), its key, its wait and
-its peers' views, its landing table started as the process's next call. So no page of start k+1 arrives before its
-landing exists; a run that comes early lands in its rows. Start k then writes its own sends into slot k mod 3, and
+Receives are posted ahead. Start k posts start k+1's landings into slot k+1 mod 4, the slot start k−3 used, once
+that slot is released: start k−3's kernels have ended (its landing kernel ran at step k−2) and its tables are done.
+So no page of k+1 lands before k−3's pages are read, whatever the peer does (an empty or uneven leg lets a peer run
+ahead), and the host runs two steps ahead of the GPU. Each landing is posted at the piece's whole room, its count
+not yet known (`need` ~0), with its key, and its landing table is started as the process's next call (the slot's views
+and waits are written once at the init). So no page of start k+1 arrives before its landing exists; a run that comes
+early lands in its rows. Start k then writes its own sends into slot k mod 4, and
 stores the count of each of its landings (posted at start k−1) from `counts`, unless the bridge has from the first
 run's key unit; a landing of no pages it stamps done. An exchange's keys are its own: the communicator's id, the
-receiving rank, and the sending rank with the request's number on the communicator (seven bits, beside the bit that
-marks an exchange) and its position start x legs + leg (rdma/NCCL.md, Keys), so no group between two starts moves
-them, and a start takes no position of the channels' and no record in the groups' order. `ncclMeshRequestFree` stamps
+receiving rank, the sending rank, the request's number on the communicator (a whole word) and its position start x
+legs + leg (Keys), so no group between two starts moves them, and a start takes no position of the channels' and no record in the groups' order. `ncclMeshRequestFree` stamps
 ~0 the landings posted ahead for a start never made; the bridge posts no receive for a landing whose count it has not
 heard of, so none is left for them.
 
-- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: start k writes its sends into slot k mod 3 once
-  the kernels bound to start k−3 have ended and its SENDs are done, and posts start k+1's landings into slot k+1 mod 3
-  once start k−2's landings have landed, waiting outside the groups' lock for the command buffer of those kernels to
-  complete, in slices of MESH_PAUSE_NS, then for the bridge's stamps, the revoke read between slices (`ncclCommAbort`
+- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: start k writes its sends into slot k mod 4 (released
+  at start k−1) and posts start k+1's landings into slot k+1 mod 4 once start k−3's kernels have ended and its tables
+  are done, waiting outside the groups' lock for the command buffer of those kernels to complete, in slices of MESH_PAUSE_NS, then for the bridge's stamps, the revoke read between slices (`ncclCommAbort`
   ends it); where those kernels are in a command buffer not yet committed, or one that ended in an error, it fails as
   a value naming it (torch-mesh commits torch's open buffer before a start where start k−3's kernels are in it). A
   kernel's wait reads the stamp of the start it lands from its crossing record (`mesh_crossing` `target`, every landing
@@ -530,7 +531,7 @@ heard of, so none is left for them.
   groups' order, since its keys are not the channels'. The caller's kernels publish and consume it, encoded after the
   start. Where a link is lost under it, its entries read ~0; the kernels bound to it run and publish as they would
   (design/pages-and-functions.md, Link error: the callgraph does not consume the status).
-- `ncclMeshBind` finds a start's slot by its number (`slot_of`, the slot of its number modulo 3 while that is its
+- `ncclMeshBind` finds a start's slot by its number (`slot_of`, the slot of its number modulo 4 while that is its
   start). A slot's use count is zero once its bound kernels have ended (above) and each of its tables' `sent` and
   `landed` has reached the slot's last call or ~0 with every tuple's `posted` equal to its `count` (`slot_held`):
   until then the bridge may post a receive into the slot. A start that only publishes is free once its

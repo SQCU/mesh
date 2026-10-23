@@ -2325,7 +2325,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
-enum { SETS = 3 };
+enum { SETS = 4 };
 struct slot { void *pages, *command; size_t offset; struct mesh_table *table; struct metal_rows rows; uint64_t row, start, landing, landing_k, *k, *kl; uint32_t bound; int unbound; };
 struct leg { uint32_t x, piece, channel, index; int32_t from; };
 struct ncclMeshRequest {
@@ -2690,14 +2690,14 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   release(comm);
   struct slot *s = r->slots + number % SETS, *ahead = r->slots + (number + 1) % SETS;
   if (!result && s->landing != number) landings_post(r, s, number);
-  while (!result && (tables_held(r, ahead, 1) || kernels_held(s) || tables_held(r, s, 0))) {
-    const int status = kernels_held(s) && s->command ? metal_ended(s->command) : 1;
+  while (!result && slot_held(r, ahead, 1)) {
+    const int status = kernels_held(ahead) && ahead->command ? metal_ended(ahead->command) : 1;
     if (revoked(comm)) result = revoked_fail(comm);
     else if (status == 2 || status < 0)
       result = fail(status < 0 ? ncclSystemError : ncclInvalidUsage, "ncclMeshStart %llu on %s: its pages are start %llu's, whose kernels' command buffer %s",
                     (unsigned long long)number, comm->name, (unsigned long long)(number - 3), status < 0 ? "ended in an error" : "is not committed");
     else {
-      void *command = status ? NULL : metal_retain(s->command);
+      void *command = status ? NULL : metal_retain(ahead->command);
       pthread_mutex_unlock(&group_lock);
       if (command) { metal_completed(command, MESH_PAUSE_NS); metal_release(command); }
       else sched_yield();
