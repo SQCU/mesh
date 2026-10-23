@@ -80,10 +80,9 @@ for f in networks.conf tailscale.key; do ssh node.local "sudo sh -c 'umask 077; 
 
 Then `ssh node.local 'sudo /usr/local/mesh/bin/mesh-networks.sh; sudo /usr/local/mesh/bin/mesh-tailscale-init.sh'` (or a
 rerun of `install.sh`) adds the networks and joins the tailnet labeled with the node's hardware serial number, not a
-host name (AGENTS.md, "Node identity and names"; the operator, 2026-10-21: "we never rely on something like a
-localhostname as a name or identifier for something which we are programming"). A node's key expires unless its
-expiry is disabled in the Tailscale admin console or it joined with a tagged key, whose nodes do not expire; a node
-whose key expired logs in again.
+host name (the operator, 2026-10-21: "we never rely on something like a localhostname as a name or identifier for
+something which we are programming"). A node's key expires unless its expiry is disabled in the Tailscale admin console
+or it joined with a tagged key, whose nodes do not expire; a node whose key expired logs in again.
 
 **Gitignored documents.** Git carries everything a node converges to except two kinds of document, which reach a node
 over ssh from a peer that holds them, when the node joins the mesh and to every node again when one changes (a network
@@ -144,9 +143,9 @@ gone <n>                            an announcement withdrawn
 `<n>` is the node's identity, its bridge node number (FNV-1 of its host UUID, `rdma/peers.py` `node_number`): a
 bridge record and an announcement are the same node when their numbers are, and `self` is this machine's own number.
 `name=` is the name table's (`etc/mesh-nodes.json`, entries keyed by host UUID, `rdma/peers.py` `table`), absent for a
-node it does not list; a name is a label for people, which nothing matches to find a node (AGENTS.md, "Node identity
-and names"). The beacon announces the host UUID as its instance name and its number, UUID and serial in its
-TXT record; a node still running an older beacon (one that announced its LocalHostName) shows as
+node it does not list; a name is a label for people, which nothing matches to find a node (AGENTS.md at 513638a4, "Node
+identity and names"). The beacon announces the host UUID as its instance name and its number, UUID and serial in its TXT
+record; a node still running an older beacon (one that announced its LocalHostName) shows as
 `unidentified-<key>` until `install.sh` next runs there. The SRV target `dns-sd -L` resolves is used only as
 mDNS's pointer to the node's address records.
 
@@ -345,7 +344,7 @@ No static IPs. Identity travels with the machine:
 - IPv6 link-local on each fabric port, EUI-64 from that port's own MAC
 
 A Bonjour `<LocalHostName>.local` name is not identity: macOS renames a running machine when another claims its name
-(AGENTS.md, "Node identity and names").
+(AGENTS.md at 513638a4, "Node identity and names").
 
 That link-local is *exactly* the value the paired RDMA device reports as one of its GIDs (`GID[0]` on macOS 26;
 on macOS 27 the M5 Ultra's devices list another address first, `23ff:…`, then the link-local at `GID[1]`), so a port's
@@ -391,7 +390,7 @@ the node's uplink.
 | `install.sh` | provision/converge a node, run by hand. Idempotent — re-running is the drift fix, and nothing reruns it. Each run sets the power policy, the firewall, sshd, screen sharing and NTP, runs the networks, fabric and tailnet inits and the health report, loads every unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and the admin user's LaunchAgents that declare the Background session type (into user/<uid>), and starts the beacon, telemetry and the observer where they are not running. It deletes `io.mesh.update`, `io.mesh.keeper`, `io.mesh.cartlane.learner` and `io.mesh.cartlane.viewer` where they remain, the update's bootout last since that job may be the run's own parent. It runs with root's home: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
 | `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
-| `AGENTS.md` | the operator's words for this repo: recovery, the hardware, access, version control, node identity, review. |
+| `CLAUDE.md` | where to start: `design/rubric-actionable.md`, then `THREAT-MODEL.md` and `design/pages-and-functions.md`. |
 | `THREAT-MODEL.md` | the operator's words on access, verbatim (2026-08-27). |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
@@ -536,8 +535,7 @@ connection with silence while looking perfectly healthy.
 Fetching is by branch: `main`, or the branch `MESH_BRANCH` names. The operator,
 2026-08-27 ([THREAT-MODEL.md](THREAT-MODEL.md)): "you can *never* index by commit *ever*
 unless you register that commit as a branch". A node pinned at a commit would fetch its
-bootstrap at that commit too, so no rerun would bring it the change that unpins it
-([AGENTS.md](AGENTS.md), "Version control").
+bootstrap at that commit too, so no rerun would bring it the change that unpins it.
 
 Branch-addressed content on `raw.githubusercontent.com` carries `cache-control:
 max-age=300`, so a node can briefly fetch a copy up to five minutes old. That is a

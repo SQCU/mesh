@@ -1,7 +1,7 @@
 # Accessibility implementation claims
 
 The operator's words on access are [`../../THREAT-MODEL.md`](../../THREAT-MODEL.md)
-(2026-08-27). Related documents: [`../../AGENTS.md`](../../AGENTS.md),
+(2026-08-27). Related documents: [`../rubrics.md`](../rubrics.md),
 [`../transport.md`](../transport.md) and
 [`../ACCESS-TOPOLOGY-SPEC.md`](../ACCESS-TOPOLOGY-SPEC.md).
 

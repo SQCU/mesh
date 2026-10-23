@@ -791,15 +791,15 @@ fails ends the open with its errno, as a value: the port is not open, the extent
 port opens again at the events that open any port (its link's coming on, a hello heard on it, its child's end), when
 the rest are registered. The registration-refusal backoff of 128d0e84 (EFBIG past `max_mr`, the k-th refusal in a row
 held 60·2^(k−1) s) is deleted: the extents fit `max_mr` by construction, and a hold that retries a deterministic
-outcome serves none of AGENTS.md "Recovery"'s three kinds of failure (the operator, 2026-10-22: "all of the relatd
-abstractions and wrappers must be deleted"). The queue pairs usable for a link are `max_qp` − 1. The port's GID is chosen
-from its whole table (up to 256 entries): the entry equal to an IPv6 link-local address its interface holds
-(getifaddrs, with the scope BSD embeds in bytes 2-3 cleared), else the table's link-local entry, else its first nonzero
-one, the open logging that no address matched. A Thunderbolt port's table does not always begin at index 0: the Mini's
-en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed every queue pair's
-connection with EIO. The M5 Ultra Studio's macOS 27 rdma_en3 (2026-10-21) held [0] 23ff:9f:174a:401d:8d37:9dff:16ac:4594,
-[1] its interface's fe80:: link-local address and [2] its fd6d ULA, and the Mini (macOS 26) failed every lane's
-connection toward [0] with EIO.
+outcome serves none of the three kinds of failure of AGENTS.md at 513638a4, "Recovery" (the operator, 2026-10-22: "all
+of the relatd abstractions and wrappers must be deleted"). The queue pairs usable for a link are `max_qp` − 1. The
+port's GID is chosen from its whole table (up to 256 entries): the entry equal to an IPv6 link-local address its
+interface holds (getifaddrs, with the scope BSD embeds in bytes 2-3 cleared), else the table's link-local entry, else
+its first nonzero one, the open logging that no address matched. A Thunderbolt port's table does not always begin at
+index 0: the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and index 0's empty address failed every
+queue pair's connection with EIO. The M5 Ultra Studio's macOS 27 rdma_en3 (2026-10-21) held [0]
+23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its interface's fe80:: link-local address and [2] its fd6d ULA, and the Mini
+(macOS 26) failed every lane's connection toward [0] with EIO.
 
 **The control socket** (`port_say`, `control_heard`). A message is a header and its `bytes` (at most 64 MiB), queued
 behind what the socket has not taken, with no bound: a peer that reads nothing holds a record a change or a health

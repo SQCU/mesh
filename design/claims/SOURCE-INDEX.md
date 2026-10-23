@@ -11,4 +11,4 @@ to the documents it cites.
 | `rdma/`, `user/mesh-telemetry.py`, `bin/mesh-observe.py` | [`MESH-TELEMETRY.md`](MESH-TELEMETRY.md) | `mesh-coprocessor-demo.md`, `rl-training-spec.md`, `ALGORITHM-CONTRACTS.md` |
 | `viz/`, `xonotic/render/`, `xonotic/payload/runtime-package.py` | [`RUNTIME.md`](RUNTIME.md) | `mesh-coprocessor-demo.md`, `FUSION-SPEC.md`, `NAV-SPEC.md`, `ALGORITHM-CONTRACTS.md` |
 | `xonotic/solver/strat/joracle/client-keep.sh` | [`RUNTIME.md`](RUNTIME.md) | `mesh-coprocessor-demo.md`, `FUSION-SPEC.md`, `ALGORITHM-CONTRACTS.md` |
-| `install*.sh`, `enable-autologin.sh`, `serve.sh`, `bin/mesh-bridge.sh` (deleted in 67f959bf, 2026-10-01), `bin/mesh-networks.sh` | [`ACCESSIBILITY.md`](ACCESSIBILITY.md) | `THREAT-MODEL.md`, `AGENTS.md`, `design/transport.md`, `ACCESS-TOPOLOGY-SPEC.md` |
+| `install*.sh`, `enable-autologin.sh`, `serve.sh`, `bin/mesh-bridge.sh` (deleted in 67f959bf, 2026-10-01), `bin/mesh-networks.sh` | [`ACCESSIBILITY.md`](ACCESSIBILITY.md) | `THREAT-MODEL.md`, `design/rubrics.md`, `design/transport.md`, `ACCESS-TOPOLOGY-SPEC.md` |

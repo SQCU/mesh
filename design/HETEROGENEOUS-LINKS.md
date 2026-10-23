@@ -4,9 +4,8 @@ A link's two bridges used to make ten queue pairs each, whatever their devices h
 could not pair at all. This document covers the failure that showed it (2026-10-21), what
 [transport.md](transport.md) assumed, every place the code depends on the count, what probes of the new machine
 showed, what the first remedial change does, and what remains. Nodes are named here by their bridge's node number
-(drawn from the host UUID) and their hardware. The operator, 2026-10-21 ([AGENTS.md](../AGENTS.md)): "from this point
-onwards, we never rely on something like a localhostname as a name or identifier for something which we are
-programming."
+(drawn from the host UUID) and their hardware. The operator, 2026-10-21: "from this point onwards, we never rely on
+something like a localhostname as a name or identifier for something which we are programming."
 
 | node | hardware | macOS | its link |
 |---|---|---|---|
@@ -253,12 +252,13 @@ all of them without sanction in rubric"). For versions to join one map:
 - **P6. A host-path sendrecv whose peers refused theirs.** On the loop fabric's 3-node line (deleted in 736ce24d),
   rank 1's sendrecv waited without bound on the host path, and returned "ok" with every value wrong on the walk path,
   once the ranks it pairs with had refused theirs. It predates this change and is a library issue, not the transport's.
-- **P7. Host names in the bridge's area** (AGENTS.md debts). The record's `name` (`mesh-link.c` `host_name`, which
-  published SCDynamicStoreCopyLocalHostName) is gone: a record carries its node number, and readers take a person's name
-  from the name table by node number (`peers.py` `label`). `nccl-mesh.c` `ncclGetUniqueId` falls back to
-  `gethostname()` for the bootstrap's listen host when the node holds no fabric address. The operator, 2026-10-21:
-  "we should be able to use any kind of virtualization of 'names' such that we never rely on anything like, again, that
-  localhostname thing, which makes no promises of selectivity or unique identifiability or anything of the sort".
+- **P7. Host names in the bridge's area** (the debts listed in AGENTS.md at e6d406ad). The record's `name`
+  (`mesh-link.c` `host_name`, which published SCDynamicStoreCopyLocalHostName) is gone: a record carries its node
+  number, and readers take a person's name from the name table by node number (`peers.py` `label`). `nccl-mesh.c`
+  `ncclGetUniqueId` falls back to `gethostname()` for the bootstrap's listen host when the node holds no fabric address.
+  The operator, 2026-10-21: "we should be able to use any kind of virtualization of 'names' such that we never rely on
+  anything like, again, that localhostname thing, which makes no promises of selectivity or unique identifiability or
+  anything of the sort".
 
 ## 9. Deployment
 

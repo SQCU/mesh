@@ -37,4 +37,4 @@ precedence over claude written text without a citation to user text").
 > if it was written by claude, it's not the threat model.
 
 
-[AGENTS.md](AGENTS.md) and [README.md](README.md) cite these.
+[CLAUDE.md](CLAUDE.md) and [README.md](README.md) cite these.

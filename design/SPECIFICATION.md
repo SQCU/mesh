@@ -327,10 +327,10 @@ The mesh task is Megatron TP2 with Goals A and B in [collective-goals.md](collec
 ### The session's requirement lines (restored 2026-10-17)
 
 Deleted with this section's body in mesh e1acaf7e (2026-09-14, "Keep collective scope narrow"), restored verbatim on
-2026-10-17 (AGENTS.md: "Verbatim operator quotes outrank everything else here"). Provenance as recorded: operator
-messages of the September 13-14, 2026 mesh session, in their relative order, original spelling; this file recorded them
-on 2026-09-14 07:22 (mesh f1da8116) unless marked; no transcript timestamp or line number is asserted. The connecting
-sentences are the record's; its interpretive paragraphs are not restored.
+2026-10-17 (metal-microbench AGENTS.md at 1017d5bf: "Verbatim operator quotes outrank everything else here"). Provenance
+as recorded: operator messages of the September 13-14, 2026 mesh session, in their relative order, original spelling;
+this file recorded them on 2026-09-14 07:22 (mesh f1da8116) unless marked; no transcript timestamp or line number is
+asserted. The connecting sentences are the record's; its interpretive paragraphs are not restored.
 
 The initial scope explicitly requires partial consumption:
 
