@@ -396,6 +396,13 @@ w = s["lm_head"].to("cpu")                        # decoded
   writes that dtype).
 - The codes are constants: no gradient reaches them, only through them.
 
+## Memory outside the region
+
+`torch_mesh.memory()` and `torch_mesh.check_memory()` weigh a process's GPU memory outside its node's region against
+what the node can give without pressure, and an `OutsideRegionWarning` says where a program will probably take its node
+down. A collective first given a tensor outside the region warns that it is staged by a copy. Why a program keeps its
+large tensors in the region: [docs/writing-a-service.md](../../docs/writing-a-service.md#memory-outside-the-region).
+
 ## Performance
 
 - The MPS path is the measured path; async ops hide the crossing behind compute.

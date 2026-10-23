@@ -92,7 +92,7 @@ def main():
     del held
     tick = lstm.Tick(W, bias, rows, config['shares'], rank, L, KIN, chain.capability(config['capabilities']))
     del W, bias
-    O = torch.empty(steps, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
+    O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
     E = chain.landed(rank, inputs, steps, rows, KIN)
     start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()

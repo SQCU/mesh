@@ -10,6 +10,8 @@ empty() makes a region tensor, whose bytes are a lease of this node's bridge's r
 DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
 lies; records() is the region tensors' leases live now, address(t) where a tensor's bytes lie in the region (0:
 outside it), and cpu_view(t) a CPU tensor over a region tensor's own pages, which the host reads and writes in place.
+memory() and check_memory() weigh this process's GPU memory outside the region against what its node can give; a
+collective given a tensor outside the region, and an exchange made, check it (OutsideRegionWarning).
 
 
 merge_partials() is the softmax over a split as the library's collective (the torch operator torch_mesh::merge_partials:
@@ -60,6 +62,43 @@ def address(tensor):
     """Where a tensor's bytes lie in the region (its first byte's address), 0 where they lie outside it."""
     from . import _stream
     return _stream.address(tensor)
+
+
+class OutsideRegionWarning(UserWarning):
+    """A tensor program holding memory outside its node's region (docs/writing-a-service.md#memory-outside-the-region)."""
+
+
+def memory():
+    """Bytes: `outside` this process's GPU memory outside the region (torch.mps.driver_allocated_memory less the region
+    tensors' leases, at least its live MPS tensors), `region` those leases, `available` what the kernel can give without
+    pressure (kern.memorystatus_level percent of the node's memory, the figure mesh.nodes() publishes) and `node` the
+    node's memory (docs/writing-a-service.md#memory-outside-the-region)."""
+    import ctypes
+
+    import torch
+
+    def read(name, value):
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        ctypes.CDLL(None).sysctlbyname(name, ctypes.byref(value), ctypes.byref(size), None, 0)
+        return value.value
+    node, level = read(b'hw.memsize', ctypes.c_uint64()), read(b'kern.memorystatus_level', ctypes.c_int())
+    region = sum(r['bytes'] for r in records())
+    outside = max(torch.mps.current_allocated_memory(), torch.mps.driver_allocated_memory() - region)
+    return {'node': node, 'region': region, 'outside': outside, 'available': level * (node // 100)}
+
+
+def check_memory():
+    """memory(), warning (OutsideRegionWarning) where this process's GPU memory outside the region is more than its node
+    can give without pressure (docs/writing-a-service.md#memory-outside-the-region)."""
+    import warnings
+    held = memory()
+    if held['outside'] > held['available']:
+        warnings.warn(f"mesh: {held['outside'] / 2**30:.2f} GiB of this process's GPU memory lies outside the bridge's "
+                      f"region and its node can give {held['available'] / 2**30:.2f} GiB without pressure: the GPU wires it "
+                      "beside the region when it runs, and a node left without pageable memory stalls until its watchdog "
+                      "resets it. Allocate with torch_mesh.empty (docs/writing-a-service.md#memory-outside-the-region)",
+                      OutsideRegionWarning, stacklevel=2)
+    return held
 
 
 def cpu_view(tensor):
