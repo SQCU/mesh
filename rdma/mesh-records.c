@@ -190,7 +190,7 @@ void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes)
    seen (its exit, the event loop's EVFILT_PROC, retires every slot it holds: a holder's death is that event, not a
    poll), one already gone retired at once; the rows of a retired client released but those a request outstanding on a
    lane names (mesh-dataflow.c mesh_retired_release, mesh_pinned), a stream a gone client held let go (mesh-link.c
-   streams_let_go: its port's send thread, which posts nothing of it once the client retired, ends the holding), and
+   streams_let_go: its port's progress thread, which posts nothing of it once the client retired, ends the holding), and
    the streams held told (busy_tell) */
 void clients_turn(int liveness){
   const pid_t self=getpid();
