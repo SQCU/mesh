@@ -88,6 +88,29 @@ class _Counted:
         return True
 
 
+def all_to_all(output, input, matrix, group=None):
+    """MPI_Alltoallv with every rank's counts (libnccl-mesh ncclMeshAlltoAllV): matrix[a * n + b] elements go from rank a
+    to rank b, every rank passing the same matrix, the counts of its compiled program (its configuration's shapes and
+    shares, or a routed program's maximum extents); input (None where this rank sends nothing) and output packed in rank
+    order. Returns the Work."""
+    import torch.distributed as dist
+
+    from . import backend
+    group = group or dist.distributed_c10d._get_default_group()
+    return backend._mesh(group.group_name, 'all_to_all').all_to_all_matrix(output, input, list(matrix))
+
+
+def batch_isend_irecv(ops, pairs, group=None):
+    """dist.batch_isend_irecv's batch with the group's whole message list (libnccl-mesh ncclMeshGroupPairs): pairs a list
+    of (from, to, bytes), every rank of the group passing the same, from its compiled program, so a rank between two
+    that no link joins relays their messages. Returns the Work."""
+    import torch.distributed as dist
+
+    from . import backend
+    group = group or dist.distributed_c10d._get_default_group()
+    return backend._mesh(group.group_name, 'batch_isend_irecv').pairs(ops, pairs)
+
+
 def all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group=None):
     """MPI_Alltoallv whose counts the GPU wrote (libnccl-mesh ncclMeshAlltoAllCounted): input's rows grouped by
     destination rank, as many to rank q as segment q of `counts` sums to (an int64 tensor on the input's device, or a

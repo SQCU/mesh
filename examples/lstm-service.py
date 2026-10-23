@@ -55,19 +55,15 @@ def prepared(config, tile):
 
 # docs/writing-a-service.md#the-lstm
 def shares(config, rank, size, held):
-    w_size, b_size = sizes(config, config['shares'][rank])
-    W = torch_mesh.empty(w_size, dtype=torch.half)
-    bias = torch_mesh.empty(b_size, dtype=torch.float32)
-    if rank:
-        dist.recv(W, src=0)
-        dist.recv(bias, src=0)
-        return W, bias
-    for r in range(1, size):
-        for part in held[r]:
-            dist.send(part, dst=r)
-    W.copy_(held[0][0])
-    bias.copy_(held[0][1])
-    return W, bias
+    every = [sizes(config, h) for h in config['shares']]
+    out = [torch_mesh.empty(every[rank][k], dtype=dtype) for k, dtype in enumerate((torch.half, torch.float32))]
+    for k, dtype in enumerate((torch.half, torch.float32)):
+        matrix = [every[q][k] if p == 0 else 0 for p in range(size) for q in range(size)]
+        whole = torch_mesh.empty(sum(e[k] for e in every), dtype=dtype) if rank == 0 else None
+        if whole is not None:
+            torch.cat([held[q][k].reshape(-1) for q in range(size)], out=whole)
+        torch_mesh.all_to_all(out[k], whole, matrix).wait()
+    return out[0], out[1]
 
 
 # docs/writing-a-service.md#the-lstm

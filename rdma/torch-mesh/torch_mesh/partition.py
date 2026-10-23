@@ -64,8 +64,8 @@ gathered queries and its partials; so the library reads what they send where it 
 refuses a lease, torch's own memory.
 
 A routed partition (routed): a mixture of experts' experts as a partition's units, each token's rows sent to the ranks
-holding their experts and back by the counted all-to-all (torch_mesh.all_to_all_counted: the counts the GPU wrote move
-with the rows), the slots past a rank's part receiving none.
+holding their experts and back by one all-to-all at the program's extents (torch_mesh.all_to_all), the rows' experts
+crossing beside them as data, the slots past a rank's part receiving none.
 
 Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
 - torch.library.custom_op with register_fake and register_autograd: torch_mesh::remask, pack, unpack, allgatherv,
@@ -1251,30 +1251,39 @@ def routed(mesh, name, x, experts, slots):
     """A routed range partition (a mixture of experts' expert parallelism): partitioned mesh dimension `name`'s units are
     experts, rank r holding capacity[r] slots, the first parts[r] of them experts off_r.. (off_r the parts before it)
     and the rest receiving no rows; `x` this rank's rows (T x D), `experts` each row's experts (T x K, int64), `slots`
-    this rank's capacity[r] callables, slot j's rows to it.  Each (row, k) crosses to its expert's rank and back by the
-    counted all-to-all (torch_mesh.all_to_all_counted: the counts the GPU wrote move with the rows, the received counts
-    read on the host as they land, no host read of the splits), every rank passing the same T K.  Returns each (row,
-    k)'s expert output (T x K x D), to be weighted and summed by the caller.  The rows it sends lie in region tensors
-    (torch_mesh.empty), made at their first use and kept (their shapes the capacities' and T K's)."""
-    from . import all_to_all_counted, counted
+    this rank's capacity[r] callables, slot j's rows to it.  Each (row, k) crosses to its expert's rank and back by one
+    all-to-all at the program's extents (torch_mesh.all_to_all): every pair's block T K rows, the most a rank can send
+    another, every rank passing the same T K, so the plan is compiled once at those extents.  The rows' experts cross
+    in a block of their own beside them, -1 past the rows sent, and the expert's rank reads them: how much of a block a
+    step fills is data in its pages, not a count the collective learns.  Returns each (row, k)'s expert output
+    (T x K x D), to be weighted and summed by the caller.  Its blocks lie in region tensors (torch_mesh.empty), made at
+    their first use and kept."""
+    from . import all_to_all
     o, group = operand(mesh, name), mesh.get_group(name)
-    rank, world, capacity = mesh.get_local_rank(name), len(o.capacity), list(o.capacity)
-    n, flat = capacity[rank], experts.flatten()
-    order = flat.argsort(stable=True)
-    counts = torch.zeros(o.units, dtype=torch.int64, device=x.device).scatter_add_(0, flat, torch.ones_like(flat))
-    sent = torch.index_select(x, 0, order // experts.shape[1], out=_routing(o.key, 'dispatched', flat.numel(), x))
-    received, landed, handle, work = all_to_all_counted(sent, unpack(counts, 0, o.key, 0.0), capacity, [n] * world, world * flat.numel(), group)
-    theirs = counted(handle)
-    work.wait()
-    sizes = [sum(theirs[r * n + e] for r in range(world)) for e in range(n)]
-    regroup = torch.repeat_interleave(torch.arange(n, device=x.device).repeat(world), landed, output_size=sum(theirs)).argsort(stable=True)
-    results = _routing(o.key, 'results', received.shape[0], received)
-    for slot, rows in zip(slots, regroup.split(sizes)):
-        results[rows] = slot(received[rows])
-    back, _, _, work = all_to_all_counted(results, theirs, [n] * world, capacity, flat.numel(), group)
-    work.wait()
-    out = torch.empty_like(back)
-    out[order] = back
+    rank, world, flat = mesh.get_local_rank(name), len(o.capacity), experts.flatten()
+    extent, width, parts = flat.numel(), x.shape[1], o.parts.to(x.device)
+    ends = parts.cumsum(0)
+    owner = torch.searchsorted(ends, flat, right=True)
+    order = owner.argsort(stable=True)
+    count = torch.bincount(owner, minlength=world)
+    position = owner[order] * extent + torch.arange(extent, device=x.device) - (count.cumsum(0) - count)[owner[order]]
+    tags = flat.view(-1, 1)
+    sent, ids = _routing(o.key, 'dispatched', world * extent, x), _routing(o.key, 'experts', world * extent, tags).view(-1)
+    received, got = _routing(o.key, 'received', world * extent, x), _routing(o.key, 'received experts', world * extent, tags).view(-1)
+    sent[position] = x[order // experts.shape[1]]
+    ids.fill_(-1)
+    ids[position] = flat[order]
+    all_to_all(received, sent, [extent * width] * world ** 2, group).wait()
+    all_to_all(got, ids, [extent] * world ** 2, group).wait()
+    results, back = _routing(o.key, 'results', world * extent, x), _routing(o.key, 'back', world * extent, x)
+    first = int(ends[rank] - parts[rank])
+    for j, slot in enumerate(slots[:int(parts[rank])]):
+        rows = (got == first + j).nonzero().flatten()
+        if rows.numel():
+            results[rows] = slot(received[rows])
+    all_to_all(back, results, [extent * width] * world ** 2, group).wait()
+    out = torch.empty(extent, width, dtype=x.dtype, device=x.device)
+    out[order] = back[position]
     return out.view(*experts.shape, -1)
 
 

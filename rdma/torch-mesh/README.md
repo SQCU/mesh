@@ -33,9 +33,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
   exchange their nodes, the nodes their bridges reach and their streams' pages posted (kept as a statistic: equal on a
   live stream), and the group keeps the map its init made of them.
-- A bidirectional exchange with one peer pairs as one batch: `dist.batch_isend_irecv`, or a coalescing manager. Every rank
-  of the group takes part in a batch: the backend gathers each rank's sends (peer and bytes) and passes the group's
-  whole list (`ncclMeshGroupPairs`), so a member between two that no link joins relays their messages.
+- A bidirectional exchange with one peer pairs as one batch: `dist.batch_isend_irecv`, or a coalescing manager.
+  `torch_mesh.batch_isend_irecv(ops, pairs)` is the batch with the group's whole message list from the caller's compiled
+  program (`ncclMeshGroupPairs`), every rank passing the same, so a member between two that no link joins relays them.
+  An uneven `all_to_all` fails as a value; `torch_mesh.all_to_all(output, input, matrix)` takes every rank's counts.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
   ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
@@ -130,8 +131,7 @@ has synchronized torch's stream.
 `all_to_all_single` takes its splits as host lists, so a mixture of experts' dispatch reads the router's counts on the
 host first (a sync). `torch_mesh.all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group)` is
 the operator `torch_mesh::all_to_all_counted` over libnccl-mesh's `ncclMeshAlltoAllCounted`, which the library returns
-as `ncclInvalidUsage` ([NCCL.md](../NCCL.md), Counted all-to-all); so does `partition.routed` below, which calls it.
-Its form, MPI_Alltoallv whose counts the GPU wrote: `input`'s rows grouped by destination, as many to rank q as segment
+as `ncclInvalidUsage` ([NCCL.md](../NCCL.md), Counted all-to-all). Its form, MPI_Alltoallv whose counts the GPU wrote: `input`'s rows grouped by destination, as many to rank q as segment
 q of `counts` (int64 on the input's device, `send_segments[q]` entries) sums to; each rank's segment for this rank moves
 with its rows in one exchange, received packed in rank order into `capacity` rows. It returns `(rows, landed, handle,
 work)`: `landed` the received counts on the GPU once `work.wait()` has ordered the call on torch's stream, and
@@ -144,9 +144,11 @@ target (metal-microbench docs/measurement.md 2026-09-30, part B, mesh ab98765 an
 
 `partition.routed(mesh, "ep", x, experts, slots)` is that dispatch and combine as a routed range partition: the
 partitioned mesh dimension's units are experts (rank r's capacity[r] slots, the first parts[r] of them its experts and
-the rest receiving no rows), each (token, k) row crosses to its expert's rank and back by the counted all-to-all, its
-send buffers region tensors made once, and it returns each row's expert output for the caller to weight and sum. Equal
-parts are the even split, so one form serves both of `ep.py`'s.
+the rest receiving no rows), each (token, k) row crosses to its expert's rank and back by one all-to-all at the
+program's extents (`torch_mesh.all_to_all`: every pair's block T K rows, the most one rank can send another, so the
+plan is compiled once), the rows' experts crossing beside them in a block of their own, -1 past the rows sent, read by
+the expert's rank: how much of a block a step fills is data in its pages. Its blocks are region tensors made once, and
+it returns each row's expert output for the caller to weight and sum.
 
 ### Partials merge
 

@@ -40,17 +40,12 @@ def folded(config):
 def shares(config, rank, size, folds):
     parts, width = config['parts'], config['width']
     a, b = (torch_mesh.empty(parts[rank], width, dtype=torch.half) for _ in range(2))
-    if rank:
-        dist.recv(a, src=0)
-        dist.recv(b, src=0)
-        return a, b
-    for r in range(size):
-        begin = sum(parts[:r])
-        for held, w in zip((a, b), folds):
-            part = held if r == 0 else torch_mesh.empty(parts[r], width, dtype=torch.half)
-            part.copy_(torch.from_numpy(w[begin:begin + parts[r]]))
-            if r:
-                dist.send(part, dst=r)
+    matrix = [parts[q] * width if p == 0 else 0 for p in range(size) for q in range(size)]
+    for held, w in zip((a, b), folds or (None, None)):
+        whole = torch_mesh.empty(sum(parts), width, dtype=torch.half) if rank == 0 else None
+        if whole is not None:
+            whole.copy_(torch.from_numpy(w))
+        torch_mesh.all_to_all(held, whole, matrix).wait()
     return a, b
 
 

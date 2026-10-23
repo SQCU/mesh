@@ -169,21 +169,21 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def end_coalescing(self, device):
         pending, self._pending = self._pending, None
-        calls = [c for calls, _, _ in pending for c in calls]
-        if any(c[0] in (SEND, RECV) for c in calls):
-            sends = [(c[5], c[1][0].numel() * c[1][0].element_size()) for c in calls if c[0] == SEND]
-            counts = self._gathered([len(sends)])
-            most = max(counts)
-            every = self._gathered([x for to, b in sends + [(0, 0)] * (most - len(sends)) for x in (to, b)]) if most else []
-            pairs = [(r, every[2 * (r * most + k)], every[2 * (r * most + k) + 1]) for r in range(self._size) for k in range(counts[r])]
-            calls.append((PAIRS, [], [], [x for p in pairs for x in p], 0, 0))
-        return self._issue(calls, [r for _, r, _ in pending], backs=[b for _, _, backs in pending for b in backs])
+        return self._issue([c for calls, _, _ in pending for c in calls], [r for _, r, _ in pending],
+                           backs=[b for _, _, backs in pending for b in backs])
 
-    def _gathered(self, row):
-        mine, every = blank((len(row),), torch.int64, 'cpu'), blank((self._size * len(row),), torch.int64, 'cpu')
-        mine.copy_(torch.tensor(row, dtype=torch.int64))
-        self._issue([(ALLGATHER, [mine], [every], [len(row)] * self._size, 0, 0)], [every]).wait()
-        return every.tolist()
+    def all_to_all_matrix(self, output, input, matrix):
+        n, me = self._size, self._rank
+        row, column = matrix[me * n:(me + 1) * n], matrix[me::n]
+        sends = list(input.reshape(-1).split(row)) if input is not None else [None] * n
+        return self._alltoall(sends, list(output.reshape(-1).split(column)), output, None, list(matrix))
+
+    def pairs(self, ops, pairs):
+        self.start_coalescing(None)
+        for op in ops:
+            op.op(op.tensor, op.peer, op.group, op.tag)
+        self._pending.append(([(PAIRS, [], [], [x for p in pairs for x in p], 0, 0)], [], ()))
+        return self.end_coalescing(None)
 
     def allreduce(self, tensors, opts=dist.AllreduceOptions()):
         return self._issue([(ALLREDUCE, [t], [], [], op(opts.reduceOp), 0) for t in tensors], tensors, asynchronous(opts))
@@ -228,15 +228,19 @@ class ProcessGroupMesh(dist.ProcessGroup):
                             for o, parts in zip(outputs, inputs)], outputs, asynchronous(opts))
 
     def alltoall(self, outputs, inputs, opts=None):
-        return self._alltoall(inputs, outputs, outputs, opts, self._gathered([t.numel() for t in inputs]))
+        if len({t.numel() for t in (*inputs, *outputs)}) != 1:
+            raise RuntimeError('libnccl-mesh: an all_to_all of uneven sizes gives only this rank\'s row; torch_mesh.all_to_all takes the '
+                               'whole count matrix every rank holds')
+        return self._alltoall(inputs, outputs, outputs, opts, [inputs[0].numel()] * self._size ** 2)
 
     def all_to_all_single(self, output, input, output_split_sizes, input_split_sizes, opts=None):
         def pieces(t, sizes):
             return list(t.split(list(sizes) or [t.shape[0] // self._size] * self._size))
+        if input_split_sizes or output_split_sizes:
+            raise RuntimeError('libnccl-mesh: an all_to_all_single of uneven splits gives only this rank\'s row; torch_mesh.all_to_all '
+                               'takes the whole count matrix every rank holds')
         sends = pieces(input, input_split_sizes)
-        equal = not input_split_sizes and not output_split_sizes
-        matrix = [sends[0].numel()] * self._size ** 2 if equal else self._gathered([t.numel() for t in sends])
-        return self._alltoall(sends, pieces(output, output_split_sizes), output, opts, matrix)
+        return self._alltoall(sends, pieces(output, output_split_sizes), output, opts, [sends[0].numel()] * self._size ** 2)
 
     def gather(self, outputs, inputs, opts=dist.GatherOptions()):
         receives = list(outputs[0]) if self._rank == opts.rootRank else [None] * self._size
