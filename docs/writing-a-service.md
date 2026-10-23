@@ -168,8 +168,9 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
 - **Workers.** G is half the GPU's cores, or the larger stage's column tiles where there are fewer. The workers wait
   for each other at their stamps, so a step runs only while all G are on the GPU. Other processes' GPU work shares
   the GPU with it. Measured 2026-10-23 (metal-microbench output_data/rank0-20261023):
-  - The GPUs come in partitions of 8 cores (ioreg `GPUConfigurationVariable`: `num_mgpus` and `core_mask_list`). The
-    Mini's 16 cores are 2 partitions, and a Studio's 64 cores are 8.
+  - The GPUs come in partitions (ioreg `GPUConfigurationVariable`: `num_mgpus` and `core_mask_list`): of 8 cores on
+    the Mini and the Studios, of 10 on the MacBook's M5 Max. The Mini's 16 cores are 2 partitions, a Studio's 64 are
+    8, and the M5 Max's 40 are 4. Its half, 20, leaves two partitions free but splits the 128 tiles 6 or 7 each.
   - With nothing of ours running, other GPU work comes in bursts. On the Mini, a burst lasts up to 90 ms, several
     times a second. On m5ult1, each burst is under 10 ms, ten times a second.
   - With G at 16, 15 or 12 on the Mini, so on both of its partitions, a step stopped for 15 to 90 ms several times a
