@@ -1,4 +1,4 @@
-# Access topology
+# Access topology specification
 
 Every node receives the same reachable-network inventory. The inventory is the gitignored
 `networks.conf`, installed as `/usr/local/mesh/networks.conf` at mode `0600`. Each nonempty
@@ -17,6 +17,8 @@ stable node names select nodes. A workstation on the same WLAN as a stationary n
 that node through its independent tailnet and point-to-point edges. Removing or moving a laptop
 therefore cannot remove the stationary subgraph.
 
-The operator (THREAT-MODEL.md, 2026-08-27): "no configuration or operation of any software in
-our mesh repo can demote the reachability, accessibility, and workload of a node or edge between
-nodes".
+The implementation is substantiated by the inventory-row count, realized-profile count,
+active-interface identity, current-address discovery, and an SSH reachability measure for every
+edge used to connect the graph. A password prompt, a fixed DHCP address as canonical identity,
+an uninstalled inventory row, or a route whose only carrier is a departing node contradicts
+this specification.

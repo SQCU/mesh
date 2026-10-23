@@ -105,37 +105,36 @@ numeric LAN address in the measurement command.
 
 The 2026-09-10 recipe below named `mesh-page-stream` and `mesh-verbs-stream`, deleted on 2026-09-12 (mesh f92e9eee,
 554a3793), and a bridge each reading started and stopped. On the resident bridge (MESH_VERSION 124, WP2), the reading
-was a client program on a lane pair of the link (mesh rdma/mesh-stream.c, deleted with MESH_VERSION 127 in a8952de9,
-2026-10-19); the bridge's own raw stream of MESH_VERSION 118 is deleted with the per-program queue pairs, so the raw
-denominator was not read by that tool. It was built beside the bridges as they ran (a client of libmesh):
+is a client program on a lane pair of the link (mesh rdma/mesh-stream.c); the bridge's own raw stream
+of MESH_VERSION 118 is deleted with the per-program queue pairs, so the raw denominator is no longer read by this
+tool. Build it beside the bridges as they run (a client of libmesh):
 
 ```
 make -C rdma mesh-stream
 ```
 
-The stream's GiB was a section of each node's region (`mesh_section_create`) beside what the bridge's clients
-leased. With the Mini's node number N (mesh-stat's `nodes`) and the M5's M, the receiver ran first (it printed a ready
-line, then its result once every block landed and every word was checked), then the sender, both naming the same lane
-pair P (0 to 3, free at both ends):
+Each bridge's region must hold the stream's GiB beside what its clients lease. With the Mini's node number N
+(mesh-stat's `nodes`) and the M5's M, the receiver first (it prints a ready line, then its result once every block
+landed and every word was checked), then the sender, both naming the same lane pair P (0 to 3, free at both ends):
 
 ```
 rdma/.build/mesh-stream receive M 1073741824 P     # on the Mini
 rdma/.build/mesh-stream send N 1073741824 P        # on the M5
 ```
 
-The receiver's JSON line's `interior_GBps` was the rate between 10 % and 90 % of the 65,536 pages, as below; a repeat
-without restarting anything read first-use and repeat apart, beside the 2026-09-10 readings (raw 9.383, the bridge's
-path 9.338).
+The receiver's JSON line's `interior_GBps` is the rate between 10 % and 90 % of the 65,536 pages, as below; repeat it
+without restarting anything to keep the first-use and repeat readings apart (the target: the bridge's path within
+0.5 % of the 2026-09-10 raw 9.383, 9.338).
 
 ### The 2026-09-10 recipe (historical: its targets and bridge lifecycle are gone)
 
-Both machines built from the same committed source:
+Build on both machines from the same committed source:
 
 ```
 make -C rdma mesh-flow mesh-page-stream mesh-verbs-stream
 ```
 
-With managed bridges stopped, the direct sender ran on M5 and the receiver on M4:
+With managed bridges stopped, start the direct sender on M5 and receiver on M4:
 
 ```
 rdma/.build/mesh-verbs-stream send ms-mac-mini.local rdma_en2 30
@@ -143,13 +142,13 @@ rdma/.build/mesh-verbs-stream receive 10.0.0.5 rdma_en3 30
 ```
 
 The receiver's numeric address is only for QP metadata exchange. All payload
-uses the named RDMA interfaces. After both JSON results, ordinary TERM went to
-the exact reported PIDs and their exit statuses were collected. Endpoints retain
+uses the named RDMA interfaces. After both JSON results, send ordinary TERM to
+the exact reported PIDs and collect their exit statuses. Endpoints retain
 registered storage until that outer teardown; no peer teardown signal is part
 of the data path. Each direct endpoint allocates and registers its one GiB
 before timing, with a continuously replenished 1023-page descriptor window.
 
-For mesh, the existing `participants.py:bridge_pair` lifecycle ran with:
+For mesh, use the existing `participants.py:bridge_pair` lifecycle with:
 
 | Node | Arena pages | Receive pages | Registered bytes |
 | --- | ---: | ---: | ---: |
@@ -158,18 +157,18 @@ For mesh, the existing `participants.py:bridge_pair` lifecycle ran with:
 
 The sender actually uses 66,213 arena pages; the receiver uses 122 arena pages
 and retains 65,536 receive pages. These bounded allocations follow the transfer
-shape, not a fraction of either machine's RAM. Both bridges started and were
-ready, then M4's receiver launched, and after its configuration-ready output,
-M5's sender:
+shape, not a fraction of either machine's RAM. Start and ready both bridges,
+then launch M4's receiver and observe its configuration-ready output before
+launching M5's sender:
 
 ```
 rdma/.build/mesh-page-stream receive 0 120
 rdma/.build/mesh-page-stream send 1 120
 ```
 
-The full transfer repeated without restarting the bridges, which kept the
-first-use and repeat readings apart. After the successful detach statuses, both
-bridges stopped through the existing managed lifecycle. No verbs owners or
+Repeat the full transfer without restarting the bridges to retain the explicit
+first-use/repeat distinction. After collecting successful detach statuses,
+stop both bridges through the existing managed lifecycle. No verbs owners or
 their registered allocations were left running after this measurement.
 
 ## Backing-memory separation measurement
@@ -205,8 +204,8 @@ and two invocations in flight. Both peers completed ten invocations per case,
 reported no errors/nonfinite values, and destroyed their contexts. Relative RMS
 against the local baseline was 0.0003935084 (limit 0.002), with exact peer
 agreement in both cases. M5/M4 medians were 34.5306/34.5999 ms for one in flight
-and 54.6755/54.0809 ms for two. The local MPS baseline was 32.37475 ms, so TP
-gave no latency improvement over it. The M5 two-in-flight maximum
+and 54.6755/54.0809 ms for two. The local MPS baseline was 32.37475 ms, so the
+required TP latency improvement is still absent. The M5 two-in-flight maximum
 was 111.4771 ms. The medians hide that sample, so it is named here. Native internal storage
 remains unverified. Both bridges were stopped after evaluation.
 

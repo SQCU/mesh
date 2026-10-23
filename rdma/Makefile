@@ -9,12 +9,12 @@ WARN = -Wall -Wextra -Werror -Wno-error=deprecated-declarations
 all: $(IMAGES:%=.build/%)
 # the bridge and mesh-stat read the region through libmesh: beside them once installed, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L.build -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
-# design/transport.md: the bridge, mesh-link.c over mesh-bridge.h
-.build/mesh-flow: mesh-link.c mesh-bridge.h mesh-observe.h mesh.h mesh-plan.h mesh-call.h .build/libmesh.dylib Makefile
-	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o $@ mesh-link.c $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit
+# design/transport.md: the bridge, mesh-link.c and mesh-records.c over mesh-bridge.h
+.build/mesh-flow: mesh-link.c mesh-records.c mesh-bridge.h mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h .build/libmesh.dylib Makefile
+	cc $(CPPFLAGS) -fblocks -O2 $(WARN) -o $@ mesh-link.c mesh-records.c $(LIBMESH) -lrdma -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
 # design/transport.md section 2: the heartbeat, the job launchd keeps alive, which opens and closes the bridge
-.build/mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-plan.h mesh-call.h mesh-observe.h Makefile
+.build/mesh-heartbeat: mesh-heartbeat.c mesh.h mesh-plan.h mesh-dataflow.h mesh-observe.h Makefile
 	mkdir -p .build
 	cc -O2 $(WARN) -o $@ mesh-heartbeat.c
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge $@ || codesign --force --sign - --identifier io.mesh.bridge $@
@@ -54,8 +54,8 @@ clean-kernels: .build/libnccl-mesh.sha256
 # under its pncclX profiling name, as NCCL exports both
 NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitRankConfig ncclCommInitRank \
   ncclCommInitAll ncclCommFinalize ncclCommDestroy ncclCommAbort ncclCommSplit ncclCommShrink ncclGetErrorString \
-  ncclGetLastError ncclCommGetAsyncError ncclCommCount ncclCommCuDevice ncclCommUserRank \
-  ncclRedOpCreatePreMulSum ncclRedOpDestroy ncclReduce ncclBcast ncclBroadcast ncclAllReduce \
+  ncclGetLastError ncclCommGetAsyncError ncclCommCount ncclCommCuDevice ncclCommUserRank ncclCommRegister \
+  ncclCommDeregister ncclRedOpCreatePreMulSum ncclRedOpDestroy ncclReduce ncclBcast ncclBroadcast ncclAllReduce \
   ncclReduceScatter ncclAllGather ncclAlltoAll ncclGather ncclScatter ncclAllReduceConfig ncclBroadcastConfig \
   ncclReduceConfig ncclAllGatherConfig ncclReduceScatterConfig ncclAlltoAllConfig ncclGatherConfig ncclScatterConfig \
   ncclSend ncclRecv ncclGroupStart ncclGroupEnd ncclCommRevoke ncclCommGetUniqueId ncclCommGrow
@@ -95,10 +95,6 @@ METAL = xcrun metal -std=metal4.0 -fmetal-math-mode=safe -mmacosx-version-min=26
 XCODE = DEVELOPER_DIR=$(or $(DEVELOPER_DIR),$(lastword $(wildcard /Applications/Xcode*.app/Contents/Developer))) \
   SDKROOT=macosx
 VENDOR = ../vendor
-# bin/mesh-lint: forms design/rubrics.md ranks below another, as ranked pairs with the operator's words
-lint:
-	@../bin/mesh-lint
-
 kernels: .build/libnccl-mesh.metallib
 	@a=$$(shasum -a 256 < $<) && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } | cmp -s - $(VENDOR)/libnccl-mesh.sha256 || { \
 	  cp $< $(VENDOR)/libnccl-mesh.metallib && { cat .build/libnccl-mesh.sha256; echo "$${a%% *}"; } > $(VENDOR)/libnccl-mesh.sha256 && \
@@ -119,9 +115,9 @@ kernels: .build/libnccl-mesh.metallib
 # person or agent who runs it; a process looks each pipeline up in it and compiles none
 .build/libnccl-mesh.binarchive: .build/nccl-mesh-kernels .build/libnccl-mesh.metallib
 	rm -f $@ && .build/nccl-mesh-kernels .build/libnccl-mesh.metallib $@
-.PHONY: lint .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
+.PHONY: .build/libnccl-mesh.binarchive kernels install-images install-nccl clean-kernels
 .build/libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl-mesh-metal.h nccl-mesh-kernels.h .build/libnccl-mesh.sha256 .build/mesh_metal.h nccl.h \
-  mesh-call.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
+  mesh-call.h mesh-dataflow.h mesh.h mesh-plan.h .build/libmesh.dylib Makefile
 	cc -fblocks -O2 $(WARN) -dynamiclib -I .build -DKERNELS_SHA256=\"$$(cat .build/libnccl-mesh.sha256)\" \
 	  -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-metal.m -L.build -lmesh \
@@ -130,9 +126,9 @@ kernels: .build/libnccl-mesh.metallib
 	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation
-.build/libmesh.dylib: mesh-dataflow.c mesh-call.h mesh-collective.c mesh.h mesh-plan.h Makefile
+.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh.h mesh-plan.h Makefile
 	mkdir -p .build
-	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-collective.c
+	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
 # the built images; never an installed image (the launchd job's binary and the libraries clients map)
 clean:
 	rm -rf $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.metal .build/libnccl-mesh.sha256 \

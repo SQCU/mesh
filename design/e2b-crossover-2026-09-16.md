@@ -1,20 +1,18 @@
 # What "Amdahl improvement" means here — gemma-4-E2B on an M5 Max, made marginally faster by a mesh
 
-Historical (September 2026). The operator, 2026-09-22 ([collective-goals.md](collective-goals.md)): "someone keeps
-thinking there is some extra goal or extra problem which supersedes the basic telic purpose of the code, which is
-unambiguously megatron-lm style simple tp2 thru an incredibly simple distributed collective operation."
+Historical; countermanded as a source of requirements (operator, 2026-09-22; see [collective-goals.md](collective-goals.md)). Its reference-class line, crossover sweep, per-stage budgets and E8 thresholds are not gates.
 
-The operator asked for this note, 2026-09-17: "so. document this i suppose. and write a regression test which
-really tediously explains that amdahl improvement, for our purposes, means making something like an *otherwise
-optimal* gemma-4-e2b, running on an *already fast* machine like a m5 pro max, running *marginally faster* by
-offloading some work onto the peered mesh machines, despite the absurdly small size of the model, ffn, etc. you will
-see that absolutely all latency is unforgivable, but also that extremely low latency is still *possible*, and that the
-mesh-tp approach can still pull ahead of a single machine *anyways* because time per decoded token increases in
-expectation as kv cache length linearly increases (can *you* identify the crossover? however, the existence of that
-crossover does not justify *any* overhead in the mesh implementation :) )"
-
-gemma-4-E2B is a 2.3B-effective model whose whole decode step is ~5 ms on the M5 Max (614 GB/s); the FFN is
-1536×6144; a single layer is ~150 µs. The peered machines are reached over Thunderbolt 5 RDMA.
+This is the tedious version. It exists because every previous measurement of "the mesh"
+compared a slow, wrongly-shaped two-node run against a solo run and then explained the
+result. The objective is the opposite and it is narrow: take an **otherwise optimal**
+gemma-4-E2B — a 2.3B-effective model whose whole decode step is ~5 ms on the fastest
+laptop chip sold — running on an **already fast** machine (M5 Max, 614 GB/s), and make it
+**marginally faster** by offloading part of each step onto peered machines over
+Thunderbolt 5 RDMA. The model is absurdly small; the FFN is 1536×6144; a single layer is
+~150 µs. Every microsecond of mechanism is visible against that, and none of it is
+forgiven. The point of this note is that (a) that is the bar, (b) extremely low latency
+is nonetheless *possible* on this transport, and (c) there is a regime — long KV — where
+the mesh wins *anyway*, whose existence justifies exactly zero overhead.
 
 ## 1. The reference class (what "otherwise optimal" means, in numbers)
 
@@ -33,9 +31,12 @@ unsloth-zoo PR #1246 (M3 Max MLX numbers, ABBA-blocked); magnitude #82 (llama.cp
 `output_data/mesh_e3/solo_report_t4.out`, `output_data/mesh_reports/20260916T012857…-solo.json`.
 
 Two readings. Decode: this engine at 5.5 ms/token on the M5 Max is at the reference
-class (LiteRT's 160 tok/s on a 546 GB/s chip scales to ~5.6 ms at 614 GB/s); two other
-solo runs read 11.9 and 14.6 ms. Prefill: 3,666 tok/s on the fastest chip against 6,117
-(M3 Max, MLX) and 7,835 (M4 Max, LiteRT) is **~2× below the reference class**.
+class (LiteRT's 160 tok/s on a 546 GB/s chip scales to ~5.6 ms at 614 GB/s). The two
+slower solo runs (11.9, 14.6 ms) are not a baseline; a comparison that uses them is
+refused (I24). Prefill: 3,666 tok/s on the fastest chip against 6,117 (M3 Max, MLX) and
+7,835 (M4 Max, LiteRT) is **~2× below the reference class** — the solo prefill path is not
+"otherwise optimal" yet, and until it is, a prefill speedup is a speedup over a slow
+baseline and counts for nothing.
 
 ## 2. The model, as bytes per decoded token
 
@@ -82,17 +83,14 @@ the whole solo forward, which is the measured pair result (5.5 tok/s vs 182). 96
 is Metal host round trips, 4% wire, <1% the RDMA runtime. The H campaign (25 commits,
 ABI 50→75) moved this number by about 0.1%.
 
-## 4. The floor of a transaction, stage by stage
+## 4. How fast a transaction *should* be — the floor, stage by stage
 
-The operator, 2026-09-17: "i do'nt care what today's 'crossing cost' is. the idea of the partial tensor was defined
-almsot entirely to simplify analysis of tensor parallelism. the rdma link is a rdma link. how fast *should*
-transactions be given our very simpel requirements and our ability to write push-only cooperative collectives which
-scatter results to each other without any kind of guard, wait, or stupid chuddy overhead?"
-
-The floor below takes the collectives as push-only (every node SENDs its partial into the consumer's posted RECV
-pages the moment the bytes exist; nobody asks, waits, or checks), the partial as exactly the bytes the consumer's
-kernel reads (Definition), and the consumer as resident. One transaction — producer kernel's last store → consumer
-kernel's first load of the remote partial — is then this budget:
+Today's crossing cost is irrelevant to this section. The RDMA link is an RDMA link; the
+collectives are push-only (every node SENDs its partial into the consumer's posted
+RECV pages the moment the bytes exist; nobody asks, waits, or checks); the partial is
+exactly the bytes the consumer's kernel reads (Definition); the consumer is resident.
+Under those requirements one transaction — producer kernel's last store → consumer
+kernel's first load of the remote partial — is this budget and nothing else:
 
 | stage | mechanism | floor |
 |---|---|---|
@@ -102,42 +100,41 @@ kernel's first load of the remote partial — is then this budget:
 | 4. remote CQ poll → presence stamp store | CQ→ring ≤ 100 ns (H7); the stamp is the ring store | ≤ 0.1 µs |
 | 5. resident consumer kernel sees the stamp | one threadgroup spinning on a device-coherent word (X9/F7) | ≤ 1 µs |
 
-**Total: ~10–14 µs for a decode-sized partial, i.e. the wire plus ≤ 2 µs**: the fabric, plus one shm→L1 on each
-side, plus one GPU poll.
+**Total: ~10–14 µs for a decode-sized partial, i.e. the wire plus ≤ 2 µs.** That is the
+number. Not 280 µs; not 25 µs; the fabric, plus one shm→L1 on each side, plus one GPU poll.
+F7's pass value ("arrival-to-first-consuming-kernel ≤ 2× the wire estimate") and H7's
+store→doorbell / CQ→ring bounds are this table; E7 uses `c ≤ 15 µs`.
 
 ### 4a. One push per layer
 
-"Four crossings per layer" in §3 describes the engine's binding of the time (two
-reduce-scatter + all-gather pairs). The operator, 2026-09-17: "i also don't know why yo'ure talking about having
-four 'crossings' per layer when there's no need to have more than 1 serial push per layer? unless you thought the
-point of mesh code was to 'prevent any duplicate computation', which, no, that's not the specification and shouldn't
-be treated as a spec anywhere. latency minimization has very specific meaning."
-
-The cost of a layer is the number of *serial* pushes on its critical path times the floor, and duplicated
-computation is free until it costs more than a hop. In the one-push decode layer every rank runs attention,
+"Four crossings per layer" in §3 describes the engine's current binding (two
+reduce-scatter + all-gather pairs), not a requirement. Latency minimization has a
+specific meaning: the cost of a layer is the number of *serial* pushes on its critical
+path times the floor, and duplicated computation is free until it costs more than a
+hop. So the decode layer has **one** push (I25, F4, E1d): every rank runs attention,
 norms, residual and PLE in full (duplicated — attention at short context is a few
 microseconds of a 5.5 ms step, a norm is nothing); each rank computes only its FFN
 column slice; its `down_proj` output is a codomain-shaped partial (Definition) that it
 pushes **directly to every other rank** — 3 KiB per token, one hop, summed on arrival in
 whatever order the partials land. No reduce-scatter (that is a hop to *distribute* the
-sum), no all-gather (a second hop to *collect* it): the old F4 ("never send-my-partial-to-all")
-spent two hops to save 6 KiB of wire on a 3 KiB vector. RS+AG costs less than the direct push only where
-`(N−1)·bytes` costs more than a hop (above ~120 KiB: prefill tiles); pipelined per tile, its exposed cost is still
-one hop per layer. The lm_head (0.8 GB, 1.3 ms) is too expensive to duplicate,
+sum), no all-gather (a second hop to *collect* it): two hops to save 6 KiB of wire on a
+3 KiB vector is exactly the mistake the old F4 ("never send-my-partial-to-all")
+mandated; it is rewritten. RS+AG belongs only where `(N−1)·bytes` costs more than a hop
+(above ~120 KiB: prefill tiles), and there it is pipelined per tile so the exposed cost
+is still one hop per layer. The lm_head (0.8 GB, 1.3 ms) is too expensive to duplicate,
 so it is split by vocabulary tile and its logit/top-k partial rides the same single hop.
 
 ### 4b. What the floor does to the model, at one push per layer
 
 - **35 pushes × ~12 µs ≈ 0.42 ms per forward** — the entire mesh overhead of a decode
-  step, against 5.5 ms.
+  step, against 5.5 ms. That is the pass value (`≤ 0.5 ms`, I25/E8).
 - **M5 Max + M4 Pro, B = 1.** Decode is bandwidth-bound, so the placement ratio is the
   bandwidth ratio `r = 273/614 = 0.44`, M4 share 31%. FFN is `f ≈ 0.69` of the weight
   bytes: `T = 5.5 × (0.31 + 0.69/1.44) + 0.42 = 4.76 ms` → **1.16×** (zero-overhead bound
   1.27×). Split the lm_head too (`f = 0.86`): `5.5 × (0.14 + 0.86/1.44) + 0.43 = 4.49 ms`
-  → **1.22×**. Small, positive, on a 2.3B model with a lesser laptop chip as the peer. The operator,
-  2026-09-17: "does this tell us to still demand a net improvement from even a m4 pro and a m5 max since the correct
-  implementation requires NEAR ZERO OVERHEAD no matter how big or small the tensors sound like they should be...?"
-  A 3 KiB partial rides the same 10 µs as a 32 KiB one.
+  → **1.22×**. Small, positive, on a 2.3B model with a lesser laptop chip as the peer —
+  and therefore demanded (I21, E8: `S ≥ 1.10`). The size of the tensors has nothing to
+  do with it: a 3 KiB partial rides the same 10 µs as a 32 KiB one.
 - **Four M5 Ultra-class nodes** (`Σ BW/BW_leader ≈ 4`): `5.5 × (0.14 + 0.86/4) + 0.45 =
   2.4 ms` → **~2.3× at B = 1**, on a model whose whole step was 5.5 ms; each layer's
   push is still one hop because a rank sends its 3 KiB partial to three peers in 1 µs of
@@ -145,10 +142,13 @@ so it is split by vocabulary tile and its logit/top-k partial rides the same sin
 - The KV crossover of §5 uses F11's second push on the 7 global layers and is a separate,
   additive win past `B·L ≈ 12k` at the floor.
 
-Every microsecond above the floor comes straight out of these numbers.
+Every microsecond above the floor comes straight out of these numbers; the 1.16× on the
+pair is the regression test (E8), and "the model is too small" is not an admissible
+explanation of a miss.
 
-Between these numbers and 280 µs lie a command-buffer commit, a completion handler, a dependent metadata load, a
-layout copy, or a wait, not the transport (§3: 96% of the crossing is Metal host round trips).
+Anything between these numbers and 280 µs is not "the transport": it is a command-buffer
+commit, a completion handler, a dependent metadata load, a layout copy, or a wait, and
+each one has a row in this document whose status is ✗ until it is gone.
 
 ## 5. The crossover: where the mesh wins *anyway*
 
@@ -194,17 +194,21 @@ Add the FFN column split on top (r_M4 ≈ 0.17 at large rows, 0.73 at B = 8) and
 term also shrinks, by the E2B bound (1.11 prefill, ≤1.42 at B = 8 decode); the two
 compose because they touch different terms.
 
-## 6. The crossover and overhead
-
-The operator, 2026-09-17: "however, the existence of that crossover does not justify *any* overhead in the mesh
-implementation :)"
+## 6. Why the crossover justifies no overhead
 
 Every row of the table above is a *loss* for every `(B, L)` below it. A mechanism that
 adds 0.28 ms per crossing does not "move the crossover"; it deletes it from the usable
-range. The crossover follows from the measured `c`.
+range. The crossover is where an implementation with *no* overhead starts to win; it is
+computed from the measured `c`, never chosen, and the pass values that bound `c`
+(H7: ≤ 200 ns store→doorbell, ≤ 100 ns CQ→ring; F7: arrival-to-kernel-start ≤ 2× wire) apply
+whether or not a run happens to land past it. "It will win at 128k" is not a result; it
+is the statement that the implementation loses everywhere else.
 
-## 7. The rows of deliverables.md from this note
+## 7. The regression rows (deliverables.md)
 
+- **I24** — the baseline is at reference class or the comparison is refused; the
+  objective is the modelled margin at every `(B, L)` past `L×(c_measured)`; the
+  crossover justifies no overhead.
 - **F11** — sequence-split attention as a partial with an associative combine: KV placed
   once by position ∝ bandwidth, `(m, l, O)` partials, 7 crossings per token on E2B,
   16.4 KiB each, no K/V movement.

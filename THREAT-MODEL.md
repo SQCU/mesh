@@ -1,8 +1,7 @@
 # Threat model
 
-The operator's words, verbatim (2026-08-27). Of text that paraphrases them, design/rubrics.md ("How to read
-them"): text an agent wrote without citing the operator's words ≺ the operator's text (10-21: "user written text takes
-precedence over claude written text without a citation to user text").
+Not a document Claude wrote. The operator's words, verbatim. Everything else answers
+to them; where anything paraphrases these, the quote wins.
 
 > the *absolute* requirement for this project is that machines may not become
 > unreachable and may never 'choose' to turn off or stop executing rdma chained
@@ -22,6 +21,8 @@ precedence over claude written text without a citation to user text").
 > configuration or operation of any software in our mesh repo can demote the
 > reachability, accessibility, and workload of a node or edge between nodes
 
+Code that may never be added, and how to spot it:
+
 > are you inventing fictional reasons for machines to become solipsistic and
 > inaccessible? this is an attack surface and must be removed categorically as it
 > violates our security model.
@@ -37,4 +38,4 @@ precedence over claude written text without a citation to user text").
 > if it was written by claude, it's not the threat model.
 
 
-[CLAUDE.md](CLAUDE.md) and [README.md](README.md) cite these.
+Consequences: [AGENTS.md](AGENTS.md), [README.md](README.md).

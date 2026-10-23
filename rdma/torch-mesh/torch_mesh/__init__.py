@@ -8,9 +8,12 @@ one commit rule (README, Performance).
 
 empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
 DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
-lies; records() is the region tensors' leases live now, address(t) where a tensor's bytes lie in the region (0:
-outside it), and cpu_view(t) a CPU tensor over a region tensor's own pages, which the host reads and writes in place.
+lies; records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the region (0:
+outside it).
 
+all_to_all_counted() is MPI_Alltoallv whose counts the GPU wrote (the torch operator torch_mesh::all_to_all_counted over
+libnccl-mesh's ncclMeshAlltoAllCounted): a mixture of experts' dispatch and combine with no host sync, counted() its
+received counts on the host as they land; partition.routed is the expert-parallel range partition whose crossing it is.
 
 merge_partials() is the softmax over a split as the library's collective (the torch operator torch_mesh::merge_partials:
 an all-reduce or reduce by libnccl-mesh's partials operator, ncclMeshRedOpCreatePartials): each member's attention over
@@ -62,37 +65,44 @@ def address(tensor):
     return _stream.address(tensor)
 
 
-def cpu_view(tensor):
-    """A CPU tensor over the same pages as region tensor `tensor` (empty() made it, mps or cpu): its sizes, strides and
-    dtype, holding it for its life, so the host reads and writes its bytes where they lie and nothing is copied (the
-    region's pages are host memory, which the NIC reads and writes coherently with the CPU).  A CPU store and the GPU's
-    work on the same pages are the program's to order: a store before the commit of the command buffer that reads it.
-    RuntimeError where the tensor's bytes lie outside the region."""
-    from . import _stream
-    return _stream.cpu_view(tensor)
+class _Counted:
+    """A counted all-to-all's Work: wait() orders its rows and its device counts on torch's stream (torch's wait_tensor
+    on the rows, where the call's Work is registered)."""
+
+    def __init__(self, out):
+        self.out = out
+
+    def wait(self):
+        import torch
+        torch.ops._c10d_functional.wait_tensor(self.out)
+        return True
 
 
-def all_to_all(output, input, matrix, group=None):
-    """MPI_Alltoallv with every rank's counts (libnccl-mesh ncclMeshAlltoAllV): matrix[a * n + b] elements go from rank a
-    to rank b, every rank passing the same matrix, the counts of its compiled program (its configuration's shapes and
-    shares, or a program's maximum extents); input (None where this rank sends nothing) and output packed in rank
-    order. Returns the Work."""
+def all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group=None):
+    """MPI_Alltoallv whose counts the GPU wrote (libnccl-mesh ncclMeshAlltoAllCounted): input's rows grouped by
+    destination rank, as many to rank q as segment q of `counts` sums to (an int64 tensor on the input's device, or a
+    list of ints; send_segments[q] entries for rank q); each rank's segment for this rank (recv_segments[q] entries)
+    and its rows move in one exchange, the rows received packed in rank order into a tensor of `capacity` rows.
+    Returns (that tensor, the received counts on the input's device, their handle, the Work): counted(handle) is the
+    received counts on the host, waited for as they land (no wait on the GPU); the Work's wait() orders the rows and
+    the device counts on the MPS stream."""
+    import torch
     import torch.distributed as dist
 
-    from . import backend
+    from . import backend  # noqa: F401  (torch_mesh::all_to_all_counted)
     group = group or dist.distributed_c10d._get_default_group()
-    return backend._mesh(group.group_name, 'all_to_all').all_to_all_matrix(output, input, list(matrix))
+    counts = torch.as_tensor(counts, dtype=torch.int64).to(input.device)
+    host = empty(1 + sum(recv_segments), dtype=torch.int64, device='cpu').zero_()
+    out, landed = torch.ops.torch_mesh.all_to_all_counted(input, counts, list(send_segments), list(recv_segments), int(capacity), host,
+                                                         group.group_name)
+    return out, landed, (host, group), _Counted(out)
 
 
-def batch_isend_irecv(ops, pairs, group=None):
-    """dist.batch_isend_irecv's batch with the group's whole message list (libnccl-mesh ncclMeshGroupPairs): pairs a list
-    of (from, to, bytes), every rank of the group passing the same, from its compiled program, so a rank between two
-    that no link joins relays their messages. Returns the Work."""
-    import torch.distributed as dist
-
+def counted(handle):
+    """An all_to_all_counted's received counts (each rank's segment for this rank, in rank order), once they have
+    landed: waited for on the host, not the GPU, until they arrive or the call fails (backend.counted)."""
     from . import backend
-    group = group or dist.distributed_c10d._get_default_group()
-    return backend._mesh(group.group_name, 'batch_isend_irecv').pairs(ops, pairs)
+    return backend.counted(*handle)
 
 
 def merge_partials(out, lse, group=None, root=-1):
@@ -120,10 +130,9 @@ class Recording:
         self.compiled = torch.compile(step, backend=self._backend, fullgraph=True, dynamic=False)
 
     def _backend(self, gm, example_inputs):
-        """compiler's graph, then every rank's compilation of it met at the default group's store, once a graph on the
-        slow channel (a peer's first crossings would otherwise wait out a long compile on the GPU, past the library's
-        poll bound): bounded by the store's timeout.  The meeting is a host wait, so a publication waiting in torch's open
-        buffer is committed first."""
+        """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
+        outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
+        timeout.  The meeting is a host wait, so a publication waiting in torch's open buffer is committed first."""
         import torch.distributed as dist
 
         from . import _stream

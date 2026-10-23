@@ -1,16 +1,15 @@
 # Writing a service on the mesh
 
 The mesh is not a language model server. Its library is for any linear algebra, or any SIMD-style function you give
-it, and transformers are one user. The operator, 2026-10-17 (design/rubrics.md D1): "the universal comes before the
-particular and we use the particular ot show off that the universal is correct"; 2026-10-19 (D10): "no part of any model
-or eval we study may ever be slow". Its bridge moves bytes between Macs, and it does not care what the bytes mean.
+it. Transformers are one user, and they must be fast on it because all code must be fast on it. Its bridge moves
+bytes between Macs, and it does not care what the bytes mean.
 This page shows a program that uses the mesh and has nothing to do with language. The program is
 [examples/chain-service.py](../examples/chain-service.py). It names three kinds of program. For each one, it says what
 the program does and what it never does.
 
 ## The function
 
-The service runs one recurrence over a stream of inputs. Call the inputs e₀, e₁, e₂ and so on, where each input is a block
+The service runs one rule over a stream of inputs. Call the inputs e₀, e₁, e₂ and so on, where each input is a block
 of rows, one row for each independent stream. At each step t:
 
 ```
@@ -21,7 +20,19 @@ x_{t+1} = e_{t+1} + z_t        (x_0 = e_0)
 
 Each step needs the step before it, and inside a step, f1 needs what f0 made. This is not an LSTM, since it has no
 gates and no cell. It is the plain shape of a filter, a control loop, a simulation or a scan. The example uses
-f0(x) = tanh(x Aᵀ) and f1(y) = tanh(y B). Any f0 and f1 with the same needs fit the same plan.
+f0(x) = tanh(rot₀(x) Aᵀ) and f1(y) = tanh(rot₁(y) B). Any f0 and f1 with the same needs fit the same plan.
+
+## Rotations
+
+rot₀ and rot₁ are normalized Hadamard rotations of an operand's columns, in blocks: `rotation_blocks` gives each one's
+block, a power of two that divides the operand's width (x's width for rot₀, the sum of the parts for rot₁). A block of 1
+is no rotation, and a block of the whole width is the full Hadamard. A Hadamard H is linear, symmetric and orthogonal,
+so rot₀(x) Aᵀ = x (A H)ᵀ and rot₁(y) B = y (H B). Rank 0 holds the whole weights before it sends each rank its part, so
+it folds each rotation into them there, once (`rotated` in examples/chain-service.py). rot₁ spans every rank's columns
+of y, and it folds all the same: each rank's rows of H B are the rows its part of y meets. The step kernel never rotates
+anything, and a rotation costs no time a step.
+An operand would have to be rotated as it is made only where its parameters are stored rotated and quantized, so that
+H cannot be folded into them; this example's parameters are float16.
 
 ## What can run at once
 
@@ -49,8 +60,8 @@ language model and this chain look the same: rows of bytes, sent and landed.
 The collective client is a library inside your process. It is `libnccl-mesh` ([rdma/NCCL.md](../rdma/NCCL.md)), and
 it is reached through torch-mesh ([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)), `mesh_mpi.py` or
 `python/mesh`. It rents rows of the region for your tensors and opens groups of ranks. It turns calls like all-reduce,
-broadcast and send into work on the bridge's streams. A host wait ends when its data lands, or when the link is lost
-(its count reads ~0) and the call then fails as a value; no clock ends it. A GPU wait ends when its data lands or at its bound of loads, and its kernel goes on with the bytes it finds.
+broadcast and send into work on the bridge's streams. Its waits end when data lands, or at their bound: a GPU wait's
+loads, or a host wait's platform deadline, 5 s in which nothing moves. Then the call fails as a value.
 
 The client does not own the devices, and it does not know your function or where your inputs come from. It does not
 pick how the work is split, and it is not a process of its own. It lives and dies with the service that loads it, and nothing
@@ -69,86 +80,95 @@ The rank service in metal-microbench is a service of this kind for a language mo
 
 ## How the example moves its data
 
-Rank 0 holds the files. Before the communicator exists it loads A and B in float16, while the other ranks wait in
-torch's rendezvous. Then it reads the input's shape and broadcasts two numbers, the steps and the rows, so every rank
-knows them, and sends each rank that rank's rows of A and B.
+Rank 0 holds the files. Before the communicator exists it loads A and B and folds their rotations in, in float16:
+seconds of host work at a large width, which no peer's wait may span (a wait on the GPU ends at its stream's bound,
+about the platform's 5 s), while the other ranks wait in torch's rendezvous. Then it reads the input's shape and
+broadcasts two numbers, the steps and the rows, so every rank knows them, and sends each rank that rank's rows of A
+and B.
 
-The inputs are one operand, a block of rows for each step: one region tensor of every step's rows
-(`chain.landed`), the pages of the whole stream held before the first step, as the page table holds every page a run
-will use (design/pages-and-functions.md, Setup). Rank 0 writes its file's rows into it through a CPU view of the same
-pages (`torch_mesh.cpu_view`) and broadcasts it on the host path, once, after every rank has compiled its kernels: the
-inputs land before the chain starts, so no step waits on them, and each rank's last wait before the chain is on these
-bytes, not on a barrier. A step then has two host calls: the start of its crossing (`exchange.start`), which presents
-the step's entries and writes the slot's table, and its kernel's three dispatches. Nothing else crosses during the
-chain.
+The inputs are one operand: a block of rows for each step. They move through a ring of slots in the region, one slot a
+step. Each rank has two rings, one for the inputs and one for the sums.
+
+The inputs cross a block at a time, a block early. They depend on nothing in the chain, so nothing makes them wait.
+Before the first step of each block, rank 0 copies the next block's inputs from its file into its ring, and broadcasts
+them into every rank's ring. The copy's command buffer ends before the broadcast is issued: the NIC reads a GPU's plain
+stores only once their command buffer has ended (metal-microbench docs/measurement.md, 2026-09-29), and the broadcast
+sends the ring's own pages. The broadcast goes on the GPU's own queue, and the host does not wait for it. The host waits for
+that broadcast just before the next block's first step, the first thing that reads it. A step then has two host calls:
+the fused all-reduce of its part of z, which only writes the crossing's records, and its kernel. Nothing else crosses
+during a block.
+
+The library lands each block's broadcast sooner than that wait, though. A call finishes every call issued before it, so
+the block's first fused all-reduce lands the next block's inputs too. That landing waits for the whole block's bytes
+to arrive, once a block.
 
 Each step's kernel lands the step before's sum, and on rank 0 it also writes tanh of that sum, the step before's output,
-into its row of the output, an MPS tensor of every step's rows. After the last step, one more dispatch, the kernel's
-first stage alone, lands the last sum and writes the last output. After the run rank 0 copies the outputs into the
-output file's memory, once. No step waits for the host, and the next section says when the host waits for the GPU.
+into a staging buffer one block deep. So a block's last output is written by the next block's first step, and one step
+after each block ends, rank 0 puts a copy of the block's outputs on the GPU's queue. After the last step, one more
+dispatch of the kernel lands the last sum, and the last block is copied the same way. The copy writes straight into the
+output file's memory. No step waits for the host, and the next section says when the host waits for the GPU.
 
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
-place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made. The pages
-a step's crossing sends from and lands in are the exchange's own, which the library allocates
-([rdma/NCCL.md](../rdma/NCCL.md#persistent-exchanges)).
+place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
 
-## The pages
+## The rings
 
-Every operand is held whole: the inputs and the outputs of every step, the weights' shares and, for the plain
-all-reduce timing after the run, one tensor of a step's rows. No slot is used twice and no index wraps. The step's own
-parts of z are the exchange's slots: a step's part is read as its own part by the next step's kernel, and the library
-gives the next start other pages while that kernel has not run, releasing a slot by its use count
-([rdma/NCCL.md](../rdma/NCCL.md#persistent-exchanges)).
+The input ring is two blocks deep. While the GPU works through one block, the next block's inputs arrive in the
+other. The sum ring is one block deep. It holds each step's part of z, which the next step's kernel reads as its own
+part when it lands the sum, before a later step writes over it.
 
-The host may run ahead of the GPU. Metal's queue holds at most 64 command buffers not yet done, and torch makes the host
-wait when it is full. A publication ends a command buffer under the commit rule, so the host gets as many steps ahead
-as the queue holds the library's buffers, and the exchange holds a slot for each start the GPU has not finished. The host's time a step includes that wait. After the first step
-the service records a timing event, which it reads after the run (below).
+How long is a block? The configuration gives `ring_bytes`, the bytes of the region the two rings may hold on each node.
+If each ring can hold the whole stream, a block is the whole stream, and no slot is used twice. If not, a block is a third
+of the slots that fit: two blocks for the inputs and one for the sums. If `ring_bytes` cannot hold three slots, the
+service stops with an error. It never picks a depth of its own.
+
+The host may run ahead of the GPU, but never by more than the input ring. After each block's outputs are copied, one
+step into the next block, it puts a mark on the GPU's queue. At the start of a block, it waits for the newest mark, the
+one two blocks back, so one block is still queued.
+
+There is a second bound, and today it is the tighter one. Metal's queue holds at most 64 command buffers not yet done,
+and torch makes the host wait when it is full. Today each publication and each copy ends a command buffer, so the host
+gets about 32 steps ahead and the ring's mark never waits. The host's time a step then includes that wait. Once the
+library ends a command buffer only when the GPU needs one, the ring's mark is the bound.
 
 ## The step kernel
 
-Each step on a rank is three dispatches, one for each stage, of one kernel template, run through torch-mesh's own
-calls. `streamed.instance` names the template's instance for each stage in [examples/chain.metal](../examples/chain.metal),
-`fused.pipeline` compiles it after the library's device header (`fused.header()`), and `exchange.encode` puts the three
-back to back in torch's open compute encoder, so no host waits for them ([examples/chain.py](../examples/chain.py)).
-That encoder is serial (Metal's `MTLDispatchTypeSerial`): each dispatch ends before the next begins, and its stores are
-seen by the next. So a dispatch boundary orders the stages, and no worker waits for another. The kernel spins on
-nothing but the landing wait. The operator, 2026-10-21: "keep only the landing wait, one acquire fence, a poll bound for
-the node". That wait and its bound are the library's: the kernel names no bound, keeps no error word and no patience of
-its own. The operator, 2026-10-22: "error states can be made unreachable and proven to be unreachable".
+Each step on a rank is one kernel, run through torch-mesh's own calls. `streamed.instance` names an instance of the
+template in [examples/chain.metal](../examples/chain.metal), `_stream.pipeline` compiles it, and `_stream.encode` puts
+it on torch's stream, so no host waits for it ([examples/chain.py](../examples/chain.py)). The rank's GPU cores run it
+as G workers that are all on the GPU at once. They hand work to each other through stamp words in memory. Every wait
+has a limit, so a stuck kernel ends instead of hanging the GPU. Once a wait has failed, each later step's kernel
+reads that at its start and ends at once, so queued steps never spin again. The limit is the library's own, `NCCL_MESH_POLLS` loads
+(`_stream.polls`), which holds a GPU at most the platform's 5 seconds. It is not a setting.
 
-The step's crossing is composed into its kernel ([rdma/NCCL.md](../rdma/NCCL.md#persistent-exchanges)). The first
-stage, bound to land the step before's start, calls `mesh_enter`: each worker waits for every peer's part of z to land.
-It adds them to its own part (`mesh_own`, `mesh_landing`), writes its slice of x = e_t + tanh(z) (on rank 0, its slice
-of tanh(z) too), and calls `mesh_leave`, which marks the landed pages read once the last worker is done. The second
-makes y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. The third, bound to publish the step's
-start, makes the rank's part of z from y and its rows of B. x and y cross a dispatch boundary, so they are plain
-memory, and `simdgroup_load` reads them as the products' operands. Each worker of the third stage writes its slice of
-the part through `mesh_send`, each element once (a system-coherent store: the bridge sends as soon as the slot's
-`published` passes, while the kernel's command buffer still runs), into the start's own pages. Then `mesh_leave`: each
-worker fences its stores and counts its arrival, and the last to arrive releases the part to every peer, one system
-fence and then a store of the slot's `published`, after which the bridge sends those pages down each link. That is the order the release needs
-and no more: each worker's stores, its arrival, one release fence, the stores. Nothing is copied. No kernel of the
-library's runs between two steps. A step's publication is committed as torch-mesh commits every caller's
-(torch-mesh README, Performance). While the GPU still holds enough of the stream's buffers, it joins the open command
-buffer instead of paying for a commit of its own. The next step's publication, or the host's next wait, commits that
-buffer.
-
-The kernel guards no buffer: no start writes pages another start still holds. A start's send part is written again
-only once the bridge has sent it, and its landing areas are landed in again only once the kernel that read them has
-ended; until then each start takes another slot.
+The kernel does three things, and it runs the step's crossing itself (torch-mesh's `fused`: rdma/nccl.h
+`ncclMeshFusableRooted`). First, each worker lands its slice of the last step's sum. It waits for every peer's part of
+z to land, adds them to its own part, and writes its slice of x = e_t + tanh(z) (on rank 0, its slice of tanh(z) too). Second, the
+workers make y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. Workers read each other's x and y
+within one dispatch, which Metal makes visible only through `coherent(device)` memory, so those loads and stores carry
+it: each lane moves the two elements its 8 x 8 matrix fragment holds (MLX's coordinates, steel/gemm/mma.h), since
+`simdgroup_load` and `simdgroup_store` take no coherent pointer. Third, they make the rank's part
+of z from y and its rows of B, and publish it. Each worker writes its slice of the part straight into the step's send
+tensor, each element once through the library's `mesh_step_write` (a system-coherent store: the bridge sends as soon as
+`ready` passes, while the kernel's command buffer still runs), and the last worker to finish releases it to every peer: one fence and one store of each holding's `ready`,
+after which the bridge sends the tensor's own pages down each link. Nothing is copied. Within a block, no kernel of the library's runs between two
+steps. The wait and the release are the library's own steps (`ncclMeshMetalPrelude`), which the kernel calls. Each wait
+is bounded. A step's publication follows torch-mesh's one
+commit rule, the same for every caller (torch-mesh README, Performance). While the GPU still holds enough of the
+stream's buffers, it joins the open command buffer instead of paying for a commit of its own. The next step's
+publication, or the host's next wait, commits that buffer.
 
 The kernel is compiled for its shape: the width K, the rank's share S and the row count. Each row count the service
-plans gets its own three instances (`chain.form`). Every choice in it follows from three inputs: the shape, the capability
+plans gets its own instance (`chain.form`). Every choice in it follows from three inputs: the shape, the capability
 file (below), and what Metal reports of the device and of the compiled kernel. Nothing is timed, and no choice is made
-by speed. A measurement of the sampled shapes checks the choices; it is never read back by the code.
+by speed. A measurement of the sampled shapes checks the rules; it is never read back by the code.
 
 - **Tiles.** Columns and rows come in tiles of the matrix unit's edge (8 on Apple7 and later), so the width, the share
-  and the row count are positive multiples of it; `chain.form` stops with an error on any other.
+  and the row count must be positive multiples of it.
 - **Workers.** G is the GPU's cores, or the larger stage's column tiles where there are fewer. Each worker takes a fair
   share of a stage's tiles: n/G rounded down, the first few one more. y's columns over the share are split this way,
-  and so are z's columns over the width. Where a stage has fewer tiles than workers, the workers without one have nothing
-  to do in its dispatch.
+  and so are z's columns over the width. Where a stage has fewer tiles than workers, the workers without one wait at its
+  stamps.
 - **Simdgroups.** A work item is a group of RG row tiles by one column tile, over K's tiles. A worker runs as many
   simdgroups as the busier stage can keep working, each on one K tile at least, up to the device's limit, rounded
   down to a power of two. The SIMD width is the compiled pipeline's (`threadExecutionWidth`), since no document states
@@ -166,16 +186,18 @@ by speed. A measurement of the sampled shapes checks the choices; it is never re
 
 ## The crossing
 
-A crossing is one send to each peer and one landing from each (torch-mesh's `fused.Exchange`, a persistent exchange:
-made once, started each step): the step's part of z goes from the start's send part to each of the n - 1 other ranks,
-and each peer's part lands in its own landing area of the start; the next step's kernel reads the n - 1 parts and adds
-them to its own. This is the one-shot all-reduce (each rank reads every peer's whole part and sums locally: one crossing
-a step, (n - 1) parts each way, over n - 1 links at once). It is the form for a part this small; the two-shot form
-(reduce-scatter, then all-gather: two crossings, each 1/n of a part) is the form for large parts. The exchange is
-declared at the row capacity, and each start moves the step's rows. Every page that crosses is a row of the node's page
-table: the exchange's slots are leases, and the weights rank 0 sends each rank are region tensors (`torch_mesh.empty`).
-The bridge sends each page from the page its row names and lands each page in the page the receiver's row names, one
-page a SEND (design/pages-and-functions.md; design/transport.md section 14).
+A crossing is one send to each peer and one landing from each (torch-mesh's `fused.exchange(send, landings,
+polls)`): the step's part of z goes from the rank's send tensor to each of the n - 1 other ranks, and each peer's part
+lands in its own slot of the rank's landing tensor; the next step's kernel reads the n - 1 slots and adds them to its
+own part. This is the one-shot all-reduce (each rank reads every peer's whole part and sums locally: one crossing a step,
+(n - 1) parts each way, over n - 1 links at once). It is the form for a part this small; the two-shot form
+(reduce-scatter, then all-gather: two crossings, each 1/n of a part) is the form for large parts. Every tensor that crosses is a region tensor (`torch_mesh.empty`): a range of rows of the node's page table, each
+row a page. The bridge sends each page from the page its row names and lands each page in the page the receiver's row
+names, one page a SEND (design/pages-and-functions.md; design/transport.md section 14). The weights rank 0 sends each
+rank are region tensors too. The service lays its ring of sums on pages (`chain.paged`: each slot whole pages, its rows
+first), and its input ring's blocks start on pages. One landing tensor serves every step: the library posts a step's
+receive only once the rank's own publication of that step has stored `ready`, after the kernel that read the landing
+before. A crossing of any size fuses; the 61,440-byte limit is gone with the bridge's rings.
 
 ## The capability
 
@@ -188,7 +210,7 @@ Shading Language Specification, and its `family` as a number: n of Metal's `MTLG
 
 The configuration names the directory that holds the files, and each rank takes from it the file of its own GPU,
 `apple<n>.json`, where n is the newest Apple family its Metal device supports (`chain.capability`). torch-mesh's
-`fused.device()` finds n by asking Metal for each family from Apple1 up, since a GPU of a family supports every
+`_stream.device_facts` finds n by asking Metal for each family from Apple1 up, since a GPU of a family supports every
 earlier one's. So every node runs the same configuration, and the ranks of one run may hold different GPUs, each with
 its own file. Where Metal reports a limit of the device (its threads and threadgroup memory a threadgroup), the rank
 takes the device's figure. What no document states, the SIMD width and how many threads a compiled kernel holds, is
@@ -197,18 +219,18 @@ read from the compiled pipeline.
 ## The configuration
 
 The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
-width and the parts. It gives `row_capacity`, the most rows a step may take, and names `capabilities`, the
+width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
+two rings. It also gives the two rotations' blocks, and names `capabilities`, the
 directory of capability files, from which each rank takes its own GPU's. Its paths are read from the directory the
 service runs in, the checkout's root in the sample. The kernel's form follows from the shape and the capability file,
 and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and
-rows there are, so the configuration does not. The service has no defaults, and a missing value is an
-error.
+rows there are, so the configuration does not. Every value must be there. The service has no defaults, and a missing
+value is an error.
 
 A part is how many rows of A and B a rank holds, in rank order. The service never guesses a part. A balancer that
-measures the calls writes the parts. The operator's pair, 2026-10-17 (design/rubrics.md D5): lower, "refusing to use it
-at all is never correct"; upper, "the *second entire computer* is a resource".
+measures the calls writes the parts. Every Mac is always loaded fully.
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
-sample. Its input's every step is held in the region (4,096 steps of 8 rows of 1,024 halves, 64 MiB a rank).
+sample. Its `ring_bytes` holds three blocks of 512 steps, so the sample's rings wrap many times.
 
 These lines make sample inputs and weights for it:
 
@@ -231,18 +253,19 @@ RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
   ~/.venv-mesh-uv/bin/python examples/chain-service.py examples/chain-service.json
 ```
 
-Each rank prints one line at the end. It gives the parts, the rows, the steps and the seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives three times a
-step: the whole step, the host's own time (with any wait inside torch), and a plain all-reduce
-alone (the library's own kernels, not composed), the crossing the composed step no longer pays. It gives the bytes
+Each rank prints one line at the end. It gives the parts, the rows, the steps, the block, the two rings' depths and the
+seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives four times a
+step: the whole step, the host's own time (with any wait inside torch), the host's wait on the ring's mark, and a plain
+all-reduce alone (the library's own kernels, not fused), the crossing the fused step no longer pays. It gives the bytes
 a rank's crossing moves a step (its part out to each of the n - 1 peers, and each peer's part in), and those bytes a
 second.
 
-The line also splits the run in two. The first step carries costs a run pays once, such as the library compiling its
-kernels the first time a collective runs. So the line gives the first step's time. It then gives the time a later step
-takes, and the rows a second they reach. The first step's end is the GPU's time at its timing event, so the later steps
-counted are the ones after it. The event is on the stream (`torch.mps.Event`), and the service reads the events only
-after the run, so the step loop reads no clock and no wait is added to take the time. The whole-run times include the
-first step; these do not.
+The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling its
+kernels the first time a collective runs. So the line gives the host's time to issue the first step, and the first
+block's time. It then gives the time a step of the later blocks takes, and the rows a second they reach. The first
+block's end is the moment the host's wait on its mark returns, and that mark comes one step into the next block, so the
+later steps counted are the ones after it: the host issues ahead of the GPU, so it is already waiting when the block
+ends, and no wait is added to take the time. The whole-run times include the first block; these do not.
 
 ## The LSTM
 
@@ -257,30 +280,21 @@ tick before, and the kernel needs no barrier between its workers. An output leav
 **Split.** Each rank owns a share of every layer's hidden units: their 4 gate columns of W_l, their bias, and their
 cell state, which never leaves the rank. The shares are configuration (`shares`) and may be ragged. A tick's crossing
 sends the rank's new h slices, every layer's, to each peer, and lands each peer's slices: an all-gather, through the
-same kind of exchange the chain sums over (`fused.Exchange`, each rank's part its share's rows). This is Megatron's split of a cell by hidden unit. Splitting by input rows
+same `fused.exchange` the chain sums over. This is Megatron's split of a cell by hidden unit. Splitting by input rows
 instead, with an all-reduce of gate partials, would send about 4n times as many bytes and repeat the cell update on
 every rank.
 
-**Reads in place.** A layer's u is never assembled in device memory. Its columns are segments read where they are: the
-step's input, this rank's own part of the landed start (`mesh_own`), and each peer's part (`mesh_landing`). They are in rank order,
-each a whole number of 8-column tiles. Each worker stages u once a layer, as GEMM operand tiling does (CUTLASS; Volkov
-and Demmel, "Benchmarking GPUs to tune dense linear algebra", SC 2008). After the landing wait, one parallel pass over
-the segments (`Segments::fill`, the segment outermost, so no segment lookup is left in the k-loop) loads a K-chunk of
-the R-row band system-coherent (the NIC wrote the landings) into threadgroup memory. Then `simdgroup_load` reads it
-there for every column tile the worker owns, where each tile once loaded its own copy system-coherent. The chunk is a
-fit, not a cost model: `lstm.form` gives the band the threadgroup memory left beside the K split's partials (`red`),
-each row padded by one tile (MLX steel/gemm's 16 bytes), in as few equal chunks as fit. Where a layer's K is more than one
-chunk and a worker's items take more than one pass of its simdgroups (ks = 1, wide layers), each pass stages every
-chunk again. This is a known cost: the system-coherent band reads repeat, R x K halves a pass against the pass's
-weights, 32 tiles of K x 8 at least. The results are the same. The weights are tiled once at load, and their gate columns are laid out
-unit-major, so an 8-column tile holds two units' (i, f, g, o).
+**Reads in place.** A layer's u is never assembled. Its columns are segments read where they are: the input slot, this
+rank's previous send slot, and each peer's landing slot. They are in rank order, each a whole number of 8-column tiles.
+The matmul's loader (`Segments`) finds a tile's segment and loads each lane's two fragment elements system-coherent
+(the NIC wrote the landings). The weights are tiled once at load, and their gate columns are laid out unit-major, so an
+8-column tile holds two units' (i, f, g, o).
 
 **Epilogue.** A lane holds (i, f) or (g, o) of one unit and row. One `simd_shuffle_xor` pairs them, and the (i, f) lane
-updates c and stores h through the tick's send view (`mesh_send`). A layer that has not started (s < l) stores
-zeros there, its h(-1). The tick's kernel lands the tick before and publishes its own, so it calls `mesh_enter` at its
-start and `mesh_leave` at its end, and the last worker releases the tick's publication in the chain's order. Rank 0 writes the top layer's landed h to its step's row of the output, as the chain does.
+updates c and stores h through `mesh_step_write` into the tick's send slot. A layer that has not started (s < l) stores
+zeros there, its h(-1). Rank 0 writes the top layer's landed h to the output staging ring, as the chain does.
 
-**Configuration.** `input` and `output` as the chain's. Also `input_width`, `layers`,
+**Configuration.** `input`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
 `shares` (one count of hidden units a rank, multiples of 8, their sum the width) and `capabilities`. The weights file
 holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order. `weights` is a directory of one .npy file an array. Before the communicator exists, rank 0 reads them
 memory-mapped and writes each rank's gate rows, already tiled, into CPU region tensors, 64 tiles at a time. It then
@@ -291,6 +305,6 @@ memory has.
 ## What to read next
 
 - [design/transport.md](../design/transport.md): the bridge, its region, its links and how they fail.
-- [rdma/NCCL.md](../rdma/NCCL.md): the collective client, its groups and a program's part in them.
+- [rdma/NCCL.md](../rdma/NCCL.md): the collective client, its groups and the rules a program keeps.
 - [rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md): the same client from PyTorch, and region tensors.
 - [design/heterogeneity.md](../design/heterogeneity.md): nodes of different speeds and links of different costs.

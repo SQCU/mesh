@@ -9,7 +9,7 @@ the installed SDK. These changes do not patch Apple's kernel.
 ## September 5, authorized recovery and receive-address repair
 
 The operator gave standing authorization to restart idle mesh machines, now recorded
-in [AGENTS.md](../AGENTS.md#restarting-an-idle-node). At 15:17 PDT the Mini had
+in [AGENTS.md](../AGENTS.md#idle-node-restart-authorization). At 15:17 PDT the Mini had
 zero user sessions, no active application client or learner, and its training service
 persistently disabled. After bounded graceful bridge teardown, an ordinary
 `shutdown -r now` was issued. SSH answered at the first check 16.93 seconds later;
@@ -64,8 +64,8 @@ At approximately 14:27 PDT, during a later 16 MiB phase, the Mini panicked with
 the backtrace. This is the earlier null-derived data-abort signature, not proof
 of a new failure mechanism. The Mini rebooted automatically and paired again.
 No host reboot command or uncatchable signal was issued. The saved filename
-`peer-watchdog.panic` is historical; its contents describe a data abort, not the
-earlier shutdown watchdog deadlock. Transfer size is
+`peer-watchdog.panic` is historical; its contents describe a data abort and should
+not be conflated with the earlier shutdown watchdog deadlock. Transfer size is
 not established as the kernel trigger.
 
 Two short projection cohorts and the smaller byte cohorts subsequently completed.
@@ -197,7 +197,7 @@ header size, rings and capacity remain unchanged. `up` means the region exists;
 Node-info, startup and status use interface state without opening verbs contexts. They label link state separately from the RDMA peer's presence, which the fabric init reads from the IORegistry (README.md, node info). Node-info
 has one sampler and serves its last or partial sample while work is pending.
 
-These commands read a node's state without opening a verbs context:
+Safe observations for the next incident:
 
 ```sh
 rdma/mesh-stat /mesh0
@@ -207,11 +207,23 @@ sudo log show --last 20m --style compact --predicate 'process == "kernel" AND (e
 sudo ls -lt /Library/Logs/DiagnosticReports
 ```
 
-`sudo spindump -i report.shutdownStall -o decoded.txt` decodes a shutdown-stall report
-offline.
+Copy those logs and matching crash/panic/reset reports before reboot. Decode a
+shutdown-stall report offline with `sudo spindump -i report.shutdownStall -o decoded.txt`.
+These commands do not open another verbs context.
 
-## Unresolved
+## Kernel repair still required
 
+The driver needs asynchronous retirement that preserves object ownership without
+waiting for IOKit termination while holding a gate that termination needs. Capture
+references and retirement state under the gate, release it, then schedule the
+dependent work. Completion advances retirement. A timed-out operation retains
+pending ownership. Any synchronous compatibility path needs one deadline propagated
+through every wait, including worker acquisition, without holding dependency locks.
+
+Provider posting and kernel queue shutdown also need a shared doorbell-mapping
+lifetime protocol. Driver traces need queue/PD identities, generations, descriptor
+indices, mapping changes, retirement state, held gate, awaited owner and deadline.
+These are patch requirements derived from the trace, not a tested Apple patch.
 The producer of the first invalid DMA state remains unresolved.
 
 ## Validation
@@ -298,6 +310,9 @@ After the 10-17 panic the Mini's bridge, started 11 s after boot, failed every q
 INIT→RTR kernel transition" in the provider's log; its lanes every 3 s, every program `code 5 domain 1`) for five
 minutes, until its binary was touched and a new bridge process connected at once. The bridge now retires and opens the
 device after three such refusals in a row (design/transport.md).
+
+Until the trigger is known, a substrate upgrade restarts the Mini's bridge with no program running and well apart
+from the M5's.
 
 On 2026-10-17 at 14:23:56Z the M5's bridge crashed with the September provider signature: EXC_BAD_ACCESS, a byte
 write at 0x100840008 (8 bytes into a 16 KiB page no longer mapped, beside a 16 KiB shared-memory mapping) in
@@ -386,6 +401,14 @@ three can happen:
 - **Receives flushed before destruction.** Its teardown moves both queue pairs to the error state and drains the
   flushed completions (`pair_flush`, 65,536 empty polls at most) before `down_pair`, so the device holds no posted
   receive of it when it is destroyed, at a stripe flow's reset (the bridge's stop releases nothing, October 18, below).
+
+What integration testing was to read first: "stripes closed (N completions flushed)" with
+N > 0 where receives were posted (the provider's flush works; with N = 0 the move to the error state did nothing here,
+and the queue pairs were destroyed as before); a session's teardown on a port with stripes up crashing nothing; the
+Mini's bridge stopped with a stripe flow up, then the M5's, apart, with each extent deregistered once in the kernel log
+and no panic. If the flush is shown to work, the same flush before HEAD's other teardowns (the lanes' at every bridge
+stop, the October 16 and 17 condition) is a one-line change to `down_pair`'s callers, HEAD's default path, for the
+main line to decide.
 
 ## October 18: the deallocation deadlock again, and a bridge that releases no device
 

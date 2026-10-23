@@ -1,6 +1,6 @@
 """The mesh from Python: mesh-plan.h through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
-node's bridge's: current() is the map it keeps (mesh_map); link maps,
+node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait); link maps,
 their routes and a communicator's members' map are the header's own.
 Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its ncclMemAlloc, the
 memory they move taken from the node's bridge's region (rdma/NCCL.md "Memory")."""
@@ -19,32 +19,49 @@ except ImportError as missing:
                       f'make -C {RDMA} mesh-c PYTHON={sys.executable}') from missing
 
 
+def _named(prefix, names):
+    """The header's constants `prefix`NAME for `names`, as a tuple in their values' order (each value its index)."""
+    values = {name: getattr(lib, prefix + name.upper()) for name in names}
+    ordered = tuple(sorted(names, key=values.get))
+    assert [values[n] for n in ordered] == list(range(len(ordered))), prefix
+    return ordered
+
+
+KINDS = _named('MESH_LINKS_', ('mesh', 'ring', 'tree', 'graph'))
+
+
 class LinkMap:
-    """mesh-plan.h's struct mesh_link_map (`c`, a pointer to it) over `nodes`: its `edges`, one a cable, each (node a,
-    node b, cable, capacity in bytes a second), the hardware fact the routes and the packed trees read, with `relays`
-    more nodes (numbered from `nodes`, holding no rank), each node's `mark` (None: its number; the bridges mark a node
-    by its node number) and the routing table `next` (each node b's in-tree, next[v * N + b] v's parent in it, for N =
-    nodes + relays; None: none), the storage held here.  An edge whose capacity is not stated (0) is refused
-    (ValueError).  A graph need not join its nodes (the bridges' records while a cable is out)."""
+    """mesh-plan.h's struct mesh_link_map (`c`, a pointer to it) of `kind` (KINDS) over `nodes`, the links `pairs`
+    and each one's bandwidth in bits a second in `bandwidth` (None: none given; 0: that link's unknown), the hardware
+    fact the routes and the packed trees read, with `relays` more nodes (numbered from `nodes`, holding no rank), each
+    node's `mark` (None: its number; the bridges mark a node by its node number) and the routing table `next` (each
+    node b's in-tree, next[v * N + b] v's parent in it, for N = nodes + relays; None: none), the storage held here;
+    refused where mesh_link_map_check refuses it (no map).  A graph need not join its nodes (the bridges' records while
+    a cable is out); mesh_link_map_joined says whether it does, and the trees and collectives run only where it does."""
 
-    def __init__(self, nodes, edges, mark, relays=0, next=None):
-        edges = [tuple(int(v) for v in e) for e in edges]
-        if any(len(e) != 4 or e[3] <= 0 for e in edges):
-            raise ValueError('a link map\'s edge is (a, b, cable, capacity in bytes a second), its capacity stated '
-                             '(rdma/NCCL.md, A link map)')
-        self.nodes, self.edges, self.relays = nodes, edges, relays
-        self.mark, self.next = [int(v) for v in mark], None if next is None else [int(v) for v in next]
-        self._edge = ffi.new('struct mesh_edge[]', [{'a': a, 'b': b, 'cable': c, 'capacity': k} for a, b, c, k in edges] or 1)
+    def __init__(self, kind, nodes, pairs, bandwidth=None, relays=0, next=None, mark=None):
+        pairs = [tuple(p) for p in pairs]
+        self.kind, self.nodes, self.pairs = kind, nodes, pairs
+        self.bandwidth = None if bandwidth is None else [int(b) for b in bandwidth]
+        self.relays = relays
+        self.next, self.mark = (None if x is None else [int(v) for v in x] for x in (next, mark))
+        self._link = ffi.new('uint32_t[][2]', [list(p) for p in pairs] or [[0, 0]])
+        self._bandwidth = ffi.new('uint64_t[]', self.bandwidth or [0]) if bandwidth is not None else ffi.NULL
         self._next = ffi.new('uint32_t[]', self.next) if self.next else ffi.NULL
-        self._mark = ffi.new('uint32_t[]', self.mark or [0])
+        self._mark = ffi.new('uint32_t[]', self.mark) if self.mark else ffi.NULL
         self.c = ffi.new('struct mesh_link_map *')
-        self.c.nodes, self.c.edges, self.c.edge = nodes, len(edges), self._edge
+        self.c.kind, self.c.nodes, self.c.links, self.c.link = KINDS.index(kind), nodes, len(pairs), self._link
+        self.c.bandwidth = self._bandwidth
         self.c.relays, self.c.next, self.c.mark = relays, self._next, self._mark
+        status = lib.mesh_link_map_check(self.c)
+        if status:
+            raise ValueError(f'a {kind} of {nodes} nodes and {relays} relays with links {pairs} is not one its algorithms run on: '
+                             f'{os.strerror(status)}')
 
 
-def link_map(nodes, edges, mark, relays=0, next=None):
+def link_map(kind, nodes, pairs, bandwidth=None, relays=0, next=None, mark=None):
     """A LinkMap (above)."""
-    return LinkMap(nodes, edges, mark, relays, next)
+    return LinkMap(kind, nodes, pairs, bandwidth, relays, next, mark)
 
 
 def routes(lmap):
@@ -69,12 +86,13 @@ def route(lmap, a, b):
 def _members(whole, members, current):
     """mesh_map_members (current False) or mesh_map (current True): the room grown until it fits."""
     asked = list(members or ())
-    room = ffi.new('struct mesh_link_map *', {'nodes': max(1, len(asked)), 'edges': max(1, len(asked) * (len(asked) - 1) // 2)})
+    room = ffi.new('struct mesh_link_map *', {'nodes': max(1, len(asked)), 'links': max(1, len(asked) * (len(asked) - 1) // 2)})
     while True:
         node = ffi.new('uint32_t[]', max(1, room.nodes))
-        edge = ffi.new('struct mesh_edge[]', max(1, room.edges))
+        link, bandwidth = ffi.new('uint32_t[][2]', max(1, room.links)), ffi.new('uint64_t[]', max(1, room.links))
         table, mark = ffi.new('uint32_t[]', max(1, room.nodes * room.nodes)), ffi.new('uint32_t[]', max(1, room.nodes))
-        made = ffi.new('struct mesh_link_map *', {'nodes': room.nodes, 'edges': room.edges, 'edge': edge, 'next': table, 'mark': mark})
+        made = ffi.new('struct mesh_link_map *', {'nodes': room.nodes, 'links': room.links, 'link': link, 'bandwidth': bandwidth,
+                                                  'next': table, 'mark': mark})
         given = ffi.new('uint32_t[]', asked) if asked else ffi.NULL
         if current:
             count = lib.mesh_map(given, len(asked), node, made)
@@ -86,16 +104,21 @@ def _members(whole, members, current):
     if count < 0:
         return count, None, None
     N = count + made.relays
-    lmap = LinkMap(count, [(e.a, e.b, e.cable, e.capacity) for e in edge[0:made.edges]], mark[0:N], made.relays, table[0:N * N])
+    lmap = LinkMap(KINDS[made.kind], count, link[0:made.links], bandwidth[0:made.links], made.relays, table[0:N * N],
+                   mark[0:N])
     return count, lmap, list(node[0:N])
 
 
-def members(whole, among):
+def members(whole, among, marks=None):
     """mesh_map_members: the map a communicator of the whole map's nodes `among` (map node i the whole map's among[i])
-    reads, the whole map's other nodes its relays, its marks and table the whole map's, so two members are linked where
-    their route crosses no other member: the rule mesh_map reads the bridges' records by, with every cable and capacity
-    of the whole map kept.  The whole map carries its routing table (routes) and its marks.  The map as it is, whether
-    or not it joins its members."""
+    reads, the whole map's other nodes its relays, its marks and table the whole map's (routes(whole) where it has
+    none), so two members are linked where their route crosses no other member: the rule mesh_map reads the bridges'
+    records by.  `marks` (None: the whole map's own) each whole-map node's mark, as the bridges mark each node by its
+    node number, so the table is the bridges' (a whole map given links and bandwidths alone, link_map('graph', N, links,
+    bandwidths), takes them here; its table, made by other marks, is made again by these).  The map as it is, whether
+    or not it joins its members (mesh_link_map_joined names two it leaves apart)."""
+    if marks is not None:
+        whole = LinkMap(whole.kind, whole.nodes, whole.pairs, whole.bandwidth, whole.relays, None, marks)
     among = None if among is None else list(among)
     count, lmap, _ = _members(whole, among, False)
     if count < 0:
@@ -103,21 +126,33 @@ def members(whole, among):
     return lmap
 
 
+def wait(serial=0, seconds=None):
+    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), waited
+    for on the serial's word, which the bridge wakes as it moves the map; `seconds` None waits with no bound (8e716999's
+    form), a number bounds it, `serial` returned where it passes first.  OSError naming the bridge where it is
+    unreachable, ESRCH where it exits while waited on."""
+    made = ffi.new('uint64_t *', serial)
+    status = lib.mesh_map_wait(made, (1 << 64) - 1 if seconds is None else max(0, min(int(seconds * 1e9), (1 << 64) - 1)))
+    if status and status != errno.ETIMEDOUT:
+        raise OSError(status, f"this node's bridge is unreachable: {os.strerror(status)}")
+    return made[0]
+
+
 def current(members=None):
-    """mesh_map: the map this node's bridge keeps, over `members` (bridge node numbers, map
+    """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
     node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
-    `map` the members' map as libnccl-mesh reads it (its relays, an edge for each cable two nodes' bridges reach each other over, at its capacity, `mark` each node's
+    `map` the members' map as libnccl-mesh reads it (its relays, a link where two nodes' bridges reach each other, at its bandwidth, `mark` each node's
     bridge node number, `next` the routing table; members(map, ...) of the whole map is the
     map over any of them), `nodes` each map node's (then each relay's) bridge node (a node is its number;
     a name a person reads is peers.label's, from the name table), `node` this node's bridge's (mesh_reached).  The whole map (members None) is the records as they are,
-    a node no bridge reaches among its nodes, and the members' map as it is, joined or not.  OSError naming the bridge
-    where it is unreachable."""
-    own = ffi.new('uint32_t *')
+    a node no bridge reaches among its nodes, and the members' map as it is, joined or not (mesh_link_map_joined names
+    two it leaves apart).  OSError naming the bridge where it is unreachable."""
+    serial, own = wait(), ffi.new('uint32_t *')
     lib.mesh_reached(ffi.NULL, 0, own)
     count, lmap, nodes = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0])
+    return SimpleNamespace(map=lmap, nodes=nodes, node=own[0], serial=serial)
 
 
 def nodes():

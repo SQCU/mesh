@@ -36,5 +36,5 @@ set. Compilation caches no longer accumulate a full copy per run or unrelated
 repository revision. Remote numerical outputs and fixtures are removed after
 collection. These policies operate outside numerical and transport execution.
 
-This record measures disk space only, not numerical acceptance or transport
-performance.
+The storage changes require subsequent application validation; disk cleanup is
+not evidence of numerical acceptance or transport performance.

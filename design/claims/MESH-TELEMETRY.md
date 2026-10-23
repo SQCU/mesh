@@ -1,0 +1,76 @@
+# Mesh telemetry implementation claims
+
+Controlling specifications: [`../mesh-coprocessor-demo.md`](../mesh-coprocessor-demo.md),
+[`../rl-training-spec.md`](../rl-training-spec.md), and
+[`../ALGORITHM-CONTRACTS.md`](../ALGORITHM-CONTRACTS.md).
+
+Implementation surfaces:
+
+- `user/mesh-telemetry.py` owns each node's in-memory telemetry stream, a workload producer's rows kept until its
+  process exits, served on loopback alone (`MESH_TELEMETRY_HOST`, 127.0.0.1): no node reads another's.
+- `viz/serve.py` owns membership (the nodes its bridge holds a record of, the roster's others its inventory), this
+  node's live aggregation and the page-table visualization feed; another node is what this node's bridge's map and
+  records say of it (its telemetry is not read across nodes: the bridge carries no request).
+- `rdma/workload.py` owns workload-independent operation envelopes and measures.
+- `xonotic/solver/strat/strat_responder.py` owns distributed Gram placement and counterfactual measures.
+
+The claims are substantiated only when active aggregates have the same support as the
+nodes in the bridge's records whose telemetry answered, the capacity of nodes outside the map is reported only as
+inventory, missing objective
+coordinates retain their own support measures, and both forward and optimization work
+are observed on distinct mesh hosts.
+
+Page-table capacity is the configured region disintegrated into receive ownership and
+application arena ownership. Neither component is capped by a historical workload count,
+and failed pairing attempts do not change either coordinate.
+
+Arbitrary-extent stream closure is driven by byte offsets and transport completions. The
+sender emits its first FIN after the complete data extent and retries it only after the
+prior FIN page is reclaimed; an application spin count is not a response window. The
+queued-copy store grows from submitted row mass with checked address-space arithmetic.
+
+Machine-activity FLOP bounds are workload-independent. Characterized CPU capacity times
+the maximum live CPU-cluster residency and characterized GPU capacity times GPU residency
+form concurrent upper-bound components; their sum brackets a CPU-only, GPU-only, or mixed
+workload without naming it. A rootless telemetry owner invokes only the root sampler through
+noninteractive sudo and keeps the same in-memory ring, port, and sequence protocol.
+Mach CPU ticks provide the unprivileged whole-CPU residency coordinate; privileged sampling
+adds power, frequency, and thermal coordinates but is not the source of CPU availability.
+An instrumented interval with unspecified arithmetic publishes a zero lower bound and a
+missing upper bound. It never publishes zero as an invented upper bound; component support
+and missing capacity remain explicit coordinates.
+
+CPU FP32 characterization doubles a square SGEMM realization from matrix order one until
+one measured multiplication occupies the requested sampling duration or allocation
+capacity is exhausted. The characterized rate is the maximum observed rate along that
+hardware-driven trajectory; neither a matrix order nor a workload row count is a release
+ceiling.
+
+The M4 Pro trajectory reached its requested interval at square order 8192 and measured a
+3,488.27664 GFLOP/s maximum at the 8192 by 8192 by 1024 coordinate. The complete
+characterization stream remains the measurement artifact rather than a preset workload
+size.
+
+Ports 8788 and 8787 should each have one answering provider. Installation retains a
+loaded system job or an answering userspace provider rather than forcing an ownership
+transfer. User installation measures the system job's socket ownership before relying on it. It can bootstrap the same userspace interface when the system
+provider is absent. Definition refresh and any pre-existing supervisor overlap require
+a continuity-preserving handoff; routine installation no longer resolves them by stopping
+the working provider. Retained jobs are not reported as newly deployed generations.
+
+Interactive observer polling requests the node's labelled scalar/array-length measure
+projection; the complete latest node record remains available without that query.
+Historical samples retain phase and workload envelopes, not repeated copies of large
+covariance objects. Namespaced updates merge into the current producer measure, and
+their delivery timestamp is distinct from the producer heartbeat. Objective-labelled
+learning, replay and outcome measures use this generic channel. The J measurement
+thread retains full numerical reports in per-responder/episode binary NPZ artifacts
+and publishes scalar/array-shape summaries with artifact descriptors. The generic
+node artifact endpoint streams registered files without parsing their numerical
+contents. Full and projected ring records cache their JSON encoding under a
+per-record lock; history requests reuse those bytes. Historical full JSON measure
+publications remain supported. The reporter reuses its result until new frames
+arrive rather than repeating an unchanged covariance computation.
+The infrastructure HUD links to the separate J-space and policy-learning pages on
+8795; those pages share an incremental application reader, not another J computation.
+These retention and display domains are described in [`../joracle-viewer.md`](../joracle-viewer.md).

@@ -47,20 +47,23 @@ These are instrumented aggregate durations, including clock-read overhead,
 dominated by idle polls. They are not loaded-path dispatch latency or evidence
 that all bridge overhead is below a threshold. The large bulk-run variation
 has not been attributed to instrumentation, scheduling, or another cause.
+A1–A6 comparisons must use matching build flags and repeat both one-page and
+bulk measurements; a warmed distribution and an uninstrumented repeated bulk
+rate remain necessary before claiming a stable performance improvement.
 
 ## Reproduction
 
-Both machines built committed source with:
+Build committed source on both machines with:
 
 ```
 make -C rdma -B CPPFLAGS=-DMESH_TRANSPORT_TIMING mesh-flow mesh-page-echo
 ```
 
-The existing `tools/mesh/participants.py:bridge_pair` lifecycle started and
-readied both bridges with `arena_pages=8192, receive_pages=8192`.
-`rdma/.build/mesh-page-echo echo 0 N 60` ran on M4; after its configuration-time
-`page_echo_ready` output, `rdma/.build/mesh-page-echo send 1 N 60` ran on M5.
-Both outputs and bridge logs were read before ordinary managed stop. No timing
+Use the existing `tools/mesh/participants.py:bridge_pair` lifecycle to start and
+ready both bridges with `arena_pages=8192, receive_pages=8192`. Launch
+`rdma/.build/mesh-page-echo echo 0 N 60` on M4; after its configuration-time
+`page_echo_ready` output, launch `rdma/.build/mesh-page-echo send 1 N 60` on M5.
+Read both outputs and bridge logs before ordinary managed stop. No timing
 coordination enters the transfer path. N is 1 or 4096 for the records above.
 
 Both bridges were stopped after measurement. Both machines were rebuilt with

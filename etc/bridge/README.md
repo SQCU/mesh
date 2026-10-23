@@ -4,7 +4,7 @@ A node's bridge (`rdma/mesh-flow`) starts from one operand, its configuration: a
 passes, in JSON, TOML or YAML. `bin/mesh-user.sh CONFIGURATION [CHECKOUT]` reads it with the mesh library's one
 loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and region
 in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's launchd agent
-definition, so every load of the agent reads it, and records the document's path beside it. A
+definition, so the keeper's load at boot keeps it, and records the document's path beside it. A
 changed configuration is renamed into place, and `mesh-user.sh` sends the heartbeat SIGHUP: the bridge restarts on
 it, its region kept (README.md, A new bridge on a node). Calls in flight across the restart fail as values, and the
 next communicator runs on the new bridge (design/transport.md section 2). There
@@ -23,23 +23,21 @@ closes the bridge.
 
 A document has these keys:
 
-- `purpose`: one line stating what the configuration is for (the loader raises `ValueError` without it,
-  rdma/bridge_configuration.py).
+- `purpose`: one line stating what the configuration is for (required).
 - the region, exactly one of `region_gib` (GiB) or `region_percent` (of the node's physical memory).
 
 The region is the bridge's pinned memory (design/transport.md). Every port's device registers all of it
-when the device comes up, before any queue pair exists. The bridge does not deregister it: the kernel releases the
-registration at the port's child's exit (design/transport.md section 5). Each device registers the region in extents
-of 2^k bytes: the least power of two, from the arena's page up to the 4 GiB bank, at which the region's extents number
-no more than that device's `max_mr` (rdma/mesh-link.c:538-541, `device_up`; design/transport.md section 1). On the
-Studios' 86 GiB under `max_mr` 100 that is 1 GiB. The bank is the hardware's fact: `tbt_post_recv` keeps only the low
-32 bits of an SGE address, so no extent crosses a 4 GiB boundary. Every input is the node's own (the region's size,
-`max_mr`, the bank), so the count of extents fits `max_mr` by construction (02002590). A registration that fails
-returns its errno as the port's open's value: the port is not open, the extents already registered stay, and it opens
-again at the events that open any port, its link's coming on, a hello heard on it or its child's end (rdma/mesh-link.c
-`port_opened`, line 895; 02002590 deleted the refusal's backoff). The bridge starts and serves the node either way;
-the region is not clamped. Clients lease from it; a lease that does not fit fails at its start with an error naming
-the execution, and the region does not grow.
+when the device comes up, before any queue pair exists. The bridge never deregisters it: the kernel releases the
+registration at the port's child's exit (design/transport.md section 5). The bridge registers the region in extents
+of MESH_EXTENT, 1 GiB (rdma/mesh-verbs.h). That size is the bridge's choice. The hardware fact is that
+`tbt_post_recv` keeps only the low 32 bits of an SGE address, so no registration may cross a 4 GiB boundary, and 1
+GiB divides that bank. Each device checks the region's extents against its own `max_mr` as it comes up, on its
+port's queue: a region of more extents than that device registers is refused for that port, logged with the extent,
+its bytes, the errno and the extents the device holds. After the k-th refusal in a row the port opens again at a
+hello heard on it from 60·2^(k−1) s on (at most an hour), or at its link's coming on, keeping its extents
+(rdma/mesh-link.c `port_opened`). The bridge starts and serves the node either way; the region is never clamped. Clients lease
+from it; a lease that does not fit fails at its start with an error naming the execution, and the region never grows.
+How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
 
 ## The examples
 
@@ -54,8 +52,8 @@ didactic programming exercises.
 - `example-10pct.yaml`: ten percent of the node's memory. It holds the operands of many crossings, and it is too
   small for many applications: a model's weights and KV pool in the region, or a long reduction's operands.
 
-The operator, 2026-10-15 (below): "with the proper bridge configuration for their application deliberately left for
-the user to derive".
+The proper configuration for an application is the client writer's to derive and write explicitly for each node of
+their mesh.
 
 ## The E2B pair under test
 
@@ -67,7 +65,7 @@ overcommitted the Mini (M09: at a 9 GiB region its userspace starved and its wat
 is one computation, metal-microbench tools/mesh/programs.py `plans` of the call's record: the planner derives no call
 whose members' leases their regions do not hold (node-info `region`) and the driver places no finished record that does
 not fit, each call's record carries each member's, and the rank holds its part's load to the record's to the byte and
-its calls within the record's total. The same count from the model file's header (2026-10-15, before programs.py
+its calls within the record's total. A count of its rule from the model file's header (2026-10-15, before programs.py
 plans was first run) gives the leases lease5's ranks took before their Neural Engine shares to the byte.
 
 - `m4pro-headless.toml`: the Mac mini, 16 GiB, the most that left it a 2 GiB margin beside the region's tables of
@@ -76,7 +74,7 @@ plans was first run) gives the leases lease5's ranks took before their Neural En
   model alone.
 
 Each file's `purpose` states its arithmetic from that computation for the pair's heads programs of 2026-10-15
-(2057c7fae8c1930a and d5a4040e726d5b44, the member's larger part in each), counted that way from the model file's
+(2057c7fae8c1930a and d5a4040e726d5b44, the member's larger part in each), counted by that rule from the model file's
 header (2026-10-15, before programs.py plans was first run): its weights (a Neural Engine share's gate, up, down and
 norm are its layer's own buffers, the down read at the layer's row pitch), the KV pool at the engine's whole page geometry
 (16000 pages and the strip, with their chunk tables; a call leases its own pages, 36 MiB for each 2048 positions of a
@@ -92,26 +90,24 @@ from its node's region too; neither file holds one.
 
 ## The Studios
 
-Two documents are written for the four Mac Studios (M5 Ultra, 96 GiB, headless) that join the pair, one sized as the
-Mini's region is and one as the M5's.
+Two documents are written for the four Mac Studios (M5 Ultra, 96 GiB, headless) that join the pair, one by each of the
+pair's rules; which a Studio runs is the operator's decision.
 
-`m5ultra-headless.toml`, sized as the Mini's (the operator, 2026-10-15: "allocate essentially all of the memory on the
-entire device"): the most whole GiB that leaves a 2 GiB margin, 82 GiB. Beside it
+`m5ultra-headless.toml`, by the Mini's rule (a headless node's memory is the mesh's; the operator, 2026-10-15: "allocate
+essentially all of the memory on the entire device"): the most whole GiB that leaves a 2 GiB margin, 82 GiB. Beside it
 the node keeps 2.98 GiB: the region's tables (0.323 GiB, 331.1 MiB), base wired (2.61, the Studios' reading on
 2026-10-23), macOS's anonymous memory (1.5), the rank's process (3.64, wired at the chain's run in m5ult2's panic of
 03:08 that day) and the Neural Engine's own copy (2.95); 83 GiB would leave 1.97. At 86 GiB those readings left -1.02,
 and both Studios reset. It holds 26B-A4B whole at the engine's whole page geometry (81.11 GiB) on one Studio and 12B's
 (97.18 GiB) on any two members, and the six regions (four Studios at 82, the M5 at 14, the Mini at 16) hold 358 GiB.
 
-`m5ultra-low.toml`, sized as the M5's (the operator, 2026-10-15, below: "the m5 system could even have a m5_low
-configuration that allocates less buffer than a m4 pro headless machine, since it has higher flops, higher bandwidth,
-and benefits less from memoization than a flops starved and bandwidth starved peer"):
-its region is the least whole GiB
+`m5ultra-low.toml`, by the M5's rule:
+a node of more flops and bandwidth than the Mini has less to gain from memoization, so its region is the least whole GiB
 that holds the whole E2B model alone at the engine's whole page geometry, 14 GiB (13.27 GiB counted by programs.py `plans`
 of a membership of one from the model file's header; 10.56 on the streamed codes export), and any part of E2B on any
-membership holds in it. Beside it the node keeps 71.24 GiB: the region's tables (0.056 GiB), base wired (2.61, the Studios'
-reading), macOS's anonymous memory (1.5), the rank's process (3.64) and the Neural Engine's own copy
-(at most every FFN column at fp16, 2.95). The Mini's sizing, the most that leaves a 2 GiB margin, gives 82 GiB. The larger
+membership holds in it. Beside it the node keeps 74.99 GiB: the region's tables (0.056 GiB), base wired (1.6, the Mini's
+figure until a Studio's is read), macOS's anonymous memory (1.5), the rank's process (0.9) and the Neural Engine's own copy
+(at most every FFN column at fp16, 2.95). The Mini's rule, the most that leaves a 2 GiB margin, gives 86 GiB. The larger
 models alone at a call's own pages take more than 14 GiB (12B 16.46 GiB at 4,096 positions, 26B-A4B 28.25 GiB): a Studio
 holds its part of them on memberships whose regions together hold the whole, and the planner fits each member's part to
 its region; at the engine's whole page geometry they take 97.18 GiB (12B) and 81.11 GiB (26B-A4B), more than the six
@@ -120,12 +116,11 @@ metal-microbench tools/mesh/programs.py under `MESH_MODEL=e2b-engine` (12b, 26b-
 `plans({'bs': 1, 'ctx_max': 256000}, structure(), pages=16000)[0]['total']`, and at a call's pages
 `pages=pool_request(1, 4096)` with `ctx_max` 4096 (metal-microbench output_data/lifecycle-20261015/studio_window.py).
 
-The region is the operator's: "will the user ever 'give permission' to pin 96gb of memory preemptively on a userspace
-machine for no reason? they *might not*" (2026-10-15, below). Each document states the arithmetic it follows from. A Studio's base wired
-memory and its devices' `max_mr` are read when it arrives: the pair's devices report `max_mr` 100, and a region
-registers as 2 GiB extents and a family shifted by half an extent (design/transport.md), 62 at 82 GiB, and a device
+The region is the operator's decision; each document states the arithmetic it follows from. A Studio's base wired
+memory and its devices' `max_mr` are read when it arrives: the pair's devices report `max_mr` 100, so each registers
+up to 100 of the bridge's 1 GiB extents, and a device
 that registers fewer than its region's extents pairs no port until the region is lowered (its refusal logged with the
-extent, above); the region is not clamped. Each of a node's devices registers the whole region, so a Studio cabled on
+extent, above), never a clamped region. Each of a node's devices registers the whole region, so a Studio cabled on
 several ports registers it once a device.
 
 ## The operator's words

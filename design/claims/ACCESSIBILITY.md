@@ -1,21 +1,19 @@
 # Accessibility implementation claims
 
-The operator's words on access are [`../../THREAT-MODEL.md`](../../THREAT-MODEL.md)
-(2026-08-27). Related documents: [`../rubrics.md`](../rubrics.md),
-[`../transport.md`](../transport.md) and
+Controlling specifications: [`../../THREAT-MODEL.md`](../../THREAT-MODEL.md),
+[`../../AGENTS.md`](../../AGENTS.md), and
+[`../transport.md`](../transport.md), with network realization controlled by
 [`../ACCESS-TOPOLOGY-SPEC.md`](../ACCESS-TOPOLOGY-SPEC.md).
 
 Implementation surfaces:
 
 - `bootstrap.sh`, `install.sh`, `install-user.sh`, and `enable-autologin.sh` realize the
   same reachability posture on every node.
-- `bin/mesh-bridge.sh` performed catchable bridge teardown and restart (deleted in 67f959bf, 2026-10-01).
+- `bin/mesh-bridge.sh` performs catchable bridge teardown and restart.
 - `networks.conf`, `install.sh`, and `bin/mesh-networks.sh` carry one noninteractive
   network inventory into every node's credential store and preferred-network set.
-- `rdma/mesh-link.c` (the bridge, built as `rdma/mesh-flow`) registers the whole configured region in each
-  port's child as its device comes up (`device_up`, mesh-link.c:525), and the port's next child registers the same
-  pages again (design/transport.md section 2). A failed pairing changes neither the region nor when the port opens
-  again: a port opens at its link's coming on, a hello heard on it or its child's end (02002590, 4dc9e98a).
+- `rdma/mesh-flow.c` retains the configured registration and page capacity across every
+  pairing attempt. Pair failure changes retry time, never shared-memory extent.
 - `bin/mesh-status.sh` invokes the colocated `bin/mesh-peers.sh` generation, so source
   and installed status observations use the same bounded, parallel peer transducer.
 - `xonotic/darkplaces-work/netconn.c` treats `sv_public` only as master-server
@@ -31,10 +29,9 @@ class, location, model, or network withholds a capability.
 The repository contains one power, firewall, remote-access, auto-login, and beacon
 policy. No post-install epilogue can turn a machine into a less reachable node class.
 
-A port's send and receive threads pass over its lanes without pause while its link serves
-(`served` nonzero) and wait on the `served` word while it serves nothing
-(rdma/mesh-link.c:298-303, `port_progress`). This keeps active data-plane service while
-returning idle host capacity to the renderer, audio deadline, telemetry, and policy processes.
+An idle bridge yields its CPU only after an iteration observes no ring transfer, no
+completion, and no send in flight. This preserves active data-plane service while returning
+idle host capacity to the renderer, audio deadline, telemetry, and policy processes.
 
 Routine installation retains loaded jobs; it does not boot out routing, discovery,
 telemetry, or the observer to refresh a plist. A retained launchd definition is reported

@@ -22,7 +22,7 @@ sums stay FP32 until the final FFN output conversion. Each tile has only its own
 mathematical dependencies; neither conversion nor reduction creates a barrier
 across output tiles. There is no mutable accumulator shared by concurrent kernels.
 
-The CPU and MPS paths already support FP32 output storage. Their kernel
+The CPU and MPS paths already support the required output storage. Their kernel
 implementations and direct canonical-page operand bindings are preserved. The
 change resides in library composition and allocation types, plus the existing
 Core ML generator. Core ML now promotes operands before matmul and removes its

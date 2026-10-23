@@ -1,8 +1,9 @@
 # Direct CPU contraction with half operands
 
 September 13, 2026. This is the source and compilation record for the CPU step of
-[Pallas-style lowering](transport.md). It holds no operational performance
-evidence.
+[Pallas-style lowering](transport.md).
+Operational performance evidence remains to be collected through the existing
+streaming-algebra workflow.
 
 ## Mechanism
 
@@ -65,7 +66,8 @@ No workload was executed for this source increment.
 
 The 4 by 4 shape is an initial ordinary register block, not a measured optimum.
 Indirect loader calls, strided gathers, small rectangles and output stores remain
-costs. FMA changes rounding relative to separately rounded multiplication/addition.
+costs. FMA changes rounding relative to separately rounded multiplication/addition;
+existing FP32 accumulation and cancellation/overflow requirements still apply.
 
 ## Existing example coverage
 

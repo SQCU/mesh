@@ -1,3 +1,12 @@
+// torch's MPS stream and the host as libnccl-mesh's streams (nccl.h): every collective of torch_mesh/backend.py and
+// torch's functional collectives on MPS is one call of `issue`, a group of calls each one kind (an all-reduce, reduce,
+// broadcast, the V all-gather, reduce-scatter and all-to-all, a send, a receive, the counted all-to-all; a reduction by
+// any of the library's operators, the partials merge among them).  On MPS tensors the group is encoded in torch's stream's command buffer and open compute encoder (its kernels
+// join torch's own) with a workspace allocator (MPS tensors from torch's caching allocator, held until the group is
+// complete, then reused in the stream's order), committed by the one commit rule (below) without waiting; on CPU
+// tensors it is the host path, complete where it returns.  A group issued and not completed (an async op, a functional
+// collective) is a MeshWork: its wait encodes the rest (its landings, later rounds and results) on the stream where it
+// is waited.
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <ATen/DLConvertor.h>
@@ -16,19 +25,53 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
-#include <algorithm>
+#include <array>
 #include <vector>
 #include "nccl.h"
 
+
+// The commit rule (README, Performance), one for every caller: eager calls and compiled graphs, the library's own
+// callers and a user's program alike, with no region, mode or counter a caller enters.  Its work is throughput: the GPU
+// fed with the fewest command buffers while the host keeps issuing.  The GPU starts a command buffer at most every
+// 13-19 us whatever it holds (metal-microbench docs/measurement.md, 2026-10-02), so a buffer for each publication (work
+// a peer waits on) is a floor of its own.  Each buffer the library commits signals its count on `progress` as the GPU
+// reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us later, at the
+// 99th percentile 20-60).  A publication is committed at once while at most one of those buffers is still in flight,
+// read from the event's value then: double buffering, one committed buffer queued behind the one the GPU runs, so a
+// commit overlaps the GPU's work (the 10-02 rule, mesh 3c00d37: 12.7 us a crossing compiled); otherwise it joins
+// torch's open command buffer.  The next
+// publication applies the rule again, and a host wait commits the open buffer, since nothing else would: the
+// library's (commit, host_wait) and torch's own (torch.mps.synchronize, torch.accelerator.synchronize, .item() and
+// .cpu() commit torch's open buffer and wait: MPSStream::synchronize COMMIT_AND_WAIT).  A host that blocks outside
+// torch while a publication waits stalls its peer, which is the program's to avoid; the peer's bounded wait ends the
+// call as a value.  In flight counts the buffers this library committed, not torch's own.
+
+// One torch MPS stream's commits and group workspace, held by the stream (made at its first group and never freed:
+// torch's streams live as long as the process, and the library's workspace allocator holds it as its context).  Its
+// commit state (committed, open) is read and written by the host inside torch's queue (dispatch_sync), where torch
+// encodes its own work, so it takes no lock, no caller enters it, and no thread but the host's touches torch's stream.
+// The rest (streamed, scratch, holders) is the host's, and workspace is freed outside torch's queue (a free may enter
+// that queue: torch's MPSAllocator adds completed handlers through it).
 struct MeshStream {
   at::mps::MPSStream *const mps;
   id<MTLSharedEvent> const progress;
+  // the buffers this stream committed, the k-th signalling k on progress as the GPU reaches its end
   uint64_t committed = 0;
+  // the root command buffer a publication joined (MPSCommandBuffer rootCommandBuffer, which commitAndContinue
+  // commits), retained until it is committed by this stream or by torch's own commits, which carry the publication
+  // with them; nil while none waits
   id<MTLCommandBuffer> open = nil;
+  // whether a group was issued on this stream since the host path last waited for it
   bool streamed = false;
+  // the workspace of the group being encoded (the library's workspace allocator's context is the MeshStream, which
+  // outlives every call), then each issued group's, by ticket, until the library has retired it (ncclMeshRetired)
+  std::vector<at::Tensor> scratch;
+  std::map<uint64_t, std::vector<at::Tensor>> holders;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
 
+  // On torch's queue: whether a publication still waits in torch's open buffer, the root it joined not yet committed
+  // (one torch committed needs no buffer of ours, which would cost the GPU a start of its own).
   bool waiting() {
     if (open && open.status < MTLCommandBufferStatusCommitted) return true;
     [open release];
@@ -36,6 +79,7 @@ struct MeshStream {
     return false;
   }
 
+  // On torch's queue: the open buffer committed (and waited for, where `wait`), its end signalling the next count.
   void signalled(bool wait) {
     mps->endKernelCoalescing();
     [mps->commandBuffer() encodeSignalEvent:progress value:++committed];
@@ -44,15 +88,27 @@ struct MeshStream {
     open = nil;
   }
 
+  // On torch's queue, as a group's encoding ends, the rule: a publication encoded in torch's open buffer, committed
+  // with every publication waiting there while at most one buffer is in flight (double buffering), else left to join
+  // it.
   void published() {
     if (!waiting()) open = [mps->commandBuffer().rootCommandBuffer retain];
     if (committed - progress.signaledValue <= 1) signalled(false);
+  }
+
+  // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
+  // complete in the stream's order once encoded, whose workspace returns to torch's allocator here, where later work
+  // reuses it after the group's), and the workspace of every group retired by now released.
+  void retire(uint64_t ticket, std::vector<at::Tensor> held) {
+    if (ticket) holders[ticket] = std::move(held);
+    holders.erase(holders.begin(), holders.upper_bound(ncclMeshRetired()));
   }
 };
 
 static std::mutex *streams_lock_ = new std::mutex;
 static auto *streams_ = new std::unordered_map<at::mps::MPSStream *, MeshStream *>;
 
+// torch's stream's MeshStream, made at its first use.
 static MeshStream &stream_of(at::mps::MPSStream *mps) {
   thread_local std::pair<at::mps::MPSStream *, MeshStream *> last{nullptr, nullptr};
   if (last.first == mps) return *last.second;
@@ -63,6 +119,8 @@ static MeshStream &stream_of(at::mps::MPSStream *mps) {
   return *found->second;
 }
 
+// Every MeshStream made so far: those of the torch streams a group was issued on (none before any was, so the host
+// path makes no MPS stream).
 static std::vector<MeshStream *> streams_made() {
   std::lock_guard<std::mutex> guard(*streams_lock_);
   std::vector<MeshStream *> made;
@@ -70,6 +128,8 @@ static std::vector<MeshStream *> streams_made() {
   return made;
 }
 
+// A host wait of the library's on stream s, on torch's queue: a publication still waiting committed, and with `wait`
+// the stream committed and waited for (torch's COMMIT_AND_WAIT, taken here on its queue).
 static void host_wait(MeshStream &s, bool wait) {
   MeshStream *self = &s;
   at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{
@@ -80,10 +140,29 @@ static void host_wait(MeshStream &s, bool wait) {
   });
 }
 
+// Before a host wait outside torch's streams (backend.counted, a recording's compile meeting): every stream's waiting
+// publication committed.
 static void commit() {
   for (MeshStream *s : streams_made()) host_wait(*s, false);
 }
 
+// The library's workspace allocator: an MPS tensor of torch's caching allocator, kept in the MeshStream's scratch
+// (`context`) until the group is complete in the stream's order (MeshStream::retire); NULL where torch's allocator
+// throws, which fails the group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through
+// the library.  It runs on torch's queue, where an allocator that frees cached buffers would enter that queue again
+// (MPSAllocator release_cached_buffers): rdma/torch-mesh/README.md, the stream's commit state.
+static void *workspace(size_t bytes, void *context) {
+  auto *s = static_cast<MeshStream *>(context);
+  try {
+    s->scratch.push_back(at::empty({(int64_t)bytes}, at::TensorOptions().dtype(at::kByte).device(at::kMPS)));
+  } catch (...) {
+    return nullptr;
+  }
+  return (__bridge void *)at::native::mps::getMTLBufferStorage(s->scratch.back());
+}
+
+
+// A dtype's NCCL type; ncclNumTypes for one NCCL lacks (moved as its bytes, never reduced).
 static ncclDataType_t kind(at::ScalarType type) {
   switch (type) {
   case at::kChar: return ncclInt8;
@@ -106,6 +185,9 @@ static void checked(int64_t result) {
   TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
 }
 
+// The evidence torch_mesh/evidence.py reads (design/heterogeneity.md R2, R3): on a watched communicator, a timing
+// event of torch's pool recorded on its stream as each collective is issued (0: the GPU has finished the work before
+// it) and once its wait is encoded (1: the GPU has passed it), and at each step's boundary (2), in order.
 static std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> marks_;
 
 static void mark(int64_t comm, int64_t kind) {
@@ -118,42 +200,51 @@ static void mark(int64_t comm, int64_t kind) {
   found->second.emplace_back(kind, (int64_t)id);
 }
 
-static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm) {
+// A group encoded in one turn of torch's stream queue: its command buffer and open encoder, the group encoded into them,
+// and the commit rule applied where it published.  Its workspace (`held`) is held:
+// split, it is issued and not completed, its ticket (0: complete at once) keeping them until the library retires it.
+static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &call, bool split, int64_t comm, std::vector<at::Tensor> held) {
   const auto *encode = &call;
   mark(comm, 0);
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
+  s->scratch = std::move(held);
   __block ncclResult_t result = ncclSuccess;
   __block ncclMeshIssue issue = {0, 0};
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), split ? &issue : nullptr};
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
       result = (*encode)(&on);
       if (!split || issue.published) s->published();
     }
   });
   s->streamed = true;
+  s->retire(issue.ticket && !result ? issue.ticket : 0, std::exchange(s->scratch, {}));
   checked(result);
   if (!issue.ticket) mark(comm, 1);
   return issue.ticket;
 }
 
+// every issued group through `ticket` completed on torch's stream where it is waited
 static void complete(uint64_t ticket) {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
-  if (ncclMeshRetired() >= ticket) return;
+  if (ncclMeshRetired() >= ticket) return s->retire(0, {});
   __block ncclResult_t result = ncclSuccess;
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
       int published = 0;
       result = ncclMeshComplete(ticket, &on, &published);
       if (published) s->published();
     }
   });
+  s->retire(0, std::exchange(s->scratch, {}));
   checked(result);
 }
 
+// c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
+// asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results
 class MeshWork : public c10d::Work {
  public:
   MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm)
@@ -191,16 +282,30 @@ static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)com
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
 
-enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, PAIRS };
+// One call of a group: its kind, its send and receive tensors (an all-to-all's none where it moves none that way; the
+// counted all-to-all's {input, counts} and {output, landed, host words}; an all-reduce's, reduce's or broadcast's sends
+// alone where it is in place), its counts (a V call's segment a rank, an all-to-all's elements to each rank then from
+// each, in its tensors' elements; the counted all-to-all's send then receive segments), its operator (an ncclRedOp_t:
+// a built-in or one the library made, as the partials merge) and its root (a send's or receive's peer).
+enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, COUNTED };
 using Tensors = std::vector<std::optional<at::Tensor>>;
 using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t, int64_t>;
 
+// A tensor as the library reads it, with ProcessGroupNCCL's dtype semantics: a collective that moves data moves any
+// dtype (one NCCL lacks as its bytes); a reduction reduces a complex tensor as its real view (sum and average) and a bool
+// tensor's sum and product as max and min (its average the library's uint8 average: the sum truncated by the ranks, 1
+// only where every rank holds 1).  `at` is an ncclMeshBuffer (its storage's MTLBuffer and byte offset) on the
+// Metal path and a host pointer on the host path (NULL: none).
 struct Operand {
   const void *at = nullptr;
   size_t count = 0;
   ncclDataType_t type = ncclUint8;
 };
 
+// A group's operands: one device's tensors (MPS: the Metal path; CPU: the host path), each contiguous; a non-contiguous
+// one fails as a value, as nothing is copied to make it one (the operator, 2026-10-21: "zero copy methods must always
+// be used over access by copy because memory bandwidth and flops are too scarce on this hardware api"; "code which
+// can't perform well can fail instead of being run").
 struct Group {
   bool metal = false;
   std::deque<ncclMeshBuffer> buffers;
@@ -210,19 +315,20 @@ struct Group {
     buffers.push_back({(__bridge void *)at::native::mps::getMTLBufferStorage(t), (size_t)(t.storage_offset() * t.element_size())});
     return &buffers.back();
   }
-  at::Tensor contiguous(const at::Tensor &t) {
+  at::Tensor contiguous(const at::Tensor &t, bool written) {
+    (void)written;
     TORCH_CHECK(t.is_mps() == metal, "the mesh backend's group takes MPS tensors or CPU tensors, not both");
     TORCH_CHECK(t.is_contiguous(), "the mesh backend's operand is a contiguous region tensor (torch_mesh.empty); a non-contiguous "
                 "one is not copied into one (zero copy: nccl.h Memory)");
     return t;
   }
-  Operand moving(const at::Tensor &tensor) {
-    const at::Tensor t = contiguous(tensor);
+  Operand moving(const at::Tensor &tensor, bool written) {
+    const at::Tensor t = contiguous(tensor, written);
     const ncclDataType_t type = kind(t.scalar_type());
     return type == ncclNumTypes ? Operand{where(t), (size_t)t.nbytes(), ncclUint8} : Operand{where(t), (size_t)t.numel(), type};
   }
-  Operand reducing(const at::Tensor &tensor, int64_t &op) {
-    const at::Tensor t = contiguous(tensor);
+  Operand reducing(const at::Tensor &tensor, int64_t &op, bool written) {
+    const at::Tensor t = contiguous(tensor, written);
     if (t.scalar_type() == at::kBool) op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
     if (t.is_complex()) {
       TORCH_CHECK(op == ncclSum || op == ncclAvg, "a complex tensor reduces by sum and average alone");
@@ -233,10 +339,13 @@ struct Group {
   }
 };
 
+// A call's operands and counts, made before its group is encoded (a staging copy is torch's work on its own queue).
 struct Issue {
   int64_t kind, op, root;
   std::vector<Operand> sends, receives;
   std::vector<size_t> counts;
+  size_t rows = 0, capacity = 0, row = 0;
+  void *words = nullptr;
 };
 
 static Issue prepare(const Call &call, Group &g) {
@@ -248,39 +357,62 @@ static Issue prepare(const Call &call, Group &g) {
   };
   switch (what) {
   case ALLREDUCE: case REDUCE:
-    i.sends = {g.reducing(tensor(sends, 0), i.op)};
-    if (!receives.empty()) i.receives = {g.reducing(tensor(receives, 0), i.op)};
+    i.sends = {g.reducing(tensor(sends, 0), i.op, receives.empty())};
+    if (!receives.empty()) i.receives = {g.reducing(tensor(receives, 0), i.op, true)};
     break;
-  case BROADCAST:
-    i.sends = {g.moving(tensor(sends, 0))};
-    if (!receives.empty()) i.receives = {g.moving(tensor(receives, 0))};
-    break;
+  case BROADCAST: i.sends = {g.moving(tensor(sends, 0), true)}; break;
   case ALLGATHER: case REDUCE_SCATTER: {
+    // MPI_Allgatherv and MPI_Reduce_scatter (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV): rank r's segment is
+    // counts[r] elements, the segments packed in rank order in the whole operand (the receive's, the send's), counted
+    // in the operand's NCCL elements; equal counts are the library's equal program
     const bool reduces = what == REDUCE_SCATTER;
     const at::Tensor &whole = reduces ? tensor(sends, 0) : tensor(receives, 0);
-    i.sends = {reduces ? g.reducing(tensor(sends, 0), i.op) : g.moving(tensor(sends, 0))};
-    i.receives = {reduces ? g.reducing(tensor(receives, 0), i.op) : g.moving(tensor(receives, 0))};
+    i.sends = {reduces ? g.reducing(tensor(sends, 0), i.op, false) : g.moving(tensor(sends, 0), false)};
+    i.receives = {reduces ? g.reducing(tensor(receives, 0), i.op, true) : g.moving(tensor(receives, 0), true)};
     const size_t per = whole.numel() ? (reduces ? i.sends : i.receives)[0].count / (size_t)whole.numel() : 1;
     for (auto c : counts) i.counts.push_back((size_t)c * per);
     break;
   }
   case ALLTOALL: {
+    // MPI_Alltoallv with its counts on the host (nccl.h ncclMeshAlltoAllV; NCCL's all-to-all, gather and scatter its
+    // forms, a gather and a scatter of any sizes the rooted V): segments packed in rank order, a buffer that moves none
+    // absent
     TORCH_CHECK(sends.size() == 1 && receives.size() == 1 && (sends[0] || receives[0]), "an all-to-all names its send and receive buffers");
-    i.sends = {sends[0] ? g.moving(*sends[0]) : Operand{}};
-    i.receives = {receives[0] ? g.moving(*receives[0]) : Operand{}};
+    i.sends = {sends[0] ? g.moving(*sends[0], false) : Operand{}};
+    i.receives = {receives[0] ? g.moving(*receives[0], true) : Operand{}};
     const at::Tensor &whole = sends[0] ? *sends[0] : *receives[0];
     const size_t per = whole.numel() ? (sends[0] ? i.sends : i.receives)[0].count / (size_t)whole.numel() : 1;
     for (auto c : counts) i.counts.push_back((size_t)c * per);
     break;
   }
-  case SEND: i.sends = {g.moving(tensor(sends, 0))}; break;
-  case RECV: i.receives = {g.moving(tensor(receives, 0))}; break;
-  case PAIRS: i.counts.assign(counts.begin(), counts.end()); break;
+  case SEND: i.sends = {g.moving(tensor(sends, 0), false)}; break;
+  case RECV: i.receives = {g.moving(tensor(receives, 0), true)}; break;
+  case COUNTED: {
+    // MPI_Alltoallv whose counts the GPU wrote (nccl.h ncclMeshAlltoAllCounted; torch_mesh.all_to_all_counted): the
+    // input's rows grouped by destination rank, as many to rank q as segment q of counts (int64) sums to, received
+    // packed in rank order into the output's capacity rows, the received counts written to host[1:] with host[0] set
+    // once they all landed (2: the call failed first), and to landed on the input's device
+    const at::Tensor &input = tensor(sends, 0), &output = tensor(receives, 0), &host = tensor(receives, 2);
+    TORCH_CHECK(tensor(sends, 1).scalar_type() == at::kLong && tensor(receives, 1).scalar_type() == at::kLong, "all_to_all_counted: counts are int64");
+    TORCH_CHECK(host.is_cpu() && host.is_contiguous() && host.scalar_type() == at::kLong,
+                "all_to_all_counted: host counts are a contiguous CPU int64 tensor");
+    i.sends = {g.moving(input, false), g.moving(tensor(sends, 1), false)};
+    i.receives = {g.moving(output, true), g.moving(tensor(receives, 1), true)};
+    i.words = host.data_ptr();
+    int64_t width = 1;
+    for (int64_t d = 1; d < input.dim(); d++) width *= input.size(d);
+    i.row = (size_t)width * (kind(input.scalar_type()) == ncclNumTypes ? input.element_size() : 1);
+    i.rows = input.dim() ? (size_t)input.size(0) : 0;
+    i.capacity = output.dim() ? (size_t)output.size(0) : 0;
+    i.counts.assign(counts.begin(), counts.end());
+    break;
+  }
   default: TORCH_CHECK(false, "no collective of kind ", what);
   }
   return i;
 }
 
+// The group's calls on stream s (NULL: the host path), one NCCL group.
 static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, ncclMeshStream *s) {
   ncclResult_t result = ncclGroupStart();
   for (const Issue &i : issues) {
@@ -295,35 +427,39 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
     case ALLGATHER: result = ncclMeshAllGatherV(a.at, b, i.counts.data(), a.type, comm, s); break;
     case REDUCE_SCATTER: result = ncclMeshReduceScatterV(a.at, b, i.counts.data(), a.type, op, comm, s); break;
     case ALLTOALL:
-      result = ncclMeshAlltoAllV(a.at, i.counts.data(), b, a.at ? a.type : i.receives[0].type, comm, s);
+      result = ncclMeshAlltoAllV(a.at, i.counts.data(), b, i.counts.data() + i.counts.size() / 2, a.at ? a.type : i.receives[0].type, comm, s);
       break;
     case SEND: result = ncclSend(a.at, a.count, a.type, (int)i.root, comm, s); break;
-    case PAIRS: {
-      const size_t count = i.counts.size() / 3;
-      std::vector<int> from(count), to(count);
-      std::vector<size_t> bytes(count);
-      for (size_t k = 0; k < count; k++) { from[k] = (int)i.counts[3 * k]; to[k] = (int)i.counts[3 * k + 1]; bytes[k] = i.counts[3 * k + 2]; }
-      result = ncclMeshGroupPairs(from.data(), to.data(), bytes.data(), (int)count, comm, s);
+    case RECV: result = ncclRecv(b, i.receives[0].count, i.receives[0].type, (int)i.root, comm, s); break;
+    case COUNTED: {
+      int64_t *words = (int64_t *)i.words;
+      const size_t n = i.counts.size() / 2;
+      result = ncclMeshAlltoAllCounted(a.at, i.rows, (const int64_t *)i.sends[1].at, i.counts.data(), b, i.capacity, words + 1,
+                                       (int64_t *)i.receives[1].at, i.counts.data() + n, (uint64_t *)words, i.row, a.type, comm, s);
       break;
     }
-    case RECV: result = ncclRecv(b, i.receives[0].count, i.receives[0].type, (int)i.root, comm, s); break;
     }
   }
   const ncclResult_t ended = ncclGroupEnd();
   return result ? result : ended;
 }
 
+// One group of `calls` on comm: on MPS tensors encoded on torch's stream, issued and not completed where `split` (its
+// ticket; 0 complete); on CPU tensors the host path, first completing every group
+// issued on torch's streams (ncclMeshComplete encodes every issued group's completion on the current one) and waiting
+// for each stream a group was issued on (the session's positions run in its order), the GIL released while it runs
+// where `unlock`.
 static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, bool unlock) {
   Group g;
   for (const Call &c : calls)
     for (const Tensors *list : {&std::get<1>(c), &std::get<2>(c)})
       for (size_t k = 0; k < list->size(); k++)
-        g.metal |= (*list)[k] && (*list)[k]->is_mps();
+        g.metal |= (*list)[k] && (*list)[k]->is_mps() && !(std::get<0>(c) == COUNTED && list == &std::get<2>(c) && k == 2);
   std::vector<Issue> issues;
   for (const Call &c : calls) issues.push_back(prepare(c, g));
   uint64_t ticket = 0;
   if (g.metal) {
-    ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm);
+    ticket = on_stream([&](ncclMeshStream *s) { return encoded(issues, communicator(comm), s); }, split, comm, {});
   } else {
     bool streamed = false;
     for (MeshStream *s : streams_made()) streamed |= s->streamed;
@@ -333,6 +469,7 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
       for (MeshStream *s : streams_made())
         if (s->streamed || s == current) {
           host_wait(*s, true);
+          s->retire(0, {});
           s->streamed = false;
         }
     }
@@ -343,6 +480,10 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
   return ticket;
 }
 
+// torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
+// for the MPS dispatch key, as torch/csrc/distributed/c10d/Functional.cpp implements them for every device but
+// issuing their group directly, the group's communicator found by the group (attach) with no Python between.
+// A group the map does not hold (another backend's, or a mesh group since destroyed) takes torch's own kernel.
 static std::unordered_map<const c10d::ProcessGroup *, std::pair<c10::weak_intrusive_ptr<c10d::ProcessGroup>, int64_t>> communicators_;
 
 static void attach(const c10::intrusive_ptr<c10d::ProcessGroup> &group, int64_t comm) {
@@ -376,6 +517,9 @@ static int group_argument(const std::string &name) {
   return 3;
 }
 
+// Issued and not completed (split) where the result is its own operand: torch's wait_tensor (its work registry) waits
+// for it; a non-contiguous result, written back from a contiguous copy, completes at once.  A result made here is a
+// region tensor (region_empty): the library sends from and lands in leases alone (nccl.h Memory).
 static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
   const std::string name = op.schema().name().substr(sizeof "_c10d_functional::" - 1) +
                            (op.schema().overload_name().empty() || op.schema().overload_name() == "default" ? "" : "." + op.schema().overload_name());
@@ -440,6 +584,10 @@ TORCH_LIBRARY_IMPL(_c10d_functional, MPS, m) {
     m.impl(name, torch::CppFunction::makeFromBoxedFunction<&functional>());
 }
 
+// The mesh library's own kernels on torch's stream (torch_mesh/sparse.py): a kernel compiled from its source at Metal
+// 4.0 (tensor operations), and a dispatch of it encoded in torch's open compute encoder on its queue, ordered with
+// torch's own work and waited on by no host: buffers by index (a tensor's storage at its offset), 32-bit constants at
+// one index, the grid in threadgroups.
 static std::vector<id<MTLComputePipelineState>> pipelines_;
 
 static int64_t pipeline(const std::string &source, const std::string &name) {
@@ -457,6 +605,13 @@ static int64_t pipeline(const std::string &source, const std::string &name) {
   return (int64_t)pipelines_.size() - 1;
 }
 
+// What Metal reports of the device a kernel runs on (its MTLDevice: its Apple GPU family, the n of the newest
+// MTLGPUFamilyApple<n> it supports, asked from Apple1 up, since a GPU of a family supports every earlier one's ("a higher
+// GPU version is always a superset of an earlier version in the same GPU family": Apple, Detecting GPU features and Metal
+// software versions); maxThreadsPerThreadgroup's width; maxThreadgroupMemoryLength; in that order) and of a compiled
+// kernel (its pipeline: maxTotalThreadsPerThreadgroup, which its registers may hold below the device's,
+// threadExecutionWidth, staticThreadgroupMemoryLength, in that order): the facts a specializer selects and checks its
+// configuration by, and reads where no document states them.
 static std::tuple<int64_t, int64_t, int64_t> device_facts() {
   id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
   int64_t family = 0;
@@ -471,8 +626,12 @@ static std::tuple<int64_t, int64_t, int64_t> pipeline_facts(int64_t handle) {
           (int64_t)state.staticThreadgroupMemoryLength};
 }
 
+static id<MTLResidencySet> fused_residency_;
+// A kernel that runs a fused crossing's steps (`fused`) reaches the library's counts, landing buffers and records by
+// address, through the residency set, which Metal does not hazard-track: its encoder declares every buffer of the set,
+// so its pass is ordered against the library's dispatches that name them (nccl-mesh-metal.h metal_uses).
 static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
-                   int64_t at, int64_t gx, int64_t gy, int64_t threads, int64_t request, int64_t start, bool lands, bool publishes, int64_t crossing) {
+                   int64_t at, int64_t gx, int64_t gy, int64_t threads, bool fused) {
   if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));
   id<MTLComputePipelineState> state = pipelines_[handle];
   std::vector<id<MTLBuffer>> bound(buffers.size(), nil);
@@ -486,26 +645,22 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
     }
   std::vector<uint32_t> words(constants.begin(), constants.end());
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  MeshStream *s = &stream_of(stream);
-  __block ncclResult_t result = ncclSuccess;
   dispatch_sync(stream->queue(), ^{
-    @autoreleasepool {
-      id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
-      [encoder setComputePipelineState:state];
-      for (size_t i = 0; i < bound.size(); i++)
-        if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
-      [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)encoder};
-      if (request)
-        result = ncclMeshBind((ncclMeshRequest_t)(uintptr_t)request, (uint64_t)start, lands, publishes, &on, (uint32_t)crossing, (uint32_t)(gx * gy));
-      if (result) return;
-      [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
-      if (request && publishes) s->published();
-    }
+    id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
+    [encoder setComputePipelineState:state];
+    for (size_t i = 0; i < bound.size(); i++)
+      if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
+    [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
+    if (fused && fused_residency_)
+      for (id<MTLAllocation> held in fused_residency_.allAllocations)
+        [encoder useResource:(id<MTLResource>)held usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+    [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
   });
-  checked(result);
 }
 
+// The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
+// GPU time (GPUEndTime - GPUStartTime), the measure the engine's kernel harness reports.  Torch's stream is synchronized
+// by the caller first.
 static std::vector<double> timed(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers,
                                  const std::vector<int64_t> &constants, int64_t at, int64_t gx, int64_t gy, int64_t threads,
                                  int64_t repeats) {
@@ -539,6 +694,10 @@ static std::vector<double> timed(int64_t handle, const std::vector<std::optional
   return out;
 }
 
+// `count` dispatches of one kernel in one command buffer on torch's queue, each after a buffer barrier, dispatch i bound to
+// sets[i % sets.size()]: the command buffer's GPU time over `count`, the measure tools/native_bench (metal-microbench
+// 3a2f72a) takes of the recorded LiteRT kernels, so weights rotated over sets totalling more than the system cache are
+// read from DRAM by every dispatch.  Torch's stream is synchronized by the caller first.
 static double sequence(int64_t handle, const std::vector<std::vector<std::optional<at::Tensor>>> &sets,
                        const std::vector<int64_t> &constants, int64_t at, int64_t gx, int64_t gy, int64_t threads, int64_t count) {
   if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("sequence: no kernel " + std::to_string(handle));
@@ -574,17 +733,22 @@ static double sequence(int64_t handle, const std::vector<std::vector<std::option
   return (buffer.GPUEndTime - buffer.GPUStartTime) / (double)count;
 }
 
+// Region tensors (torch_mesh.empty, records, address): a tensor whose bytes are a lease of this node's bridge's region
+// (ncclMemAlloc: pages registered on every device when it came up), so the library reaches it with no staging copy
+// where it reads or writes its operands in place.  An MPS one is made through torch's documented interop, DLPack
+// (at::fromDLPack of a kDLMetal tensor: its data an id<MTLBuffer>, its byte_offset the offset in it, as torch's own
+// toDLPack writes an MPS tensor), over the lease's Metal buffer (ncclMeshMemBuffer); its release is the rule torch's MPS
+// allocator keeps for a buffer in flight: the lease returned (ncclMemFree) once the stream's command buffer open at the
+// release has completed, so every command bound to it before then has run.  A CPU one is torch::from_blob over the
+// lease, returned at its release (a host-path call is complete when it returns).  No allocator of torch's is replaced:
+// tensors the program makes otherwise stay its MPS allocator's.
 static std::mutex region_tensors_lock_;
 static std::map<uintptr_t, size_t> region_tensors_;
 
-static void forgotten(void *memory) {
-  std::lock_guard<std::mutex> guard(region_tensors_lock_);
-  region_tensors_.erase((uintptr_t)memory);
-}
-
 static void returned(void *memory) {
   ncclMemFree(memory);
-  forgotten(memory);
+  std::lock_guard<std::mutex> guard(region_tensors_lock_);
+  region_tensors_.erase((uintptr_t)memory);
 }
 
 struct RegionShape {
@@ -594,10 +758,8 @@ struct RegionShape {
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps) {
   const at::ScalarType dtype = like.scalar_type();
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
-  const size_t word = (bytes + sizeof(uint32_t) - 1) / sizeof(uint32_t) * sizeof(uint32_t);
   void *memory = nullptr;
-  checked(ncclMemAlloc(&memory, mps ? word + sizeof(uint32_t) : bytes));
-  if (mps) *(volatile uint32_t *)((char *)memory + word) = 0;
+  checked(ncclMemAlloc(&memory, bytes));
   {
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
     region_tensors_[(uintptr_t)memory] = bytes;
@@ -625,16 +787,14 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
     delete (RegionShape *)self->manager_ctx;
     delete self;
   };
-  return at::fromDLPack(managed, [managed, memory, word](void *) {
+  return at::fromDLPack(managed, [managed, memory](void *) {
     managed->deleter(managed);
-    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-    dispatch_sync(stream->queue(), ^{
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
-      if (ncclMeshMemFreeAfter(memory, word, &on) == ncclSuccess) forgotten(memory);
-    });
+    at::mps::getCurrentMPSStream()->addCompletedHandler(^(id<MTLCommandBuffer>) { returned(memory); });
   });
 }
 
+// Where a tensor's bytes lie in the region (0: outside it): an MPS tensor's where its MTLBuffer is the Metal buffer of the
+// lease its contents lie in, a CPU tensor's where its pointer lies in a lease.
 static uint64_t address(const at::Tensor &t) {
   void *theirs = nullptr;
   size_t offset = 0;
@@ -647,12 +807,7 @@ static uint64_t address(const at::Tensor &t) {
   return (uint64_t)(uintptr_t)at;
 }
 
-static at::Tensor cpu_view(const at::Tensor &t) {
-  const uint64_t where = address(t);
-  TORCH_CHECK(where, "cpu_view: the tensor's bytes are not in the region (torch_mesh.empty makes a tensor that is)");
-  return at::from_blob((void *)(uintptr_t)where, t.sizes(), t.strides(), [held = t](void *) { (void)held; }, t.options().device(at::kCPU));
-}
-
+// The region tensors' leases live now: each its address and bytes.
 static std::vector<std::pair<uint64_t, uint64_t>> records() {
   std::lock_guard<std::mutex> guard(region_tensors_lock_);
   std::vector<std::pair<uint64_t, uint64_t>> out;
@@ -660,50 +815,134 @@ static std::vector<std::pair<uint64_t, uint64_t>> records() {
   return out;
 }
 
+// Fused crossings (torch_mesh/fused.py; nccl.h ncclMeshFusableRooted, ncclMeshFused): the one-shot exchange, ncclSend
+// of a rank's part to every other rank and ncclRecv of each one's part into a landing tensor of its own, in one group,
+// whose steps the caller's kernels run on torch's stream: the kernel that makes the rank's part writes it into its send
+// tensor and publishes it to every peer (one store of each holding's `ready`), and the kernel after the call awaits
+// every landing and reads each peer's part from its landing tensor, adding them to its own (an all-reduce's sum, which
+// the caller makes); the call dispatches no step (a fused group's channels complete in the stream's order with no
+// dispatch: nccl-mesh.c complete, complete_track).  The send tensor and every landing tensor lie in region tensors
+// (torch_mesh.empty: a lease), each starting on a page, which the bridge sends from and lands in, zero copy.  The call
+// is the library's classic form on torch's command buffer and open encoder with a residency set: the library writes
+// each publication's and each landing's argument record into the lists this call gives it room in (n - 1 of each:
+// ncclMeshFusableRooted's all-reduce counts) and returns their bindings, GPU addresses the caller's kernels reach by
+// address, and adds every buffer they name to the set, which is resident for every command buffer of each queue it
+// was added to (the device's one set, added to a stream's queue at its first fused call); nothing removes a buffer from
+// it.  A call the library does not fuse (a tensor that is no region tensor or does not start on a page) fails as a
+// value, the library's refusal; nothing falls back to a slower form.  The peers are every other rank, in rank order.
+static std::vector<void *> fused_queues_;
+
+static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
+  if (!fused_residency_) {
+    NSError *error = nil;
+    fused_residency_ = [stream->device() newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:&error];
+    TORCH_CHECK(fused_residency_, "fused crossing: torch's device made no residency set: ",
+                error ? error.localizedDescription.UTF8String : "no reason given");
+  }
+  void *queue = (__bridge void *)stream->commandQueue();
+  bool added = false;
+  for (void *q : fused_queues_) added |= q == queue;
+  if (!added) {
+    id<MTLResidencySet> set = fused_residency_;
+    dispatch_sync(stream->queue(), ^{ [stream->commandQueue() addResidencySet:set]; });
+    fused_queues_.push_back(queue);
+  }
+  return fused_residency_;
+}
+
+// The library's Metal prelude (ncclMeshMetalPrelude): rdma/mesh.metal as the loaded library was built with it, then its
+// steps; the text a kernel that runs them is compiled after.
 static std::string metal_prelude() { return ncclMeshMetalPrelude(); }
 
-static std::pair<int64_t, int64_t> exchange_init(const std::vector<int64_t> &sizes, const at::Tensor &like, int64_t comm) {
+// The fused exchange of `send` (this rank's part) and `landings` (where each other rank's part lands, in rank order),
+// contiguous MPS region tensors of one dtype and size, on communicator `comm`, each landing's wait bounded by `polls`
+// (nccl.h ncclMeshStream polls; _stream.polls the library's most): one group of ncclSend(send) and ncclRecv(landing)
+// toward each other rank, on torch's stream, the stream's `fused` set; each publication's bindings and each landing's,
+// in rank order (ncclMeshFused, six GPU addresses each).  A dtype NCCL lacks moves as its bytes.  Nothing is committed
+// here: the publication is the caller's kernel, encoded after this returns (fused_published).
+// a tensor's NCCL count and type: its elements of its own type, or its bytes where NCCL names no such type
+static std::pair<size_t, ncclDataType_t> counted(const at::Tensor &t) {
+  const ncclDataType_t type = kind(t.scalar_type());
+  return type == ncclNumTypes ? std::pair<size_t, ncclDataType_t>{(size_t)t.nbytes(), ncclUint8} : std::pair<size_t, ncclDataType_t>{(size_t)t.numel(), type};
+}
+
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_exchange(
+    const at::Tensor &send, const std::vector<at::Tensor> &landings, int64_t comm, int64_t polls) {
   int rank = 0, ranks = 0;
   checked(ncclCommUserRank(communicator(comm), &rank));
   checked(ncclCommCount(communicator(comm), &ranks));
-  TORCH_CHECK(sizes.size() == (size_t)ranks, "an exchange names each of the ", ranks, " ranks' parts, not ", sizes.size());
-  const ncclDataType_t type = kind(like.scalar_type());
-  const size_t scale = type == ncclNumTypes ? (size_t)like.element_size() : 1;
-  std::vector<size_t> parts(ranks, 0);
-  std::vector<int> lands((size_t)ranks * ranks, 1);
-  for (int q = 0; q < ranks; q++) {
-    parts[q] = (size_t)sizes[q] * scale;
-    lands[(size_t)q * ranks + q] = 0;
-  }
-  ncclMeshRequest_t made = nullptr;
-  checked(ncclMeshExchangeInit(parts.data(), lands.data(), type == ncclNumTypes ? ncclUint8 : type, communicator(comm), &made));
-  return {(int64_t)(uintptr_t)made, (int64_t)scale};
-}
-
-static int64_t exchange_start(int64_t request, const std::vector<int64_t> &sizes) {
-  std::vector<size_t> counts(sizes.begin(), sizes.end());
-  const size_t *given = counts.empty() ? nullptr : counts.data();
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  TORCH_CHECK(landings.size() == (size_t)(ranks - 1), "fused exchange: a landing tensor for each of the ", ranks - 1,
+              " other ranks, not ", landings.size());
+  for (const at::Tensor &landing : landings)
+    TORCH_CHECK(send.is_mps() && send.is_contiguous() && landing.is_mps() && landing.is_contiguous(),
+                "fused exchange: send and landings are contiguous MPS tensors (region tensors: torch_mesh.empty)");
+  TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused exchange: polls ", polls, " is not a 32-bit count of loads");
+  const std::pair<size_t, ncclDataType_t> sent_as = counted(send);
+  const size_t count = sent_as.first;
+  const ncclDataType_t type = sent_as.second;
+  std::vector<std::pair<size_t, ncclDataType_t>> each;
+  for (const at::Tensor &landing : landings) each.push_back(counted(landing));
+  const auto *const sizes = each.data();
+  const ncclMeshBuffer out = {(__bridge void *)at::native::mps::getMTLBufferStorage(send), (size_t)(send.storage_offset() * send.element_size())};
+  std::vector<ncclMeshBuffer> in;
+  for (const at::Tensor &landing : landings)
+    in.push_back({(__bridge void *)at::native::mps::getMTLBufferStorage(landing), (size_t)(landing.storage_offset() * landing.element_size())});
+  std::vector<std::array<uint64_t, 6>> publish(landings.size()), land(landings.size());
+  ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
+                         (uint32_t)landings.size(), (uint32_t)landings.size()};
+  ncclMeshFused *const records = &steps;
+  ncclMeshBuffer *const ins = in.data();
   __block ncclResult_t result = ncclSuccess;
-  __block uint64_t start = 0;
+  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  MeshStream *s = &stream_of(stream);
+  id<MTLResidencySet> residency = fused_residency(stream);
+  const ncclComm_t c = communicator(comm);
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
-      result = ncclMeshStart((ncclMeshRequest_t)(uintptr_t)request, given, &on, &start);
+      ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
+                           nullptr, (__bridge void *)residency, (uint32_t)polls, records};
+      ncclMeshBuffer sent = out;
+      ncclResult_t made = ncclGroupStart();
+      for (int q = 0, i = 0; q < ranks && !made; q++) {
+        if (q == rank) continue;
+        made = ncclSend(&sent, count, type, q, c, &on);
+        if (!made) made = ncclRecv(ins + i, sizes[i].first, sizes[i].second, q, c, &on);
+        i++;
+      }
+      const ncclResult_t ended = ncclGroupEnd();
+      result = made ? made : ended;
     }
   });
-  stream_of(stream).streamed = true;
+  s->streamed = true;
+  s->retire(0, std::exchange(s->scratch, {}));
   checked(result);
-  return (int64_t)start;
+  std::vector<std::vector<uint64_t>> published, landed;
+  for (uint32_t k = 0; k < steps.publishes; k++) published.emplace_back(publish[k].begin(), publish[k].end());
+  for (uint32_t k = 0; k < steps.lands; k++) landed.emplace_back(land[k].begin(), land[k].end());
+  return {published, landed};
 }
 
+// A fused crossing's publishing kernel just encoded on torch's stream (fused.encode): a publication under the stream's
+// one commit rule (MeshStream::published), as a group that published is.
+static void fused_published() {
+  MeshStream *s = &stream_of(at::mps::getCurrentMPSStream());
+  dispatch_sync(s->mps->queue(), ^{
+    @autoreleasepool {
+      s->published();
+    }
+  });
+}
+
+
+// The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
+// MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
   module.def("device_facts", &device_facts);
   module.def("pipeline_facts", &pipeline_facts);
+  module.attr("polls") = (int64_t)NCCL_MESH_POLLS;
   module.def("encode", &encode, pybind11::arg("handle"), pybind11::arg("buffers"), pybind11::arg("constants"), pybind11::arg("at"),
-             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::arg("request") = 0, pybind11::arg("start") = 0,
-             pybind11::arg("lands") = false, pybind11::arg("publishes") = false, pybind11::arg("crossing") = 14);
+             pybind11::arg("gx"), pybind11::arg("gy"), pybind11::arg("threads"), pybind11::arg("fused") = false);
   module.def("timed", &timed);
   module.def("sequence", &sequence);
   module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
@@ -721,10 +960,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("commit", &commit);
   module.def("region_empty", &region_empty);
   module.def("address", &address);
-  module.def("cpu_view", &cpu_view);
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
-  module.def("exchange_init", &exchange_init);
-  module.def("exchange_start", &exchange_start);
-  module.def("exchange_free", [](int64_t request) { checked(ncclMeshRequestFree((ncclMeshRequest_t)(uintptr_t)request)); });
+  module.def("fused_exchange", &fused_exchange);
+  module.def("fused_published", &fused_published);
 }

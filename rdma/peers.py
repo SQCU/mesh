@@ -21,8 +21,7 @@ def node_number(node_id: str) -> int:
 
 def host() -> dict:
     """This machine's identity: its host UUID (IOPlatformUUID, the one gethostuuid gives the bridge), its bridge node
-    number, and its serial number, read from the IORegistry's archive form (AGENTS.md at 513638a4, "Node identity and
-    names")."""
+    number, and its serial number, read from the IORegistry's archive form (AGENTS.md: a node is its hardware)."""
     import plistlib, subprocess
     entry = plistlib.loads(subprocess.run(["/usr/sbin/ioreg", "-a", "-rd1", "-c", "IOPlatformExpertDevice"],
                                           capture_output=True, check=True).stdout)[0]
@@ -32,7 +31,7 @@ def host() -> dict:
 def table(*paths: str) -> dict[int, dict]:
     """The name table (etc/mesh-nodes.json: entries keyed by host UUID), from the first of `paths` that reads, keyed by
     bridge node number, each entry with its node_id; {} where none reads. A name is a label for people, resolved from
-    identity, never matched to find a node (AGENTS.md at 513638a4, "Node identity and names")."""
+    identity, never matched to find a node (AGENTS.md: names are virtual)."""
     import json
     for path in paths:
         try:

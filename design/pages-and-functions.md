@@ -7,13 +7,13 @@ Statements below about instant execution and topology-independent utilization
 express the desired absence of added control dependencies, not a zero-latency
 theorem or a measured performance guarantee.
 
-Plain statements of the algorithm, in the words of the operator's own turns:
-mesh, peers, pages, page table, rows, stamps, use count, buffers as function
-returns, functions, release, reduce, accumulator page, index page, NFE, status
-word, metadata. The other words that have appeared in code ("stage", "chunk",
-"version", "gate", "token", "group", "consumer", "scheduler") each named a
-control-flow object standing in for something the page table already holds;
-the algorithm below uses none of them.
+Plain statements of the algorithm. Only the words used in the operator's own
+turns: mesh, peers, pages, page table, rows, stamps, use count, buffers as
+function returns, functions, release, reduce, accumulator page, index page,
+NFE, status word, metadata. Every other word that has appeared in code
+("stage", "chunk", "version", "gate", "token", "group", "consumer",
+"scheduler") named a control-flow object standing in for something the page
+table already holds, and is not part of the algorithm.
 
 ## One NFE on two peers
 
@@ -28,44 +28,48 @@ Every function has a known number of output pages. Every function input is
 the output pages of some function, on this node or on a peer. All of this is
 known before the NFE starts.
 
-The operator, 2026-09-10: "pages can be freed, pages can be consumed, but all
-allocations needed within a page table for a complete compute graph should be
-known a priori at the time a callgraph using these apis has been launched;
-there cannot, should not, and will not be any operations which introduce data
-dependent control flow, branching, eror recovery, etc. pages can be freed if we
-need to 'recover' pages which are used by a hung kernel; our mesh api level
-primitives should let us invalidate a page table in this manner whenever we
-want to. furthermore all of our nodes will alway,s without exception, either
-have nvme ssds or be rdma-peered-transitively to a system which does have nvme
-ssds, allowing things like invalidated and destroyed dnn parameter pages to be
-retransmitted to a node which somehow doesn't have them en-disk and also
-deleted them and wants them again."
+All page-table allocations needed by the complete compute graph are determined
+before launch, including parameters, intermediates, accumulators, indices and
+outputs. Numerical execution does not discover allocations or introduce
+data-dependent control flow to repair missing storage.
 
-The operator, 2026-09-10: "recovery is something which is only sanctioned
-through the mechanism of a totally feed forward nfe computation callgraph being
-re-run by the calling process because they don't like the results they got.
-there are to be no parity mechanisms or syncs, guards, waits, checks, or
-inferences in the mesh computation transport and reduction layer, and functions
-which use this layer are not to introduce data dependent control flow
-attempting to add overhead of this sort or any sort."
+The calling process may invalidate the page table whenever it chooses, including
+when a kernel is hung. The mesh API must expose that operation directly. Pages
+may be consumed, freed and invalidated; these operations do not start recovery,
+retry, parity, or waiting protocols inside computation, transport or reduction.
+The caller decides whether to rerun the complete feed-forward NFE.
+
+Every node has NVMe storage or is transitively RDMA-connected to a node that
+does. This is a deployment invariant, not a capability to infer during an NFE.
+Deleted or invalidated DNN parameter pages can be loaded again from local NVMe
+or retransmitted from such a peer. Parameter residency is not a reason to retain
+an invalidated graph or add a recovery protocol to its numerical functions.
 
 ### Asynchronous error metadata
 
-The operator, 2026-09-10: "error status returns are allowed by the
-specifications we use... but it can never be synchronous or blocking or
-consumed by a callgraph itself... it can only be passed monadically through a
-metadata channel... s.t. calling contexts can call `out, meta =
-meshfunction(x)`, with literal values corresponding to error codes and
-where/when they happened in a callgraph reported in the meta channel, not the
-output channel, for calling consumers to interpret and handle..."
+The calling interface is `out, meta = meshfunction(x)`. `out` contains numerical
+values; `meta` contains literal error codes and their callgraph location and
+occurrence (where and when). Error status returns are permitted only through
+this asynchronous metadata channel. Returning the pair does not synchronously
+wait for execution or for a final error verdict.
 
-Metadata occupies page-table pages configured before launch: a return channel
-beside `out`, not a private allocation, completion token or readiness gate. A
-terminal device completion publishes the configured output pages whatever the
-metadata holds. Their stamp says the pages are available, not that their
-contents are correct: the calling context may reject them by `meta`. Without a
-terminal completion the output is unavailable, and metadata published alone
-carries no numerical value and does not say that outstanding work completed.
+Composition carries metadata monadically alongside values. A function in the
+callgraph does not consume error metadata to branch, short-circuit, suppress
+arithmetic, synchronize, wait, retry or recover. Only the calling context
+interprets and handles it, including deciding whether to repeat the complete
+feed-forward NFE. Here monadic propagation does not mean exception-style
+short-circuiting on an error.
+
+Metadata storage is also configured before launch and occupies literal
+page-table pages. It is a distinct return channel, not a private allocation,
+completion token or readiness gate. Error codes never replace numerical output
+values. A terminal device completion publishes the actual configured output
+pages independently of any error metadata. Their stamp certifies availability,
+not correctness: the calling context may reject their contents using `meta`.
+Without a terminal completion the output remains unavailable. Publishing
+metadata alone neither invents a numerical value nor certifies that outstanding
+work has completed. An error-dependent publication gate would consume metadata
+inside the callgraph and is excluded by the operator's instruction.
 
 ### The NFE, number k
 
@@ -107,12 +111,12 @@ carries no numerical value and does not say that outstanding work completed.
 
 ## The same NFE on infinitely many Mac Minis
 
-(After `metal-microbench/docs/mesh_distributed_reduction_analysis.md`: the
-program installed once; weights where they live; each intermediate at its
-next consumer; a finished piece enabling its local continuation with no host
-decision; every Mini with at most three links; a result at depth D back in D
-hops; the per-link ceiling standing for any number of workers; a partition
-consumed as soon as it has arrived.)
+(After `metal-microbench/docs/mesh_distributed_reduction_analysis.md`:
+install the program once; keep weights where they live; keep each
+intermediate at its next consumer; a finished piece enables its local
+continuation with no host decision; every Mini has at most three links; a
+result at depth D comes back in D hops; infinite workers do not remove the
+per-link ceiling; consume a partition as soon as it has arrived.)
 
 ### The mesh
 
@@ -237,27 +241,25 @@ stands in for the pages. Then it acts on the message. This is what goes wrong.
    many Minis would need a message from each, each a hop, each a race with its
    pages. The rows give one check for all of them: are they all stamped k.
 
-The operator, 2026-09-10: "syncs, messages, ping pongs, and gaurds or waits
-are not part of a specification... remember this..."
-
-In the algorithm above a Mini acts on data alone, the moment the data is
-present. The row's stamp is the only signal. The GPU is handed only functions
-whose rows are stamped. The calling context receives errors through
-asynchronous metadata, not through numerical values or a status gate inside
-the callgraph. So a Mini's latency and utilization are the same whether it has
-one neighbour or an infinite mesh behind it.
+The rule that follows is the one already in the spec. A Mini acts on data,
+and only on data, and acts the moment the data is present. The row's stamp is
+the only signal. The GPU is handed only functions whose rows are stamped. The
+calling context receives errors through asynchronous metadata, never through
+numerical values or a status gate inside the callgraph. With that
+rule a Mini's latency and utilization are the same whether it has one
+neighbour or an infinite mesh behind it. Without it they are not.
 
 ## What this is called elsewhere
 
-The operator, 2026-09-10, of an agent's review of the digest path ("its
-bit-at-a-time CRC loop adds substantial work even though digest results do not
-gate arithmetic"): "hm delete crc then bye-bye superfluous feature". Mesh does
-not hash payloads, exchange digests, compare them, or retain pages for those
-operations. Literal device and transport errors travel through asynchronous
-metadata, and the calling context reads them.
+On September 9, 2026, the operator removed the CRC/digest feature as superfluous.
+Mesh does not hash payloads, exchange digests, compare them, or retain pages for
+those operations. Earlier checking clauses are superseded. Literal device and
+transport errors still travel through asynchronous metadata; the calling context
+owns numerical acceptance and whole-NFE repetition.
 
 The firing principle is tagged-token dataflow; operand slots and presence
 bits have hardware prior art in Monsoon. In-data flags, dependency-driven
 execution and pipelined reductions also have published implementations.
-None of them is the exact caller described here. The reduce description and
-the historical incident record are in [distributed-reduce.md](distributed-reduce.md).
+None of them is the exact caller required here, which remains an implementation
+obligation. The binding reduce description and
+historical incident record are in [distributed-reduce.md](distributed-reduce.md).

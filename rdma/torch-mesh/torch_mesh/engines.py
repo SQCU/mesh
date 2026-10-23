@@ -45,15 +45,17 @@ no units for that decision.
 The data path is zero-copy where the memory allows: torch's MPS tensors live in shared Metal memory, so the CPU and
 Neural Engine shares read their inputs in place (the GPU's prologue converts the input to fp32 for the CPU's products;
 the Neural Engine's graph reads it row-major as it is) and write their outputs into MPS tensors in place; the GPU
-combines the shares.
+combines the shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted
+in its time).
 
-  pool = engines.Engines(['mps', 'cpu', 'ane'], ane={'tile': 128, 'block': 4096})
+  pool = engines.Engines(['mps', 'cpu', 'ane'], ane={'tile': 128})
   ffn = engines.FFN(gate, up, down, engines=pool, name='layer3.ffn')
   y = ffn(x)                # x [..., H] on MPS: every configured engine its share of the neurons
   engines.rebalance(pool)   # each (operation, rows)'s search on the calls since the last: its next allocation"""
 import concurrent.futures
 import ctypes
 import hashlib
+import json
 import os
 import shutil
 import time
@@ -92,7 +94,7 @@ _CORE_ML = None
 
 def _coreml():
     """The native Core ML binding (rdma/mesh-coreml.m: predictions on caller memory, no copies on the CPU), the mesh's
-    installed library beside mesh.py; None where it cannot load (the Neural Engine engine is then missing)."""
+    installed library beside mesh.py; None where it cannot load."""
     global _CORE_ML
     if _CORE_ML is None:
         from mesh import RDMA
@@ -226,19 +228,18 @@ class Ane(Engine):
     row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms against 5.9 with them
     on the GPU), compiled and loaded once a share and row count, its package kept in ~/.cache/mesh-engines; its
     predictions through rdma/mesh-coreml.m on the operands' own memory (no CPU copy on its critical path: through
-    coremltools' copies a 3 ms prediction took 9 once the CPU clocked down beside a busy GPU); fp16 operands and
-    activation.  Its outputs carry an
+    coremltools' copies a 3 ms prediction took 9 once the CPU clocked down beside a busy GPU), coremltools' own where
+    that binding cannot load; fp16 operands and activation.  Its outputs carry an
     absolute error floor (on an M4 Pro and an M5 Max about 3e-4 RMS for a 3840-wide contraction, whatever the input's
     scale; above unit-scale activations its error is fp16's relative 2e-4): accurate on normalized activations,
-    inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which conditioning answers, not routing.
-    (Its compiler folds a constant scaling of the weights into the convolution, so no rescaling in the graph moves the
-    floor.)  `block` is the units a convolution of its graph takes, the configuration's (the Neural Engine's compiler
-    refuses a convolution past a weight size: neural_engine_share)."""
+    inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which an operation's `tolerance`
+    measures (conditioning, not routing, answers it).  (Its compiler folds a constant scaling of the weights into the convolution, so no rescaling in the
+    graph moves the floor.)"""
     name, limits, occupies = 'ane', {'dtypes': (torch.float16,), 'constants': True}, frozenset({'ane'})
 
     def __init__(self, **options):
         super().__init__(**options)
-        self.tile, self.block = int(options.get('tile', 128)), int(options['block'])
+        self.tile = int(options.get('tile', 128))
 
     @classmethod
     def missing(cls):
@@ -246,7 +247,7 @@ class Ane(Engine):
             import coremltools  # noqa: F401
         except ImportError:
             return 'coremltools is not installed (rdma/requirements.txt)'
-        return None if _coreml() else 'rdma/libmesh-coreml.dylib does not load'
+        return None
 
     def prepare_linear(self, op, start, end):
         return _Compiled('linear', (op.weight[start:end].detach().to('cpu', torch.float16).numpy(),))
@@ -259,25 +260,45 @@ class Ane(Engine):
         return rows in shard.models
 
     def load(self, shard, rows):
+        import numpy as np
+        tile = self.tile
+        width = shard.arrays[0].shape[1]
+        n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
         native = _coreml()
-        compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, self.tile, self.block)
-        handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
-        if handle < 0:
-            raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-        placed = ctypes.create_string_buffer(1 << 20)
-        if native.mesh_coreml_placement(handle, placed, len(placed)) >= 0:
-            devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
-            shard.placement = sorted(devices - {'unknown'})
-            self.occupies = self.occupies | frozenset(devices - {'unknown'})
-        shard.models[rows] = handle
+        handle, model = None, None
+        if native:
+            compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, tile)
+            inputs, outputs = '', ''
+            handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
+            if handle < 0:
+                raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+            placed = ctypes.create_string_buffer(1 << 20)
+            if native.mesh_coreml_placement(handle, placed, len(placed)) >= 0:
+                devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
+                shard.placement = sorted(devices - {'unknown'})
+                self.occupies = self.occupies | frozenset(devices - {'unknown'})
+        else:
+            model = neural_engine_model(shard.kind, shard.arrays, rows, tile)
+            spec = model.get_spec().description
+            inputs, outputs = spec.input[0].name, spec.output[0].name
+        shard.models[rows] = (model, inputs, outputs, handle, n)
+        warm = torch.zeros(rows, width, dtype=torch.float16)
+        self._predict(shard, warm, torch.empty(rows, n, dtype=torch.float16))
 
     def _predict(self, shard, source, target):
-        """One prediction from `source` into `target` (CPU tensors over the operands' memory), on that memory."""
+        """One prediction from `source` into `target` (CPU tensors over the operands' memory): natively on that memory
+        where the binding loads, else through coremltools (a copy each way)."""
+        model, name, output, handle, n = shard.models[source.shape[0]]
+        if handle is None:
+            target.copy_(torch.from_numpy(model.predict({name: source.numpy()})[output]))
+            return
         shape_in = (ctypes.c_int64 * 2)(*source.shape)
         shape_out = (ctypes.c_int64 * 2)(*target.shape)
         native = _coreml()
-        if native.mesh_coreml_predict(shard.models[source.shape[0]], source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2) < 0:
+        backed = native.mesh_coreml_predict(handle, source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2)
+        if backed < 0:
             raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+        self.backed = backed
 
     def _run(self, shard, x, out):
         began = time.perf_counter()
@@ -343,41 +364,55 @@ def neural_engine_model(kind, arrays, rows, tile=128, block=None):
                       compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
 
 
-def neural_engine_share(kind, arrays, rows, tile, block):
-    """A Neural Engine share in convolutions of `block` units (the caller's configuration): built (neural_engine_model),
-    compiled once into ~/.cache/mesh-engines by content (the arrays, kind, rows, tile and block), and its compute plan
-    read (coremltools MLComputePlan).  The Neural Engine's compiler refuses a convolution past a weight size (on an M4 Pro
+def neural_engine_share(kind, arrays, rows, tile=128, grain=1):
+    """A Neural Engine share compiled where its every operation runs on the Neural Engine: built
+    (neural_engine_model), compiled once into ~/.cache/mesh-engines by content (the arrays, kind, rows, tile and block),
+    its compute plan read (coremltools MLComputePlan), and built again in halved blocks of `grain` units while any
+    operation is placed elsewhere: the Neural Engine's compiler refuses a convolution past a weight size (on an M4 Pro
     between 7680 and 8192 units of a 1536-wide input in fp16: 22.5 to 24 MiB), and Core ML then runs the whole program
-    on the CPU, 20 to 60 times slower: the devices returned say where its operations run, and a caller whose share
-    places elsewhere fails it.  The search that halved the block and built again until it placed, and its store of the
-    largest block a node placed (~/.cache/mesh-engines/blocks.json), were deleted 2026-10-22 (no retry: the block is a
-    stated fact of the configuration).  (compiled .mlmodelc path, block, its operations' devices)."""
+    on the CPU, 20 to 60 times slower.  The largest block that placed is kept for the node by input width
+    (~/.cache/mesh-engines/blocks.json) and tried first.  (compiled .mlmodelc path, block, its operations' devices)."""
     import collections
     import coremltools as ct
     import numpy as np
     from coremltools.models.compute_plan import MLComputePlan
     cache = Path(os.path.expanduser('~/.cache/mesh-engines'))
     cache.mkdir(parents=True, exist_ok=True)
+    known_path = cache / 'blocks.json'
+    try:
+        known = json.loads(known_path.read_text())
+    except (OSError, ValueError):
+        known = {}
+    units, width = arrays[0].shape[0], arrays[0].shape[1]
     digest = hashlib.sha1(b''.join(np.ascontiguousarray(a).tobytes() for a in arrays) + f'{kind} {rows} {tile}'.encode()).hexdigest()
     native = _coreml()
     if native is None:
         raise RuntimeError('Neural Engine share: rdma/libmesh-coreml.dylib does not load')
-    compiled = cache / f'{digest}-b{block}.mlmodelc'
-    if not compiled.exists():
-        package = cache / f'{digest}-b{block}.mlpackage'
-        neural_engine_model(kind, arrays, rows, tile, block).save(str(package))
-        failed = native.mesh_coreml_compile(str(package).encode(), str(compiled).encode())
-        shutil.rmtree(package, ignore_errors=True)
-        if failed:
-            raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
-    plan = MLComputePlan.load_from_path(path=str(compiled), compute_units=ct.ComputeUnit.CPU_AND_NE)
-    devices = collections.Counter()
-    for op in plan.model_structure.program.functions['main'].block.operations:
-        usage = plan.get_compute_device_usage_for_mlprogram_operation(op)
-        if usage is not None:
-            name = type(usage.preferred_compute_device).__name__
-            devices['ane' if 'NeuralEngine' in name else 'gpu' if 'GPU' in name else 'cpu' if 'CPU' in name else 'unknown'] += 1
-    return compiled, block, dict(devices)
+    block = min(units, int(known.get(str(width), units)))
+    while True:
+        compiled = cache / f'{digest}-b{block}.mlmodelc'
+        if not compiled.exists():
+            package = cache / f'{digest}-b{block}.mlpackage'
+            neural_engine_model(kind, arrays, rows, tile, block).save(str(package))
+            failed = native.mesh_coreml_compile(str(package).encode(), str(compiled).encode())
+            shutil.rmtree(package, ignore_errors=True)
+            if failed:
+                raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+        plan = MLComputePlan.load_from_path(path=str(compiled), compute_units=ct.ComputeUnit.CPU_AND_NE)
+        devices = collections.Counter()
+        for op in plan.model_structure.program.functions['main'].block.operations:
+            usage = plan.get_compute_device_usage_for_mlprogram_operation(op)
+            if usage is not None:
+                name = type(usage.preferred_compute_device).__name__
+                devices['ane' if 'NeuralEngine' in name else 'gpu' if 'GPU' in name else 'cpu' if 'CPU' in name else 'unknown'] += 1
+        if set(devices) <= {'ane'} or block <= grain:
+            if set(devices) <= {'ane'} and block > int(known.get(str(width), 0)) and block < units:
+                known[str(width)] = block
+                known_path.write_text(json.dumps(known) + '\n')
+            return compiled, block, dict(devices)
+        shutil.rmtree(compiled, ignore_errors=True)
+        known[str(width)] = min(int(known.get(str(width), units)), max(grain, (block // 2) // grain * grain))
+        block = known[str(width)]
 
 
 ENGINES = {e.name: e for e in (Mps, Cpu, Ane)}
@@ -409,7 +444,7 @@ class Engines:
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
         self.operations, self.decisions, self.evidence, self.solvers, self.last = [], {}, {}, {}, {}
-        self.separated = {}
+        self.errors, self.separated = {}, {}
 
 
 class Operation:
@@ -418,11 +453,15 @@ class Operation:
     a decision a name and row count (operations of one name, a stack's layers of one shape, share it and pool their
     evidence: the allocation is measured where the program runs it, between its other operations); its shares concatenate (`combine` 'concat', the shared axis the output's) or sum ('sum',
     the shared axis contracted); `constant` states that its weights do not change (an engine whose weights are
-    constants takes a share only then).  The allocation follows the times alone."""
+    constants takes a share only then); `tolerance` (relative), where given, is measured on each allocation's first
+    call: every share an engine other than the GPU computes against the same share on the GPU, its error recorded
+    (`Engines.errors`), never a routing input: the allocation follows
+    the times alone."""
     kind = combine = None
 
-    def __init__(self, units, width, engines, name, grain, constant):
+    def __init__(self, units, width, engines, name, grain, constant, tolerance=None):
         self.units, self.width, self.engines, self.grain, self.constant = units, width, engines, grain, constant
+        self.tolerance = tolerance
         self.name = name or f'{self.kind}{id(self):x}'
         self.shards, self.warm, self.calls = {}, set(), {}
         if engines is not None:
@@ -513,6 +552,8 @@ class Operation:
             for p in pieces[1:]:
                 y = y + p.float()
             y = y.to(dtype)
+        if self.tolerance is not None and first:
+            self._verify(key, held, bounds, shards, x2, prologue, outs)
         self._separate(key)
         y = self.finish(y)
         if measured:
@@ -536,14 +577,30 @@ class Operation:
                     self.engines.separated[key].add(pair)
                     self.engines.decisions[key]['parts'] = solver(self.engines, key).forbid(i, j)
 
+    def _verify(self, key, held, bounds, shards, x2, prologue, outs):
+        """An allocation's first call, where the operation names a `tolerance`: each share an engine other than the GPU
+        computed, against the same share on the GPU (torch's MPS, its own products), its relative error recorded
+        (`Engines.errors`).  A measurement, not a routing input: an engine's numerics are conditioned where they matter
+        (scaling, a normalization), not excluded."""
+        engines = self.engines.engines
+        gpu = next((e for e in engines if e.name == 'mps'), None) or Mps()
+        for i in held:
+            if engines[i].name == 'mps':
+                continue
+            reference = torch.empty(outs[i].shape, device=x2.device, dtype=x2.dtype)
+            gpu.run(self, gpu.prepare(self, bounds[i], bounds[i + 1]), x2, prologue, reference)
+            got, want = outs[i].float(), reference.float()
+            error = float((got - want).norm() / want.norm().clamp_min(1e-30))
+            self.engines.errors.setdefault(key, {})[engines[i].name] = round(error, 6)
+
 
 class Linear(Operation):
     """y = x W^T (+ b), W [N, K]: its N outputs shared (they concatenate)."""
     kind, combine = 'linear', 'concat'
 
-    def __init__(self, weight, bias=None, engines=None, name=None, grain=64, constant=True):
+    def __init__(self, weight, bias=None, engines=None, name=None, grain=64, constant=True, tolerance=None):
         self.weight, self.bias = weight, bias
-        super().__init__(weight.shape[0], weight.shape[0], engines, name, grain, constant)
+        super().__init__(weight.shape[0], weight.shape[0], engines, name, grain, constant, tolerance)
 
     def torch(self, x):
         return torch.nn.functional.linear(x, self.weight, self.bias)
@@ -559,9 +616,9 @@ class FFN(Operation):
     columns (grain a multiple of 32), the GPU's share their fused couple, another engine's share decoded."""
     kind, combine = 'ffn', 'sum'
 
-    def __init__(self, gate, up, down, engines=None, name=None, grain=128, constant=True):
+    def __init__(self, gate, up, down, engines=None, name=None, grain=128, constant=True, tolerance=None):
         self.gate, self.up, self.down = gate, up, down
-        super().__init__(gate.shape[0], down.shape[0], engines, name, grain, constant)
+        super().__init__(gate.shape[0], down.shape[0], engines, name, grain, constant, tolerance)
 
     def torch(self, x):
         return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)

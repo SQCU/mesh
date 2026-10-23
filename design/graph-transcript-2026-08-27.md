@@ -5,7 +5,7 @@ home folder, 2026-08-27 to 2026-09-01; its transcript at ~/.claude-personal/proj
 The operator's turns and the replies they produced on the fabric as a graph: degree three and the clique it caps,
 rings and application forwarding, computing while forwarding, what stalls a hop, how agreement amortizes, and the
 agents that never block one another. Nothing here is paraphrased; each section is one turn, by its role and time
-(UTC), and "[...]" marks words cut from a reply. The algorithm these lead to is design/pages-and-functions.md; its analysis, metal-microbench
+(UTC). The algorithm these lead to is design/pages-and-functions.md; its analysis, metal-microbench
 docs/mesh_distributed_reduction_analysis.md (2026-09-06; the session that wrote it is in no transcript store that
 survives).
 
@@ -68,7 +68,7 @@ active_width 8X · active_speed 10.0 Gbps → 80 Gb/s
 Plus, from the doc, the constraints that will actually shape the program:
 
 - **Send/recv only.** `IBV_WR_SEND`, `IBV_ACCESS_LOCAL_WRITE` only. This is zero-copy messaging, not one-sided RDMA.
-- **UC only, and no hardware ACK.** "Completion does not indicate the receiver has successfully received the sent data or that data was not corrupted in flight because Thunderbolt does not perform Acks in hardware." [...]
+- **UC only, and no hardware ACK.** "Completion does not indicate the receiver has successfully received the sent data or that data was not corrupted in flight because Thunderbolt does not perform Acks in hardware." Every hop of a ring collective needs application-level integrity and retransmit. For a relay-and-reduce ring this is the dominant correctness problem.
 - **Sender and receiver must post the same number of frames.** A 16K send against a 4K or 32K posted receive fails. Rigid framing contract across every hop.
 - **Per-controller IOMMU** — a buffer must be registered in each device's protection domain separately, so a forwarding node pays 2 MRs per buffer against the 100 cap.
 - **GID/QPN exchange is out-of-band over TCP.** Which makes the IP plane a hard dependency of RDMA connection setup, not just management.
@@ -83,11 +83,11 @@ Three planes, and conflating them is what produced my bad answer:
 2. **IP fabric plane** — bridge **off**, so each `enX` becomes its own point-to-point link with its own link-local addresses (which is also what restores GID[1]/GID[2]). Now non-adjacent nodes are unreachable over IP, so this plane needs real L3: `net.inet6.ip6.forwarding=1` and a routing protocol over the per-link `fe80::` adjacencies.
 3. **WAN edge** — unchanged: exactly two appliances advertising the fabric prefix into the tailnet.
 
-For plane 2, [...] `babeld` is the right shape — designed for churning ad-hoc topologies, tiny, uses IPv6 link-local next-hops natively, reconverges on replug with no per-node static config. Each node gets a stable ULA `/128` on **`lo0`** — and now lo0 is genuinely correct, not stylistic, because with the bridge off there's no longer any single fabric segment for an address to live on. Babel distributes those /128s; retopo is handled by the protocol. Unlike STP it uses *every* link rather than blocking one, which is the whole point of paying for the ring.
+For plane 2, "write our own router" should mean *configure* one, not author one. `babeld` is the right shape — designed for churning ad-hoc topologies, tiny, uses IPv6 link-local next-hops natively, reconverges on replug with no per-node static config. Each node gets a stable ULA `/128` on **`lo0`** — and now lo0 is genuinely correct, not stylistic, because with the bridge off there's no longer any single fabric segment for an address to live on. Babel distributes those /128s; retopo is handled by the protocol. Unlike STP it uses *every* link rather than blocking one, which is the whole point of paying for the ring.
 
 **Two consequences for the repo that I should flag as alarm-corrupting**, given its own threat model:
 
-- **`mesh-peers` silently degrades to "my direct neighbours."** It's Bonjour multicast; with the bridge off, mDNS reaches one cable-hop. The command keeps working, keeps printing a table, and quietly stops meaning "the fabric" — a false negative dressed as a healthy report. [...]
+- **`mesh-peers` silently degrades to "my direct neighbours."** It's Bonjour multicast; with the bridge off, mDNS reaches one cable-hop. The command keeps working, keeps printing a table, and quietly stops meaning "the fabric" — a false negative dressed as a healthy report. It has to move onto the routed plane (or the beacon has to register with something reachable) *in the same change* that disables the bridge.
 - **`ping6 -c3 -I bridge0 ff02::1`**, the discovery idiom in the README and in my last answer, stops being a fabric-wide probe for the same reason.
 
 So the N=2→N=3 transition is a bigger cutover than the repo implies: disable bridge, per-port addressing, forwarding + babeld, re-found peer discovery, re-verify GIDs. All of it doable remotely over the tailnet edge — none of it needs a physical visit.
@@ -126,9 +126,9 @@ down port         → refuses before allocating anything
 leftover processes: 0
 ```
 
-And the correction you'd expect me to have needed: my *first* hardened version still hung forever. I bounded `ibv_poll_cq` and left `accept()`, `connect()` and the OOB `read()` unbounded in front of it — so it never reached the part I'd fixed. [...] That's the same error as before in a different place: fixing the thing I was thinking about instead of every detail.
+And the correction you'd expect me to have needed: my *first* hardened version still hung forever. I bounded `ibv_poll_cq` and left `accept()`, `connect()` and the OOB `read()` unbounded in front of it — so it never reached the part I'd fixed. **A program with one unbounded syscall is an unbounded program**, now a rule in `RDMA-RULES.md`. That's the same error as before in a different place: fixing the thing I was thinking about instead of every detail.
 
-**Labels corrected.** "Control plane = Wi-Fi, data plane = fabric" encoded exactly the assumption you rejected. Whether Wi-Fi exists is a property of the room; a MacBook can't host one for the minis; the fabric is copper between two machines you own. So the fabric can be a node's *only* link, control rides it when that's the case, [...]
+**Labels corrected.** "Control plane = Wi-Fi, data plane = fabric" encoded exactly the assumption you rejected. Whether Wi-Fi exists is a property of the room; a MacBook can't host one for the minis; the fabric is copper between two machines you own. So the fabric can be a node's *only* link, control rides it when that's the case, and the invariant is "a node comes back with every link the room offers, and reports all of them" — not "every link comes back," which can't be promised for a network that may not exist.
 
 One honest number: throughput is **3–10 Gbit/s**, far below the 70.9 Gbit/s `ibv_uc_pingpong` reached. That's not the link — it's that `mesh-hop` keeps exactly one message in flight and serializes recv → compute → send. Pipelining depth is the next real change, and it's a change to the primitive rather than a discovery.
 
@@ -142,11 +142,11 @@ One honest number: throughput is **3–10 Gbit/s**, far below the 70.9 Gbit/s `i
 
 Both corrections land, and the second one undoes an over-correction I made.
 
-**On absolutes.** You're right, and it's quantifiable rather than a matter of taste. In-channel agreement costs copper time; whether that matters is a ratio. At 8.9 GB/s a 1 KB exchange is 112 ns of wire, but the round trip is ~10 µs (measured: 10.2 µs at 4 KB), so an agreement is **latency-dominated, ~10–20 µs**. Against a 1 GB stream (112 ms) that's 0.01% — a bubble you'd never find. Against a single 64 KB page (7.3 µs of wire) it's over 200% — catastrophic. [...]
+**On absolutes.** You're right, and it's quantifiable rather than a matter of taste. In-channel agreement costs copper time; whether that matters is a ratio. At 8.9 GB/s a 1 KB exchange is 112 ns of wire, but the round trip is ~10 µs (measured: 10.2 µs at 4 KB), so an agreement is **latency-dominated, ~10–20 µs**. Against a 1 GB stream (112 ms) that's 0.01% — a bubble you'd never find. Against a single 64 KB page (7.3 µs of wire) it's over 200% — catastrophic. So the rule isn't "control must be out of band," it's **agreement amortizes per stream, never per page**. Once that holds, in-channel is fine and sometimes preferable, because it needs no second network to exist.
 
 And there's a version that costs no parsing at all: time-share the *copper* with a separate control QP. Stream identity is then the discriminator, so the data path still never inspects bytes, and you've given up nothing but a slice of link time.
 
-**On the identity function — I over-corrected.** I went from "the router parses every record" to "the router never looks at anything," and both are wrong. [...] "Nothing, forward to peer P" is a computed answer, not the absence of computation. [...]
+**On the identity function — I over-corrected.** I went from "the router parses every record" to "the router never looks at anything," and both are wrong. *Passing along unchanged is still a decision that has to be made, per landed page, by somebody.* "Nothing, forward to peer P" is a computed answer, not the absence of computation. What I actually get to eliminate is dereferencing the *payload*; what I do not get to eliminate is the dispatch step.
 
 And the reason I kept getting this wrong is that I was writing a loop. In a loop, "decide" has to sit inline between lissen and yeller, so it looks like either a cost to remove or a header to parse. Concurrently it's neither — it's a **third agent**:
 

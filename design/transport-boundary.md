@@ -10,7 +10,8 @@ The previous bridge acknowledged a SUB page when `link_submit` could not accept
 it, released a forwarding page on the same condition, and released received
 application data when CMP approached capacity. The 4,096-row Gemma FFN run
 exposed a permanent receive deficit with fully published local outputs and no
-remaining client send work.
+remaining client send work. Queue pressure must retain ownership; it is not a
+transport completion or an instruction to discard the operand.
 
 SUB and each link's completion ring now retain their existing descriptors until
 the next destination accepts them. Their single consumer selects by numeric
@@ -69,7 +70,7 @@ Apple's [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-
 specifies UC send/receive operations, failure reporting in completion status,
 messages up to 16,773,120 bytes and a 4095-frame queue limit. Send completion does
 not establish successful remote receipt. Posts are nonblocking and make no
-syscall. It requires message and receive-buffer frame counts to agree.
+syscall. Message and receive-buffer frame counts must agree.
 
 The upstream [Thunderbolt/USB4 driver](https://github.com/torvalds/linux/blob/master/drivers/net/thunderbolt/main.c)
 consumes the hardware `RING_DESC_CRC_ERROR` flag in `tbnet_check_frame`, without
@@ -81,7 +82,8 @@ Mesh retains its explicit `IBV_WC_SUCCESS` check before emitting a receive event
 
 This is an API trust boundary, not a claim that short numerical runs prove every
 physical bit error is detected. An overwrite after completion is an ownership
-defect; a wrong numerical result is a computation defect.
+defect; a wrong numerical result is a computation defect. A second transport
+checksum is not the implementation of either responsibility.
 
 ## Removed and retained work
 
@@ -106,8 +108,8 @@ of flipping application memory after a simulated successful receive. Stale epoch
 missing terminal receipts, plan mismatch, borrowed storage and numerical reductions
 through Y/cyclic lesions remain covered.
 
-The scoped wire marker advances from `0x4d580000` to `0x4d590000`, in scoped
-clients and bridge terminal responders alike. The old
+The scoped wire marker advances from `0x4d580000` to `0x4d590000`. Both scoped
+clients and bridge terminal responders need matching implementations. The old
 marker is not accepted as a new scoped frame; no legacy checksum implementation
 is retained. Legacy unscoped framing is unchanged. The internal C frame remains
 40 bytes because of alignment; the deletion removes payload work, not eight wire

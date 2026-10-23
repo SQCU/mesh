@@ -10,8 +10,8 @@
    .mlmodelc loads as it is) and loads it on `units` (0 CPU and Neural Engine, 1 all, 2 CPU only), its input and output
    named (empty: the model's own first); its handle, or -1 (mesh_coreml_error).
    mesh_coreml_predict(handle, in, in_shape, in_rank, out, out_shape, out_rank): one prediction, the input read from
-   `in` and the output written to `out` (row-major float16 of those shapes); 0 where Core ML wrote the output into
-   `out` itself, -1 on an error or where it wrote its own memory instead (nothing is copied). */
+   `in` and the output written to `out` (row-major float16 of those shapes); 1 where Core ML wrote the output into
+   `out` itself, 0 where it was copied there from Core ML's own, -1 on an error. */
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 #include <stdint.h>
@@ -74,9 +74,15 @@ int mesh_coreml_predict(long handle, void *in, const int64_t *in_shape, int in_r
     id<MLFeatureProvider> result = [model predictionFromFeatures:features options:options error:&error];
     if (!result) { snprintf(error_, sizeof error_, "predict: %s", error.localizedDescription.UTF8String); return -1; }
     MLMultiArray *got = [result featureValueForName:names[1]].multiArrayValue;
-    if (got.dataPointer == out) return 0;
-    snprintf(error_, sizeof error_, "output: Core ML wrote it apart from the caller's memory (outputBackings not taken)");
-    return -1;
+    if (got.dataPointer == out) return 1;
+    int64_t count = 1;
+    for (int i = 0; i < out_rank; i++) count *= out_shape[i];
+    __block int copied = 0;
+    [got getBytesWithHandler:^(const void *bytes, NSInteger size) {
+      if ((int64_t)size >= count * 2) { memcpy(out, bytes, (size_t)count * 2); copied = 1; }
+    }];
+    if (!copied) { snprintf(error_, sizeof error_, "output: %ld elements, %lld expected", (long)got.count, (long long)count); return -1; }
+    return 0;
   }
 }
 

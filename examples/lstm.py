@@ -1,14 +1,16 @@
 from pathlib import Path
 
 import torch
-from torch_mesh import fused
+import torch_mesh
+from torch_mesh import _stream, fused
 from torch_mesh.streamed import instance, node
 
 import chain
 
 # docs/writing-a-service.md#the-lstm
 SOURCE = chain.SOURCE + '\n' + Path(__file__).with_name('lstm.metal').read_text()
-ARGS = ('TILE', 'KIN', 'H', 'HR', 'L', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PEERS', 'NSEG', 'SPAN', 'BAND')
+ARGS = ('TILE', 'KIN', 'H', 'HR', 'L', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PEERS', 'NSEG')
+SLOTS = 2
 _PIPELINES = {}
 
 
@@ -36,25 +38,20 @@ def form(KIN, H, HR, L, rows, ranks, held):
     def splits(rg, sg):
         return [chain._ksplit(items(rg), kt, sg) for kt in kts]
 
-    def room(rb):
-        return held['threadgroup_memory_bytes'] - 3 * held['threadgroup_memory_alignment_bytes'] - SG * rb * tile * tile * 4
-
     SG = simdgroups(1)
     RG = max(rg for rg in (1 << i for i in range(rt.bit_length()))
              if rt % rg == 0 and simdgroups(rg) == SG and splits(rg, SG) == splits(1, SG))
     while True:
         RB = RG
-        while RB and room(RB) < rows * 2 * tile * 2:
+        while SG * RB * tile * tile * 4 + 2 * held['threadgroup_memory_alignment_bytes'] > held['threadgroup_memory_bytes']:
             RB //= 2
         if not RB:
-            raise ValueError(f'lstm tick: {SG} simdgroups hold no {tile} x {tile} float partial each beside a band of '
-                             f'{rows} rows of one tile in {held["threadgroup_memory_bytes"]} bytes of threadgroup memory')
-        chunks = -(-max(kts) // (room(RB) // (rows * 2 * tile) - 1))
-        span = -(-max(kts) // chunks)
+            raise ValueError(f'lstm tick: {SG} simdgroups hold no {tile} x {tile} float partial each in '
+                             f'{held["threadgroup_memory_bytes"]} bytes of threadgroup memory')
         args = dict(TILE=tile, KIN=KIN, H=H, HR=HR, L=L, G=G, RG=RG, RB=RB, THREADS=SG * simd, SIMD=simd,
-                    PEERS=ranks - 1, NSEG=max(1 + ranks, 2 * ranks), SPAN=span, BAND=rows * (span + 1) * tile)
+                    PEERS=ranks - 1, NSEG=max(1 + ranks, 2 * ranks))
         handle = _pipeline(args)
-        if fused.facts(handle)[0] >= args['THREADS']:
+        if _stream.pipeline_facts(handle)[0] >= args['THREADS']:
             break
         if RG == 1:
             raise RuntimeError(f'lstm tick {args}: its pipeline holds fewer threads a threadgroup than its {SG} '
@@ -67,7 +64,7 @@ def form(KIN, H, HR, L, rows, ranks, held):
 def _pipeline(args):
     name, line = instance('lstm_tick', *(args[a] for a in ARGS))
     if name not in _PIPELINES:
-        _PIPELINES[name] = fused.pipeline(SOURCE + '\n' + line + '\n', name)
+        _PIPELINES[name] = _stream.pipeline(SOURCE + '\n' + line + '\n', name)
     return _PIPELINES[name]
 
 
@@ -79,47 +76,56 @@ class Tick:
         self.handle, self.args, self.ks = form(KIN, H, HR, L, rows, len(shares), held)
         self.W, self.bias = weights, bias
         self.C = torch.zeros(L, rows, HR, dtype=torch.float32, device='mps')
-        self.exchange = fused.Exchange([L * rows * h for h in shares], torch.half)
-        self.words = self._words(self._segments(KIN, H))
-        self.start, self.tick = 0, 0
+        self.arrivals = torch.zeros(1, dtype=torch.int32, device='mps')
+        self.S = torch_mesh.empty(SLOTS, chain.paged(L * rows * HR), dtype=torch.half)
+        peers = [q for q in range(len(shares)) if q != rank]
+        offsets, at = {}, 0
+        for q in peers:
+            offsets[q], at = at, at + chain.paged(L * rows * shares[q])
+        self.landing = torch_mesh.empty(max(at, chain.paged(1)), dtype=torch.half)
+        self.landings = [self.landing[offsets[q]:offsets[q] + L * rows * shares[q]] for q in peers]
+        self.segments = self._segments(KIN, H, offsets)
+        self.sent, self.previous, self.tick = None, None, 0
 
     # docs/writing-a-service.md#the-lstm
-    def _segments(self, KIN, H):
+    def _segments(self, KIN, H, offsets):
         starts = [sum(self.shares[:q]) for q in range(len(self.shares))]
-        peers = [q for q in range(len(self.shares)) if q != self.rank]
 
         def slices(layer, base):
-            return [(1 if q == self.rank else 2 + peers.index(q), layer * self.rows * h, h, (base + starts[q]) // 8, h // 8)
+            return [(1, layer * self.rows * h, h, (base + starts[q]) // 8, h // 8) if q == self.rank else
+                    (2, offsets[q] + layer * self.rows * h, h, (base + starts[q]) // 8, h // 8)
                     for q, h in enumerate(self.shares)]
 
         return [[(0, 0, KIN, 0, KIN // 8)] + slices(0, KIN)] + [slices(l - 1, 0) + slices(l, H) for l in range(1, self.L)]
 
     # docs/writing-a-service.md#the-lstm
-    def _words(self, segments):
+    def _words(self, last, drains, zeroed, active, outs):
         even = lambda xs: list(xs) + [0] * (len(xs) % 2)
-        words = [1, 0, self.rows, 0, 0, 0] + even(self.ks) + even([len(t) for t in segments])
-        for t in segments:
+        words = [int(self.previous is None), last, drains, self.rows, zeroed, active, outs, 0]
+        words += even(self.ks) + even([len(t) for t in self.segments])
+        for t in self.segments:
             for segment in t + [(0, 0, 0, 0, 0)] * (self.args['NSEG'] - len(t)):
                 words += list(segment)
-        return even(words)
+        return words
 
     # docs/writing-a-service.md#the-lstm
     def __call__(self, steps, e, out):
-        s, L, first = self.tick, self.L, not self.start
-        self.start = self.exchange.start()
-        w = self.words
-        w[0], w[3], w[4], w[5] = (int(first), sum(1 << l for l in range(L) if s < l),
-                                  sum(1 << l for l in range(L) if 0 <= s - l < steps), int(out is not None))
-        self._encode(e, out, self.start, first, True)
-        self.tick = s + 1
+        s, L = self.tick, self.L
+        send = self.S[s % SLOTS][:L * self.rows * self.HR]
+        crossing = fused.exchange(send, self.landings, _stream.polls)
+        active = sum(1 << l for l in range(L) if 0 <= s - l < steps)
+        zeroed = sum(1 << l for l in range(L) if s < l)
+        self._encode(e, out, send, crossing, self._words(0, int(out is not None), zeroed, active, int(out is not None)))
+        self.sent, self.previous, self.tick = send, crossing, s + 1
 
     # docs/writing-a-service.md#the-lstm
     def land(self, e, out):
-        w = self.words
-        w[0], w[1], w[3], w[4], w[5] = 0, 1, 0, 0, int(out is not None)
-        self._encode(e, out, self.start + 1, False, False)
+        self._encode(e, out, self.sent, None, self._words(1, int(out is not None), 0, 0, int(out is not None)))
 
     # docs/writing-a-service.md#the-lstm
-    def _encode(self, e, out, start, first, publishes):
-        self.exchange.encode(self.handle, [self.W, self.bias, e, out if out is not None else self.C, self.C], self.words, 15,
-                             self.args['G'], 1, self.args['THREADS'], start, lands=not first, publishes=publishes)
+    def _encode(self, e, out, send, crossing, words):
+        prev = self.sent if self.sent is not None else send
+        fused.encode(self.handle, [self.W, self.bias, e, out if out is not None else self.C, self.C, prev, send,
+                                   self.arrivals, self.landing],
+                     words, 15, self.args['G'], 1, self.args['THREADS'], len(self.shares) - 1,
+                     land=self.previous, publish=crossing)

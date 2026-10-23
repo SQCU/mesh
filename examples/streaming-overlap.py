@@ -1,0 +1,158 @@
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
+
+import numpy as np  # noqa: E402
+import kernels  # noqa: E402
+from mesh import BlockSpec, Program, ShapeDtypeStruct  # noqa: E402
+from mesh.collective import sync_on_some_remote_fill  # noqa: E402
+
+STOP = (signal.SIGTERM, signal.SIGINT)
+
+
+class Stopped(Exception):
+    pass
+
+
+# design/algorithm-sources.md#streaming-overlap-measurement
+def stop(*_):
+    raise Stopped
+
+
+# design/algorithm-sources.md#streaming-overlap-measurement
+def moments(values):
+    mean = m2 = 0.0
+    for count, value in enumerate(values, 1):
+        delta = value - mean
+        mean += delta / count
+        m2 += delta * (value - mean)
+    return dict(count=len(values), mean=mean if values else None,
+                sample_variance=m2 / (len(values) - 1) if len(values) > 1 else None)
+
+
+# design/algorithm-sources.md#streaming-overlap-measurement
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('mode', choices=('whole', 'streamed'))
+    parser.add_argument('--rows', type=int, default=2048)
+    parser.add_argument('--tile', type=int, default=64)
+    parser.add_argument('--trials', type=int, default=3000)
+    parser.add_argument('--depth', type=int, default=3)
+    parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
+    parser.add_argument('--trace')
+    args = parser.parse_args()
+    if min(args.rows, args.tile, args.trials, args.depth) < 1:
+        parser.error('rows, tile, trials and depth must be positive')
+    for number in STOP:
+        signal.signal(number, stop)
+    signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
+    with Program(backend=args.backend, trace=bool(args.trace)) as program:
+        if program.size != 2:
+            parser.error('the paired chain runs on two ranks (RANK, WORLD_SIZE=2, MASTER_ADDR, MASTER_PORT)')
+        print(json.dumps(dict(pid=os.getpid(), rank=program.rank, mode=args.mode)), flush=True)
+        rows, tile, width = args.rows, args.tile, 256
+        block_rows = min(tile, rows) if args.mode == 'streamed' else rows
+        count = (rows + block_rows - 1) // block_rows
+        w = program.tensor((width, width))
+        v = program.tensor((width, width))
+        rng = np.random.default_rng(1701)
+        weights = rng.standard_normal((width, width), dtype=np.float32) / np.sqrt(width)
+        projection = rng.standard_normal((width, width), dtype=np.float32) / np.sqrt(width)
+        data = rng.standard_normal((rows, width), dtype=np.float32)
+        program.constant(w[0, 0], weights)
+        program.constant(v[0, 0], projection)
+
+        # design/algorithm-sources.md#streaming-overlap-measurement
+        def configure(slot):
+            x = program.tensor((rows, width), (block_rows, width))
+            row = BlockSpec((block_rows, width), lambda i: (i, 0))
+            weight = BlockSpec((width, width), lambda i: (0, 0))
+            shape = ShapeDtypeStruct((rows, width), np.float32)
+            p = program.kernel_call(kernels.matmul, grid=(count,),
+                in_specs=(row, weight), out_specs=row, out_shape=shape, peer=0)(x, w)
+            received = program.tensor(p.shape, p.block_shape, dtype=p.dtype)
+            y = program.kernel_call(kernels.matmul, grid=(count,),
+                in_specs=(row, weight), out_specs=row, out_shape=shape, peer=1)(received, v)
+            returned = program.tensor(y.shape, y.block_shape, dtype=y.dtype)
+            program.copy(p.on(0), received.on(1), queue=2 * slot)
+            program.copy(y.on(1), returned.on(0), queue=2 * slot + 1)
+            results = tuple(program.export(ref) for ref in returned.blocks.values()) if program.rank == 0 else ()
+            return tuple(x.blocks.values()), results
+
+        slots = tuple(configure(slot) for slot in range(args.depth))
+        program.realize()
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
+        print(json.dumps(dict(event='realized', rank=program.rank, mode=args.mode,
+            backend=args.backend, regions=count, depth=args.depth)), flush=True)
+
+        # design/algorithm-sources.md#streaming-overlap-measurement
+        def write_trace():
+            if args.trace:
+                Path(args.trace).write_text(json.dumps(dict(rank=program.rank, trace=program.trace)) + '\n')
+
+        if program.rank == 1:
+            try:
+                while True:
+                    signal.pause()
+            except Stopped:
+                pass
+            write_trace()
+            print(json.dumps(dict(rank=1, mode=args.mode, report=vars(program.report))), flush=True)
+            return
+
+        # design/algorithm-sources.md#streaming-overlap-measurement
+        def run_batch(total):
+            submitted = completed = 0
+            outstanding = {}
+            latencies, first_sections = [], []
+            began_batch = time.perf_counter()
+            while completed < total:
+                for slot, (inputs, results) in enumerate(slots):
+                    if slot in outstanding or submitted == total:
+                        continue
+                    began = time.perf_counter()
+                    scale = 1 + (submitted % 17) / 32
+                    for section, ref in enumerate(inputs):
+                        start = section * block_rows
+                        with program.write(ref) as buffer:
+                            np.multiply(data[start:start + ref.shape[0]], scale, out=buffer)
+                    outstanding[slot] = (began, False)
+                    submitted += 1
+                waiting = [result for slot in outstanding for result in slots[slot][1] if not result.ready]
+                if waiting:
+                    sync_on_some_remote_fill(*waiting)
+                for slot, (_, results) in enumerate(slots):
+                    if slot not in outstanding:
+                        continue
+                    began, first_seen = outstanding[slot]
+                    ready = tuple(result.ready for result in results)
+                    if not first_seen and any(ready):
+                        first_sections.append(time.perf_counter() - began)
+                        outstanding[slot] = (began, True)
+                    if not all(ready):
+                        continue
+                    latencies.append(time.perf_counter() - began)
+                    del outstanding[slot]
+                    completed += 1
+                    for result in results:
+                        result.consume()
+            ended_batch = time.perf_counter()
+            return dict(seconds=latencies, statistics=moments(latencies),
+                first_section_seconds=first_sections, first_section_statistics=moments(first_sections),
+                steady_seconds=ended_batch - began_batch,
+                results_per_second=total / (ended_batch - began_batch))
+
+        measured = run_batch(args.trials)
+        write_trace()
+        print(json.dumps(dict(rank=0, mode=args.mode, rows=rows, tile=tile, depth=args.depth, backend=args.backend,
+            **measured, numerical_calls_per_trial=2 * count, report=vars(program.report))), flush=True)
+
+
+if __name__ == '__main__':
+    main()

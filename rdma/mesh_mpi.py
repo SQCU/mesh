@@ -1,3 +1,30 @@
+"""NumPy arrays on libnccl-mesh, spelled as mpi4py spells a communicator's buffer methods, so an mpi4py program ports
+by its import (rdma/NCCL.md "NumPy"):
+
+    from mesh_mpi import Comm, SUM, MAX
+    comm = Comm()
+    comm.Allreduce(local, total, op=SUM)
+
+Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
+communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
+links among the ranks' nodes their bridges hold paired), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
+complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Allgatherv,
+Reduce_scatter_block, Reduce_scatter, Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions
+pair), Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use
+(Gather's off the root, Scatter's send off it); an array of a dtype the library has no type of moves as its bytes, and
+a reduction takes the library's types alone.  Allgatherv and Reduce_scatter take a count a rank, as mpi4py spells
+them (a receive buffer [array, counts], recvcounts): one program over the segments (ncclMeshAllGatherV,
+ncclMeshReduceScatterV), every rank passing the same counts; Allgather and Reduce_scatter_block are the same calls with
+equal counts (the library takes equal segments as its equal program).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
+for none), Shrink(exclude) (ncclCommShrink), Grow(size) and Comm.joining (ncclCommGrow), Revoke() (ncclCommRevoke), and
+a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
+each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
+nonblocking calls, Alltoallv, Gatherv and Scatterv, object (pickled) collectives; separately issued Send and Recv that do not pair
+are reported (rdma/NCCL.md "Rules").  A message to a rank the
+map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node whose bridge runs (a communicator, a lone rank's too, is a client of its node's bridge: rdma/NCCL.md "Communicators"); it is not the measured path (GPU tensors take the Metal
+path through torch-mesh).  Memory: empty(shape, dtype) is an array in this node's bridge's region (ncclMemAlloc, the
+role mpi4py's MPI.Alloc_mem plays), the memory a program hands the collectives (rdma/NCCL.md "Memory"); the module's
+own temporaries are such arrays."""
 import math
 import os
 
@@ -26,12 +53,15 @@ def check(result):
 
 
 def empty(shape, dtype=np.float64):
+    """An uninitialized C-contiguous array of `shape` and `dtype` in this node's bridge's region (mesh.lease), its pages
+    returned when it and every view of it are gone."""
     dtype = np.dtype(dtype)
     count = math.prod(shape) if isinstance(shape, (tuple, list)) else int(shape)
     return np.frombuffer(mesh.lease(count * dtype.itemsize), dtype, count=count).reshape(shape)
 
 
 def to_region(array):
+    """`array` where it is C-contiguous, else its copy in the region (empty)."""
     if array.flags.c_contiguous:
         return array
     made = empty(array.shape, array.dtype)
@@ -40,6 +70,7 @@ def to_region(array):
 
 
 def at(array):
+    """A buffer's address: a C-contiguous array's own (another would cross only through a copy: rdma/NCCL.md "Memory")."""
     if array is None:
         return ffi.NULL
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
@@ -48,11 +79,15 @@ def at(array):
 
 
 def kind(dtype):
+    """The library's type a call that moves `dtype` takes and the count of it in one element: (its type, 1), or, a dtype
+    the library has no type of, (ncclUint8, its itemsize), moved as its bytes.  A reduction takes TYPES alone."""
     dtype = np.dtype(dtype)
     return (TYPES[dtype], 1) if dtype in TYPES else (lib.ncclUint8, dtype.itemsize)
 
 
 def segments(spec, size):
+    """A v-collective's receive buffer as mpi4py gives it, [array, counts] or [array, (counts, displacements)]: the
+    array and a count a rank, summing to its size, the displacements (where given) the counts' running sums."""
     if not isinstance(spec, (list, tuple)) or len(spec) != 2:
         raise ValueError('a v-collective\'s buffer is [array, counts]')
     array, layout = spec
@@ -65,6 +100,7 @@ def segments(spec, size):
 
 
 class Comm:
+    """The world (the module's docstring)."""
 
     def __init__(self):
         rank, size = int(os.environ.get('RANK', '0')), int(os.environ.get('WORLD_SIZE', '1'))
@@ -84,16 +120,21 @@ class Comm:
         return made
 
     def Split(self, color=0, key=0):
+        """The ranks of `color`, ordered by `key` then rank; None for UNDEFINED (ncclCommSplit)."""
         made = ffi.new('ncclComm_t *')
         check(lib.ncclCommSplit(self.comm, -1 if color == UNDEFINED else color, key, made, ffi.NULL))
         return Comm._of(made[0], self) if made[0] != ffi.NULL else None
 
     def Shrink(self, exclude, abort=False):
+        """This communicator without the ranks `exclude`, each kept rank's order kept (ncclCommShrink; `abort` revokes
+        this one's groups in flight first, NCCL_SHRINK_ABORT); None on a rank among those excluded."""
         made, ranks = ffi.new('ncclComm_t *'), ffi.new('int[]', list(exclude) or [0])
         check(lib.ncclCommShrink(self.comm, ranks, len(exclude), made, ffi.NULL, 1 if abort else 0))
         return Comm._of(made[0], self) if made[0] != ffi.NULL else None
 
     def Grow(self, size):
+        """This communicator's ranks and `size` - its size more, which join with Comm.joining at the id its root
+        gives (ncclCommGetUniqueId), returned on the root to hand to them (ncclCommGrow)."""
         made, unique = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
         if self.rank == 0:
             check(lib.ncclCommGetUniqueId(self.comm, unique))
@@ -102,14 +143,20 @@ class Comm:
 
     @classmethod
     def joining(cls, size, unique, rank):
+        """A process joining a grown communicator of `size` ranks as `rank`, at the root's id `unique` (ncclCommGrow)."""
         made = ffi.new('ncclComm_t *')
         check(lib.ncclCommGrow(ffi.NULL, size, ffi.new('ncclUniqueId *', unique), rank, made, ffi.NULL))
         return cls._of(made[0], None)
 
     def Revoke(self):
+        """This communicator's groups in flight end with an error and none is issued after it (ncclCommRevoke)."""
         check(lib.ncclCommRevoke(self.comm, 0))
 
     def Create_cart(self, dims, periods=None, reorder=False):
+        """This communicator's ranks as a process grid of shape `dims` (row-major: the last dimension varies
+        fastest); `periods` (default every dimension) where Shift wraps.  A grid of fewer ranks than the communicator
+        holds its first ones (a Split of them), the others None, as MPI_Cart_create gives them MPI_COMM_NULL; one of
+        more has no rank for a coordinate."""
         cells = math.prod(dims)
         if cells > self.size:
             raise ValueError(f'a grid {list(dims)} of {cells} ranks over {self.size}')
@@ -139,6 +186,9 @@ class Comm:
         self.Allgatherv(sendbuf, [recvbuf, [recvbuf.size // self.size] * self.size])
 
     def Allgatherv(self, sendbuf, recvbuf):
+        """Every rank's segment into recvbuf, given as [array, counts] (or [array, (counts, displacements)], the
+        displacements the counts' running sums: segments packed in rank order), rank r's counts[r] elements
+        (ncclMeshAllGatherV); IN_PLACE takes this rank's segment from the array."""
         array, counts = segments(recvbuf, self.size)
         before = sum(counts[:self.rank])
         send = to_region(array[before:before + counts[self.rank]] if sendbuf is IN_PLACE else sendbuf)
@@ -151,6 +201,8 @@ class Comm:
         self.Reduce_scatter(sendbuf, recvbuf, None, op)
 
     def Reduce_scatter(self, sendbuf, recvbuf, recvcounts=None, op=SUM):
+        """sendbuf's segments reduced by op, rank r's recvcounts[r] elements left in its recvbuf (packed in rank order in
+        sendbuf; ncclMeshReduceScatterV); recvcounts None: recvbuf's size each (Reduce_scatter_block)."""
         counts = [int(c) for c in recvcounts] if recvcounts is not None else [recvbuf.size] * self.size
         if len(counts) != self.size or sum(counts) != sendbuf.size or recvbuf.size != counts[self.rank]:
             raise ValueError(f'recvcounts {counts}: one a rank of {self.size}, summing to the send buffer\'s {sendbuf.size}, '
@@ -193,6 +245,11 @@ class Comm:
         t, k = kind(buf.dtype)
         check(lib.ncclRecv(at(buf), buf.size * k, t, source, self.comm, ffi.NULL))
 
+    def Barrier(self):
+        box = empty(1, np.int32)
+        box[0] = 0
+        self.Allreduce(IN_PLACE, box)
+
     def allreduce(self, value, op=SUM):
         box = empty(1, value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
         box[0] = value
@@ -204,6 +261,7 @@ class Comm:
 
 
 class Cartcomm(Comm):
+    """A process grid over a communicator's ranks (Comm.Create_cart)."""
 
     def __init__(self, base, dims, periods):
         self.rank, self.size, self.comm = base.rank, base.size, base.comm
@@ -223,6 +281,7 @@ class Cartcomm(Comm):
         return rank
 
     def Shift(self, direction, disp):
+        """(source, dest): the ranks `disp` back and on along `direction`, None past a non-periodic edge."""
         coords, d = self.Get_coords(self.rank), self.dims[direction]
 
         def at(offset):
@@ -235,6 +294,8 @@ class Cartcomm(Comm):
         return at(-disp), at(disp)
 
     def Sub(self, remain_dims):
+        """The sub-grid through this rank that keeps the dimensions where `remain_dims` is true (a row of a 2-D
+        grid: [False, True]); a Split of this grid by the coordinates it drops."""
         coords = self.Get_coords(self.rank)
         color = self.Get_cart_rank([0 if keep else c for keep, c in zip(remain_dims, coords)])
         sub = self.Split(color, self.rank)

@@ -6,7 +6,7 @@ Apple's [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-
 requires matching sender/receiver frame counts for a corresponding message.
 It does not require a single payload length for the whole program. Hardware
 queue capacity is measured in 4096-byte frames, and the configured queue's
-actual capacity is read by a query. Receive credits permit posting a payload
+actual capacity must be queried. Receive credits permit posting a payload
 before its matching receive is posted. These facts support the asynchronous
 index-push mechanism cited in
 [algorithm sources](algorithm-sources.md#programcopy).
@@ -40,9 +40,9 @@ maximum-sized payloads. Every shorter payload fits that bound, and completion
 arrays and pending vectors retain their existing capacity. This removes wire
 padding without silently increasing the possible outstanding WR count.
 
-The depth change of the same day ([actual frame capacity](actual-frame-capacity-2026-09-13.md))
-retains actual per-QP frame capacities, sums the frames of posted and announced
-requests, releases each stored request's frame cost at completion, and sizes the
-completion queues by frame count rather than by the old maximum block. Index
-messages each cost one frame. Software entry capacity,
+A later depth change must retain actual per-QP frame capacities, sum the frames
+of posted and announced requests, and decrement each stored request's frame cost
+at completion. The completion queue and its result array must accommodate the
+number of possible shorter WRs; dividing by the old maximum block would no
+longer be correct. Index messages each cost one frame. Software entry capacity,
 hardware frame capacity, and useful byte length are separate quantities.

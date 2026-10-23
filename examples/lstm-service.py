@@ -55,27 +55,43 @@ def prepared(config, tile):
 
 # docs/writing-a-service.md#the-lstm
 def shares(config, rank, size, held):
-    every = [sizes(config, h) for h in config['shares']]
-    out = [torch_mesh.empty(every[rank][k], dtype=dtype) for k, dtype in enumerate((torch.half, torch.float32))]
-    for k, dtype in enumerate((torch.half, torch.float32)):
-        matrix = [every[q][k] if p == 0 else 0 for p in range(size) for q in range(size)]
-        whole = torch_mesh.empty(sum(e[k] for e in every), dtype=dtype) if rank == 0 else None
-        if whole is not None:
-            torch.cat([held[q][k].reshape(-1) for q in range(size)], out=whole)
-        torch_mesh.all_to_all(out[k], whole, matrix).wait()
-    return out[0], out[1]
+    w_size, b_size = sizes(config, config['shares'][rank])
+    W = torch_mesh.empty(w_size, dtype=torch.half)
+    bias = torch_mesh.empty(b_size, dtype=torch.float32)
+    if rank:
+        dist.recv(W, src=0)
+        dist.recv(bias, src=0)
+        return W, bias
+    for r in range(1, size):
+        for part in held[r]:
+            dist.send(part, dst=r)
+    W.copy_(held[0][0])
+    bias.copy_(held[0][1])
+    return W, bias
 
 
 # docs/writing-a-service.md#the-lstm
-def lstm_stream(tick, steps, E, O):
-    first, L = torch.mps.Event(enable_timing=True), tick.L
+def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
+    e, pace, L = E.unbind(0), chain.Pace(), tick.L
+    landing, first = chain.fill(E, rank, inputs, 0, steps, block), None
     for s in range(steps + L - 1):
+        if s < steps and s % block == 0:
+            pace.wait()
+            ahead = chain.fill(E, rank, inputs, s + block, steps, block) if s + block < steps else None
+            landing.wait()
+            landing = ahead
         t = s - L
-        tick(steps, E[min(s, steps - 1)], O[t] if O is not None and t >= 0 else None)
+        issued = time.perf_counter()
+        tick(steps, e[min(s, steps - 1) % len(e)], O[t % block] if O is not None and t >= 0 else None)
         if s == 0:
-            first.record()
-    tick.land(E[steps - 1], O[steps - 1] if O is not None else None)
-    return first
+            first = time.perf_counter() - issued
+        if O is not None and t >= 0 and (t + 1) % block == 0:
+            chain.drain(t + 1 - block, steps, block, O, outputs)
+        if s < steps and s % block == 0 and s:
+            pace.mark()
+    tick.land(e[(steps - 1) % len(e)], O[(steps - 1) % block] if O is not None else None)
+    chain.drain((steps - 1) // block * block, steps, block, O, outputs)
+    return pace.waited, pace.done, first
 
 
 # docs/writing-a-service.md#the-lstm
@@ -88,33 +104,31 @@ def main():
         raise ValueError('The configuration gives each rank a share')
     KIN, H, L = config['input_width'], sum(config['shares']), config['layers']
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
+    block, deep, _ = chain.ring(config['ring_bytes'], steps, rows * KIN * torch.half.itemsize)
     W, bias = shares(config, rank, size, held)
     del held
     tick = lstm.Tick(W, bias, rows, config['shares'], rank, L, KIN, chain.capability(config['capabilities']))
     del W, bias
-    O = torch.empty(steps, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
-    E = chain.landed(rank, inputs, steps, rows, KIN)
-    start, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
+    E = torch_mesh.empty(deep, rows, KIN, dtype=torch.half)
+    O = torch.empty(block, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
+    outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H)) if rank == 0 else None
+    torch.mps.synchronize()
+    dist.barrier()
     began = time.perf_counter()
-    start.record()
-    first = lstm_stream(tick, steps, E, O)
-    end.record()
-    hosted = time.perf_counter() - began
+    paced, done, first = lstm_stream(tick, rank, steps, block, E, O, inputs, outputs)
+    hosted = time.perf_counter() - began - paced
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
     ticks = steps + L - 1
-    steady = first.elapsed_time(end) / 1e3 / (ticks - 1) if ticks > 1 else None
-    if O is not None:
-        torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
+    steady = (began + seconds - done[0]) / (ticks - block - 1) if done else None
     moved = (size - 1) * rows * L * config['shares'][rank] * torch.half.itemsize
     summary = dict(rank=rank, size=size, shares=config['shares'], layers=L, rows=rows, input_width=KIN, width=H,
-                   steps=steps, ticks=ticks, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
+                   steps=steps, ticks=ticks, block=block, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    per_stream_steps_per_second=steps / seconds, tick_microseconds=seconds / ticks * 1e6,
-                   latency_ticks=L, host_microseconds=hosted / ticks * 1e6,
-                   steady_tick_microseconds=steady * 1e6 if steady else None,
+                   latency_ticks=L, host_microseconds=hosted / ticks * 1e6, paced_microseconds=paced / ticks * 1e6,
+                   first_issue_milliseconds=first * 1e3, steady_tick_microseconds=steady * 1e6 if steady else None,
                    sent_bytes_per_tick=moved, kernel={key: tick.args[key] for key in lstm.ARGS})
     print(json.dumps(summary), flush=True)
-    tick.exchange.free()
     dist.destroy_process_group()
 
 

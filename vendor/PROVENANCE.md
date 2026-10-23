@@ -2,7 +2,8 @@
 
 Babel routing daemon, shipped prebuilt because building on a node requires `cc`,
 and invoking `cc` on a virgin Mac triggers the Command Line Tools GUI installer —
-the same trap `bootstrap.sh` avoids by not using `git`.
+the same trap `bootstrap.sh` avoids by not using `git`. A node must never need a
+toolchain, a package manager, or a human at a keyboard.
 
     source   https://www.irif.fr/~jch/software/files/babeld-1.13.1.tar.gz
     tarball  sha256 15f24d26da0ccfc073abcdef0309f281e4684f2aa71126f826572c4c845e8dd9

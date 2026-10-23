@@ -53,6 +53,11 @@ compulsory reduction-to-epilogue dispatch boundary. Raw compiled backend code
 also remains capable of expressing control flow; removing Python callbacks is
 not proof that every remaining backend body satisfies streaming semantics.
 
-At `a4110d4`, `mesh_publish` made a region PRESENT and also cleared PRODUCING.
-Source review showed readers and send posting can use PRESENT while PRODUCING
-retains storage ownership. No partial-publication ABI was implemented.
+The next native publication change must separate making a region PRESENT from
+ending its producer's ownership. Current `mesh_publish` also clears PRODUCING.
+Source review shows readers and send posting can use PRESENT while PRODUCING
+retains storage ownership; final completion must still retire the invocation's
+input readers. This identifies reusable canonical state, not a newly implemented
+partial-publication ABI. Generated arithmetic still needs to emit publication
+for exact configured regions while continuing computation, and shared lowering
+still needs to preserve independently runnable consumer regions.
