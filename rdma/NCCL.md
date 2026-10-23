@@ -438,8 +438,10 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
   `metal_stamp`: one `stamp` dispatch after the program's other dispatches, on either encoder: the page's stamp, written
   by the GPU, with no completion handler standing in for it), so the word equals `reader` once each of those programs has ended, in whatever order the caller
   commits them and on whatever queues, and once each of its tables' `sent` and `landed` has reached its last call
-  (`plan_quiet`: the bridge has done with its pages and its table). Where every plan of these calls is held, a new one is made
-  (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
+  (`plan_quiet`: the bridge has done with its pages and its table, ~0 stamps included once every tuple's `posted`
+  equals its `count`). Where every plan of these calls is held, a new one is made, up to three for one shape of calls
+  (its page sets, as an exchange's: two calls in flight and one beside them); where three are held by calls not yet
+  retired, the call fails as a value (`ncclInvalidUsage`) naming its shape, and nothing waits (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
   a page is written again only after release). The `stamp` dispatch is a system-scope fence, then the atomic add, so
   the pages' stores are visible before the count the host reads with acquire (design/hardware-and-discipline.md
   section 1); a stamp that cannot be encoded fails its program's call as a value.

@@ -1416,14 +1416,21 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
 }
 
 static int plan_quiet(struct ncclComm *comm, const struct plan *p);
+enum { PLAN_SETS = 3 };
 static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n, struct plan **out) {
   release(comm);
   for (size_t i = 0; i < n; i++) list[i].direct_ok = direct_ok(list + i);
   struct plan *p = comm->plans;
-  for (int same = 0; p && !same; p = same ? p : p->next) {
-    same = p->n == n && plan_idle(p) && plan_quiet(comm, p);
+  uint32_t held = 0;
+  for (; p; p = p->next) {
+    int same = p->n == n;
     for (size_t i = 0; same && i < n; i++) same = call_same(p->list + i, list + i);
+    if (same && plan_idle(p) && plan_quiet(comm, p)) break;
+    held += same;
   }
+  if (!p && held >= PLAN_SETS)
+    return fail(ncclInvalidUsage, "%s on communicator %s: the %u page sets of its shape are each held by a call not yet retired", call_name(list),
+                comm->name, (unsigned)PLAN_SETS);
   const ncclResult_t result = p ? ncclSuccess : plan_make(comm, list, n, &p);
   if (result) return result;
   p->rows.at = p->rows.used = 0;
@@ -2300,14 +2307,12 @@ struct ncclMeshRequest {
   struct ncclMeshRequest *next;
 };
 
-static int table_quiet(const struct mesh_plan *t, uint64_t k) {
-  const uint64_t sent = t && k ? stamp_of(&t->sent) : 0, landed = t && k ? stamp_of(&t->landed) : 0;
-  return !t || !k || (sent >= k && landed >= k && !stamp_lost(sent) && !stamp_lost(landed));
-}
-
 static int plan_quiet(struct ncclComm *comm, const struct plan *p) {
-  for (uint32_t h = 0; h < comm->count; h++)
-    if (!table_quiet(p->plans[h].t, p->plans[h].k)) return 0;
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct mesh_plan *t = p->plans[h].t;
+    const uint64_t k = p->plans[h].k;
+    if (t && k && (stamp_of(&t->sent) < k || stamp_of(&t->landed) < k || !mesh_plan_balanced(t))) return 0;
+  }
   return 1;
 }
 
