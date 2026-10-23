@@ -684,15 +684,17 @@ static int64_t exchange_start(int64_t request, const std::vector<int64_t> &sizes
   std::vector<size_t> counts(sizes.begin(), sizes.end());
   const size_t *given = counts.empty() ? nullptr : counts.data();
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  MeshStream *s = &stream_of(stream);
   __block ncclResult_t result = ncclSuccess;
   __block uint64_t start = 0;
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
+      if (s->waiting()) s->signalled(false);
       ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
       result = ncclMeshStart((ncclMeshRequest_t)(uintptr_t)request, given, &on, &start);
     }
   });
-  stream_of(stream).streamed = true;
+  s->streamed = true;
   checked(result);
   return (int64_t)start;
 }

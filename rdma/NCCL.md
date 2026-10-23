@@ -469,14 +469,19 @@ way). A member's landing legs are the pieces it receives from its parent in each
 parent, in order of the part's owner and then the tree; its send legs the pieces it sends to its children, in the same
 order: from its own part, or from the rows where its landing leg of that piece landed. Both ends of a channel compile
 the same legs in the same order, so its entries pair. The library allocates the buffers, as MPI's `MPI_Alloc_mem` and
-NCCL's `ncclMemAlloc` do for buffers a library registers: a slot is one lease holding this rank's part, an area for each
-part it receives any piece of (each piece at its offset), and the slot's table (`struct mesh_table`, then a `struct
-mesh_peer` for each part this rank lands, in rank order, then a `struct mesh_wait` for each landing leg of those parts,
-then a `struct mesh_relay` for each piece it sends on from its rows). A request makes its slots as its starts need
-them.
+NCCL's `ncclMemAlloc` do for buffers a library registers: a slot holds this rank's part, an area for each part it
+receives any piece of (each piece at its offset), and the slot's table (`struct mesh_table`, then a `struct mesh_peer`
+for each part this rank lands, in rank order, then a `struct mesh_wait` for each landing leg of those parts, then a
+`struct mesh_relay` for each piece it sends on from its rows), then its channels' tables. The init makes the request's
+two slots, start k's and start k + 1's, in one lease with one Metal buffer over it, links their tables into the queue
+and takes their rows (a Metal 4 binding's records), once (design/pages-and-functions.md, Freeing 7: "rows for NFE k+1
+point at other pages until the rows for NFE k are released"). No start or binding allocates.
 
-- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, takes a free slot,
-  else the request makes one. A slot is released by use count: every kernel bound to it (`ncclMeshBind`, landing its
+- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, takes the slot of
+  its number modulo 2 once that slot is released, the groups' lock let go while it waits and the revoke read between
+  looks; where the kernels bound to that slot's last start are in a command buffer not yet committed, or one that ended
+  in an error, it fails as a value naming it (torch-mesh commits torch's open buffer before each start). A slot is
+  released by use count: every kernel bound to it (`ncclMeshBind`, landing its
   start or publishing it) counts its end in the slot's table (`ended`, the last threadgroup of `mesh_leave`), and the slot
   is free once that count reaches the binds made of it (`bound`) and the bridge has stamped its tables (below),
   whatever kernels the caller binds or none. So no start reuses pages
@@ -502,10 +507,10 @@ them.
   whose sends count as published and whose landings as consumed: the caller's kernels do both, encoded after the
   start. Where a link is lost under it, its entries read ~0; the kernels bound to it run and publish as they would
   (design/pages-and-functions.md, Link error: the callgraph does not consume the status).
-- A start takes the first of the request's slots whose use count is zero, else makes one, and `ncclMeshBind` finds a
-  start's slot by its number (`slot_of`). A slot's use count is zero once its bound kernels have ended (above) and
-  each of its tables' `sent` and `landed` has reached the slot's last call (~0 reads not reached): until
-  then the bridge may post a receive into the slot. A start that only publishes is free once its
+- `ncclMeshBind` finds a start's slot by its number (`slot_of`, the slot of its number modulo 2 while that is its
+  start). A slot's use count is zero once its bound kernels have ended (above) and each of its tables' `sent` and
+  `landed` has reached the slot's last call or ~0 with every tuple's `posted` equal to its `count` (`slot_held`):
+  until then the bridge may post a receive into the slot. A start that only publishes is free once its
   publishing kernel has ended and its SENDs are done; one whose landing no kernel reads, once it has landed. A start
   never takes the slot of the start before it, whose landing a kernel bound with the new start's number reads.
 - `ncclMeshBind(request, start, lands, publishes, stream, index, groups)` binds the crossing record (`struct
