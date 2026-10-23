@@ -223,9 +223,8 @@ _Static_assert(offsetof(struct link,stopped)%128==0,"the receive thread's words 
    interface terminating (CHILD_TERMINATED, as the child heard it: B9b) */
 /* design/transport.md section 14, "A process a port": the version of the contract between the bridge and its children,
    declared: their command line, `mesh-flow --child VERSION DEVICE INDEX ONES` (its first three words the same
-   for every version, so a bridge finds a child of any version that holds a device: child_elsewhere), and struct
-   child_message.  It changes only where that contract does; a build of the same contract is the same child, whatever
-   its bytes (the operator, 2026-10-21) */
+   for every version), and struct child_message.  It changes only where that contract does; a build of the same
+   contract is the same child, whatever its bytes (the operator, 2026-10-21) */
 #define MESH_CHILD_VERSION 2u
 /* the code a link's loss is booked with where no stream of it is live, each holding on it having ended with units
    outstanding (mesh-link.c stream_gone): the ends of its clients' holdings, not a failure of its lanes (EIO) or its
@@ -288,8 +287,8 @@ struct port {
      the hold they set before the next (`hold_to`), whether the port's link, lost once its lanes were asked for, waits
      to end its child (`recycle`) and whether that end was asked (`ending`), the part of its child's next message
      read (`child_in`, `child_held` bytes of it), and a child of its device from an earlier launch last found alive
-     (`elsewhere`: mesh-link.c child_elsewhere) */
-  pid_t child,elsewhere;
+     (`elsewhere`, its exit watched; `awaited`, the last one told: mesh-link.c child_elsewhere) */
+  pid_t child,elsewhere,awaited;
   uint32_t holder;
   int child_fd,recycle,ending;
   uint32_t aborts,child_held;
