@@ -419,11 +419,11 @@ large tensors in the region: [docs/writing-a-service.md](../../docs/writing-a-se
     buffer queued behind the one the GPU runs, so a commit overlaps the GPU's work (the 10-02 rule, mesh 3c00d37).
     Otherwise it joins torch's open command buffer. In flight counts the library's buffers, not torch's own. The depth
     is the rule's structure, not a setting: nothing is read from a file or the environment, and no node is configured.
-  - A buffer holding four of the library's programs is committed before a fifth is encoded into it, since a group
-    shape keeps four plans and the fifth call of a shape waits for the oldest's program to end (NCCL.md, Plans).
   - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
-    library's: the host path, a recording's compile meeting, and an exchange's start (which waits for start k−3's
-    slot): it commits a publication waiting in the open buffer, and the buffer holding start k−3's kernels. torch's own: `torch.mps.synchronize()`,
+    library's: the host path, a recording's compile meeting, and every call into the library that can wait (a
+    collective's, whose plan may wait for its shape's oldest program, and an exchange's start, which waits for start
+    k−3's slot): before it, the open buffer is committed where a publication waits in it, or, for a start, where it
+    holds start k−3's kernels (`MeshStream::called`, one rule for both callers). torch's own: `torch.mps.synchronize()`,
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
   - A host that blocks outside torch while a publication waits in the open buffer stalls its peer: nothing else
