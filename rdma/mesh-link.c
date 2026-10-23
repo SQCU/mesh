@@ -364,8 +364,8 @@ static void stream_end(struct port *port,uint32_t t){
 /* design/transport.md section 14: stream t's holding at its port's progress thread, each pass.  On its group's first
    cable, an owner word holding a client's while none is served begins a holding, told the group's other cables
    (`begun`, a count); on another cable, the first's count moving past the last holding it served begins one, its owner
-   the first stream's (a cable whose group changed serves from the first's next holding; one not of its first's group,
-   or lost to it, none).  A cable tells the holding
+   the first stream's (a cable whose group changed serves from the first's holding after the count as the group was
+   made, which the parent told in its own `begun`; one not of its first's group, or lost to it, none).  A cable tells the holding
    it serves (`serving`) before it reads whether its group is being made again (`regroup`), and begins none while it is
    (groups_turn: of the two, one sees the other's word).  Its walks begin at its lanes'
    SENDs and receives posted so far and at the other cables' pages as their last holding ended (no unit of an earlier
@@ -386,7 +386,7 @@ static void stream_turn(struct port *port,uint32_t t){
   if(l->hold[t]==HOLD_NONE){
     const uint32_t lead=atomic_load_explicit(&x->lead,memory_order_relaxed);
     uint64_t begun=atomic_load_explicit(&h->begun,memory_order_acquire);
-    if(lead!=l->lead[t]){l->lead[t]=lead;l->begun[t]=begun;}
+    if(lead!=l->lead[t]){l->lead[t]=lead;l->begun[t]=atomic_load(&x->begun);}
     if(!lead && !owner)return;
     if(!lead && owner&MESH_STREAM_GIVEN){stream_free(x,0);return;}
     if(lead && begun==l->begun[t])return;
@@ -1023,6 +1023,7 @@ static void group_set(const uint32_t *at,uint32_t n,uint64_t bandwidth){
     const uint64_t id=atomic_load(&m->cable);
     for(int i=0;i<8;i++){wire^=id>>(8*i)&0xff;wire*=UINT64_C(1099511628211);}
     h->member[c]=(uint8_t)at[c];
+    if(c)atomic_store(&m->begun,atomic_load(&h->begun));
     atomic_store(&m->lead,c?at[0]+1:0);
   }
   atomic_store(&h->wire,n>1?(wire?wire:1):atomic_load(&h->cable));
