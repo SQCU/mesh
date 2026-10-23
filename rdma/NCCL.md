@@ -496,11 +496,15 @@ them, and a start takes no position of the channels' and no record in the groups
 ~0 the landings posted ahead for a start never made; the bridge posts no receive for a landing whose count it has not
 heard of, so none is left for them.
 
-- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, posts into the slot
-  of its number plus one modulo 3 once that slot is released, waiting outside the groups' lock for the command buffer
-  of the kernels last bound to it to complete, in slices of MESH_PAUSE_NS, then for the bridge's stamps, the revoke read
-  between slices (`ncclCommAbort` ends it); where the kernels bound to that slot's last start are in a command buffer not yet committed, or one that ended
-  in an error, it fails as a value naming it (torch-mesh commits torch's open buffer before each start). A slot is
+- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: start k writes its sends into slot k mod 3 once
+  the kernels bound to start k−3 have ended and its SENDs are done, and posts start k+1's landings into slot k+1 mod 3
+  once start k−2's landings have landed, waiting outside the groups' lock for the command buffer of those kernels to
+  complete, in slices of MESH_PAUSE_NS, then for the bridge's stamps, the revoke read between slices (`ncclCommAbort`
+  ends it); where those kernels are in a command buffer not yet committed, or one that ended in an error, it fails as
+  a value naming it (torch-mesh commits torch's open buffer before a start where start k−3's kernels are in it). A
+  kernel's wait reads the stamp of the start it lands from its crossing record (`mesh_crossing` `target`, every landing
+  of a start one call), so a slot's views and waits are written once at the init and no start rewrites them; a slot's
+  `ended` and `bound` count up from the init. A slot is
   released by use count: every kernel bound to it (`ncclMeshBind`, landing its
   start or publishing it) counts its end in the slot's table (`ended`, the last threadgroup of `mesh_leave`), and the slot
   is free once that count reaches the binds made of it (`bound`) and the bridge has stamped its tables (below),

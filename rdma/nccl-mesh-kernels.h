@@ -22,7 +22,7 @@ static NSString *const STEPS =
   "mesh_view<T> operator+(ulong k) const { return mesh_view<T>(at + k * sizeof(T)); } "
   "template <typename U> mesh_view<U> as() const { return mesh_view<U>(at); } "
   "private: device uchar *at; };\n"
-  XSTR(MESH_CROSSING(device mesh_table *, uint,
+  XSTR(MESH_CROSSING(device mesh_table *, uint, ulong,
                      friend void mesh_enter(constant mesh_crossing &, uint); friend void mesh_leave(constant mesh_crossing &, uint);
                      friend uint mesh_landings(constant mesh_crossing &);
                      template <typename T> friend mesh_view<T> mesh_landing(constant mesh_crossing &, uint);
@@ -51,7 +51,7 @@ static NSString *const STEPS =
   "} while (left && ++looks < polls); }\n"
   "inline void mesh_enter(constant mesh_crossing &c, uint i) { "
   "for (uint q = 0; i == 0 && c.land && q < c.land->waits; q++) { device mesh_wait &e = mesh_waits(c.land)[q]; "
-  "mesh_step_until(c.polls, e.landed, e.target); } "
+  "mesh_step_until(c.polls, e.landed, c.target); } "
   "threadgroup_barrier(mem_flags::mem_device); atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, MESH_SYSTEM); }\n"
   "inline void mesh_leave(constant mesh_crossing &c, uint i) { "
   "device mesh_table *t = c.publish ? c.publish : c.land; "

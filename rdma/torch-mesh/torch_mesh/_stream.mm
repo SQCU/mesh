@@ -698,7 +698,7 @@ static int64_t exchange_start(int64_t request, const std::vector<int64_t> &sizes
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
       MeshStream::Exchanged &x = s->exchanged[request];
-      const int64_t held = x.last - 1;
+      const int64_t held = x.last - 2;
       if (held > 0 && x.bound[held % 3] == (__bridge void *)stream->commandBuffer().rootCommandBuffer) s->signalled(false);
       ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)stream->commandEncoder()};
       result = ncclMeshStart((ncclMeshRequest_t)(uintptr_t)request, given, &on, &start);

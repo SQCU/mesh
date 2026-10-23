@@ -2326,7 +2326,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
 enum { SETS = 3 };
-struct slot { void *pages, *command; size_t offset; struct mesh_table *table; struct metal_rows rows; uint64_t row, start, landing, *k, *kl; uint32_t bound; int unbound; };
+struct slot { void *pages, *command; size_t offset; struct mesh_table *table; struct metal_rows rows; uint64_t row, start, landing, landing_k, *k, *kl; uint32_t bound; int unbound; };
 struct leg { uint32_t x, piece, channel, index; int32_t from; };
 struct ncclMeshRequest {
   struct ncclComm *comm;
@@ -2362,15 +2362,17 @@ static uint64_t slot_address(const struct ncclMeshRequest *r, const struct slot 
   return metal_address(r->buffer) + s->offset + (uint64_t)((const char *)at - (const char *)s->pages);
 }
 
-static int slot_held(const struct ncclMeshRequest *r, const struct slot *s, int tables) {
-  const uint32_t H = r->comm->count;
-  if (__atomic_load_n(&s->table->ended, __ATOMIC_ACQUIRE) < s->bound) return 1;
-  for (uint32_t h = 0; tables && h < 2 * H; h++) {
-    const struct mesh_plan *t = slot_table(r, s, h % H, (int)(h / H));
-    const uint64_t k = h / H ? s->kl[h % H] : s->k[h % H];
+static int tables_held(const struct ncclMeshRequest *r, const struct slot *s, int land) {
+  for (uint32_t h = 0; h < r->comm->count; h++) {
+    const struct mesh_plan *t = slot_table(r, s, h, land);
+    const uint64_t k = land ? s->kl[h] : s->k[h];
     if (t && k && (stamp_of(&t->sent) < k || stamp_of(&t->landed) < k || !mesh_plan_balanced(t))) return 1;
   }
   return 0;
+}
+static int kernels_held(const struct slot *s) { return __atomic_load_n(&s->table->ended, __ATOMIC_ACQUIRE) < s->bound; }
+static int slot_held(const struct ncclMeshRequest *r, const struct slot *s, int tables) {
+  return kernels_held(s) || (tables && (tables_held(r, s, 0) || tables_held(r, s, 1)));
 }
 
 static int request_held(const struct ncclMeshRequest *r, int tables) {
@@ -2460,13 +2462,8 @@ static void landings_post(struct ncclMeshRequest *r, struct slot *s, uint64_t m)
   struct ncclComm *const comm = r->comm;
   const size_t z = SIZE[r->type];
   const uint32_t me = (uint32_t)comm->rank;
-  struct mesh_table *t = s->table;
-  struct mesh_peer *peer = (struct mesh_peer *)(t + 1);
-  struct mesh_wait *wait = (struct mesh_wait *)(peer + r->peers);
-  *t = (struct mesh_table){metal_address(r->buffer) + s->offset, 0, r->peers, 0, r->relays, r->waits, 0, 0, 0};
-  comm->unpublished -= s->unbound;
-  s->unbound = 0; s->bound = 0; s->start = 0; s->landing = m; s->rows.at = s->rows.used = 0;
-  for (uint32_t h = 0; h < comm->count; h++) s->kl[h] = r->ltab[h] ? ++comm->attach->calls : 0;
+  s->landing = m; s->landing_k = ++comm->attach->calls;
+  for (uint32_t h = 0; h < comm->count; h++) s->kl[h] = r->ltab[h] ? s->landing_k : 0;
   for (uint32_t e = 0; e < r->ins; e++) {
     const struct leg *l = r->in + e;
     const uint32_t p = r->first[l->x] + l->piece;
@@ -2475,11 +2472,6 @@ static void landings_post(struct ncclMeshRequest *r, struct slot *s, uint64_t m)
     x->offset = 0; x->bytes = part_bytes(r, NULL, l->x, p);
     x->need = MESH_NEED_AHEAD;
     key_of(x, comm->id, me, (uint32_t)comm->channels[l->channel].peer, r->seq, m * r->lands[l->channel] + l->index);
-  }
-  for (uint32_t e = 0; e < r->peers; e++) peer[e] = (struct mesh_peer){metal_address(r->buffer) + s->offset + r->area[r->own[e]]};
-  for (uint32_t e = 0; e < r->waits; e++) {
-    const struct leg *l = r->in + r->awaited[e];
-    wait[e] = (struct mesh_wait){slot_address(r, s, &slot_entry(r, s, l->channel, 1, l->index)->done), s->kl[l->channel]};
   }
   for (uint32_t h = 0; h < comm->count; h++)
     if (r->ltab[h]) table_begin(slot_table(r, s, h, 1), s->kl[h]);
@@ -2511,6 +2503,8 @@ static void sends_write(struct ncclMeshRequest *r, struct slot *s, uint64_t m, c
   struct mesh_table *t = s->table;
   struct mesh_relay *relay = (struct mesh_relay *)((struct mesh_wait *)((struct mesh_peer *)(t + 1) + r->peers) + r->waits);
   uint64_t ready = 0;
+  comm->unpublished -= s->unbound;
+  s->unbound = 0; s->rows.at = s->rows.used = 0;
   for (uint32_t h = 0; h < comm->count; h++) s->k[h] = r->tab[h] ? ++comm->attach->calls : 0;
   for (uint32_t e = 0, j = 0; e < r->outs; e++) {
     const struct leg *l = r->out + e;
@@ -2648,6 +2642,9 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
     size_t at;
     s->pages = (char *)r->pages + i * stride; s->offset = offset + i * stride; s->row = row + i * stride / comm->page;
     s->table = memset((char *)s->pages + r->table, 0, r->bytes - r->table);
+    *s->table = (struct mesh_table){metal_address(r->buffer) + s->offset, 0, r->peers, 0, r->relays, r->waits, 0, 0, 0};
+    struct mesh_peer *peer = (struct mesh_peer *)(s->table + 1);
+    for (uint32_t e = 0; e < r->peers; e++) peer[e] = (struct mesh_peer){metal_address(r->buffer) + s->offset + r->area[r->own[e]]};
     s->rows.comm = comm;
     if (metal_rows_take(&s->rows, 1, &rows, &at)) made = fail(ncclSystemError, "out of memory: an exchange's rows");
     s->rows.at = s->rows.used = 0;
@@ -2658,6 +2655,14 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
       pthread_mutex_lock(&attach_lock);
       mesh_queue_link(&comm->attach->context, t);
       pthread_mutex_unlock(&attach_lock);
+    }
+  }
+  for (uint32_t i = 0; !made && i < SETS; i++) {
+    struct slot *s = r->slots + i;
+    struct mesh_wait *wait = (struct mesh_wait *)((struct mesh_peer *)(s->table + 1) + r->peers);
+    for (uint32_t e = 0; e < r->waits; e++) {
+      const struct leg *l = r->in + r->awaited[e];
+      wait[e] = (struct mesh_wait){slot_address(r, s, &slot_entry(r, s, l->channel, 1, l->index)->done), 0};
     }
   }
   if (made) { request_end(r, 1); return made; }
@@ -2685,14 +2690,14 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   release(comm);
   struct slot *s = r->slots + number % SETS, *ahead = r->slots + (number + 1) % SETS;
   if (!result && s->landing != number) landings_post(r, s, number);
-  while (!result && slot_held(r, ahead, 1)) {
-    const int status = ahead->command ? metal_ended(ahead->command) : 0;
+  while (!result && (tables_held(r, ahead, 1) || kernels_held(s) || tables_held(r, s, 0))) {
+    const int status = kernels_held(s) && s->command ? metal_ended(s->command) : 1;
     if (revoked(comm)) result = revoked_fail(comm);
     else if (status == 2 || status < 0)
-      result = fail(status < 0 ? ncclSystemError : ncclInvalidUsage, "ncclMeshStart %llu on %s: the pages it posts ahead are start %llu's, whose kernels' command buffer %s",
-                    (unsigned long long)number, comm->name, (unsigned long long)(number - 2), status < 0 ? "ended in an error" : "is not committed");
+      result = fail(status < 0 ? ncclSystemError : ncclInvalidUsage, "ncclMeshStart %llu on %s: its pages are start %llu's, whose kernels' command buffer %s",
+                    (unsigned long long)number, comm->name, (unsigned long long)(number - 3), status < 0 ? "ended in an error" : "is not committed");
     else {
-      void *command = status ? NULL : metal_retain(ahead->command);
+      void *command = status ? NULL : metal_retain(s->command);
       pthread_mutex_unlock(&group_lock);
       if (command) { metal_completed(command, MESH_PAUSE_NS); metal_release(command); }
       else sched_yield();
@@ -2722,7 +2727,8 @@ ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int pu
                                  (unsigned long long)start)
                           : gpu(metal_bind(on->commandEncoder, on->argumentTable, on->residencySet, held ? &held->rows : NULL,
                                            land ? metal_address(r->buffer) + land->offset + r->table : 0,
-                                           publish ? metal_address(r->buffer) + publish->offset + r->table : 0, groups, index, buffers, held != NULL),
+                                           publish ? metal_address(r->buffer) + publish->offset + r->table : 0, land ? land->landing_k : 0, groups, index,
+                                           buffers, held != NULL),
                                 "a crossing's binding");
   for (int i = 0; !result && i < 2; i++) {
     struct slot *s = i ? publish : land;
