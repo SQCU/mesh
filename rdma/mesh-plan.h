@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-struct mesh_reach { uint32_t node,padding; uint64_t bandwidth; };
+struct mesh_reach { uint32_t node,cable; uint64_t bandwidth; };
 int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node);
 
 int mesh_region(uint64_t *bytes,uint64_t *unleased);
@@ -29,8 +29,6 @@ int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
 
 struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const double *log_weight; };
 
-uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight);
-
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
 
 enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
@@ -40,8 +38,6 @@ enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_AL
 struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
-
-uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
 
 void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts,uint32_t *moves);
 
@@ -68,12 +64,21 @@ uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,in
 
 struct mesh_routing { uint32_t nodes,routes; const uint32_t *pair,*start,*node; const double *share; };
 
-void mesh_routing_room(uint32_t nodes,uint32_t most,uint32_t *routes,uint32_t *hops);
+struct mesh_demand { uint32_t root,padding; uint64_t up,down; const uint64_t *leaves; };
 
-uint32_t mesh_routing_trees(const struct mesh_trees *,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,uint32_t *node,double *share);
+uint32_t mesh_solve_room(const struct mesh_link_map *,double eps,uint32_t count);
 
-uint32_t mesh_routing_pack(const struct mesh_link_map *,double eps,uint32_t most,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,
-                           uint32_t *node,double *share);
+uint32_t mesh_solve(const struct mesh_link_map *,double eps,double hop,const struct mesh_demand *demands,uint32_t count,uint32_t room,
+                    uint32_t *demand,uint32_t *parent,double *share);
+
+uint32_t mesh_flow_trees(uint32_t nodes,const struct mesh_demand *demands,const uint32_t *demand,const uint32_t *parent,const double *share,
+                         uint32_t count,uint32_t first,uint32_t last,uint32_t *root,uint32_t *tree,double *log_weight);
+
+uint32_t mesh_flow_routing(uint32_t nodes,const struct mesh_demand *demands,const uint32_t *demand,const uint32_t *parent,const double *share,
+                           uint32_t count,uint32_t first,uint32_t last,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,uint32_t *node,
+                           double *weight);
+
+void mesh_cut_shares(uint64_t elements,uint32_t element_bytes,uint64_t page,const double *share,uint32_t count,uint64_t *first,uint64_t *length);
 
 struct mesh_block { uint32_t from,to,source,target,type,element_bytes; uint64_t first,at,elements; };
 struct mesh_part { uint32_t route,padding; uint64_t first,elements; };

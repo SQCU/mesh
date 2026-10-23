@@ -78,17 +78,15 @@ landed in place (a COPY earlier in the group), and the landed bytes are the NIC'
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
   (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens, on the node's fabric address where it holds one), where
   each rank's node meets the others'. The root listens on that host alone where it is an IPv6 address.
-- `ncclMeshCommInitRank(comm, nranks, id, rank, paths, programs, count, small, name, config)`: the same init and
+- `ncclMeshCommInitRank(comm, nranks, id, rank, programs, count, small, name, config)`: the same init and
   bootstrap (`id` the root's `host:port`, which the caller hands every rank; each rank's node is its bridge's), with
   the collectives as operands; the map is its members' (below).
-  - `paths`: the routing tables every collective of the structural table (below) is compiled along, each member's
-    trees, checked against the communicator's map. NULL means the map's shortest-path trees.
-  - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the structural table
-    (below).
+  - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means each plan compiles its own
+    along the solver's trees (below).
   - `small`: not read.
   - `name`: the communicator's, which its failures and its splits' names carry (NULL: the id).
   - `config`: NULL, or `blocking` not 0, is a blocking init; `blocking` 0 is NCCL's non-blocking init (below).
-  - The library compares none of these values across ranks. `ncclCommInitRank` is this call with no paths, programs, small, name or config,
+  - The library compares none of these values across ranks. `ncclCommInitRank` is this call with no programs, small, name or config,
     and `ncclCommInitRankConfig` the same with its config.
 - Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
   nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
@@ -160,25 +158,24 @@ Whether a map joins every two of its nodes is
 collectives run only on a map that joins their members: a communicator's collective on a map that does not fails as a
 value naming two members no path between members joins (`ncclInvalidUsage`).
 
-Every member makes the map from the same gathered reports, so the members' maps are one. Paths, programs and forms are
-each rank's caller's, and nothing compares them at run time.
+Every member makes the map from the same gathered reports, so the members' maps are one. Programs, forms and the solver
+are each rank's caller's, and nothing compares them at run time.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
-MSCCL-IR), the communicator's table of them. The caller passes its own table (`ncclMeshCommInitRank`'s `programs`;
-`mesh_compile`, `chunks` its cut, `whole` the single-phase all-reduce); with none, the communicator compiles
-the structural table at its first call that needs it, along the caller's `paths` or else the map's shortest-path trees
-(each member's in-tree of the map's routes, its parents among equals spread over the links):
+MSCCL-IR). The caller passes its own table (`ncclMeshCommInitRank`'s `programs`; `mesh_compile`, `chunks` its cut,
+`whole` the single-phase all-reduce); with none, a plan compiles each of its collectives when it is made, along the
+trees the solver gives the plan's traffic ([Routing](#routing)):
 
-- the all-reduce single-phase (Trivance: each member's sum up its own tree, the map's diameter in dependent crossings;
-  at two members, and wherever every two members are linked, the direct exchange);
+- the all-reduce single-phase (each member's sum up its own trees, the map's diameter in dependent crossings; at two
+  members, and wherever every two members are linked, the direct exchange) or two-phase;
 - the reduce-scatter and the all-gather, segment s up and down s's trees;
 - each root's reduce and broadcast, up and down the root's trees.
 
 Each is uncut: a step's piece is one entry of its holding's list, any size, which the bridge alone cuts into SENDs. A
 program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) lie on the region's pages
 (`mesh_program_steps_cut`), so every piece starts on a page wherever its buffer does ([Memory](#memory)). A call runs
-its table's first program of its collective (and root) whose size bound its operand is under. Nothing about a program
-is decided where a call runs.
+the caller's first program of its collective (and root) whose size bound its operand is under, else its plan's. Nothing
+about a program is decided where a plan restarts.
 
 **Counted all-to-all.** `ncclMeshAlltoAllCounted(send, sendrows, counts, sendsegs, recv, capacity, received, landed,
 recvsegs, arrived, row, type, comm, stream)`, MPI_Alltoallv whose counts the GPU wrote, is refused as a value
@@ -221,13 +218,11 @@ of a full mesh was 331, 331 and 226 us against the gather's 534 a chunk's layer 
 output_data/planner-20261015/pass2 engine2-after.json).
 
 **Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
-list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, compiled ahead of the
-structural table at each map read, so a call takes the first form that fits it and the default otherwise:
+list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, so a plan compiles a
+call by the first form that fits it and else by the default (the all-reduce single-phase, every collective uncut):
 
 | field | form |
 |---|---|
-| `trees` | `ncclMeshTreesShortest` (the communicator's paths, else the shortest-path trees) or `ncclMeshTreesPacked` (`mesh_trees_pack` at the entry's `eps` and `most` trees a root: Blink's packed spanning trees, every link a share) |
-| `shares` | a form's cut of each segment among its root's trees (root r's k-th tree, the packing's heaviest first or the shortest trees' order, `shares[r x most + k]`, a tree of share 0 or past `most` carrying none; NULL: equally): the configuration's allocation, never the flows the packing infers from the map's links |
 | `whole` | an all-reduce's: 1 single-phase, 0 two-phase (the reduce-scatter and then the all-gather along the same trees) |
 | `chunks` | each tree's part cut into chunks, pipelined down and up the trees (1: uncut) |
 | `below` | the bytes a call is under to take it (0: any size): the size classes |
@@ -236,10 +231,8 @@ These are the forms mesh cc8a6f8e^'s default table chose among by a price (its `
 chunks, by size class); the price is gone and the caller's configuration document names the form (the operator,
 2026-10-17: "if there is an overriding operand that stops our code from running beacuse someone wanted ot put in a shim
 1 month ago and tried to justify it by calling the hardocde a 'model', we need to rip out all of the rleated tech debt,
-includnig notatinoal debt"). With no forms nothing changes: the structural table as above. A rank's forms are taken at
-the communicator's next group, and nothing compares them across ranks; splits and shrinks keep them; a communicator over the
-caller's own programs compiles them ahead of its programs. A share is 0 or more: a tree of share 0 carries none of its
-root's segment, and a form whose root's trees all take 0 fails as a value where it is compiled. A form's cuts lie on pages. Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
+includnig notatinoal debt"). A rank's forms are taken at the communicator's next plan, and nothing compares them across
+ranks; splits and shrinks keep them. A form's cuts lie on pages. Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
 16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench
 output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 57.4 to 31.2-36.2 us
 (pair_programs.json): never measured on more than two nodes.
@@ -248,7 +241,7 @@ output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 5
 `ncclMeshReduceScatterV(send, recv, counts, type, op, comm, stream)` are MPI_Allgatherv and MPI_Reduce_scatter: rank
 r's segment is `counts[r]` elements (any of them 0), packed in rank order. Each is one program, the communicator's
 all-gather or reduce-scatter, its operand cut into those segments (`mesh-plan.h` `mesh_program_steps_cut`: a part
-within segment s takes its tree's share of `counts[s]` in pages: a configured form's `shares`, else equal; each
+within segment s takes its tree's share of `counts[s]` in pages, the solver's; each
 segment starts on a page of its buffer, else the call fails as a value), so a capacity-shaped division of the work (metal-microbench
 docs/placement.md) is one tree program over unequal segments rather than a rooted broadcast or reduce a rank. MPI
 specifies the counts alike on every rank [MPI 4.1 §6.7, §6.10.2], and the library compares none across ranks; equal
@@ -499,15 +492,18 @@ bridge post a run's last unit at its own length, is not a field of it.
 `ncclMeshExchangeInit(parts, lands, type, comm, &request)` is MPI-4's `MPI_Neighbor_allgatherv_init` [MPI 4.1 section
 8.8] over the adjacency the caller names (as `MPI_Dist_graph_create_adjacent` names one), every member passing the same
 exchange: rank a's part is `parts[a]` elements, and it lands at each rank b with `lands[a x nranks + b]` set. Each member
-compiles the whole exchange into its own legs at the init, with no message: for each pair (a, b) the route (their link
-where one joins them, else the routing table's route of fewest hops), and on each link of a route from a, a's part
-crosses once. A member's landing legs are the parts it lands on each channel, in rank order of their source, and its
-send legs the parts it sends on each channel in the same order: its own part, or the rows a landing leg of another
-member's part landed in. Both ends of a channel compile the same legs in the same order, so its entries pair. The
-library allocates the buffers, as MPI's `MPI_Alloc_mem` and NCCL's `ncclMemAlloc` do for buffers a library registers: a
-slot is one lease holding this rank's part, a landing area a landing leg, and the slot's table (`struct mesh_table`,
-then a `struct mesh_peer` for each part this rank lands, in rank order, then a `struct mesh_relay` for each part it
-sends on from its rows). A request makes its slots as its starts need them.
+compiles the whole exchange into its own legs at the init, with no message: each part is a demand of the solver (its
+owner the root, the ranks that land it the leaves, its bytes down: [Routing](#routing)), and each of the part's trees
+carries a piece of it, the part cut by the trees' shares in pages (`mesh_cut_shares`; a start's count cut the same
+way). A member's landing legs are the pieces it receives from its parent in each tree, on the channel toward that
+parent, in order of the part's owner and then the tree; its send legs the pieces it sends to its children, in the same
+order: from its own part, or from the rows where its landing leg of that piece landed. Both ends of a channel compile
+the same legs in the same order, so its entries pair. The library allocates the buffers, as MPI's `MPI_Alloc_mem` and
+NCCL's `ncclMemAlloc` do for buffers a library registers: a slot is one lease holding this rank's part, an area for each
+part it receives any piece of (each piece at its offset), and the slot's table (`struct mesh_table`, then a `struct
+mesh_peer` for each part this rank lands, in rank order, then a `struct mesh_wait` for each landing leg of those parts,
+then a `struct mesh_relay` for each piece it sends on from its rows). A request makes its slots as its starts need
+them.
 
 - `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, takes a free slot,
   else the request makes one. A slot is released by use count: every kernel bound to it (`ncclMeshBind`, landing its
@@ -521,7 +517,8 @@ sends on from its rows). A request makes its slots as its starts need them.
   declared (partitioned communication's `MPI_Pready` [MPI 4.1 chapter 4]; design/extents-and-liveness.md, b); NULL moves
   the declared counts. The start presents each leg's entry. A send entry of this rank's part is gated on the table's
   `published`, and one of a relayed part on its relay record's (`struct mesh_entry` `word`, its region offset; `base`
-  0), which a kernel bound to the start stores (`mesh_leave`): the holding's `ready`, a count that every later
+  0; the table's `published` is the pages of this rank's whole part, so it covers each piece's entry), which a kernel
+  bound to the start stores (`mesh_leave`): the holding's `ready`, a count that every later
   group's publication moves, never covers it (the bridge reads an entry's word, design/transport.md section 14). So a
   group or another start encoded before this start's publishing kernel sends nothing of the slot before it is written.
   A channel's entries are posted in their order, so that group's SENDs on the channel wait behind the start's until its
@@ -560,8 +557,8 @@ as a prologue and an epilogue around its function (Triton-distributed's and Tile
 communication fused into the GEMM's prologue and epilogue, 2024). The device header (`ncclMeshMetalPrelude`) gives the
 kernel:
 
-- `mesh_enter(crossing, tid)`, called by every thread: thread 0 of each threadgroup awaits each peer's `landed` past the
-  landed start's entry (bounded), then a barrier and one system-scope fence;
+- `mesh_enter(crossing, tid)`, called by every thread: thread 0 of each threadgroup awaits each of the landed start's
+  waits (each piece's `landed` past its entry, bounded), then a barrier and one system-scope fence;
 - the views: `mesh_landing<T>(crossing, q)` (the q-th peer's part, in rank order, q below `mesh_landings(crossing)`),
   `mesh_own<T>(crossing)` (this rank's part of the landed start) and `mesh_send<T>(crossing)` (this start's part), each
   a `mesh_view<T>` whose `[k]` loads system-coherent and whose `store(k, v)` stores system-coherent; `view + k` is the
@@ -679,6 +676,48 @@ Porting:
   waiting in a host-path collective (an `ncclBroadcast` from a peer) does not stop its other communicators.
 - `ncclCommRegister` refuses a buffer outside the region.
 
+## Routing
+
+The routes of every crossing come from one solver, run when a plan is made and when an exchange is initialized, on
+data every member holds alike, so nothing is exchanged (design/rubrics.md C7). The operator, 2026-10-22: "congestion,
+using all links which would reduce the aggregate latency of the complete compiled function instead of using arbitrary
+links wihtout any feedback from the effect of the previous routing? an iterative solver that converges on all graphs
+including unseen ones in fast finite time is preferred".
+
+- **Input.** The traffic as demands (`mesh-plan.h` `struct mesh_demand`): a root, the leaves it joins (a bit a rank;
+  NULL every rank), and the bytes each edge of its tree carries toward the root (`up`) and away from it (`down`).
+  - A plan's collective: a demand a segment's owner, every rank a leaf: a reduce-scatter's segment `up`, an
+    all-gather's `down`, a two-phase all-reduce's both, a single-phase all-reduce's whole operand `up` toward every
+    rank; a reduce's operand `up` toward its root, a broadcast's `down` from it.
+  - A plan's all-to-all (the hosted family and `ncclMeshAlltoAllV`): a demand a block from a to b, root b, leaf a, `up`
+    its bytes.
+  - An exchange: a demand a rank's part, root its owner, the ranks that land it the leaves, `down` its bytes.
+  - The capacities are the communicator's map: each link's bandwidth in each direction, parallel links summed (a link
+    without a figure one unit), so a figure a cable drops in as one more link; and a per-hop latency (`hop`, seconds:
+    0, the bridges' records carrying no latency).
+- **Multiplicative weights** [Garg and Könemann, FOCS 1998; Fleischer, SIAM J. Discrete Math. 2000; the framework of
+  Arora, Hazan and Kale, Theory of Computing 2012]: T = floor(ln m / ε²) + 1 rounds (m the directed links, ε
+  `MESH_SOLVE_EPS`, 0.1). In each round a link's length is exp(ε (x_e − x_max) / ρ) / c_e, x_e its load so far over its
+  capacity c_e and ρ the most load a round can put on the narrowest link; each demand takes the tree of least length
+  from its leaves to its root (Dijkstra toward the root, an edge's length its `up` bytes times the length toward the
+  root plus its `down` bytes times the length away, plus `hop`; ties to the lower rank), and after the round each
+  tree's edges add the demand's bytes / T to their loads. A reduction's leaves meet in one in-tree, so its partials
+  combine where their paths meet (design/pages-and-functions.md item 6). The average over the rounds is within (1 + ε)
+  of the least worst-link congestion of trees, in O(ε⁻² m log m) rounds on any graph (collectives as multicommodity
+  flow: TE-CCL [Liu et al., SIGCOMM 2024]; packed collective forests: ForestColl [Zhao et al., 2024]).
+- **Output.** For each demand its distinct trees, each with its share (the rounds that took it over T), in three flat
+  arrays: `demand`, `parent` (n entries a tree, UINT32_MAX off it) and `share` (`mesh_solve`; room from
+  `mesh_solve_room`). A collective's trees become its program's (`mesh_flow_trees`, `mesh_compile`), an all-to-all's
+  its table's routes (`mesh_flow_routing`, `mesh_block_parts`, `mesh_exchange_steps`), an exchange's its legs; every
+  cut by shares is in page quanta (`mesh_cut_shares`).
+- **When.** Once when a plan is made (`plan_calls`) and once when an exchange is initialized; a plan's restarts read its
+  programs. The solver is deterministic: every member computes the same trees from the same map and demands (its exp
+  and log IEEE-exact, the planner compiled with `FP_CONTRACT OFF`). A map that leaves two members of a demand apart
+  fails the call as a value.
+- **The operand.** `ncclMeshCommSetSolver(comm, solver, context)` sets a function of the solver's signature
+  (`ncclMeshSolver`) in its place, every member passing the same between its groups (NULL: `mesh_solve`); the
+  communicator's plans are made again. A learned optimizer passes its own (design/rubrics.md D6).
+
 ## Routes between unlinked ranks
 
 A bridge posts only its own holders' entries (design/transport.md); members relay. A communicator's init holds a stream
@@ -690,25 +729,15 @@ calls where every member knows them: the operator, 10-21, "forwarding is REQUIRE
 this point onwards and therefore all topologies must be supported forever without justification by current environment
 state"; "the collective api can contain a solver or optimizer".
 
-**The routing table** (`mesh-plan.h` `struct mesh_routing`) is an operand (design/rubrics.md C3): for each ordered pair
+**Routes** of every crossing are the solver's ([Routing](#routing)). An all-to-all's table (`mesh-plan.h` `struct
+mesh_routing`, the solver's paths for its blocks, `mesh_flow_routing`): for each ordered pair
 (a, b) of the communicator's ranks, the routes a block from a to b takes, each a list of ranks from a to b whose every
 two consecutive ones are linked, and each route's share of the pair's bytes. A pair's bytes cross several routes at
 once: a Thunderbolt link moves far fewer bytes a second than a node's memory, through which a member between two others
 relays (the operator, 10-21, of single path against multipath: "a choice related to whether link bandwidth is higher or
-lower than SHM<->CPU bandwidth"). The table is the caller's (`ncclMeshCommSetRouting(comm, table)`, every member passing
-the same table at the same point between its groups, as forms are passed; NULL: none; a table of another count of nodes,
-or without its pairs and starts, is refused at that call as a value) where one is given, and else the routing
-solver's on the map
-(`mesh_routing_pack`): the map's spanning trees packed by Garg and Könemann's maximum concurrent flow over its links'
-bandwidths [FOCS 1998], as Blink packs them [Wang et al., MLSys 2020], each pair's routes the paths from a up each of b's
-trees and each route's share the flow of the trees that give it (`mesh_routing_trees`); where no tree packs, each pair's
-route on the map's table. Every member makes the same table from the same map and the same operand, so nothing is
-exchanged (C7, as programs and forms are). It is made at the first call or query that reads it on the communicator's
-map. `ncclMeshCommGetRouting(comm, &table, &given)` copies the table
-the calls read now (freed by `ncclMeshRoutingFree`), `given` 1 where it is the caller's: the solver sits behind the
-operand, so a learned optimizer can pass its own (design/rubrics.md D6).
+lower than SHM<->CPU bandwidth").
 
-**Collectives** run along the communicator's trees ([Communicators](#communicators)): a member between two others on a
+**Collectives** run along their plan's trees ([Communicators](#communicators)): a member between two others on a
 tree receives, combines or copies, and sends on, in its own program; nothing about it differs where two members are not
 linked.
 
@@ -732,11 +761,11 @@ reaches the entry.
 
 **Calls every member plans.** An `ncclMeshAlltoAllV` and a persistent exchange are passed alike at every member (the
 count matrix; each rank's part and where it lands), as the hosted family's blocks are known to every member, so each
-member compiles from the routing table the pairs that route through it, with no message (MSCCL's and TACCL's relay
+member compiles from the solver's routes the pairs that route through it, with no message (MSCCL's and TACCL's relay
 schedules, compiled at every rank [Cowan et al., ASPLOS 2023; Shah et al., NSDI 2023]). For a pair x to b through a:
 x's plan presents its pages as a send to a, a's plan presents those rows as a landing and then as a send to b, and b's
 plan lands them. An all-to-all's relay is the hosted family's (above: a send gated on the step's receive). An
-exchange's relay is a leg of a's slot: a's send of the rows its landing leg landed in, gated on the relay record's
+exchange's relay is a leg of a's slot: a's send of the rows its landing leg of a piece landed in, gated on the relay record's
 `published`, which a's kernel bound to the start stores once the landing has landed ([Persistent
 exchanges](#persistent-exchanges)); the slot's rows return by its use count once its entries are done.
 
@@ -849,8 +878,8 @@ gathers, parses or joins bridge records itself.
 - **A link map** (`struct mesh_link_map`), an operand: `nodes` nodes and `links` links of a kind. `MESH_LINKS_MESH`
   every pair linked; `MESH_LINKS_RING` link i's second node follows its first around one cycle through every node;
   `MESH_LINKS_TREE` link i's first node is its second's parent; `MESH_LINKS_GRAPH` the links as given, any connected
-  graph. `bandwidth` (NULL: none) is each link's, a hardware fact: of routes of equally few links the planner takes the
-  one over the faster hops, and a hop's capacity is its pair's parallel links' count times the slowest one's bandwidth.
+  graph. `bandwidth` (NULL: none) is each link's, a hardware fact: the solver's capacity of a pair is its parallel links'
+  bandwidths summed, and `mesh_routes` takes of routes of equally few links the one over the faster hops.
   `relays` are nodes numbered from `nodes` that a route may cross and that hold no rank (a communicator's map has none:
   the bridges forward nothing). `mark` is each node's and relay's mark (its bridge's node number). `next` is the
   routing table, of N = nodes + relays: each node b's in-tree, `next[v x N + b]` v's parent in it. The route between a
@@ -870,15 +899,11 @@ gathers, parses or joins bridge records itself.
 - **Trees** (`struct mesh_trees`): tree t rooted at `root[t]`, node v's parent `parent[t x nodes + v]`, `log_weight[t]`
   its unnormalised log share of what its root gathers and sends; a root's trees split its elements by exp(weight), each
   the floor of its share and the first ones one element more. A reduction toward r runs up r's trees, a broadcast from
-  r down them, a message to r along its sender's path in r's heaviest tree. `mesh_trees_shortest`: each member's in-tree of shortest paths over the members' hops, a parent among those one
-  equal hop nearer the root chosen first by the least hash, then by four passes of local search on the sum of the
-  squares of the physical links' loads (the potential of the congestion game [Rosenthal 1973], which every move
-  lowers), the pass whose most loaded link carries fewest edges kept. `mesh_trees_pack(map, eps, most, ...)`: each
-  node's spanning in-arborescences packed into the map's links by Garg and Konemann's maximum concurrent flow [FOCS
-  1998], each phase sending every root's unit along minimum-length arborescences [Chu and Liu 1965; Edmonds 1967], a
-  link's length growing by (1 + eps x flow / capacity); a root's equal trees merged and its `most` heaviest kept (Blink's
-  packing [Wang et al., MLSys 2020]). exp and log there are computed from IEEE-exact operations alone and the file is
-  compiled with `FP_CONTRACT OFF`, so every node computes the same trees and shares whatever its libm.
+  r down them. `mesh_flow_trees` makes them from the solver's trees of a range of demands.
+- **The solver** (`mesh_solve(map, eps, hop, demands, count, room, demand, parent, share)`, `mesh_solve_room`):
+  [Routing](#routing). `mesh_flow_routing` makes an all-to-all's routing table from its demands' trees (each a path
+  from its leaf to its root); `mesh_cut_shares(elements, element_bytes, page, share, count, first, length)` cuts
+  elements by shares in quanta of the least multiple of the page and an element.
 - **Programs** (`struct mesh_program`, as MSCCL-IR is the program the MSCCL runtime interprets [Cowan et al., ASPLOS
   2023]): every rank's moves, its operand cut into parts, part p within segment `segment[p]` at its log weight.
   `mesh_compile(trees, what, root, whole, chunks, contributors, ...)` (room from `mesh_compile_room`): a reduce up the
@@ -904,12 +929,7 @@ gathers, parses or joins bridge records itself.
 - **Routing tables** (`struct mesh_routing`): `nodes` nodes and `routes` routes; pair (a, b)'s routes are
   `[pair[a x nodes + b], pair[a x nodes + b + 1])` (`pair`: nodes x nodes + 1 entries, nondecreasing; none where a is
   b), route k the nodes `node[start[k] .. start[k + 1])` from a to b, every two consecutive ones linked and none twice,
-  and `share[k]`, above 0, its share. `mesh_routing_room(nodes, most, &routes, &hops)` the room of a table of at most `most` routes a pair;
-  `mesh_routing_trees(trees, ...)` a tree set's table (pair (a, b)'s routes the paths from a up each of b's trees, each
-  share the weight of the trees that give it, ordered by their nodes so that the table is a function of the trees'
-  paths and weights alone); `mesh_routing_pack(map, eps, most, ...)` the solver (`mesh_trees_pack`'s trees as such a
-  table; where no tree packs, each pair's route on the map's table, one share). Each returns its routes, UINT32_MAX
-  where its room could not be had.
+  and `share[k]`, above 0, its share.
 - **Blocks along a table** (`struct mesh_block`: `elements` of `element_bytes` from rank `from`'s buffer `source` at
   element `first` to rank `to`'s buffer `target` at element `at`). `mesh_block_parts(table, block, shortest, page,
   parts)`: the block cut among its pair's routes (`shortest`: those of the fewest nodes) by their shares, in quanta of

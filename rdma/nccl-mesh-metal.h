@@ -17,11 +17,13 @@ static inline int pages_lost(mesh_pages a) { return a.n == UINT64_MAX; }
 static inline uint64_t pages_to_word(mesh_pages a) { return a.n; }
 static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){word}; }
 
-#define MESH_PEER(P, U64) struct mesh_peer { P landing; P landed; U64 landed_target; }
+#define MESH_PEER(P) struct mesh_peer { P landing; }
+#define MESH_WAIT(P, U64) struct mesh_wait { P landed; U64 target; }
 #define MESH_RELAY(P, U64) struct mesh_relay { P landed; U64 landed_target, published, ready; }
-#define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; ATOMIC ended; U32 relays; U64 published, ready; }
+#define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; ATOMIC ended; U32 relays, waits, pad; U64 published, ready; }
 #define MESH_CROSSING(T, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; U32 groups, polls; }
-MESH_PEER(uint64_t, uint64_t);
+MESH_PEER(uint64_t);
+MESH_WAIT(uint64_t, uint64_t);
 MESH_RELAY(uint64_t, uint64_t);
 MESH_TABLE(uint64_t, uint64_t, uint32_t, uint32_t);
 enum { METAL_PLAIN, METAL_LAND };

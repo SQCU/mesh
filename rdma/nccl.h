@@ -24,8 +24,8 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 struct mesh_program;
-struct mesh_trees;
-struct mesh_routing;
+struct mesh_link_map;
+struct mesh_demand;
 
 /* rdma/NCCL.md#two-paths */
 typedef void *cudaStream_t;
@@ -440,29 +440,22 @@ ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);
 
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
-ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, const struct mesh_trees* paths,
-                                  const ncclMeshProgram* programs, int count, uint64_t small, const char* name, ncclConfig_t* config);
+ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank, const ncclMeshProgram* programs, int count,
+                                  uint64_t small, const char* name, ncclConfig_t* config);
 
-typedef enum { ncclMeshTreesShortest = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
 typedef struct {
   int collective;
   int root;
   uint64_t below;
-  ncclMeshTrees trees;
   int whole;
   uint32_t chunks;
-  uint32_t most;
-  double eps;
-  const double* shares;
 } ncclMeshForm;
 
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
 
-ncclResult_t ncclMeshCommSetRouting(ncclComm_t comm, const struct mesh_routing* table);
-
-ncclResult_t ncclMeshCommGetRouting(ncclComm_t comm, struct mesh_routing* table, int* given);
-
-ncclResult_t ncclMeshRoutingFree(struct mesh_routing* table);
+typedef uint32_t (*ncclMeshSolver)(const struct mesh_link_map* map, const struct mesh_demand* demands, uint32_t count, uint32_t room,
+                                   uint32_t* demand, uint32_t* parent, double* share, void* context);
+ncclResult_t ncclMeshCommSetSolver(ncclComm_t comm, ncclMeshSolver solver, void* context);
 
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
 
