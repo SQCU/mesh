@@ -235,9 +235,7 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
     halt frees every row outside W(t), the plan's in-flight window, at once, and W(t) ends as each unit completes or as
     its port's child exits with its queue pairs, so the flush would only end W(t) early (design/extents-and-liveness.md,
     d and "What follows for the mesh" 3; design/transport.md section 14, "A holding's end"). This ranking stands
-    unchanged. It is used once, at a port child's exit, for the lanes that still hold work: on 2026-10-23 the kernel's
-    release of queue pairs holding work waited forever at both ends of a cable and kept the node's memory wired, and the
-    literature's teardown flushes before it destroys (design/transport.md section 14, "A process a port");
+    unchanged;
   - a wait whose end depends on an event that may never come (a poll or socket read with no timeout, a refusal only
     another party's action lifts) ≺ every wait ending in finite time: "it is your own responsibility to write code which
     doesn't stallblock unboundedly. semaphores allow all waits in all programs to termiante in finite time, e.g. 0.1ms
