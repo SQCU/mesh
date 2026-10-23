@@ -42,7 +42,7 @@ has its own record. The public `mesh_transfer_trace_count` and
 `mesh_transfer_trace` functions enumerate configured records out of band and
 return the retained descriptor, queue, direction, timestamps and occurrence count.
 An observation during execution is a set of atomic field reads, not a transactional
-multi-field snapshot; inspect completed records to compare complete intervals.
+multi-field snapshot; a completed record holds a complete interval.
 Failed WC status remains available through the existing port metadata.
 
 Adding `peer_index` makes each transfer descriptor 40 bytes, allowing 102

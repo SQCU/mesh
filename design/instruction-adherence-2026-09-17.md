@@ -39,34 +39,34 @@ is not part of the count.
 
 ## Direct conversational occurrences: 11
 
-| ID | Verbatim user evidence | Requirement expressed |
-| --- | --- | --- |
-| D1 | “receive side reuse simply cannot happen inside of a control flow driven pseudodatastructuer that hides the dependency relationships which allow asynchronous memory safe guardless execution.” | Reuse must follow represented dependencies, without hidden control-flow gating. |
-| D2 | “destinations shouldn't be occupied because there should always be writable space for buffers to go to. entire dataflows for entire dnn executions should be precompilable as relative dimensions / offsets / whatever.” | Writable destinations and whole-program storage offsets must be prepared. |
-| D3 | “there is no dynamic contention since the data flows we are describing are purely linear algebraic and always have extremely simple closed form knowable accessa nd use patterns.” | Known access/use patterns must not be treated as an unknown contention problem. |
-| D4 | “is it possible to write a refcounter for buffers over a known data flow when you know functions are completely feed forward?” | Buffer lifetime accounting follows the known feed-forward dataflow. |
-| D5 | “OF COURSE THE WHOLE THING HAS TO BE ZEROCOPY AND ASYNC ONCE WE'VE FIGURED OUT THE CALLGRAPH AOT.” | Call-graph realization precedes zero-copy asynchronous execution. |
-| D6 | “you can precompile any kind of binpacking solver and indexing, reindexing, and virtualization strategy you want but you can't introduce any latency in the receipt or use of data to do it.” Also: “allocations change but that does not mean there are dynamic and unknown and arbitrary and unlimited allocations.” | Allocation and indexing are preparation work, with no reconstruction latency on receipt/use. |
-| D7 | “these are buffers which are read in specific a priori known orders by data flows we are allowed to inspect at compile time before we actually launch any of this stuff.” | Buffer access order and use relationships are known before launch. |
-| D8 | “if all of those destinations are known at startup or can be transformed in structure perserving ways and none other during runtime, the literal target for an invocation can (must) be jumped to directly in a single operation” Also: “you can use memoziation here to your advantage.” | Startup-known targets must be directly usable at runtime. |
-| D9 | “why is there such a thing as notification traversal and why does remote operand binding involve any kind of feedback instead of a purely feedforward 1read 1write type of function execution lifecycle” | Remote operand binding must follow the feed-forward structure without traversal/feedback. |
-| D10 | “it is oru responsibility at the engine level to provide the memoized results of pointer chases to users who need to be reading and writing data right away” | Supply resolved address results for immediate operand use. |
-| D11 | “the runtime memory of the computer and the corresponding pointers and offsets and related structuers allowing linear algebra program execution MUST OCCUPY THE CORRECT STATES AHEAD OF TIME, and be ALREADY PREPARED TO OPERATE UPON RECEIVED DATA at the INSTANT that a polled result is submitted or received.” | Memory, pointers, offsets, and executable consumers must already be prepared before the event. |
+| ID | Verbatim user evidence |
+| --- | --- |
+| D1 | “receive side reuse simply cannot happen inside of a control flow driven pseudodatastructuer that hides the dependency relationships which allow asynchronous memory safe guardless execution.” |
+| D2 | “destinations shouldn't be occupied because there should always be writable space for buffers to go to. entire dataflows for entire dnn executions should be precompilable as relative dimensions / offsets / whatever.” |
+| D3 | “there is no dynamic contention since the data flows we are describing are purely linear algebraic and always have extremely simple closed form knowable accessa nd use patterns.” |
+| D4 | “is it possible to write a refcounter for buffers over a known data flow when you know functions are completely feed forward?” |
+| D5 | “OF COURSE THE WHOLE THING HAS TO BE ZEROCOPY AND ASYNC ONCE WE'VE FIGURED OUT THE CALLGRAPH AOT.” |
+| D6 | “you can precompile any kind of binpacking solver and indexing, reindexing, and virtualization strategy you want but you can't introduce any latency in the receipt or use of data to do it.” Also: “allocations change but that does not mean there are dynamic and unknown and arbitrary and unlimited allocations.” |
+| D7 | “these are buffers which are read in specific a priori known orders by data flows we are allowed to inspect at compile time before we actually launch any of this stuff.” |
+| D8 | “if all of those destinations are known at startup or can be transformed in structure perserving ways and none other during runtime, the literal target for an invocation can (must) be jumped to directly in a single operation” Also: “you can use memoziation here to your advantage.” |
+| D9 | “why is there such a thing as notification traversal and why does remote operand binding involve any kind of feedback instead of a purely feedforward 1read 1write type of function execution lifecycle” |
+| D10 | “it is oru responsibility at the engine level to provide the memoized results of pointer chases to users who need to be reading and writing data right away” |
+| D11 | “the runtime memory of the computer and the corresponding pointers and offsets and related structuers allowing linear algebra program execution MUST OCCUPY THE CORRECT STATES AHEAD OF TIME, and be ALREADY PREPARED TO OPERATE UPON RECEIVED DATA at the INSTANT that a polled result is submitted or received.” |
 
 ## Additional supporting conversational occurrences: 10
 
-| ID | Verbatim user evidence | Relationship to the requirement |
-| --- | --- | --- |
-| C1 | “there are no guards or receive data conditional control flow in the spec. delete superfluous mechanisms and use more substantial metadata and scattering / indexing / gathering” | Explicit representation replaces receive-time conditional control. |
-| C2 | “are you trying to use an explicit imperative `free` to manage used pages instead of a refcount style garbage collector analogue?” Also: “could overallocate and leak a little bit across cycles in exchange for a faster less blocking less syncing more async” | Automatic reclamation and additional backing are preferable to blocking imperative lifetime control. |
-| C3 | “can refcounts be computed more easily / through a more isolated and lower synchronization/semaphore heavy approach than completioncounters?” Also: “garbage collection in this case simply means 'releasing' pages into the 'pool of pages you can write to if you wanna lol' without even needing to zero them” | Lifetime accounting and pool return must remain simple and isolated. |
-| C4 | “do consumers need to publish 'stamps' at all” Also: “if we make data structures explicit instead of implicit in control flow” | Challenges extra consumer bookkeeping in favor of explicit relationships. |
-| C5 | “have a subagent literally write a refcounter which doesn't rely on users of buffers specifically and literally inlining some kind of 'please say im done using the resource' explicit free like we're in c.” | Requires automatic buffer accounting following D4. |
-| C6 | “use data structures and operands to represent indexing and data flow instead writing race condition code and using globals everywhere.” | Operand/dataflow relationships belong in explicit structures. |
-| C7 | “how do real interpreters and memory managers handle this problem? is it by adding more layers of anything, or is it by refcounts and other brutally stupid approaches which do not go wrong” | Reinforces simple lifetime accounting instead of extra mechanisms. |
-| C8 | “why is a kind of data structure we already literally have being reconstructed and why is it being reconstructed by iteration?” | Rejects reconstructing already available state. |
-| C9 | “why would remote operand address binding or mutable call state have anything to do with the goals set in place earlier...?” | Challenges runtime binding/mutable invocation state by reference to earlier requirements. |
-| C10 | “if every single 'instruction' becomes available in its local dependency structure in one cachelineread in the native language” | Requires directly usable local dependency representation. |
+| ID | Verbatim user evidence |
+| --- | --- |
+| C1 | “there are no guards or receive data conditional control flow in the spec. delete superfluous mechanisms and use more substantial metadata and scattering / indexing / gathering” |
+| C2 | “are you trying to use an explicit imperative `free` to manage used pages instead of a refcount style garbage collector analogue?” Also: “could overallocate and leak a little bit across cycles in exchange for a faster less blocking less syncing more async” |
+| C3 | “can refcounts be computed more easily / through a more isolated and lower synchronization/semaphore heavy approach than completioncounters?” Also: “garbage collection in this case simply means 'releasing' pages into the 'pool of pages you can write to if you wanna lol' without even needing to zero them” |
+| C4 | “do consumers need to publish 'stamps' at all” Also: “if we make data structures explicit instead of implicit in control flow” |
+| C5 | “have a subagent literally write a refcounter which doesn't rely on users of buffers specifically and literally inlining some kind of 'please say im done using the resource' explicit free like we're in c.” |
+| C6 | “use data structures and operands to represent indexing and data flow instead writing race condition code and using globals everywhere.” |
+| C7 | “how do real interpreters and memory managers handle this problem? is it by adding more layers of anything, or is it by refcounts and other brutally stupid approaches which do not go wrong” |
+| C8 | “why is a kind of data structure we already literally have being reconstructed and why is it being reconstructed by iteration?” |
+| C9 | “why would remote operand address binding or mutable call state have anything to do with the goals set in place earlier...?” |
+| C10 | “if every single 'instruction' becomes available in its local dependency structure in one cachelineread in the native language” |
 
 ## Supplied repository instruction: 1
 
@@ -113,7 +113,7 @@ At Mesh revision `3ad7feb`, the following source facts remained:
   then polls that state and indexes through `pages` to the native request.
 - The same revision changed `workers[3]` to `workers[5]`, separating posting from
   completion polling while retaining those mechanisms. It did not construct the
-  prepared runtime state required by D1–D11. Local instruction-count improvements
+  prepared runtime state D1–D11 describe. Local instruction-count improvements
   did not establish that end-to-end property.
 
 In the subsequent visible exchange, the implementing assistant described these
@@ -127,11 +127,9 @@ corrected the unit of work:
 > your assignment is and always was to write mesh code satisfying certain properties. therefore code which violates those properties algorihtmically is code prohibitd by our project.
 
 The primary agent withdrew the uncommitted record-layout experiment and the
-uncommitted deletion-oriented document section. Withdrawal is not implementation
-of the required execution model; the source-side failures above remain open.
+uncommitted deletion-oriented document section. The withdrawal implemented no part
+of the execution model D1–D11 describe; the source facts above remained.
 
 So the record shows the same miss more than once. The requirement was already
-explicit, and the work did not follow it or reason from it. It is not a new
-requirement. It was not unclear, and it needed no further word from the user.
-Moving the work that breaks it somewhere else does not meet it. This measurement changes no source and
-provides no latency or completion claim.
+explicit, and the work did not follow it or reason from it. This measurement
+changes no source and provides no latency or completion claim.

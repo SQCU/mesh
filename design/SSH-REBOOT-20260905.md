@@ -30,8 +30,8 @@ the host; connection closure alone does not establish that reboot completed.
 
 SSH probes request the boot UUID, boot time and uptime. They use both a connection
 timeout and SSH keepalive settings, with fifteen seconds between attempts. A
-successful connection must report a changed boot UUID to count as a verified
-restart. The planned observation window is ten minutes from the command.
+connection counted as a verified restart when it reported a changed boot
+UUID. The planned observation window is ten minutes from the command.
 
 | Time after command | Observation |
 | --- | --- |

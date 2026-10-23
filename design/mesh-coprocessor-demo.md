@@ -1,9 +1,9 @@
 # Whole-mesh page-table and policy-compute instrument
 
-This specification controls the macroscopic demonstration of the mesh. The policy
-details are controlled by [`rl-training-spec.md`](rl-training-spec.md), matrix
-execution by [`MATRIX-EXECUTION-SPEC.md`](MATRIX-EXECUTION-SPEC.md), topology by
-[`ACCESS-TOPOLOGY-SPEC.md`](ACCESS-TOPOLOGY-SPEC.md), and the joined flows by
+This document describes the macroscopic demonstration of the mesh. The policy is
+described in [`rl-training-spec.md`](rl-training-spec.md), matrix execution in
+[`MATRIX-EXECUTION-SPEC.md`](MATRIX-EXECUTION-SPEC.md), topology in
+[`ACCESS-TOPOLOGY-SPEC.md`](ACCESS-TOPOLOGY-SPEC.md), and the joined flows in
 [`ALGORITHM-CONTRACTS.md`](ALGORITHM-CONTRACTS.md).
 
 ## Demonstration
@@ -76,9 +76,8 @@ feature-Gram/probe broadcast or DPP instrument allocation on this live path.
 
 Repository-owned paged Metal kernels implement `AB`, `AᵀB`, `ABᵀ` and their reverse
 products. Prepared physical capacities determine dispatch extent; active row counts,
-addresses, masks and expert assignments are tensor data. New capacities still require
-preparation, and persistent allocation-free intermediate storage remains an explicit
-execution obligation rather than a consequence of fixed kernel templates.
+addresses, masks and expert assignments are tensor data. A new capacity is prepared
+before it runs.
 
 Each learned policy has one parameter/optimizer/checkpoint lineage. The learner
 (`xonotic/solver/strat`, restored on torch; xonotic/README.md "The policy learner") is
@@ -89,10 +88,12 @@ placement's parts (parts [0, 1] put the whole cross on the Mini, as on 09-06), t
 operand and parameter cotangents derived by autograd through Megatron's mappings. A
 rank updates only what it holds (rank 0 the replicated parameters, which every rank
 then reads from it; each rank its own expert columns): one optimizer over one
-parameter set, not a worker's own. Forward, cotangent, update, checkpoint, FLOP, byte and
-deadline measures must identify the actual placement for the same batch. Historical
-two-host runs are evidence for their recorded architecture, not automatic validation
-of a subsequently changed tensor program.
+parameter set, not a worker's own. design/rubrics.md, Quantities: a measurement without
+the TP ratio (the parts tuple the balancer set) ≺ one logging aggregate tok/s, the TP
+ratio and per-stream tok/s; the operator, 2026-10-21: "you can compute a linear fit from
+2 cases; logging aggregate; tp ratio; per-stream will add enough dimensionality that you
+will never become confused about whether there was conflated load on one machine or
+another".
 
 The RDMA and local relay layers transduce literal float tensor rows plus structural
 framing. A 64-bit value extent determines page count. Shared page credit and socket
@@ -123,9 +124,8 @@ solver") is this demonstration's measured operating point: the window of R = 4,0
 lifted to 2,048 residual columns, eight experts at a mean of 512 rows each
 (T·k/E ≥ 512) and the window's Gram, about 104 GFLOP and 269 MB of resident weights a
 solve, its experts and Gram divided among the members by column shares the Balancer
-moves on the ticks' own times. Its reproduction target is the Mini alone at 24 ms a
-solve (4.29 TF/s, 4905622f) and a 26.6 ms full-scale tick (ac3b543b); on the pair each
-member's share and the tick are read against it.
+moves on the ticks' own times. The Mini alone measured 24 ms a solve (4.29 TF/s,
+4905622f) and a 26.6 ms full-scale tick (ac3b543b).
 
 The game is one demonstrator, not a special telemetry mode. The macroscopic result is a
 live account of where pages, bytes, arithmetic, time, and optimization reside across the

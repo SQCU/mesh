@@ -355,13 +355,23 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
 ### Abstract
 
 **C1. Provenance.**
-- Ranks higher: the form closer to NCCL's API and semantics and to the published algorithm it implements.
-- Lower pole: invented semantics and home-grown algorithms, with objects no reference has.
-- Upper pole: the literature transcribed near verbatim, NCCL's calls as the syntax, and any deviation argued from the
-  hardware's interface.
+- Ranks higher: the form that keeps NCCL's API and semantics as its interface and whose implementation is Pareto
+  dominant to NCCL's: fewer transactions per collective operation, more sparsity, lower latency.
+- Lower pole: NCCL's implementation imitated behind its API (its staging buffers, its rendezvous and their retries, its
+  copies), or invented semantics with objects no reference has.
+- Upper pole: NCCL's calls as the syntax; beneath them, the literature's algorithm for this hardware's interface, at or
+  past NCCL on every measured axis, and any deviation argued from the hardware's interface.
+- The operator, 10-22, verbatim: "the nccl type interface is allowed and that the repository code is pareto dominant to
+  nccl in number of transactions per collective operation, in sparsity, in latnecy, in latency again, in latency yet
+  again, and that regressions in performance are never accepted in exchnage to imitate strictly dominated strictly
+  inferior code." Also, 10-22: "nccl-shaped type interfaces do not mean that he code uses nccl implementations in any
+  sense for any reason at any time."
 - The operator's pair: lower, "a hand-written sloplib breadboarding two cpus together" (10-18); upper, "nccl is good
   enough as a syntax to allow us to directly use the dma code" (10-19).
 - Ranked:
+  - a performance regression accepted to imitate NCCL's implementation ≺ none (10-22);
+  - an NCCL internal carried in behind its API (a staging pool, a root rendezvous and its retry, a reduce-copy) ≺ the
+    form that dominates it on transactions, sparsity and latency (10-22);
   - "sessions", "meets" and "destructions" ≺ "buffers and basically async 'awaities' and 'maybes' wrt to buffers" (10-19);
   - "complicated logic hidden inside of classmodules" ≺ "something from the established literature" for routing
     (10-04);
@@ -503,6 +513,15 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
   - argparse strings and hardcoded defaults ≺ configuration documents passed by consumers, with didactic defaults only
     (10-15);
   - configuration read as files on the hot path ≺ records from protocol, database or file alike (10-16).
+  - a callgraph or tensor shape changed partway through a tensor function's execution (source-level metaprogramming,
+    run-time shape polymorphism, sizes learned at run time) ≺ shapes, maximum extents and the callgraph fixed when the
+    program is compiled (10-22): "we do not intend to support any source level metaprogramming which tries to change
+    what the syntax of the callgraph is or the shapes of any tensors are partway through a tensor function execution;
+    this is barely a restriction or a dsl-like narrowing of programming strategy as there are no hardware abis that
+    exist in the real world which allow faster overall execution through the use of wacky runtime shape polymorphism
+    etc. ... if hardware existed that was faster under dynamism, we'd probably treat that as a strange compute
+    capability and compile those programs differently, holding the same restraints for cuda and cdna and metal
+    backends."
 
 **D3. Control flow.**
 - Ranks higher: the form with fewer branches. Its control flow differs only where a configuration says so.

@@ -3,9 +3,9 @@
 A link's two bridges used to make ten queue pairs each, whatever their devices held. A device that holds fewer
 could not pair at all. This document covers the failure that showed it (2026-10-21), what
 [transport.md](transport.md) assumed, every place the code depends on the count, what probes of the new machine
-showed, what the first remedial change does, and what remains. Nodes are named by their bridge's node number (drawn
-from the host UUID) and their hardware, never by host name ([AGENTS.md](../AGENTS.md), "A node is its hardware;
-names are virtual").
+showed, what the first remedial change does, and what remains. Nodes are named here by their bridge's node number
+(drawn from the host UUID) and their hardware. The operator, 2026-10-21: "from this point onwards, we never rely on
+something like a localhostname as a name or identifier for something which we are programming."
 
 | node | hardware | macOS | its link |
 |---|---|---|---|
@@ -117,7 +117,7 @@ machine report the same.
 **Allocation on the link-down devices.** A context's `ibv_alloc_pd` was refused (errno ESRCH in one run, 0 in the
 next) and its `ibv_create_cq` was refused with EBUSY: in a first and a second context on rdma_en2 and on rdma_en5, and
 in a context on rdma_en4 and on rdma_en6. On 27 a device whose port is down makes no PD and no CQ, so no queue pair
-could be made, and the user queue pair count could not be measured within the probing rules. The bridge is not
+could be made, and the user queue pair count was not measured on these devices. The bridge is not
 affected: `device_up` reads the port active before it allocates.
 
 **The operator's questions, as far as the evidence goes.**
@@ -156,38 +156,39 @@ affected: `device_up` reads the port active before it allocates.
   The child makes one queue pair per lane of the plan (`pair_up`), tells them in CHILD_MADE, connects only those, and
   serves `served = plan`. The LINK names the plan's lanes in `count` and is checked against this end's plan.
 
-| budget (the fewer of the two ends') | plan | lanes | streams | keepalive lane |
+| budget (the fewer of the two ends') | plan | lanes | streams | lane 0 |
 |---|---|---|---|---|
-| 0, 1 | 0 | 0 | 0 | off: the link pairs, records flow, no stream is live |
-| 2 | 0xc | 2 | 1 | off |
-| 3, 4 | 0xd | 3 | 1 | on |
-| 5, 6 | 0x3d | 5 | 2 | on |
-| 7, 8 | 0xfd | 7 | 3 | on |
-| 9 | 0x3fd | 9 | 4 | on (no reserved lane 1) |
-| 10 and more | 0x3ff | 10 | 4 | on, lane 1 made as before |
+| 0, 1 | 0 | 0 | 0 | not made: the link pairs, records flow, no stream is live |
+| 2 | 0xc | 2 | 1 | not made |
+| 3, 4 | 0xd | 3 | 1 | made |
+| 5, 6 | 0x3d | 5 | 2 | made |
+| 7, 8 | 0xfd | 7 | 3 | made |
+| 9 | 0x3fd | 9 | 4 | made (no reserved lane 1) |
+| 10 and more | 0x3ff | 10 | 4 | made, and lane 1 |
 
-The keepalive lane comes first once a stream fits beside it. The reserved lane 1 is made only in the full plan, so a
-full plan is lane for lane the layout of MESH_VERSION 131. The plan of a smaller budget is always a subset of a
-larger one's.
+Lane 0 comes first once a stream fits beside it (`rdma/mesh-bridge.h` `link_plan`: bit 0 where the budget is three or
+more). The reserved lane 1 is made only in the full plan, so a full plan is lane for lane the layout of MESH_VERSION
+131. The plan of a smaller budget is always a subset of a larger one's.
 
-Section 10 gives every plan the keepalive. The plans stay as in this table, so the two ends' LINKs still match. A
-plan with lane 0 sends it there; a plan without lane 0 sends it on its stream's first lane while no stream is held.
-Nothing is posted on lane 1.
+Lane 0 carried the keepalive in versions before 133 (section 10 has its history). Since version 133 there is no
+keepalive (section 10; design/transport.md section 5: "a link carries no keepalive"), and nothing is posted on lane 0
+or lane 1. The plans stay as in this table, so the two ends' LINKs still match.
 
 - **Streams.** Streams beyond the plan's are never opened: not live, not free, never offered to a client
-  (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports
-  `bandwidth / MESH_LINK_STREAMS` as before, so the map's per-link figure is comparable across plans.
-- **Completion queues.** Each lane's share of the two completion queues is `cqe / lanes`, so a two-lane link's lanes
-  get 2048 frames each, against 409 on a ten-lane link. A lane's receive window is its share counted in its units (a
-  page on a stream's lane, a frame on lane 0), at most the queue pair's receive capacity (mesh-link.c).
+  (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports its cable's
+  bandwidth (since layout 143; `bandwidth / MESH_LINK_STREAMS` before), so a cable's figure is comparable across plans.
+- **Completion queues.** Each stream lane's share of the two completion queues is `cqe` over the plan's stream lanes
+  (mesh-link.c:603), so a two-lane link's lanes get 2048 frames each, against 512 on a ten-lane link's eight stream
+  lanes. A stream lane's receive window is its share counted in pages, at most the queue pair's receive capacity
+  (mesh-link.c:636-639). Lanes 0 and 1 have no window: nothing is posted on them.
 
 **What a two-lane link costs.** Node 521750041's link to node 1974797816 gets the 0xc plan: one stream and no
-keepalive lane.
+lane 0.
 - One communicator at a time between the two nodes. A second concurrent one is refused at its init with EBUSY as a
   value ("rank 0 could not hold its streams at its bridge"). The first runs exact.
-- No keepalive frames, so a controller that slows after a quiet stretch (etc/bridge/README.md, the Mac mini's 6-10 us
-  after 40 us of nothing) is not kept warm. This costs latency on the first frames after a pause, not correctness.
-  Section 10 gives such a link the keepalive while its stream serves no holding.
+- No keepalive frames, as on every link since version 133 (section 10), so a controller that slows after a quiet
+  stretch (the Mac mini's SEND 6.2 us after 40-50 us of nothing, section 10) is not kept warm. This costs latency on
+  the first frames after a pause, not correctness.
 
 **Version.** MESH_VERSION stays 131 and MESH_LAYOUT stays 133. The full plan is byte for byte the 131 wire (the
 HELLO's `count`, which 131 sends as 0 and never reads, is the only new information), and the region's layout is
@@ -221,21 +222,19 @@ all of them without sanction in rubric"). For versions to join one map:
 2. *A version-stating hello* (done in part, 7d236bbb). The header is version-independent: the fixed magic, and the
    sender's MESH_VERSION in `version` (0 from a bridge before it). No reader tests `version`, so a bridge hears a
    peer of any version and pairs with it. Not done: logging which version a peer runs.
-3. *Records only appended.* `struct mesh_record` and the region's header and slots are appended to, never reordered,
-   as the region rule already requires. A newer bridge then floods records an older one can still read up to its
-   own length.
+3. *Records appended.* A field added at the end of `struct mesh_record`, the region's header or a slot leaves the
+   fields before it where they were, so a newer bridge floods records an older one can still read up to its own
+   length.
 4. *The region stays apart from the wire* (already so: MESH_LAYOUT), so a wire change never expires a region.
 
 ## 8. What remains
 
-- **P1. Measure what a 27 device holds.** The budget assumes `max_qp - 1`. To measure it, with node 521750041's
-  bridge released (`launchctl kill SIGUSR1 user/$(id -u)/io.mesh.bridge`, the operator's window) and rdma_en3's link
-  up, run one probe process that opens rdma_en3, allocates a PD and two CQs, and makes UC queue pairs until refused.
-  Then do the same in a second context of the same device (per context or per device), then on a second device with
-  its link up (pooled across a machine's devices or not). No release call; exit releases everything. The second
-  Studio, cabled, gives a second device with its link up. If 3 are usable, `max_pairs` for this driver is `max_qp`,
-  and the plan gains the keepalive lane (0xd).
-- **P2. Make until refused.** The device, not the stated budget, has the last word. Each end could make its plan's
+- **P1. What a 27 device holds: not measured.** The budget assumes `max_qp - 1`. A process that opens rdma_en3 with
+  its link up, allocates a PD and two CQs and makes UC queue pairs until refused would read the count; a second
+  context of the same device would tell a per-context count from a per-device one, and a second device with its link
+  up (the second Studio, cabled) whether the count is pooled across a machine's devices. If 3 are usable, `max_pairs`
+  for this driver is `max_qp`, and the plan gains lane 0 (0xd).
+- **P2. Making until refused (not done).** Each end could make its plan's
   queue pairs in the order 2, 3, 0, 4, 5, 6, 7, 8, 9, 1, so that the first c made always contain `link_plan(c)`.
   It would stop at the first refusal and name in LINK how many it made, and both ends would connect
   `link_plan(min(made, peer's made))`. Queue pairs made past that stay in INIT until the child's exit. Two 131-
@@ -244,38 +243,42 @@ all of them without sanction in rubric"). For versions to join one map:
 - **P3. More streams on few queue pairs.** If P1 finds a per-context count, a child can open more than one context on
   its device and spread a link's lanes over them, each context with its own two CQs (max_cq 6, one the kernel's,
   bounds it to two contexts). The progress threads would poll both pairs of CQs. Otherwise, more streams on two queue
-  pairs would need a staging ring and a copy (section 4), which this design has refused so far.
-- **P4. Publish the plan.** `struct mesh_link_info` (the bridge's observation pages) has no room for the plan without a
+  pairs would need a staging ring and a copy (section 4); the operator, 10-21: "zero copy methods must always be used
+  over access by copy".
+- **P4. The plan is not published.** `struct mesh_link_info` (the bridge's observation pages) has no room for the plan without a
   MESH_LAYOUT bump, so mesh-stat cannot show it yet; the log line does. A record's `reach` could carry each link's
   stream count so a planner knows how many communicators a node pair takes at once.
-- **P5. A keepalive on a two-lane link.** Done in section 10, on every link: lane 0's frame where the plan has lane 0,
-  else a page of all ones on the stream's first lane while no stream is held.
+- **P5. A keepalive on a two-lane link.** Done at version 132 on every link (lane 0's frame where the plan had lane 0,
+  else a page of all ones on the stream's first lane while no stream was held) and deleted at version 133 with every
+  keepalive (section 10).
 - **P6. A host-path sendrecv whose peers refused theirs.** On the loop fabric's 3-node line (deleted in 736ce24d),
   rank 1's sendrecv waited without bound on the host path, and returned "ok" with every value wrong on the walk path,
   once the ranks it pairs with had refused theirs. It predates this change and is a library issue, not the transport's.
-- **P7. Host names in the bridge's area** (AGENTS.md debts). The record's `name` (`mesh-link.c` `host_name`, which
-  published SCDynamicStoreCopyLocalHostName) is gone: a record carries its node number, and readers take a person's name
-  from the name table by node number (`peers.py` `label`). `nccl-mesh.c` `ncclGetUniqueId` falls back to
-  `gethostname()` for the bootstrap's listen host when the node holds no fabric address. It should fall back to an
-  address the node holds instead (a global IPv6 or IPv4 of an up interface).
+- **P7. Host names in the bridge's area** (the debts listed in AGENTS.md at e6d406ad). The record's `name`
+  (`mesh-link.c` `host_name`, which published SCDynamicStoreCopyLocalHostName) is gone: a record carries its node
+  number, and readers take a person's name from the name table by node number (`peers.py` `label`). `nccl-mesh.c`
+  `ncclGetUniqueId` falls back to `gethostname()` for the bootstrap's listen host when the node holds no fabric address.
+  The operator, 2026-10-21: "we should be able to use any kind of virtualization of 'names' such that we never rely on
+  anything like, again, that localhostname thing, which makes no promises of selectivity or unique identifiability or
+  anything of the sort".
 
-## 9. Deploying it
+## 9. Deployment
 
 The change is in `rdma/mesh-bridge.h`, `rdma/mesh-verbs.h`, `rdma/mesh-link.c` (the bridge binary, `mesh-flow`) and
-`rdma/loopverbs.c` (the loop build only). Neither libmesh nor libnccl-mesh changes, so clients need nothing. Each
-node needs its own build of the merged source: `make -C rdma all install` by hand, then its heartbeat's SIGHUP
-(`bin/mesh-user.sh`), which restarts the bridge, keeping its region (MESH_LAYOUT unchanged).
+`rdma/loopverbs.c` (the loop build only). Neither libmesh nor libnccl-mesh changes, so clients are unaffected. Each
+node runs its own build of the merged source (`make -C rdma all install`), and its heartbeat's SIGHUP
+(`bin/mesh-user.sh`) restarts the bridge, keeping its region (MESH_LAYOUT unchanged).
 
-- Node 521750041 (M5 Ultra, 27): required. Until node 1974797816 also runs it, its rdma_en3 link keeps re-pairing every
-  5 s, now with the cause logged.
-- Node 1974797816 (M4 Pro): required for the link to node 521750041. Its link to node 1980260065 is unaffected either
-  way: both hold ten, and the full plan is the 131 wire.
-- Node 1980260065 (M5 Max): optional, at any time.
+- Node 521750041 (M5 Ultra, 27): until node 1974797816 also runs it, its rdma_en3 link keeps re-pairing every 5 s, now
+  with the cause logged.
+- Node 1974797816 (M4 Pro): its link to node 521750041 pairs once both run it. Its link to node 1980260065 is
+  unaffected either way: both hold ten, and the full plan is the 131 wire.
+- Node 1980260065 (M5 Max): unaffected by the change or its order.
 
 Either order works. Rebuilding node 1974797816 restarts its bridge, so the link to node 1980260065 drops for one
-re-pair (the usual cost of a SIGHUP restart). Do it with no program running across that link. Once both node
-521750041 and node 1974797816 run it, their link should log "paired with node ... (queue pairs for the link: this
-port's 2, its 10; plan 0xc, 2 lanes, 1 stream)" and "2 lanes up".
+re-pair (the usual cost of a SIGHUP restart). Once both node 521750041 and node 1974797816 run it, their link logs
+"paired with node ... (queue pairs for the link: this port's 2, its 10; plan 0xc, 2 lanes, 1 stream)" and "2 lanes
+up".
 
 ## 10. The keepalive on every link
 
@@ -364,7 +367,8 @@ line below no longer holds, and lane 0's receives are posted again.
   Chosen: the dud wherever the peer may still serve a holding, the 16-byte frame where it cannot.
 - M8, bytes: a whole frame every 5 us on a quiet held link (0.8 GB/s of wire and the peer's memory) ≺ 16 bytes on a
   stream that has served no holding, as a held link's idle stream usually has.
-- M5: the pace in the consumer's configuration ≺ the bridge's own figure.
+- M5: the pace in the consumer's configuration ≺ the bridge's own figure ("only the bridge is allowed to know these
+  configuration details", the operator, 10-21).
 - M2, M3: unchanged. The frame describes no traffic. It waits only in the hardware's credit, as every SEND does.
 - Lost: a link of four or more queue pairs whose every stream is held kept its controller warm on lane 0, and does
   not now. Gained: the keepalive at every budget.

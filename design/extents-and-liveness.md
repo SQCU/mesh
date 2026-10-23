@@ -1,13 +1,27 @@
 # Extents and liveness: what a program's pages are, and when they are free
 
 This document states, with the literature behind it, how the mesh knows which pages a collective program uses and when
-each page is free. It is the reason the bridge never assumes an arbitrary access pattern, uses no error state, and
-waits on nothing but data. The memory model is [pages-and-functions.md](pages-and-functions.md); the transport is
+each page is free. It is why the bridge assumes no arbitrary access pattern, uses no error state, and waits on data
+alone. The memory model is [pages-and-functions.md](pages-and-functions.md); the transport is
 [transport.md](transport.md) section 14.
 
 The operator, 2026-10-22: "some algorithm tries to assume that all prorgams have arbitrary access patterns and
 communication schedules for the sake of breadth, but in so doing relaxes the problem socpe they are working on so
-severely that they describe a less stable or worse-converging algorithm".
+severely that they describe a less stable or worse-converging algorithm". Sections a to e follow the points the
+operator gave the same day, verbatim:
+
+> a: a collective program can assert that it would hope to use extents a,b,c,d,e as scatters, writes, whatever.
+> b: a collective program can dynamically pass less data than the extents it hopes to use.
+> c: a collective program's access pattern can be derived from the compute graph through boring graph analysis
+> algorithms and the explicit knowledge of its operands and function behaviors, up to the limits of data dependent
+> functions returning extents.
+> d: a program which has halted is in a special kind of callgraph state where we can treat its successive dependency
+> and write relationships as 'maximally underused'; those extents *aren't* being 'requested' by that program anymore
+> even if they might have been used if it wasn't halting.
+> e: given these constraints, we always know more information about what extents could be under use or in-flight for
+> a program the more we know about its operands and data-independent functions(pages)->pages; we can for some
+> functions know so much that we can apply performance optimizations, like asynchronously freeing its pages partway
+> through some data lflows.
 
 ## Terms
 
@@ -25,8 +39,9 @@ severely that they describe a less stable or worse-converging algorithm".
 ## a. A program declares its extents when it is called
 
 D(P) is known at the call. The operands and the configuration name every extent the program may scatter into, gather
-from or write. Nothing the program does later adds to D(P). The memory model requires this: "All page-table
-allocations needed by the complete compute graph are determined before launch".
+from or write. Nothing the program does later adds to D(P). The operator, 2026-09-10 (pages-and-functions.md,
+Setup): "all allocations needed within a page table for a complete compute graph should be known a priori at the time
+a callgraph using these apis has been launched".
 
 Literature:
 - **MPI-4.** It declares buffers ahead of use. A partitioned send is set up once with `MPI_Psend_init` over a buffer
@@ -69,10 +84,10 @@ output extent is still bounded by its declaration (a), and the analysis keeps th
 
 ## d. A halted program uses nothing after it halts
 
-A program that has halted has no future events, by exit, by revoke, or by the page table's invalidation ("The calling
-process may invalidate the page table whenever it chooses", pages-and-functions.md). So L(P, t) is empty from the halt
-on. Every extent it might have used, had it run on, is no longer requested by it. In the operator's words, it is
-"maximally underused".
+A program that has halted has no future events, by exit, by revoke, or by the page table's invalidation (the
+operator, 2026-09-10, pages-and-functions.md, Setup: "our mesh api level primitives should let us invalidate a page
+table in this manner whenever we want to"). So L(P, t) is empty from the halt on. Every extent it might have used, had
+it run on, is no longer requested by it: in the operator's words (d, above), "maximally underused".
 
 Only W(t) remains: requests already handed to the hardware.
 - **Verbs.** The hardware owns a buffer that a posted work request names until that request completes. It may write a
@@ -95,7 +110,7 @@ is exact.
 - **Memory schedules.** Chen et al. trade recomputation for memory by schedule ([Chen et al. 2016][chen]), and
   Checkmate solves for optimal rematerialization schedules on arbitrary graphs ([Jain et al. 2020][checkmate]). Both
   rest on knowing every tensor's uses from the graph.
-- **Over-approximation.** A design that assumes nothing about the program must over-approximate. It treats every row
+- **Over-approximation.** A design that assumes nothing about the program over-approximates. It treats every row
   the program owns as possibly live, and every request as possibly unfinished. That is the weakest analysis, with the
   most state and the most waiting.
 
@@ -135,6 +150,9 @@ That is needed because such a computation's extent is not known in advance ([Dij
 compiled plan knows its extent, so each node knows its own last use and needs no acknowledgement.
 
 ### Failure: the halt's cones
+The operator, 2026-10-22: "we must now explain to ourselves how we will propagate shutdowns at fastest possible speed at
+the earliest point a dependency structure makes explicit that we can start freeing a concluded-or-failed call".
+
 A halt at a node ends the sources of some hops. A halt is the node's holding ending, its call revoked, or a link on a
 route lost. From the halted hops:
 - **The forward cone F** is every node and piece the feeds relation reaches downstream. Those pieces will never arrive.
@@ -191,40 +209,43 @@ call holds no hop of that call's plan; it joins the next call's plan.
   No timing, no inference, no waiting.
 - **The caller** reads the status in `meta` and decides whether to rerun.
 
-### To measure
+### Not yet measured
 - **The control channel's hop latency,** which bounds the notice: h hops cost h of it. Data lanes would be faster,
   and plan-only lanes rule them out.
 - **The time from a halt to the last row freed** in its cones, on graphs of several shapes.
 
 ## What follows for the mesh
 
-1. **The bridge never assumes an arbitrary access pattern.** The rows any request on a queue pair can reference are
+1. **The bridge assumes no arbitrary access pattern.** The rows any request on a queue pair can reference are
    W(t), the plan's window. Nothing else is pinned.
 2. **When a holder gives or dies (d), every row of its holding outside W(t) is free at once.** A row in W(t) is free
    when its unit completes, or when the link's port process exits and its queue pairs are gone.
-3. **No error state is needed.** The documented queue-pair flush (move to Error, poll every `IBV_WC_WR_FLUSH_ERR`)
-   would only end W(t) early. The plan bounds W(t), so the flush is permitted (the operator, 2026-10-22) and unused.
+3. **No error state is used.** The documented queue-pair flush (move to Error, poll every `IBV_WC_WR_FLUSH_ERR`)
+   would only end W(t) early. The operator, 2026-10-22, of that flush as the literature states it: "you can do this and nothing else with
+   error states and if and only if it is exactly what is supported by the literature". The plan bounds W(t), and the
+   flush is unused.
 4. **A row is released at its last planned use (e), not at a holding's end.** The use count of pages-and-functions.md
    is this analysis's result.
-5. **Predictions are reported, not obeyed.** A compiler's prediction of the page-table mapping can be checked against
-   the facts the bridge reports: its page size, its rows' pages and stamps. Examples are contiguity, or which rows a
-   crossing lands in. A mismatch is "an error channel return kind of statistic, not a data dependent control flow for
-   a collective verb or a bridge transaction" (the operator, 2026-10-22), returned in `meta`.
+5. **A prediction's mismatch is a statistic in `meta`.** A compiler's prediction of the page-table mapping can be
+   checked against the facts the bridge reports: its page size, its rows' pages and stamps. Examples are contiguity, or
+   which rows a crossing lands in. A mismatch is "an error channel return kind of statistic, not a data dependent
+   control flow for a collective verb or a bridge transaction" (the operator, 2026-10-22), returned in `meta`.
 
 ## Dominating methods and choices
 
-Prior work separates what we must do from what we may choose. A method is strictly dominating when it is never worse
-on any measure, so there is nothing to trade. A choice trades one measure against another, and is made by measurement
-or by the balancer.
+The operator, 2026-10-22: "connection to the prior literature is important for understanding what are choices and
+what are strictly dominating superior methods we must use". A method is strictly dominating when it is never worse on
+any measure, so there is nothing to trade. A choice trades one measure against another; a measurement or the balancer
+decides it.
 
-Strictly dominating, so required:
+Strictly dominating:
 - **Freeing every row outside W(t) at a halt (d).** It releases earlier at no cost: no request references those rows.
 - **Releasing a row at its last use, when that use is known exactly (c, e).** It is never later than releasing at a
   holding's end. XLA's buffer assignment and region inference take this for granted.
 - **Using the declaration and the counts (a, b) instead of inferring them at run time.** The facts are exact, an
   inference can only be equal or wrong, and the inference costs time.
 
-Choices, so measured:
+Choices:
 - **Rematerialization.** It trades recomputation for memory ([Chen et al. 2016][chen]; [Checkmate][checkmate]). Only a
   memory budget decides it.
 - **The documented flush.** It ends W(t) early at the cost of a dead stream. The plan bounds W(t), so it is not chosen

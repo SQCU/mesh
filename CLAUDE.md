@@ -1,3 +1,4 @@
-See [AGENTS.md](AGENTS.md) — the accessibility contract that binds all changes to this repo, and [THREAT-MODEL.md](THREAT-MODEL.md) for why.
-
-Short version, in the operator's words (THREAT-MODEL.md): "accessibility is required; inaccessibility is *contractually forbidden*", and "rejection filtering and defensive programming are broadly forbidden by our security model". So code acts. It does not decline to act, hold back a capability by node class, or fail toward a less reachable state.
+Start with the rubric in `design/rubric-actionable.md`.
+It ranks each change against the old form, one trait at a time.
+The user's own words are in `THREAT-MODEL.md`.
+Every other document is listed in `INDEX.md`, with a short note on each.

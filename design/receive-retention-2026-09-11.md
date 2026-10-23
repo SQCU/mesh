@@ -47,8 +47,8 @@ The receiver measured 858,193,920 interior payload bytes over 0.092853 seconds:
 9.2432 GB/s. Full first-to-last block spans were about 116 ms.
 
 The late-binding receiver's reported roughly 0.2 ms span measures association
-and observation of already-delivered memory. It is not link bandwidth and must
-not be reported as such. These runs qualify storage/transport, not numerical MFU
+and observation of already-delivered memory. It is not link bandwidth.
+These runs qualify storage/transport, not numerical MFU
 or FFN speedup. Evidence files are `metal-microbench/.build/f10-late-bind-*` and
 `metal-microbench/.build/f10-bound-*`.
 

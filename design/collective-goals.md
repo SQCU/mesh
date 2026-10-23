@@ -26,7 +26,7 @@ Operator, 2026-09-22, verbatim:
   codomain-shaped row-split partial once, directly to its peer, and partials are
   summed on arrival in any order. Head-split attention adds its own o_proj
   collective: one per attention block and one per MLP block, as in Megatron.
-  Norms, residual and PLE may be duplicated on every rank. Duplicated or
+  Norms, residual and PLE can be duplicated on every rank. Duplicated or
   head-split attention is the caller's placement choice. RS+AG is used only for
   large tiles.
 - **The mechanism:** one SEND into a posted RECV; presence is the receive
@@ -45,13 +45,14 @@ Operator, 2026-09-22, verbatim:
 - **Goal A.** One gemma-4-12B FFN layer split M5 (11,904 neurons) / M4 (3,456
   neurons) with a streaming reduce-scatter/all-gather exchange: median
   completed-result period ≤ 20.40 ms, against the recorded 26.12 ms for the M5
-  alone. Any build that meets the period counts.
-- **Goal B.** gemma-4-E2B decode (any rows per forward: batch, sessions, draft-verify width; B=1 is one point, never the target), attention heads [7,1] and FFN 7:1: pair
+  alone.
+- **Goal B.** gemma-4-E2B decode (any rows per forward: batch, sessions, draft-verify width; B=1 one point of them), attention heads [7,1] and FFN 7:1: pair
   decoded tokens/s ≥ 1.035× solo decoded tokens/s (recorded best 1.035–1.045×).
 
-Pair and solo tokens may differ (row-split reduction order). Decoded-token
-identity with solo is not a requirement, criterion or diagnostic target; never
-report it as a finding (operator 2026-09-08, 2026-09-18, 2026-09-22).
+Pair and solo tokens differ by row-split reduction order. The operator,
+2026-09-16: "bit identicality does not seem to appear from any requirement we
+have ever described. wasting NFEs on anything you're calling 'bit
+idenitcality' is a waste of an extremely slow and tedious NFE."
 
 ## Design notes
 
@@ -78,4 +79,7 @@ Operator, 2026-09-18, verbatim:
 > there's no inhibition against runtime testing if what's being tested is
 > following the design documents
 
-Ops notes: the Mini builds from pushed source; run outputs go to `output_data`.
+Ops, the operator, 2026-09-10: "you must synchronize code across all machines
+by using git commits, git checkouts, and building on every machine at the same
+time, not building on some machines and ignoring others." The runs' outputs
+are in metal-microbench `output_data`.

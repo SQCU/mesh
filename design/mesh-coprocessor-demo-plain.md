@@ -12,9 +12,9 @@ inventory but stops contributing live capacity.
 The phase-space picture uses all four page states. A point near `FREE`, `RECV`, `SEND`,
 or `APP` means page ownership is concentrated there. Each computer gets its own anchor
 and nearby trajectory, so two machines do not collapse into one dot. Lines show reachable
-topology. Moving particles require measured traffic.
+topology. Moving particles show measured traffic.
 
-FLOP/s and byte/s need not be falsely exact. Known operations supply a lower count;
+FLOP/s and byte/s are intervals, not exact values. Known operations supply a lower count;
 algorithm and activity envelopes supply an upper count. The viewer reports both,
 including variance and missing observations. That is enough to see whether a pipeline is
 compute-bound, bandwidth-bound, waiting on the link, or missing its real-time deadline.
@@ -22,8 +22,7 @@ compute-bound, bandwidth-bound, waiting on the link, or missing its real-time de
 The workload chooses its own size. For Xonotic, players may join and leave while the
 server runs. The profiler changes player count, observes the result, and searches around
 the hardware response. It then varies team and cart counts around that measured point.
-It never chooses a desired client count first and bends the algorithm until the numbers
-coincide.
+It starts from no desired client count.
 
 The policy first projects the game's complete numeric rows. It integrates nearby
 observations along navigable map paths after that projection, preserving each
@@ -38,9 +37,7 @@ over all rows. Each bot state page receives its own full-width velocity output.
 
 The complete learner can run on the Mini. Optional split execution places row
 contractions or routed feed-forward work on another node and returns the corresponding
-gradients to the same complete policy optimizer. Actual placement and current
-validation must be measured; earlier two-host demonstrations do not certify later
-code changes. The transport copies literal tensor rows without normalizing, summing,
+gradients to the same complete policy optimizer. The transport copies literal tensor rows without normalizing, summing,
 interpreting or capping them.
 
 Xonotic makes the result visible. Teams push and suppress many carts through a fused

@@ -3,7 +3,7 @@
 September 13, 2026. Transport-capacity implementation record. No shared-memory or transfer
 wire ABI change; both endpoint tuples and useful byte lengths are unchanged.
 
-## Published rule and previous limitation
+## TN3205 and the previous limitation
 
 [Apple TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
 specifies 4 KiB frame queue units, queried assigned capacities, matching
@@ -39,9 +39,9 @@ Before announcement, ready-list selection passes over a transfer that does
 not fit the residual capacity and retains its index for a later pass. It can
 therefore use residual capacity for a shorter ready message. After
 announcement, both payload posting and receive posting retain hardware
-message order. A receive destination already in use still requires its
-existing lifetime to finish; this change does not turn live destination
-reuse into a legal concurrent write.
+message order. A receive destination already in use still waits for its
+existing lifetime to finish; this change does not make live destination
+reuse a concurrent write.
 
 At least one frame belongs to every valid transfer. Thus no posted or
 announced queue can exceed its 4095-entry storage when its summed frame
@@ -76,5 +76,4 @@ all configured block sizes.
 -fsyntax-only rdma/mesh-flow.c rdma/mesh-dataflow.c` succeeds without warnings.
 No bridge restart or workload was run for this source increment.
 
-Provider capacities and storage lifetimes are substrate constraints. This record
-adds no requirements beyond the [async contract](transport.md).
+Provider capacities and storage lifetimes are substrate constraints.
