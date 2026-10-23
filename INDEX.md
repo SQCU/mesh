@@ -22,7 +22,8 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 - [design/data-model.md](design/data-model.md): the hardware preliminaries of the data model: the M-series
   accelerator and its caches beside sm90's, memory to NIC to memory on InfiniBand and here, the Thunderbolt RDMA
-  driver's SEND and RECV, and what the chain and the LSTM cost.
+  driver's SEND and RECV, and what the chain and the LSTM cost. Section 6 gives what the bridge must have, each
+  requirement tied to the section it follows from.
 - [design/transport.md](design/transport.md): the transport as the code holds it: the registered region, the page
   table, links, posted receives, SENDs and readiness words, and who owns each. It explains why SEND and RECV do not
   fail and what happens on a hang, a lost cable or a stopped bridge, and gives the data path (section 14), the source's

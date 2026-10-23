@@ -152,6 +152,40 @@ node a partial passes through can spend its own FLOPs and bandwidth on it. It ca
 the sum on. A collective here is a set of nodes that compute while they forward, not a set of endpoints joined by a
 fabric.
 
+## 6. What the bridge must have
+
+Each requirement below follows from a section above, which it names.
+
+**Register once.** The bridge registers one region with each device when the port opens (section 2). It keeps that
+region when it restarts. The next bridge takes the same memory, so nothing is wired twice
+(design/transport.md section 2). Nothing is registered during a call. Registering then would cost what sm90 pays,
+with each buffer pinned in 64 KB pages, which can take milliseconds (section 2).
+
+**Post ahead.** The bridge posts each receive before its SEND arrives. It posts it at the page the receiver named, in
+the order both ends fixed (section 3; section 5, position 1). The driver gives it no other way to place bytes, since it
+has no remote write (section 3).
+
+**No choices during a call.** The bridge sends no header, makes no request and gives no answer. It picks no page from
+what arrives (section 5, position 3). Each of these would cost another crossing or another pass over the bytes (the
+table in section 5). So the bridge reads and writes words, and it never touches a byte of the pages it moves.
+
+**One writer per device.** Only the bridge posts on each device (section 3), and only it counts how many frames each
+queue has free. The driver takes a post past a queue's frames, and later frames come out corrupt. It does not check
+the order of calls on a device, or it checks by faulting (design/transport.md section 2).
+
+**Queue pairs made once.** Each queue pair is made once and connected once. Its only release is the exit of the
+process that holds it (section 3). On the M5, a move back to RESET caused a panic on October 19, and a teardown call
+left the device stuck for 17 hours on October 18 (design/transport.md sections 5 and 14). On October 20 the operator
+ruled that no queue pair is reset, put in Error or destroyed while its process runs. On October 22 the operator
+allowed one exception, the flush the literature uses: a queue pair is moved to Error so that each request it still
+holds ends with a completion. The operator's words: "you can do this and nothing else with error states"
+(design/rubrics.md M3).
+
+**No fixed cost per step.** The bridge adds no fixed cost to a step, because the floors under a step are small. A
+poll sees a store 0.58 µs after it is made, and a dispatch costs 0.9-1.4 µs (section 1). A crossing lands about
+3.6 µs after its post (section 4). So a write posted ahead takes about 4.2 µs (section 5). Each µs the bridge adds is
+a large share of that, about a quarter.
+
 ## Sources
 
 - Apple. TN3205: Low-latency communication with RDMA over Thunderbolt. 2026.
