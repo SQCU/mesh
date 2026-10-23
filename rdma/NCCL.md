@@ -442,8 +442,8 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
   (`plan_quiet`: the bridge has done with its pages and its table, ~0 stamps included once every tuple's `posted`
   equals its `count`). Where every plan of these calls is held, a new one is made, up to four for one shape of calls
   (`SETS`, the exchange's window, one rule for both); where four are held by GPU work, the call waits outside the
-  groups' lock for the oldest's command buffer, in slices of MESH_PAUSE_NS with the revoke read between them, as
-  NCCL's bounded work FIFO blocks its host when full. Where that buffer is not committed (a C caller's), a plan is
+  groups' lock, reading the plans' stamps and the bridge's again after each yield of its thread and the revoke at each,
+  as NCCL's bounded work FIFO blocks its host when full. Where that buffer is not committed (a C caller's), a plan is
   made, as only the caller could end that wait; where it ended in an error, the call fails as a value. torch-mesh
   commits its open buffer once it holds four of the library's programs, so its wait is on committed work. So plans are made only while a program warms up (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
   a page is written again only after release). The `stamp` dispatch is a system-scope fence, then the atomic add, so
@@ -505,14 +505,15 @@ heard of, so none is left for them.
 
 - `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: start k writes its sends into slot k mod 4 (released
   at start k−1) and posts start k+1's landings into slot k+1 mod 4 once start k−3's kernels have ended and its tables
-  are done, waiting outside the groups' lock for the command buffer of those kernels to complete, in slices of MESH_PAUSE_NS, then for the bridge's stamps, the revoke read between slices (`ncclCommAbort`
-  ends it); where those kernels are in a command buffer not yet committed, or one that ended in an error, it fails as
+  are done, waiting outside the groups' lock: it reads the slot's `ended` and the bridge's stamps again after each
+  yield of its thread, and the revoke at each (`ncclCommAbort` ends it); where those kernels are in a command buffer not yet committed, or one that ended in an error, it fails as
   a value naming it (torch-mesh commits torch's open buffer before a start where start k−3's kernels are in it). A
   kernel's wait reads the stamp of the start it lands from its crossing record (`mesh_crossing` `target`, every landing
   of a start one call), so a slot's views and waits are written once at the init and no start rewrites them; a slot's
   `ended` and `bound` count up from the init. A slot is
   released by use count: every kernel bound to it (`ncclMeshBind`, landing its
-  start or publishing it) counts its end in the slot's table (`ended`, the last threadgroup of `mesh_leave`), and the slot
+  start or publishing it) counts its end in the slot's table (`ended`, the last threadgroup of `mesh_leave`, stored
+  system-coherent so the host reads it while the kernel's command buffer runs on), and the slot
   is free once that count reaches the binds made of it (`bound`) and the bridge has stamped its tables (below),
   whatever kernels the caller binds or none. So no start reuses pages
   another start still holds, and a kernel writes no guard of its own (the operator, 2026-10-22: "programs overwrite

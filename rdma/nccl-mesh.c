@@ -1466,10 +1466,8 @@ static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n
     if (status < 0)
       return fail(ncclSystemError, "%s on communicator %s: the %u plans of its shape are held by GPU work whose command buffer ended in an error",
                   call_name(list), comm->name, (unsigned)SETS);
-    void *command = status ? NULL : metal_retain(held->command);
     pthread_mutex_unlock(&group_lock);
-    if (command) { metal_completed(command, MESH_PAUSE_NS); metal_release(command); }
-    else sched_yield();
+    sched_yield();
     pthread_mutex_lock(&group_lock);
     release(comm);
   }
@@ -2309,7 +2307,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, calls + i);
     if (!result) result = retire_groups(program);
   } else if (!result) result = epilogue(program, calls, n);
-  plan->leaving = !g;
+  if (!g) plan->leaving = 1;
   result = program_end(program, list[0].encoder != NULL, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   pthread_mutex_unlock(&group_lock);
@@ -2720,10 +2718,8 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
       result = fail(status < 0 ? ncclSystemError : ncclInvalidUsage, "ncclMeshStart %llu on %s: its pages are start %llu's, whose kernels' command buffer %s",
                     (unsigned long long)number, comm->name, (unsigned long long)(number - 3), status < 0 ? "ended in an error" : "is not committed");
     else {
-      void *command = status ? NULL : metal_retain(ahead->command);
       pthread_mutex_unlock(&group_lock);
-      if (command) { metal_completed(command, MESH_PAUSE_NS); metal_release(command); }
-      else sched_yield();
+      sched_yield();
       pthread_mutex_lock(&group_lock);
     }
   }

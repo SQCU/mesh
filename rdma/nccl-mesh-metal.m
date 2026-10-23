@@ -5,7 +5,6 @@
 #include "nccl.h"
 #include <dlfcn.h>
 #include <errno.h>
-#include <sched.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,13 +123,6 @@ int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLShared
 void metal_release(void *object) { [(id)object release]; }
 void *metal_retain(void *object) { return [(id)object retain]; }
 void *metal_command(const struct metal_program *program) { return [program->buffer retain]; }
-int metal_completed(void *command, uint64_t ns) {
-  id<MTLCommandBuffer> buffer = (id<MTLCommandBuffer>)command;
-  for (const uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + ns;
-       buffer.status < MTLCommandBufferStatusCompleted && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < until;)
-    sched_yield();
-  return buffer.status >= MTLCommandBufferStatusCompleted;
-}
 int metal_ended(void *command) {
   const MTLCommandBufferStatus status = ((id<MTLCommandBuffer>)command).status;
   return status == MTLCommandBufferStatusError ? -1 : status == MTLCommandBufferStatusCompleted ? 1 : status < MTLCommandBufferStatusCommitted ? 2 : 0;
