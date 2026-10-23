@@ -67,7 +67,7 @@ def form(K, S, rows, peers, held):
                          f'a share and a row count are positive multiples of {tile}, not {", ".join(wrong)}')
     simd, cores = _width(), node()[1]
     kt, st, rt = K // tile, S // tile, rows // tile
-    G = min(cores // 2, max(kt, st))
+    G = min(cores, max(kt, st))
     most = held['max_threads_per_threadgroup'] // simd
 
     def simdgroups(rg):
