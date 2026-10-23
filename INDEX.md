@@ -32,7 +32,11 @@ other projects, such as a game bot, and old dated records; they are not listed h
   requirement tied to the section it follows from. Section 8 works out writes over many hops and many paths: the cut
   that bounds a transfer, the DMA a receiving node and a relay spend, and the sizes past which more paths win, as facts
   of the hardware rather than rules the bridge applies; then who balances the load, and the operator's position that
-  the bridge does not care how big a write is.
+  the bridge does not care how big a write is. Section 9 explains why a generic backend matches one fused for a single
+  program (shapes and callgraph fixed at compile, so every call's pages and order are compiled ahead and a step is
+  writes posted ahead landing and the program's arithmetic), the per-call planning, size thresholds, locks, waits on
+  driver state and host round trips that rules out, each kind of collective as compiled one-sided writes, the
+  balancer's share change as a new plan, and where today's code is slower.
 - [design/quiet-link.md](design/quiet-link.md): an adjunct to data-model.md section 3: what a link's first SEND after
   a quiet stretch costs, where mesh runs meet it, and the transfer size above which the cost is under 1%, filed as an
   idiosyncrasy that moves no kernel on the (throughput, latency) frontier.

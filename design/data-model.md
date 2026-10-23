@@ -421,6 +421,90 @@ they are laid over the paths, so that all of them happen as fast as they can, ev
 even know what a page is, or which data goes with which page. Those belong to the data processing functions and the
 collective functions.
 
+## 9. Any collective as compiled one-sided writes
+
+The operator, 2026-10-23: "if any of these are slow then the data model's eplanation of them is wrong and teh data
+model docuemnt will be re-written until we explain how we can run any collective with one-sided writes with no
+irreducible overhead, e.g. no overhead that could be reduced by writing a single program 'fused backend' for that one
+program alone." "These" are the steps of expert parallelism, ring attention and Megatron, and the collectives that a
+tensor-parallel program makes. This section explains how each one runs.
+
+**Why a generic backend matches a fused one.** A fused backend is code written for one program alone. It knows that
+program's shapes and the order of its calls. A generic backend can know them too. The operator, 2026-10-22: "we do not
+intend to support any source level metaprogramming which tries to change what the syntax of the callgraph is or the
+shapes of any tensors are partway through a tensor function execution" (design/rubrics.md D2). So the shapes, their
+maximum extents and the callgraph are fixed when the program is compiled. Then every call's pages, and their order,
+can be compiled ahead. That is done once, for every rank. Every rank and every relay on a path holds the same facts
+(section 6). The bridge posts each receive at its page before its SEND comes (section 7).
+
+So a step is two things. Writes posted ahead land, at one crossing and one wait a hop, about 4.2 µs (section 5). And
+the program does its own arithmetic. A fused backend could do no less. It crosses the same cables, and the hardware
+fixes how many crossings and waits a page needs (section 5). What is left is the bytes over the cut, and that bounds
+the fused backend just as it bounds the generic one (section 8).
+
+**What this rules out.** Each of these costs something a fused backend would not pay. So none of them is in a generic
+one.
+
+- Planning per call. A plan made at the call is a choice at run time. In section 5's table, asking first takes 3
+  crossings, about 12.6 µs, where a write posted ahead takes about 4.2 µs. Measured, a 3 KB crossing took 11.7 µs in a
+  fixed order. It took 24.1 µs with a scheduling kernel, a copy and gate words (section 4).
+- A program chosen by a size threshold. That is a choice at run time too, tuned on one shape. A rule chosen at width
+  1,024 made the chain about 78% slower at width 16,384 on two nodes: 1,539 µs a step against 865 (section 6). The
+  bridge does not care how big a write is (section 8).
+- Locks. A lock makes one party wait on another's word. On one node that is a poll, 0.58 µs at the soonest, and then
+  as long as the other party takes. Between nodes it is at least one more crossing, about 3.6 µs, and no data moves in
+  it (section 6).
+- Waits on driver state. The bridge's thread sees a completion within about 0.04 µs. Data code's turn is a dispatch,
+  0.9-1.4 µs, or a command buffer, 13.7-18.7 µs. A wait on driver state either holds the driver to data code's pace,
+  or reads state that has already moved on (section 6).
+- Host round trips each step. The host waits for the GPU and then starts a new command buffer, 13.7-18.7 µs. A
+  dispatch in an open one costs 0.9-1.4 µs (section 1). In the chain's step of 27.2-28.8 µs, that adds about half to
+  two thirds again (section 6).
+
+**Each kind of collective, as compiled writes.** Below, n is the number of ranks and S is the operand's bytes. B is
+one cable's rate, about 9.2 GB/s each way (section 8).
+
+- All-gather and reduce-scatter over ragged shares. Rank r holds p_r of P units (partition.py, attach). The shares
+  stay fixed between evaluations. So the plan knows each share's pages, and where each one lands in every output. In
+  an all-gather, each share's pages go to every other rank, into their places. In a reduce-scatter, each rank's partial
+  of a block goes to the block's owner. A node it passes through can add it on the way (section 5). Neither has a
+  header, a count or a choice in the call.
+- All-reduce, in two phases. A reduce-scatter leaves each rank with its block summed. Then an all-gather sends each
+  sum to every rank. In each phase a node takes in (n − 1)/n of S, so its cut bounds the time. Take two nodes with two
+  paths' worth between them, as m5ult1 and m5ult2 have (section 8's table). Each phase takes in S/2 at 2B, which is
+  S/(4B). Both phases take S/(2B).
+- Broadcast and reduce from a root. In a broadcast, every other node takes in all of S. So it can go no faster than
+  the smallest cut between the root and any one node (section 8). A reduce is the same writes run the other way.
+  Partials flow toward the root, and each node they pass adds them (section 5).
+- Expert routing. It is an all-to-all. Each rank sends each expert's rows to the rank that holds that expert, and the
+  results come back. Its pages are fixed ahead in one of two ways. The counts can be fixed ahead for each layer. Or
+  each slot can be sized at its maximum extent. Then the count the GPU wrote moves with the rows, and the padding past
+  it is never read unmasked (partition.py's header).
+- Ring attention. Each rank keeps its query block. The K/V blocks go around a fixed ring, one block a turn. At each
+  turn a rank attends over the block it holds and sends that block on. Which block lands where, at each turn, is fixed
+  ahead. So the ring is a fixed list of writes posted ahead.
+- Megatron's column and row splits (partition.py, ColwiseParallel and RowwiseParallel). A column split gives each
+  rank some of a weight's columns. Each rank's output is then its own share, and nothing crosses. A row split gives
+  each rank some of the rows, so each rank's output is a partial sum. That ends in a reduce-scatter or an all-reduce,
+  as above. So a column split and then a row split has one collective, at the place the callgraph fixes.
+- A relay. A relay is the identity at a rank in the topology. What lands there is sent on unchanged, from the same
+  memory, and its bridge never touches a byte (section 8). Where a node adds partials as they pass, the sum takes the
+  identity's place. Either way, each path's relays are in the plan.
+
+**Where the balancer fits.** The collective measures the residual, how far apart the ranks finish (section 8).
+Between one evaluation and the next, the balancer sets the shares from it. A new share is then a new compiled plan,
+with new pages and a new order, made once for every rank. It is not control at run time. Within an evaluation,
+nothing about the shares is chosen.
+
+**Where today's code is slower than this.**
+
+- A communicator holds one stream toward each member's node, on one cable (rdma/nccl-mesh.c, comm_hold), so a
+  collective between two nodes gets B where their cut is 2B or 3B (section 8's table).
+- routed reads the received counts on the host and sizes each expert's rows from them, a host round trip in every
+  layer (rdma/torch-mesh/torch_mesh/partition.py, routed).
+- allgatherv copies this rank's block into its place in the output, and reduce_scatterv copies an input that lies
+  outside the region, each one more pass over the bytes (partition.py, allgatherv and reduce_scatterv).
+
 ## Sources
 
 - Apple. TN3205: Low-latency communication with RDMA over Thunderbolt. 2026.
