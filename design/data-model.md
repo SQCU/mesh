@@ -93,6 +93,34 @@ code fits the hardware. A 3 KB crossing takes 11.7 µs as plain dispatches in a 
 completion runs a scheduling kernel, the operand is copied to scratch, and the waits read gate words
 (measurement.md:3230-3238).
 
+## 5. Peak and what is reached
+
+An H100's peak is far above a Studio's. But on real work it reaches only part of that peak.
+
+Its 50 MB L2 is split in two halves. A load from the far half takes nearly twice as long as one from the near half. Read
+across all 50 MB, L2 gives 3.8 TB/s, less than an A100's 4.5 TB/s (Chips and Cheese 2023). An L2 hit takes about 273
+cycles, and about 508 when both halves are busy (Jarmusch et al. 2025). A B200 splits its L2 across its two dies.
+Atomics take 90-100 ns on the near side and 190-220 ns across (Chips and Cheese, B200).
+
+Dense math hits the power limit. A dense BF16 matmul on an H100 SXM holds about 680 TFLOPS at 700 W, with the clock near
+69% of its top, against a 989 TFLOPS peak. Random inputs flip more bits than zeros, so they draw more power and slow the
+clock more. Under long load some H100s have dropped from 1,755 MHz to 450-550 MHz (Spheron 2026). Where it fits,
+sparse beats dense: 2:4 sparse FP8 reached about 1,900 TFLOPS against 1,500 dense at 16,384 cubed. At small layer sizes
+it was slower than dense (Hu et al. 2024; Fisher-weighted SVD study 2026).
+
+Small steps that wait on each other are the worst case. At batch 1 an H100 used about 27% of its memory bandwidth on a
+7B model, where an L4 used about 81%. The cause was a fixed CPU launch cost each step (Batch-1 decode study 2026).
+Below batch 100, MFU stays under 20% (Chen et al. 2024). Each launch ends in a PCIe write to the GPU's doorbell, and the
+GPU idles until it comes (Blink 2026). On an A100, one decode layer took 0.38 ms on the GPU and 1.14 ms on the CPU
+(Adrenaline 2025).
+
+So for a chain of small steps, the share of the roofline reached each step decides the speed, not the peak. On CUDA
+that share falls, because each step pays fixed costs: the launch and its doorbell, PCIe hops, far-L2 trips, and clocks
+held down by the power limit. A Studio has one memory, no PCIe or BAR, a dispatch of about 1 µs in an open command
+buffer, and a crossing that lands about 3.6 µs after it is posted (sections 1-3). It keeps that share high only while
+every part of mesh adds no fixed cost to a step: no waits, no copies, pages and their order fixed and posted ahead, and
+one region registered once. One part that breaks this pays a fixed cost every step, as CUDA does.
+
 ## Sources
 
 - Apple. TN3205: Low-latency communication with RDMA over Thunderbolt. 2026.
@@ -109,3 +137,13 @@ completion runs a scheduling kernel, the operand is copied to scratch, and the w
 - C. Zhao et al. Insights into DeepSeek-V3: Scaling Challenges and Reflections on Hardware for AI Architectures. ISCA
   2025.
 - InfiniBand Trade Association. InfiniBand Architecture Specification, Volume 1.
+- C. Lam. Nvidia's H100: Funny L2, and Tons of Bandwidth. Chips and Cheese, 2023.
+- Chips and Cheese. Nvidia's B200: Keeping the CUDA Juggernaut Rolling.
+- A. Jarmusch et al. Dissecting the NVIDIA Blackwell Architecture with Microbenchmarks. 2025.
+- Spheron. GPU Performance Consistency in the Cloud: The Hidden Clock Tax. 2026.
+- Y. Hu et al. S-STE: Continuous Pruning Function for Efficient 2:4 Sparse Pre-training. arXiv 2409.09099.
+- Mind the Approximation: Fisher-Weighted SVD Compression for ViTs. arXiv 2609.07155.
+- Memory-Bound but Not Bandwidth-Limited: The Physical AI Inference Gap in Batch-1 LLM Decode. arXiv 2605.30571.
+- S. Chen et al. Efficient Heterogeneous LLM Decoding with Model-Attention Disaggregation. arXiv 2405.01814.
+- Blink: CPU-Free LLM Inference by Delegating the Serving Stack to GPU and SmartNIC. arXiv 2604.07609.
+- Injecting Adrenaline into LLM Serving. arXiv 2503.20552.
