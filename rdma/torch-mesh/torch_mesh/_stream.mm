@@ -50,6 +50,9 @@ struct MeshStream {
   }
 };
 
+struct Exchanged { void *bound[3] = {nullptr, nullptr, nullptr}; int64_t last = 0; };
+static auto *exchanged_ = new std::unordered_map<int64_t, Exchanged>;
+
 static std::mutex *streams_lock_ = new std::mutex;
 static auto *streams_ = new std::unordered_map<at::mps::MPSStream *, MeshStream *>;
 
@@ -500,6 +503,12 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
         result = ncclMeshBind((ncclMeshRequest_t)(uintptr_t)request, (uint64_t)start, lands, publishes, &on, (uint32_t)crossing, (uint32_t)(gx * gy));
       if (result) return;
       [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
+      if (request && (lands || publishes)) {
+        Exchanged &x = (*exchanged_)[request];
+        void *root = (__bridge void *)stream->commandBuffer().rootCommandBuffer;
+        if (lands) x.bound[(start - 1) % 3] = root;
+        if (publishes) x.bound[start % 3] = root;
+      }
       if (request && publishes) s->published();
     }
   });
@@ -689,9 +698,12 @@ static int64_t exchange_start(int64_t request, const std::vector<int64_t> &sizes
   __block uint64_t start = 0;
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      if (s->waiting()) s->signalled(false);
+      Exchanged &x = (*exchanged_)[request];
+      const int64_t held = x.last - 1;
+      if (held > 0 && x.bound[held % 3] == (__bridge void *)stream->commandBuffer().rootCommandBuffer) s->signalled(false);
       ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
       result = ncclMeshStart((ncclMeshRequest_t)(uintptr_t)request, given, &on, &start);
+      if (result == ncclSuccess) x.last = (int64_t)start;
     }
   });
   s->streamed = true;
@@ -728,5 +740,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("metal_prelude", &metal_prelude);
   module.def("exchange_init", &exchange_init);
   module.def("exchange_start", &exchange_start);
-  module.def("exchange_free", [](int64_t request) { checked(ncclMeshRequestFree((ncclMeshRequest_t)(uintptr_t)request)); });
+  module.def("exchange_free", [](int64_t request) {
+    exchanged_->erase(request);
+    checked(ncclMeshRequestFree((ncclMeshRequest_t)(uintptr_t)request));
+  });
 }
