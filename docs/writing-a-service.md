@@ -130,10 +130,8 @@ than a few MiB. Only a kernel's few rows of scratch belong outside. Read inputs 
 
 `torch_mesh.memory()` gives this process's GPU memory outside the region (`outside`) and its region tensors' leases
 (`region`), both the process's own figures. `torch_mesh.check_memory(budget)` warns, with an `OutsideRegionWarning`,
-where `outside` is more than `budget`, the bytes the program's configuration gives it beside the region (on a Studio,
-the rank's process figure of [etc/bridge/m5ultra-headless.toml](../etc/bridge/m5ultra-headless.toml)): the program will
-probably take its node down with it. A program calls it once, after it has made its tensors. Nothing of the bridge's or
-the node's is read for it. A collective first given a tensor outside the region warns that it is staged by a copy.
+where `outside` is more than `budget`, the bytes the program's own configuration gives it beside the region. A program
+calls it once, after it has made its tensors. It reads nothing of the bridge's, and knows no node.
 
 ## The step kernel
 
