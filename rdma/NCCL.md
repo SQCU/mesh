@@ -445,7 +445,8 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
   groups' lock, reading the plans' stamps and the bridge's again after each yield of its thread and the revoke at each,
   as NCCL's bounded work FIFO blocks its host when full. Where that buffer is not committed (a C caller's), a plan is
   made, as only the caller could end that wait; where it ended in an error, the call fails as a value. torch-mesh
-  commits its open buffer before each call where a publication waits in it, so its wait is on committed work. So plans are made only while a program warms up (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
+  commits its open buffer before a call where it holds four of the library's programs or an exchange's waiting
+  publication, so its wait is on committed work. So plans are made only while a program warms up (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
   a page is written again only after release). The `stamp` dispatch is a system-scope fence, then the atomic add, so
   the pages' stores are visible before the count the host reads with acquire (design/hardware-and-discipline.md
   section 1); a stamp that cannot be encoded fails its program's call as a value.

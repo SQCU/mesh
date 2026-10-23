@@ -27,6 +27,8 @@ struct MeshStream {
   uint64_t committed = 0;
   id<MTLCommandBuffer> open = nil;
   bool streamed = false;
+  void *programmed = nullptr;
+  uint32_t programs = 0;
   std::unordered_map<int64_t, Exchanged> exchanged;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
@@ -46,8 +48,11 @@ struct MeshStream {
     open = nil;
   }
 
-  void called(void *held) {
-    if (waiting() || (held && held == (__bridge void *)mps->commandBuffer().rootCommandBuffer)) signalled(false);
+  void called(void *held, bool any) {
+    void *root = (__bridge void *)mps->commandBuffer().rootCommandBuffer;
+    bool exchange = any;
+    for (const auto &e : exchanged) exchange |= e.second.last > 0 && e.second.bound[e.second.last % 3] == root;
+    if ((exchange && waiting()) || (held && held == root)) signalled(false);
   }
 
   void published() {
@@ -133,7 +138,10 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   __block ncclMeshIssue issue = {0, 0};
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      s->called(nullptr);
+      s->called(s->programs >= 4 ? s->programmed : nullptr, false);
+      void *root = (__bridge void *)stream->commandBuffer().rootCommandBuffer;
+      if (root != s->programmed) { s->programmed = root; s->programs = 0; }
+      s->programs++;
       ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)stream->commandEncoder(), split ? &issue : nullptr};
       result = (*encode)(&on);
       if (!split || issue.published) s->published();
@@ -704,7 +712,7 @@ static int64_t exchange_start(int64_t request, const std::vector<int64_t> &sizes
     @autoreleasepool {
       MeshStream::Exchanged &x = s->exchanged[request];
       const int64_t held = x.last - 2;
-      s->called(held > 0 ? x.bound[held % 3] : nullptr);
+      s->called(held > 0 ? x.bound[held % 3] : nullptr, true);
       ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)stream->commandEncoder()};
       result = ncclMeshStart((ncclMeshRequest_t)(uintptr_t)request, given, &on, &start);
       if (result == ncclSuccess) x.last = (int64_t)start;

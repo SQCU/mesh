@@ -422,8 +422,10 @@ large tensors in the region: [docs/writing-a-service.md](../../docs/writing-a-se
   - The next publication applies the rule again. A host wait commits the open buffer, since nothing else would. The
     library's: the host path, a recording's compile meeting, and every call into the library that can wait (a
     collective's, whose plan may wait for its shape's oldest program, and an exchange's start, which waits for start
-    k−3's slot): before it, the open buffer is committed where a publication waits in it, or, for a start, where it
-    holds start k−3's kernels (`MeshStream::called`, one rule for both callers). torch's own: `torch.mps.synchronize()`,
+    k−3's slot): before it, the open buffer is committed where what the call can wait on lies in it
+    (`MeshStream::called`, one rule for both callers): for a start, a publication waiting there or start k−3's kernels;
+    for a collective, an exchange's publication waiting there, or four of the library's programs, since a group shape
+    keeps four plans and the fifth call of a shape waits for the oldest's program (NCCL.md, Plans). torch's own: `torch.mps.synchronize()`,
     `torch.accelerator.synchronize()`, `.item()` and `.cpu()` commit torch's open buffer and wait
     (`MPSStream::synchronize` with `COMMIT_AND_WAIT`).
   - A host that blocks outside torch while a publication waits in the open buffer stalls its peer: nothing else
