@@ -160,6 +160,4 @@ struct port {
   uint64_t child_at,late_from,late_at,elsewhere_start;
   unsigned char child_in[sizeof(struct child_message)];
 };
-struct known { uint32_t node; uint64_t heard,gone,boot,sequence; };
-#define MESH_KNOWN 256
 #endif

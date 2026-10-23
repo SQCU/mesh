@@ -820,15 +820,16 @@ the higher's listener at the address it heard from, and the higher answers its h
 states 1 + the queue pairs its device holds for a link. A peer whose blocks are another size loses the link (its SENDs
 would cover other frames than this end's: TN3205), and so does a LINK naming other lanes than this end's plan.
 
-**The map** (`map_put`, `record_heard`). This node's record is made again when its port table changes (its sequence one
-more) and told on every greeted port (`records_say`), and a port newly paired is told every record of the map. A record that changes only its health and
-sequence is written under the `health` serial, not the map's, so the map serial moves only where the mesh changes. A
-record put in is kept only where a paired path from this node reaches its node (a breadth-first walk over
-`mesh_joined`); one the walk drops is logged unreachable. `known` is RFC 2328 s13's database: each node's newest record
-heard (its boot and sequence), held apart from the map, so a record no newer than one heard is not flooded again; a
-record the map dropped is put back when heard again at that sequence (a new pairing's exchange of the map) or a newer
-one (its node's next change). A full table gives its longest-unheard entry's
-place. A record heard is copied up to this build's size, the rest 0
+**The map** (`map_publish`, `record_heard`). `known` is RFC 2328 s13's link-state database: the newest record heard
+of every node (its boot, then its sequence), this node's own among them, kept whole and apart from the map, growing with
+the nodes heard; a record no newer than the one held is neither kept nor flooded again. This node's record is made
+again when its port table changes (its sequence one more) and told on every greeted port (`records_say`), and a port
+newly paired is told every record of the database. The map is the database's records whose nodes a paired path from
+this node reaches (RFC 2328 s16: a breadth-first walk over `mesh_joined`), made again from the whole database at each
+record kept, so a node a lost link cut off returns to the map when a link reaches it again, with nothing re-sent and
+nothing put back; a node leaving or entering the map is logged. Where the map's nodes and links are unchanged and only
+records' sequences and health moved, they are written under the `health` serial, not the map's, so the map serial moves
+only where the mesh changes. A record heard is copied up to this build's size, the rest 0
 (`struct mesh_record` is only appended to). A record's reach has one entry for each cable whose link is up with a
 stream in its plan: the peer node, the cable (its first stream's `cable`) and the link's bandwidth. So two nodes that
 several cables join are as many links of the map, one per cable. The entry's `cable` was 0 in every bridge before
@@ -920,7 +921,7 @@ The parent (mesh-link.c `main`):
 | wait or loop | waits on | ended by | why it ends |
 |---|---|---|---|
 | the event loop's `kevent64` | signals, sockets, children's exits and messages, `wake` | the event, or `turn_due` | the timeout is at most MESH_PAUSE_NS |
-| a turn's work (`job_finish`, `port_open`, `port_hello`, `link_turn`, `child_turn`, `clients_turn`, `map_put`) | nothing | its end | loops over the ports, slots, rows, streams and lane rings, each a fixed table |
+| a turn's work (`job_finish`, `port_open`, `port_hello`, `link_turn`, `child_turn`, `clients_turn`, `map_publish`) | nothing | its end | loops over the ports, slots, rows, streams, lane rings and the nodes heard, each finite |
 | `quiet_until` | other writers of the word | its swap, or a value at least `until` | each failed swap read a larger value; the word only grows |
 | sends on a control socket (`port_flush`) | the socket's room | EAGAIN, then EVFILT_WRITE | non-blocking |
 | sends to a child (`child_say`) | nothing | at once | non-blocking (since this section); a send that does not go whole marks the child deaf (below) |

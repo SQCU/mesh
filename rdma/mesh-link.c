@@ -5,7 +5,7 @@ static struct hdr *M;
 static struct wire_mapping wire;
 static struct port ports[MESH_PORTS];
 static uint32_t port_count,device_count,ones=MESH_ABSENT,link_page[MESH_PORTS],map_page,map_pages,map_room,
-                known_count,child_asked;
+                known_count,known_room,child_asked;
 static int events=-1,listener=-1,hello=-1,network=-1,addresses=-1,unreleased,finding,find_wanted,child_halted;
 static uint64_t now,sequence,memory,held_pages,find_at,owners[MESH_CLIENTS];
 static int64_t stop_reason;
@@ -18,7 +18,7 @@ static uintptr_t provider[2];
 static _Atomic uintptr_t mapped,job_thread;
 static _Atomic uint64_t exit_at;
 static char devices[MESH_PORTS][32],self_path[PATH_MAX],model[MESH_MODEL_BYTES];
-static struct known known[MESH_KNOWN];
+static struct mesh_record *known;
 static struct mesh_health health;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 _Static_assert(MESH_PORTS<=32,"a bit a port");
@@ -343,25 +343,28 @@ static void port_say(struct port *port,struct message said,const void *payload,u
 }
 
 /* design/transport.md section 3, RECORD; section 15, "The map" */
-static struct mesh_record *record_held(uint32_t node){
-  for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
-  return NULL;
-}
-static void records_say(const struct port *from,const struct mesh_record *record,int held){
-  for(uint32_t p=0;(!held || record_held(record->node)) && p<port_count;p++)
+static void records_say(const struct port *from,const struct mesh_record *record){
+  for(uint32_t p=0;p<port_count;p++)
     if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},record,sizeof *record);
 }
 static uint64_t available_now(void){
   int level=0;size_t size=sizeof level;
   return sysctlbyname("kern.memorystatus_level",&level,&size,NULL,0) || level<0?0:(uint64_t)level*(memory/100);
 }
-static struct known *known_at(uint32_t node){
+static struct mesh_record *known_at(uint32_t node){
   for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
-  struct known *at=NULL;
-  if(known_count<MESH_KNOWN)at=known+known_count++;
-  else for(uint32_t i=0;i<known_count;i++)if(!record_held(known[i].node) && (!at || known[i].heard<at->heard))at=known+i;
-  if(at)*at=(struct known){.node=node};
-  return at;
+  return NULL;
+}
+static int known_put(const struct mesh_record *record){
+  struct mesh_record *at=known_at(record->node);
+  if(!at && known_count==known_room){
+    struct mesh_record *grown=realloc(known,(known_room?2*known_room:16)*sizeof *known);
+    if(!grown){say("map: no memory to hold node %u's record\n",record->node);return ENOMEM;}
+    known=grown;known_room=known_room?2*known_room:16;
+  }
+  if(!at)at=known+known_count++;
+  *at=*record;
+  return 0;
 }
 static int map_grow(uint64_t records){
   if(records<=map_room)return 0;
@@ -375,31 +378,40 @@ static int map_grow(uint64_t records){
   map_page=page;map_pages=pages;map_room=(uint32_t)((uint64_t)pages*M->pgsz/sizeof(struct mesh_record));
   return 0;
 }
-static void map_put(const struct mesh_record *record){
+static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
+  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
+    a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
+  for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
+    same=a->reach[k].node==b->reach[k].node && a->reach[k].cable==b->reach[k].cable && a->reach[k].bandwidth==b->reach[k].bandwidth;
+  return same;
+}
+static void map_publish(void){
   const uint64_t n=atomic_load(&M->map_nodes);
-  struct mesh_record *r=mesh_records(M);
-  uint64_t at=0;
-  while(at<n && r[at].node!=record->node)at++;
-  const uint64_t count=at==n?n+1:n;
-  struct mesh_record *next=malloc(count*sizeof *next);
-  unsigned char *reached=calloc(count,1);
-  uint32_t *order=malloc(count*sizeof *order),head=0,tail=0;
-  if(!next || !reached || !order){free(next);free(reached);free(order);say("map: no memory to put node %u's record\n",record->node);return;}
-  memcpy(next,r,(size_t)n*sizeof *r);
-  memcpy(next+at,record,sizeof *record);
-  for(uint64_t k=0;k<count;k++)if(next[k].node==M->node){reached[k]=1;order[tail++]=(uint32_t)k;}
+  struct mesh_record *r=mesh_records(M),*next=malloc((known_count+1)*sizeof *next);
+  unsigned char *reached=calloc(known_count+1,1);
+  uint32_t *order=malloc((known_count+1)*sizeof *order),head=0,tail=0;
+  if(!next || !reached || !order){free(next);free(reached);free(order);say("map: no memory to make it\n");return;}
+  for(uint32_t k=0;k<known_count;k++)if(known[k].node==M->node){reached[k]=1;order[tail++]=k;}
   while(head<tail){
-    uint32_t a=order[head++];
-    for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,NULL,0)){reached[b]=1;order[tail++]=(uint32_t)b;}
-  }
-  for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
-    struct known *gone=known_at(next[k].node);
-    say("node %u unreachable, heard %.1f s before\n",next[k].node,gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0);
-    if(gone)gone->gone=now;
+    const uint32_t a=order[head++];
+    for(uint32_t b=0;b<known_count;b++)if(!reached[b] && mesh_joined(known+a,known+b,NULL,0)){reached[b]=1;order[tail++]=b;}
   }
   uint64_t kept=0;
-  for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+kept++,next+k,sizeof *next);
-  if(kept!=n || memcmp(next,r,(size_t)n*sizeof *r)){
+  int same=1;
+  for(uint32_t k=0;k<known_count;k++){
+    int held=0;
+    for(uint64_t i=0;i<n;i++)held|=r[i].node==known[k].node;
+    if(held!=reached[k] && known[k].node!=M->node)say(reached[k]?"node %u reached\n":"node %u unreachable\n",known[k].node);
+    if(!reached[k])continue;
+    same&=kept<n && record_links_same(r+kept,known+k);
+    next[kept++]=known[k];
+  }
+  if(same && kept==n){
+    mesh_notify(&M->health);
+    for(uint64_t i=0;i<n;i++){r[i].sequence=next[i].sequence;r[i].health=next[i].health;}
+    mesh_notify(&M->health);
+  }
+  else{
     mesh_notify(&M->map);
     if(map_grow(kept))say("map: no lease for %llu records; %llu kept\n",(unsigned long long)kept,(unsigned long long)map_room);
     if(kept>map_room)kept=map_room;
@@ -409,27 +421,15 @@ static void map_put(const struct mesh_record *record){
   }
   free(next);free(reached);free(order);
 }
-static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
-  int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
-    a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
-  for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
-    same=a->reach[k].node==b->reach[k].node && a->reach[k].cable==b->reach[k].cable && a->reach[k].bandwidth==b->reach[k].bandwidth;
-  return same;
-}
-static void record_put(struct mesh_record *held,const struct mesh_record *record){
-  if(!held || !record_links_same(held,record)){map_put(record);return;}
-  mesh_notify(&M->health);
-  held->sequence=record->sequence;held->health=record->health;
-  mesh_notify(&M->health);
-}
 static void record_changed(void){
   health.available=available_now();
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=wire.length-held_pages*M->pgsz,.memory=memory,.health=health};
   memcpy(own.model,model,sizeof own.model);
   for(uint32_t p=0;p<port_count;p++)if(ports[p].link.state==LINK_UP && plan_streams(ports[p].link.plan))
     own.reach[own.reached++]=(struct mesh_reach){.node=ports[p].peer,.cable=atomic_load(&stream_of(ports+p,0)->cable),.bandwidth=ports[p].bandwidth};
-  record_put(record_held(M->node),&own);
-  records_say(NULL,&own,0);
+  if(known_put(&own))return;
+  map_publish();
+  records_say(NULL,&own);
 }
 static void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes){
   struct mesh_record heard={0};
@@ -437,18 +437,11 @@ static void record_heard(struct port *from,const unsigned char *payload,uint32_t
   if(!heard.node || heard.node==M->node)return;
   heard.reached=MIN(heard.reached,(uint32_t)MESH_STREAMS);
   heard.model[sizeof heard.model-1]=0;
-  struct mesh_record *held=record_held(heard.node);
-  struct known *k=known_at(heard.node);
-  if(k && k->boot && (heard.boot<k->boot || (heard.boot==k->boot && heard.sequence<=k->sequence))){
-    if(!held && heard.boot==k->boot && heard.sequence==k->sequence){map_put(&heard);records_say(from,&heard,1);}
-    return;
-  }
-  if(held && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
-  if(!held && k && k->gone)say("node %u back after %.1f s\n",heard.node,(double)(now-k->gone)/1e9);
-  else if(!held && k && !k->heard)say("node %u joined\n",heard.node);
-  if(k){k->heard=now;k->gone=0;k->boot=heard.boot;k->sequence=heard.sequence;}
-  record_put(held,&heard);
-  records_say(from,&heard,0);
+  const struct mesh_record *k=known_at(heard.node);
+  if(k && (heard.boot<k->boot || (heard.boot==k->boot && heard.sequence<=k->sequence)))return;
+  if(known_put(&heard))return;
+  map_publish();
+  records_say(from,&heard);
 }
 static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code){
   struct mesh_link_info *link=&mesh_links(M)[port->index];
@@ -807,8 +800,8 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
            port->budget,theirs,l->plan,plan_lanes(l->plan),plan_streams(l->plan),
            plan_streams(l->plan)==1?"":"s");
   link_set(port,port->peer,MESH_PAIRED,0);
-  for(uint64_t i=0;port->greeted && i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node!=M->node)
-    port_say(port,(struct message){.kind=RECORD},mesh_records(M)+i,sizeof(struct mesh_record));
+  for(uint32_t i=0;port->greeted && i<known_count;i++)if(known[i].node!=M->node)
+    port_say(port,(struct message){.kind=RECORD},known+i,sizeof(struct mesh_record));
   if(port->greeted)link_turn(port);
 }
 static void streams_cancel(const struct port *port){
