@@ -119,10 +119,8 @@ int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
     for(uint32_t b=a+1;b<n;b++){
       uint32_t cable[MESH_REACH];
       uint64_t bandwidth[MESH_REACH];
-      for(uint32_t c=0,cables=mesh_joined(r+a,r+b,cable,bandwidth,MESH_REACH);c<cables && c<MESH_REACH;c++){
-        if(!bandwidth[c])return EINVAL;
+      for(uint32_t c=0,cables=mesh_joined(r+a,r+b,cable,bandwidth,MESH_REACH);c<cables && c<MESH_REACH;c++)
         w->map.edge[w->map.edges++]=(struct mesh_edge){a,b,cable[c],bandwidth[c]/8};
-      }
     }
   }
   const int error=n?mesh_routes(&w->map,w->next):0;

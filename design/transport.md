@@ -695,7 +695,7 @@ up to a tick late.
 (mesh.rdma.send) and `way` 1 for its receives (mesh.rdma.receive), the index of `walking[port][way]`. A pass
 (`port_pass`) reads the lanes served once, refreshes its copy of the map's names and routes where the map's count has
 moved (`routes_fresh`: names sorted for binary search, the next node toward each node on the map `mesh_whole_make` builds
-for `mesh_map`, each cable at its bandwidth / 8; a map with a cable of no bandwidth is EINVAL and has no route), polls that
+for `mesh_map`, each cable at its bandwidth / 8), polls that
 way's completion queue and counts each completion (`completed`), then serves each lane: the send thread goes on with
 its lane's run (`run_send`) and then takes new runs (`tables_send`, `relays_send`); the receive thread places or posts
 its lane's run (`run_receive`) and frees its sent relay entries (`relays_free`). A thread with no lane served waits on
@@ -760,7 +760,8 @@ last such turn, it writes the clock to the region's `progress[port]` (section 16
   the connect moves each to RTR, then RTS.
 - A link's `cable` (`link_cable`, the parent's, as the connect completes) is FNV-1a over its lane 0's two ends (each
   port's GID and queue pair number), the lesser end first, folded to 32 bits, 1 where 0: both bridges compute it alike,
-  and it names the cable in both ends' records. A link's bandwidth is its port's figure, alike for links of every
+  and it names the cable in both ends' records. A link's bandwidth is its port's figure (`port_bandwidth`: its active width's lanes, 1X, 2X, 4X, 8X
+  or 12X, times its active speed's lane rate, SDR to NDR, by verbs' `ibv_rate_to_mbps`), alike for links of every
   plan and the same in the node's reach and in its record.
 - A child whose parent is gone halts its lanes and exits once MESH_PLATFORM_NS and its windows have passed
   (`child_leave`), at most twice MESH_PLATFORM_NS on.

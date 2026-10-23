@@ -111,13 +111,13 @@ static void routes_fresh(struct walker *w){
   for(uint32_t a=0,at=0;name && a<n;a++)for(uint32_t j=0;named && j<r[a].names;j++,at++)name[at]=(struct named){{named[at][0],named[at][1]},r[a].node,0};
   struct mesh_whole whole;
   const int error=mesh_whole_make(r,n,&whole);
-  if(error==ENOMEM || !name || !node || !hop || !least || !path || !paths){
+  if(error || !name || !node || !hop || !least || !path || !paths){
     free(r);free(named);free(name);free(node);free(hop);free(least);free(path);free(paths);mesh_whole_free(&whole);return;
   }
   uint32_t self=n;
   for(uint32_t a=0;a<n;a++){node[a]=r[a].node;if(r[a].node==M->node)self=a;}
   qsort(name,names,sizeof *name,named_order);
-  for(uint32_t b=0;!error && self<n && b<n;b++){
+  for(uint32_t b=0;self<n && b<n;b++){
     uint32_t *to=path+(size_t)b*n;
     paths[b]=b!=self?mesh_route_path(&whole.map,self,b,to):0;
     for(uint32_t i=0;i<paths[b];i++)to[i]=node[to[i]];
@@ -848,9 +848,11 @@ static int pair_up(struct mesh_verbs *p,uint32_t plan){
   return 0;
 }
 static uint64_t port_bandwidth(const struct ibv_port_attr *port){
-  static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
-  static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
-  return speeds[port->active_speed]*widths[port->active_width];
+  static const enum ibv_rate lane[256]={[1]=IBV_RATE_2_5_GBPS,[2]=IBV_RATE_5_GBPS,[4]=IBV_RATE_10_GBPS,[8]=IBV_RATE_10_GBPS,[16]=IBV_RATE_14_GBPS,
+                                         [32]=IBV_RATE_25_GBPS,[64]=IBV_RATE_50_GBPS,[128]=IBV_RATE_100_GBPS};
+  static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12,[16]=2};
+  const int mbps=ibv_rate_to_mbps(lane[port->active_speed]);
+  return mbps>0?(uint64_t)mbps*UINT64_C(1000000)*widths[port->active_width]:0;
 }
 static void job_begin(struct port *port,int job){
   port->job=job;port->job_pairing=atomic_load_explicit(&port->link.pairing,memory_order_relaxed);port->job_at=now;
