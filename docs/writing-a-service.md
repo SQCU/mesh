@@ -111,6 +111,22 @@ output file's memory. No step waits for the host, and the next section says when
 The example puts its shared tensors in the region with `torch_mesh.empty`. Collectives then read and write them in
 place, with no copy. They also use memory the bridge already holds, so no second copy of anything is made.
 
+## Memory outside the region
+
+A program builds its buffers from pages of the region. In C it leases them with `ncclMemAlloc`. In torch it makes
+region tensors with `torch_mesh.empty`, which lease the same pages. The bridge wired these pages for the devices once,
+when it came up. So a collective sends from the pages a tensor lies in and lands bytes in the pages they belong in.
+
+A program should not take large blocks of memory of its own outside the region. They gain it nothing. No peer can be
+passed them zero copy, so the program must copy them into the region to send them, and it moves the bytes twice. When
+the GPU uses them, macOS wires them in RAM beside the region, where the node has little room. On 2026-10-23 at 03:08,
+the chain's process wired 3.64 GiB beside an 86 GiB region on a 96 GiB Studio, and both Studios reset
+([etc/bridge/README.md](../etc/bridge/README.md)).
+
+So put weights, KV caches, inputs, outputs and large scratch in the region. Only a kernel's few rows of scratch belong
+outside it. `torch_mesh.check_memory()` warns when the process's MPS tensors outside the region come to 1 GiB or more.
+Both examples call it once, after they make their tensors.
+
 ## The rings
 
 The input ring is two blocks deep. While the GPU works through one block, the next block's inputs arrive in the

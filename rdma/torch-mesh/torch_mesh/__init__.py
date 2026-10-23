@@ -9,7 +9,7 @@ one commit rule (README, Performance).
 empty() makes a region tensor, whose bytes are a lease of this node's bridge's region (an MPS one through torch's
 DLPack interop over the lease's Metal buffer: _stream.mm region_empty), which a collective reads and writes where it
 lies; records() is the region tensors' leases live now and address(t) where a tensor's bytes lie in the region (0:
-outside it).
+outside it); check_memory() warns where this process's MPS tensors outside it come to 1 GiB or more.
 
 all_to_all_counted() is MPI_Alltoallv whose counts the GPU wrote (the torch operator torch_mesh::all_to_all_counted over
 libnccl-mesh's ncclMeshAlltoAllCounted): a mixture of experts' dispatch and combine with no host sync, counted() its
@@ -63,6 +63,21 @@ def address(tensor):
     """Where a tensor's bytes lie in the region (its first byte's address), 0 where they lie outside it."""
     from . import _stream
     return _stream.address(tensor)
+
+
+def check_memory():
+    """Bytes of this process's MPS tensors outside the region (torch.mps.current_allocated_memory: torch's allocator
+    makes no region tensor), with a warning where they come to 1 GiB or more
+    (docs/writing-a-service.md#memory-outside-the-region)."""
+    import warnings
+
+    import torch
+    outside = torch.mps.current_allocated_memory()
+    if outside >= 2**30:
+        warnings.warn(f'mesh: {outside / 2**30:.2f} GiB of MPS tensors lie outside the region: no peer can be passed them '
+                      'zero copy, and the GPU wires them beside the region, which risks the node. Make them with '
+                      'torch_mesh.empty (docs/writing-a-service.md#memory-outside-the-region)', stacklevel=2)
+    return outside
 
 
 class _Counted:

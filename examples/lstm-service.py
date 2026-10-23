@@ -112,6 +112,7 @@ def main():
     E = torch_mesh.empty(deep, rows, KIN, dtype=torch.half)
     O = torch.empty(block, rows, H, dtype=torch.half, device='mps') if rank == 0 else None
     outputs = np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H)) if rank == 0 else None
+    torch_mesh.check_memory()
     torch.mps.synchronize()
     dist.barrier()
     began = time.perf_counter()

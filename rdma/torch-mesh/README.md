@@ -56,6 +56,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   flight). Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
   it reads or writes region operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the region
   tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the region (0: outside it).
+  `torch_mesh.check_memory()` warns where the process's MPS tensors outside the region come to 1 GiB or more
+  ([docs/writing-a-service.md](../../docs/writing-a-service.md#memory-outside-the-region)).
   Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on region
   tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
   allocator's, and a collective that sends from one, or lands in one, across a link fails as a value
