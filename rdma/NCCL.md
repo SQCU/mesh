@@ -468,21 +468,29 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`, `nccl
   barrier on Metal 4), so the word equals `reader` once each of those programs has ended, in whatever order the caller
   commits them and on whatever queues. Where every plan of these calls is held, a new one is made
   (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
-  a page is written again only after release).
-- A plan whose group was lost with its communicator, or made before `ncclMeshCommForms` changed the table, is never
-  started again, and is freed once idle (`sweep`): a lost group's programs were counted as they ended, so its pages
-  are returned only after them. Where the region cannot meet a new lease (a plan's or an exchange's slot), the idle
-  plans are freed and the lease is taken again. `ncclCommDestroy` frees the communicator's idle plans and leaves a
-  plan whose programs have not all ended held, its lease returned with the process's.
+  a page is written again only after release). On Metal 4 the end is the `stamp` dispatch: a system-scope fence, then
+  the atomic add, so the pages' stores are visible before the count the host reads with acquire (design/
+  hardware-and-discipline.md section 1).
+- A plan whose group was lost with its communicator, failed on the host path, or was made before `ncclMeshCommForms`
+  changed the table is never started again. Its lease is returned once it is idle and quiet (`sweep`, `plan_quiet`):
+  idle, every program that named its pages has ended; quiet, on each channel the holding's `landed` has passed the
+  plan's last landing entry and `sent` its last send entry, or the count reads `~0` (the link lost), or the stream is
+  no longer this communicator's (`mesh_stream_held`). Until then the bridge may still post a receive it was presented
+  into the plan's rows, since a presented entry stays in the holding until the holding ends (design/transport.md
+  section 14, "A holding's end": returning such a lease is the holder's error). So a lost group's plan on a stream the
+  communicator still holds is kept until `ncclCommDestroy` has given the stream back; the bridge's reclaim then keeps
+  the rows of units still in flight (W(t), design/extents-and-liveness.md d). Where the region cannot meet a new lease
+  (a plan's or an exchange's slot), the idle and quiet plans and the freed requests' free slots are returned and the
+  lease is taken again. A group or a start looks at the plans only while a stale one is held, so one that finds none
+  does no work for it. `ncclCommDestroy` frees the communicator's idle plans after giving its streams back, and leaves
+  a plan whose programs have not all ended held, its lease returned with the process's.
 - The host path takes plans as the Metal path does; its group has ended when it returns, so its plan is idle at once.
 
-**Page lengths.** Each rank's report at init carries its region's page length (`block x pgsz`). A channel keeps its
-peer's (`channel.page`), and the program's own cuts lie on this node's page (`mesh_program_steps_cut`). A
-unit is one page of a run, page-start-aligned at both ends, and expresses only a length: a run of one unit fits where
-it is no longer than either end's page, and a run of more lands page for page only where the two ends' pages are equal
-(`nccl-mesh-metal.h` `units_fit`). A plan or an exchange whose run does not fit fails as a value when it is made,
-naming the two page lengths. `mesh.h` `struct mesh_entry` names its rows and a count of pages; an entry's length in
-bytes, which would let the bridge post a run's last unit at its own length, is not a field of it.
+**Page lengths.** A link pairs only two nodes of one page length (`block x pgsz`): the bridge ends a pairing whose
+HELLO names another (mesh-link.c, EPROTO). Channels go only over links, so the two ends of every channel lay the same
+pages, and the program's own cuts lie on this node's page (`mesh_program_steps_cut`). No length is compared at run
+time. `mesh.h` `struct mesh_entry` names its rows and a count of pages; an entry's length in bytes, which would let the
+bridge post a run's last unit at its own length, is not a field of it.
 
 ## Persistent exchanges
 
@@ -503,10 +511,26 @@ its slots as its starts need them.
   explicit allocation per buffer or pageset that they operate against, rather than an attempt to make timed single
   landings"). `counts` (nranks entries: this rank's part, then each peer's) moves fewer elements than declared
   (partitioned communication's `MPI_Pready` [MPI 4.1 chapter 4]; design/extents-and-liveness.md, b); NULL moves the
-  declared counts. The start presents one send entry and one landing entry toward each peer. It first completes any
-  earlier group of the communicator with a send not yet published on a channel where it sends, since `ready` is a
-  count. It is then in flight as a composed group, whose sends count as published and whose landings as consumed: the
-  caller's kernels do both, encoded after the start.
+  declared counts. The start presents one send entry and one landing entry toward each peer. Its send entry is gated on
+  a word of its own, the peer's `published` in the slot's table (`struct mesh_entry` `word`, its region offset; `base`
+  0), which the start's publishing kernel stores (`mesh_leave`): the holding's `ready`, a count that every later
+  group's publication moves, never covers it (the bridge reads an entry's word, design/transport.md section 14). So a
+  group or another start encoded before this start's publishing kernel sends nothing of the slot before it is written.
+  A channel's entries are posted in their order, so that group's SENDs on the channel wait behind the start's until its
+  publishing kernel has run: a GPU wait that needs them reaches its bound and fails as a value, and a host-path group
+  fails as a value at its call while a start is not yet bound to the kernel that publishes it (`ncclMeshBind`
+  `publishes`), as it does while the communicator's GPU groups are issued and not complete (MPI's persistent request:
+  its buffer is the request's between `MPI_Start` and its completion). The start first completes any earlier group of
+  the communicator with a send not yet published on a channel where it sends. It is then in flight as a composed group,
+  whose sends count as published and whose landings as consumed: the caller's kernels do both, encoded after the
+  start.
+- A request's slots are a ring in start order: a start takes the first free slot from the oldest on, and else makes
+  one, the newest, so where starts end in their order a start checks one slot and `ncclMeshBind` finds a start's slot
+  at its place in the ring (`slot_of`; else by a look at each slot). A slot is free
+  once the kernel bound to land its start has stamped it, and on each channel the holding's `sent` has passed its send
+  entry and `landed` its landing entry, or the count reads `~0`, or the stream is no longer the communicator's: a
+  landing entry not yet landed stays presented, and the bridge may post its receive into the slot until the holding
+  ends.
 - `ncclMeshBind(request, start, lands, publishes, stream, index, groups)` binds the crossing record (`struct
   mesh_crossing`) at buffer `index` of the caller's next dispatch on the stream's encoder: with `lands`, start − 1's
   landings and this rank's part of it; with `publishes`, start's send part and publication; `groups` the dispatch's
@@ -514,8 +538,11 @@ its slots as its starts need them.
   (`useResource`); on Metal 4 it is a record of the argument ring at the table's `index`, and its buffers join the
   residency set.
 - `ncclMeshRequestFree(request)` is `MPI_Request_free`: each slot's lease returns once the slot is free, at the free
-  or at a later start, plan or `ncclCommDestroy` of the communicator (which leaves a slot not yet free held, its lease
-  returned with the process's). A request is freed before its communicator is destroyed.
+  or at a later start, plan or `ncclCommDestroy` of the communicator, whose streams are given back first so that a slot
+  whose landing never came is free once its kernel has stamped it (a slot whose kernel has not, its lease returned with
+  the process's). A request not freed when its communicator is destroyed keeps its slots' leases until the process
+  ends, and a later free of it reads the destroyed communicator (MPI frees a request before its communicator,
+  `MPI_Request_free` before `MPI_Comm_free`).
 
 **The composed form.** The crossing's waits and its publication are the library's, compiled into the caller's kernel
 as a prologue and an epilogue around its function (Triton-distributed's and TileLink's tile primitives, 2025; Flux's
@@ -524,13 +551,17 @@ kernel:
 
 - `mesh_enter(crossing, tid)`, called by every thread: thread 0 of each threadgroup awaits each peer's `landed` past the
   landed start's entry (bounded, a failure recorded in the failure words), then a barrier and one system-scope fence;
-- the views: `mesh_landing<T>(crossing, q)` (the q-th peer's part, in rank order), `mesh_own<T>(crossing)` (this rank's
-  part of the landed start) and `mesh_send<T>(crossing)` (this start's part), each a `mesh_view<T>` whose `[k]` loads
-  system-coherent and whose `store(k, v)` stores system-coherent; any kernel may make a `mesh_view` over a buffer of its
-  own that the NIC writes;
+- the views: `mesh_landing<T>(crossing, q)` (the q-th peer's part, in rank order, q below `mesh_landings(crossing)`),
+  `mesh_own<T>(crossing)` (this rank's part of the landed start) and `mesh_send<T>(crossing)` (this start's part), each
+  a `mesh_view<T>` whose `[k]` loads system-coherent and whose `store(k, v)` stores system-coherent; `view + k` is the
+  view from its k-th element and `view.as<U>()` the same bytes as `U`; any kernel may make a `mesh_view` over a buffer
+  of its own that the NIC writes. A view's address is private, and the crossing record's fields are private to the
+  library's functions (`mesh_enter`, `mesh_leave`, the views), so a kernel names no holding's word and no slot's
+  address (design/rubrics.md, What data code reaches; the operator: "nobody ever gives them a dereferenced anything");
 - `mesh_leave(crossing, tid)`, called by every thread of every threadgroup: each threadgroup fences its stores and
-  counts its arrival in the table's word, and the last to arrive stores each peer's `ready` past this start's send after
-  one system-scope fence, stores the landed slot's stamp, and zeroes the arrival word for the slot's next use.
+  counts its arrival in the table's word, and the last to arrive stores each peer's `published` (the pages of this
+  start's send entry toward it) after one system-scope fence, stores the landed slot's stamp, and zeroes the arrival
+  word for the slot's next use.
 
 The kernel's math is its own. A dispatch bound with neither `lands` nor `publishes` takes an empty record, and enter and
 leave do nothing in it. The compiled form was chosen over dispatches of the library's own: the in-kernel crossings
@@ -703,7 +734,8 @@ released meanwhile; one not committed is not awaited; work encoded in a caller's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
 may take. Likewise, while a revoked or failed communicator still holds its streams, its bridge may still post receives
 into a lease its groups named, for entries already presented, until `ncclCommDestroy` gives the streams back
-(design/transport.md section 14, "A holding's end").
+(design/transport.md section 14, "A holding's end"): the library keeps its own such leases (plans, slots) until then
+([Plans](#plans)), and the bridge may post into a caller's lease that a lost group named until then too.
 
 A communicator's bytes of its node's region are its plans' and its exchanges' leases ([Plans](#plans),
 [Persistent exchanges](#persistent-exchanges)). The process

@@ -135,6 +135,7 @@ def main():
                    collective_gigabytes_per_second=moved * steps / seconds / 1e9,
                    kernel={key: step.args[key] for key in chain.ARGS})
     print(json.dumps(summary), flush=True)
+    step.exchange.free()
     dist.destroy_process_group()
 
 

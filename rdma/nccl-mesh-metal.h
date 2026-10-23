@@ -16,14 +16,10 @@ static inline int pages_below(mesh_pages a, mesh_pages b) { return a.n < b.n; }
 static inline int pages_lost(mesh_pages a) { return a.n == UINT64_MAX; }
 static inline uint64_t pages_to_word(mesh_pages a) { return a.n; }
 static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){word}; }
-typedef struct { uint64_t bytes; } mesh_length;
-static inline int units_fit(mesh_length run, mesh_length mine, mesh_length theirs) {
-  return run.bytes <= mine.bytes ? run.bytes <= theirs.bytes : mine.bytes == theirs.bytes;
-}
 
-#define MESH_PEER(P, U64, U32) struct mesh_peer { P landing; P landed; U64 landed_target, landed_at; P ready; U64 ready_value; U32 channel, pad; }
+#define MESH_PEER(P, U64, U32) struct mesh_peer { P landing; P landed; U64 landed_target, landed_at, published, ready_value; U32 channel, pad; }
 #define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; U64 stamp, value; }
-#define MESH_CROSSING(T, P, W, U64, U32) struct mesh_crossing { T land; T publish; P failure; W progress; U64 sequence; U32 groups, polls; }
+#define MESH_CROSSING(T, P, W, U64, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; P failure; W progress; U64 sequence; U32 groups, polls; }
 MESH_PEER(uint64_t, uint64_t, uint32_t);
 MESH_TABLE(uint64_t, uint64_t, uint32_t, uint32_t);
 enum { METAL_PLAIN, METAL_LAND };

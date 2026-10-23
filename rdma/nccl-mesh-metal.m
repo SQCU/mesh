@@ -342,7 +342,7 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
   return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, wait_args(w, dst_offset, n, op), n, 0);
 }
 
-MESH_CROSSING(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t);
+MESH_CROSSING(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, );
 _Static_assert(sizeof(struct mesh_crossing) <= RECORD, "a crossing record");
 
 uint64_t metal_address(void *buffer) { return ((id<MTLBuffer>)buffer).gpuAddress; }

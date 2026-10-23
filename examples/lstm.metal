@@ -13,12 +13,13 @@ struct Segments {
         while (k + 1 < count && kt >= seg[k + 1].first) k++;
         return k;
     }
-    device uchar* base(constant lstm_segment& s) const {
-        return s.source == 0 ? e : zero_h ? nullptr : s.source == 1 ? mesh_own<half>(*crossing).at : mesh_landing<half>(*crossing, s.source - 2).at;
+    bool held(constant lstm_segment& s) const { return s.source == 0 || !zero_h; }
+    mesh_view<half> view(constant lstm_segment& s) const {
+        return (s.source == 0 ? mesh_view<half>(e) : s.source == 1 ? mesh_own<half>(*crossing) : mesh_landing<half>(*crossing, s.source - 2)) + s.offset;
     }
     half element(uint row, uint col) const {
         constant lstm_segment& s = seg[find(col / 8)];
-        return mesh_view<half>{base(s) + 2 * s.offset}[row * s.ld + col - s.first * 8];
+        return view(s)[row * s.ld + col - s.first * 8];
     }
     void fill(uint c0, uint n) thread {
         if (c0 == chunk) return;
@@ -27,11 +28,11 @@ struct Segments {
         for (uint k = 0; k < count; k++) {
             constant lstm_segment& s = seg[k];
             const uint lo = max(c0, s.first), hi = min(c0 + n, s.first + s.tiles), quads = hi > lo ? (hi - lo) * 2 : 0;
-            device uchar* b = base(s);
+            const bool live = held(s);
+            const mesh_view<half4> b = live ? view(s).template as<half4>() : mesh_view<half4>();
             for (uint q = tid; q < rows * quads; q += THREADS) {
                 const uint row = q / quads, col = (lo - s.first) * 8 + q % quads * 4;
-                *(threadgroup half4*)(band + row * ld + (lo - c0) * 8 + q % quads * 4) =
-                    b ? mesh_view<half4>{b + 2 * s.offset}[(row * s.ld + col) / 4] : half4(0.0h);
+                *(threadgroup half4*)(band + row * ld + (lo - c0) * 8 + q % quads * 4) = live ? b[(row * s.ld + col) / 4] : half4(0.0h);
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

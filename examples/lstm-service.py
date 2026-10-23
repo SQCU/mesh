@@ -130,6 +130,7 @@ def main():
                    steady_tick_microseconds=steady * 1e6 if steady else None,
                    sent_bytes_per_tick=moved, kernel={key: tick.args[key] for key in lstm.ARGS})
     print(json.dumps(summary), flush=True)
+    tick.exchange.free()
     dist.destroy_process_group()
 
 
