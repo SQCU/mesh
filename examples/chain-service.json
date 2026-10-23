@@ -1,6 +1,6 @@
 {
   "input": "chain-input.npy",
-  "weights": "chain-weights.npz",
+  "weights": "chain-weights",
   "output": "chain-output.npy",
   "width": 1024,
   "parts": [512, 512],

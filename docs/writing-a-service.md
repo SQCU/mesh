@@ -28,9 +28,9 @@ rot₀ and rot₁ are normalized Hadamard rotations of an operand's columns, in 
 block, a power of two that divides the operand's width (x's width for rot₀, the sum of the parts for rot₁). A block of 1
 is no rotation, and a block of the whole width is the full Hadamard. A Hadamard H is linear, symmetric and orthogonal,
 so rot₀(x) Aᵀ = x (A H)ᵀ and rot₁(y) B = y (H B). Rank 0 holds the whole weights before it sends each rank its part, so
-it folds each rotation into them there, once, in region tensors (`rotated` in examples/chain-service.py). rot₁ spans every rank's columns
-of y, and it folds all the same: each rank's rows of H B are the rows its part of y meets. The step kernel never rotates
-anything, and a rotation costs no time a step.
+it folds each rotation into them there, once, in region tensors (`rotated` in examples/chain-service.py). rot₁ spans
+every rank's columns of y, and it folds all the same: each rank's rows of H B are the rows its part of y meets. The step
+kernel never rotates anything, and a rotation costs no time a step.
 An operand would have to be rotated as it is made only where its parameters are stored rotated and quantized, so that
 H cannot be folded into them; this example's parameters are float16.
 
@@ -80,11 +80,11 @@ The rank service in metal-microbench is a service of this kind for a language mo
 
 ## How the example moves its data
 
-Rank 0 holds the files. Before the communicator exists it loads A and B and folds their rotations in, in float16:
-seconds of host work at a large width, which no peer's wait may span (a wait on the GPU ends at its stream's bound,
-about the platform's 5 s), while the other ranks wait in torch's rendezvous. Then it reads the input's shape and
-broadcasts two numbers, the steps and the rows, so every rank knows them, and sends each rank that rank's rows of A
-and B.
+Rank 0 holds the files. Before the communicator exists it reads A and B memory-mapped and folds their rotations in, into
+region tensors, in float16: seconds of host work at a large width, which no peer's wait may span (a wait on the GPU ends
+at its stream's bound, about the platform's 5 s), while the other ranks wait in torch's rendezvous. Then it reads the
+input's shape and broadcasts two numbers, the steps and the rows, so every rank knows them, and sends each rank that
+rank's rows of A and B.
 
 The inputs are one operand: a block of rows for each step. They move through a ring of slots in the region, one slot a
 step. Each rank has two rings, one for the inputs and one for the sums.
@@ -255,9 +255,9 @@ read from the compiled pipeline.
 
 ## The configuration
 
-The service takes one operand: a configuration file. It names the input, the weights and the output. It gives the
-width and the parts. It gives `row_capacity`, the most rows a step may take, and `ring_bytes`, the region bytes for the
-two rings. It also gives the two rotations' blocks, and names `capabilities`, the
+The service takes one operand: a configuration file. It names the input, the weights (a directory holding `a.npy` and
+`b.npy`) and the output. It gives the width and the parts. It gives `row_capacity`, the most rows a step may take, and
+`ring_bytes`, the region bytes for the two rings. It also gives the two rotations' blocks, and names `capabilities`, the
 directory of capability files, from which each rank takes its own GPU's. Its paths are read from the directory the
 service runs in, the checkout's root in the sample. The kernel's form follows from the shape and the capability file,
 and its wait limit is the library's, so the configuration names none of them. The input file says how many steps and

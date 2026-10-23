@@ -252,7 +252,8 @@ def _drawn(out, draw, scratch):
 def inputs(config, steps, rows):
     g, w, n, scratch = np.random.default_rng(0), config['width'], sum(config['parts']), region(CHUNK, torch.float64)
     np.save(config['input'], _drawn(region((steps, rows, w), torch.half), lambda b: g.standard_normal(out=b), scratch))
-    with open(config['weights'] + '.part', 'wb') as f:
-        scaled = lambda b: np.divide(g.standard_normal(out=b), np.sqrt(w), out=b)
-        np.savez(f, **{k: _drawn(region((n, w), torch.half), scaled, scratch) for k in 'ab'})
-    os.replace(config['weights'] + '.part', config['weights'])
+    part, scaled = config['weights'] + '.part', lambda b: np.divide(g.standard_normal(out=b), np.sqrt(w), out=b)
+    os.makedirs(part, exist_ok=True)
+    for k in 'ab':
+        np.save(f'{part}/{k}.npy', _drawn(region((n, w), torch.half), scaled, scratch))
+    os.replace(part, config['weights'])

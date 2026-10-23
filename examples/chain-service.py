@@ -31,8 +31,7 @@ def rotated(w, block, axis):
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def folded(config):
-    weights = np.load(config['weights'])
-    full = tuple(weights[name] for name in ('a', 'b'))
+    full = tuple(np.load(f'{config["weights"]}/{name}.npy', mmap_mode='r') for name in ('a', 'b'))
     if any(w.shape != (sum(config['parts']), config['width']) for w in full):
         raise ValueError('The weights a and b are [sum of the parts, width] each')
     blocks = config['rotation_blocks']
