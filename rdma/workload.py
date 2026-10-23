@@ -38,7 +38,7 @@ class WorkloadMeter:
             self.measure_condition.notify()
 
     def measure_loop(self):
-        undelivered = None
+        failed = None
         while True:
             with self.measure_condition:
                 while self.pending_measures is None and not self.measure_stopping:
@@ -46,10 +46,8 @@ class WorkloadMeter:
                 payload, self.pending_measures = self.pending_measures, None
             if payload is None:
                 return
-            if undelivered is not None:
-                payload["measures"] = {**undelivered["measures"], **payload["measures"]}
-                payload["delivery_error"] = undelivered["delivery_error"]
-                payload["delivery_attempts"] = undelivered["delivery_attempts"]
+            if failed is not None:
+                payload["delivery_error"] = failed
             body = json.dumps(payload, separators=(",", ":")).encode()
             try:
                 connection = http.client.HTTPConnection(self.address[0], self.address[1])
@@ -59,10 +57,9 @@ class WorkloadMeter:
                 connection.close()
                 if response.status >= 300:
                     raise OSError(f"HTTP {response.status}")
-                undelivered = None
+                failed = None
             except Exception as error:
-                undelivered = dict(payload, delivery_error=f"{type(error).__name__}: {error}",
-                                   delivery_attempts=int(payload.get("delivery_attempts", 0)) + 1)
+                failed = f"{type(error).__name__}: {error}"
 
     def close(self, measures=None):
         if measures is not None:
