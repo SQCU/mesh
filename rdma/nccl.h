@@ -263,7 +263,6 @@ typedef void *cudaEvent_t;
 
 /* Opaque handle to communicator */
 typedef struct ncclComm* ncclComm_t;
-typedef struct ncclWindow_vidmem* ncclWindow_t;
 #define NCCL_COMM_NULL NULL
 
 #define NCCL_UNIQUE_ID_BYTES 128
@@ -288,17 +287,6 @@ typedef enum { ncclSuccess                 =  0,
 
 /* Internal use only */
 #define NCCL_API_MAGIC 0xcafebeef
-
-/* Window Registration flags */
-#define NCCL_WIN_DEFAULT 0x00
-#define NCCL_WIN_COLL_SYMMETRIC 0x01
-#define NCCL_WIN_STRICT_ORDERING 0x02
-/* Restrict window registration to GIN only. By default, register for all supported capabilities. */
-#define NCCL_WIN_GIN_ONLY 0x04
-/* Restrict window registration to CFT COUNTED only. By default, register for non-COUNTED LEs. */
-#define NCCL_WIN_CFT_COUNTED 0x08
-
-#define NCCL_WIN_REQUIRED_ALIGNMENT 4096
 
 /* NCCL performance policy */
 #define NCCL_CTA_POLICY_DEFAULT 0x00
@@ -466,23 +454,6 @@ typedef struct ncclCollConfig_v23200 {
   NCCL_CONFIG_UNDEF_INT,                    /* CTAPolicy */           \
   0,                                        /* userProfilerTag */     \
   NCCL_CONFIG_UNDEF_PTR,                    /* launchCompletionEvent */ \
-}
-
-/* This struct will be used by ncclGroupSimulateEnd() API to query information about simulation. */
-typedef struct ncclSimInfo_v22200 {
-    size_t size;
-    unsigned int magic;
-    unsigned int version;
-    float estimatedTime;
-} ncclSimInfo_t;
-
-/* NCCL_SIM_INFO_INITIALIZER must be assigned to initialize simInfo structure when it is created.
- * Not initialized simInfo will result in NCCL error. */
-#define NCCL_SIM_INFO_INITIALIZER {                                  \
-  sizeof(ncclSimInfo_t),                     /* size */              \
-  0x74685283,                                /* magic */             \
-  NCCL_VERSION_CODE,                         /* version */           \
-  NCCL_UNDEF_FLOAT                           /* estimated time */    \
 }
 
 /* NCCL malloc and free function for all types of NCCL optimizations
