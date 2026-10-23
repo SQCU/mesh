@@ -261,6 +261,10 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
     if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->start=mesh_started(getpid());
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
+    /* design/transport.md section 2: the bridge woken (as mesh_retire wakes it), so it watches this process's exit
+       from its next turn, at once: a holder taken between two of its turns, which come MESH_PAUSE_NS apart where
+       nothing wakes it, and ended before the second kept its streams to that turn (a next program's EBUSY, 10-23) */
+    mesh_notify(&m->control);
     return 0;
   }
   return EBUSY;
