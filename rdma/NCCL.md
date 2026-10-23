@@ -868,8 +868,10 @@ gathers, parses or joins bridge records itself.
   mesh_edge {a, b, cable, capacity}`, the capacity in bytes a second), built from the bridges' records of each cable
   (`mesh_map`, a communicator's `map_of`: each cable's bandwidth the lesser of its two ends', over 8). The capacity is a
   hardware fact: the solver's capacity of a pair is its parallel cables' summed, and `mesh_routes` takes of routes of
-  equally few edges the one over the faster hops. A construction given an edge with no capacity fails (EINVAL; the
-  communicator's init, `mesh_map`, `mesh_map_members`, Python's `LinkMap`): no capacity is defaulted. There are no map
+  equally few edges the one over the faster hops. No capacity is defaulted: a cable whose port reports a width or speed code
+  verbs does not define, or XDR's, which Apple's 8-bit `active_speed` cannot hold, is an edge of capacity 0. It costs
+  infinity in the routes (its hop's inverse, 10^15 / 0) and in the solver (its length), so routes of equally few hops
+  avoid it, a hop's share of it is none, and nothing refuses it. There are no map
   kinds (the MESH, RING, TREE and GRAPH of 761223a8 to this revision kept a second store of which pairs are joined,
   beside the edges, which no parallel cable fit, and a complete map's unlisted pairs were edges of capacity 1 byte a
   second).
@@ -883,7 +885,7 @@ gathers, parses or joins bridge records itself.
   them). The table-less forms (a route as the direct link alone, a join check by search, a members' map whose
   table it derived, default marks) served synthetic maps alone and are deleted.
 - `mesh_routes(map, next)`: each node's in-tree of shortest routes toward it, by fewest links, then the least sum of its
-  hops' inverse bandwidths in whole fs a byte (Dijkstra [1959] in its dense form, every length an exact integer), each
+  hops' inverse bandwidths in whole fs a byte (Dijkstra [1959] in its dense form, every finite length an exact integer), each
   node's parent among its equals the one of the least hash of its mark, the parent's and the root's (48 bits of
   SplitMix64's finalizer [Steele, Lea and Flood, OOPSLA 2014]: equal-cost multipath by a hash, as ECMP spreads flows
   [RFC 2992]). So routes of equal length spread over the links, every bridge and member that holds the same records

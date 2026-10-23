@@ -24,9 +24,8 @@ static uint64_t mesh_capacity(const struct mesh_link_map *map,uint32_t u,uint32_
   return sum;
 }
 
-static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
-  const uint64_t capacity=mesh_capacity(map,u,x);
-  return capacity?(uint64_t)llround(1e9/(double)capacity*1e6):0;
+static double mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
+  return round(1e9/(double)mesh_capacity(map,u,x)*1e6);
 }
 
 static uint32_t mesh_mark(const struct mesh_link_map *map,uint32_t v){ return map->mark[v]; }
@@ -66,11 +65,11 @@ static uint64_t mesh_hash(uint32_t x,uint32_t y,uint32_t z){
   return (h^(h>>31))>>16;
 }
 
-struct mesh_length { uint64_t hops,inverse; };
+struct mesh_length { uint64_t hops; double inverse; };
 static int mesh_shorter(struct mesh_length a,struct mesh_length b){ return a.hops!=b.hops?a.hops<b.hops:a.inverse<b.inverse; }
 static int mesh_equal(struct mesh_length a,struct mesh_length b){ return a.hops==b.hops && a.inverse==b.inverse; }
 
-static void mesh_distances(uint32_t N,const unsigned char *joined,const uint64_t *inverse,uint32_t b,struct mesh_length *length,unsigned char *done){
+static void mesh_distances(uint32_t N,const unsigned char *joined,const double *inverse,uint32_t b,struct mesh_length *length,unsigned char *done){
   for(uint32_t v=0;v<N;v++){length[v]=(struct mesh_length){UINT64_MAX,0};done[v]=0;}
   length[b]=(struct mesh_length){0,0};
   for(;;){
@@ -91,7 +90,7 @@ int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
   if(!N || (map->edges && !map->edge) || !map->mark)return EINVAL;
   for(uint32_t l=0;l<map->edges;l++)if(map->edge[l].a>=N || map->edge[l].b>=N || map->edge[l].a==map->edge[l].b)return EINVAL;
   const size_t pairs=(size_t)N*N;
-  uint64_t *inverse=calloc(pairs,sizeof *inverse);
+  double *inverse=calloc(pairs,sizeof *inverse);
   unsigned char *joined=calloc(pairs,1),*done=malloc(N);
   struct mesh_length *length=malloc(N*sizeof *length);
   const int status=inverse && joined && done && length?0:ENOMEM;
@@ -122,7 +121,7 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
   const uint32_t W=whole->nodes,N=n?n:W;
   if(whole->relays || (whole->edges && !whole->edge) || !whole->next || !whole->mark)return -EINVAL;
   const uint32_t L=whole->edges;
-  for(uint32_t k=0;k<L;k++)if(whole->edge[k].a>=W || whole->edge[k].b>=W || !whole->edge[k].capacity)return -EINVAL;
+  for(uint32_t k=0;k<L;k++)if(whole->edge[k].a>=W || whole->edge[k].b>=W)return -EINVAL;
   uint32_t *place=malloc(((size_t)W+1)*sizeof *place),*at=malloc(((size_t)N+W+1)*sizeof *at),relays=0;
   int error=place && at?0:ENOMEM;
   for(uint32_t k=0;!error && k<W;k++)place[k]=n?UINT32_MAX:k;
@@ -413,8 +412,7 @@ uint32_t mesh_solve(const struct mesh_link_map *map,const struct mesh_uses *uses
   double least=0,total=0;
   for(uint32_t c=0;!failed && c<P;c++){
     pcap[c]=uses?(double)uses->capacity[c]:cap[c];
-    if(!(pcap[c]>0))failed=1;
-    else if(!least || pcap[c]<least)least=pcap[c];
+    if(pcap[c]>0 && (!least || pcap[c]<least))least=pcap[c];
   }
   for(uint32_t d=0;!failed && d<count;d++)total+=(double)demands[d].up+(double)demands[d].down;
   const uint32_t rounds=failed?0:(uint32_t)(mesh_log(2*P>1?(double)(2*P):2.0)/(eps*eps))+1;
@@ -422,7 +420,7 @@ uint32_t mesh_solve(const struct mesh_link_map *map,const struct mesh_uses *uses
   for(uint32_t r=0;!failed && r<rounds;r++){
     double most=0;
     for(size_t c=0;c<2*(size_t)P;c++)if(load[c]/pcap[c/2]>most)most=load[c]/pcap[c/2];
-    for(size_t c=0;c<2*(size_t)P;c++){plen[c]=mesh_exp(eps*(load[c]/pcap[c/2]-most)/width)/pcap[c/2];add[c]=0;}
+    for(size_t c=0;c<2*(size_t)P;c++){plen[c]=pcap[c/2]>0?mesh_exp(eps*(load[c]/pcap[c/2]-most)/width)/pcap[c/2]:INFINITY;add[c]=0;}
     for(uint32_t e=0;e<E;e++)for(uint32_t toward=0;toward<2;toward++){
       double sum=uses?0:plen[2*(size_t)e+toward];
       for(uint32_t i=uses?uses->first[index[e]]:0;uses && i<uses->first[index[e]+1];i++)

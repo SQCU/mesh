@@ -488,8 +488,8 @@ static int map_of(struct ncclComm *comm) {
         uint32_t least = UINT32_MAX;
         const uint64_t sum = hop_capacity(&whole, path[h - 1], path[h], &least), used = hops == 2 ? sum : least == UINT32_MAX ? 0 : whole.edge[least].capacity;
         if (h == 1 || used < bottleneck) bottleneck = used;
-        for (uint32_t c = 0; hops == 2 && sum && c < whole.edges; c++)
-          if ((whole.edge[c].a == path[0] && whole.edge[c].b == path[1]) || (whole.edge[c].a == path[1] && whole.edge[c].b == path[0])) {
+        for (uint32_t c = 0; hops == 2 && c < whole.edges; c++)
+          if (whole.edge[c].capacity && ((whole.edge[c].a == path[0] && whole.edge[c].b == path[1]) || (whole.edge[c].a == path[1] && whole.edge[c].b == path[0]))) {
             use[uses] = c << 1 | (whole.edge[c].a != path[0]); weight[uses++] = (double)whole.edge[c].capacity / (double)sum;
           }
         if (hops > 2 && least != UINT32_MAX) { use[uses] = least << 1 | (whole.edge[least].a != path[h - 1]); weight[uses++] = 1; }
