@@ -129,12 +129,15 @@ where each one's bridge reaches the other's node, at the lesser of the two ends'
 equals the least hash of its mark, its parent's and the root's, so routes of equal length spread rather than pile onto
 the lowest-numbered node, and a route moves only where the shortest routes between its ends change, never for a link
 lost elsewhere or a node joining; a route between two nodes the higher-marked one's in-tree path, one path both ways).
-No node outside the communicator is on it: the bridges forward nothing. Two ranks are linked where a link joins them; a
-communicator has one channel toward each member it is joined to, and none toward another ([Routes between
+Its nodes are its members: a route between two members crosses members alone, each sending on what lands, so a node a
+route is to cross takes part as a member. Two ranks are linked where a link joins them (one link a pair: the channel
+toward a member is one stream, on one of the cables joining the two nodes); a communicator has one channel toward each
+member it is joined to, and none toward another ([Routes between
 unlinked ranks](#routes-between-unlinked-ranks)). A later communicator reads the reports again, so a node that joins,
 a node gone or a link lost (down until its ports' next children pair it again, with nobody acting: design/transport.md
-section 14) reaches the next communicator with no edit and no restart. libmesh's whole map of every node's record (`mesh_map` over no members, Python `mesh.current()`) joins two
-nodes by the same rule.
+section 14) reaches the next communicator with no edit and no restart. libmesh's whole map of every node's record
+(`mesh_map` over no members, Python `mesh.current()`) joins two nodes by the same rule, a link a cable joining them
+(parallel links where several do, which the routes and the packed trees count together).
 
 The bridges' records are a map whatever reaches what: a node that still has a record may be reached by no bridge,
 and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it is.
@@ -502,12 +505,13 @@ Porting:
 
 ## Routes between unlinked ranks
 
-The bridges forward nothing (design/transport.md). A communicator's init holds a stream only toward the members whose
-nodes its bridge reaches and whose bridges reach its node, and its channels go only toward those members. A collective
+A communicator's init holds a stream only toward the members whose nodes its bridge reaches and whose bridges reach its
+node, and its channels go only toward those members. A collective
 whose members no path between members joins fails at its first call that needs its programs, naming two, and a call
 whose program or point-to-point step moves bytes between two members not joined fails at that call
-(`ncclInvalidUsage`). A node a route would cross between two members takes part only as a member of the
-communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`).
+(`ncclInvalidUsage`). A node a route would cross between two members takes part as a member of the communicator; a
+program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`), and it then runs the identity:
+it copies its first child's partial as it comes, combines the rest, and sends the result on.
 
 ## Rules a program keeps
 

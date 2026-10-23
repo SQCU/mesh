@@ -205,7 +205,7 @@ The operator, 2026-10-21: "we are here to REMOVE fences, REMOVE guards, REMOVE w
 PROCESSING FUNCTIONS to not overwrite each other's buffers." The operator, 2026-10-18: "all of these sound like attempts
 to add statefulness to functions that don't need it, and in so doing create contagious brittleness"
 (design/rubrics.md M4). Of one cable waiting on another's word before it begins, the operator, 2026-10-23: "i do not
-want an ipc barrier happening inside of networking code" (design/transport.md section 14).
+want an ipc barrier happening inside of networking code" (mesh 7bbd1c22).
 
 **When one is ever added.** The operator, 2026-10-23: "the user will appear and demand the minimum amount of
 statefulness, side effects, globals, and guards b presenting algorithmic problems that cannot be handled in any way
@@ -256,7 +256,7 @@ section has priced. Each is answered by what the document already shows.
   computation transport and reduction layer" (design/pages-and-functions.md). Of a reference, the operator,
   2026-10-23: "what is a reference and why are you running anything related to it?"
 - **One shape tested, then a threshold or a fixed rule to protect it.** One example is a piece under 8 pages sent whole
-  on the first cable (design/transport.md section 14). Another is half the GPU's cores for the chain's workers, chosen
+  on the first cable (mesh b0c64f27). Another is half the GPU's cores for the chain's workers, chosen
   at width 1,024 (docs/writing-a-service.md, Workers). At width 16,384 on two nodes, the chain with it took 1,539 µs a
   step, where its record took 865, about 78% slower (output_data/hourly/log.jsonl, run 20261023T2305Z). A threshold on
   size is a choice at run time, and the bridge does not care how big a write is (section 8). The demo is judged across
@@ -264,8 +264,7 @@ section has priced. Each is answered by what the document already shows.
   why the lstm-chain-demo demands that multiple shapes be run".
 - **A wait or a handshake between processes or threads.** Examples are other cables waiting on the first cable's count
   before they begin, and two threads in one port handing each holding between them. Each is a barrier inside
-  networking code, in the operator's words above. The count is deleted, and a port has one progress thread
-  (design/transport.md sections 5 and 14).
+  networking code, in the operator's words above.
 - **State kept from one holding to the next.** An example is a standing ring of relays kept for a pairing's whole life.
   That is state one call leaves for the next, a global with side effects. The next call reads it and checks it, which
   is a wait and a guard (above).
@@ -404,10 +403,6 @@ When nodes compute at different speeds, a weaker node gets a smaller share. In t
 ends its compute early. Then its DMA engines, links and memory have slack, and slack is just what a relay uses. The
 balancer is to set the shares from the measured residuals, not from a model. If relaying ever slows a node, its
 residual shows it, and the balancer moves work.
-
-**Where today's code differs.** Today the bridge counts 16 KiB pages: each SEND and each receive is one whole page, and
-it cuts a piece over a node's cables by its count of pages (design/transport.md section 14). And the bridges forward
-nothing, so a transfer uses only the cables that join its two ends (rdma/nccl-mesh.c, map_of).
 
 **The bridge does not care how big a write is.** The operator, 2026-10-23: "it is not the job of the bridge or the
 collective to make programs run slower based on narrow case guesses for how big a transaction is; the bridge is not

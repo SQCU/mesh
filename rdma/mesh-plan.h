@@ -32,14 +32,15 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
      MESH_LINKS_GRAPH  the links as given, either way, any connected graph (a ring, a tree or a mesh's links
                        among them, unoriented)
    bandwidth (NULL: none given) is link i's bandwidth either way in bits a second, a hardware fact (mesh_map's: the
-   lesser of its two ends' streams' bandwidths as their bridges report them, mesh_reached; 0 where none reports one),
-   which the
-   routes and the packed trees read: of routes of equally few links the one over the faster hops (mesh_routes), and a
-   hop's capacity (mesh_trees_pack).
-   `relays` (a graph's, with a table) more nodes, numbered from `nodes`, that a route may cross and that hold no rank:
-   a collective's ranks are the map's first `nodes`, and its links may join any of its nodes and relays (a
-   communicator's map has none: the bridges forward nothing, nccl-mesh.c map_of).  `mark` (NULL: each node's number)
-   is each node's and relay's mark, distinct (mesh_map's: its bridge's node number, the same wherever it is numbered).
+   least that either end's record reports of the cables joining the pair; 0 where none reports one), which the routes
+   and the packed trees read: of routes of equally few links the one over the faster hops (mesh_routes), and a hop's
+   capacity (mesh_trees_pack).  `relays` (a graph's, with a table) more nodes, numbered from `nodes`, that a route may
+   cross and that hold no rank with work: a collective's working ranks are the map's first `nodes`, and its links may
+   join any of its nodes and relays.  A route through a node is carried by the node's rank of the communicator that
+   runs the collective, sending on what lands (a rank with no work: the identity, mesh_compile's `contributors`), so a
+   communicator's map, whose nodes are its ranks, lists such a node among them and has no relays (nccl-mesh.c map_of).
+   `mark` (NULL: each node's number) is each node's and relay's mark, distinct (mesh_map's: its bridge's node number,
+   the same wherever it is numbered).
    `next` (NULL: none, and no relays) is the routing table, an operand (mesh_routes makes one): of N = nodes + relays,
    each node b's in-tree, next[v * N + b] v's parent in it, a node a link joins to v (b's own entry b; v itself where
    no route reaches b).  The route between a and b is the path up the in-tree of the one of the higher mark from the
@@ -47,7 +48,7 @@ int mesh_busy(uint64_t *busy,uint64_t *idle_since);
    nodes are linked where the route between them crosses no other of them (relays alone), and that hop's bytes cross
    every link of it (mesh_trees_pack).  Without one, two nodes are linked where a link joins them.  Several links listed
    between one pair are parallel: the planner counts them together at n times the slowest one's bandwidth (mesh_routes,
-   mesh_trees_pack); mesh_map lists one link a pair.  `link`, `bandwidth`, `next` and `mark` are the caller's
+   mesh_trees_pack); mesh_map lists a link a cable.  `link`, `bandwidth`, `next` and `mark` are the caller's
    storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark; };
@@ -94,12 +95,12 @@ uint32_t mesh_route_path(const struct mesh_link_map *,uint32_t a,uint32_t b,uint
    one rule mesh_map reads the bridges' records by. */
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map);
 /* The map of the node's bridge (design/transport.md) as of one map serial, from its records of the nodes every node's
-   bridge reaches (mesh_reached's views), so the same records give every member the same map: the whole map, its nodes
-   the records' ascending by bridge, two joined by one link where each one's bridge reaches the other, at the lesser
-   of the two ends' bandwidths (0 where either reports none), each node marked by its bridge's number, its
-   table mesh_routes';
-   then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
-   i's bridge.  Room and returns as mesh_map_members'. */
+   bridge reaches (each record's reach, an entry a cable: mesh-link.c record_reach), so the same records give every
+   member the same map: the whole map, its nodes the records' ascending by bridge, two joined by a link a cable each
+   one's bridge reaches the other over (the fewer of the two ends' counts: parallel links where several cables join
+   them), each at the least bandwidth either end reports (0 where either reports none), each node marked by its
+   bridge's number, its table mesh_routes'; then over `members` (bridge numbers; n 0: every node), mesh_map_members of
+   it; node[i] (node NULL: none) map node i's bridge.  Room and returns as mesh_map_members'. */
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map);
 /* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
    passes and writes it there; 0 where it differs, ETIMEDOUT where the bound passed, else an unreachable bridge's errno.

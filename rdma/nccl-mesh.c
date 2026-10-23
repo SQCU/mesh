@@ -514,8 +514,9 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
    its entries along the routes): a
    call takes the first entry that fits it (program_of), so a collective no form names, or a size past every form's
    bound, runs the caller's program or the default.  Where trees are compiled (a form, or no programs listed), a map
-   whose links do not join its members fails it, naming two: the bridges forward nothing, so no route crosses a node
-   outside the communicator */
+   whose links do not join its members fails it, naming two: a route crosses ranks alone, each sending on what lands
+   (a rank with no work: the identity, mesh-plan.h mesh_compile's contributors), so a node a route is to cross takes
+   part as a rank */
 #define CHUNKS 4
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
@@ -525,8 +526,8 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     uint32_t apart[2] = {0, 0};
     const int joined = mesh_link_map_joined(&comm->map, apart);
     if (joined == ENOTCONN)
-      return fail(ncclInvalidUsage, "rank %u (node %u) and rank %u (node %u) of %s are joined by no path of links between its members: the "
-                  "bridges forward nothing, so a route through a node outside the communicator is refused", apart[0], comm->members[apart[0]],
+      return fail(ncclInvalidUsage, "rank %u (node %u) and rank %u (node %u) of %s are joined by no path of links between its members: a "
+                  "route crosses ranks alone, so a node it is to cross takes part as a rank", apart[0], comm->members[apart[0]],
                   apart[1], comm->members[apart[1]], comm->name);
     if (joined) return fail(ncclInternalError, "the members' map of %s: %s", comm->name, strerror(joined));
     if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
@@ -572,8 +573,8 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
 }
 
 /* the communicator's table made where it is not (comm_routes), each move of each program between two members a link
-   joins (the caller's programs too: the bridges forward nothing, so a route through another node is refused as a
-   value); under group_lock */
+   joins (the caller's programs too: a move is one crossing, and a route over several crosses a move at each rank it
+   passes, so a move between ranks no link joins is refused as a value); under group_lock */
 static ncclResult_t comm_compile(struct ncclComm *comm) {
   if (comm->compiled) return ncclSuccess;
   ncclResult_t result = comm_routes(comm);
@@ -582,8 +583,8 @@ static ncclResult_t comm_compile(struct ncclComm *comm) {
     for (uint32_t r = 0; !result && r < x->nodes; r++)
       for (uint32_t m = x->first[r]; !result && m < x->first[r + 1]; m++)
         if (!mesh_link_between(&comm->map, r, x->move[m].peer))
-          result = fail(ncclInvalidUsage, "program %u of %s moves between ranks %u and %u, which no link joins: the bridges forward nothing, "
-                        "so a route through another node is refused", e, comm->name, r, x->move[m].peer);
+          result = fail(ncclInvalidUsage, "program %u of %s moves between ranks %u and %u, which no link joins: a move is one crossing, "
+                        "and a route through another node a move of that node's rank", e, comm->name, r, x->move[m].peer);
   }
   if (result) { routes_free(comm, 0); return result; }
   comm->compiled = 1;
@@ -833,8 +834,10 @@ static uint32_t joined(const struct report *reports, uint32_t a, uint32_t b, uin
 
 /* design/transport.md section 14: the communicator's map, made alike by every member from the same gathered reports:
    its ranks its nodes, each marked by its bridge's node number, two linked where they are joined (joined: each one's
-   bridge reaches the other's node), its routing table mesh_routes'.  No node outside the communicator is in it: the
-   bridges forward nothing.  0, or ENOMEM, EINVAL */
+   bridge reaches the other's node), its routing table mesh_routes'.  It has no relays: a route crosses ranks alone,
+   each sending on what lands (a rank with no work: the identity, mesh-plan.h mesh_compile's contributors), so a node
+   a route is to cross takes part as a rank.  One link a pair, the one the pair's channel crosses (comm_hold: one
+   stream toward each member's node, on one of the cables joining them).  0, or ENOMEM, EINVAL */
 static int map_of(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
   uint32_t links = 0;
@@ -1837,7 +1840,7 @@ static size_t piece_bytes(const struct mesh_step *step) { return step->piece.ele
    an all-gather's segments NCCL's, a rank's count each or its counts, so its program's segments must be the ranks), its
    operand's element a merge's row where it merges; a point-to-point call one SEND or COPY step; an all-to-all to and
    from each other rank (mesh_counted_steps); a step that moves bytes toward or from a rank no link of this node joins
-   refused (the bridges forward nothing) */
+   refused (a step is one crossing, and a point-to-point call one step) */
 static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     struct call *c = list + i;
@@ -1879,8 +1882,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     else s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->segments, comm->page, s->steps);
     for (uint32_t k = 0; k < s->count; k++)
       if (piece_bytes(s->steps + k) && comm->toward[s->steps[k].peer] < 0)
-        return fail(ncclInvalidUsage, "a call of %s moves bytes between rank %d and rank %u (node %u), which no link of this node joins: the "
-                    "bridges forward nothing, so a route through another node is refused", comm->name, comm->rank, s->steps[k].peer,
+        return fail(ncclInvalidUsage, "a call of %s moves bytes between rank %d and rank %u (node %u), which no link of this node joins: a "
+                    "step is one crossing, and a point-to-point call one step", comm->name, comm->rank, s->steps[k].peer,
                     comm->members[s->steps[k].peer]);
   }
   return ncclSuccess;

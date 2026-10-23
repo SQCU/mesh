@@ -89,17 +89,18 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   }
 }
 
-/* design/transport.md section 14: the one join of two nodes' records: 1 where each one's bridge reaches the other
-   (its record names the other among the nodes it reaches), *slowest the lesser bandwidth either reports (0: neither
-   reports one); else 0 */
+/* design/transport.md section 14: the one join of two nodes' records: the cables each one's bridge reaches the other
+   over (its record names the other once a cable, mesh-link.c record_reach), the fewer of the two ends' counts, *slowest
+   the least bandwidth either reports of them (0: neither reports one); 0 where either names the other none */
 static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *slowest){
+  uint32_t cables=0;
   for(uint32_t i=0;i<record->reached && i<MESH_STREAMS;i++)
     if(record->reach[i].node==node){
       const uint64_t bandwidth=record->reach[i].bandwidth;
       if(bandwidth && (!*slowest || bandwidth<*slowest))*slowest=bandwidth;
-      return 1;
+      cables++;
     }
-  return 0;
+  return cables;
 }
 static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *bandwidth){
   uint64_t slowest=0;
@@ -115,9 +116,10 @@ int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
   return (int)joined;
 }
 
-/* The records' whole map, its nodes ascending (the records sorted by node), one link where two join (mesh_join), at
-   the join's bandwidth, and its routing table (mesh-collective.c mesh_routes, each node marked by its bridge's number,
-   so every member that holds the same records makes the same routes) */
+/* The records' whole map, its nodes ascending (the records sorted by node), a link a cable where two join (mesh_join:
+   several a pair's parallel links), each at the join's bandwidth, and its routing table (mesh-collective.c
+   mesh_routes, each node marked by its bridge's number, so every member that holds the same records makes the same
+   routes) */
 struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
@@ -136,7 +138,7 @@ static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w
   for(uint32_t a=0;a<n;a++){
     w->mark[a]=r[a].node;
     for(uint32_t b=a+1;b<n;b++)
-      if(mesh_join(r+a,r+b,&bandwidth)){
+      for(uint32_t k=mesh_join(r+a,r+b,&bandwidth);k;k--){
         w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=bandwidth;links++;
       }
   }

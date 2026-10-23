@@ -37,9 +37,10 @@
    silent past that bound; what it held is then let go and the next init reads the streams as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the
    next (one that sends nothing holds the root's read until the phase ends).  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
-   every member from the same reports and kept for its life: no node outside the communicator is on it, since the
-   bridges forward nothing, so two members no path between members joins fail a collective, and a call between two
-   members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
+   every member from the same reports and kept for its life: its nodes are its members, and a route crosses members
+   alone, each sending on what lands (a member with no work: the identity, mesh-plan.h mesh_compile's contributors), so
+   a node a route is to cross takes part as a member; two members no path between members joins fail a collective, and
+   a call between two members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
    Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
    two ranks or more holds none: it is made with no channel, and its first call that crosses a link fails as a value

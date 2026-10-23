@@ -639,24 +639,15 @@ void port_say(struct port *port,struct message said,const void *payload,uint32_t
 uint64_t owners[MESH_CLIENTS];
 /* design/transport.md: this node's record, its region, memory and model with its ports and health */
 char model[MESH_MODEL_BYTES];
-/* design/transport.md section 14: this node's reach as its record tells it (mesh-records.c record_changed), a node an
-   entry in the order of its first port: of each node, every cable whose link is up toward it with a stream in its plan,
-   their bandwidths together, at most `room`; their count.  The cables, not the streams live this instant, so two nodes
-   that several cables join are one link of the map at all their cables' bandwidth (mesh-dataflow.c mesh_join), which a
-   cable's link coming up or lost moves (link_turn, link_set) */
+/* design/transport.md section 14: this node's reach as its record tells it (mesh-records.c record_changed): an entry
+   a cable whose link is up with a stream in its plan, its peer node and bandwidth, at most `room`; their count.  The
+   cables, not the streams live this instant, so two nodes several cables join are as many parallel links of the map
+   (mesh-dataflow.c mesh_join), which a cable's link coming up or lost moves (link_turn, link_set) */
 uint32_t record_reach(struct mesh_reach *reach,uint32_t room){
   uint32_t count=0;
-  for(uint32_t p=0;p<port_count;p++){
-    const struct port *port=ports+p;
-    if(port->link.state!=LINK_UP || !plan_streams(port->link.plan))continue;
-    uint32_t k=0;
-    while(k<count && reach[k].node!=port->peer)k++;
-    if(k==count){
-      if(count==room)continue;
-      reach[count++]=(struct mesh_reach){.node=port->peer};
-    }
-    reach[k].bandwidth+=port->bandwidth;
-  }
+  for(uint32_t p=0;p<port_count && count<room;p++)
+    if(ports[p].link.state==LINK_UP && plan_streams(ports[p].link.plan))
+      reach[count++]=(struct mesh_reach){.node=ports[p].peer,.bandwidth=ports[p].bandwidth};
   return count;
 }
 /* a port's link as the port table tells it; a change is a new record */

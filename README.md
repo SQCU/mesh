@@ -590,6 +590,6 @@ library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-m
 different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's launchd agent
 `io.mesh.bridge` run from the user's mesh checkout with the node's bridge configuration, a document its consumer writes and passes
 (`bin/mesh-user.sh CONFIGURATION [CHECKOUT]`; etc/bridge/README.md, with the two didactic examples; no default; design/transport.md; A new bridge on a node, above). What it owns and does:
-design/transport.md. It forwards nothing, runs no command and carries no request.
+design/transport.md. It runs no command and carries no request.
 
 The transport, every page and word with its writer: [design/transport.md](design/transport.md).
