@@ -1166,7 +1166,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
 }
 
 struct message { struct call *c; uint32_t step; int32_t war; uint64_t entry, need, rel_entry, rel_need; mesh_pages pages;
-                 size_t offset, bytes, area; struct where data; uint64_t row; };
+                 size_t offset, bytes, area, skew; struct where data; uint64_t row; };
 
 struct schedule { struct message *out, *in; size_t outs, ins, table; uint64_t first[2], k; struct mesh_plan *t; };
 
@@ -1259,7 +1259,6 @@ static struct where buffer_at(const struct call *c, uint32_t b, size_t offset) {
 }
 
 static ncclResult_t place_group(struct ncclComm *comm, struct plan *plan) {
-  const unsigned char *region = (const unsigned char *)comm->attach->context.M;
   const uint64_t page = comm->page;
   struct schedule *plans = plan->plans;
   for (uint32_t h = 0; h < comm->count; h++)
@@ -1275,14 +1274,12 @@ static ncclResult_t place_group(struct ncclComm *comm, struct plan *plan) {
         const int inside = in_region(comm, x->data, x->bytes);
         pthread_mutex_lock(&attach_lock);
         const struct lease *held = inside ? lease_at(address) : NULL;
-        const uint64_t row = held ? held->row + (uint64_t)(address - (const unsigned char *)held->address) / page : 0;
+        const uint64_t into = held ? (uint64_t)(address - (const unsigned char *)held->address) : 0;
         pthread_mutex_unlock(&attach_lock);
-        if (held && !((size_t)(address - region) % page)) { x->row = row; continue; }
-        return fail(ncclInvalidUsage, "%s on communicator %s: the %zu bytes its %s rank %u %s (buffer %u, byte %zu) %s", call_name(x->c), comm->name,
-                    x->bytes, send ? "SEND to" : "receive from", step->peer, send ? "reads" : "lands in", step->buffer, x->offset,
-                    held ? "do not start on a page: an entry is a range of rows, each a page (design/pages-and-functions.md), and a cut NCCL's "
-                           "call fixes is never moved by a copy"
-                         : "are in no lease of this process: a crossing's pages are a lease's rows (ncclMemAlloc), never copied");
+        if (held) { x->row = held->row + into / page; x->skew = into % page; continue; }
+        return fail(ncclInvalidUsage, "%s on communicator %s: the %zu bytes its %s rank %u %s (buffer %u, byte %zu) are in no lease of this process: "
+                    "a crossing's pages are a lease's rows (ncclMemAlloc)", call_name(x->c), comm->name, x->bytes, send ? "SEND to" : "receive from",
+                    step->peer, send ? "reads" : "lands in", step->buffer, x->offset);
       }
   return ncclSuccess;
 }
@@ -1505,13 +1502,14 @@ static void tables_start(struct ncclComm *comm, struct schedule *plans) {
     for (size_t k = 0; k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry *e = p->t->entry + m->rel_entry;
-      e->row = m->row; e->pages = pages_count(m->pages); e->word = region_offset(comm, &p->t->ready); e->need = ready_need(p->k, m->rel_entry);
+      e->row = m->row; e->offset = m->skew; e->bytes = m->bytes; e->pages = pages_count(m->pages);
+      e->word = region_offset(comm, &p->t->ready); e->need = ready_need(p->k, m->rel_entry);
       key_of(e, comm->id, peer, me, 0, m->entry);
     }
     for (size_t k = 0; k < p->ins; k++) {
       const struct message *m = p->in + k;
       struct mesh_entry *e = p->t->entry + p->outs + m->rel_entry;
-      e->row = m->row; e->pages = pages_count(m->pages); e->word = 0; e->need = 0;
+      e->row = m->row; e->offset = m->skew; e->bytes = m->bytes; e->pages = pages_count(m->pages); e->word = 0; e->need = 0;
       key_of(e, comm->id, me, peer, 0, m->entry);
     }
     table_begin(p->t, p->k);
@@ -2406,10 +2404,12 @@ static int32_t leg_in(const struct ncclMeshRequest *r, uint32_t x, uint32_t piec
   return -1;
 }
 
-static uint32_t piece_pages(const struct ncclMeshRequest *r, const size_t *counts, uint32_t x, uint32_t p) {
+static uint64_t part_bytes(const struct ncclMeshRequest *r, const size_t *counts, uint32_t x, uint32_t p) {
   const uint64_t first = r->cut[p], length = r->cut[r->pieces + p], count = counts ? counts[x] : r->parts[x];
-  const uint64_t n = count <= first ? 0 : count - first < length ? count - first : length;
-  return pages_count(pages_of(n * SIZE[r->type], r->comm->page));
+  return (count <= first ? 0 : count - first < length ? count - first : length) * SIZE[r->type];
+}
+static uint32_t piece_pages(const struct ncclMeshRequest *r, const size_t *counts, uint32_t x, uint32_t p) {
+  return pages_count(pages_of(part_bytes(r, counts, x, p), r->comm->page));
 }
 
 static void landings_post(struct ncclMeshRequest *r, struct slot *s, uint64_t m) {
@@ -2428,6 +2428,7 @@ static void landings_post(struct ncclMeshRequest *r, struct slot *s, uint64_t m)
     const uint32_t p = r->first[l->x] + l->piece;
     struct mesh_entry *x = slot_entry(r, s, l->channel, 1, l->index);
     x->row = s->row + (r->area[l->x] + r->cut[p] * z) / comm->page; x->pages = piece_pages(r, NULL, l->x, p); x->word = 0;
+    x->offset = 0; x->bytes = part_bytes(r, NULL, l->x, p);
     x->need = MESH_NEED_AHEAD;
     key_of(x, comm->id, me, (uint32_t)comm->channels[l->channel].peer, r->seq, m * r->lands[l->channel] + l->index);
   }
@@ -2478,6 +2479,7 @@ static void sends_write(struct ncclMeshRequest *r, struct slot *s, uint64_t m, c
     } else if (pages) ready = m;
     struct mesh_entry *y = slot_entry(r, s, l->channel, 0, l->index);
     y->row = s->row + ((l->from < 0 ? 0 : r->area[l->x]) + r->cut[p] * z) / comm->page; y->pages = pages;
+    y->offset = 0; y->bytes = part_bytes(r, counts, l->x, p);
     y->word = region_offset(comm, word); y->need = m;
     key_of(y, comm->id, (uint32_t)comm->channels[l->channel].peer, me, r->seq, m * r->sends[l->channel] + l->index);
   }

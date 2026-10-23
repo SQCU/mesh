@@ -75,7 +75,6 @@ static int row_at(struct mesh_row r,uint64_t *at){
 static struct ibv_sge span_of(const struct port *port,uint64_t at,uint64_t bytes){
   return (struct ibv_sge){.addr=(uintptr_t)wire.data+at,.length=(uint32_t)bytes,.lkey=port->device.extent_mrs[at>>port->device.extent_shift]->lkey};
 }
-static struct ibv_sge page_span(const struct port *port,uint64_t at){ return span_of(port,at,page_bytes()-at%page_bytes()); }
 static const _Atomic uint64_t *region_word(uint64_t offset){
   return offset && offset<=M->length-8 && !(offset%8)?(const _Atomic uint64_t *)((char *)M+offset):NULL;
 }
@@ -280,6 +279,18 @@ static int post_receive(struct port *port,uint32_t lane,struct ibv_sge span,stru
   atomic_store_explicit(&s->record->posted[1],++s->posted,memory_order_release);
   return 1;
 }
+static uint64_t unit_bytes(const struct key_unit *u,uint32_t posted){
+  const uint64_t at=((uint64_t)u->offset+posted)*page_bytes();
+  return u->bytes>at?MIN(page_bytes(),u->bytes-at):page_bytes();
+}
+static int entry_at(const struct port *port,const struct mesh_entry *e,uint64_t unit,uint64_t bytes,uint64_t *at){
+  uint64_t base=0;
+  if(!mesh_rows_hold(M,(struct mesh_row){e->row},(struct mesh_pages){mesh_entry_rows(M,e)}) || !row_at((struct mesh_row){e->row},&base))return 0;
+  const uint64_t first=base+e->offset+unit*page_bytes();
+  if(bytes && first>>port->device.extent_shift!=(first+bytes-1)>>port->device.extent_shift)return 0;
+  *at=first;
+  return 1;
+}
 static uint64_t relay_at(const struct relay *x,uint32_t page){ return ((uint64_t)x->page+(uint64_t)page*M->block)*M->pgsz; }
 /* design/transport.md section 14, "Sending" */
 static void run_send(struct port *port,uint32_t lane){
@@ -298,9 +309,8 @@ static void run_send(struct port *port,uint32_t lane){
   while(r->state==RUN_PAGES && r->posted<r->unit.count && s->sent-s->done<s->sends){
     uint64_t at=(uint64_t)ones*M->pgsz;
     if(r->kind==UNIT_RELAY)at=relay_at(r->relay,r->posted);
-    else if(r->entry && region_word(r->entry->word) && mesh_rows_hold(M,(struct mesh_row){r->first},(struct mesh_pages){r->unit.count}))
-      row_at((struct mesh_row){r->first+r->posted},&at);
-    if(!post_send(port,lane,page_span(port,at),unit_of(r)))return;
+    else if(r->entry && region_word(r->entry->word))entry_at(port,r->entry,(uint64_t)r->unit.offset+r->posted,unit_bytes(&r->unit,r->posted),&at);
+    if(!post_send(port,lane,span_of(port,at,unit_bytes(&r->unit,r->posted)),unit_of(r)))return;
     r->posted++;
   }
   if(r->state==RUN_PAGES && r->posted==r->unit.count){*r=(struct run){0};run_note(s,0,0);}
@@ -354,7 +364,7 @@ static void tables_send(struct port *port,struct walker *w,uint32_t served){
               port->link.lane[lane].sending.state==RUN_NONE && (n=tuple_take(x,k,MESH_RUN,&first))){
           struct run *r=&port->link.lane[lane].sending;
           *r=(struct run){.table=t,.entry=x,.k=k,.first=x->row+first,.state=RUN_KEY,.kind=UNIT_PAGE};
-          memcpy(r->unit.key,x->key,sizeof r->unit.key);r->unit.offset=first;r->unit.count=n;r->unit.total=x->pages;
+          memcpy(r->unit.key,x->key,sizeof r->unit.key);r->unit.offset=first;r->unit.count=n;r->unit.total=x->pages;r->unit.bytes=x->bytes;
           run_note(port->link.lane+lane,0,UINT64_MAX);
           run_send(port,lane);
         }
@@ -387,7 +397,7 @@ static void relays_send(struct port *port,struct walker *w,uint32_t served){
       if(!first || !atomic_compare_exchange_strong_explicit(&x->state,&ready,relay_sending(port->index),memory_order_acq_rel,memory_order_acquire))continue;
       struct run *r=&l->lane[lane].sending;
       *r=(struct run){.relay=x,.state=RUN_KEY,.kind=UNIT_RELAY};
-      memcpy(r->unit.key,x->key,sizeof r->unit.key);r->unit.offset=x->offset;r->unit.count=x->count;r->unit.total=x->total;
+      memcpy(r->unit.key,x->key,sizeof r->unit.key);r->unit.offset=x->offset;r->unit.count=x->count;r->unit.total=x->total;r->unit.bytes=x->bytes;
       run_note(l->lane+lane,0,UINT64_MAX);
       run_send(port,lane);
     }
@@ -451,7 +461,7 @@ static struct relay *relay_take(struct port *port,uint32_t lane,uint32_t node,co
   if(entry==MESH_RELAYS || first==MESH_POOL_BLOCKS)return NULL;
   for(uint32_t b=first;b<first+unit->count;b++)l->pool_free[b/64]|=UINT64_C(1)<<(b%64);
   struct relay *x=relay+entry;
-  x->lane=lane;x->order=(uint32_t)++l->order[lane];x->total=unit->total;memcpy(x->key,unit->key,sizeof x->key);x->offset=unit->offset;x->count=unit->count;
+  x->lane=lane;x->order=(uint32_t)++l->order[lane];x->total=unit->total;x->bytes=unit->bytes;memcpy(x->key,unit->key,sizeof x->key);x->offset=unit->offset;x->count=unit->count;
   x->page=l->pool+first*M->block;x->node=node;
   atomic_store_explicit(&x->landed,0,memory_order_relaxed);atomic_store_explicit(&x->sent,0,memory_order_relaxed);
   atomic_store_explicit(&x->state,RELAY_LANDING,memory_order_release);
@@ -492,9 +502,9 @@ static void run_place(struct port *port,struct walker *w,uint32_t lane){
   r->posted=0;r->state=RUN_PAGES;
   if(x && u->total<=x->entry->pages)__atomic_compare_exchange_n(&x->entry->need,&ahead,(uint64_t)u->total+1,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST);
   if(u->count>MESH_RUN)r->kind=UNIT_SINK;
-  else if(x && (uint64_t)u->offset+u->count<=x->entry->pages && (placed=tuple_post(x->entry,x->k,u->count))>0){
-    r->kind=UNIT_PAGE;r->table=x->table;r->entry=x->entry;r->k=x->k;r->first=x->entry->row+u->offset;
-    if(!mesh_rows_hold(M,(struct mesh_row){x->entry->row},(struct mesh_pages){x->entry->pages}))r->first=UINT64_MAX;
+  else if(x && (uint64_t)u->offset+u->count<=x->entry->pages && u->bytes<=x->entry->bytes && (placed=tuple_post(x->entry,x->k,u->count))>0){
+    uint64_t at=0;
+    r->kind=UNIT_PAGE;r->table=x->table;r->entry=x->entry;r->k=x->k;r->first=entry_at(port,x->entry,0,0,&at)?x->entry->row:UINT64_MAX;
     run_note(port->link.lane+lane,1,port->link.lane[lane].posted);
   }
   else if((!x && node==M->node && !index_later(w,u->key)) || placed<0)r->state=RUN_HELD;
@@ -535,9 +545,9 @@ static void run_receive(struct port *port,struct walker *w,uint32_t lane){
   if(r->state==RUN_HELD)run_place(port,w,lane);
   while(r->state==RUN_PAGES && r->posted<r->unit.count && s->posted-s->got<s->window){
     uint64_t at=link_at(l);
-    if(r->kind==UNIT_PAGE && r->first!=UINT64_MAX)row_at((struct mesh_row){r->first+r->posted},&at);
+    if(r->kind==UNIT_PAGE && r->first!=UINT64_MAX)entry_at(port,r->entry,(uint64_t)r->unit.offset+r->posted,unit_bytes(&r->unit,r->posted),&at);
     else if(r->kind==UNIT_RELAY)at=relay_at(r->relay,r->posted);
-    if(!post_receive(port,lane,page_span(port,at),unit_of(r)))return;
+    if(!post_receive(port,lane,span_of(port,at,unit_bytes(&r->unit,r->posted)),unit_of(r)))return;
     r->posted++;
   }
   if(r->state==RUN_PAGES && r->posted==r->unit.count){*r=(struct run){0};run_note(s,1,0);}

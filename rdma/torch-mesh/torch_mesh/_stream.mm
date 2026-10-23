@@ -21,11 +21,13 @@
 #include "nccl.h"
 
 struct MeshStream {
+  struct Exchanged { void *bound[3] = {nullptr, nullptr, nullptr}; int64_t last = 0; };
   at::mps::MPSStream *const mps;
   id<MTLSharedEvent> const progress;
   uint64_t committed = 0;
   id<MTLCommandBuffer> open = nil;
   bool streamed = false;
+  std::unordered_map<int64_t, Exchanged> exchanged;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
 
@@ -49,9 +51,6 @@ struct MeshStream {
     if (committed - progress.signaledValue <= 1) signalled(false);
   }
 };
-
-struct Exchanged { void *bound[3] = {nullptr, nullptr, nullptr}; int64_t last = 0; };
-static auto *exchanged_ = new std::unordered_map<int64_t, Exchanged>;
 
 static std::mutex *streams_lock_ = new std::mutex;
 static auto *streams_ = new std::unordered_map<at::mps::MPSStream *, MeshStream *>;
@@ -498,13 +497,13 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
       for (size_t i = 0; i < bound.size(); i++)
         if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
       [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)encoder};
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)encoder};
       if (request)
         result = ncclMeshBind((ncclMeshRequest_t)(uintptr_t)request, (uint64_t)start, lands, publishes, &on, (uint32_t)crossing, (uint32_t)(gx * gy));
       if (result) return;
       [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
       if (request && (lands || publishes)) {
-        Exchanged &x = (*exchanged_)[request];
+        MeshStream::Exchanged &x = s->exchanged[request];
         void *root = (__bridge void *)stream->commandBuffer().rootCommandBuffer;
         if (lands) x.bound[(start - 1) % 3] = root;
         if (publishes) x.bound[start % 3] = root;
@@ -698,10 +697,10 @@ static int64_t exchange_start(int64_t request, const std::vector<int64_t> &sizes
   __block uint64_t start = 0;
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      Exchanged &x = (*exchanged_)[request];
+      MeshStream::Exchanged &x = s->exchanged[request];
       const int64_t held = x.last - 1;
       if (held > 0 && x.bound[held % 3] == (__bridge void *)stream->commandBuffer().rootCommandBuffer) s->signalled(false);
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder()};
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)stream->commandEncoder()};
       result = ncclMeshStart((ncclMeshRequest_t)(uintptr_t)request, given, &on, &start);
       if (result == ncclSuccess) x.last = (int64_t)start;
     }
@@ -741,7 +740,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("exchange_init", &exchange_init);
   module.def("exchange_start", &exchange_start);
   module.def("exchange_free", [](int64_t request) {
-    exchanged_->erase(request);
+    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+    MeshStream *s = &stream_of(stream);
+    dispatch_sync(stream->queue(), ^{ s->exchanged.erase(request); });
     checked(ncclMeshRequestFree((ncclMeshRequest_t)(uintptr_t)request));
   });
 }

@@ -180,7 +180,7 @@ arrive, and every member plans every block, C7). A porter passes the matrix its 
 from MPI holds its own row and column and gathers the rest once; an SPMD program holds the matrix; torch-mesh, which is
 given torch's per-rank splits, fails such a call as a value and takes the matrix in `torch_mesh.all_to_all`, from the
 compiled program (its configuration's shapes and shares, a program's maximum extents, how much of a block a step
-fills being data in its pages). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
+fills being data in its pages). A segment may start anywhere in its buffer (an entry's byte offset). NCCL's `ncclAlltoAll` is it with
 every count `count`, and `ncclGather` and `ncclScatter` its rooted forms (every count 0 but toward or from the root),
 where they were each rank's sends and receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). Every member
 knows every block of the four, so they run along the communicator's routing table, each block cut among its pair's
@@ -208,8 +208,8 @@ output_data/planner-20261015/pass2 engine2-after.json).
 `ncclMeshReduceScatterV(send, recv, counts, type, op, comm, stream)` are MPI_Allgatherv and MPI_Reduce_scatter: rank
 r's segment is `counts[r]` elements (any of them 0), packed in rank order. Each is one program, the communicator's
 all-gather or reduce-scatter, its operand cut into those segments (`mesh-plan.h` `mesh_program_steps_cut`: a part
-within segment s takes its tree's share of `counts[s]` in pages, the solver's; each
-segment starts on a page of its buffer, else the call fails as a value), so a capacity-shaped division of the work (metal-microbench
+within segment s takes its tree's share of `counts[s]` in pages, the solver's; a segment may start anywhere in its
+buffer), so a capacity-shaped division of the work (metal-microbench
 docs/placement.md) is one tree program over unequal segments rather than a rooted broadcast or reduce a rank. MPI
 specifies the counts alike on every rank [MPI 4.1 §6.7, §6.10.2], and the library compares none across ranks; equal
 counts are NCCL's own calls. Reproduction target (metal-microbench docs/measurement.md
@@ -459,8 +459,9 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
 HELLO names another (mesh-link.c, EPROTO), and a relaying bridge lands and sends whole pages of that length, so the
 two ends of every channel lay the same pages, and the program's own cuts lie on this node's page
 (`mesh_program_steps_cut`). No length is compared at run
-time. `mesh.h` `struct mesh_entry` names its rows and a count of pages; an entry's length in bytes, which would let the
-bridge post a run's last unit at its own length, is not a field of it.
+time. `mesh.h` `struct mesh_entry` names its first row, its byte `offset` in that row's page and its `bytes` (layout
+150): unit i of an entry is its bytes from i pages on, at most a page, read or landed at the row's address plus the
+offset plus i pages, and a run's key unit carries its tuple's `bytes`, so a last unit goes at its own length.
 
 ## Persistent exchanges
 
@@ -644,18 +645,17 @@ Porting:
   memory bandwidth and flops are too scarce on this hardware api"; "good performance cannot be opt-in ... code which
   can't perform well can fail instead of being run". The bridge sends a crossing's bytes from the pages they lie in and
   lands them in the pages they belong in: a COPY lands in its destination, and a combine lands in a landing area of the
-  communicator's and is combined from there. Each step is one entry, a range of page-table rows (`struct mesh_entry`),
-  so it starts on a page by construction: nothing in the transport is a byte offset. Each SEND is one whole page with
-  one SGE (`max_sge` is 1). The bridge registers the region in extents of 2^k bytes, the least power of two at which
+  communicator's and is combined from there. Each step is one entry, its first page-table row and a byte offset in it
+  (`struct mesh_entry`), NCCL's displacements as they come. Each SEND is one unit, a page or a last part of one, with
+  one SGE (`max_sge` is 1); a unit at an offset spans two pages of its lease, which are adjacent in the region. The bridge registers the region in extents of 2^k bytes, the least power of two at which
   the region's extents number no more than the device's `max_mr` (1 GiB on the Studios' 86 GiB under max_mr 100;
   design/transport.md, The registered region), each inside one of the 4 GiB banks no registration may cross
   (`tbt_post_recv` keeps only an address's low 32 bits: `rdma/mesh-verbs.h`), so no page crosses an extent. So:
   - every crossing call's send buffer, and every buffer it sends from or lands in, is a lease's (in this node's region);
-  - every piece starts on a page;
-  - the program's own cuts lie on pages (`mesh_program_steps_cut`).
-  A cut NCCL's call fixes (a reduce-scatter's and an all-gather's segment r at r x count, an all-to-all's segments, a
-  send's or receive's buffer) that is not on a page, or an operand outside the region, fails the call as a value
-  (`ncclInvalidUsage`, naming the piece and its buffer) before anything is presented; nothing is copied to make it
+  - the program's own cuts lie on pages (`mesh_program_steps_cut`), and a cut NCCL's call fixes lies where it does.
+  A unit at an offset that would cross one of this port's registered extents (1 GiB on the Studios) is sent as the
+  all-ones page and landed in the spare page (mesh-link.c `entry_at`). An operand outside the region fails the call as
+  a value (`ncclInvalidUsage`, naming the piece and its buffer) before anything is presented; nothing is copied to make it
   fit.
 - Every crossing collective but a premultiplied one reads its send buffer and writes its result where they lie (the
   direct form): a SEND of a range no step of the rank wrote reads the send buffer; the first combine of such a range
@@ -795,8 +795,7 @@ compiled program (`torch_mesh.batch_isend_irecv(ops, pairs)`); torch's own `batc
   from it, as NCCL's do. A blocking exchange with one peer completes as one group (`ncclGroupStart`/`End`; torch's
   `batch_isend_irecv`); as two blocking sends before the receives, each waits on the other's group. The library does
   not detect unequal counts or different collectives on two ranks: no landed payload is checked.
-- A crossing whose buffer is not a lease's, or whose piece does not start on a page, fails as a value
-  ([Memory](#memory)).
+- A crossing whose buffer is not a lease's fails as a value ([Memory](#memory)).
 - Communicators know nothing of one another, and share every queue pair of every link: a key names its communicator,
   and no init is refused for the links others use. The bridge sends a process's tables toward a node in the order the
   process started them, so communicators whose calls the ranks issue in the same order progress as NCCL's do on one

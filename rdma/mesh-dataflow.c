@@ -325,11 +325,11 @@ static void mesh_lease_free(struct hdr *m,uint32_t row,uint32_t from){
   mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),row,pages/m->block);
 }
 /* design/transport.md section 14, "Rows"; design/extents-and-liveness.md, d */
-static int mesh_names_rows(const struct mesh_plan *t,uint32_t first,uint32_t count){
+static int mesh_names_rows(const struct hdr *m,const struct mesh_plan *t,uint32_t first,uint32_t count){
   const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire);
   for(uint32_t e=0;e<t->sends+t->lands;e++){
     const struct mesh_entry *x=t->entry+e;
-    if(x->row>=(uint64_t)first+count || first>=x->row+x->pages)continue;
+    if(x->row>=(uint64_t)first+count || first>=x->row+mesh_entry_rows(m,x))continue;
     const uint64_t done=atomic_load_explicit(&x->done,memory_order_seq_cst);
     if((k && done<k) || !mesh_entry_balanced(x))return 1;
   }
@@ -341,7 +341,7 @@ static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count,uint64_t clie
   for(const struct mesh_plan *t=mesh_plan_at(m,atomic_load_explicit(&mesh_client_at(m,client)->queue,memory_order_acquire));t && tables--;
       t=mesh_plan_at(m,atomic_load_explicit(&t->next,memory_order_acquire))){
     const uint64_t at=(uint64_t)((const char *)t-(const char *)m);
-    if((at>=lo && at<hi) || mesh_names_rows(t,first,count))return 1;
+    if((at>=lo && at<hi) || mesh_names_rows(m,t,first,count))return 1;
   }
   return 0;
 }

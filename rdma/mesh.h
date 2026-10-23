@@ -9,8 +9,8 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 141u
-#define MESH_LAYOUT 149u
+#define MESH_VERSION 142u
+#define MESH_LAYOUT 150u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_PORTS 8u
@@ -46,7 +46,7 @@ struct mesh_page_entry {
 _Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
   offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
 /* design/transport.md section 14, "The queue"; design/pages-and-functions.md */
-struct mesh_entry { uint64_t row,pages,word,need; _Atomic uint64_t done,count,posted; uint64_t key[5]; };
+struct mesh_entry { uint64_t row,pages,word,need; _Atomic uint64_t done,count,posted; uint64_t key[5],offset,bytes; };
 struct mesh_plan {
   _Alignas(MESH_LINE) _Atomic uint64_t next;
   _Atomic uint64_t start,ready;
@@ -56,7 +56,7 @@ struct mesh_plan {
   _Atomic uint64_t landed,completed[2];
   _Alignas(MESH_LINE) struct mesh_entry entry[];
 };
-_Static_assert(sizeof(struct mesh_entry)==96 && offsetof(struct mesh_plan,sent)==MESH_LINE && offsetof(struct mesh_plan,entry)==2*MESH_LINE,
+_Static_assert(sizeof(struct mesh_entry)==112 && offsetof(struct mesh_plan,sent)==MESH_LINE && offsetof(struct mesh_plan,entry)==2*MESH_LINE,
   "a table's writers a line each");
 #define MESH_STAMP_LOST UINT64_MAX
 #define MESH_NEED_AHEAD UINT64_MAX
@@ -107,6 +107,10 @@ static inline uint64_t (*mesh_map_names(struct hdr *m,uint64_t at))[2]{ return (
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
+static inline uint64_t mesh_entry_rows(const struct hdr *m,const struct mesh_entry *e){
+  const uint64_t page=(uint64_t)m->block*m->pgsz;
+  return (e->offset+e->bytes+page-1)/page;
+}
 static inline int mesh_rows_hold(const struct hdr *m,struct mesh_row row,struct mesh_pages pages){
   return row.r<mesh_rows(m) && pages.n<=mesh_rows(m)-row.r;
 }

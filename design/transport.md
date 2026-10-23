@@ -467,7 +467,8 @@ Every word below, with its one writer at a time and its readers:
 | | its lanes' records (`struct lane_record`): each lane's requests posted and completed each way, what each was (`ring`, region offsets), and its run in hand (`run`: its tuple, its count, the index of its first page) | the port's child | the parent, after the child's exit |
 
 - **A tuple.** A send tuple is (source rows `row`, `pages`; destination `key`; ready word `word`, `need`): its pages go
-  once the word at region offset `word` reads at least `need`. A landing tuple is (`key`; landing rows `row`, `pages`;
+  once the word at region offset `word` reads at least `need`; its rows start at `row`, `offset` bytes into that row's
+  page, and run `bytes` (layout 150). A landing tuple is (`key`; landing rows `row`, `offset`, `bytes`, `pages`;
   `from`, its sender's registration; `need`): the receive the client expects. A landing's `need` is 0 where its count is
   its `pages`; ~0 (`MESH_NEED_AHEAD`) where it is posted ahead with `pages` its room and its count not yet known; and
   else its count plus one, stored by compare-and-swap from ~0 by the client at the start that knows it or by the
@@ -491,7 +492,8 @@ Every word below, with its one writer at a time and its readers:
   A client reads which node holds a name from the map (`mesh_names_find`). A send tuple whose key's registration no
   record of the map has held stays in its queue: no bridge sends it.
 - **The wire.** Every queue pair of a link carries runs. A run is a key unit (64 bytes: the key, the offset of its first
-  page within the tuple, its count of pages, the tuple's count of pages `total`; version 140) and then those pages, each a SEND of one whole page; a run is at most
+  page within the tuple, its count of pages, the tuple's count of pages `total` and its `bytes`; version 142) and then
+  its units, each the tuple's bytes from i pages on, at most a page, at the tuple's byte offset plus i pages, each a SEND of one whole page; a run is at most
   `MESH_RUN` pages, at the tuple's offsets 0, `MESH_RUN`, 2 `MESH_RUN` and on. Run i of a tuple travels one lane of one
   cable of each hop (`placed`): the cables the two nodes' records join between them (`mesh_joined`, sorted by `cable`)
   each hold a share of a cycle, their bandwidths divided by the bandwidths' greatest common divisor (one each where
