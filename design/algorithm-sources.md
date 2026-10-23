@@ -877,13 +877,17 @@ routing reads (`mesh_map`; `MESH_ALPHA_US` and `MESH_BETA_NS` were deleted in cc
 
 `mesh_reached`, `mesh_region`, `mesh_map` and `mesh_nodes_health`, the bridge's map readers (mesh-plan.h, rdma/mesh-dataflow.c:26-150): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
 `mesh_reached` returns this node and the nodes its streams reach, each with its bandwidth, and `mesh_region` the
-region's bytes and those not leased. `mesh_map` copies the bridge's map (design/transport.md), every node's newest
-record, as the seqlock's reader (Boehm, MSPC 2012): the serial read with acquire once it is even, the records copied,
-the copy kept where the serial is unchanged (`mesh_map_whole`), else copied again. From that copy it makes the whole
+region's bytes and those not leased. The bridge publishes its map (design/transport.md section 16), every node's
+newest record, by one word: each change is written whole into arena pages leased anew, then `map_at` (the first page
+shifted 32 bits, or'd with the count of records) is stored with release, then `map`, the publication count, moves one
+more, and only then are the last map's pages freed; this is RCU's publication of a new copy by one pointer (McKenney
+and Slingwine, PDCS 1998), with no odd state. `mesh_map` (`mesh_records_read`) reads `map` with acquire, then
+`map_at` and the records it names, then `map` again, and copies again where it moved, since a page it read is freed
+and written again only after `map` has moved; nothing waits. From that copy it makes the whole
 map, two nodes linked where each one's record reaches the other, at the lesser bandwidth (`mesh_joined`), its table the
 shortest routes (`mesh_routes`), and over the members the members' map of it (#topology). `mesh_nodes_health` reads
-the same records for each node's region, memory, model and health (`mesh_map_wait`, a wait on the serial, was deleted
-2026-10-22 with the serial, mesh 5dcb4f69). The bridges keep their links paired with or without a client, so
+the same records for each node's region, memory, model and health. `mesh_map_wait`, a wait for the seqlock's serial
+to move, was deleted with the serial (mesh 5dcb4f69, layout 144). The bridges keep their links paired with or without a client, so
 the map is current whether or not anything runs (design/transport.md). `mesh_observe`, which copied the port table,
 became `mesh_reached` in f4b363ad, and Swift's `Mesh.observe` was deleted with swift/ in a8952de9.
 
