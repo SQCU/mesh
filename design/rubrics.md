@@ -85,8 +85,7 @@ specific way of failing the code's dependants, and the upper pole a specific kin
 The standards are literal statements about code. Where the operator's words give both poles of a dimension, they are
 quoted as a pair. Where they give only one, neither is quoted, so that no dimension leans on rhetoric at one end.
 
-`A ≺ B` means A ranks below B. Every ranked pair is the operator's own judgement in this project, dated (UTC). The
-quotations are the operator's, from this project's sessions.
+`A ≺ B` means A ranks below B. The quotations are the operator's, from this project's sessions.
 
 Text in source, documents or notes that an agent wrote without citing the operator's words ≺ the operator's text: "user
 written text takes precedence over claude written text without a citation to user text" (10-21, of a docstring's
