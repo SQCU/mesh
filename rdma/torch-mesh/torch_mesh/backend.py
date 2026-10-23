@@ -45,6 +45,16 @@ def done(result):
     return _create_work_from_future(future)
 
 
+def outside(tensor):
+    import warnings
+
+    from . import OutsideRegionWarning
+    warnings.warn(f'mesh: a {tuple(tensor.shape)} {tensor.dtype} tensor given to a collective lies outside the bridge\'s '
+                  'region: the library stages it through its own pages, one copy each way, kept while its plan lives. '
+                  'Allocate it with torch_mesh.empty for zero copy (docs/writing-a-service.md#memory-outside-the-region)',
+                  OutsideRegionWarning, stacklevel=2)
+
+
 def _flat(value):
     return [value] if isinstance(value, torch.Tensor) else [t for v in value for t in _flat(v)]
 
@@ -68,7 +78,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         self._held(rank, size, made[0])
 
     def _held(self, rank, size, comm):
-        self._rank, self._size, self._pending, self._operators = rank, size, None, {}
+        self._rank, self._size, self._pending, self._operators, self._seen = rank, size, None, {}, set()
         self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         _stream.attach(self, self.handle)
@@ -117,6 +127,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
             self._pending.append((calls, result))
             return done(result)
         host = not any(t is not None and t.device.type == 'mps' for call in calls for t in (*call[1], *call[2]))
+        for t in (t for call in calls for t in (*call[1], *call[2]) if t is not None and t.numel() and t.data_ptr() not in self._seen):
+            self._seen.add(t.data_ptr())
+            if not _stream.address(t):
+                outside(t)
         if host:
             evidence.mark(self, True)
         work = _stream.issue(calls, self.handle, bool(split), _flat(result))
