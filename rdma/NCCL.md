@@ -651,7 +651,8 @@ Porting:
   the region's extents number no more than the device's `max_mr` (1 GiB on the Studios' 86 GiB under max_mr 100;
   design/transport.md, The registered region), each inside one of the 4 GiB banks no registration may cross
   (`tbt_post_recv` keeps only an address's low 32 bits: `rdma/mesh-verbs.h`), so no page crosses an extent. So:
-  - every crossing call's send buffer, and every buffer it sends from or lands in, is a lease's (in this node's region);
+  - every piece the bridge sends from or lands in is a lease's rows (in this node's region): the caller's own, or its
+    plan's stage where the caller's memory is in no lease (below);
   - the program's own cuts lie on pages (`mesh_program_steps_cut`), and a cut NCCL's call fixes lies where it does.
   `max_sge` is 1 on every device measured (design/HETEROGENEOUS-LINKS.md section 1), so a unit is one range, named by
   one memory region. Each port registers two families: extents of 2^k bytes from the region's start, and the same
@@ -662,9 +663,14 @@ Porting:
   across its line, and `span_of` names that one. No registration and no unit crosses a 4 GiB bank's line
   (`tbt_post_recv` keeps an address's low 32 bits): the arena lays a lease of at most a bank inside one, and a larger
   one from a bank's line (`mesh_arena_alloc`), and a call whose page would cross a bank's line inside a lease larger
-  than a bank fails as a value (`ncclInvalidUsage`, `bank_crossed`) before anything is presented. An operand outside the region fails the call as
-  a value (`ncclInvalidUsage`, naming the piece and its buffer) before anything is presented; nothing is copied to make it
-  fit.
+  than a bank fails as a value (`ncclInvalidUsage`, `bank_crossed`) before anything is presented. A piece whose buffer lies in no lease of
+  this process (memory not from `ncclMemAlloc`, a private MPS tensor) is staged through the communicator's own
+  registered pages by one copy, as NCCL stages an unregistered user buffer through its own: each plan holds a stage of
+  every SEND's and every copy landing's bytes (a reduce lands in the plan's pages already), taken from the region the
+  first time a call of it needs one and kept with the plan; a SEND's bytes are copied into its stage just before its
+  publication (the host's `memcpy` in `run_group`, a copy dispatch before the publication on the Metal path), and a
+  landing's out of its stage just after its wait (`consume`). Memory from `ncclMemAlloc` and the region tensors stay
+  zero copy.
 - Every crossing collective but a premultiplied one reads its send buffer and writes its result where they lie (the
   direct form): a SEND of a range no step of the rank wrote reads the send buffer; the first combine of such a range
   writes send op piece (`combine3_*`, a partials merge's `combine3_merge` too; the host's `combine_from`, three
@@ -803,7 +809,6 @@ compiled program (`torch_mesh.batch_isend_irecv(ops, pairs)`); torch's own `batc
   from it, as NCCL's do. A blocking exchange with one peer completes as one group (`ncclGroupStart`/`End`; torch's
   `batch_isend_irecv`); as two blocking sends before the receives, each waits on the other's group. The library does
   not detect unequal counts or different collectives on two ranks: no landed payload is checked.
-- A crossing whose buffer is not a lease's fails as a value ([Memory](#memory)).
 - Communicators know nothing of one another, and share every queue pair of every link: a key names its communicator,
   and no init is refused for the links others use. The bridge sends a process's tables toward a node in the order the
   process started them, so communicators whose calls the ranks issue in the same order progress as NCCL's do on one

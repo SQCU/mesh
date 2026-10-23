@@ -230,9 +230,10 @@ struct plan {
   size_t n;
   struct schedule *plans;
   struct metal_rows rows;
-  void *pages, *buffer;
+  void *pages, *buffer, *stage, *stage_buffer;
   struct where base;
-  size_t word;
+  size_t word, stage_bytes, stage_offset;
+  uint64_t stage_row;
   uint32_t reader;
   int flight, leaving;
   struct plan *next;
@@ -1166,7 +1167,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
 }
 
 struct message { struct call *c; uint32_t step; int32_t war; uint64_t entry, need, rel_entry, rel_need; mesh_pages pages;
-                 size_t offset, bytes, area, skew; struct where data; uint64_t row; };
+                 size_t offset, bytes, area, skew, stage; struct where data; uint64_t row; int staged; };
 
 struct schedule { struct message *out, *in; size_t outs, ins, table; uint64_t first[2], k; struct mesh_plan *t; };
 
@@ -1258,6 +1259,7 @@ static struct where buffer_at(const struct call *c, uint32_t b, size_t offset) {
   return offset >= first && offset < first + length * z ? shifted(c->recv_at, offset - first) : shifted(c->bound->buffer[b], offset);
 }
 
+static ncclResult_t lease_take(size_t bytes, void **pages, void **buffer, size_t *offset);
 static int bank_crossed(struct hdr *m, uint32_t row, uint64_t into, uint64_t bytes, uint64_t page) {
   const uint64_t base = atomic_load_explicit(&mesh_page(m)[row].address, memory_order_relaxed) - m->data_off + into;
   for (uint64_t line = (base / MESH_BANK + 1) * MESH_BANK; line < base + bytes; line += MESH_BANK)
@@ -1288,10 +1290,18 @@ static ncclResult_t place_group(struct ncclComm *comm, struct plan *plan) {
                       "a page of them crosses a 4 GiB bank's line, which no SGE may cross (max_sge 1, and the provider keeps an address's low 32 bits)",
                       call_name(x->c), comm->name, x->bytes, send ? "SEND to" : "receive from", step->peer, send ? "reads" : "lands in", step->buffer,
                       x->offset, (unsigned long long)into);
+        x->staged = !held;
         if (held) { x->row = held->row + into / page; x->skew = into % page; continue; }
-        return fail(ncclInvalidUsage, "%s on communicator %s: the %zu bytes its %s rank %u %s (buffer %u, byte %zu) are in no lease of this process: "
-                    "a crossing's pages are a lease's rows (ncclMemAlloc)", call_name(x->c), comm->name, x->bytes, send ? "SEND to" : "receive from",
-                    step->peer, send ? "reads" : "lands in", step->buffer, x->offset);
+        if (!plan->stage) {
+          size_t at = 0;
+          const ncclResult_t made = lease_take(plan->stage_bytes, &plan->stage, plan->buffer ? &plan->stage_buffer : NULL, &at);
+          if (made) return made;
+          plan->stage_offset = at;
+          pthread_mutex_lock(&attach_lock);
+          plan->stage_row = lease_at(plan->stage)->row;
+          pthread_mutex_unlock(&attach_lock);
+        }
+        x->row = plan->stage_row + x->stage / page; x->skew = 0;
       }
   return ncclSuccess;
 }
@@ -1311,6 +1321,7 @@ static void plan_free(struct ncclComm *comm, struct plan *p) {
   struct mesh_plan *table[comm->count + 1];
   for (uint32_t h = 0; h < comm->count; h++) table[h] = p->plans ? p->plans[h].t : NULL;
   if (p->pages) retire_locked(comm, p->pages, table, comm->count);
+  if (p->stage) retire_locked(comm, p->stage, NULL, 0);
   calls_free(p->list, p->n);
   schedules_free(comm, p->plans);
   rows_free(&p->rows, 1);
@@ -1397,6 +1408,13 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
     for (uint32_t b = 1; st && b < st->buffers; b++) st->at[b] = c->direct && !st->needed[b] ? SIZE_MAX : (bytes += each) - each;
   }
   if (!result) result = schedule_group(comm, p->list, n, p->plans, &bytes);
+  for (uint32_t h = 0; h < comm->count && !result; h++)
+    for (size_t k = 0; k < p->plans[h].outs + p->plans[h].ins; k++) {
+      struct message *m = k < p->plans[h].outs ? p->plans[h].out + k : p->plans[h].in + (k - p->plans[h].outs);
+      if (k >= p->plans[h].outs && m->c->bound->steps[m->step].op == MESH_STEP_REDUCE) continue;
+      m->stage = p->stage_bytes;
+      p->stage_bytes += page_up(m->bytes, comm->page);
+    }
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     struct schedule *s = p->plans + h;
     if (!s->outs && !s->ins) continue;
@@ -1544,7 +1562,8 @@ static ncclResult_t lost_fail(const struct channel *ch) {
   return fail(ncclRemoteError, "the link to node %u was lost (its plan's stamps ~0)", ch->node);
 }
 
-static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
+static ncclResult_t run_group(struct ncclComm *comm, struct plan *plan) {
+  struct schedule *const plans = plan->plans;
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
     int open = 0;
@@ -1564,13 +1583,14 @@ static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
           unsigned char *to = address_of(buffer_at(m->c, step->buffer, m->offset));
           const unsigned char *with = st->fresh && st->fresh[m->step] ? address_of(read_at(m->c)) + m->offset : to;
           combine_from(ktype(m->c), kop(m->c), to, with, address_of(m->data), kcount(m->c, m->bytes));
-        }
+        } else if (m->staged) memcpy(address_of(m->data), (const unsigned char *)plan->stage + m->stage, m->bytes);
         st->done[m->step] = 1;
         ch->consumed++;
       }
       while (ch->published < p->first[0] + p->outs) {
         const struct message *m = p->out + (ch->published - p->first[0]);
         if (!ready(m->c->bound, m->step)) break;
+        if (m->staged) memcpy((unsigned char *)plan->stage + m->stage, address_of(m->data), m->bytes);
         atomic_thread_fence(memory_order_release);
         atomic_store_explicit(&p->t->ready, ready_need(p->k, m->rel_entry), memory_order_release);
         ch->published++;
@@ -1591,8 +1611,9 @@ static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
   return ncclSuccess;
 }
 
-static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
-  const ncclResult_t result = run_group(comm, plans);
+static ncclResult_t run(struct ncclComm *comm, struct plan *plan) {
+  struct schedule *const plans = plan->plans;
+  const ncclResult_t result = run_group(comm, plan);
   for (uint32_t h = 0; result && h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
     const struct schedule *p = plans + h;
@@ -1752,7 +1773,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
   if (!result && remote && !(result = plan_start(comm, plan))) atomic_fetch_add(&comm->runs, 1);
   const int running = remote && !result;
   pthread_mutex_unlock(&group_lock);
-  if (running) result = run(comm, plan->plans);
+  if (running) result = run(comm, plan);
   if (running) atomic_fetch_sub(&comm->runs, 1);
   for (size_t i = 0, self = 0; i < n && !result; i++) {
     struct call *c = calls + i;
@@ -1853,10 +1874,16 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
     const struct metal_release release = {g->plan->buffer, table_word(g, &s->t->ready), ready_need(s->k, out_at(g, h, last - 1)->rel_entry)};
     void *operands[64];
     size_t n = 0;
-    for (uint64_t at = ch->published; at < last; at++) {
+    for (uint64_t at = ch->published; !result && at < last; at++) {
+      const struct message *m = out_at(g, h, at);
+      if (m->staged) metal_resident(program, g->plan->stage_buffer);
+      if (m->staged)
+        result = gpu(metal_copy(program, METAL_PLAIN, g->plan->stage_buffer, g->plan->stage_offset + m->stage, m->data.buffer, m->data.offset, m->bytes),
+                     "a SEND's staging copy");
       if (n == sizeof operands / sizeof *operands) { metal_uses(program, operands, n, 0); n = 0; }
-      operands[n++] = out_at(g, h, at)->data.buffer;
+      operands[n++] = m->staged ? g->plan->stage_buffer : m->data.buffer;
     }
+    if (result) break;
     metal_uses(program, operands, n, 0);
     if (!(result = gpu(metal_publish(program, &release), "a publication"))) { ch->published = last; *published = 1; }
   }
@@ -1876,8 +1903,8 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   }
   struct schedule *s = g->plans + h;
   const _Atomic uint64_t *sent = m->war >= 0 ? &s->t->entry[m->war].done : NULL;
-  const struct metal_wait wait = {g->plan->buffer, m->data.buffer, table_word(g, &s->t->entry[s->outs + m->rel_entry].done),
-                                  sent ? table_word(g, sent) : 0, m->data.offset, s->k, sent ? s->k : 0};
+  const struct metal_wait wait = {g->plan->buffer, m->staged ? g->plan->stage_buffer : m->data.buffer, table_word(g, &s->t->entry[s->outs + m->rel_entry].done),
+                                  sent ? table_word(g, sent) : 0, m->staged ? g->plan->stage_offset + m->stage : m->data.offset, s->k, sent ? s->k : 0};
   if (!result && step->op == MESH_STEP_REDUCE) {
     const struct where to = buffer_at(m->c, step->buffer, m->offset);
     if (st->fresh && st->fresh[m->step]) {
@@ -1888,6 +1915,10 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
                                     kcount(m->c, m->bytes)), "a first combine");
     } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, kcount(m->c, m->bytes), &wait), "a landing");
   } else if (!result) result = gpu(metal_spin(program, &wait), "a wait");
+  if (m->staged) metal_resident(program, g->plan->stage_buffer);
+  if (!result && m->staged && step->op != MESH_STEP_REDUCE)
+    result = gpu(metal_copy(program, METAL_PLAIN, m->data.buffer, m->data.offset, g->plan->stage_buffer, g->plan->stage_offset + m->stage, m->bytes),
+                 "a landing's staging copy");
   if (result) return result;
   st->done[m->step] = 1;
   if (at == ch->consumed) ch->consumed = at + 1;
@@ -2280,6 +2311,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     else {
       for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group) {
         if (g->plan && g->plan->buffer) metal_resident(program, g->plan->buffer);
+        if (g->plan && g->plan->stage_buffer) metal_resident(program, g->plan->stage_buffer);
       }
       result = walk(program, NULL, through, &any);
       if (!result) result = retire_groups(program);
