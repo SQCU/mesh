@@ -32,8 +32,9 @@ congest. The pressure is inside the core, where all data shares one cache.
 
 The floors measured here are these. A GPU kernel that fences before each poll sees a store from outside the GPU in
 0.58 µs. A dispatch in an open command buffer costs 0.9-1.4 µs. A new command buffer costs 13.7-18.7 µs
-(measurement.md:414, 3233-3235). Apple gives the M5 Ultra 1.2 TB/s of memory bandwidth for its 80-core model, and no separate figure for the Studios'
-64-core model. At width 16,384 the chain's kernel streams its weights at about 620 GB/s, about half of that
+(measurement.md:414, 3233-3235). Apple gives the M5 Ultra 1.2 TB/s of memory bandwidth, for the Studios' 64-core
+model and its 80-core model alike (Apple, Mac Studio specs). At width 16,384 the chain's kernel streams its weights at
+about 620 GB/s, about half of that
 (output_data/chain-20261022/RESULTS.md). An H800 reads HBM at 1,861.5 GB/s (Luo et al. 2025).
 
 ## 2. From one GPU's memory to another's
@@ -187,9 +188,114 @@ poll sees a store 0.58 µs after it is made, and a dispatch costs 0.9-1.4 µs (s
 3.6 µs after its post (section 4). So a write posted ahead takes about 4.2 µs (section 5). Each µs the bridge adds is
 a large share of that, about a quarter.
 
+## 7. Writes over many hops and many paths
+
+This section works out what a write costs when it takes more than one path. It uses three figures. B is one cable's
+rate, about 9.2 GB/s each way with both ways in use (9.21 and 9.25 GB/s on 2026-10-01, measurement.md:364). P is a
+page, 16 KiB. Δ is what each hop past the first adds, about 4.2 µs: 3.6 µs from post to landing, then a poll
+(section 5).
+
+**What a write over many hops is.**
+
+- Each hop lands in a receive posted ahead, at a place fixed before the call. So nothing on the path decides anything
+  at run time (section 5, positions 1 and 3).
+- A relay's bridge sees the landing and sends the bytes on from the same memory. It never touches a byte of them. No
+  CPU or GPU work runs on them there.
+- A relay works piece by piece. Piece k moves on while piece k + 1 comes in. So a path of h hops adds about
+  (h − 1)·Δ to when the first byte lands. It does not add that to how long the whole transfer takes. Once it is full,
+  each path delivers B.
+- Each byte a relay sends on costs one DMA write and one DMA read in the relay's DRAM. A node that receives pays one
+  DMA write a byte. Each port costs one polling core, since commit 60b00774 (design/transport.md section 14).
+
+**The bound is a cut, not the cables.** A transfer between two nodes can use at most the max-flow between them (Ford
+and Fulkerson 1956). It can be no more than the source's ports, and no more than the target's. The mesh has four
+cables. One joins m5ult1 and m5ult2, one joins m5ult1 and the Mini, and two join m5ult2 and the Mini
+(output_data/spin-20261023, each run's paired.log; commit 7876150c). So each pair has one more path's worth than its
+own cables, through the third node.
+
+| Pair | Its own cables | Paths' worth |
+|---|---|---|
+| m5ult1 and m5ult2 | 1 | 2 |
+| m5ult1 and the Mini | 1 | 2 |
+| m5ult2 and the Mini | 2 | 3 |
+
+**What taking in costs a node's memory.** A node that takes in on N ports takes N × 9.2 GB/s of DMA writes.
+
+| N | GB/s | Of 620 GB/s | Of 1.2 TB/s | Of 273 GB/s |
+|---|---|---|---|---|
+| 3 | 27.6 | 4.5% | 2.3% | 10.1% |
+| 6 | 55.2 | 8.9% | 4.6% | — |
+| 12 | 110.4 | 17.8% | 9.2% | — |
+| 18 | 165.6 | 26.7% | 13.8% | — |
+
+620 GB/s is what the chain's kernel streams on a Studio, and 1.2 TB/s is Apple's figure for the M5 Ultra (section 1).
+273 GB/s is Apple's figure for the Mini's M4 Pro (Apple, Mac mini specs). The Mini has 3 ports and a Studio has 6
+(Apple, Mac mini specs and Mac Studio specs). So 12 and 18 are what-ifs. A relay that carries one cable's worth spends
+about 18.4 GB/s, since it writes each byte once and reads it once. No one has measured a Studio taking in on all 6
+ports at once. The one figure for more than one cable is 15.36 GB/s each way on two cables, 1.67 times one cable. It
+came from a smoke test on 2026-10-23 (output_data/smoke-20261023-11c52f5e; commit 7876150c).
+
+**When more paths win.** Take one direct path with latency L1, and N − 1 relayed paths with latency L2 = L1 + Δ.
+Split a transfer of S bytes so that all the paths end at the same time.
+
+- The direct path alone takes T1 = L1 + S/B.
+- All N paths take T_N = S/(N·B) + mean(L).
+
+All the paths beat the direct one once S > Δ·B, about 38.6 KB. That holds for any N. Now say each path carries at
+least one page. Then all N paths are in use from S_min(N) = Δ·B + N·P up.
+
+| N | S_min | Time saved at S_min |
+|---|---|---|
+| 3 | 87,792 B | 3.6 µs |
+| 6 | 136,944 B | 8.9 µs |
+| 12 | 235,248 B | 19.6 µs |
+| 18 | 333,552 B | 30.3 µs |
+
+The time saved at S_min is (N − 1)·P/B. Far above S_min, the time comes close to S/(N·B). When every path is direct,
+the Δ·B term drops out. Each hop past the first adds about Δ·B, 38.6 KB, to the size where its path pays off. A path
+of 10 hops adds about 348 KB. One cable moves that in about 38 µs, well under a millisecond.
+
+**Who balances the load.** The operator, 2026-10-23: "there is no such thing as link business if there is a transfer
+backend mediated schedule of transactions. a link might be 'busy' and it might not be. it is not anyone's job to think
+about this; it is the bridge's job to transact as fast as possible, it is the collective's job to use every rank to
+the maximum extent possible and measure the residual in completion time between ranks to allow for
+cross-function-evaluation rebalancings, and it is the data processing job's code to declare enormous tensors or
+workloads and let the collective and bridge api backend converge on the fastest possible solving time the hardware can
+ever support no matter what the mesh graph is."
+
+| Who | Its job |
+|---|---|
+| The bridge | Transact as fast as it can. |
+| The collective | Use every rank as fully as it can. Measure the residual, how far apart the ranks finish, so work can move between one evaluation and the next. |
+| The data processing code | Declare huge tensors or workloads. Let the collective and the bridge find the fastest time the hardware allows, whatever the mesh's graph. |
+
+When nodes compute at different speeds, a weaker node gets a smaller share. In the LSTM on three nodes the shares are
+448, 448 and 128 of 1,024, and the Mini's is the 128 (output_data/lstm-20261022/t134-n3-lstm-rank0.log). So the Mini
+ends its compute early. Then its DMA engines, links and memory have slack, and slack is just what a relay uses. The
+balancer is to set the shares from the measured residuals, not from a model. If relaying ever slows a node, its
+residual shows it, and the balancer moves work.
+
+**Where today's code differs.** Today the bridge counts 16 KiB pages: each SEND and each receive is one whole page, and
+it cuts a piece over a node's cables by its count of pages (design/transport.md section 14). And the bridges forward
+nothing, so a transfer uses only the cables that join its two ends (rdma/nccl-mesh.c, map_of).
+
+**The bridge does not care how big a write is.** The operator, 2026-10-23: "it is not the job of the bridge or the
+collective to make programs run slower based on narrow case guesses for how big a transaction is; the bridge is not
+there to 'care' about how big a write is; only to schedule writes and their swizzlings and so on s.t. they all happen
+as fast as possible every single time. a bridge ideally does not even know what a 'page' is or which data dependencies
+are related to which pages; as that is a namespace of data processing functions and collective functions."
+
+So the sizes worked out above are facts about the hardware. They are not rules the bridge applies. Neither the bridge
+nor the collective makes a program slower on a guess about how big a transfer is. The bridge schedules writes, and how
+they are laid over the paths, so that all of them happen as fast as they can, every time. Ideally a bridge does not
+even know what a page is, or which data goes with which page. Those belong to the data processing functions and the
+collective functions.
+
 ## Sources
 
 - Apple. TN3205: Low-latency communication with RDMA over Thunderbolt. 2026.
+- Apple. Mac Studio: Technical Specifications. apple.com/mac-studio/specs, read 2026-10-23.
+- Apple. Mac mini (2024): Tech Specs. support.apple.com/121555, read 2026-10-23.
 - Apple. Explore GPU advancements in M3 and A17 Pro. Tech talk 111375.
 - Apple. Boost your graphics performance with the M5 and A19 GPUs. Tech talk 111431.
 - Apple. Accelerate your machine learning workloads with the M5 and A19 GPUs. Tech talk 111432.
@@ -204,3 +310,4 @@ a large share of that, about a quarter.
   2025.
 - InfiniBand Trade Association. InfiniBand Architecture Specification, Volume 1.
 - J. Gu et al. Efficient Memory Disaggregation with Infiniswap. NSDI 2017.
+- L. R. Ford and D. R. Fulkerson. Maximal flow through a network. Canadian Journal of Mathematics 8, 1956.
