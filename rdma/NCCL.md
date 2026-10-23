@@ -505,17 +505,17 @@ heard of, so none is left for them.
 
 - `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: start k writes its sends into slot k mod 4 (released
   at start k−1) and posts start k+1's landings into slot k+1 mod 4 once start k−3's kernels have ended and its tables
-  are done, waiting outside the groups' lock: it reads the slot's `ended` and the bridge's stamps again after each
+  are done, waiting outside the groups' lock: it reads the slot's bind words and the bridge's stamps again after each
   yield of its thread, and the revoke at each (`ncclCommAbort` ends it); where those kernels are in a command buffer not yet committed, or one that ended in an error, it fails as
   a value naming it (torch-mesh commits torch's open buffer before a start where start k−3's kernels are in it). A
   kernel's wait reads the stamp of the start it lands from its crossing record (`mesh_crossing` `target`, every landing
-  of a start one call), so a slot's views and waits are written once at the init and no start rewrites them; a slot's
-  `ended` and `bound` count up from the init. A slot is
-  released by use count: every kernel bound to it (`ncclMeshBind`, landing its
-  start or publishing it) counts its end in the slot's table (`ended`, the last threadgroup of `mesh_leave`, stored
-  system-coherent so the host reads it while the kernel's command buffer runs on), and the slot
-  is free once that count reaches the binds made of it (`bound`) and the bridge has stamped its tables (below),
-  whatever kernels the caller binds or none. So no start reuses pages
+  of a start one call), so a slot's views and waits are written once at the init and no start rewrites them. A slot is
+  released by its binds: each kernel bound to it (`ncclMeshBind`, landing its start or publishing it) has a word of
+  its own, taken in the rows of the slot its record lies in, and its crossing record names the word and the bind's
+  start (`end`, `stamp`); the last threadgroup of `mesh_leave` stores the stamp there, system-coherent, so the host
+  reads it while the kernel's command buffer runs on, and no two kernels write one word. The slot keeps the words of
+  its use's binds (`binds`, emptied when its landings are posted), and is free once each holds its stamp and the
+  bridge has stamped its tables (below), whatever kernels the caller binds or none. So no start reuses pages
   another start still holds, and a kernel writes no guard of its own (the operator, 2026-10-22: "programs overwrite
   each other in data processing by default with no extraneous lines of code written"; NCCL-style primitives "use
   explicit allocation per buffer or pageset that they operate against, rather than an attempt to make timed single

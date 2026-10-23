@@ -22,7 +22,7 @@ static NSString *const STEPS =
   "mesh_view<T> operator+(ulong k) const { return mesh_view<T>(at + k * sizeof(T)); } "
   "template <typename U> mesh_view<U> as() const { return mesh_view<U>(at); } "
   "private: device uchar *at; };\n"
-  XSTR(MESH_CROSSING(device mesh_table *, uint, ulong,
+  XSTR(MESH_CROSSING(device mesh_table *, device ulong *, uint, ulong,
                      friend void mesh_enter(constant mesh_crossing &, uint); friend void mesh_leave(constant mesh_crossing &, uint);
                      friend uint mesh_landings(constant mesh_crossing &);
                      template <typename T> friend mesh_view<T> mesh_landing(constant mesh_crossing &, uint);
@@ -61,8 +61,7 @@ static NSString *const STEPS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, MESH_SYSTEM); "
   "if (c.publish && c.publish->ready) *(volatile coherent(system) device ulong *)&c.publish->published = c.publish->ready; "
   "mesh_relay_all(t, c.polls); "
-  "if (c.land) *(volatile coherent(system) device uint *)&c.land->ended += 1u; "
-  "if (c.publish && c.publish != c.land) *(volatile coherent(system) device uint *)&c.publish->ended += 1u; "
+  "*(volatile coherent(system) device ulong *)c.end = c.stamp; "
   "atomic_store_explicit(&t->arrivals, 0u, memory_order_relaxed); }\n"
   "template <typename W> inline W mesh_wait(volatile coherent(system) device const W *word, ulong target) { "
   "return mesh_wait_bounded(word, target, " XSTR(MESH_POLLS) "); }\n"

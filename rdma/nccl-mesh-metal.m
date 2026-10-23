@@ -293,14 +293,14 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
   return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, wait_args(w, dst_offset, n, op), n, 0);
 }
 
-MESH_CROSSING(uint64_t, uint32_t, uint64_t, );
+MESH_CROSSING(uint64_t, uint64_t, uint32_t, uint64_t, );
 _Static_assert(sizeof(struct mesh_crossing) <= RECORD, "a crossing record");
 
 uint64_t metal_address(void *buffer) { return ((id<MTLBuffer>)buffer).gpuAddress; }
 
-struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, uint64_t target, uint32_t groups,
-                               uint32_t index, void *const *buffers, size_t n) {
-  struct mesh_crossing c = {land, publish, target, groups, MESH_POLLS};
+struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, uint64_t target,
+                               uint64_t end, uint64_t stamp, uint32_t groups, uint32_t index, void *const *buffers, size_t n) {
+  struct mesh_crossing c = {.land = land, .publish = publish, .end = end, .target = target, .stamp = stamp, .groups = groups, .polls = MESH_POLLS};
   @autoreleasepool {
     if (!table) {
       id<MTLComputeCommandEncoder> e = (id<MTLComputeCommandEncoder>)encoder;

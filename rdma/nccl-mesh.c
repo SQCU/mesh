@@ -2347,7 +2347,8 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
-struct slot { void *pages, *command; size_t offset; struct mesh_table *table; struct metal_rows rows; uint64_t row, start, landing, landing_k, *k, *kl; uint32_t bound; int unbound; };
+struct bind { const uint64_t *word; uint64_t stamp; };
+struct slot { void *pages, *command; size_t offset; struct mesh_table *table; struct metal_rows rows; struct bind *binds; uint64_t row, start, landing, landing_k, *k, *kl; uint32_t bound, bind_room; int unbound; };
 struct leg { uint32_t x, piece, channel, index; int32_t from; };
 struct ncclMeshRequest {
   struct ncclComm *comm;
@@ -2391,7 +2392,11 @@ static int tables_held(const struct ncclMeshRequest *r, const struct slot *s, in
   }
   return 0;
 }
-static int kernels_held(const struct slot *s) { return __atomic_load_n(&s->table->ended, __ATOMIC_ACQUIRE) < s->bound; }
+static int kernels_held(const struct slot *s) {
+  for (uint32_t b = 0; b < s->bound; b++)
+    if (__atomic_load_n(s->binds[b].word, __ATOMIC_ACQUIRE) != s->binds[b].stamp) return 1;
+  return 0;
+}
 static int slot_held(const struct ncclMeshRequest *r, const struct slot *s, int tables) {
   return kernels_held(s) || (tables && (tables_held(r, s, 0) || tables_held(r, s, 1)));
 }
@@ -2426,6 +2431,7 @@ static void request_end(struct ncclMeshRequest *r, int idle) {
     struct slot *s = r->slots + i;
     if (s->unbound) { s->unbound = 0; comm->unpublished--; }
     if (s->command) metal_release(s->command);
+    free(s->binds);
     rows_free(&s->rows, idle);
   }
   request_parts_free(r);
@@ -2483,7 +2489,7 @@ static void landings_post(struct ncclMeshRequest *r, struct slot *s, uint64_t m)
   struct ncclComm *const comm = r->comm;
   const size_t z = SIZE[r->type];
   const uint32_t me = (uint32_t)comm->rank;
-  s->landing = m; s->landing_k = ++comm->attach->calls;
+  s->landing = m; s->landing_k = ++comm->attach->calls; s->bound = 0;
   for (uint32_t h = 0; h < comm->count; h++) s->kl[h] = r->ltab[h] ? s->landing_k : 0;
   for (uint32_t e = 0; e < r->ins; e++) {
     const struct leg *l = r->in + e;
@@ -2663,7 +2669,7 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
     size_t at;
     s->pages = (char *)r->pages + i * stride; s->offset = offset + i * stride; s->row = row + i * stride / comm->page;
     s->table = memset((char *)s->pages + r->table, 0, r->bytes - r->table);
-    *s->table = (struct mesh_table){metal_address(r->buffer) + s->offset, 0, r->peers, 0, r->relays, r->waits, 0, 0, 0};
+    *s->table = (struct mesh_table){metal_address(r->buffer) + s->offset, 0, r->peers, r->relays, r->waits, 0, 0};
     struct mesh_peer *peer = (struct mesh_peer *)(s->table + 1);
     for (uint32_t e = 0; e < r->peers; e++) peer[e] = (struct mesh_peer){metal_address(r->buffer) + s->offset + r->area[r->own[e]]};
     s->rows.comm = comm;
@@ -2740,19 +2746,31 @@ ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int pu
   pthread_mutex_lock(&group_lock);
   struct slot *land = lands ? slot_of(r, start - 1) : NULL, *publish = publishes ? slot_of(r, start) : NULL, *held = publish ? publish : land;
   if (held && held->unbound) { held->unbound = 0; r->comm->unpublished--; }
-  void *buffers[1] = {r->buffer};
+  void *buffers[2] = {r->buffer, NULL};
+  size_t at = 0;
+  uint64_t *word = NULL;
   ncclResult_t result = (lands && !land) || (publishes && !publish)
                           ? fail(ncclInvalidUsage, "ncclMeshBind: start %llu, or the one before it, is not one of this exchange's held starts",
                                  (unsigned long long)start)
-                          : gpu(metal_bind(on->commandEncoder, on->argumentTable, on->residencySet, held ? &held->rows : NULL,
-                                           land ? metal_address(r->buffer) + land->offset + r->table : 0,
-                                           publish ? metal_address(r->buffer) + publish->offset + r->table : 0, land ? land->landing_k : 0, groups, index,
-                                           buffers, held != NULL),
-                                "a crossing's binding");
+                          : ncclSuccess;
+  for (int i = 0; !result && i < 2; i++) {
+    struct slot *s = i ? publish : land;
+    struct bind *grown = s && s->bound == s->bind_room ? realloc(s->binds, (s->bind_room ? 2 * s->bind_room : 4) * sizeof *grown) : NULL;
+    if (s && s->bound == s->bind_room && !grown) result = fail(ncclSystemError, "out of memory");
+    else if (grown) { s->binds = grown; s->bind_room = s->bind_room ? 2 * s->bind_room : 4; }
+  }
+  if (!result && held && metal_rows_take(&held->rows, sizeof *word, &buffers[1], &at)) result = fail(ncclSystemError, "out of memory: a binding's word");
+  else if (!result && held) *(word = (uint64_t *)((char *)metal_contents(buffers[1]) + at)) = 0;
+  if (!result)
+    result = gpu(metal_bind(on->commandEncoder, on->argumentTable, on->residencySet, held ? &held->rows : NULL,
+                            land ? metal_address(r->buffer) + land->offset + r->table : 0,
+                            publish ? metal_address(r->buffer) + publish->offset + r->table : 0, land ? land->landing_k : 0,
+                            word ? metal_address(buffers[1]) + at : 0, start, groups, index, buffers, held ? 2 : 0),
+                 "a crossing's binding");
   for (int i = 0; !result && i < 2; i++) {
     struct slot *s = i ? publish : land;
     if (!s) continue;
-    s->bound++;
+    s->binds[s->bound++] = (struct bind){word, start};
     if (on->commandBuffer && s->command != on->commandBuffer) {
       if (s->command) metal_release(s->command);
       s->command = metal_retain(on->commandBuffer);
