@@ -1802,9 +1802,9 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
    served, a job out lapsed), an end, and a message of any other kind let be; and tells each job's end, naming the pairing it was asked for.  A connect that
    ends while its pairing stands opens the link's streams (streams_open) and then serves every lane, its pairing read
    again (port_halt's order).  The child ends at its parent's word, once its own windows have ended (at most
-   MESH_PLATFORM_NS on), or at its parent's loss (the socket's end), its lanes served no more, MESH_PLATFORM_NS and its
-   windows on (at most twice that): its exit, the kernel's release of its device's objects, after the lanes holding work
-   are flushed (child_leave, lanes_flush) */
+   MESH_PLATFORM_NS on), or at a stop from outside (SIGTERM, SIGINT, SIGHUP) as at that word, or at its parent's loss
+   (the socket's end), its lanes served no more, MESH_PLATFORM_NS and its windows on (at most twice that): its exit, the
+   kernel's release of its device's objects, after the lanes holding work are flushed (child_leave, lanes_flush) */
 static uint32_t child_asked;
 static uint64_t child_bandwidth;
 static int child_halted;
@@ -1973,6 +1973,14 @@ static int child_main(int argc,char **argv){
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
   EV_SET64(&event,3,EVFILT_READ,EV_ADD,0,0,UINT64_MAX,0,0);
   if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+  /* a stop from outside (a shutdown's SIGTERM, SIGINT, SIGHUP) heard as an event, its filter added before its default
+     is ignored (the parent's own stop, main), so the child leaves as at its parent's word (child_leave) */
+  static const int ending[]={SIGTERM,SIGINT,SIGHUP};
+  for(size_t i=0;i<sizeof ending/sizeof *ending;i++){
+    EV_SET64(&event,(uint64_t)ending[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);
+    if(kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("child events");
+    signal(ending[i],SIG_IGN);
+  }
   terminations_watch(0);
   for(;;){
     now=clock_ns();
@@ -1982,7 +1990,10 @@ static int child_main(int argc,char **argv){
     struct timespec tick={(time_t)(MESH_PAUSE_NS/1000000000u),(long)(MESH_PAUSE_NS%1000000000u)};
     const int count=kevent64(events,NULL,0,ready,4,0,&tick);
     now=clock_ns();
-    for(int i=0;i<count;i++)if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+    for(int i=0;i<count;i++){
+      if(ready[i].filter==EVFILT_SIGNAL)child_leave(port,1);
+      if(ready[i].filter==EVFILT_READ && ready[i].ident==3)child_read(port);
+    }
   }
 }
 

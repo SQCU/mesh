@@ -545,7 +545,9 @@ W(t) those requests already handed to the hardware reference, the plan's window 
 - A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
   passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
   most an hour (section 9's rule, a port's: "restarted, not crashing again of course"). A child whose parent is gone halts its
-  lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
+  lanes and exits MESH_PLATFORM_NS later, its own windows held; one stopped from outside (a shutdown's SIGTERM, SIGINT,
+  SIGHUP) leaves as at its parent's word, its lanes flushed as there, and only a crash ends a child another way; a
+  port's child is spawned only while no other child of
   its device lives (one of an earlier launch, alive or in its exit: each holder entry names its child's device, and an
   exiting one is read again every MESH_PAUSE_NS, since XNU attaches no filter to it), so a device's queue pairs are one
   child's at a time, no make meets the device's ceiling, and no child enters a device an earlier one has not left; the
