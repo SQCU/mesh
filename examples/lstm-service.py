@@ -61,7 +61,7 @@ def shares(config, rank, size, held):
         matrix = [every[q][k] if p == 0 else 0 for p in range(size) for q in range(size)]
         whole = torch_mesh.empty(sum(e[k] for e in every), dtype=dtype) if rank == 0 else None
         if whole is not None:
-            torch.cat([held[q][k].reshape(-1) for q in range(size)], out=whole)
+            whole.copy_(torch.cat([held[q][k].reshape(-1) for q in range(size)]))
         torch_mesh.all_to_all(out[k], whole, matrix).wait()
     return out[0], out[1]
 
