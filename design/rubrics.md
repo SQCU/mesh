@@ -21,7 +21,6 @@ Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mix
 
 **What the bridge does (M), one process per node.**
 - At its launch, it maps the node's region and registers it once on every RDMA device.
-- When it first hears a peer on a cable, it makes that link's queue pairs and exchanges their numbers once. It connects them once in its life. That exchange, and the map records it floods, are its only messages.
 - On each link it keeps four streams toward the peer node, each on a lane pair of its own and named by an identity both bridges compute alike:
   - It posts receives into the stream's in ring for the link's life.
   - For each unit the holder declared, it posts a SEND when the unit's ready word is set. If the deadline passes or the holding ends first, it posts the same SEND from its all-ones block instead.
