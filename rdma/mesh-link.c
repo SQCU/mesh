@@ -20,8 +20,8 @@ static dispatch_queue_t finder;
 /* design/transport.md: the devices to be read again (an interface that no port is attached or its link came on), read
    on the event loop's turn once no window stands and no call is stuck (ports_find) */
 static int find_wanted;
-/* design/transport.md B12: a port's job out past MESH_PLATFORM_NS, during which no port dispatches a driver
-   call and the devices are not read (ports_stalled's, each event-loop turn); and the ports whose progress threads did
+/* design/transport.md B12: a port's job out past MESH_PLATFORM_NS, during which the devices are not read
+   (ports_stalled's, each event-loop turn); and the ports whose progress threads did
    not hold for a settle or a guarded change within MESH_PLATFORM_NS (`unguarded`, a bit a port: port_wait), concluded
    alike */
 static _Atomic int stalled;
@@ -993,7 +993,7 @@ static void link_turn(struct port *port){
       record_changed();
     }
   }
-  const int held=atomic_load_explicit(&stalled,memory_order_relaxed) || now<port->quiet_at;
+  const int held=now<port->quiet_at;
   if(!port->greeted)return;
   if(l->state==LINK_UP){
     const uint32_t broken=atomic_exchange_explicit(&l->broken,0,memory_order_acq_rel);
@@ -1024,8 +1024,10 @@ static void link_turn(struct port *port){
    is still out MESH_PLATFORM_NS after it began is concluded around
    it, once: open 0 and port_lost (ETIMEDOUT: its socket closed, the map's phase STOPPED, its stream's words ~0), no
    verbs call.  The call itself cannot
-   be ended.  While any port's job is so out, no port dispatches a driver call and the devices are not read (`stalled`:
-   port_open, link_turn, ports_find).  A port whose progress threads did not hold for a settle or a
+   be ended.  While any port's job is so out the devices are not read (`stalled`: ports_find, the parent's own driver
+   entry), and the port itself takes no job until the call returns (`stuck`, its job's word); each port's calls are its
+   own child's, a process of its own (section 14), so one port's stuck call holds no other port's (a hold of every
+   port's was 10-18's, when one process made every port's calls).  A port whose progress threads did not hold for a settle or a
    guarded change within MESH_PLATFORM_NS (`unguarded`, port_wait: the change not made) is concluded alike, once, unless
    already concluded around a call.  Each conclusion moves the port's epoch and wakes its threads; the port stays
    `stuck` until the call returns and each progress thread has told the conclusion's epoch (a thread tells it on its
@@ -1172,8 +1174,8 @@ static struct port *port_at(uint32_t interface){
 }
 /* design/transport.md: a port's device opened, on its own queue (guarded), where it is to be (at the start,
    at its link's coming on or its interface's attaching, at a hello heard while it is not open, while it has no peer,
-   and as the call its port was concluded around returns, ports_stalled), once its quiet window has ended and no port's
-   job is out past MESH_PLATFORM_NS (design/transport.md B9, B12): the hellos' group joined on its
+   and as the call its port was concluded around returns, ports_stalled), once its quiet window has ended and no job of
+   its own is out (design/transport.md B9, B12): the hellos' group joined on its
    interface, so the port hears them open or not (hello_heard, B16); its port read (none where the guard was not held
    within MESH_PLATFORM_NS: ETIMEDOUT, port_wait); a context that fails stays as it is, and the port with it, until its
    child ends (design/transport.md section 14: nothing made is forgotten or made again in a process).  The device is
@@ -1183,7 +1185,7 @@ static struct port *port_at(uint32_t interface){
 static int child_spawn(struct port *port);
 static void port_open(struct port *port){
   if(port->job || port->stuck || !port->opening || port->control>=0 || now<port->quiet_at || port->recycle || now<port->hold_to ||
-     now<port->retry_at || atomic_load_explicit(&stalled,memory_order_relaxed))return;
+     now<port->retry_at)return;
   if(!port->child && child_spawn(port))return;
   port->opening=0;
   port->interface=if_nametoindex(port->name);
@@ -1745,11 +1747,10 @@ static void child_heard(struct port *port){
   }
 }
 /* a port whose link was lost once its lanes were asked for (`recycle`) asks its child to end once its quiet window and
-   the exit's have ended (B9, B9b: no release inside a termination), no port's call is stuck (B12) and no job of its own
-   is out */
+   the exit's have ended (B9, B9b: no release inside a termination) and no job of its own is out (B12) */
 static void child_turn(struct port *port){
   if(!port->recycle || !port->child || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
-     now<atomic_load(&exit_at) || atomic_load_explicit(&stalled,memory_order_relaxed))return;
+     now<atomic_load(&exit_at))return;
   child_send(port,(struct child_message){.kind=CHILD_END});
   port->ending=1;
   say("link %u (%s): its child %d asked to end, its lanes released at its exit (design/transport.md section 14)\n",

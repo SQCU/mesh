@@ -539,8 +539,8 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   of the link live, the link going off, a termination, an absorbed fault, a protocol error, the child's own end): its
   streams cancelled (landed
   words ~0), its lanes served no more (the child halted, before the control socket closes), the port closed. Once the
-  port's quiet window and any termination's have ended and no call is stuck (B9, B9b, B12), the parent asks the child
-  to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
+  port's quiet window and any termination's have ended and no call of the port's own is stuck (B9, B9b, B12), the
+  parent asks the child to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
   Other ports' children and links, the clients and their leases are untouched.
 - A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
   passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
