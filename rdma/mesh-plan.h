@@ -72,6 +72,27 @@ uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,in
 
 uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps);
 
+struct mesh_routing { uint32_t nodes,routes; const uint32_t *pair,*start,*node; const double *share; };
+
+int mesh_routing_check(const struct mesh_link_map *,const struct mesh_routing *);
+
+void mesh_routing_room(uint32_t nodes,uint32_t most,uint32_t *routes,uint32_t *hops);
+
+uint32_t mesh_routing_trees(const struct mesh_trees *,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,uint32_t *node,double *share);
+
+uint32_t mesh_routing_pack(const struct mesh_link_map *,double eps,uint32_t most,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,
+                           uint32_t *node,double *share);
+
+struct mesh_block { uint32_t from,to,source,target,type,element_bytes; uint64_t first,at,elements; };
+struct mesh_part { uint32_t route,padding; uint64_t first,elements; };
+
+uint32_t mesh_block_parts(const struct mesh_routing *,const struct mesh_block *,int shortest,uint64_t page,struct mesh_part *parts);
+
+uint32_t mesh_exchange_steps(const struct mesh_routing *,uint32_t rank,const struct mesh_block *blocks,uint32_t count,int pairwise,uint32_t relay,
+                             uint64_t page,struct mesh_step *steps,uint32_t *block,uint64_t *relayed);
+
+uint32_t mesh_exchange_room(const struct mesh_routing *,const struct mesh_block *blocks,uint32_t count,uint32_t *parts);
+
 struct mesh_health { uint64_t booted,available; };
 
 #define MESH_MODEL_BYTES 32

@@ -193,10 +193,13 @@ part B). Rows whose counts the host holds move with `ncclMeshAlltoAllV`.
 MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
 `recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`; its own
 segment copied, the lesser of `sendcounts[rank]` and `recvcounts[rank]` elements). Its counts
-known to both ends, no count crosses, and each pair's elements move as one entry of their own size, one call a group,
+known to both ends, no count crosses, and each pair's elements move over their link as one entry of their own size, one call a group,
 each segment starting on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with every count `count`, and `ncclGather` and
 `ncclScatter` its rooted forms (every count 0 but toward or from the root), where they were each rank's sends and
-receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`).
+receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). Every member knows every block of those three, so
+they run along the communicator's routing table, each block cut among its pair's routes, through the members between two
+that no link joins; an `ncclMeshAlltoAllV`'s pairs are its two ranks' alone, each one entry over their link
+([Routes between unlinked ranks](#routes-between-unlinked-ranks)).
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -452,11 +455,13 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`, `nccl
 
 - **Made** (`plan_make`) the first time a communicator's group has these calls: each call's kind, root or peer,
   counts (and an uneven call's segments), type and operator, whether it reads its send buffer in place, and whether it
-  is on a stream (`call_same`). Its steps are planned (`plan_calls`: the communicator's program, cut on the
-  communicator's quantum by `mesh_program_steps_cut`), laid on each channel relative to the channel's counts
-  (`schedule_group`), and checked against the receiving peer's page length (below).
+  is on a stream (`call_same`). Its steps are planned (`plan_calls`: a collective's program, cut on the
+  communicator's quantum by `mesh_program_steps_cut`; the hosted family's blocks along the routing table,
+  `mesh_exchange_steps`; an `ncclMeshAlltoAllV`'s pairs, `mesh_counted_steps`) and laid on each channel relative to the
+  channel's counts (`schedule_group`).
 - **Its pages.** A call's extra pages, f(n) pages for its n: a not-in-place collective's operand (a reduce-scatter's, a
-  non-root reduce's, a one-rank group's), each scratch buffer its program names, and each combine's landing area. They
+  non-root reduce's, a one-rank group's), each scratch buffer its program names, each combine's landing area, and a
+  hosted call's relay area. They
   are rows of one lease the plan takes when it is made (`lease_take`), at offsets fixed then (`call.at`, `steps.at`,
   `message.area`). Peers land into them by scatter, and the reduce reads them in place.
 - **Started** (`plan_start`) at each call: its entries rebased onto the channels' counts, its pages and the caller's
@@ -667,12 +672,59 @@ Porting:
 
 ## Routes between unlinked ranks
 
-The bridges forward nothing (design/transport.md). A communicator's init holds a stream only toward the members whose
-nodes its bridge reaches and whose bridges reach its node, and its channels go only toward those members. A collective
-whose members no path between members joins fails at its first call that needs its programs, naming two, and a call
-whose program or point-to-point step moves bytes between two members not joined fails at that call
-(`ncclInvalidUsage`). A node a route would cross between two members takes part only as a member of the
-communicator; a program may have it contribute nothing (`mesh-plan.h` `mesh_compile`'s `contributors`).
+A bridge posts only its own holders' entries (design/transport.md); members relay. A communicator's init holds a stream
+only toward the members whose nodes its bridge reaches and whose bridges reach its node, and its channels go only toward those members.
+Bytes between two members no link joins cross the members between them, along the communicator's routing table, in the
+calls where every member knows them: the operator, 10-21, "forwarding is REQUIRED"; "cabling is extremely dynamic from
+this point onwards and therefore all topologies must be supported forever without justification by current environment
+state"; "the collective api can contain a solver or optimizer".
+
+**The routing table** (`mesh-plan.h` `struct mesh_routing`) is an operand (design/rubrics.md C3): for each ordered pair
+(a, b) of the communicator's ranks, the routes a block from a to b takes, each a list of ranks from a to b whose every
+two consecutive ones are linked, and each route's share of the pair's bytes. A pair's bytes cross several routes at
+once: a Thunderbolt link moves far fewer bytes a second than a node's memory, through which a member between two others
+relays (the operator, 10-21, of single path against multipath: "a choice related to whether link bandwidth is higher or
+lower than SHM<->CPU bandwidth"). The table is the caller's (`ncclMeshCommSetRouting(comm, table)`, every member passing
+the same table at the same point between its groups, as forms are passed; NULL: none; a table of another count of nodes,
+or without its pairs and starts, is refused at that call as a value) where it fits the communicator's map
+(`mesh_routing_check`: each hop a link), and else the routing solver's on the map
+(`mesh_routing_pack`): the map's spanning trees packed by Garg and Könemann's maximum concurrent flow over its links'
+bandwidths [FOCS 1998], as Blink packs them [Wang et al., MLSys 2020], each pair's routes the paths from a up each of b's
+trees and each route's share the flow of the trees that give it (`mesh_routing_trees`); where no tree packs, each pair's
+route on the map's table. Every member makes the same table from the same map and the same operand, so nothing is
+exchanged (C7, as programs and forms are). It is made at the first call or query that reads it on the communicator's
+map. `ncclMeshCommGetRouting(comm, &table, &given)` copies the table
+the calls read now (freed by `ncclMeshRoutingFree`), `given` 1 where it is the caller's: the solver sits behind the
+operand, so a learned optimizer can pass its own (design/rubrics.md D6).
+
+**Collectives** run along the communicator's trees ([Communicators](#communicators)): a member between two others on a
+tree receives, combines or copies, and sends on, in its own program; nothing about it differs where two members are not
+linked.
+
+**The hosted family** (`ncclAlltoAll`, `ncclGather`, `ncclScatter`): every member knows every block (its two ranks, its
+count, where it is read and where it lands), so every member lays the same steps along the table (`mesh_exchange_steps`,
+MPI_Alltoall's exchange as a multi-commodity flow over routes). A block is cut among its pair's routes by their shares,
+in quanta of the least multiple of the page and an element, so every part starts on a page (`mesh_block_parts`). A part
+on a route of two ranks is one SEND and one COPY; a longer one is a hop a round: its first rank sends it from its send
+buffer, each rank between receives it into pages of its plan (the relay area, one more of a plan's f(n) pages) and sends
+it on, and its last rank receives it into its receive buffer. The relay's SEND is a send entry over the very rows its
+receive landed in, nothing copied, published once that receive is consumed (the step's receive before it: a host-path
+look, or a GPU wait and then the publication), so the relay sends no page before it has landed. Where the incoming link
+is lost, the relay's call fails as a value at that receive. On the Metal path its later dispatches run as encoded
+([Bounded waits](#bounded-waits)): the SEND is published once the wait has ended, and the next hop lands the bytes the
+relay's rows hold, its own positions being on a link that was not lost. On the host path the relay's group returns at
+the loss, its SEND unpublished. A relay's group ends once its SENDs are done, so its plan's pages are started again only
+after the bytes it relays have gone on. Gating the relay's SEND on the incoming holding's `landed` itself (`struct
+mesh_entry` `word`) would send each page as it lands, with no wait or publication of the relay's; it is not this form,
+since a stream's counts start again at 0 when its link pairs again, and the bridge reads an entry's word only when it
+reaches the entry.
+
+**Pairwise calls** (`ncclSend` and `ncclRecv`, `ncclMeshAlltoAllV`, persistent exchanges) are known to their two ranks
+alone: no other member calls anything for them, and a point-to-point call's pairing is the two ends' order of their
+calls toward each other, nothing gathered. They cross a link: a pairwise call between two members no link joins fails as
+a value at the call, naming them (`ncclInvalidUsage`). Open: the relaying member's library carrying them as a proxy, with
+holdings of its own, which needs the pairwise block's size and order at the relay before its bytes arrive and, on an M5
+Ultra's link of one stream, no second stream to carry them apart from its communicator's own (design/HETEROGENEOUS-LINKS.md).
 
 ## Ranks, lists and streams
 
@@ -836,8 +888,30 @@ gathers, parses or joins bridge records itself.
   list and its receives on the landing list, by round, the collectives in call order, then the hosted all-to-alls,
   then the point-to-point calls, so a rank's k-th send to a peer is the peer's k-th receive from it.
   `mesh_steps_before` and `mesh_group_before` give each step the receive before it (a step's first event waits until
-  that receive is consumed; a hosted all-to-all's receives each progress alone). `mesh_counted_steps(nodes, rank,
-  segments, element, steps)`: an all-to-all whose counts both ends hold, one SEND to and one COPY from each other rank.
+  that receive is consumed; a hosted all-to-all's receives each progress alone).
+- **Routing tables** (`struct mesh_routing`): `nodes` nodes and `routes` routes; pair (a, b)'s routes are
+  `[pair[a x nodes + b], pair[a x nodes + b + 1])` (`pair`: nodes x nodes + 1 entries, nondecreasing; none where a is
+  b), route k the nodes `node[start[k] .. start[k + 1])` from a to b, every two consecutive ones linked and none twice,
+  and `share[k]`, above 0, its share. `mesh_routing_check(map, table)` is 0 where a table fits a map (EINVAL else);
+  `mesh_routing_room(nodes, most, &routes, &hops)` the room of a table of at most `most` routes a pair;
+  `mesh_routing_trees(trees, ...)` a tree set's table (pair (a, b)'s routes the paths from a up each of b's trees, each
+  share the weight of the trees that give it, ordered by their nodes so that the table is a function of the trees'
+  paths and weights alone); `mesh_routing_pack(map, eps, most, ...)` the solver (`mesh_trees_pack`'s trees as such a
+  table; where no tree packs, each pair's route on the map's table, one share). Each returns its routes, UINT32_MAX
+  where its room could not be had.
+- **Blocks along a table** (`struct mesh_block`: `elements` of `element_bytes` from rank `from`'s buffer `source` at
+  element `first` to rank `to`'s buffer `target` at element `at`). `mesh_block_parts(table, block, shortest, page,
+  parts)`: the block cut among its pair's routes (`shortest`: those of the fewest nodes) by their shares, in quanta of
+  the least multiple of the page and an element, so every part starts on a page wherever the block does; both ends
+  cut it alike from the block and the table. `mesh_exchange_steps(table, rank, blocks, count, pairwise, relay, page,
+  steps, block, &relayed)`: a rank's steps of an exchange of blocks: a part on a route of two nodes one SEND and one
+  COPY of round 0; a longer one (not `pairwise`) hop j in round j, a rank between its ends receiving it into buffer
+  `relay` (at the next of the bytes it relays, each part from a multiple of the page, `relayed` their total) and
+  sending it on from there; `pairwise`, the parts on longer routes are no rank's steps. A round's SENDs, then its
+  receives, each in block, then route order, so a hop's SENDs at one end and its receives at the other are the same
+  parts in the same order (`mesh_lay`). `mesh_exchange_room` the most steps it makes at a rank. `mesh_counted_steps(nodes,
+  rank, segments, element, steps)`: an all-to-all whose counts both ends hold, one SEND to and one COPY from each other
+  rank.
 
 ## Environment
 

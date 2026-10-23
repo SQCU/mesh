@@ -220,6 +220,8 @@ struct plan;
 #define GROUP_TIMES 65536u
 struct ncclComm {
   struct mesh_link_map map;
+  struct mesh_routing routing, table;
+  int routed, taken;
   uint64_t page;
   struct mesh_trees paths, trees;
   struct entry *entries, *given;
@@ -290,6 +292,58 @@ static void map_free(struct mesh_link_map *map) {
   *map = (struct mesh_link_map){0};
 }
 
+static void routing_free(struct mesh_routing *routing) {
+  free((void *)routing->pair); free((void *)routing->start); free((void *)routing->node); free((void *)routing->share);
+  *routing = (struct mesh_routing){0};
+}
+
+static int routing_room(struct mesh_routing *made, uint32_t nodes, uint32_t routes, uint32_t hops) {
+  uint32_t *pair = calloc((size_t)nodes * nodes + 1, sizeof *pair), *start = calloc((size_t)routes + 1, sizeof *start),
+           *node = calloc((size_t)hops + 1, sizeof *node);
+  double *share = calloc((size_t)routes + 1, sizeof *share);
+  *made = (struct mesh_routing){nodes, routes, pair, start, node, share};
+  if (pair && start && node && share) return 0;
+  routing_free(made);
+  return ENOMEM;
+}
+
+static int routing_copy(struct mesh_routing *made, const struct mesh_routing *from) {
+  const uint32_t n = from->nodes, hops = from->routes ? from->start[from->routes] : 0;
+  if (routing_room(made, n, from->routes, hops)) return ENOMEM;
+  memcpy((void *)made->pair, from->pair, ((size_t)n * n + 1) * sizeof *from->pair);
+  memcpy((void *)made->start, from->start, ((size_t)from->routes + 1) * sizeof *from->start);
+  if (hops) memcpy((void *)made->node, from->node, hops * sizeof *from->node);
+  if (from->routes) memcpy((void *)made->share, from->share, from->routes * sizeof *from->share);
+  return 0;
+}
+
+static int comm_routed(struct ncclComm *comm) {
+  if (comm->routed) return 0;
+  const uint32_t n = (uint32_t)comm->nranks;
+  const int mapped = comm->map.nodes == n && comm->map.mark;
+  uint32_t routes, hops;
+  mesh_routing_room(n, n, &routes, &hops);
+  const int fits = mapped && comm->table.pair ? mesh_routing_check(&comm->map, &comm->table) : EINVAL;
+  comm->taken = !fits;
+  int status = fits == ENOMEM ? ENOMEM : comm->taken ? routing_copy(&comm->routing, &comm->table)
+                                                      : routing_room(&comm->routing, n, mapped ? routes : 0, mapped ? hops : 0);
+  if (!status && !comm->taken && mapped &&
+      mesh_routing_pack(&comm->map, 0, n, &comm->routing, (uint32_t *)comm->routing.pair, (uint32_t *)comm->routing.start,
+                        (uint32_t *)comm->routing.node, (double *)comm->routing.share) == UINT32_MAX)
+    status = ENOMEM;
+  if (!status && !comm->taken && mapped) {
+    void *start = realloc((void *)comm->routing.start, ((size_t)comm->routing.routes + 1) * sizeof *comm->routing.start);
+    void *share = realloc((void *)comm->routing.share, ((size_t)comm->routing.routes + 1) * sizeof *comm->routing.share);
+    if (start) comm->routing.start = start;
+    if (share) comm->routing.share = share;
+    void *node = realloc((void *)comm->routing.node, ((size_t)comm->routing.start[comm->routing.routes] + 1) * sizeof *comm->routing.node);
+    if (node) comm->routing.node = node;
+  }
+  if (status) routing_free(&comm->routing);
+  comm->routed = !status;
+  return status;
+}
+
 static void routes_free(struct ncclComm *comm, int all) {
   trees_free(&comm->trees);
   comm->compiled = 0;
@@ -297,6 +351,8 @@ static void routes_free(struct ncclComm *comm, int all) {
   free(comm->entries);
   comm->entries = NULL; comm->programs = 0;
   if (!all) return;
+  routing_free(&comm->routing); routing_free(&comm->table);
+  comm->routed = 0;
   trees_free(&comm->paths); map_free(&comm->map);
   for (int e = 0; e < comm->listed; e++) program_free(&comm->given[e].program);
   free(comm->given);
@@ -464,8 +520,8 @@ static ncclResult_t comm_compile(struct ncclComm *comm) {
     for (uint32_t r = 0; !result && r < x->nodes; r++)
       for (uint32_t m = x->first[r]; !result && m < x->first[r + 1]; m++)
         if (!mesh_link_between(&comm->map, r, x->move[m].peer))
-          result = fail(ncclInvalidUsage, "program %u of %s moves between ranks %u and %u, which no link joins: the bridges forward nothing, "
-                        "so a route through another node is refused", e, comm->name, r, x->move[m].peer);
+          result = fail(ncclInvalidUsage, "program %u of %s moves between ranks %u and %u, which no link joins: a program's move crosses one "
+                        "link", e, comm->name, r, x->move[m].peer);
   }
   if (result) { routes_free(comm, 0); return result; }
   comm->compiled = 1;
@@ -485,6 +541,37 @@ static ncclMeshForm *forms_copy(const ncclMeshForm *forms, uint32_t count, uint3
     at += (size_t)nranks * forms[f].most;
   }
   return made;
+}
+
+ncclResult_t ncclMeshCommSetRouting(ncclComm_t comm, const struct mesh_routing *table) {
+  if (!comm || (table && (table->nodes != (uint32_t)comm->nranks || !table->pair || !table->start || (table->routes && (!table->node || !table->share)))))
+    return fail(ncclInvalidArgument, "ncclMeshCommSetRouting: a table of the communicator's %d ranks, its pairs and its routes' starts, and their "
+                "nodes and shares where it has routes", comm ? comm->nranks : 0);
+  struct mesh_routing made = {0};
+  if (table && routing_copy(&made, table)) return fail(ncclSystemError, "out of memory");
+  pthread_mutex_lock(&group_lock);
+  routing_free(&comm->table);
+  routing_free(&comm->routing);
+  comm->table = made;
+  comm->routed = comm->taken = 0;
+  for (struct plan *p = comm->plans; p; p = p->next) p->stale = comm->sweeps = 1;
+  pthread_mutex_unlock(&group_lock);
+  return ncclSuccess;
+}
+
+ncclResult_t ncclMeshCommGetRouting(ncclComm_t comm, struct mesh_routing *table, int *given) {
+  if (!comm || !table) return fail(ncclInvalidArgument, "comm or table is NULL");
+  pthread_mutex_lock(&group_lock);
+  int status = comm_routed(comm);
+  if (!status) status = routing_copy(table, &comm->routing);
+  if (given) *given = comm->taken;
+  pthread_mutex_unlock(&group_lock);
+  return status ? fail(ncclSystemError, "out of memory") : ncclSuccess;
+}
+
+ncclResult_t ncclMeshRoutingFree(struct mesh_routing *table) {
+  if (table) routing_free(table);
+  return ncclSuccess;
 }
 
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int count) {
@@ -1360,6 +1447,7 @@ static unsigned char *address_of(struct where w) {
 struct steps {
   struct mesh_step *steps;
   uint32_t count, buffers;
+  uint64_t relayed;
   unsigned char *done, *reads, *fresh, *needed;
   struct where *buffer;
   size_t *at;
@@ -1385,7 +1473,7 @@ struct call {
   ncclDataType_t type;
   ncclRedOp_t op;
   ncclComm_t comm;
-  int combine, post;
+  int combine, post, every;
   uint32_t unit;
   unsigned char pre[8];
 
@@ -1433,7 +1521,8 @@ static uint64_t seg_first(const uint64_t *seg, int q) {
 
 static const char *call_name(const struct call *c) {
   static const char *const names[] = {"ncclAllReduce", "ncclBroadcast", "ncclReduce", "ncclReduceScatter", "ncclAllGather"};
-  return c->what == WHAT_SEND ? "ncclSend" : c->what == WHAT_RECV ? "ncclRecv" : counted(c) ? "ncclMeshAlltoAllV" : names[c->what];
+  return c->what == WHAT_SEND ? "ncclSend" : c->what == WHAT_RECV ? "ncclRecv" : !counted(c) ? names[c->what] : !c->every ? "ncclMeshAlltoAllV"
+         : c->root >= 0 ? "ncclScatter" : c->peer >= 0 ? "ncclGather" : "ncclAlltoAll";
 }
 
 static int crosses(const struct call *c) { return elements(c) && c->comm->nranks > 1 && !(p2p(c) && c->peer == c->comm->rank); }
@@ -1475,11 +1564,46 @@ static void steps_free(struct steps *s) {
 
 static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
 
+static uint64_t hosted_count(const struct call *c, int a, int b) {
+  return (c->root < 0 || c->root == a) && (c->peer < 0 || c->peer == b) ? c->total : 0;
+}
+
+static ncclResult_t hosted_steps(ncclComm_t comm, const struct call *c, struct mesh_operand operand, struct mesh_step **steps, uint32_t *count,
+                                 uint64_t *relayed) {
+  const int n = comm->nranks, me = comm->rank;
+  const struct mesh_routing *g = &comm->routing;
+  struct mesh_block *blocks = calloc((size_t)n * n + 1, sizeof *blocks);
+  uint32_t made = 0;
+  if (!blocks || !(*steps = calloc(c->every ? 1 : 2 * (size_t)n + 1, sizeof **steps))) { free(blocks); return fail(ncclSystemError, "out of memory"); }
+  if (!c->every) {
+    *count = mesh_counted_steps((uint32_t)n, (uint32_t)me, c->segments, (struct mesh_operand){operand.type, operand.element_bytes, 0}, *steps);
+    free(blocks);
+    return ncclSuccess;
+  }
+  for (int a = 0; a < n; a++)
+    for (int b = 0; b < n; b++) {
+      uint64_t first = 0, at = 0;
+      for (int q = 0; q < b; q++) first += hosted_count(c, a, q);
+      for (int q = 0; q < a; q++) at += hosted_count(c, q, b);
+      if (a != b && hosted_count(c, a, b))
+        blocks[made++] = (struct mesh_block){(uint32_t)a, (uint32_t)b, 0, 1, operand.type, operand.element_bytes, first, at, hosted_count(c, a, b)};
+    }
+  const uint32_t room = mesh_exchange_room(g, blocks, made, NULL);
+  ncclResult_t result = ncclSuccess;
+  free(*steps);
+  if (!(*steps = calloc((size_t)room + 1, sizeof **steps))) result = fail(ncclSystemError, "out of memory");
+  else if ((*count = mesh_exchange_steps(g, (uint32_t)me, blocks, made, 0, 2, comm->page, *steps, NULL, relayed)) == UINT32_MAX)
+    result = fail(ncclInvalidUsage, "%s on %s: a block between ranks the communicator's routing table joins by no route", call_name(c), comm->name);
+  free(blocks);
+  return result;
+}
+
 static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
-    const ncclResult_t compiled = p2p(c) || counted(c) ? ncclSuccess : comm_compile(comm);
+    const ncclResult_t compiled = p2p(c) ? ncclSuccess : !counted(c) ? comm_compile(comm) : c->every && comm_routed(comm)
+                                                                    ? fail(ncclSystemError, "out of memory") : ncclSuccess;
     if (compiled) return compiled;
     const struct mesh_program *program = p2p(c) || counted(c) ? NULL : program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
     if (!p2p(c) && !counted(c) && !program)
@@ -1492,31 +1616,28 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
         return fail(ncclInvalidUsage, "a reduce-scatter's or all-gather's program cuts %u segments, not one a rank of %d", segments, comm->nranks);
     }
     struct steps *s = calloc(1, sizeof *s);
-    const size_t most = (program ? program->first[program->nodes] : counted(c) ? 2 * (size_t)comm->nranks : 1) + 1;
-    if (s) s->buffers = counted(c) ? 2 : 1 + (program ? program->scratch : 0);
-    if (!s || !(s->steps = calloc(most, sizeof *s->steps)) || !(s->done = calloc(most, 1)) || !(s->channel = calloc(most, sizeof *s->channel)) ||
-        !(s->entry = calloc(most, sizeof *s->entry)) || !(s->before = calloc(most, sizeof *s->before)) ||
-        !(s->buffer = calloc(s->buffers, sizeof *s->buffer)) || !(s->at = calloc(s->buffers, sizeof *s->at)) || (nccl && !(s->cut = malloc((size_t)comm->nranks * sizeof *s->cut)))) {
-      steps_free(s);
-      return fail(ncclSystemError, "out of memory");
-    }
+    if (!s) return fail(ncclSystemError, "out of memory");
     c->bound = s;
     const uint32_t u = unit_of(c);
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
+    const ncclResult_t hosted = counted(c) ? hosted_steps(comm, c, operand, &s->steps, &s->count, &s->relayed) : ncclSuccess;
+    if (hosted) return hosted;
+    const size_t most = (program ? program->first[program->nodes] : counted(c) ? s->count : 1) + 1;
+    s->buffers = counted(c) ? 2 + (s->relayed != 0) : 1 + (program ? program->scratch : 0);
+    if ((!s->steps && !(s->steps = calloc(most, sizeof *s->steps))) || !(s->done = calloc(most, 1)) || !(s->channel = calloc(most, sizeof *s->channel)) ||
+        !(s->entry = calloc(most, sizeof *s->entry)) || !(s->before = calloc(most, sizeof *s->before)) ||
+        !(s->buffer = calloc(s->buffers, sizeof *s->buffer)) || !(s->at = calloc(s->buffers, sizeof *s->at)) || (nccl && !(s->cut = malloc((size_t)comm->nranks * sizeof *s->cut))))
+      return fail(ncclSystemError, "out of memory");
     s->operand = operand;
     for (int r = 0; nccl && r < comm->nranks; r++) s->cut[r] = (c->segments ? c->segments[r] : c->count) / u;
     if (p2p(c)) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1;
-    } else if (counted(c))
-      s->count = mesh_counted_steps((uint32_t)comm->nranks, (uint32_t)comm->rank, c->segments,
-                                    (struct mesh_operand){operand.type, operand.element_bytes, 0}, s->steps);
-    else s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->cut, comm->page, s->steps);
+    } else if (!counted(c)) s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->cut, comm->page, s->steps);
     for (uint32_t k = 0; k < s->count; k++)
       if (piece_bytes(s->steps + k) && comm->toward[s->steps[k].peer] < 0)
-        return fail(ncclInvalidUsage, "a call of %s moves bytes between rank %d and rank %u (node %u), which no link of this node joins: the "
-                    "bridges forward nothing, so a route through another node is refused", comm->name, comm->rank, s->steps[k].peer,
-                    comm->members[s->steps[k].peer]);
+        return fail(ncclInvalidUsage, "%s on %s moves bytes between rank %d and rank %u (node %u), which no link of this node joins (rdma/NCCL.md, "
+                    "Routes between unlinked ranks)", call_name(c), comm->name, comm->rank, s->steps[k].peer, comm->members[s->steps[k].peer]);
   }
   return ncclSuccess;
 }
@@ -1596,6 +1717,15 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
   for (size_t i = 0; i < n && !result; i++) {
     struct steps *st = list[i].bound;
     if (st && mesh_group_before(group_kind(list + i), st->steps, st->count, st->before)) result = fail(ncclSystemError, "out of memory");
+    for (uint32_t k = 0; st && st->relayed && !result && k < st->count; k++) {
+      const struct mesh_step *x = st->steps + k;
+      uint32_t j = 0;
+      while (x->op == MESH_STEP_SEND && x->buffer == 2 && j < st->count &&
+             !(st->steps[j].op == MESH_STEP_COPY && st->steps[j].buffer == 2 && st->steps[j].first == x->first && st->steps[j].piece.elements == x->piece.elements))
+        j++;
+      if (x->op == MESH_STEP_SEND && x->buffer == 2 && j == st->count) result = fail(ncclInternalError, "a relayed part of %s with no receive", call_name(list + i));
+      else if (x->op == MESH_STEP_SEND && x->buffer == 2) st->before[k] = (int32_t)j;
+    }
   }
   free(steps); free(counts); free(group_calls); free(made); free(scratch);
   return result;
@@ -1670,7 +1800,7 @@ static int call_same(const struct call *a, const struct call *b) {
   const size_t segs = (counted(a) ? 2 : 1) * (size_t)a->comm->nranks;
   return a->what == b->what && a->root == b->root && a->peer == b->peer && a->count == b->count && a->total == b->total && a->type == b->type &&
          a->combine == b->combine && a->post == b->post && a->premultiplied == b->premultiplied && a->unit == b->unit &&
-         a->direct_ok == b->direct_ok && !a->stream == !b->stream && !a->segments == !b->segments &&
+         a->direct_ok == b->direct_ok && a->every == b->every && !a->stream == !b->stream && !a->segments == !b->segments &&
          (!a->segments || !memcmp(a->segments, b->segments, segs * sizeof *a->segments));
 }
 
@@ -1699,6 +1829,7 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
   for (size_t i = 0; i < n && !result; i++) {
     struct call *c = p->list + i;
     struct steps *st = c->bound;
+    if (counted(c) && st && st->relayed) { const size_t each = page_up(st->relayed, comm->page); st->at[2] = (bytes += each) - each; }
     if (p2p(c) || counted(c)) continue;
     const size_t each = page_up(elements(c) * SIZE[c->type], comm->page);
     c->direct = st && plan_direct(c);
@@ -2028,6 +2159,7 @@ static void calls_free(struct call *list, size_t n);
 static void operands_at(const struct plan *plan, struct call *c) {
   struct steps *st = c->bound;
   if (counted(c) && st) { st->buffer[0] = c->send_at; st->buffer[1] = c->recv_at; }
+  if (counted(c) && st && st->relayed) st->buffer[2] = shifted(plan->base, st->at[2]);
   if (p2p(c) && st) st->buffer[0] = c->what == WHAT_SEND ? c->send_at : c->recv_at;
   if (p2p(c) || counted(c)) return;
   c->sum = c->at == SIZE_MAX ? c->recv_at : shifted(plan->base, c->at);
@@ -3271,13 +3403,15 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *s
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
   const int n = comm->nranks, me = comm->rank, root = from < 0 ? to : from;
   if (root < -1 || root >= n) return fail(ncclInvalidArgument, "root %d of %d ranks", root, n);
-  struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream};
+  struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream,
+                   .every = !sendcounts, .root = from, .peer = to, .total = count};
   if (!(c.segments = malloc(2 * (size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
   for (int q = 0; q < n; q++) {
     c.segments[q] = sendcounts ? sendcounts[q] : (from < 0 || from == me) && (to < 0 || to == q) ? count : 0;
     c.segments[n + q] = recvcounts ? recvcounts[q] : (from < 0 || from == q) && (to < 0 || to == me) ? count : 0;
     if (q != me) c.count += c.segments[q] + c.segments[n + q];
   }
+  if (c.every) c.count = count;
   return enqueue(c);
 }
 ncclResult_t ncclMeshAlltoAllV(const void *sendbuff, const size_t *sendcounts, void *recvbuff, const size_t *recvcounts, ncclDataType_t datatype,

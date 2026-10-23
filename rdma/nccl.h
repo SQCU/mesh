@@ -25,6 +25,7 @@ extern "C" {
 #include <stddef.h>
 struct mesh_program;
 struct mesh_trees;
+struct mesh_routing;
 
 /* rdma/NCCL.md#two-paths */
 typedef void *cudaStream_t;
@@ -456,6 +457,12 @@ typedef struct {
 } ncclMeshForm;
 
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
+
+ncclResult_t ncclMeshCommSetRouting(ncclComm_t comm, const struct mesh_routing* table);
+
+ncclResult_t ncclMeshCommGetRouting(ncclComm_t comm, struct mesh_routing* table, int* given);
+
+ncclResult_t ncclMeshRoutingFree(struct mesh_routing* table);
 
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
 

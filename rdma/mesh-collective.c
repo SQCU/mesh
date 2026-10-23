@@ -825,6 +825,227 @@ done:
   return written;
 }
 
+void mesh_routing_room(uint32_t nodes,uint32_t most,uint32_t *routes,uint32_t *hops){
+  const uint64_t r=(uint64_t)nodes*(nodes?nodes-1:0)*(most?most:1);
+  *routes=r>UINT32_MAX?UINT32_MAX:(uint32_t)r;
+  *hops=r*nodes>UINT32_MAX?UINT32_MAX:(uint32_t)(r*nodes);
+}
+
+int mesh_routing_check(const struct mesh_link_map *map,const struct mesh_routing *g){
+  const uint32_t n=g->nodes;
+  if(!n || n!=map->nodes || !g->pair || (g->routes && (!g->start || !g->node || !g->share)) || g->pair[0] || g->pair[(size_t)n*n]!=g->routes ||
+     (g->routes && g->start[0]))
+    return EINVAL;
+  unsigned char *seen=malloc(n);
+  int status=seen?0:ENOMEM;
+  for(uint32_t a=0;!status && a<n;a++)for(uint32_t b=0;!status && b<n;b++){
+    const size_t p=(size_t)a*n+b;
+    if(g->pair[p+1]<g->pair[p] || (a==b && g->pair[p+1]!=g->pair[p]))status=EINVAL;
+    for(uint32_t k=g->pair[p];!status && k<g->pair[p+1];k++){
+      const uint32_t lo=g->start[k],hi=g->start[k+1];
+      if(hi<lo+2 || hi-lo>n || g->node[lo]!=a || g->node[hi-1]!=b || !(g->share[k]>0) || !isfinite(g->share[k])){status=EINVAL;break;}
+      memset(seen,0,n);
+      for(uint32_t i=lo;!status && i<hi;i++){
+        if(g->node[i]>=n || seen[g->node[i]] || (i>lo && !mesh_link_between(map,g->node[i-1],g->node[i])))status=EINVAL;
+        else seen[g->node[i]]=1;
+      }
+    }
+  }
+  free(seen);
+  return status;
+}
+
+static int mesh_route_before(const uint32_t *x,uint32_t xn,const uint32_t *y,uint32_t yn){
+  if(xn!=yn)return xn<yn;
+  for(uint32_t i=0;i<xn;i++)if(x[i]!=y[i])return x[i]<y[i];
+  return 0;
+}
+uint32_t mesh_routing_trees(const struct mesh_trees *trees,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,uint32_t *node,double *share){
+  const uint32_t n=trees->nodes,T=trees->count;
+  uint32_t routes=0,hops=0,*nodes=malloc(((size_t)T*n+1)*sizeof *nodes),*length=malloc(((size_t)T+1)*sizeof *length),*order=malloc(((size_t)T+1)*sizeof *order);
+  double *weight=malloc(((size_t)T+1)*sizeof *weight);
+  if(!nodes || !length || !order || !weight){free(nodes);free(length);free(order);free(weight);return UINT32_MAX;}
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++){
+    pair[(size_t)a*n+b]=routes;
+    if(a==b)continue;
+        double most=-INFINITY;
+    for(uint32_t t=0;t<T;t++)if(trees->root[t]==b && trees->log_weight[t]>most)most=trees->log_weight[t];
+    uint32_t found=0;
+    for(uint32_t t=0;t<T;t++){
+      if(trees->root[t]!=b)continue;
+      uint32_t *path=nodes+(size_t)found*n,count=0;
+      for(uint32_t at=a;count<n;at=trees->parent[(size_t)t*n+at]){
+        path[count++]=at;
+        if(at==b)break;
+      }
+      const double w=mesh_exp(trees->log_weight[t]-most);
+      if(!count || path[count-1]!=b || !(w>0))continue;
+      uint32_t same=0;
+      while(same<found && !(length[same]==count && !memcmp(nodes+(size_t)same*n,path,count*sizeof *path)))same++;
+      if(same<found){weight[same]+=w;continue;}
+      length[found]=count;weight[found]=w;found++;
+    }
+        for(uint32_t i=0;i<found;i++){
+      uint32_t j=i;
+      while(j && mesh_route_before(nodes+(size_t)i*n,length[i],nodes+(size_t)order[j-1]*n,length[order[j-1]])){order[j]=order[j-1];j--;}
+      order[j]=i;
+    }
+    for(uint32_t i=0;i<found;i++){
+      const uint32_t x=order[i];
+      start[routes]=hops;share[routes]=weight[x];routes++;
+      memcpy(node+hops,nodes+(size_t)x*n,length[x]*sizeof *node);
+      hops+=length[x];
+    }
+  }
+  pair[(size_t)n*n]=routes;start[routes]=hops;
+  *routing=(struct mesh_routing){n,routes,pair,start,node,share};
+  free(nodes);free(length);free(order);free(weight);
+  return routes;
+}
+
+uint32_t mesh_routing_pack(const struct mesh_link_map *map,double eps,uint32_t most,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,
+                           uint32_t *node,double *share){
+  const uint32_t n=map->nodes,m=most?most:1,N=mesh_all(map);
+  uint32_t *root=malloc(((size_t)n*m+1)*sizeof *root),*parent=malloc(((size_t)n*n*m+1)*sizeof *parent);
+  double *weight=malloc(((size_t)n*m+1)*sizeof *weight);
+  if(!root || !parent || !weight){free(root);free(parent);free(weight);return UINT32_MAX;}
+  const int apart=n>1?mesh_link_map_joined(map,NULL):ENOTCONN;
+  const uint32_t trees=!apart?mesh_trees_pack(map,eps,m,root,parent,weight):0;
+  uint32_t routes=0;
+  if((apart && apart!=ENOTCONN) || (!apart && !trees))routes=UINT32_MAX;
+  else if(trees){
+    const struct mesh_trees packed={n,trees,root,parent,weight};
+    routes=mesh_routing_trees(&packed,routing,pair,start,node,share);
+  }else{
+    uint32_t path[N+1],hops=0;
+    for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++){
+      pair[(size_t)a*n+b]=routes;
+      const uint32_t count=a==b?0:mesh_route_path(map,a,b,path);
+      uint32_t kept=0;
+      for(uint32_t i=0;i<count;i++)if(path[i]<n)path[kept++]=path[i];
+      int linked=kept>=2;
+      for(uint32_t i=1;linked && i<kept;i++)linked=mesh_link_between(map,path[i-1],path[i]);
+      if(!linked)continue;
+      start[routes]=hops;share[routes]=1;routes++;
+      memcpy(node+hops,path,kept*sizeof *node);
+      hops+=kept;
+    }
+    pair[(size_t)n*n]=routes;start[routes]=hops;
+    *routing=(struct mesh_routing){n,routes,pair,start,node,share};
+  }
+  free(root);free(parent);free(weight);
+  return routes;
+}
+
+static int mesh_block_moves(const struct mesh_routing *g,const struct mesh_block *x){
+  return x->from!=x->to && x->from<g->nodes && x->to<g->nodes && x->elements;
+}
+static int mesh_block_stray(const struct mesh_routing *g,const struct mesh_block *x){
+  if(x->from>=g->nodes || x->to>=g->nodes)return 1;
+  const size_t p=(size_t)x->from*g->nodes+x->to;
+  return mesh_block_moves(g,x) && g->pair[p]==g->pair[p+1];
+}
+
+static uint32_t mesh_route_size(const struct mesh_routing *g,uint32_t k){ return g->start[k+1]-g->start[k]; }
+uint32_t mesh_block_parts(const struct mesh_routing *g,const struct mesh_block *x,int shortest,uint64_t page,struct mesh_part *parts){
+  if(!mesh_block_moves(g,x) || mesh_block_stray(g,x))return 0;
+  const size_t p=(size_t)x->from*g->nodes+x->to;
+  const uint32_t r0=g->pair[p],r1=g->pair[p+1];
+  uint32_t fewest=UINT32_MAX,count=0;
+  for(uint32_t k=r0;k<r1;k++)if(mesh_route_size(g,k)<fewest)fewest=mesh_route_size(g,k);
+#define MESH_TAKEN(k) (!shortest || mesh_route_size(g,k)==fewest)
+  const uint64_t q=mesh_quantum(page,x->element_bytes),quanta=(x->elements+q-1)/q;
+  double total=0;
+  for(uint32_t k=r0;k<r1;k++)if(MESH_TAKEN(k))total+=g->share[k];
+  uint64_t floors=0;
+  for(uint32_t k=r0;k<r1;k++)if(MESH_TAKEN(k))floors+=(uint64_t)floor(g->share[k]/total*(double)quanta);
+  uint64_t remainder=floors<quanta?quanta-floors:0,at=0;
+  for(uint32_t k=r0;k<r1;k++){
+    if(!MESH_TAKEN(k))continue;
+    uint64_t e=(uint64_t)floor(g->share[k]/total*(double)quanta);
+    if(remainder){e++;remainder--;}
+    if(at+e>quanta)e=quanta-at;
+    if(!e)continue;
+    const uint64_t first=at*q,last=(at+e)*q<x->elements?(at+e)*q:x->elements;
+    parts[count++]=(struct mesh_part){k,0,first,last-first};
+    at+=e;
+  }
+#undef MESH_TAKEN
+  if(count && at<quanta)parts[count-1].elements=x->elements-parts[count-1].first;
+  return count;
+}
+
+uint32_t mesh_exchange_room(const struct mesh_routing *g,const struct mesh_block *blocks,uint32_t count,uint32_t *parts){
+  uint64_t room=0;
+  uint32_t most=0;
+  for(uint32_t i=0;i<count;i++){
+    if(!mesh_block_moves(g,blocks+i) || mesh_block_stray(g,blocks+i))continue;
+    const size_t p=(size_t)blocks[i].from*g->nodes+blocks[i].to;
+    const uint32_t routes=g->pair[p+1]-g->pair[p];
+    room+=2*(uint64_t)routes;
+    if(routes>most)most=routes;
+  }
+  if(parts)*parts=most;
+  return room>=UINT32_MAX?UINT32_MAX-1:(uint32_t)room;
+}
+
+uint32_t mesh_exchange_steps(const struct mesh_routing *g,uint32_t rank,const struct mesh_block *blocks,uint32_t count,int pairwise,uint32_t relay,
+                             uint64_t page,struct mesh_step *steps,uint32_t *block,uint64_t *relayed){
+  for(uint32_t i=0;i<count;i++)if(mesh_block_stray(g,blocks+i))return UINT32_MAX;
+  uint64_t parts=0;
+  for(uint32_t i=0;i<count;i++)parts+=mesh_block_moves(g,blocks+i)?g->pair[(size_t)blocks[i].from*g->nodes+blocks[i].to+1]-
+                                                                     g->pair[(size_t)blocks[i].from*g->nodes+blocks[i].to]:0;
+  struct mesh_part *part=malloc(((size_t)parts+1)*sizeof *part);
+  uint32_t *first=malloc(((size_t)count+1)*sizeof *first),*made=malloc(((size_t)count+1)*sizeof *made);
+  uint64_t *place=malloc(((size_t)parts+1)*sizeof *place),bytes=0;
+  if(!part || !first || !made || !place){free(part);free(first);free(made);free(place);return UINT32_MAX;}
+  uint32_t rounds=0,at=0,k=0;
+  for(uint32_t i=0;i<count;i++){
+    const struct mesh_block *x=blocks+i;
+    first[i]=at;
+    made[i]=mesh_block_parts(g,x,pairwise,page,part+at);
+    for(uint32_t j=0;j<made[i];j++){
+      const uint32_t lo=g->start[part[at+j].route],h=g->start[part[at+j].route+1]-lo;
+      if(pairwise && h>2)continue;
+      if(h-1>rounds)rounds=h-1;
+      uint32_t r=0;
+      while(r<h && g->node[lo+r]!=rank)r++;
+      place[at+j]=0;
+      if(!r || r+1>=h)continue;
+      const uint64_t e=x->element_bytes?x->element_bytes:1,quantum=mesh_quantum(page,(uint32_t)e)*e;
+      bytes=(bytes+quantum-1)/quantum*quantum;
+      place[at+j]=bytes/e;
+      bytes+=part[at+j].elements*e;
+    }
+    at+=made[i];
+  }
+    for(uint32_t round=0;round<rounds;round++)for(uint32_t receive=0;receive<2;receive++)
+    for(uint32_t i=0;i<count;i++){
+      const struct mesh_block *x=blocks+i;
+      for(uint32_t j=0;j<made[i];j++){
+        const struct mesh_part *y=part+first[i]+j;
+        const uint32_t lo=g->start[y->route],h=g->start[y->route+1]-lo;
+        if(pairwise && h>2)continue;
+        uint32_t r=0;
+        while(r<h && g->node[lo+r]!=rank)r++;
+        if(r>=h)continue;
+        const struct mesh_operand piece={x->type,x->element_bytes,y->elements};
+        const uint64_t relay_at=place[first[i]+j];
+        if(!receive && r==round && r+1<h){
+          if(block)block[k]=i;
+          steps[k++]=(struct mesh_step){MESH_STEP_SEND,g->node[lo+r+1],round,r?relay:x->source,r?relay_at:x->first+y->first,piece};
+        }
+        if(receive && r && r-1==round){
+          if(block)block[k]=i;
+          steps[k++]=(struct mesh_step){MESH_STEP_COPY,g->node[lo+r-1],round,r+1<h?relay:x->target,r+1<h?relay_at:x->at+y->first,piece};
+        }
+      }
+    }
+  if(relayed)*relayed=bytes;
+  free(part);free(first);free(made);free(place);
+  return k;
+}
+
 static uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
 
 static int mesh_rounds_sorted(const struct mesh_step *steps,uint32_t count){
