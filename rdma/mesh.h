@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 138u
+#define MESH_VERSION 139u
 #define MESH_LAYOUT 147u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX

@@ -160,6 +160,13 @@ static uint32_t hop_of(const struct walker *w,uint32_t node){
   for(uint32_t i=0;i<w->nodes;i++)if(w->node[i]==node)return w->hop[i];
   return 0;
 }
+static int joined_same(const struct walker *a,const struct walker *b,uint32_t node){
+  const uint32_t hop=hop_of(a,node);
+  uint32_t i=0,j=0;
+  while(i<a->nodes && a->node[i]!=hop)i++;
+  while(j<b->nodes && b->node[j]!=hop)j++;
+  return hop && hop==hop_of(b,node) && i<a->nodes && j<b->nodes && !memcmp(a->joined+i,b->joined+j,sizeof *a->joined);
+}
 static int path_same(const struct walker *a,const struct walker *b,uint32_t node){
   uint32_t i=0,j=0;
   while(i<a->nodes && a->node[i]!=node)i++;
@@ -219,7 +226,6 @@ static uint32_t tuple_take(struct mesh_entry *e,uint64_t k,uint32_t most,uint32_
     if((uint32_t)(was>>32)!=k32(k) || taken>=e->pages)return 0;
     const uint32_t n=(uint32_t)MIN((uint64_t)most,e->pages-taken);
     if(!atomic_compare_exchange_weak_explicit(&e->posted,&was,was+n,memory_order_seq_cst,memory_order_seq_cst))continue;
-    if(atomic_load_explicit(&e->done,memory_order_seq_cst)==MESH_STAMP_LOST){atomic_fetch_add_explicit(&e->count,n,memory_order_seq_cst);return 0;}
     *first=taken;
     return n;
   }
@@ -287,7 +293,8 @@ static void run_send(struct port *port,uint32_t lane){
   while(r->state==RUN_PAGES && r->posted<r->unit.count && s->sent-s->done<s->sends){
     uint64_t at=(uint64_t)ones*M->pgsz;
     if(r->kind==UNIT_RELAY)at=relay_at(r->relay,r->posted);
-    else if(r->entry && region_word(r->entry->word) && mesh_rows_hold(M,(struct mesh_row){r->first},(struct mesh_pages){r->unit.count}))
+    else if(r->entry && region_word(r->entry->word) && atomic_load_explicit(&r->entry->done,memory_order_acquire)!=MESH_STAMP_LOST &&
+            mesh_rows_hold(M,(struct mesh_row){r->first},(struct mesh_pages){r->unit.count}))
       row_at((struct mesh_row){r->first+r->posted},&at);
     if(!post_send(port,lane,page_span(port,at),unit_of(r)))return;
     r->posted++;
@@ -334,11 +341,11 @@ static void tables_send(struct port *port,struct walker *w,uint32_t served){
       for(uint32_t e=0;e<t->sends;e++){
         struct mesh_entry *x=t->entry+e;
         const uint64_t done=atomic_load_explicit(&x->done,memory_order_acquire);
-        const uint32_t node=x->pages && done<k?name_node(w,x->key):0,hop=node?hop_of(w,node):0;
+        const uint32_t node=x->pages && (done<k || done==MESH_STAMP_LOST)?name_node(w,x->key):0,hop=node?hop_of(w,node):0;
         uint32_t lane=MESH_LINK_LANES,first,n;
         if(!hop || blocked(w,node,before) || hop!=port->peer)continue;
         const _Atomic uint64_t *word=region_word(x->word);
-        if(word && atomic_load_explicit(word,memory_order_acquire)<x->need){block(w,node);continue;}
+        if(done!=MESH_STAMP_LOST && word && atomic_load_explicit(word,memory_order_acquire)<x->need){block(w,node);continue;}
         while(placed(w,port,hop,x->key,mesh_called(atomic_load_explicit(&x->posted,memory_order_acquire))/MESH_RUN,&lane) && (served>>lane&1) &&
               port->link.lane[lane].sending.state==RUN_NONE && (n=tuple_take(x,k,MESH_RUN,&first))){
           struct run *r=&port->link.lane[lane].sending;
@@ -473,7 +480,6 @@ static void run_place(struct port *port,struct walker *w,uint32_t lane){
   if(u->count>MESH_RUN)r->kind=UNIT_SINK;
   else if(x && (uint64_t)u->offset+u->count<=x->entry->pages && (placed=tuple_post(x->entry,x->k,u->count))>0){
     r->kind=UNIT_PAGE;r->table=x->table;r->entry=x->entry;r->k=x->k;r->first=x->entry->row+u->offset;
-    arrival_add(port->link.lane+lane,x->entry,x->k);
     if(!mesh_rows_hold(M,(struct mesh_row){x->entry->row},(struct mesh_pages){x->entry->pages}))r->first=UINT64_MAX;
     run_note(port->link.lane+lane,1,port->link.lane[lane].posted);
   }
@@ -483,6 +489,7 @@ static void run_place(struct port *port,struct walker *w,uint32_t lane){
     if(!(r->relay=relay_take(port,lane,node,u)))r->state=RUN_HELD;
   }
   else r->kind=UNIT_SINK;
+  if(x && r->state==RUN_PAGES && u->count<=MESH_RUN && (uint64_t)u->offset+u->count<=x->entry->pages)arrival_add(port->link.lane+lane,x->entry,x->k);
 }
 static int lane_expects(struct port *port,struct walker *w,uint32_t lane){
   struct lane_state *s=port->link.lane+lane;
@@ -493,15 +500,14 @@ static int lane_expects(struct port *port,struct walker *w,uint32_t lane){
   for(uint32_t i=0;i<s->arrivals;){
     const struct arrival *a=s->arrival+i;
     const uint64_t posted=atomic_load_explicit(&a->entry->posted,memory_order_acquire),done=atomic_load_explicit(&a->entry->done,memory_order_acquire);
-    if((uint32_t)(posted>>32)==k32(a->k) && done!=a->k && done!=MESH_STAMP_LOST)i++;
+    if((uint32_t)(posted>>32)==k32(a->k) && done!=a->k)i++;
     else s->arrival[i]=s->arrival[--s->arrivals];
   }
   for(uint32_t i=0;i<w->indexed;i++){
     const struct indexed *y=w->index+i;
     const uint64_t posted=atomic_load_explicit(&y->entry->posted,memory_order_acquire);
     const uint32_t from=name_node(w,y->entry->from),*runs=arrival_runs(s,y->entry,y->k);
-    if(atomic_load_explicit(&y->entry->done,memory_order_acquire)==MESH_STAMP_LOST || (uint32_t)(posted>>32)!=k32(y->k) ||
-       mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer)continue;
+    if((uint32_t)(posted>>32)!=k32(y->k) || mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer)continue;
     if(placed_runs(w,port,port->peer,y->key,(y->entry->pages+MESH_RUN-1)/MESH_RUN,lane)>(runs?*runs:0))return 1;
   }
   return 0;
@@ -745,7 +751,7 @@ static void tuples_walk(const struct walker *now,uint32_t peer){
         const uint32_t was=name_node(&routes,name),is=now?name_node(now,name):was;
         if(!was || was==M->node)continue;
         if(!now){if(landing && hop_of(&routes,was)==peer)tuple_stamped(t,x,k,landing);continue;}
-        const int moved=!is || !path_same(&routes,now,was);
+        const int moved=!is || !path_same(&routes,now,was) || !joined_same(&routes,now,was);
         if(!is || (moved && (landing || mesh_called(atomic_load_explicit(&x->posted,memory_order_acquire)))))tuple_stamped(t,x,k,landing);
       }
     }
