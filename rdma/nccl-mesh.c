@@ -211,7 +211,6 @@ struct channel {
   size_t ready, sent, landed;
   uint64_t sends, lands, published, consumed, waited, bandwidth;
   mesh_pages out, in, sent_waited;
-  int64_t differ[2];
 };
 
 struct attach;
@@ -343,8 +342,7 @@ static ncclResult_t flow_solve(ncclComm_t comm, const struct mesh_demand *demand
                                                                                comm->solver_context) : 0;
   if (made == UINT32_MAX) {
     flow_free(f);
-    return fail(ncclInvalidUsage, "communicator %s: its map joins no route between two members its calls cross between, or the solver's room "
-                "of %u trees was not enough", comm->name, room);
+    return fail(ncclInvalidUsage, "communicator %s: its map joins no route between two members its calls cross between", comm->name);
   }
   f->count = made;
   return ncclSuccess;
@@ -522,14 +520,13 @@ struct report {
   int32_t rank, status;
   uint32_t node, count, frees, padding;
   struct mesh_reach reach[MESH_STREAMS];
-  uint64_t posted[MESH_STREAMS][2], free_wire[MESH_STREAMS];
+  uint64_t free_wire[MESH_STREAMS];
   uint32_t free_node[MESH_STREAMS], free_cable[MESH_STREAMS];
 };
 
-static int same_cable(uint32_t x, uint32_t y) { return x == y || !x || !y; }
 static uint32_t reach_of(const struct report *x, uint32_t node, uint32_t cable) {
   uint32_t k = 0;
-  while (k < x->count && k < MESH_STREAMS && !(x->reach[k].node == node && same_cable(x->reach[k].cable, cable))) k++;
+  while (k < x->count && k < MESH_STREAMS && !(x->reach[k].node == node && x->reach[k].cable == cable)) k++;
   return k;
 }
 static uint32_t joined(const struct report *reports, uint32_t a, uint32_t b, uint32_t *cable, uint64_t *bandwidth) {
@@ -541,9 +538,8 @@ static uint32_t joined(const struct report *reports, uint32_t a, uint32_t b, uin
     if (k >= reports[b].count) continue;
     const uint64_t one = x->bandwidth, other = reports[b].reach[k].bandwidth;
     uint32_t at = count++;
-    const uint32_t made = x->cable ? x->cable : reports[b].reach[k].cable;
-    while (at && cable[at - 1] > made) { cable[at] = cable[at - 1]; bandwidth[at] = bandwidth[at - 1]; at--; }
-    cable[at] = made;
+    while (at && cable[at - 1] > x->cable) { cable[at] = cable[at - 1]; bandwidth[at] = bandwidth[at - 1]; at--; }
+    cable[at] = x->cable;
     bandwidth[at] = one && other ? (one < other ? one : other) : 0;
   }
   return count;
@@ -726,11 +722,9 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
     if (!status && !met) { comm->until = now_s() + bound; met = 1; }
     if (!status) bootstrap_put(comm, 0, fd);
     if (!status && revoked(comm)) status = ECANCELED;
-    const int read = status ? status : whole(comm, fd, &heard, sizeof heard, 0);
-    if (read == ECANCELED || read == ETIMEDOUT) status = read;
+    if (!status && !(status = whole(comm, fd, &heard, sizeof heard, 0)) && (heard.rank <= 0 || heard.rank >= comm->nranks || peers[heard.rank] >= 0))
+      status = EPROTO;
     if (status) { bootstrap_put(comm, 0, -1); break; }
-
-    if (read || heard.rank <= 0 || heard.rank >= comm->nranks || peers[heard.rank] >= 0) { bootstrap_put(comm, 0, -1); continue; }
     reports[heard.rank] = heard;
     pthread_mutex_lock(&comm->guard);
     peers[heard.rank] = fd; peers[0] = -1;
@@ -754,7 +748,7 @@ static int gather(struct ncclComm *comm, int nranks, int rank, struct report *re
     return status;
   }
   for (int r = 1; r < nranks && !status && !sent; r++)
-    if (!(status = whole(comm, peers[r], reports + r, sizeof *reports, 0)) && reports[r].rank != r) status = EPROTO;
+    status = whole(comm, peers[r], reports + r, sizeof *reports, 0);
   for (int r = 1; r < nranks && !status; r++) status = whole(comm, peers[r], reports, table, 1);
   return status;
 }
@@ -768,7 +762,7 @@ static void reach_read(struct attach *a, struct report *report) {
 static uint64_t wire_between(const struct report *mine, const struct report *theirs, uint32_t cable) {
   uint64_t least = 0;
   for (uint32_t i = 0; i < mine->frees && i < MESH_STREAMS; i++) {
-    if (mine->free_node[i] != theirs->node || !same_cable(mine->free_cable[i], cable)) continue;
+    if (mine->free_node[i] != theirs->node || mine->free_cable[i] != cable) continue;
     for (uint32_t j = 0; j < theirs->frees && j < MESH_STREAMS; j++)
       if (theirs->free_node[j] == mine->node && theirs->free_wire[j] == mine->free_wire[i] && (!least || mine->free_wire[i] < least))
         least = mine->free_wire[i];
@@ -776,15 +770,6 @@ static uint64_t wire_between(const struct report *mine, const struct report *the
   return least;
 }
 
-static int comm_apart(const struct report *reports, uint32_t n) {
-  for (uint32_t a = 0; a < n; a++)
-    for (uint32_t b = a + 1; b < n; b++)
-      if (reports[a].node == reports[b].node) return EINVAL;
-  return 0;
-}
-static ncclResult_t apart_fail(const char *name) {
-  return fail(ncclInvalidUsage, "communicator %s: two of its ranks are on one node (its holdings and their pages posted are kept a node)", name);
-}
 static ncclResult_t hold_fail(const char *name, int rank, int status) {
   return fail(ncclSystemError, "communicator %s: rank %d could not hold its streams at its bridge (%s: EBUSY, a stream another communicator holds, "
               "or whose last holding its bridge is still ending; ENOLINK, no stream toward a member's node); a communicator made next "
@@ -802,11 +787,11 @@ static int comm_table(struct ncclComm *made, const ncclMeshProgram *programs, in
 
 static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node, uint32_t cable) {
   for (uint32_t k = 0; k < MESH_STREAMS; k++)
-    if ((comm->held >> k & 1) && comm->attach->holds[k].node == node && same_cable(comm->attach->holds[k].cable, cable)) return comm->attach->holds + k;
+    if ((comm->held >> k & 1) && comm->attach->holds[k].node == node && comm->attach->holds[k].cable == cable) return comm->attach->holds + k;
   return NULL;
 }
 
-static int comm_hold(struct ncclComm *comm, const struct report *reports, struct report *mine) {
+static int comm_hold(struct ncclComm *comm, const struct report *reports) {
   struct attach *a = comm->attach;
   const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   uint32_t cable[MESH_STREAMS];
@@ -815,7 +800,7 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
   pthread_mutex_lock(&attach_lock);
   for (uint32_t q = 0; !status && q < n; q++)
    for (uint32_t c = 0, cables = q == me ? 0 : joined(reports, me, q, cable, bandwidth); !status && c < cables; c++) {
-    const uint32_t node = reports[q].node, k = reach_of(mine, node, cable[c]);
+    const uint32_t node = reports[q].node;
     const uint64_t wire = wire_between(reports + me, reports + q, cable[c]);
     struct hold *h = NULL;
     uint32_t stream = 0;
@@ -831,10 +816,7 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     if (status) break;
     const uint32_t index = (uint32_t)(h - a->holds);
     h->users++; comm->held |= UINT32_C(1) << index; comm->binding = 1;
-    if (!(status = mesh_stream_view(&a->context, stream, &h->view)))
-      for (int way = 0; way < 2; way++)
-        mine->posted[k][way] = atomic_load_explicit(&h->view.posts[way].posted[0], memory_order_acquire) +
-                               atomic_load_explicit(&h->view.posts[way].posted[1], memory_order_acquire);
+    status = mesh_stream_view(&a->context, stream, &h->view);
   }
   pthread_mutex_unlock(&attach_lock);
   return status;
@@ -854,7 +836,7 @@ static int channel_buffer(struct channel *ch) {
 static int comm_join(struct ncclComm *comm, const struct report *reports) {
   struct mesh_ctx *context = &comm->attach->context;
   const struct hdr *m = context->M;
-  const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank, node = reports[me].node;
+  const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   uint32_t cable[MESH_STREAMS];
   uint64_t bandwidth[MESH_STREAMS];
   comm->page = (uint64_t)m->block * m->pgsz;
@@ -865,14 +847,10 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
     pthread_mutex_lock(&attach_lock);
     struct hold *h = comm_hold_toward(comm, reports[q].node, cable[c]);
     pthread_mutex_unlock(&attach_lock);
-    if (!h) { status = EPROTO; break; }
     if (!c) comm->toward[q] = (int)comm->count;
     struct channel *ch = comm->channels + comm->count++;
     *ch = (struct channel){.peer = (int)q, .node = reports[q].node, .stream = h->stream, .wire = &h->wire, .view = h->view, .bandwidth = bandwidth[c]};
     if (!(status = channel_buffer(ch))) atomic_store(&comm->attach->wrapped, 1);
-    const uint64_t *own = reports[me].posted[reach_of(reports + me, reports[q].node, cable[c])], *theirs = reports[q].posted[reach_of(reports + q, node, cable[c])];
-    ch->differ[0] = (int64_t)(theirs[1] - own[0]);
-    ch->differ[1] = (int64_t)(theirs[0] - own[1]);
   }
   if (!status && !(comm->timed = calloc((size_t)GROUP_TIMES * comm->count + 1, sizeof *comm->timed))) status = ENOMEM;
   return status;
@@ -898,9 +876,8 @@ static ncclResult_t comm_init(struct ncclComm *made) {
     if (reports[r].status && r != rank)
       result = fail(ncclRemoteError, "communicator %s: rank %d could not join it: %s", made->name, r, strerror(reports[r].status));
   for (int r = 0; !result && r < nranks; r++) made->members[r] = reports[r].node;
-  if (!result && nranks > 1 && comm_apart(reports, (uint32_t)nranks)) result = apart_fail(made->name);
   if (!result && nranks > 1) {
-    mine->status = comm_hold(made, reports, mine);
+    mine->status = comm_hold(made, reports);
     made->until = now_s() + (double)MESH_PLATFORM_NS / 1e9;
     if ((status = gather(made, nranks, rank, reports, 0))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status));
     for (int r = 0; !result && r < nranks; r++)
@@ -1030,24 +1007,6 @@ ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank) {
   if (!comm || !rank) return fail(ncclInvalidArgument, "comm or rank is NULL");
   *rank = comm->rank;
   return ncclSuccess;
-}
-
-ncclResult_t ncclCommRegister(const ncclComm_t comm, void *buff, size_t size, void **handle) {
-  if (!comm || !handle) return fail(ncclInvalidArgument, "comm or handle is NULL");
-  pthread_mutex_lock(&attach_lock);
-  const struct hdr *m = attaches ? attaches->context.M : NULL;
-  const uintptr_t at = (uintptr_t)buff, first = m ? (uintptr_t)m + m->data_off : 0, end = m ? (uintptr_t)m + m->length : 0;
-  pthread_mutex_unlock(&attach_lock);
-  if (!m || at < first || at > end || size > end - at)
-    return fail(ncclInvalidArgument, "ncclCommRegister of %zu bytes at %p: not in the region of this node's bridge; a buffer "
-                "collectives move is leased from the region (ncclMemAlloc)", size, buff);
-  *handle = buff;
-  return ncclSuccess;
-}
-
-ncclResult_t ncclCommDeregister(const ncclComm_t comm, void *handle) {
-  (void)handle;
-  return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL");
 }
 
 ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
@@ -1232,7 +1191,6 @@ struct call {
   const void *scalar_at;
   int premultiplied, direct, direct_ok;
   struct steps *bound;
-  unsigned char *copy;
   size_t at;
   cudaStream_t stream;
   void *command, *encoder, *table, *residency;
@@ -1286,28 +1244,6 @@ static int in_region(const struct ncclComm *comm, struct where w, size_t bytes) 
   return at && at >= first && at <= end && bytes <= (size_t)(end - at);
 }
 
-static size_t sent_bytes(const struct call *c) {
-  const size_t z = SIZE[c->type];
-  size_t length = 0;
-  if (c->what == WHAT_RECV || (c->what == MESH_BROADCAST && c->root != c->comm->rank)) return 0;
-  if (c->what == MESH_ALLGATHER) { segment_at(c, c->comm->rank, &length); return length * z; }
-  if (counted(c)) return seg_first(c->segments, c->comm->nranks) * z;
-  if (c->what == WHAT_SEND || c->what == MESH_BROADCAST) return c->count * z;
-  return elements(c) * z;
-}
-
-static ncclResult_t operands_check(const struct call *list, size_t n) {
-  for (size_t i = 0; i < n; i++) {
-    const struct call *c = list + i;
-    const size_t bytes = crosses(c) ? sent_bytes(c) : 0;
-    if (bytes && !in_region(c->comm, c->send_at, bytes))
-      return fail(ncclInvalidUsage, "%s on communicator %s: its send buffer (%zu bytes) is not in this node's region: an operand that crosses a "
-                  "link is a lease's (ncclMemAlloc, ncclMeshMemBuffer), and none is copied into the region (nccl.h, Memory)", call_name(c),
-                  c->comm->name, bytes);
-  }
-  return ncclSuccess;
-}
-
 static void steps_free(struct steps *s) {
   if (!s) return;
   free(s->buffer); free(s->steps); free(s->done); free(s->channel); free(s->entry); free(s->before); free(s->reads); free(s->fresh);
@@ -1347,7 +1283,7 @@ static ncclResult_t hosted_steps(ncclComm_t comm, const struct call *c, const st
   ncclResult_t result = ncclSuccess;
   if (!(*steps = calloc((size_t)room + 1, sizeof **steps))) result = fail(ncclSystemError, "out of memory");
   else if ((*count = mesh_exchange_steps(g, (uint32_t)me, blocks, made, 0, 2, comm->page, *steps, NULL, relayed)) == UINT32_MAX)
-    result = fail(ncclInvalidUsage, "%s on %s: a block between ranks the communicator's routing table joins by no route", call_name(c), comm->name);
+    result = fail(ncclSystemError, "out of memory");
   free(blocks);
   return result;
 }
@@ -1500,7 +1436,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       uint32_t ways = 0;
       for (uint32_t h = 0; h < comm->count && ways < MESH_STREAMS; h++)
         if (comm->channels[h].peer == c->peer) share[ways++] = comm->channels[h].bandwidth ? (double)comm->channels[h].bandwidth : 1;
-      if (!ways) { share[0] = 1; ways = 1; }
+      if (!ways) { result = fail(ncclInvalidUsage, "%s on %s: no channel joins rank %d to rank %d (a group's pairs, ncclMeshGroupPairs, relay it)",
+                                 call_name(c), comm->name, comm->rank, c->peer); break; }
       mesh_cut_shares(operand.elements, operand.element_bytes, comm->page, share, ways, at, length);
       s->count = 0;
       for (uint32_t w = 0; w < ways; w++) {
@@ -1582,7 +1519,8 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
       if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
       for (size_t j = 0; j < p->outs; j++) {
         const struct message *o = p->out + j;
-        if (o->c != m->c || o->step >= m->step || (st->reads && st->reads[o->step]) || !meet(st->steps + o->step, st->steps + m->step)) continue;
+        if (o->c != m->c || o->step >= m->step || (st->reads && st->reads[o->step] && m->c->direct_ok != 2) || !meet(st->steps + o->step, st->steps + m->step))
+          continue;
         if (o->rel_entry + 1 > m->rel_need) m->rel_need = o->rel_entry + 1;
         if (pages_below(m->rel_sent, o->rel_end)) m->rel_sent = o->rel_end;
       }
@@ -1597,8 +1535,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
       while (x->op == MESH_STEP_SEND && x->buffer == 2 && j < st->count &&
              !(st->steps[j].op == MESH_STEP_COPY && st->steps[j].buffer == 2 && st->steps[j].first == x->first && st->steps[j].piece.elements == x->piece.elements))
         j++;
-      if (x->op == MESH_STEP_SEND && x->buffer == 2 && j == st->count) result = fail(ncclInternalError, "a relayed part of %s with no receive", call_name(list + i));
-      else if (x->op == MESH_STEP_SEND && x->buffer == 2) st->before[k] = (int32_t)j;
+      if (x->op == MESH_STEP_SEND && x->buffer == 2) st->before[k] = (int32_t)j;
     }
   }
   free(steps); free(counts); free(group_calls); free(made); free(scratch);
@@ -1609,12 +1546,6 @@ static void schedules_free(const struct ncclComm *comm, struct schedule *plans) 
   for (uint32_t h = 0; plans && h < comm->count; h++) { free(plans[h].out); free(plans[h].in); }
   free(plans);
 }
-
-
-
-
-
-
 
 static struct where read_at(const struct call *c) { return (struct where){c->send_at.buffer, c->send_at.offset - c->bound->lo * SIZE[c->type]}; }
 
@@ -1659,11 +1590,10 @@ static void rows_free(struct metal_rows *rows, int idle) {
 }
 
 static void plan_free(struct ncclComm *comm, struct plan *p) {
-  const int idle = plan_idle(p);
   calls_free(p->list, p->n);
   schedules_free(comm, p->plans);
-  if (p->pages && idle) ncclMemFree(p->pages);
-  rows_free(&p->rows, idle);
+  if (p->pages) ncclMemFree(p->pages);
+  rows_free(&p->rows, 1);
   free(p);
 }
 
@@ -1672,11 +1602,13 @@ static int in_place(const struct call *c) {
 }
 static int direct_ok(const struct call *c) {
   if (p2p(c) || counted(c) || !crosses(c) || c->premultiplied || unit_of(c) > 1 || (c->what == MESH_BROADCAST && c->root != c->comm->rank)) return 0;
-  size_t length = elements(c);
-  if (c->what == MESH_ALLGATHER) segment_at(c, c->comm->rank, &length);
+  size_t length = elements(c), before = 0;
+  if (c->what == MESH_ALLGATHER) before = segment_at(c, c->comm->rank, &length);
   const size_t z = SIZE[c->type], sent = length * z, made = elements(c) * z;
   const unsigned char *a = address_of(c->send_at), *b = address_of(c->recv_at);
-  return in_region(c->comm, c->send_at, sent) && (!in_place(c) || (b && !(a < b + made && b < a + sent)));
+  if (!in_region(c->comm, c->send_at, sent)) return 0;
+  if (in_place(c) && b && a == b + before * z) return 2;
+  return !in_place(c) || (b && !(a < b + made && b < a + sent));
 }
 static int call_same(const struct call *a, const struct call *b) {
   const size_t segs = (counted(a) ? 2 : 1) * (size_t)a->comm->nranks;
@@ -1688,9 +1620,8 @@ static int call_same(const struct call *a, const struct call *b) {
          a->npairs == b->npairs && (!a->npairs || !memcmp(a->pairs, b->pairs, a->npairs * sizeof *a->pairs));
 }
 
-static ncclResult_t lease_take(struct ncclComm *comm, size_t bytes, void **pages, void **buffer, size_t *offset) {
+static ncclResult_t lease_take(size_t bytes, void **pages, void **buffer, size_t *offset) {
   ncclResult_t result = ncclMemAlloc(pages, bytes);
-  if (result) { sweep(comm, 1, 0); result = ncclMemAlloc(pages, bytes); }
   if (!result && buffer && lease_buffer(*pages, buffer, offset)) result = fail(ncclSystemError, "no Metal buffer over a lease of %zu bytes", bytes);
   return result;
 }
@@ -1702,7 +1633,7 @@ int metal_rows_take(struct metal_rows *rows, size_t bytes, void **buffer, size_t
     struct row_chunk made = {.bytes = page_up(bytes > (64u << 10) ? bytes : (64u << 10), rows->comm->page)};
     struct row_chunk *grown = realloc(rows->chunk, (rows->chunks + 1) * sizeof *grown);
     if (grown) rows->chunk = grown;
-    if (!grown || lease_take(rows->comm, made.bytes, &made.pages, &made.buffer, &made.offset)) {
+    if (!grown || lease_take(made.bytes, &made.pages, &made.buffer, &made.offset)) {
       if (made.pages) ncclMemFree(made.pages);
       return ENOMEM;
     }
@@ -1727,7 +1658,7 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
     const size_t segs = (counted(list + i) ? 2 : 1) * (size_t)comm->nranks;
     *c = list[i];
     const size_t cells = (size_t)comm->nranks * comm->nranks;
-    c->bound = NULL; c->complement = NULL; c->complements = 0; c->copy = NULL; c->segments = NULL; c->matrix = NULL; c->pairs = NULL; c->at = SIZE_MAX;
+    c->bound = NULL; c->complement = NULL; c->complements = 0; c->segments = NULL; c->matrix = NULL; c->pairs = NULL; c->at = SIZE_MAX;
     if ((list[i].segments && !(c->segments = malloc(segs * sizeof *c->segments))) || (list[i].matrix && !(c->matrix = malloc(cells * sizeof *c->matrix))) ||
         (list[i].npairs && !(c->pairs = malloc(list[i].npairs * sizeof *c->pairs))))
       result = fail(ncclSystemError, "out of memory");
@@ -1749,7 +1680,7 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
   if (!result) result = schedule_group(comm, p->list, n, p->plans, &bytes);
   p->word = bytes;
   size_t offset = 0;
-  if (!result && (bytes || list[0].stream)) result = lease_take(comm, bytes + sizeof(uint32_t), &p->pages, list[0].stream ? &p->buffer : NULL, &offset);
+  if (!result && (bytes || list[0].stream)) result = lease_take(bytes + sizeof(uint32_t), &p->pages, list[0].stream ? &p->buffer : NULL, &offset);
   if (p->pages) memset((char *)p->pages + p->word, 0, sizeof(uint32_t));
   p->base = p->buffer ? (struct where){p->buffer, offset} : (struct where){NULL, (size_t)p->pages};
   if (result) { plan_free(comm, p); return result; }
@@ -1773,7 +1704,7 @@ static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n
   for (size_t i = 0; i < n; i++) {
     struct call *c = p->list + i, made = list[i];
     made.bound = c->bound; made.segments = c->segments; made.matrix = c->matrix; made.pairs = c->pairs; made.complement = c->complement; made.complements = c->complements;
-    made.direct = c->direct; made.at = c->at; made.copy = NULL;
+    made.direct = c->direct; made.at = c->at;
     *c = made;
   }
   p->flight = 1;
@@ -1889,16 +1820,10 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
   }
 }
 
-
 static int ready(const struct steps *s, uint32_t k) { return s->before[k] < 0 || s->done[s->before[k]]; }
 
 static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atomic_load_explicit(word, memory_order_acquire)); }
 
-static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel *ch) {
-  return fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended with the group's entries there not done (the "
-              "stream is no longer its own: its link lost and paired again, or its bridge restarted; design/transport.md section 14)",
-              comm->name, ch->node);
-}
 static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
   const mesh_pages none = {0};
   for (;;) {
@@ -1911,8 +1836,6 @@ static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
       if (ch->consumed < lands && pages_lost(count_of(ch->view.landed)))
         return fail(ncclRemoteError, "the link to node %u was lost at landing entry %llu (its holding's counts ~0)", ch->node,
                     (unsigned long long)ch->consumed);
-      if ((ch->consumed < lands || ch->published < p->first[0] + p->outs) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
-        return held_fail(comm, ch);
       while (ch->consumed < lands) {
         const struct message *m = p->in + (ch->consumed - p->first[1]);
         struct steps *st = m->c->bound;
@@ -1949,8 +1872,6 @@ static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
       const struct channel *ch = comm->channels + h;
       const mesh_pages sent = plans[h].outs ? count_of(ch->view.sent) : none;
       if (pages_lost(sent)) return fail(ncclRemoteError, "the link to node %u was lost before its SENDs completed (its holding's counts ~0)", ch->node);
-      if (plans[h].outs && pages_below(sent, ch->out) && !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
-        return held_fail(comm, ch);
       all &= !plans[h].outs || !pages_below(sent, ch->out);
     }
   }
@@ -1966,12 +1887,8 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; result && h < comm->count; h++) {
     struct channel *ch = comm->channels + h;
     const struct schedule *p = plans + h;
-    if (p->outs && ch->published < p->first[0] + p->outs) {
-      atomic_thread_fence(memory_order_release);
-      atomic_store_explicit(ch->view.ready, pages_to_word(p->out[p->outs - 1].end), memory_order_release);
-      ch->published = p->first[0] + p->outs;
-    }
-    if (p->ins && ch->consumed < p->first[1] + p->ins) ch->consumed = p->first[1] + p->ins;
+    if (p->outs) ch->published = p->first[0] + p->outs;
+    if (p->ins) ch->consumed = p->first[1] + p->ins;
     ch->waited = ch->consumed;
   }
   return result;
@@ -2042,8 +1959,7 @@ static size_t own_segment(const struct call *c, size_t *sent, size_t *landed) {
   return (out < in ? out : in) * SIZE[c->type];
 }
 
-
-enum { GPU_ENDED, GPU_ERROR, GPU_UNCOMMITTED, GPU_REVOKED, GPU_HOLDING };
+enum { GPU_ENDED, GPU_ERROR, GPU_UNCOMMITTED, GPU_REVOKED };
 
 static int gpu_wait(struct ncclComm *comm, int group) {
   int ended = GPU_ENDED;
@@ -2056,9 +1972,6 @@ static int gpu_wait(struct ncclComm *comm, int group) {
       const int status = metal_ended(command);
       if (status) { ended = status < 0 ? GPU_ERROR : status == 2 ? GPU_UNCOMMITTED : GPU_ENDED; break; }
       if (group && revoked(comm)) { ended = GPU_REVOKED; break; }
-      for (uint32_t h = 0; group && h < comm->count && ended == GPU_ENDED; h++)
-        if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
-      if (ended != GPU_ENDED) break;
       metal_wait(finished, last, MESH_PAUSE_NS);
     }
     metal_release(command);
@@ -2076,9 +1989,6 @@ static ncclResult_t gpu_finished(struct ncclComm *comm) {
   case GPU_UNCOMMITTED:
     return fail(ncclInvalidUsage, "a host-path group on communicator %s before the command buffer of its last GPU program is committed", comm->name);
   case GPU_REVOKED: return revoked_fail(comm);
-  case GPU_HOLDING:
-    return fail(ncclRemoteError, "communicator %s: a holding of its streams ended before its host-path group (design/transport.md section 14)",
-                comm->name);
   default: return ncclSuccess;
   }
 }
@@ -2118,7 +2028,6 @@ static ncclResult_t launch(struct call *list, size_t n) {
     result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete), or "
                   "an exchange's start is not bound to the kernel that publishes it (ncclMeshBind)");
   if (!result && remote && finished && comm->last) result = gpu_finished(comm);
-  if (!result) result = operands_check(list, n);
   struct plan *plan = NULL;
   if (!result) result = plan_take(comm, list, n, &plan);
   if (result) { pthread_mutex_unlock(&group_lock); return result; }
@@ -2127,10 +2036,6 @@ static ncclResult_t launch(struct call *list, size_t n) {
     struct call *c = calls + i;
     const size_t bytes = elements(c) * SIZE[c->type];
     operands_at(plan, c);
-    if (c->what == WHAT_SEND && c->peer == comm->rank) {
-      if (!(c->copy = malloc(bytes ? bytes : 1))) result = fail(ncclSystemError, "out of memory");
-      else memcpy(c->copy, c->send, bytes);
-    }
     if (p2p(c) || counted(c) || c->direct) continue;
     stage(c, address_of(c->sum));
     for (uint32_t b = 1; c->bound && b < c->bound->buffers; b++)
@@ -2140,26 +2045,18 @@ static ncclResult_t launch(struct call *list, size_t n) {
   if (!result && remote && !(result = plan_start(comm, plan, &refused))) atomic_fetch_add(&comm->runs, 1);
   const int running = remote && !result;
   pthread_mutex_unlock(&group_lock);
-  if (running && (result = run(comm, plan->plans))) {
-    pthread_mutex_lock(&group_lock);
-    plan->stale = comm->sweeps = 1;
-    pthread_mutex_unlock(&group_lock);
-  }
+  if (running) result = run(comm, plan->plans);
   if (!result) result = refused;
   if (running) atomic_fetch_sub(&comm->runs, 1);
   for (size_t i = 0, self = 0; i < n && !result; i++) {
     struct call *c = calls + i;
     if (c->what == WHAT_RECV && c->peer == comm->rank) {
       while (self < n && !(calls[self].what == WHAT_SEND && calls[self].peer == comm->rank)) self++;
-      if (self < n) { memmove(c->recv, calls[self].copy, c->count * SIZE[c->type]); self++; }
+      if (self < n) { memmove(c->recv, calls[self].send, c->count * SIZE[c->type]); self++; }
     } else if (counted(c)) {
       size_t sent, landed, own = own_segment(c, &sent, &landed);
       if (own) memmove((unsigned char *)c->recv + landed, (const unsigned char *)c->send + sent, own);
     } else if (!p2p(c)) finish(c);
-  }
-  for (size_t i = 0; i < n; i++) {
-    free(calls[i].copy);
-    calls[i].copy = NULL;
   }
   pthread_mutex_lock(&group_lock);
   plan->flight = 0;
@@ -2197,10 +2094,8 @@ static struct inflight *inflight, *inflight_last;
 static uint64_t tickets;
 static _Atomic uint64_t retired;
 
-
 static void call_parts_free(struct call *c) {
   steps_free(c->bound);
-  free(c->copy);
   free(c->segments);
   free(c->matrix);
   free(c->pairs);
@@ -2213,7 +2108,7 @@ static void calls_free(struct call *list, size_t n) {
 
 static void inflight_free(struct inflight *g, int retired) {
   if (g->plan && retired) g->plan->leaving = 1;
-  else if (g->plan) { g->plan->stale = g->comm->sweeps = 1; g->plan->flight = 0; }
+  else if (g->plan) g->plan->flight = 0;
   free(g->start);
   free(g);
 }
@@ -2243,11 +2138,6 @@ static struct inflight *inflight_at(struct ncclComm *comm, uint32_t h, int list,
 static struct message *out_at(struct inflight *g, uint32_t h, uint64_t at) { return g->plans[h].out + (at - g->start[h][0]); }
 static struct message *in_at(struct inflight *g, uint32_t h, uint64_t at) { return g->plans[h].in + (at - g->start[h][1]); }
 
-static ncclResult_t outside_groups(struct ncclComm *comm, uint32_t h, int list, uint64_t at) {
-  return fail(ncclInternalError, "%s entry %llu of channel %u of %s is in no group in flight", list ? "landing" : "send", (unsigned long long)at, h,
-              comm->name);
-}
-
 static int publishable(struct ncclComm *comm, uint32_t h, uint64_t at) {
   struct inflight *g = inflight_at(comm, h, 0, at);
   const struct message *m = g ? out_at(g, h, at) : NULL;
@@ -2257,7 +2147,6 @@ static int publishable(struct ncclComm *comm, uint32_t h, uint64_t at) {
 static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t upto, int *published) {
   struct channel *ch = comm->channels + h;
   struct inflight *g = inflight_at(comm, h, 0, upto - 1);
-  if (!g) return outside_groups(comm, h, 0, upto - 1);
   const struct message *m = out_at(g, h, upto - 1);
   const struct metal_release release = {ch->buffer, ch->ready, m->end};
   void *operands[64];
@@ -2280,7 +2169,6 @@ static uint64_t consumed_past(struct ncclComm *comm, uint32_t h, uint64_t at) {
 static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint64_t at, uint32_t base, int fold) {
   struct channel *ch = comm->channels + h;
   struct inflight *g = inflight_at(comm, h, 1, at);
-  if (!g) return outside_groups(comm, h, 1, at);
   const struct message *m = in_at(g, h, at);
   struct steps *st = m->c->bound;
   const struct mesh_step *step = st->steps + m->step;
@@ -2333,13 +2221,8 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
   while (!result && (ch->published < out || ch->consumed < in)) {
     uint64_t upto = ch->published;
     while (upto < out && publishable(comm, h, upto)) upto++;
-    if (upto > ch->published) { result = publish(program, comm, h, upto, published); continue; }
-    struct inflight *x = ch->consumed < in ? inflight_at(comm, h, 1, ch->consumed) : NULL;
-    const struct message *r = x ? in_at(x, h, ch->consumed) : NULL;
-    if (r && ready(r->c->bound, r->step) && ch->published >= r->need) result = consume(program, comm, h, ch->consumed, METAL_NONE, 1);
-    else
-      result = fail(ncclInternalError, "channel %u's entries admit no order on one track (published %llu of %llu, consumed %llu of %llu)", h,
-                    (unsigned long long)ch->published, (unsigned long long)out, (unsigned long long)ch->consumed, (unsigned long long)in);
+    if (upto > ch->published) result = publish(program, comm, h, upto, published);
+    else result = consume(program, comm, h, ch->consumed, METAL_NONE, 1);
   }
   return result;
 }
@@ -2389,9 +2272,7 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
       consumed[track] = ch->consumed;
       while (!result && ch->published < end[h][0]) {
         const uint64_t at = ch->published;
-        struct inflight *g = inflight_at(c, h, 0, at);
-        if (!g || g->composed) { result = g ? fail(ncclInternalError, "a composed crossing's publication on two tracks") : outside_groups(c, h, 0, at); break; }
-        const struct message *m = out_at(g, h, at);
+        const struct message *m = out_at(inflight_at(c, h, 0, at), h, at);
         result = gpu(metal_record(program, track, METAL_PUBLISH, at, 0), "a publication's record");
         if (!result && m->c->bound->before[m->step] >= 0) {
           const struct steps *prior = m->c->bound;
@@ -2402,9 +2283,7 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
       }
       while (!result && ch->consumed < end[h][1]) {
         const uint64_t at = ch->consumed;
-        struct inflight *g = inflight_at(c, h, 1, at);
-        if (!g || g->composed) { result = g ? fail(ncclInternalError, "a composed crossing's landing on two tracks") : outside_groups(c, h, 1, at); break; }
-        result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(g, h, at)->need), "a consumption's record");
+        result = gpu(metal_record(program, track, METAL_CONSUME, at, in_at(inflight_at(c, h, 1, at), h, at)->need), "a consumption's record");
         if (!result) result = consume(program, c, h, at, base[k], 0);
       }
     }
@@ -2415,7 +2294,6 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
   free(end); free(consumed); free(comm); free(base);
   return result;
 }
-
 
 static int meets(const struct inflight *x, const struct inflight *g) {
   for (uint32_t h = 0; !x->composed && x->comm == g->comm && h < g->comm->count; h++)
@@ -2451,7 +2329,6 @@ static struct where where_of(const void *argument) {
   const ncclMeshBuffer *b = argument;
   return b ? (struct where){b->buffer, b->offset} : (struct where){NULL, 0};
 }
-
 
 struct spans { uint64_t (*span)[2]; size_t count, room; };
 
@@ -2509,7 +2386,7 @@ static int plan_direct(struct call *c) {
   uint64_t first = lo, last = hi;
   if (c->what == MESH_REDUCE_SCATTER) { size_t length; first = segment_at(c, c->comm->rank, &length); last = first + length; }
   if (c->what == MESH_REDUCE && c->root != c->comm->rank) last = first;
-  if (direct) {
+  if (direct && c->direct_ok != 2) {
     c->complement = calloc(3 * (w[0].count + 1), sizeof *c->complement);
     direct = c->complement != NULL;
     for (size_t k = 0, at = first; direct && at < last; k++) {
@@ -2605,23 +2482,23 @@ static ncclResult_t retire(struct metal_program *program) {
   return result;
 }
 
-static void stamp(struct metal_program *program, struct ncclComm *comm, struct plan *p) {
-  if (p->buffer && metal_stamp(program, p->buffer, p->word).status) p->stale = comm->sweeps = 1;
+static ncclResult_t stamp(struct metal_program *program, struct plan *p) {
+  const ncclResult_t result = p->buffer ? gpu(metal_stamp(program, p->buffer, p->word), "a plan's stamp") : ncclSuccess;
   p->reader += p->buffer != NULL;
   p->flight = !p->leaving;
   p->leaving = 0;
+  return result;
 }
 
 static ncclResult_t program_end(struct metal_program *program, int borrowed, ncclResult_t result) {
-  struct ncclComm *held_comm = NULL;
   struct plan *held = NULL;
   for (struct ncclComm *comm = touching; comm; comm = comm->next_touched)
     for (struct plan *p = comm->plans; p; p = p->next)
-      if (p->flight && p->buffer && metal_rows(program, &p->rows) == &p->rows) { held = p; held_comm = comm; }
+      if (p->flight && p->buffer && metal_rows(program, &p->rows) == &p->rows) held = p;
   for (struct ncclComm *comm = touching; comm; comm = comm->next_touched)
     for (struct plan *p = comm->plans; p; p = p->next)
-      if (p->flight && p != held) stamp(program, comm, p);
-  if (held) stamp(program, held_comm, held);
+      if (p->flight && p != held) { const ncclResult_t stamped = stamp(program, p); if (!result) result = stamped; }
+  if (held) { const ncclResult_t stamped = stamp(program, held); if (!result) result = stamped; }
   const uint64_t count = borrowed || result ? 0 : ++issued;
   void *command = count ? metal_command(program) : NULL;
   metal_end(program, count ? (finished ? finished : (finished = metal_event())) : NULL, count);
@@ -2658,7 +2535,6 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && revoked(comm)) result = revoked_fail(comm);
   pthread_mutex_lock(&group_lock);
   if (!result) group_numbered(comm);
-  if (!result) result = operands_check(list, n);
   struct plan *plan = NULL;
   if (!result) result = plan_take(comm, list, n, &plan);
   if (result) { pthread_mutex_unlock(&group_lock); calls_free(list, n); return result; }
@@ -2776,23 +2652,23 @@ struct ncclMeshRequest {
   size_t *parts, *area, table, bytes;
   struct leg *in, *out;
   double *share;
-  uint32_t ins, outs, peers, waits, relays, pieces, *own, *awaited, *first, *count, nslots, turn;
+  uint32_t ins, outs, peers, waits, relays, pieces, *own, *awaited, *first, *count, nslots;
   struct slot *slots;
   uint64_t starts;
   struct ncclMeshRequest *next;
 };
 
-static int entry_done(struct ncclComm *comm, const struct channel *ch, _Atomic uint64_t *word, uint64_t end) {
+static int entry_done(_Atomic uint64_t *word, uint64_t end) {
   const mesh_pages count = count_of(word);
-  return !end || pages_lost(count) || !pages_below(count, pages_from_word(end)) || !mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire);
+  return !end || pages_lost(count) || !pages_below(count, pages_from_word(end));
 }
 
 static int plan_quiet(struct ncclComm *comm, const struct plan *p) {
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct schedule *x = p->plans + h;
     const struct channel *ch = comm->channels + h;
-    if ((x->ins && !entry_done(comm, ch, ch->view.landed, pages_to_word(x->in[x->ins - 1].end))) ||
-        (x->outs && !entry_done(comm, ch, ch->view.sent, pages_to_word(x->out[x->outs - 1].end))))
+    if ((x->ins && !entry_done(ch->view.landed, pages_to_word(x->in[x->ins - 1].end))) ||
+        (x->outs && !entry_done(ch->view.sent, pages_to_word(x->out[x->outs - 1].end))))
       return 0;
   }
   return 1;
@@ -2802,22 +2678,21 @@ static int slot_free(const struct ncclMeshRequest *r, const struct slot *s) {
   if (__atomic_load_n(&s->table->ended, __ATOMIC_ACQUIRE) < s->bound) return 0;
   for (uint32_t h = 0; h < r->comm->count; h++) {
     const struct channel *ch = r->comm->channels + h;
-    if (!entry_done(r->comm, ch, ch->view.sent, s->ends[2 * h]) || !entry_done(r->comm, ch, ch->view.landed, s->ends[2 * h + 1])) return 0;
+    if (!entry_done(ch->view.sent, s->ends[2 * h]) || !entry_done(ch->view.landed, s->ends[2 * h + 1])) return 0;
   }
   return 1;
 }
 
 static struct slot *slot_of(struct ncclMeshRequest *r, uint64_t start) {
-  if (!start || start > r->starts) return NULL;
-  struct slot *s = r->starts - start < r->nslots ? r->slots + (r->turn + r->nslots - 1 - (uint32_t)(r->starts - start)) % r->nslots : NULL;
-  for (uint32_t k = 0; (!s || s->start != start) && k < r->nslots; k++) s = r->slots + k;
-  return s && s->start == start ? s : NULL;
+  for (uint32_t k = 0; start && k < r->nslots; k++)
+    if (r->slots[k].start == start) return r->slots + k;
+  return NULL;
 }
 
-static ncclResult_t slot_make(struct ncclMeshRequest *r, uint32_t at) {
+static ncclResult_t slot_make(struct ncclMeshRequest *r) {
   struct slot made = {.rows = {.comm = r->comm}};
   size_t offset = 0;
-  ncclResult_t result = (made.ends = calloc(2 * (size_t)r->comm->count + 1, sizeof *made.ends)) ? lease_take(r->comm, r->bytes, &made.pages, &made.buffer, &offset)
+  ncclResult_t result = (made.ends = calloc(2 * (size_t)r->comm->count + 1, sizeof *made.ends)) ? lease_take(r->bytes, &made.pages, &made.buffer, &offset)
                                                                                           : fail(ncclSystemError, "out of memory");
   struct slot *grown = result ? NULL : realloc(r->slots, (r->nslots + 1) * sizeof *grown);
   if (!result && !grown) result = fail(ncclSystemError, "out of memory");
@@ -2827,8 +2702,7 @@ static ncclResult_t slot_make(struct ncclMeshRequest *r, uint32_t at) {
     return result;
   }
   r->slots = grown;
-  memmove(grown + at + 1, grown + at, (r->nslots - at) * sizeof *grown);
-  struct slot *s = grown + at;
+  struct slot *s = grown + r->nslots;
   *s = made;
   s->table = memset((char *)s->pages + r->table, 0, r->bytes - r->table);
   pthread_mutex_lock(&attach_lock);
@@ -2968,7 +2842,6 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
   return ncclSuccess;
 }
 
-
 static void pieces_cut(const struct ncclMeshRequest *r, const size_t *counts, uint64_t *first, uint64_t *length) {
   for (uint32_t x = 0; x < (uint32_t)r->comm->nranks; x++)
     if (r->count[x])
@@ -3007,9 +2880,9 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   ncclResult_t result = met ? ncclMeshComplete(met, on, NULL) : ncclSuccess;
   pthread_mutex_lock(&group_lock);
   sweep(comm, 0, 0);
-  uint32_t k = r->turn, looked = 0;
-  while (!result && looked < r->nslots && ((r->starts && r->slots[k].start == r->starts) || !slot_free(r, r->slots + k))) { k = (k + 1) % r->nslots; looked++; }
-  if (!result && looked == r->nslots) result = slot_make(r, k = r->turn);
+  uint32_t k = 0;
+  while (!result && k < r->nslots && ((r->starts && r->slots[k].start == r->starts) || !slot_free(r, r->slots + k))) k++;
+  if (!result && k == r->nslots) result = slot_make(r);
   for (uint32_t h = 0; h < comm->count && !result; h++)
     for (int list = 0; list < 2 && !result; list++) {
       const uint64_t need = g->end[h][list] - g->start[h][list];
@@ -3082,11 +2955,8 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   t->ready = ready;
   s->start = *start = ++r->starts;
   s->bound = 0;
-  s->unbound = !refused && (ready != 0 || r->relays != 0);
-  for (uint32_t j = 0; refused && j < r->relays; j++) __atomic_store_n(&relay[j].published, relay[j].ready, __ATOMIC_RELEASE);
-  if (refused) __atomic_store_n(&t->published, ready, __ATOMIC_RELEASE);
+  s->unbound = ready != 0 || r->relays != 0;
   comm->unpublished += s->unbound;
-  if (k == r->turn) r->turn = (k + 1) % r->nslots;
   g->ticket = ++tickets;
   if (inflight_last) inflight_last->next_group = g; else inflight = g;
   inflight_last = g;
@@ -3121,7 +2991,6 @@ ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int pu
   pthread_mutex_unlock(&group_lock);
   return result;
 }
-
 
 static uint64_t time_of(const _Atomic uint64_t *ring, uint64_t e) {
   const _Atomic uint64_t *entry = ring + 2 * (e % MESH_STREAM_TIMES);
@@ -3170,8 +3039,6 @@ ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint
   return ncclSuccess;
 }
 
-
-
 const char *ncclMeshMetalPrelude(void) { return metal_prelude(); }
 
 ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
@@ -3190,7 +3057,6 @@ static void *part_run(void *argument) {
   p->said = last;
   return NULL;
 }
-
 
 ncclResult_t ncclGroupEnd(void) {
   if (depth <= 0) return fail(ncclInvalidUsage, "ncclGroupEnd without ncclGroupStart");
@@ -3479,7 +3345,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   const int n = comm->nranks;
   const uint32_t split = comm->splits++;
   struct row { int64_t color, key; struct report report; } mine = {color, key, {.rank = comm->rank}}, *every = calloc((size_t)n, sizeof *every);
-  struct binding { int32_t status, padding; uint64_t posted[MESH_STREAMS][2]; } bound = {0, 0, {{0}}}, *binds = calloc((size_t)n, sizeof *binds);
+  struct binding { int32_t status; } bound = {0}, *binds = calloc((size_t)n, sizeof *binds);
   int *ranks = calloc((size_t)n, sizeof *ranks), count = 0;
   struct report *reports = calloc((size_t)n, sizeof *reports);
 
@@ -3501,12 +3367,7 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
     for (int b = a; b > 0 && every[ranks[b]].key < every[ranks[b - 1]].key; b--) { const int t = ranks[b]; ranks[b] = ranks[b - 1]; ranks[b - 1] = t; }
   if (!result && count) result = comm_sub(comm, ranks, count, split, color, newcomm);
   for (int i = 0; !result && i < count; i++) reports[i] = every[ranks[i]].report;
-  if (!result && count > 1 && comm_apart(reports, (uint32_t)count)) result = apart_fail((*newcomm)->name);
-  if (!result && count > 1) {
-    struct report *own = reports + (*newcomm)->rank;
-    bound.status = comm_hold(*newcomm, reports, own);
-    memcpy(bound.posted, own->posted, sizeof bound.posted);
-  }
+  if (!result && count > 1) bound.status = comm_hold(*newcomm, reports);
   else if (result && count) bound.status = ECANCELED;
   if (gathered) {
     memcpy(rows + (size_t)comm->rank * stride, &bound, sizeof bound);
@@ -3516,7 +3377,6 @@ static ncclResult_t split(ncclComm_t comm, int color, int key, ncclComm_t *newco
   }
   for (int i = 0; !result && i < count; i++)
     if (binds[ranks[i]].status) result = hold_fail((*newcomm)->name, i, binds[ranks[i]].status);
-  for (int i = 0; !result && i < count; i++) memcpy(reports[i].posted, binds[ranks[i]].posted, sizeof reports[i].posted);
   int status = 0;
   if (!result && count > 1 && (status = comm_join(*newcomm, reports)))
     result = fail(ncclSystemError, "communicator %s: its channels on the streams it held: %s", (*newcomm)->name, strerror(status));

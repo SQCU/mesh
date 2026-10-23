@@ -281,14 +281,7 @@ struct metal_result metal_publish(struct metal_program *program, const struct me
 }
 
 struct metal_result metal_stamp(struct metal_program *program, void *words, size_t word) {
-  if (program->encoder4) return dispatch(program, KIND_stamp, words, NULL, NULL, (struct args){.aux = word}, 1, 1);
-  if (!program->buffer) return (struct metal_result){EINVAL, "a stamp on a classic program with no command buffer"};
-  id<MTLBuffer> held = (id<MTLBuffer>)words;
-  [program->buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
-    (void)done;
-    __atomic_fetch_add((uint32_t *)((char *)held.contents + word), 1u, __ATOMIC_RELEASE);
-  }];
-  return METAL_DONE;
+  return dispatch(program, KIND_stamp, words, NULL, NULL, (struct args){.aux = word}, 1, 1);
 }
 
 struct metal_result metal_spin(struct metal_program *program, const struct metal_wait *w) {

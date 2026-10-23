@@ -32,7 +32,7 @@ static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint
 
 static uint32_t mesh_mark(const struct mesh_link_map *map,uint32_t v){ return map->mark?map->mark[v]:v; }
 
-static uint32_t mesh_route_nodes(const struct mesh_link_map *map,uint32_t a,uint32_t b,uint32_t *path){
+uint32_t mesh_route_path(const struct mesh_link_map *map,uint32_t a,uint32_t b,uint32_t *path){
   const uint32_t N=mesh_all(map);
   if(a==b || a>=N || b>=N)return 0;
   if(!map->next){
@@ -55,22 +55,12 @@ static uint32_t mesh_route_nodes(const struct mesh_link_map *map,uint32_t a,uint
   return count;
 }
 
-uint32_t mesh_route_path(const struct mesh_link_map *map,uint32_t a,uint32_t b,uint32_t *path){
-  const uint32_t N=mesh_all(map);
-  if(map->next || a>=N || b>=N || a==b)return mesh_route_nodes(map,a,b,path);
-  struct mesh_link_map with=*map;
-  uint32_t *made=malloc((size_t)N*N*sizeof *made),count=0;
-  if(made && !mesh_routes(map,made)){with.next=made;count=mesh_route_nodes(&with,a,b,path);}
-  free(made);
-  return count;
-}
-
 int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
   const uint32_t n=map->nodes;
   if(map->next){
     uint32_t path[mesh_all(map)+1];
     for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)
-      if(!mesh_route_nodes(map,a,b,path)){
+      if(!mesh_route_path(map,a,b,path)){
         if(apart){apart[0]=a;apart[1]=b;}
         return ENOTCONN;
       }
@@ -98,7 +88,7 @@ int mesh_link_between(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   if(a==b || a>=map->nodes || b>=map->nodes)return 0;
   if(!map->next)return mesh_joins(map,a,b);
   uint32_t path[mesh_all(map)+1];
-  const uint32_t count=mesh_route_nodes(map,a,b,path);
+  const uint32_t count=mesh_route_path(map,a,b,path);
   for(uint32_t i=1;i+1<count;i++)if(path[i]<map->nodes)return 0;
   return count>=2;
 }
@@ -564,7 +554,6 @@ uint32_t mesh_solve(const struct mesh_link_map *map,double eps,double hop,const 
       if(failed)break;
       uint32_t k=0;
       while(k<made && !(demand[k]==d && !memcmp(parent+(size_t)k*n,tree,n*sizeof *tree) && !memcmp(links+(size_t)k*n,treel,n*sizeof *treel)))k++;
-      if(k==made && made==room){failed=1;break;}
       if(k==made){
         demand[made]=d;
         memcpy(parent+(size_t)made*n,tree,n*sizeof *tree);
@@ -648,15 +637,10 @@ void mesh_cut_shares(uint64_t elements,uint32_t element_bytes,uint64_t page,cons
 static int mesh_block_moves(const struct mesh_routing *g,const struct mesh_block *x){
   return x->from!=x->to && x->from<g->nodes && x->to<g->nodes && x->elements;
 }
-static int mesh_block_stray(const struct mesh_routing *g,const struct mesh_block *x){
-  if(x->from>=g->nodes || x->to>=g->nodes)return 1;
-  const size_t p=(size_t)x->from*g->nodes+x->to;
-  return mesh_block_moves(g,x) && g->pair[p]==g->pair[p+1];
-}
 
 static uint32_t mesh_route_size(const struct mesh_routing *g,uint32_t k){ return g->start[k+1]-g->start[k]; }
 uint32_t mesh_block_parts(const struct mesh_routing *g,const struct mesh_block *x,int shortest,uint64_t page,struct mesh_part *parts){
-  if(!mesh_block_moves(g,x) || mesh_block_stray(g,x))return 0;
+  if(!mesh_block_moves(g,x))return 0;
   const size_t p=(size_t)x->from*g->nodes+x->to;
   const uint32_t r0=g->pair[p],r1=g->pair[p+1];
   uint32_t fewest=UINT32_MAX,count=0;
@@ -677,7 +661,7 @@ uint32_t mesh_exchange_room(const struct mesh_routing *g,const struct mesh_block
   uint64_t room=0;
   uint32_t most=0;
   for(uint32_t i=0;i<count;i++){
-    if(!mesh_block_moves(g,blocks+i) || mesh_block_stray(g,blocks+i))continue;
+    if(!mesh_block_moves(g,blocks+i))continue;
     const size_t p=(size_t)blocks[i].from*g->nodes+blocks[i].to;
     const uint32_t routes=g->pair[p+1]-g->pair[p];
     room+=2*(uint64_t)routes;
@@ -689,7 +673,6 @@ uint32_t mesh_exchange_room(const struct mesh_routing *g,const struct mesh_block
 
 uint32_t mesh_exchange_steps(const struct mesh_routing *g,uint32_t rank,const struct mesh_block *blocks,uint32_t count,int pairwise,uint32_t relay,
                              uint64_t page,struct mesh_step *steps,uint32_t *block,uint64_t *relayed){
-  for(uint32_t i=0;i<count;i++)if(mesh_block_stray(g,blocks+i))return UINT32_MAX;
   uint64_t parts=0;
   for(uint32_t i=0;i<count;i++)parts+=mesh_block_moves(g,blocks+i)?g->pair[(size_t)blocks[i].from*g->nodes+blocks[i].to+1]-
                                                                      g->pair[(size_t)blocks[i].from*g->nodes+blocks[i].to]:0;

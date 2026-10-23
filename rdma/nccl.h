@@ -290,12 +290,6 @@ ncclResult_t pncclCommCuDevice(const ncclComm_t comm, int* device);
 ncclResult_t  ncclCommUserRank(const ncclComm_t comm, int* rank);
 ncclResult_t pncclCommUserRank(const ncclComm_t comm, int* rank);
 
-ncclResult_t  ncclCommRegister(const ncclComm_t comm, void* buff, size_t size, void** handle);
-ncclResult_t pncclCommRegister(const ncclComm_t comm, void* buff, size_t size, void** handle);
-
-ncclResult_t  ncclCommDeregister(const ncclComm_t comm, void* handle);
-ncclResult_t pncclCommDeregister(const ncclComm_t comm, void* handle);
-
 typedef enum { ncclNumOps_dummy = 5 } ncclRedOp_dummy_t;
 typedef enum { ncclSum        = 0,
                ncclProd       = 1,
