@@ -39,9 +39,9 @@ interfaces" (682).
 | M1 | The bridge's scope | the form whose bridge does fewer kinds of work | 133 |
 | M2 | Messages about messages | the form in which less of what crosses a link describes other traffic | 150 |
 | M3 | States and their exits | the form in which more of the reachable states have a transition to off, taken on a signal from outside, and which has fewer states that exist only to wait | 164 |
-| M4 | Containment | the form in which a failure's effects stay with the party that failed, and in which no mechanism is added to survive someone else's failure | 196 |
-| M5 | Mediation | the form in which clients can name less of the device and the bridge decides more of what goes where | 221 |
-| M6 | Recovery without people | the form that gets back to serving after a loss with fewer parties involved and less downtime | 239 |
+| M4 | Containment | the form in which a failure's effects stay with the party that failed, and in which no mechanism is added to survive someone else's failure | 197 |
+| M5 | Mediation | the form in which clients can name less of the device and the bridge decides more of what goes where | 222 |
+| M6 | Recovery without people | the form that gets back to serving after a loss with fewer parties involved and less downtime | 240 |
 | M7 | Memory commitment | the form that commits registrations earlier and changes address translation less while DMA is live | 264 |
 | M8 | The hot path | the form with fewer steps between a client's supplied buffer and the link | 274 |
 | M9 | Addressing | the form that uses what the bridge already knows about where each buffer goes, instead of reconstructing it at run time | 287 |

@@ -189,9 +189,10 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
     another party's action lifts) ≺ every wait ending in finite time: "it is your own responsibility to write code which
     doesn't stallblock unboundedly. semaphores allow all waits in all programs to termiante in finite time, e.g. 0.1ms
     or 5s. it is your own choice to not use semaphores in potentially infinite waits, a hcoice which the literal rubric
-    was written to emphasize as an exercise of decision, and a poor discretion wherever it happens" (10-20).  A wait
-    that spins and reads a stop flag ends when the flag is set (M8, C4 rank its parking lower); what this ranks lowest
-    is a wait nothing can end.
+    was written to emphasize as an exercise of decision, and a poor discretion wherever it happens" (10-20);
+  - of forms with every wait ending in finite time, a write that asks first (three waits) or lands with a header (two)
+    ≺ a write posted ahead, whose one wait is on its own landing (design/data-model.md section 5, "What each kind of
+    write waits for").
 
 **M4. Containment.**
 - Ranks higher: the form in which a failure's effects stay with the party that failed, and in which no mechanism is added
@@ -247,17 +248,16 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
   (10-18).
 - Ranked:
   - keyboard and monitor on the Mini ≺ "100% remote administrable" (10-15);
-  - asking for administrative actions ≺ "services always respect shutdown isgnals no matter what state" (10-18);
-  - a link lost after it connected staying down until a person relaunches the bridge (version 129) ≺ the port's child
-    ending once its quiet window has passed and the next child pairing the link again (version 130, transport.md
-    section 14): "this violates some of the first mandates ever written into this codebase's documentation, which
-    cover reconnection of existing bridges or mesh applications as the first basic requirement for mesh networking
-    code. bridges might die, collective clients might die, data procesing clients might die, but all of these and any
-    of these are not contagious to other sections in the same data flow. e.g. a bridge crashing on a computer two hops
-    down should result in the bridge being restarted, not crashing again of course, and becoming available again as a
-    resource for collectives with nothing but an error channel indicating that calls-in-flight failed and ought to be
-    retried" (10-20); "when the machine is back it is back, and the fact that it is gone is not very meaningful"
-    (10-20), "making the code work is some implicit zeroeth law that stands above all other laws" (10-20).
+  - asking for administrative actions ≺ "services always respect shutdown isgnals no matter what state" (10-18).
+- Also, of a link lost after it connected staying down until a person relaunched the bridge (version 129): "this
+  violates some of the first mandates ever written into this codebase's documentation, which cover reconnection of
+  existing bridges or mesh applications as the first basic requirement for mesh networking code. bridges might die,
+  collective clients might die, data procesing clients might die, but all of these and any of these are not contagious
+  to other sections in the same data flow. e.g. a bridge crashing on a computer two hops down should result in the
+  bridge being restarted, not crashing again of course, and becoming available again as a resource for collectives with
+  nothing but an error channel indicating that calls-in-flight failed and ought to be retried" (10-20); "when the
+  machine is back it is back, and the fact that it is gone is not very meaningful" (10-20), "making the code work is
+  some implicit zeroeth law that stands above all other laws" (10-20).
 
 ### Fine-grained
 
@@ -736,8 +736,7 @@ The positions, in every kind, as ranked pairs:
 
    Ranked: a deliberate stop that leaves memory held until reboot ≺ a release that frees it; launchd relaunching a
    stopped bridge ≺ a heartbeat that closes it and keeps it closed; a bridge ending its clients for a region change ≺
-   clients that receive the expiry as a value and let go; a restart policy of one second ≺ one bridge start a minute at
-   most (REOPEN_S).
+   clients that receive the expiry as a value and let go.
 
 ## Strings are messages
 
@@ -876,14 +875,9 @@ a numeric constant or a typed operand; logging on a change found by comparing st
 - **M3:** the deleted kill guard ≺ HEAD after its deletion.
 - **C1:** libnccl-mesh exporting its own Metal functions and including the planner in nccl.h ≺ HEAD's ABI of NCCL's
   functions, their twins and its extensions (5312f9b2).
-- **C2, C7:** one communicator a node pair (version 128 with 287795f5: a second toward a node refused, EBUSY, as
-  metal-microbench's rank process makes beside its standing group) ≺ HEAD's four streams a link (version 129), each
-  communicator holding its own toward each member's node, taken by the identity free at both ends, as v127's four lane
-  pairs a link allowed without its binding.
 - **C6, M8 (10-20):** communicators made again every call (metal-microbench 906726c, 21–34 ms a call) ≺ communicators
   kept for as long as they work, a failed one reporting its failure through `ncclCommGetAsyncError` and made again
-  between calls: "1% overhead is not acceptable" (10-20). C6's lower pole is state the next call must repair, not
-  persistence.
+  between calls: "1% overhead is not acceptable" (10-20).
 - **D7:** goal_a.swift reading its bridge's records to find its node ≺ the host's own name (metal-microbench 5e95b12);
   mesh_rank.m asking libnccl-mesh for its node's fabric address ≺ the configured fabric address that binds here
   (configs/driver.json and bind(2)); rank.swift polling `ncclMeshMemLive` each second, and timing init waits by
