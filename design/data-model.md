@@ -109,12 +109,42 @@ than a Mini's own SSD. On an InfiniBand fat tree a remote node is one NIC hop an
 memory beats local NVMe there too (Infiniswap, NSDI 2017). On the Mac mesh each node is itself the switch. So each hop
 adds its own few µs, and 20 hops are still faster than one random NVMe read.
 
-**3. One-sided writes are faster than two-sided writes that run a protocol at run time.** A one-sided write puts bytes
-where the receiver already said they go, and nobody answers. A protocol adds a request, an answer, a header or a lookup
-to each move. Each of those is another trip or another pass over memory. The Thunderbolt driver only has SEND and RECV.
-But when every receive is posted ahead, in an order both ends fixed, a SEND lands like a one-sided write. Nothing on the
+**3. One-sided writes are faster than two-sided writes that run a protocol at run time.** A one-sided write needs 1. It
+puts bytes in a page that the receiver named before the call, in the table both ends hold, and nobody answers. Without
+that table there is no page to name, so there is no one-sided write. InfiniBand's RDMA WRITE is the same: the sender
+must hold the receiver's address and key before it writes (IBTA). The Thunderbolt driver only has SEND and RECV. But
+when every receive is posted ahead, in an order both ends fixed, a SEND lands like a one-sided write. Nothing on the
 receiving side decides anything at run time. That holds only while every hop stays preposted and one-way, whatever else
 changes.
+
+**What each kind of write waits for.** Take one page going from node A to node B, where B's next step needs it. B can't
+place the bytes before it knows where they go. It learns that before the call, from the table, or during the call, over
+the same cable. There are three ways to write the page.
+
+- Posted ahead. B posted a receive at the page before the call. A sends. The bytes cross once and land in the page. B
+  sees them on its next poll.
+- Asking first. A sends a request. B sees it, picks a page, posts a receive there and sends an answer. A sees the answer
+  and sends. The bytes cross, and B sees them. The request and the answer each land in a receive posted ahead, so this
+  form needs 1 as well.
+- Landing with a header. A sends a header and the bytes into a staging receive that B posted ahead. B sees them, reads
+  the header and picks a page. It copies the bytes there, and B's next step waits for the copy.
+
+| Write | Crossings | Waits | Choices at run time | Passes over the bytes |
+|---|---|---|---|---|
+| Posted ahead | 1 | 1 | 0 | 1 |
+| Asking first | 3 or more | 3 | 1, and a receive posted then | 1 |
+| Landing with a header | 1 | 2 | 1 | 3 |
+
+On this hardware a crossing lands about 3.6 µs after its post, and a poll sees it 0.58 µs later (sections 1 and 2). So
+a write posted ahead takes about 4.2 µs. Asking first takes three of those, about 12.6 µs, before B's choice and its
+post. A copy on the GPU adds a dispatch, 0.9-1.4 µs, or a command buffer, 13.7-18.7 µs, and moves the bytes twice more.
+Measured, a 3 KB crossing took 11.7 µs in a fixed order and 24.1 µs with a choice and a copy (section 4). Every hop of
+every step pays its row again.
+
+**Why this is the hardware, not a choice.** No write can put bytes in a page before B knows the page. If B learns it
+during the call, that fact must cross the cable too, or the bytes must move again after they land. Each crossing and
+each pass costs what sections 1-3 measured. Faster parts make each one cheaper, but they don't change how many there
+are. That count is the same on InfiniBand and sm90 as here.
 
 **What this makes of a collective here.** On sm90 a collective pays HBM transactions, PCIe and BAR hops, and the
 congested split L2 at every step (section 1). A Mac node has none of these between its memory and its cable. So every
