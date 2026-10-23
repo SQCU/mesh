@@ -77,8 +77,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 
 Dtypes follow ProcessGroupNCCL's: a collective that moves data moves any dtype (one NCCL lacks as its bytes); a
 reduction reduces a complex tensor as its real view (sum and average alone) and a bool tensor's sum and product as max
-and min (its average the library's uint8 average). An operand is contiguous; a non-contiguous one fails as a value,
-since nothing is copied to make it one. A functional collective (`_c10d_functional`, what DTensor and a compiled graph
+and min (its average the library's uint8 average). A non-contiguous operand fails as a value (`_stream.mm`
+`contiguous`). A functional collective (`_c10d_functional`, what DTensor and a compiled graph
 call) on MPS tensors is a kernel for the MPS dispatch key in `_stream.mm` that issues its group directly, its
 communicator found by the group with no Python between; a group the backend does not hold takes torch's own kernel. Its
 result is a region tensor, issued and not completed where it is its own operand (torch's `wait_tensor` waits for it).
@@ -121,14 +121,15 @@ has synchronized torch's stream.
 | ring attention | `partition.ring_attention` on capacity blocks (equal parts: torch's equal shards), and SDPA on a `RaggedShard` of the sequence, forward only, in place of `context_parallel`: split-KV partials merged by the library (below) |
 | partials merge | `torch_mesh.merge_partials(out, lse, group)`: each member's attention over its own keys merged into the attention over all of them (the operator `torch_mesh::merge_partials`, below) |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
-| expert parallelism | all_to_all_single; `torch_mesh.all_to_all_counted` with counts the GPU wrote, and `partition.routed`, the experts a partition's units (below) |
+| expert parallelism | all_to_all_single |
 
 ### Counted all-to-all
 
 `all_to_all_single` takes its splits as host lists, so a mixture of experts' dispatch reads the router's counts on the
 host first (a sync). `torch_mesh.all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group)` is
-MPI_Alltoallv whose counts the GPU wrote (the operator `torch_mesh::all_to_all_counted` over libnccl-mesh's
-`ncclMeshAlltoAllCounted`, [NCCL.md](../NCCL.md)): `input`'s rows grouped by destination, as many to rank q as segment
+the operator `torch_mesh::all_to_all_counted` over libnccl-mesh's `ncclMeshAlltoAllCounted`, which the library returns
+as `ncclInvalidUsage` ([NCCL.md](../NCCL.md), Counted all-to-all); so does `partition.routed` below, which calls it.
+Its form, MPI_Alltoallv whose counts the GPU wrote: `input`'s rows grouped by destination, as many to rank q as segment
 q of `counts` (int64 on the input's device, `send_segments[q]` entries) sums to; each rank's segment for this rank moves
 with its rows in one exchange, received packed in rank order into `capacity` rows. It returns `(rows, landed, handle,
 work)`: `landed` the received counts on the GPU once `work.wait()` has ordered the call on torch's stream, and

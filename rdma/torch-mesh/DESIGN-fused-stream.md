@@ -36,8 +36,9 @@ staging buffer. `mesh_leave` stores the landed slot's stamp once the last worker
 
 **Stage 2 of step t publishes start t.** The `Summand` epilogue stores the part through `mesh_send` (system-coherent),
 each worker its own columns, into the slot's own pages: the bridge sends those pages, nothing copied. `mesh_leave`:
-each worker fences and counts its arrival, and the last to arrive stores each peer's `ready` after one system-scope
-fence and zeroes the count for the slot's next use. No worker waits for another to publish.
+each worker fences and counts its arrival, and the last to arrive stores each peer's `published` (the word that peer's
+send entry waits on) after one system-scope fence, counts the kernel's end in the slot's table, and zeroes the count of
+arrivals for the slot's next use. No worker waits for another to publish.
 
 Start t + 1 lands in other pages than start t whenever start t's are still held: no landing tensor is reused while a
 kernel may read it, and no send part while the NIC may read it. The kernel carries no guard and no binding of its own.

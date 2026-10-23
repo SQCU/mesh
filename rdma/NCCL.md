@@ -654,9 +654,10 @@ Porting:
   lands them in the pages they belong in: a COPY lands in its destination, and a combine lands in a landing area of the
   communicator's and is combined from there. Each step is one entry, a range of page-table rows (`struct mesh_entry`),
   so it starts on a page by construction: nothing in the transport is a byte offset. Each SEND is one whole page with
-  one SGE (`max_sge` is 1). The bridge registers the region in extents of `MESH_EXTENT` (1 GiB, its own choice) inside
-  the 4 GiB banks no registration may cross (`tbt_post_recv` keeps only an address's low 32 bits:
-  `rdma/mesh-verbs.h`), so no page crosses an extent. So:
+  one SGE (`max_sge` is 1). The bridge registers the region in extents of 2^k bytes, the least power of two at which
+  the region's extents number no more than the device's `max_mr` (1 GiB on the Studios' 86 GiB under max_mr 100;
+  design/transport.md, The registered region), each inside one of the 4 GiB banks no registration may cross
+  (`tbt_post_recv` keeps only an address's low 32 bits: `rdma/mesh-verbs.h`), so no page crosses an extent. So:
   - every crossing call's send buffer, and every buffer it sends from or lands in, is a lease's (in this node's region);
   - every piece starts on a page;
   - the program's own cuts lie on pages (`mesh_program_steps_cut`).
