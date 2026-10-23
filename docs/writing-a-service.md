@@ -166,14 +166,25 @@ by speed. A measurement of the sampled shapes checks the rules; it is never read
 - **Tiles.** Columns and rows come in tiles of the matrix unit's edge (8 on Apple7 and later), so the width, the share
   and the row count must be positive multiples of it.
 - **Workers.** G is half the GPU's cores, or the larger stage's column tiles where there are fewer. The workers wait
-  for each other at their stamps, so all G must be on the GPU at once. Measured on 2026-10-23 (metal-microbench
-  output_data/rank0-20261023), not explained:
-  - With G at all 16 of the Mini's cores, a step stopped for 15 to 90 ms several times a second. G at 15 and at 12
-    did the same, and G at 8 never did.
-  - A step's time was otherwise unchanged. The three-node chain's steady figure counts these stops: 31, 44 or 57 us a
-    step for none, one or two in its window. With half the cores on every node, six runs of the service read 28.3 to
-    30.0 us, against the record's 31.24, with outputs within the record's bound.
-  - On the Studios, 32 workers run the two-Studio chain as fast as 64 (28.6 to 30.1 us, against 29.0 to 29.9).
+  for each other at their stamps, so a step runs only while all G are on the GPU. Other processes' GPU work shares
+  the GPU with it. Measured 2026-10-23 (metal-microbench output_data/rank0-20261023):
+  - The GPUs come in partitions of 8 cores (ioreg `GPUConfigurationVariable`: `num_mgpus` and `core_mask_list`). The
+    Mini's 16 cores are 2 partitions, and a Studio's 64 cores are 8.
+  - With nothing of ours running, other GPU work comes in bursts. On the Mini, a burst lasts up to 90 ms, several
+    times a second. On m5ult1, each burst is under 10 ms, ten times a second.
+  - With G at 16, 15 or 12 on the Mini, so on both of its partitions, a step stopped for 15 to 90 ms several times a
+    second. With G at 8, so on one partition, it never did.
+  - The same showed when other kernels spun on the Mini's GPU (2026-10-23 14:37-14:43): at G 16 a step took about
+    580 us, and at G 8 it took 31.
+  - On m5ult1, a second process's small kernels beside 64 spinning workers waited at most 1.5 ms. On the Mini, beside
+    12 or 16, a few waited 0.1 to 2.5 s.
+
+  So on the Mini a step on every partition waits whenever other work takes the GPU, while a step that leaves one
+  partition free runs beside that work. Half the cores leaves one of the Mini's two partitions free. On a Studio,
+  32 is the largest power of two that leaves a partition free, so the width's 128 tiles divide evenly. In 15
+  interleaved pairs, the two-Studio chain averaged 28.8 us at 32 workers and 29.1 at 64. In 4 pairs after the Mini's
+  restart, the three-node chain read 28.9 to 29.6 us at half the cores and 30.0 to 31.3 at all of them. The LSTM's
+  workers do not wait for each other (below), so its G stays at the cores.
 
   Each worker takes a fair share of a stage's tiles: n/G rounded down, the first few one more. y's columns over the
   share are split this way, and so are z's columns over the width. Where a stage has fewer tiles than workers, the
