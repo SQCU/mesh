@@ -63,10 +63,6 @@ place; the reduce-scatter's input (where it does not lie in the region already, 
 gathered queries and its partials; so the library reads what they send where it lies.  Elsewhere, and where the region
 refuses a lease, torch's own memory.
 
-A routed partition (routed): a mixture of experts' experts as a partition's units, each token's rows sent to the ranks
-holding their experts and back by one all-to-all at the program's extents (torch_mesh.all_to_all), the rows' experts
-crossing beside them as data, the slots past a rank's part receiving none.
-
 Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
 - torch.library.custom_op with register_fake and register_autograd: torch_mesh::remask, pack, unpack, allgatherv,
   reduce_scatterv.
@@ -1245,58 +1241,6 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     group.merge_partials(merged, packed, rows)
     out, lse = attention(merged.view(lead + (lengths[rank], width)))
     return out.to(query.dtype), lse
-
-
-def routed(mesh, name, x, experts, slots):
-    """A routed range partition (a mixture of experts' expert parallelism): partitioned mesh dimension `name`'s units are
-    experts, rank r holding capacity[r] slots, the first parts[r] of them experts off_r.. (off_r the parts before it)
-    and the rest receiving no rows; `x` this rank's rows (T x D), `experts` each row's experts (T x K, int64), `slots`
-    this rank's capacity[r] callables, slot j's rows to it.  Each (row, k) crosses to its expert's rank and back by one
-    all-to-all at the program's extents (torch_mesh.all_to_all): every pair's block T K rows, the most a rank can send
-    another, every rank passing the same T K, so the plan is compiled once at those extents.  The rows' experts cross
-    in a block of their own beside them, -1 past the rows sent, and the expert's rank reads them: how much of a block a
-    step fills is data in its pages, not a count the collective learns.  Returns each (row, k)'s expert output
-    (T x K x D), to be weighted and summed by the caller.  Its blocks lie in region tensors (torch_mesh.empty), made at
-    their first use and kept."""
-    from . import all_to_all
-    o, group = operand(mesh, name), mesh.get_group(name)
-    rank, world, flat = mesh.get_local_rank(name), len(o.capacity), experts.flatten()
-    extent, width, parts = flat.numel(), x.shape[1], o.parts.to(x.device)
-    ends = parts.cumsum(0)
-    owner = torch.searchsorted(ends, flat, right=True)
-    order = owner.argsort(stable=True)
-    count = torch.bincount(owner, minlength=world)
-    position = owner[order] * extent + torch.arange(extent, device=x.device) - (count.cumsum(0) - count)[owner[order]]
-    tags = flat.view(-1, 1)
-    sent, ids = _routing(o.key, 'dispatched', world * extent, x), _routing(o.key, 'experts', world * extent, tags).view(-1)
-    received, got = _routing(o.key, 'received', world * extent, x), _routing(o.key, 'received experts', world * extent, tags).view(-1)
-    sent[position] = x[order // experts.shape[1]]
-    ids.fill_(-1)
-    ids[position] = flat[order]
-    all_to_all(received, sent, [extent * width] * world ** 2, group).wait()
-    all_to_all(got, ids, [extent] * world ** 2, group).wait()
-    results, back = _routing(o.key, 'results', world * extent, x), _routing(o.key, 'back', world * extent, x)
-    first = int(ends[rank] - parts[rank])
-    for j, slot in enumerate(slots[:int(parts[rank])]):
-        rows = (got == first + j).nonzero().flatten()
-        if rows.numel():
-            results[rows] = slot(received[rows])
-    all_to_all(back, results, [extent * width] * world ** 2, group).wait()
-    out = torch.empty(extent, width, dtype=x.dtype, device=x.device)
-    out[order] = back[position]
-    return out.view(*experts.shape, -1)
-
-
-_ROUTING = {}
-
-
-def _routing(key, what, rows, like):
-    """A routed partition's region tensor of `rows` rows like `like`, made at its first use (torch_mesh.empty)."""
-    from . import empty
-    at = (key, what, rows, like.shape[1:], like.dtype, like.device.type)
-    if at not in _ROUTING:
-        _ROUTING[at] = empty(rows, *like.shape[1:], dtype=like.dtype, device=like.device.type)
-    return _ROUTING[at]
 
 
 _BALANCING = {}

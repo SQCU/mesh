@@ -489,10 +489,6 @@ ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* counts, void*
 
 ncclResult_t ncclMeshGroupPairs(const int* from, const int* to, const size_t* bytes, int count, ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
-                                     size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,
-                                     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
-
 ncclResult_t ncclMeshRedOpCreatePartials(ncclRedOp_t* op, size_t dim, ncclDataType_t datatype, ncclComm_t comm);
 
 #ifdef __cplusplus

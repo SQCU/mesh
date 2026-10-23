@@ -191,7 +191,7 @@ static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)com
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
 
-enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, COUNTED, PAIRS };
+enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, PAIRS };
 using Tensors = std::vector<std::optional<at::Tensor>>;
 using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t, int64_t>;
 
@@ -237,8 +237,6 @@ struct Issue {
   int64_t kind, op, root;
   std::vector<Operand> sends, receives;
   std::vector<size_t> counts;
-  size_t rows = 0, capacity = 0, row = 0;
-  void *words = nullptr;
 };
 
 static Issue prepare(const Call &call, Group &g) {
@@ -275,22 +273,6 @@ static Issue prepare(const Call &call, Group &g) {
   case SEND: i.sends = {g.moving(tensor(sends, 0))}; break;
   case RECV: i.receives = {g.moving(tensor(receives, 0))}; break;
   case PAIRS: i.counts.assign(counts.begin(), counts.end()); break;
-  case COUNTED: {
-    const at::Tensor &input = tensor(sends, 0), &output = tensor(receives, 0), &host = tensor(receives, 2);
-    TORCH_CHECK(tensor(sends, 1).scalar_type() == at::kLong && tensor(receives, 1).scalar_type() == at::kLong, "all_to_all_counted: counts are int64");
-    TORCH_CHECK(host.is_cpu() && host.is_contiguous() && host.scalar_type() == at::kLong,
-                "all_to_all_counted: host counts are a contiguous CPU int64 tensor");
-    i.sends = {g.moving(input), g.moving(tensor(sends, 1))};
-    i.receives = {g.moving(output), g.moving(tensor(receives, 1))};
-    i.words = host.data_ptr();
-    int64_t width = 1;
-    for (int64_t d = 1; d < input.dim(); d++) width *= input.size(d);
-    i.row = (size_t)width * (kind(input.scalar_type()) == ncclNumTypes ? input.element_size() : 1);
-    i.rows = input.dim() ? (size_t)input.size(0) : 0;
-    i.capacity = output.dim() ? (size_t)output.size(0) : 0;
-    i.counts.assign(counts.begin(), counts.end());
-    break;
-  }
   default: TORCH_CHECK(false, "no collective of kind ", what);
   }
   return i;
@@ -322,13 +304,6 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
       break;
     }
     case RECV: result = ncclRecv(b, i.receives[0].count, i.receives[0].type, (int)i.root, comm, s); break;
-    case COUNTED: {
-      int64_t *words = (int64_t *)i.words;
-      const size_t n = i.counts.size() / 2;
-      result = ncclMeshAlltoAllCounted(a.at, i.rows, (const int64_t *)i.sends[1].at, i.counts.data(), b, i.capacity, words + 1,
-                                       (int64_t *)i.receives[1].at, i.counts.data() + n, (uint64_t *)words, i.row, a.type, comm, s);
-      break;
-    }
     }
   }
   const ncclResult_t ended = ncclGroupEnd();
@@ -340,7 +315,7 @@ static uint64_t issue(const std::vector<Call> &calls, int64_t comm, bool split, 
   for (const Call &c : calls)
     for (const Tensors *list : {&std::get<1>(c), &std::get<2>(c)})
       for (size_t k = 0; k < list->size(); k++)
-        g.metal |= (*list)[k] && (*list)[k]->is_mps() && !(std::get<0>(c) == COUNTED && list == &std::get<2>(c) && k == 2);
+        g.metal |= (*list)[k] && (*list)[k]->is_mps();
   std::vector<Issue> issues;
   for (const Call &c : calls) issues.push_back(prepare(c, g));
   uint64_t ticket = 0;

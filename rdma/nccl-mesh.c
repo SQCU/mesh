@@ -3378,18 +3378,6 @@ ncclResult_t ncclMeshReduceScatterV(const void *sendbuff, void *recvbuff, const 
                                       .stream = stream}, counts);
 }
 
-ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff, size_t sendrows, const int64_t *counts, const size_t *sendsegs, void *recvbuff,
-                                     size_t capacity, int64_t *received, int64_t *landed, const size_t *recvsegs, uint64_t *arrived, size_t row,
-                                     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
-  (void)sendbuff; (void)sendrows; (void)counts; (void)sendsegs; (void)recvbuff; (void)capacity; (void)received; (void)landed; (void)recvsegs;
-  (void)row; (void)datatype; (void)stream;
-  if (arrived) __atomic_store_n(arrived, 2, __ATOMIC_RELEASE);
-  return fail(ncclInvalidUsage, "ncclMeshAlltoAllCounted%s%s: its rows' places are computed on the GPU from its counts, so none of them can be an "
-              "entry the host presents (a page's first byte and its bytes): they would cross only through a copy, which this library never "
-              "makes; ncclMeshAlltoAllV moves rows whose counts the host holds, each pair's segment from a page", comm ? " on communicator " : "",
-              comm ? comm->name : "");
-}
-
 ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
   return enqueue((struct call){.what = WHAT_SEND, .peer = peer, .send = sendbuff, .count = count, .type = datatype, .comm = comm, .stream = stream});
 }

@@ -178,15 +178,6 @@ program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) 
 the caller's first program of its collective (and root) whose size bound its operand is under, else its plan's. Nothing
 about a program is decided where a plan restarts.
 
-**Counted all-to-all.** `ncclMeshAlltoAllCounted(send, sendrows, counts, sendsegs, recv, capacity, received, landed,
-recvsegs, arrived, row, type, comm, stream)`, MPI_Alltoallv whose counts the GPU wrote, is refused as a value
-(`ncclInvalidUsage`, `*arrived` 2). Its rows' places in the send and receive buffers are computed on the GPU from its
-counts, and a crossing's bytes are entries the host presents (a range of page-table rows, counted in pages), so its
-rows could cross only through a copy into pages the host knows, which the library never makes (the operator, 2026-10-21: "zero
-copy methods must always be used over access by copy"; "code which can't perform well can fail instead of being run").
-It last ran on the rings (mesh fba2af36^: ep at 27.5-27.7 ms a step, metal-microbench docs/measurement.md 2026-09-30
-part B). Rows whose counts the host holds move with `ncclMeshAlltoAllV`.
-
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, counts, recv, type, comm, stream)` is MPI_Alltoallv with
 its counts on the host, every member passing the same matrix: `counts[a x nranks + b]` elements go from rank a to rank
 b, packed in rank order in a's send buffer and in b's receive buffer (a rank's own block, `counts[r x nranks + r]`, is
@@ -194,8 +185,8 @@ copied). MPI_Alltoallv takes each rank's own `sendcounts` and `recvcounts`, a ro
 every member passes the whole n x n matrix, so that every member plans every block (design/rubrics.md C7, at a C1
 cost). A program ported from MPI holds its own row and column; an SPMD program holds the matrix; torch-mesh, which is
 given torch's per-rank splits, fails such a call as a value and takes the matrix in `torch_mesh.all_to_all`, from the
-compiled program (its configuration's shapes and shares; a routed program's maximum extents, how much of a block a
-step fills being data in its pages). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
+compiled program (its configuration's shapes and shares, a program's maximum extents, how much of a block a step
+fills being data in its pages). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
 every count `count`, and `ncclGather` and `ncclScatter` its rooted forms (every count 0 but toward or from the root),
 where they were each rank's sends and receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). Every member
 knows every block of the four, so they run along the communicator's routing table, each block cut among its pair's

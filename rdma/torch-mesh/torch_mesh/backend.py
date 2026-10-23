@@ -1,5 +1,4 @@
 import math
-import os
 
 import torch
 import torch.distributed as dist
@@ -13,7 +12,7 @@ import mesh
 ffi, LIB = mesh.ffi, mesh.lib
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
-ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, COUNTED, PAIRS = range(10)
+ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, PAIRS = range(9)
 
 
 def check(result):
@@ -260,10 +259,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def recv(self, tensors, src, tag):
         return self._issue([(RECV, [], [t], [], 0, src) for t in tensors], tensors, True)
 
-    def all_to_all_counted(self, out, input, counts, sends, receives, host, landed):
-        return self._issue([(COUNTED, [input, counts], [out, landed, host], [*sends, *receives], 0, 0)], [out, landed], True,
-                           registered=out)
-
     def merge_partials(self, out, partials, rows=None, root=-1, async_op=False):
         width = partials.shape[-1]
         if width not in self._operators:
@@ -295,21 +290,6 @@ def _mesh(group_name, what):
     return group
 
 
-@torch.library.custom_op('torch_mesh::all_to_all_counted', mutates_args=('host',))
-def all_to_all_counted(input: torch.Tensor, counts: torch.Tensor, send_segments: list[int], recv_segments: list[int], capacity: int,
-                       host: torch.Tensor, group_name: str) -> tuple[torch.Tensor, torch.Tensor]:
-    group = _mesh(group_name, 'all_to_all_counted')
-    out = torch.empty((capacity,) + tuple(input.shape[1:]), dtype=input.dtype, device=input.device)
-    landed = torch.empty(sum(recv_segments), dtype=torch.int64, device=input.device)
-    group.all_to_all_counted(out, input.contiguous(), counts.contiguous(), send_segments, recv_segments, host, landed)
-    return out, landed
-
-
-@all_to_all_counted.register_fake
-def _(input, counts, send_segments, recv_segments, capacity, host, group_name):
-    return input.new_empty((capacity,) + tuple(input.shape[1:])), counts.new_empty(sum(recv_segments))
-
-
 @torch.library.custom_op('torch_mesh::merge_partials', mutates_args=())
 def merge_partials(partials: torch.Tensor, root: int, group_name: str) -> torch.Tensor:
     out = blank(partials.shape, partials.dtype, partials.device)
@@ -320,20 +300,6 @@ def merge_partials(partials: torch.Tensor, root: int, group_name: str) -> torch.
 @merge_partials.register_fake
 def _(partials, root, group_name):
     return torch.empty_like(partials)
-
-
-def counted(host, group):
-    _stream.commit()
-    word, error = ffi.cast('uint64_t *', host.data_ptr()), ffi.new('ncclResult_t *')
-    while not word[0]:
-        check(LIB.ncclCommGetAsyncError(group.comm, error))
-        check(error[0])
-        os.sched_yield()
-    if word[0] != 1:
-        check(LIB.ncclCommGetAsyncError(group.comm, error))
-        check(error[0])
-        raise RuntimeError('libnccl-mesh: all_to_all_counted failed before its counts arrived (its wait raises why)')
-    return host[1:].tolist()
 
 
 def create(opts, options):
