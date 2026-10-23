@@ -280,40 +280,29 @@ ends, and no wait is added to take the time. The whole-run times include the fir
 
 ## The LSTM
 
-The same template runs an L-layer LSTM (examples/lstm.metal, lstm.py, lstm-service.py). Each step, layer l takes
-u = [v, h_l(t - 1)], where v is the step's input for layer 0 and h_{l-1}(t) above it. It makes the gates z = u W_l + b_l,
+The LSTM (examples/lstm.py, lstm-service.py) is a program on torch-mesh's tensor-parallel backend
+([rdma/torch-mesh/torch_mesh/partition.py](../rdma/torch-mesh/torch_mesh/partition.py)) over the mesh backend of
+torch.distributed. It holds the math. Everything that crosses ranks is the library's. Each step, layer l takes
+u = [v, h_l(t - 1)], where v is the step's input for layer 0 and h_{l-1}(t) above it. It makes the gates z = u W_lᵀ + b_l,
 split as (i, f, g, o), then c_l = σ(f) c_l + σ(i) tanh(g) and h_l = σ(o) tanh(c_l). The output is the top layer's h.
 
 **Wavefront.** At tick s, layer l works on step s - l. Everything it reads was made at tick s - 1: h_{l-1}(s - l) by
-the layer below and h_l(s - l - 1) by itself. So one crossing a tick carries every layer, a tick depends only on the
-tick before, and the kernel needs no barrier between its workers. An output leaves L ticks after its input.
+the layer below and h_l(s - l - 1) by itself. So one gather a tick carries every layer, and an output leaves L ticks
+after its input.
 
-**Split.** Each rank owns a share of every layer's hidden units: their 4 gate columns of W_l, their bias, and their
-cell state, which never leaves the rank. The shares are configuration (`shares`) and may be ragged. A tick's crossing
-sends the rank's new h slices, every layer's, to each peer, and lands each peer's slices: an all-gather, through the
-same `fused.exchange` the chain sums over. This is Megatron's split of a cell by hidden unit. Splitting by input rows
-instead, with an all-reduce of gate partials, would send about 4n times as many bytes and repeat the cell update on
-every rank.
+**Split.** The hidden units are the mesh dimension `tp`, attached with the backend (`partition.attach`), and each
+rank's block of them is the backend's (`partition.split`), never the configuration's. A rank holds its units' gate rows
+of W_l and b_l, unit-major, as a ragged shard (`RaggedShard(0)`: torch's column-parallel split of a linear layer), and
+its units' cell state, which never leaves the rank. The gate product is torch's linear on the replicated u and the
+sharded weights, so the backend's dispatch gives each rank its own gate columns. The new h slices of every layer are
+then one ragged tensor (`RaggedShard(2)`), and `full_tensor()` gathers them to every rank: the backend's allgatherv,
+one crossing a tick. This is Megatron's split of a cell by hidden unit.
 
-**Reads in place.** A layer's u is never assembled. Its columns are segments read where they are: the input slot, this
-rank's previous send slot, and each peer's landing slot. They are in rank order, each a whole number of 8-column tiles.
-The matmul's loader (`Segments`) finds a tile's segment and loads each lane's two fragment elements system-coherent
-(the NIC wrote the landings). The weights are tiled once at load, and their gate columns are laid out unit-major, so an
-8-column tile holds two units' (i, f, g, o).
-
-**Epilogue.** A lane holds (i, f) or (g, o) of one unit and row. One `simd_shuffle_xor` pairs them, and the (i, f) lane
-updates c and stores h through `mesh_step_write` into the tick's send slot. A layer that has not started (s < l) stores
-zeros there, its h(-1). Rank 0 writes the top layer's landed h to the output staging ring, as the chain does.
-
-**Configuration.** `input`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
-`shares` (one count of hidden units a rank, multiples of 8, their sum the width) and `capabilities`. The weights file
-holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order.
-`lstm.inputs(configuration, steps, rows)` makes sample ones the same way, with torch's initialization. `weights` is
-a directory of one .npy file an array. Before the communicator exists, rank 0 reads them
-memory-mapped and writes each rank's gate rows, already tiled, into CPU region tensors, 64 tiles at a time. It then
-sends each rank its tiles, and each rank receives them into an MPS region tensor the kernel reads. Nothing the size of
-a weight matrix lives outside the region: a Studio's region wires 82 of its 96 GiB, and the rest is all that other
-memory has.
+**Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H) and `layers`. The weights directory holds
+`w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
+`lstm.inputs(configuration, steps, rows)` makes sample ones with torch's initialization. Rank 0 reads them
+memory-mapped and sends each rank its gate rows, into MPS region tensors; the input is broadcast once into a region
+tensor.
 
 ## What to read next
 
