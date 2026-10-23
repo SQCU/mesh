@@ -9,8 +9,8 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 139u
-#define MESH_LAYOUT 147u
+#define MESH_VERSION 140u
+#define MESH_LAYOUT 148u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_PORTS 8u
@@ -59,6 +59,7 @@ struct mesh_plan {
 _Static_assert(sizeof(struct mesh_entry)==96 && offsetof(struct mesh_plan,sent)==MESH_LINE && offsetof(struct mesh_plan,entry)==2*MESH_LINE,
   "a table's writers a line each");
 #define MESH_STAMP_LOST UINT64_MAX
+#define MESH_NEED_AHEAD UINT64_MAX
 static inline uint64_t mesh_plan_bytes(uint32_t sends,uint32_t lands){ return sizeof(struct mesh_plan)+((uint64_t)sends+lands)*sizeof(struct mesh_entry); }
 static inline uint64_t mesh_call(uint64_t k){ return k<<32; }
 static inline uint32_t mesh_called(uint64_t word){ return (uint32_t)word; }

@@ -146,8 +146,12 @@ not fails as a value naming two members no route joins (`ncclInvalidUsage`).
 lists (`sends`, `lands`: the entries laid on each since the init, so a rank's k-th send to a peer is the peer's k-th
 receive from it), `published` and `consumed`. A send entry on the channel toward rank q is a tuple whose key is (id, q,
 me × 2^40 + `sends` + i), and a landing entry from q one whose key is (id, me, q × 2^40 + `lands` + i), i the entry's
-place in this call's list: the two ends compose the same key for the same pages. A tuple's `from` is (id, the sending
-rank), so its bridge can tell when the sender's route moves. The bridge compares keys and names as words.
+place in this call's list: the two ends compose the same key for the same pages. A persistent exchange's keys are its
+own: (id, the receiving rank, the sending rank × 2^40 + 2^39 + the request's number on the communicator modulo 128 ×
+2^32 + start × the channel's legs + the leg's place), so no group between two starts moves them. A tuple's `from` is
+(id, the sending rank), so its bridge can tell when the sender's route moves. The bridge compares keys and names as
+words; a run whose key no started landing holds while a started landing of the same sender and space has a later
+place is of a call already over (design/transport.md section 14, "The index").
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR). A plan compiles each of its collectives when it is made, along the trees the solver gives the plan's
@@ -464,22 +468,35 @@ bridge post a run's last unit at its own length, is not a field of it.
 exchange: rank a's part is `parts[a]` elements, and it lands at each rank b with `lands[a x nranks + b]` set. Each member
 compiles the whole exchange into its own legs at the init, with no message: each part is a demand of the solver (its
 owner the root, the ranks that land it the leaves, its bytes down: [Routing](#routing)), and each of the part's trees
-carries a piece of it, the part cut by the trees' shares in pages (`mesh_cut_shares`; a start's count cut the same
-way). A member's landing legs are the pieces it receives from its parent in each tree, on the channel toward that
+carries a piece of it, the part cut by the trees' shares in pages at the init (`mesh_cut_shares`); a start's count
+fills the pieces in order, each piece at its offset and its count the start's elements within it. A member's landing legs are the pieces it receives from its parent in each tree, on the channel toward that
 parent, in order of the part's owner and then the tree; its send legs the pieces it sends to its children, in the same
 order: from its own part, or from the rows where its landing leg of that piece landed. Both ends of a channel compile
 the same legs in the same order, so its entries pair. The library allocates the buffers, as MPI's `MPI_Alloc_mem` and
 NCCL's `ncclMemAlloc` do for buffers a library registers: a slot holds this rank's part, an area for each part it
 receives any piece of (each piece at its offset), and the slot's table (`struct mesh_table`, then a `struct mesh_peer`
 for each part this rank lands, in rank order, then a `struct mesh_wait` for each landing leg of those parts, then a
-`struct mesh_relay` for each piece it sends on from its rows), then its channels' tables. The init makes the request's
-two slots, start k's and start k + 1's, in one lease with one Metal buffer over it, links their tables into the queue
-and takes their rows (a Metal 4 binding's records), once (design/pages-and-functions.md, Freeing 7: "rows for NFE k+1
-point at other pages until the rows for NFE k are released"). No start or binding allocates.
+`struct mesh_relay` for each piece it sends on from its rows), then a table of its sends and a table of its landings
+for each channel its legs cross. The init makes the request's three slots in one lease with one Metal buffer over it,
+links their tables into the queue and takes their rows (a Metal 4 binding's records), once: start k uses slot k mod 3,
+two calls in flight and one posted ahead (design/pages-and-functions.md, Freeing 7: "rows for NFE k+1 point at other
+pages until the rows for NFE k are released"). No start or binding allocates.
 
-- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, takes the slot of
-  its number modulo 2 once that slot is released, waiting outside the groups' lock for the command buffer of the
-  kernels last bound to it to complete, in slices of MESH_PAUSE_NS, then for the bridge's stamps, the revoke read
+Receives are posted ahead. Start k posts start k+1's landings into slot k+1 mod 3, once the call that last used it
+(k−2) is released: each landing at the piece's whole room, its count not yet known (`need` ~0), its key, its wait and
+its peers' views, its landing table started as the process's next call. So no page of start k+1 arrives before its
+landing exists; a run that comes early lands in its rows. Start k then writes its own sends into slot k mod 3, and
+stores the count of each of its landings (posted at start k−1) from `counts`, unless the bridge has from the first
+run's key unit; a landing of no pages it stamps done. An exchange's keys are its own: the communicator's id, the
+receiving rank, and the sending rank with the request's number on the communicator (seven bits, beside the bit that
+marks an exchange) and its position start x legs + leg (rdma/NCCL.md, Keys), so no group between two starts moves
+them, and a start takes no position of the channels' and no record in the groups' order. `ncclMeshRequestFree` stamps
+~0 the landings posted ahead for a start never made; the bridge posts no receive for a landing whose count it has not
+heard of, so none is left for them.
+
+- `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, posts into the slot
+  of its number plus one modulo 3 once that slot is released, waiting outside the groups' lock for the command buffer
+  of the kernels last bound to it to complete, in slices of MESH_PAUSE_NS, then for the bridge's stamps, the revoke read
   between slices (`ncclCommAbort` ends it); where the kernels bound to that slot's last start are in a command buffer not yet committed, or one that ended
   in an error, it fails as a value naming it (torch-mesh commits torch's open buffer before each start). A slot is
   released by use count: every kernel bound to it (`ncclMeshBind`, landing its
@@ -491,9 +508,8 @@ point at other pages until the rows for NFE k are released"). No start or bindin
   explicit allocation per buffer or pageset that they operate against, rather than an attempt to make timed single
   landings"). `counts` (nranks entries, each rank's part, every member passing the same) moves fewer elements than
   declared (partitioned communication's `MPI_Pready` [MPI 4.1 chapter 4]; design/extents-and-liveness.md, b); NULL moves
-  the declared counts. A slot holds a table for each channel its legs cross, linked into the queue when the slot is
-  made; the start writes each leg's entry for this start (a piece's rows in the slot, its pages from `counts`, its key
-  at the channel's next position, a leg of no pages counted at none) and starts each table as the process's next call
+  the declared counts. The start writes each send leg's entry for this start (a piece's rows in the slot, its pages from
+  `counts`, its key, a leg of no pages counted at none) and starts each send table as the process's next call
   (`table_begin`). A send entry of this rank's part names the slot's `published` and one of a
   relayed part its relay record's (`struct mesh_entry` `word`, its region offset), each with `need` the start's number,
   which a kernel bound to the start stores there (`mesh_leave`). So a group or another start encoded before this
@@ -504,11 +520,11 @@ point at other pages until the rows for NFE k are released"). No start or bindin
   fails as a value at its call while a start is not yet bound to the kernel that publishes it (`ncclMeshBind`
   `publishes`), as it does while the communicator's GPU groups are issued and not complete (MPI's persistent request:
   its buffer is the request's between `MPI_Start` and its completion). The start first completes any earlier group of
-  the communicator with a send not yet published on a channel where it sends. It is then in flight as a composed group,
-  whose sends count as published and whose landings as consumed: the caller's kernels do both, encoded after the
+  the communicator with a send not yet published on a channel where it sends; it takes no record of its own in the
+  groups' order, since its keys are not the channels'. The caller's kernels publish and consume it, encoded after the
   start. Where a link is lost under it, its entries read ~0; the kernels bound to it run and publish as they would
   (design/pages-and-functions.md, Link error: the callgraph does not consume the status).
-- `ncclMeshBind` finds a start's slot by its number (`slot_of`, the slot of its number modulo 2 while that is its
+- `ncclMeshBind` finds a start's slot by its number (`slot_of`, the slot of its number modulo 3 while that is its
   start). A slot's use count is zero once its bound kernels have ended (above) and each of its tables' `sent` and
   `landed` has reached the slot's last call or ~0 with every tuple's `posted` equal to its `count` (`slot_held`):
   until then the bridge may post a receive into the slot. A start that only publishes is free once its

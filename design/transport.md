@@ -468,7 +468,11 @@ Every word below, with its one writer at a time and its readers:
 
 - **A tuple.** A send tuple is (source rows `row`, `pages`; destination `key`; ready word `word`, `need`): its pages go
   once the word at region offset `word` reads at least `need`. A landing tuple is (`key`; landing rows `row`, `pages`;
-  `from`, its sender's registration): the receive the client expects. A key is three words: the first two its registration, the third its position. The
+  `from`, its sender's registration; `need`): the receive the client expects. A landing's `need` is 0 where its count is
+  its `pages`; ~0 (`MESH_NEED_AHEAD`) where it is posted ahead with `pages` its room and its count not yet known; and
+  else its count plus one, stored by compare-and-swap from ~0 by the client at the start that knows it or by the
+  receiving child from the first run's key unit (`total`), the two alike. Its `done` is stamped when `count` reaches
+  that count (`tuple_total`). A key is three words: the first two its registration, the third its position. The
   client library composes them (its communicator's id and the destination rank; the source rank and the place on that
   pair's list: rdma/NCCL.md, Keys), and the bridge compares keys as words and reads none as a number.
 - **A call.** The client starts call k on a table once the table's `sent` and `landed` have reached its last call: it
@@ -484,7 +488,7 @@ Every word below, with its one writer at a time and its readers:
   A client reads which node holds a name from the map (`mesh_names_find`). A send tuple whose key's registration no
   record of the map has held stays in its queue: no bridge sends it.
 - **The wire.** Every queue pair of a link carries runs. A run is a key unit (64 bytes: the key, the offset of its first
-  page within the tuple, its count of pages) and then those pages, each a SEND of one whole page; a run is at most
+  page within the tuple, its count of pages, the tuple's count of pages `total`; version 140) and then those pages, each a SEND of one whole page; a run is at most
   `MESH_RUN` pages, at the tuple's offsets 0, `MESH_RUN`, 2 `MESH_RUN` and on. Run i of a tuple travels one lane of one
   cable of each hop (`placed`): the cables the two nodes' records join between them (`mesh_joined`, sorted by `cable`)
   each hold a share of a cycle, their bandwidths divided by the bandwidths' greatest common divisor (one each where
@@ -493,7 +497,8 @@ Every word below, with its one writer at a time and its readers:
   goes to its lane m modulo its lanes. Both ends of a hop compute it from the same records and the same key, so a
   tuple's runs spread over every lane of every cable of the hop by the cables' shares (version 138).
 - **What is posted.** A receiving child posts a key unit's receive on a lane only where a run is to come on it: a
-  started landing tuple of its node, not complete (~0 included), whose sender's name the map holds and whose sender's
+  started landing tuple of its node, not complete (~0 included), its count known (not posted ahead and unheard of),
+  whose sender's name the map holds and whose sender's
   node this port's peer is the way to, of whose runs placed on this lane (`placed_runs`) fewer have come than are placed (`arrival`, counted by the lane as
   each is placed: `lane_expects`), or, on every lane of a port, a registration at a node to
   which that port's peer routes through this node (the walker's `relaying`: the relays it may carry). After a run's
