@@ -85,14 +85,13 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
 struct wire_mapping { char *data; size_t length; };
 #define QD 4095
 #define MESH_BANK ((size_t)1<<32)
-#define MESH_EXTENT ((size_t)1<<30)
 struct mesh_device {
   char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **extent_mrs;
   uint32_t frame_capacity,pairs,max_pairs;
   struct ibv_port_attr port;
   union ibv_gid gid;
-  uint8_t gid_index,gid_matched;
+  uint8_t gid_index,gid_matched,extent_shift;
 };
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
@@ -125,13 +124,13 @@ struct link {
 };
 _Static_assert(offsetof(struct link,stopped)%MESH_LINE==0,"the receive thread's words a line of their own");
 /* design/transport.md section 14, "A process a port"; section 15, "The children"; section 16 */
-#define MESH_CHILD_VERSION 6u
+#define MESH_CHILD_VERSION 7u
 #define LINK_STREAMS_ENDED ECONNABORTED
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
        CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED };
 struct child_message {
   uint32_t kind,pairing;
-  int32_t result,refused;
+  int32_t result;
   uint32_t qpn[MESH_LINK_LANES],peer[MESH_LINK_LANES][2],psn,share,broken,node,page,lanes;
   uint16_t lid,padding;
   uint8_t gid[16];
@@ -143,11 +142,11 @@ struct port;
 struct progress { _Alignas(MESH_LINE) _Atomic uint64_t passes; struct port *port; int way; };
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,greeted,connecting,writing,open,opening,stuck,budget,refusals,family,unit,job_pairing;
+  uint32_t index,interface,peer,greeted,connecting,writing,open,opening,stuck,budget,family,unit,job_pairing;
   char name[IFNAMSIZ];
-  int control,job,result,refused,threads;
+  int control,job,result,threads;
   _Atomic int done,closing;
-  uint64_t next,bandwidth,job_at,retry_at;
+  uint64_t next,bandwidth,job_at;
   _Atomic uint64_t quiet_at;
   struct message heard;
   uint16_t lid;

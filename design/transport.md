@@ -11,8 +11,10 @@ transport note: [TN3205](https://developer.apple.com/documentation/technotes/tn3
 
 - **The registered region.** One POSIX shared-memory object per node, `/mesh0`, mapped by the bridge and registered
   with every Thunderbolt RDMA device of the node by that port's child as it opens the device (section 14), one ibv_mr
-  per extent of `MESH_EXTENT` bytes (1 GiB, the bridge's choice), aligned so that each lies inside one 4 GiB bank. The
-  hardware fact is the bank: `tbt_post_recv` keeps only the low 32 bits of an SGE address with the extent's key, so an
+  per extent, aligned so that each lies inside one 4 GiB bank. An extent is 2^k bytes, the least power of two from the
+  arena's page up to the bank at which the region's extents number no more than the device's `max_mr` (`device_up`):
+  1 GiB for the Studios' 86 GiB under max_mr 100. The facts are the region's size, `max_mr` and the bank;
+  `max_mr_size` is not one (the devices report 16,384,000 and register 1 GiB extents). The bank's fact: `tbt_post_recv` keeps only the low 32 bits of an SGE address with the extent's key, so an
   extent crossing a 4 GiB boundary aliased receives 4 GiB low (September 5). Every address a request names is inside
   it.
 - **The page table.** The region's rows (one row is one block, 16 KiB on the pair) and, per row, an owner word and the
@@ -622,8 +624,8 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   it, and when its last child has ended; an open port with no peer says its hello at once, again whenever an IPv6
   address of its interface is added or changed (the kernel's `KEV_INET6_SUBCLASS` events: a hello that left before the
   address could carry it), and every MESH_PAUSE_NS otherwise. The parent's event loop sleeps until the next event or
-  the next time its turn waits for (a quiet window's end, the exit window, a hold, an open's retry, a hello, a job's
-  bound, the liveness turn), at most MESH_PAUSE_NS; every other change it takes wakes it where the change is made (a
+  the next time its turn waits for (a quiet window's end, the exit window, a hold, a hello, a job's bound, the liveness
+  turn), at most MESH_PAUSE_NS; every other change it takes wakes it where the change is made (a
   child of an earlier launch is awaited by its exit, EVFILT_PROC). Between a cable's loss and its next pairing stand the
   quiet window (MESH_PLATFORM_NS), the old child's exit (the kernel's release of its device's objects), the new child's
   open and the make and connect: the
@@ -701,7 +703,7 @@ MESH_PLATFORM_NS after it began is concluded around it once (`ports_stalled`: op
 verbs call); while any job is so out, no port dispatches a job, no child is asked to end and the devices are not read
 (`stalled`), and the port stays `stuck` until its job returns, then opens again. The event loop's wait (`turn_due`)
 ends at the earliest time a turn waits for (a liveness turn, a health sample, a window's end,
-a spawn hold, an open's retry, a hello, a job's bound), at most MESH_PAUSE_NS on; every other change wakes it where it
+a spawn hold, a hello, a job's bound), at most MESH_PAUSE_NS on; every other change wakes it where it
 is made (`wake`, a socket, a signal, an exit). A fixed 250 ms tick had taken each such time
 up to a tick late.
 
@@ -761,7 +763,8 @@ live); a fault absorbed (`CHILD_FAULTED`). After a termination it hears itself, 
 with ECANCELED until the parent's halt (the parent hears the same termination from IOKit itself), and after a fault
 for the rest of its life. Each turn of its main loop at which each progress thread serving lanes has passed since the
 last such turn, it writes the clock to the region's `progress[port]` (section 16).
-- `MESH_CHILD_VERSION` 6 writes the child's progress, which its parent reads, and ends the child after the provider's
+- `MESH_CHILD_VERSION` 7 has no `refused` in a child message (the registration-refusal backoff deleted). Version 6
+  writes the child's progress, which its parent reads, and ends the child after the provider's
   fault absorbed in it, as a child whose parent is gone ends. Version 5 told an absorbed fault (`CHILD_FAULTED`, after `CHILD_BROKEN`) and has no
   `CHILD_TERMINATED`; its open names its pairing and its connect no bandwidth (the child keeps its own from its open).
   Version 4 (ad55cbf4) had no `CHILD_FAULTED`. Version 3 had no `CHILD_UNGUARDED`. Version 118's guard (542d0bc7) held a port's progress threads
@@ -781,11 +784,13 @@ last such turn, it writes the clock to the region's `progress[port]` (section 16
   (`child_leave`), at most twice MESH_PLATFORM_NS on.
 
 **The port's device** (`device_up`, `device_gid`). A port's device is opened by its name from the device list, its port
-read, its protection domain made and the whole region registered in extents of MESH_EXTENT. A registration the device
-refuses keeps the device and the extents it took (EFBIG where the region's extents exceed `max_mr`), so a later open
-registers the rest; the parent opens a refused device again no sooner than 60·2^(k−1) s after its k-th refusal in a
-row, at most an hour, or at its link's coming on, since each try wires more memory (the Mini's watchdog halted it once
-its memory was wired whole, 2026-10-20). The queue pairs usable for a link are `max_qp` − 1. The port's GID is chosen
+read, its protection domain made and the whole region registered in its extents (section 1). A registration that
+fails ends the open with its errno, as a value: the port is not open, the extents taken stay the device's, and the
+port opens again at the events that open any port (its link's coming on, a hello heard on it, its child's end), when
+the rest are registered. The registration-refusal backoff of 128d0e84 (EFBIG past `max_mr`, the k-th refusal in a row
+held 60·2^(k−1) s) is deleted: the extents fit `max_mr` by construction, and a hold that retries a deterministic
+outcome serves none of AGENTS.md "Recovery"'s three kinds of failure (the operator, 2026-10-22: "all of the relatd
+abstractions and wrappers must be deleted"). The queue pairs usable for a link are `max_qp` − 1. The port's GID is chosen
 from its whole table (up to 256 entries): the entry equal to an IPv6 link-local address its interface holds
 (getifaddrs, with the scope BSD embeds in bytes 2-3 cleared), else the table's link-local entry, else its first nonzero
 one, the open logging that no address matched. A Thunderbolt port's table does not always begin at index 0: the Mini's

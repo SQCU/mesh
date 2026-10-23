@@ -83,7 +83,7 @@ static int row_at(struct mesh_row r,uint64_t *at){
 }
 static struct ibv_sge page_span(const struct port *port,uint64_t at){
   return (struct ibv_sge){.addr=(uintptr_t)wire.data+at,.length=(uint32_t)(page_bytes()-at%page_bytes()),
-                          .lkey=port->device.extent_mrs[at/MESH_EXTENT]->lkey};
+                          .lkey=port->device.extent_mrs[at>>port->device.extent_shift]->lkey};
 }
 static const _Atomic uint64_t *region_word(uint64_t offset){
   return offset && offset<=M->length-8 && !(offset%8)?stream_words(offset):NULL;
@@ -523,8 +523,7 @@ static int wire_map(struct wire_mapping *mapping,struct hdr *m,int file){
   if(mapping->data==MAP_FAILED){mapping->data=NULL;return -1;}
   return 0;
 }
-static int device_up(struct mesh_device *device,int *refused){
-  *refused=0;
+static int device_up(struct mesh_device *device){
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
     for(int i=0;list && list[i];i++)if(!strcmp(device->name,ibv_get_device_name(list[i]))){device->context=ibv_open_device(list[i]);break;}
@@ -537,26 +536,22 @@ static int device_up(struct mesh_device *device,int *refused){
   struct ibv_device_attr capabilities;
   if(ibv_query_device(device->context,&capabilities))return errno?errno:EIO;
   if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return errno?errno:EIO;
-  const uint32_t extents=(uint32_t)((wire.length+MESH_EXTENT-1)/MESH_EXTENT);
-  if((uint64_t)extents>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:0)){
-    say("%s: the region of %zu bytes is %u extents of %zu bytes, past the device's max_mr %d: refused\n",device->name,
-      wire.length,extents,MESH_EXTENT,capabilities.max_mr);
-    *refused=EFBIG;return EFBIG;
+  if(!device->extent_mrs){
+    uint32_t shift=(uint32_t)__builtin_ctzll(page_bytes());
+    while(shift<32 && ((wire.length-1)>>shift)+1>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:1))shift++;
+    device->extent_shift=(uint8_t)shift;
+    if(!(device->extent_mrs=calloc(((wire.length-1)>>shift)+1,sizeof *device->extent_mrs)))return ENOMEM;
   }
-  if(!device->extent_mrs && !(device->extent_mrs=calloc(extents,sizeof *device->extent_mrs)))return ENOMEM;
+  const size_t extent=(size_t)1<<device->extent_shift;
+  const uint32_t extents=(uint32_t)(((wire.length-1)>>device->extent_shift)+1);
   const uint64_t began=clock_ns();
-  for(size_t e=0,first=0;e<extents;e++,first+=MESH_EXTENT){
-    const size_t bytes=wire.length-first<MESH_EXTENT?wire.length-first:MESH_EXTENT;
-    if(!device->extent_mrs[e] && !(device->extent_mrs[e]=ibv_reg_mr(device->domain,wire.data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
-      const int error=errno?errno:EIO;
-      uint32_t held=0;
-      for(uint32_t k=0;k<extents;k++)held+=device->extent_mrs[k]!=NULL;
-      say("%s: extent %zu of %u (%zu bytes at %zu) refused: %s; %u of the region's extents registered, max_mr %d\n",
-        device->name,e,extents,bytes,first,strerror(error),held,capabilities.max_mr);
-      *refused=error;return error;
-    }
+  for(size_t e=0,first=0;e<extents;e++,first+=extent){
+    const size_t bytes=wire.length-first<extent?wire.length-first:extent;
+    if(!device->extent_mrs[e] && !(device->extent_mrs[e]=ibv_reg_mr(device->domain,wire.data+first,bytes,IBV_ACCESS_LOCAL_WRITE)))
+      return errno?errno:EIO;
   }
-  say("%s: region of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire.length,extents,(double)(clock_ns()-began)/1e9);
+  say("%s: region of %zu bytes (%u extents of %zu bytes) registered in %.3f s\n",device->name,wire.length,extents,extent,
+      (double)(clock_ns()-began)/1e9);
   device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;
@@ -673,7 +668,7 @@ static void job_run(struct port *port,int job){
   job_begin(port,job);
   dispatch_async(port->work,^{
     atomic_store(&job_thread,(uintptr_t)pthread_self());
-    int refused=0,result=job==CHILD_OPEN?device_up(&port->device,&refused):link_lapsed(port);
+    int result=job==CHILD_OPEN?device_up(&port->device):link_lapsed(port);
     if(!result)result=job==CHILD_OPEN?device_gid(&port->device,port->name):job==CHILD_MAKE?link_make(port):link_connect(port);
     if(!result && job==CHILD_CONNECT)result=port_threads(port);
     if(!result && job==CHILD_OPEN && !port->device.gid_matched){
@@ -682,7 +677,7 @@ static void job_run(struct port *port,int job){
                "%02x%02x:%02x%02x:%02x%02x:%02x%02x used\n",port->device.name,port->name,port->device.gid_index,
                g[0],g[1],g[2],g[3],g[4],g[5],g[6],g[7],g[8],g[9],g[10],g[11],g[12],g[13],g[14],g[15]);
     }
-    port->result=result;port->refused=refused;
+    port->result=result;
     atomic_store_explicit(&port->done,1,memory_order_release);
     wake();
   });
@@ -728,7 +723,7 @@ static void child_job(struct port *port,int job){
     memcpy(said.peer,l->peer,sizeof said.peer);said.lid=port->heard.lid;memcpy(said.gid,port->heard.gid,16);
     said.node=port->peer;
   }
-  if(child_say(port,said)){port->result=EPIPE;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
+  if(child_say(port,said)){port->result=EPIPE;atomic_store_explicit(&port->done,1,memory_order_release);}
 }
 static void port_opened(struct port *port,int result);
 static void job_finish(struct port *port){
@@ -891,7 +886,7 @@ static void hello_send(const struct port *port,const struct sockaddr_in6 *to){
 static int child_spawn(struct port *port);
 static void port_open(struct port *port){
   if(port->job || port->stuck || !port->opening || port->control>=0 || now<port->quiet_at || port->recycle || now<port->hold_to ||
-     now<port->retry_at || atomic_load_explicit(&stalled,memory_order_relaxed))return;
+     atomic_load_explicit(&stalled,memory_order_relaxed))return;
   if(!port->child && child_spawn(port))return;
   port->opening=0;
   port->interface=if_nametoindex(port->name);
@@ -900,17 +895,10 @@ static void port_open(struct port *port){
 }
 static void port_opened(struct port *port,int result){
   if(result){
-    if(port->refused){
-      port->refusals++;
-      const uint64_t hold=backoff(port->refusals-1);
-      port->retry_at=now+hold*UINT64_C(1000000000);
-      port_log(port,"the region's registration refused (%s), %u in a row: opened again at a hello heard on it from %llu s on, or at "
-               "its link's coming on\n",strerror(port->refused),port->refusals,(unsigned long long)hold);
-    }
     port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);
     return;
   }
-  port->open=1;port->refusals=0;
+  port->open=1;
   if(port->control>=0)return;
   link_set(port,0,MESH_PAIRING,0);
   port->next=now;
@@ -1035,7 +1023,7 @@ static void network_heard(int stopping){
     int known=0;
     for(uint32_t p=0;p<port_count;p++)if(!strcmp(name,ports[p].name)){
       known=1;
-      if(code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED){ports[p].opening=1;ports[p].retry_at=0;}
+      if(code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED)ports[p].opening=1;
       else if(code!=KEV_DL_LINK_OFF && code!=KEV_DL_IF_DETACHED){}
       else if(stopping)quiet_until(&ports[p].quiet_at,now+MESH_PLATFORM_NS);
       else{ports[p].open=0;port_lost(ports+p,ENETDOWN);}
@@ -1132,7 +1120,7 @@ static void terminations_turn(void){
     port_lost(ports+p,ENXIO);
   }
   const uint32_t came=atomic_exchange(&arrived,0);
-  for(uint32_t p=0;p<port_count;p++)if(came>>p&1 && ports[p].control<0){ports[p].opening=1;ports[p].retry_at=0;}
+  for(uint32_t p=0;p<port_count;p++)if(came>>p&1 && ports[p].control<0)ports[p].opening=1;
   if(atomic_exchange(&arrived_elsewhere,0))find_wanted=1;
 }
 
@@ -1199,7 +1187,7 @@ static void child_heard(struct port *port){
     if(job>=CHILD_OPEN && job<=CHILD_CONNECT){
       if(job==CHILD_CONNECT && !current)streams_cancel(port);
       if(port->job!=job || heard.pairing!=port->job_pairing)continue;
-      port->result=heard.result;port->refused=heard.refused;
+      port->result=heard.result;
       if(!heard.result && job!=CHILD_CONNECT){port->lid=heard.lid;memcpy(port->gid,heard.gid,16);}
       if(!heard.result && job==CHILD_OPEN){port->bandwidth=heard.bandwidth;port->budget=heard.lanes;}
       if(!heard.result && job==CHILD_MAKE){memcpy(l->qpn,heard.qpn,sizeof l->qpn);l->psn=heard.psn;l->share=(struct frames){heard.share};}
@@ -1260,7 +1248,7 @@ static void child_reaped(struct port *port){
     port->open=0;
     if(!port->hung)port_lost(port,ECHILD);
   }
-  if(port->job){port->result=ECHILD;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
+  if(port->job){port->result=ECHILD;atomic_store_explicit(&port->done,1,memory_order_release);}
   streams_cancel(port);
   unreleased=1;
   l->state=LINK_DOWN;l->lanes=l->heard=0;l->share=(struct frames){0};l->plan=0;
@@ -1365,7 +1353,7 @@ static void child_jobs(struct port *port){
   if(!port->job || !atomic_load_explicit(&port->done,memory_order_acquire))return;
   const int job=port->job;
   port->job=0;
-  struct child_message said={.kind=(uint32_t)(job-CHILD_OPEN+CHILD_OPENED),.pairing=child_asked,.result=port->result,.refused=port->refused};
+  struct child_message said={.kind=(uint32_t)(job-CHILD_OPEN+CHILD_OPENED),.pairing=child_asked,.result=port->result};
   if(!said.result && job!=CHILD_OPEN && port->job_pairing!=atomic_load(&l->pairing))said.result=ECANCELED;
   if(!said.result && job!=CHILD_CONNECT){
     port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
@@ -1417,7 +1405,7 @@ static int child_main(int argc,char **argv){
   for(;;){
     now=clock_ns();
     const int fault=atomic_load(&faulted)!=0;
-    if(port->job && atomic_load(&job_parked)){port->result=ECANCELED;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
+    if(port->job && atomic_load(&job_parked)){port->result=ECANCELED;atomic_store_explicit(&port->done,1,memory_order_release);}
     child_jobs(port);
     const uint64_t sent=atomic_load_explicit(&port->progress[0].passes,memory_order_relaxed),got=atomic_load_explicit(&port->progress[1].passes,memory_order_relaxed);
     const uint32_t served=atomic_load_explicit(&port->link.served,memory_order_relaxed);
@@ -1526,7 +1514,6 @@ static uint64_t turn_due(uint64_t liveness){
   for(uint32_t p=0;p<port_count;p++){
     const struct port *port=ports+p;
     due_at(&due,atomic_load(&port->quiet_at));due_at(&due,port->hold_to);
-    if(port->opening)due_at(&due,port->retry_at);
     if(port->open && port->control<0)due_at(&due,port->next);
     if(port->job)due_at(&due,port->job_at+MESH_PLATFORM_NS);
   }
