@@ -87,9 +87,11 @@ heartbeat opens a bridge only once no expired region is named. A process that ma
 or a child forked by a client without exec) is not recorded; none registers it or makes it resident.
 
 **The heartbeat** (rdma/mesh-heartbeat, the job launchd keeps alive, `io.mesh.bridge`) supervises the bridge. It holds no
-device, region or socket of the mesh. It opens the bridge (a child in a process group of its own, so the bridge serves
+device or socket of the mesh; it maps the region only for a moment at a time, to read its holders and its bridge's
+progress and to write its expiry and the hang statistic (section 16). It opens the bridge (a child in a process group of its own, so the bridge serves
 on if the heartbeat ends), closes it on the operator's signal and hears its end as a kernel event (EVFILT_PROC
-NOTE_EXIT), not inferred from a delay. It is the one process that unlinks an expired region. Its signals, sent with
+NOTE_EXIT), not inferred from a delay. It is the one process that unlinks an expired region, and the watchdog of its
+bridge: it ends a bridge whose event loop has not turned for MESH_PLATFORM_NS (section 16). Its signals, sent with
 `launchctl kill SIG user/$(id -u)/io.mesh.bridge`:
 - SIGHUP opens the bridge, or restarts it: the bridge closes by SIGHUP (its region kept), the heartbeat runs its own
   image again (a deploy's new binaries both, bin/mesh-user.sh), and the bridge opens and adopts the region;
@@ -228,6 +230,8 @@ was ours, and the one kernel hang was entered through a call of ours.
 Open: the Mini's two kernel data aborts at fault address 0x98, seconds after its bridge stopped, October 16 and 17
 (each stop then destroyed queue pairs while posts could be in flight; trigger not established).
 
+Section 16 gives each its form, and the watchdog for what no form excludes.
+
 ## 7. With one second of warning
 
 The case: someone presses the Mac mini's power button within a second of a cable being pulled, or the cable goes
@@ -260,10 +264,10 @@ No warning at all: the hardware is gone before any event says so. This is tenabl
   the next calls plan over the remaining cables (two thirds, five sixths).
 - **A post racing the loss.** A post issued in the instant the hardware went may touch a doorbell mapping that no
   longer exists. Recorded only with a queue pair being destroyed by our own call at the same time (October 16-17);
-  with no destroy calls it has not been seen. Where it happens, the port's child absorbs the post's fault and lives on
+  with no destroy calls it has not been seen. Where it happens, the provider's fault is absorbed in the port's child
   (section 15, "Terminations and faults"), and the parent loses the port as at its link's going off, as the cable is.
-  The child is asked to end only once the port's quiet window and the termination's have passed, so its exit, and the
-  kernel's release of its device's objects with it, does not fall inside the termination (section 5).
+  The child ends once the port's quiet window and the termination's have passed, so its exit, and the kernel's release
+  of its device's objects with it, does not fall inside the termination (section 5).
 
 Positions in flight on the crushed link are transport errors (section 11). Nothing needs administration.
 
@@ -271,7 +275,8 @@ Positions in flight on the crushed link are transport errors (section 11). Nothi
 
 It does not stop because of a peer, a link, a client, a call, a time or a fault. A stop exists only to replace
 its binary, or to release the node's memory, and it is started from outside (its heartbeat's SIGHUP, or its SIGTERM:
-section 2). The stop is: a flag; the port threads see it and
+section 2). Its one end that is not a stop is its heartbeat's SIGKILL where its own event loop has not turned for the
+platform deadline (section 16), which the next bridge meets as a crash: the region adopted, the reopen a minute later. The stop is: a flag; the port threads see it and
 post nothing more; exit. It makes no verbs call, needs no interrupt handler (the signal
 handler only sets the flag), and cannot enter the October 18 deadlock, which needs a deallocation call in flight.
 
@@ -326,6 +331,25 @@ can meet. After it, only physical events (a cable pulled or crushed, a node losi
 
 Counted by the bridge, per port: frames posted, frames landed, duds sent, and transport-error frames by cause. A
 summary of the four is part of each node's record.
+
+**Whose loss it is** (rubric M10: "the form whose accounts assign each lost frame to its real cause and owner"). Each
+loss is booked, in the links table's `code` and the log, by the event that told it, which names its owner:
+- the control socket's end (ENETRESET, or the socket's own error): the peer node's bridge ended;
+- the link's going off or its interface's detach (ENETDOWN), the provider's fault absorbed in the port's child
+  (ENETDOWN): this port's device or cable;
+- the peer interface's termination (ENXIO): the device at the cable's far end gone;
+- lanes failed (a failed completion or post's error), no stream live (LINK_STREAMS_ENDED): this link's lanes;
+- a job or a child past the platform deadline (ETIMEDOUT, section 16): this bridge's own conclusion;
+- a child ended unbidden (ECHILD), a job that failed (its errno, ECANCELED, EPIPE), a message this end cannot pair
+  with (EPROTO), no room in the region (ENOMEM): this end, by what failed.
+
+A peer bridge's restart, its release and its crash all reach this node as its control socket's end, and are booked
+alike: the owner is the same (that node's bridge), and the reason is that node's own, written once where it is known,
+in its heartbeat's log ("asked to close (SIGHUP...)", "ended unasked", "ended by signal"). Ranked: a FAREWELL message
+carrying the reason to every peer (ad55cbf4^; M2's lower pole, "a second protocol on top of RDMA", and a second store
+of a fact its node already keeps) ≺ the end of the socket the pairing made, joined with the peer's own log by time. Until
+this change a termination was booked ETIMEDOUT, the code of the bridge's own conclusion at the deadline: a physical
+event booked as the bridge's own (M10's lower pole, inverted) ≺ ENXIO.
 
 ## 12. The code before this document
 
@@ -476,8 +500,10 @@ stable or worse-converging algorithm"; on `mesh_touched` pinning every row of a 
 excess and must be corrected"). The analysis, with its literature, is design/extents-and-liveness.md, in its terms:
 D(P) the extents a program declares, U(P, t) those it uses, L(P, t) those some later event of it may still use, and
 W(t) those requests already handed to the hardware reference, the plan's window in flight.
-- The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`), and the event loop does so for
-  a holder gone (its exit, the event loop's EVFILT_PROC: the death is that event, not a poll). The send thread ends the
+- The holder gives the stream by setting bit 63 of its owner word (`MESH_STREAM_GIVEN`). A holder gone gives nothing:
+  its exit retires its client slot (the event loop's EVFILT_PROC: the death is that event, not a poll), and the send
+  thread's read of the slot (`owned`) finds it not the holder's, as a give would; `mesh_pinned` reads a stream of a
+  client gone as given. The send thread ends the
   holding at the first pass that reads the give, or its client's retirement: nothing more of it is posted, its entries
   taken and not posted are dropped, and the receive thread is told (`ended`). Each progress thread reads whether the
   holding is still its holder's (its owner word not given, its client's slot its own) once a pass, not once a unit
@@ -567,7 +593,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   Other ports' children and links, the clients and their leases are untouched.
 - A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
   passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
-  most an hour (the operator, rubric M6: "restarted, not crashing again of course"). A child whose parent is gone halts its
+  most an hour (the operator, rubric M6: "restarted, not crashing again of course"). A child that makes no progress for
+  MESH_PLATFORM_NS, or to which a message did not go whole, loses its link the same way, is asked to end once its
+  windows have passed, and counts as an unbidden end; a child asked to end that has not ended is stopped and then
+  killed, outside every window, its port with no job out and no port's job out past the deadline (section 16). A child whose parent is gone halts its
   lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one child's at
   a time and no make meets the device's ceiling. At the bridge's stop every child is halted, asked to end after the
@@ -718,7 +747,9 @@ gate of 5d6f8c61 counted frames, for transfers of any size; since version 132 ev
 these units times a constant, and its own counts and `wr_id` encoding were deleted (2026-10-22).
 
 **The children.** A child is spawned with its parent's socket at descriptor 3, /dev/null as its input and output and
-its parent's stderr, in a process group of its own (`child_spawn`). Each child's holder entry names its device, so a
+its parent's stderr, in a process group of its own (`child_spawn`). The parent's end of the socket does not block: a
+message that does not go whole marks the child deaf (`child_say`), and nothing more is sent to it (the child would read
+the next message's bytes as the rest of the cut one); a job whose message it was ends EPIPE at once. Each child's holder entry names its device, so a
 bridge finds a child of an earlier launch that still holds a device in the region it adopted, and spawns its own after
 that one's exit (EVFILT_PROC); every child of a region is in its entries, since the heartbeat opens a bridge only once
 no holder of an expired region lives. `struct child_message` carries, from the parent: open; make (the link's page and
@@ -728,10 +759,12 @@ its device holds for a link; made: its address, each lane's queue pair number, t
 lanes' share; connected); the lanes found failed (`CHILD_BROKEN`, its `result` LINK_STREAMS_ENDED where no stream is
 live); a fault absorbed (`CHILD_FAULTED`). After a termination it hears itself, the child answers make and connect
 with ECANCELED until the parent's halt (the parent hears the same termination from IOKit itself), and after a fault
-for the rest of its life.
-- `MESH_CHILD_VERSION` 5 tells an absorbed fault (`CHILD_FAULTED`, after `CHILD_BROKEN`) and has no `CHILD_TERMINATED`;
-  its open names its pairing and its connect no bandwidth (the child keeps its own from its open). Version 4 (ad55cbf4)
-  had no `CHILD_FAULTED`. Version 3 had no `CHILD_UNGUARDED`. Version 118's guard (542d0bc7) held a port's progress threads
+for the rest of its life. Each turn of its main loop at which each progress thread serving lanes has passed since the
+last such turn, it writes the clock to the region's `progress[port]` (section 16).
+- `MESH_CHILD_VERSION` 6 writes the child's progress, which its parent reads, and ends the child after the provider's
+  fault absorbed in it, as a child whose parent is gone ends. Version 5 told an absorbed fault (`CHILD_FAULTED`, after `CHILD_BROKEN`) and has no
+  `CHILD_TERMINATED`; its open names its pairing and its connect no bandwidth (the child keeps its own from its open).
+  Version 4 (ad55cbf4) had no `CHILD_FAULTED`. Version 3 had no `CHILD_UNGUARDED`. Version 118's guard (542d0bc7) held a port's progress threads
   around every verbs change, for stripe flows whose queue pairs were made and destroyed while other queue pairs of the
   same device were posted on. Since version 130 a child makes and connects its queue pairs before it starts its
   progress threads, and no later open, make or connect reaches a child whose threads run: the parent marks the lanes
@@ -789,22 +822,14 @@ MESH_HEALTH_NS (10 s) apart.
 (kIOTerminatedNotification), on a queue of its own: every window is held MESH_PLATFORM_NS from then before any property
 is read, and the port whose interface carries the same "RID" (bin/mesh-fabric-init.sh) is halted. The parent also hears
 arrivals (kIOFirstMatchNotification) and opens a port whose device's far end has come, which the en interface's link
-can precede. The provider's doorbell fault (2f4c511f, "the bridge does not exit"), in a port's child: at its start the
-child reads the provider's text range (the __TEXT segment of the loaded libthunderboltrdma) and installs `fault_heard`
-for SIGSEGV and SIGBUS, which runs on a progress thread's alternate stack, or on a job's own. A fault whose pc lies in
-that text maps one anonymous page at the faulting page by hint, not MAP_FIXED, so nothing mapped is replaced. Where it
-got that page, or the port is already halted for a fault (its other thread got the page first), the store lands
-there, no doorbell rings, and the port is halted; a fault at a page it could not map with no fault before is made once
-more (`retried`, b11621e6), since the other thread may be mapping it. Any other fault restores the default action, and
-the process ends. The handler calls only mmap, munmap and sigaction. In a child every thread that enters the
-provider's text is its one port's, so no thread table is kept, and an open's job is covered as a make's and a
-connect's are. The child tells its parent once (`CHILD_FAULTED`), which loses the port as at its link's going off
-(open 0, ENETDOWN), and refuses every make and connect for the rest of its life, so a fault during an open still ends
-the child at the port's next make. Its reason is
-rubrics.md "Failure across interfaces" 4 ("inducing a system halt or kernel halt causes the entire node to fail. that
-is not permittable for obvious reasons"): a child that ended at the fault would exit, and its kernel release its
-device's objects, inside the termination's window (section 5), where the handler keeps it alive until its parent asks
-it to end once that window has passed. ad55cbf4 deleted it, and it was restored the same day.
+can precede. The provider's fault is absorbed in the port's child (`fault_heard`; 2f4c511f, "the bridge does not
+exit"; b53804bf; section 16): the child halts its lanes, answers ECANCELED a job the fault ended, tells its parent once
+(`CHILD_FAULTED`), which loses the port as at its link's going off (open 0, ENETDOWN) and does nothing else, and ends
+itself as a child whose parent is gone does (`child_leave`): MESH_PLATFORM_NS and its windows after, at most twice
+MESH_PLATFORM_NS. Every thread of it ends with it. Its reason is rubrics.md "Failure across interfaces" 4 ("inducing a
+system halt or kernel halt causes the entire node to fail. that is not permittable for obvious reasons"): a child that
+ended at the fault would exit, and its kernel release its device's objects, inside the termination's window (section
+5). ad55cbf4 deleted the absorption, and it was restored the same day.
 
 **The region** (`region_open`, `region_adopt`). A region is adopted where its magic, layout version and geometry (page
 size, block, rows, stream and client counts, every offset and its length) are this bridge's. Adopting it sets every
@@ -839,12 +864,260 @@ a 31-bit FNV hash of the host's UUID (drawn at random where none is read), 1 whe
 defaults and its re-raise. Before it runs its image again it blocks its signals and raises again each
 one its kqueue heard since its last read, so the signal is pending across the exec. While an expired region waits for
 its holders, the slots are read every second for a client that lets go and lives on. A bridge asked to end that has
-not ended 3·MESH_PLATFORM_NS later is left, and the heartbeat ends.
+not ended 3·MESH_PLATFORM_NS later is left, and the heartbeat ends. While a bridge is open its watchdog (`watchdog`,
+TIMER_WATCH each WATCH_MS) reads the bridge's `turned` and `hung_from`, adds to the statistic and ends a bridge whose
+loop has stopped (section 16).
 
 **mesh-stat** prints one JSON line: `up` (else the errno), the node, its ports by index (peer, phase, bandwidth), the
 map (nodes by bridge number; links as [node, node, bandwidth or null]), the region and its unleased bytes, and each
-node's record (region, memory, model, boot, available memory).
+node's record (region, memory, model, boot, available memory), and the hang statistic (`hang`: `active` and `hung` in
+nanoseconds, `hangs`, and `share`, hung over active: section 16), printed beside `up` false too (0 where no region stands).
 
 **The disk floor** (rdma/mesh-disk.h). MESH_DISK_FLOOR_GIB is the free space a writer of the mesh stack leaves on its
 filesystem; rdma/mesh_disk.py and the services' scripts read the number from the header. The log cap beside it
 (MESH_LOG_CAP_MIB) lost its last reader in 4d4595cc and was deleted.
+
+## 16. Hangs, and the watchdog
+
+The operator, 2026-10-22: "lets focus on making sure peers: 1: don't hang 2: are heartbeated and or watchdogged along a
+distinct hardware process so they unhang if they somehow hang anyways 3: are hanging less than 0.1% of the time a
+bridge is active". The deadline is section 5's ("you cannot be using a low level kernel like a dma or networking
+send/rcv channel for more than 5 seconds without something happening/concluding"), and the stake THREAT-MODEL.md's
+("the most important class of compromise is the false negative: the computer should be on and receiving work and doing
+work, but isn't, for any reason").
+
+A hang is a party with work outstanding whose progress has not moved for MESH_PLATFORM_NS. The parties are the
+bridge's processes: the parent; each port's child, with its main loop, its job thread (the port's serial queue) and its
+two progress threads; and the heartbeat. A hang is remedied by acting on the hung party itself: its own supervisor ends
+it (the heartbeat the parent, the parent each child), the next one starts, and its peers pair again unaided (section
+14). Nothing fails a client's program: calls in flight on a link the remedy loses fail as values, as at any link loss.
+
+### Every wait and loop
+
+The parent (mesh-link.c `main`):
+
+| wait or loop | waits on | ended by | why it ends |
+|---|---|---|---|
+| the event loop's `kevent64` | signals, sockets, children's exits and messages, `wake` | the event, or `turn_due` | the timeout is at most MESH_PAUSE_NS |
+| a turn's work (`job_finish`, `port_open`, `port_hello`, `link_turn`, `child_turn`, `clients_turn`, `map_put`) | nothing | its end | loops over the ports, slots, rows, streams and lane rings, each a fixed table |
+| `quiet_until` | other writers of the word | its swap, or a value at least `until` | each failed swap read a larger value; the word only grows |
+| sends on a control socket (`port_flush`) | the socket's room | EAGAIN, then EVFILT_WRITE | non-blocking |
+| sends to a child (`child_say`) | nothing | at once | non-blocking (since this section); a send that does not go whole marks the child deaf (below) |
+| `recv`, `recvfrom`, `accept`, `connect` | data | at once | non-blocking sockets |
+| the device list's read (the `mesh.ports` queue) | the kernel | its return | not ours to bound: read only outside every window and while no job is out past the deadline; past the deadline it counts as hung |
+| the IOKit notifications (`peer_terminated`, `peer_arrived`, `peer_port`) | the kernel | its return | not ours to bound |
+| `waitpid` in `child_reaped` | the child's exit | the exit | called on NOTE_EXIT, or where that registration failed |
+| the stop's hold (`poll` on the link events) | the windows' end | its bound | MESH_PLATFORM_NS in all, each wait at most MESH_PAUSE_NS |
+| the stop's wait for its children (`kevent64`) | their NOTE_EXITs | its bound | MESH_PLATFORM_NS in all, each wait at most MESH_PAUSE_NS; a child it had stopped (below) is sent SIGKILL first |
+| the log (`say`) | the log file | the write | launchd's StandardErrorPath, a regular file |
+
+A port's child (`child_main`):
+
+| wait or loop | waits on | ended by | why it ends |
+|---|---|---|---|
+| the main loop's `kevent64` | its parent's socket, `wake` | the event or the tick | MESH_PAUSE_NS |
+| sends to the parent (`message_send`, blocking) | room in the parent's socket | the send | the child sends one reply a job (a port has one job out), one CHILD_BROKEN and one CHILD_FAULTED a pairing: at most three of 192 bytes unread in 8,192; a socket that full is a parent that does not turn, which its heartbeat ends, and the send then fails (EPIPE) |
+| a job (`device_up`, `link_make`, `link_connect`, `getifaddrs`) | the kernel | its return | not ours to bound: the parent concludes the port around it at MESH_PLATFORM_NS (`ports_stalled`), and it counts as hung |
+| a progress thread's pass (`port_pass`) | nothing | its end | posts and polls return (section 6); `stream_post` ends at the lane's window or the last entry presented |
+| a progress thread with no lane served | `served` | a change, or the bound | MESH_PAUSE_NS a wait |
+| `child_leave` | the windows | its bound | at most twice MESH_PLATFORM_NS, each wait at most MESH_PAUSE_NS, its progress written between |
+
+The heartbeat (mesh-heartbeat.c):
+
+| wait or loop | waits on | ended by | why it ends |
+|---|---|---|---|
+| `kevent64` | signals, NOTE_EXITs, its timers | the event | while a bridge is open its watchdog ticks each WATCH_MS; while a region waits for its holders, each REPLACE_TICK_MS |
+| `waitpid` in `bridge_ended` | the bridge's exit | the exit | on NOTE_EXIT, or a failed registration of a bridge just spawned (`open_bridge`, the block-quoted spawn, unchanged), which is ESRCH where the bridge has exited |
+| `run_again`'s drain | pending events | at once | a zero timeout |
+| a bridge it asked to close | its NOTE_EXIT | its exit, or the watchdog | TIMER_END ends an end's wait after 3·MESH_PLATFORM_NS; the watchdog ends every ask's bridge that stops turning |
+
+### The hang modes on record
+
+| record | what hung | the form that makes it unreachable, or the watchdog that ends it |
+|---|---|---|
+| 2026-09-05 | processes in the release of their verbs objects at exit, during a device's fault (STAT U) | No process of ours exits inside a termination's window: a child is asked to end, or ended by the watchdog, only once its port's quiet window and every termination's have passed (`quiet_at`, `exit_at`) and while no job is out past the deadline (`stalled`). The exposure left is a termination that begins after that check (section 9). Nothing in user space ends a thread in U (below). |
+| 2026-09-05, 10-18 | `deallocPD` waiting on a termination that waits on its gate | No `ibv_dealloc_pd`, `ibv_dereg_mr`, `ibv_destroy_qp`, `ibv_destroy_cq` or `ibv_close_device` exists in the bridge (section 5): unreachable. |
+| 2026-10-02 | a GPU kernel spinning on a word another queue wrote | The collective's: every GPU wait keeps its poll bound. Not the bridge's. |
+| 2026-10-17 | `pair_flush` waiting for drain markers | No flush and no drain exist: unreachable. |
+| to 2026-10-19 | host and GPU waits on landed words, waits on peers in setup | The collective's: a group's waits re-read the revoke and the holding, the bootstrap's phases end within the deadline. The bridge waits on no peer. |
+| 2026-10-16, 10-17 | the Mini's kernel data aborts at 0x98 seconds after its bridge stopped (a panic, not a hang) | Each stop then destroyed queue pairs while posts could be in flight. No queue pair is destroyed; a child's are released only by its exit, after it has halted its lanes (`served` 0, `closing`) and waited MESH_PLATFORM_NS and its windows (`child_leave`), so no post is in flight at the release. A child the watchdog ends cannot halt itself: it is stopped first (SIGSTOP stops every thread of it, so none posts), and killed MESH_PLATFORM_NS later, its device quiet as after a halt. The trigger is not established and the record stays open. A panic is the kernel's: no watchdog of ours runs through it; the node restarts, launchd starts the heartbeat, and peers pair again (M6). |
+| this section's inventory | the parent blocked sending to a child that does not read (a blocking socketpair) | Non-blocking: a send that does not go whole marks the child deaf; its job, if that message was it, ends EPIPE at once (it never reached the child), nothing more is sent to it, and it is ended as a hung child. |
+| this section's inventory | a child asked to end that does not end (its main loop not reading CHILD_END, or its exit held): its port waits for it forever (`recycle`) | The watchdog: SIGSTOP MESH_PLATFORM_NS and MESH_PAUSE_NS after the ask (`child_leave` ends an asked child within MESH_PLATFORM_NS), then SIGKILL MESH_PLATFORM_NS later, each outside every window, its port with no job out and no port's job out past the deadline (`child_may_end`). |
+| this section's inventory | an earlier launch's child that does not end: its port's next child is never spawned (`elsewhere`) | The watchdog: the same, from twice MESH_PLATFORM_NS after it was found (its own `child_leave` ends within that), while it is still that process (its pid and start, `mesh_holds`). |
+| this section's inventory | the heartbeat waiting forever for a bridge it asked to restart or release | The watchdog: the stop's waits turn the progress word, and a stop that stops turning is ended. |
+| review of b53804bf (finding 6) | the provider's fault, absorbed in the port's child, recurring in it until its parent ended it, and holding a job of it out | Absorbed in the port's child, and ended within the child's own life: a job it ended is answered ECANCELED, and the child ends itself as a child whose parent is gone does, at most twice MESH_PLATFORM_NS on; the parent loses the port as at a link's going off and does nothing else. |
+| any | a parent whose event loop stops turning; a child with no job out whose main loop stops, or whose progress thread stops passing while its link serves | The watchdog (below). |
+
+### The watchdog
+
+The words (rdma/mesh-observe.h `struct mesh_bridge_pages`, appended; each written by one process, read by its
+supervisor):
+- `turned`, the parent's: its clock at each turn of its event loop and at each pass of its stop's waits. The clock,
+  the bridge's and the heartbeat's alike, is CLOCK_UPTIME_RAW (mach_absolute_time's), which stops while the system
+  sleeps.
+- `progress[port]`, each child's: the clock at a turn of its main loop at which each of its progress threads that
+  serves lanes has passed since the last such turn. A progress thread counts its passes on its own line (`struct
+  progress`'s `passes`), one store a pass and no clock. A thread with no lane served waits on `served` and holds no unit
+  (a lost link's units stay the hardware's until the child's exit), so the passes counted are the posting threads'
+  while units can be outstanding.
+- `hung_from`, the parent's: the earliest time a party it supervises passed the deadline without progress, 0 where
+  none (and 0 while it stops): a child's last progress, a job's start or the device list's read, each plus
+  MESH_PLATFORM_NS; a child asked to end, from MESH_PLATFORM_NS and MESH_PAUSE_NS after the ask; an earlier launch's
+  child, from twice MESH_PLATFORM_NS after its discovery.
+
+What reads them, and what each reader does:
+- **The heartbeat** (a distinct process launchd keeps; it holds no device) reads `turned` each WATCH_MS while a bridge
+  is open, once that bridge has written it since its open (a bridge the heartbeat found serving, from its first word
+  on). The parent's loop always has a turn due at most
+  MESH_PAUSE_NS on (its liveness turn), with or without work, so a quiet bridge turns and is never ended; where `turned`
+  is MESH_PLATFORM_NS old, a turn due has not come, and the heartbeat logs it and sends SIGKILL (to a bridge it did not
+  spawn, only while that pid is still the process that started then, `mesh_holds`). The bridge's stop signals are
+  kqueue events and ignored as signals, so a loop that does not turn never reads SIGHUP or SIGTERM, and SIGKILL is the
+  signal that ends it from every state.
+  It holds no device, so its exit releases no device object, wherever a termination stands. Its children see its socket
+  end, halt their lanes and leave after their own windows (`child_leave`); the next bridge adopts the region. The
+  heartbeat asks nothing of its own: where it had asked nothing, the end is an unasked end, and the bridge opens again
+  REOPEN_S after it, at most once a minute, as after a crash; where it had asked a restart, a release or an end, that
+  ask is carried out. The heartbeat's reopen, backoff, spawn settings, signal branches, end timer and log format are as
+  they were (the operator's block quote, 2026-10-21). The heartbeat acts on the parent's own loop alone: a port's stall
+  is the parent's to end, by ending that port's child, which it spawns again; the whole bridge is never ended for it.
+- **The parent** reads each child's `progress[port]` at each turn (`child_turn`). A child with no progress for
+  MESH_PLATFORM_NS, or deaf, is hung: its port is lost (ETIMEDOUT; streams cancelled, calls in flight fail as values),
+  a job of it that is out stays out, under `ports_stalled`, until it is answered, and the child is asked to end as at
+  any lost link, once its windows have passed, its port has no job out and no port's job is out past the deadline
+  (`child_may_end`). A child asked to end that has not ended MESH_PLATFORM_NS and MESH_PAUSE_NS later (its own leave
+  ends it within MESH_PLATFORM_NS), and an earlier launch's child twice MESH_PLATFORM_NS after it was found, is sent
+  SIGSTOP under the same gate, and SIGKILL MESH_PLATFORM_NS after that. A hung child's end counts toward its port's spawn backoff as an unbidden end does
+  (section 14); its loss stays booked ETIMEDOUT.
+
+### A thread in the kernel
+
+A thread in a kernel call that waits on something that never happens (STAT U) takes no signal, SIGKILL included, and
+its process's exit completes only when the call returns (section 5). For it the watchdog:
+- counts the time, through `hung_from` (a job or the device list's read past the deadline) or `turned` (a parent's
+  loop);
+- ends a parent so held all the same: the parent holds no device, so its exit, whenever the call returns, releases
+  nothing of a device, and the heartbeat opens no bridge beside it before its NOTE_EXIT;
+- ends no child with a job out, nor any child at all while a job is out past the deadline (`stalled`): its exit would
+  release device objects whenever the call returned, perhaps inside a termination. While such a call lasts no port
+  opens, makes or connects and no child is ended (section 15, "Windows"), and the time counts as hung;
+- reboots nothing, panics nothing and makes no teardown call. "transactions can fail, nodes that are healthy can never
+  fail ... inducing a system halt or kernel halt causes the entire node to fail. that is not
+  permittable for obvious reasons" (rubrics.md "Failure across interfaces" 4, 10-20). Its remedy is upstream: no call
+  of ours that can wait on a termination (section 5), so the U state is reachable only through the kernel's own defect.
+  The node stays up and reachable, the ports' children keep serving the links they have, and the parent serves its
+  control sockets and the map.
+
+### Peers
+
+A peer can notice that this node's bridge is not answering: its control socket unread, its records not renewed, its
+SENDs held in credit. Nothing is gained by having it act:
+- only the node can end its own bridge; the peer would reach it over the slow channel, which "never decides a running
+  RDMA channel's state" (rubrics.md "Two channels") and takes 10⁴ to 10⁸ ns where the node's heartbeat acts within
+  MESH_PLATFORM_NS and a second;
+- a parent that stops leaves its children serving: a peer that concluded the link would fail calls the data path is
+  still completing;
+- the bridge has no API to act on a suspicion (rubrics.md M1, "What the bridge cannot do": "declare a quiet peer lost"),
+  and a timer that declares a quiet peer lost and fails the program ranks below no such detector (M4, 10-18; C5's lower
+  pole).
+
+In Chandra and Toueg's terms (1996), a failure detector is a module at each process whose suspicions only that process's
+own algorithm consumes, by ceasing to wait for the suspected one; it never acts on the suspected process, and it may
+suspect a correct one. Here no algorithm consumes a suspicion: the collective waits on landed data and the platform
+deadline alone (C5), and the hung party's own supervisor is the one that acts. A peer reads a node's hangs in that
+node's statistic and records, for people.
+
+### Where a driver's or a link's event reaches
+
+A device's or a link's event (a provider fault, a link's going off, a termination, failed lanes, a child that ends)
+reaches, past the port's child and the parent's record of that port:
+- the calls with positions in flight on that link: its streams are cancelled (landed and sent ~0, not live), and those
+  calls fail as values (section 14);
+- this node's record and the map: the link leaves the record, and the next calls are planned over the cables left
+  (section 15, "The map"); that is data, and fails nothing;
+- the peer's end of the link, by its control socket's end: its in-flight positions on that link fail as values;
+- the rows its outstanding units name (W(t)), held until they complete or the child exits (section 14).
+And, inside the bridge, a job past the deadline holds every port's jobs, device reads and child ends (`stalled`, section
+15 "Windows") while it lasts; it fails no call and no other namespace. Nothing else is reached.
+
+### The statistic
+
+Three counters in `struct mesh_bridge_pages`, the heartbeat their one writer, each WATCH_MS while a bridge it watches
+is open: `active`, the nanoseconds a bridge was open; `hung`, the nanoseconds of those past the deadline without
+progress, from the earliest of `turned` plus MESH_PLATFORM_NS and `hung_from`; `hangs`, the times that condition began.
+They live with the region, so they count across the bridge's restarts and begin again at a release. mesh-stat prints
+them and `hung` over `active`; the operator's 0.1% is that ratio below 0.001, read once nodes run.
+
+### Ranked
+
+Each design point, by design/rubrics.md, the operator's words behind it, and the literature:
+- **Who acts on a hang** (M4, M1, "Two channels"). A peer's or a client's detector declaring a bridge hung, or asking it
+  to restart over the slow channel ≺ the hung party's own supervisor ending it, its peers pairing again unaided. "a
+  bridge crashing on a computer two hops down should result in the bridge being restarted, not crashing again of course,
+  and becoming available again as a resource for collectives with nothing but an error channel indicating that
+  calls-in-flight failed and ought to be retried" (10-20). Armstrong's supervision trees (*Making reliable distributed
+  systems in the presence of software errors*, KTH 2003; Erlang/OTP's supervisor): a supervisor starts, watches and
+  restarts its own children, and a worker's failure is its supervisor's to handle, not its siblings'.
+- **A distinct process** (the operator's item 2). A party watching itself, a thread of the process that hangs ≺ a
+  watchdog in another process the hung one cannot stop: the heartbeat for the parent, the parent for each child.
+  Mahmood and McCluskey, "Concurrent error detection using watchdog processors: a survey" (IEEE Trans. Computers 37(2),
+  1988): a watchdog processor checks the main processor from outside it, from information the checked one emits as it
+  runs.
+- **How progress is read** (M2, M8). A probe the watched party answers (a message about messages) ≺ words it writes as
+  it passes, read where they lie: "the only exchange that is not data is the pairing of a new cable" (M2). A clock read
+  each pass of a progress thread ≺ a counter on the thread's own line, the child's main loop reading the clock it
+  already reads: "if there is 10ns of reducible overhead anywhere in our code we reduce it to 0ns" (M8, 10-20).
+- **Ending a hung parent** (M3). SIGHUP and a wait with no bound (the heartbeat before this section) ≺ SIGKILL at the
+  deadline: "imagine a number for every isngle state the bridge cna be in. for all numbers there must be a signal whic
+  hcan be sent to the bridge which causes the bridge to shut down as an application and release all resources" (10-18);
+  "semaphores allow all waits in all programs to termiante in finite time" (10-20). Erlang/OTP's shutdown asks a child
+  to end and kills it after its shutdown time; a loop that does not turn reads no ask, so the ask is skipped. Candea and
+  Fox, "Crash-Only Software" (HotOS IX, 2003): a component whose stop is a crash and whose start is its recovery; the
+  bridge's region is adopted across any end (section 2), so a kill loses nothing a stop keeps.
+- **How soon it opens again** (the operator's block quote of 2026-10-21; rubrics.md "Failure across interfaces" 5 and
+  6). A watchdog with a restart path of its own, faster than an unasked end's ≺ its end taken as an unasked end, the
+  heartbeat's reopen unchanged: "launchd heartbeat reopen code is required by the user by block quote and will never be
+  overridden implicitly as a side effect of any other message or statement"; "THE HEARTBEAT SERVICE THAT ENSURES UPTIME
+  OF THE MESH SERVICE WHILE STILL IMPLEMENTING A BACKOFF SCHEDULE IF IT CAUSES A BOOTLOOP. there is only ONE program in
+  this ontology which is capable of bootlooping or crashing other systems! it is the bridge!" (10-21); "a restart policy
+  of one second ≺ one bridge start a minute at most" (10-20). OTP bounds restarts too (MaxR in MaxT) but then ends the
+  supervisor itself, which here would leave the node with no bridge (THREAT-MODEL.md's false negative); here the excess
+  waits instead.
+- **When it acts** (the operator, 10-21, of the deleted keeper: "i do not think anything i said implied that i wanted an
+  arbitrary unspecified service trying to crash services once a minute"). A watchdog ending a bridge on a schedule, or
+  for quiet ≺ one ending it only where a turn due has not come for the platform deadline: a bridge with nothing to do
+  turns each MESH_PAUSE_NS and is never ended.
+- **The narrowest act** (M4). Ending the whole bridge for one port's stall ≺ ending that port's child, which the parent
+  spawns again; the heartbeat acts only on the parent's own loop, which no child can end.
+- **Ending a hung child** ("Failure across interfaces" 4, M4, M6). A hung child left until a person acts ≺ its link lost
+  as at a link's going off, the child asked to end once its windows pass and ended if it has not a deadline later:
+  "restarted, not crashing again of course" (M6, 10-20). A kill at any time ≺ a kill only outside a termination's window
+  and while no job of it is in a call: "inducing a system halt or kernel halt causes the entire node to fail. that is
+  not permittable" (10-20). On "Failure across interfaces" 4 again, SIGKILL alone, whose release can follow a post by
+  microseconds (the October 16-17 aborts' open trigger was a release while posts could be in flight) ≺ SIGSTOP, then
+  SIGKILL once the device has been quiet MESH_PLATFORM_NS, as after a halt; on M3 the second costs one deadline more,
+  and both end.
+- **A child's main loop that stops while its lanes still serve** (section 5: "no transaction fails because time
+  passed"; the operator, 2026-10-22: "we don't introduce race conditions or use timing anywhere"; C5's upper pole:
+  "within a call, the only thing that ends a wait is the data or the platform deadline"). A child kept serving whose
+  parent can no longer halt or end it (it reads no halt, tells no failed lane and answers no job: a state nothing
+  ends, M3's lower pole) ≺ its link lost at the platform deadline, its calls in flight failing as values, as at a link's
+  going off (C6's upper pole, "the call returns an error, and the caller runs it again"). The deadline here bounds the
+  bridge's own lifecycle, as section 5 has it, not a wait on a peer's data; and by the inventory above the main loop
+  has no wait that can reach it.
+- **A thread in the kernel** ("Failure across interfaces" 4). A watchdog that signals, restarts or reboots to clear it ≺
+  one that counts it and leaves it to the kernel, the node reachable and its other ports serving: no signal reaches it,
+  a parent's restart releases no child's call and loses every other link, and a reboot is the node failing.
+- **The parent's sends** (M3). A blocking send to a child that may not read: "a wait whose end depends on an event that
+  may never come" ≺ a send that never waits, a full socket read as the child's hang (10-20).
+- **The provider's fault** (the operator, 2026-10-22: "process isolation of 'things using hte driver' should totally and
+  absolutely contain absolutely all faults or exception-like-errors that could ever relate to the dma driver itself.
+  nothign we write in any other namespace has any justification for failing transitively because of a hardware
+  failure"; M3; "Failure across interfaces" 4). The fault recurring in the child until its parent ended it, a job of
+  it held out and with it every port's jobs (b53804bf; the review of it, finding 6) ≺ the fault absorbed in the port's
+  child and ended within its own life, its parent seeing a link lost and nothing more.
+- **The bridge's own bounded waits** (M3). A wait of the bridge's bounded at MESH_PLATFORM_NS while it is watched (the
+  stop's single waits, a leaving child's), which its watchdog would read as a hang ≺ each bounded at MESH_PAUSE_NS, the
+  progress word written between.
+- **The statistic** (Quantities). A hang known from a log line ≺ counters a reader takes whole: "a measurement without
+  those values ≺ one with them"; "a channel 5 s without anything happening on it ≺ one that is never so long quiet".

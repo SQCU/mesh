@@ -124,8 +124,8 @@ struct link {
   _Atomic uint64_t *landed_at[MESH_LINK_STREAMS];
 };
 _Static_assert(offsetof(struct link,stopped)%MESH_LINE==0,"the receive thread's words a line of their own");
-/* design/transport.md section 14, "A process a port"; section 15, "The children" */
-#define MESH_CHILD_VERSION 5u
+/* design/transport.md section 14, "A process a port"; section 15, "The children"; section 16 */
+#define MESH_CHILD_VERSION 6u
 #define LINK_STREAMS_ENDED ECONNABORTED
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
        CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED };
@@ -140,7 +140,7 @@ struct child_message {
 #define MESH_CHILD_SETTLE_NS (UINT64_C(60)*1000000000)
 #define TAG_CHILD (UINT64_C(1)<<58)
 struct port;
-struct progress { struct port *port; int way; };
+struct progress { _Alignas(MESH_LINE) _Atomic uint64_t passes; struct port *port; int way; };
 struct port {
   struct mesh_device device;
   uint32_t index,interface,peer,greeted,connecting,writing,open,opening,stuck,budget,refusals,family,unit,job_pairing;
@@ -161,7 +161,8 @@ struct port {
   uint32_t holder;
   int child_fd,recycle,ending;
   uint32_t aborts,child_held;
-  uint64_t child_at,hold_to;
+  int deaf,hung,stage;
+  uint64_t child_at,hold_to,late_from,late_at,elsewhere_start;
   unsigned char child_in[sizeof(struct child_message)];
 };
 #define MESH_HEALTH_NS UINT64_C(10000000000)

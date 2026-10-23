@@ -6,9 +6,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-/* design/transport.md section 15, "mesh-stat" */
+/* design/transport.md section 15, "mesh-stat"; section 16, "The statistic" */
 struct port_view { uint32_t peer,phase; uint64_t bandwidth; };
-static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
+static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node,uint64_t hang[3]){
   const int file=shm_open(MESH_NAME,O_RDONLY,0);
   if(file<0)return -errno;
   struct stat info;
@@ -17,6 +17,8 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
   close(file);
   if(m==MAP_FAILED)return -errno;
   int count=m->magic!=MESH_MAGIC || m->version!=MESH_LAYOUT?-EINVAL:mesh_gone((pid_t)atomic_load(&m->bridge_pid))?-ESRCH:0;
+  const struct mesh_bridge_pages *own=mesh_bridge_pages(m);
+  if(count!=-EINVAL){hang[0]=atomic_load(&own->active);hang[1]=atomic_load(&own->hung);hang[2]=atomic_load(&own->hangs);}
   if(!count)*node=m->node;
   for(uint32_t i=0;count>=0 && i<MESH_PORTS;i++){
     const struct mesh_link_info *link=mesh_links(m)+i;
@@ -29,12 +31,17 @@ static int ports_read(struct port_view *out,uint32_t capacity,uint32_t *node){
   munmap(m,(size_t)info.st_size);
   return count;
 }
+static void hang_say(const uint64_t hang[3]){
+  printf("\"hang\":{\"active\":%llu,\"hung\":%llu,\"hangs\":%llu,\"share\":%.6f}",(unsigned long long)hang[0],(unsigned long long)hang[1],
+         (unsigned long long)hang[2],hang[0]?(double)hang[1]/(double)hang[0]:0.0);
+}
 int main(void){
   struct port_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
   uint64_t *bandwidth=NULL;
-  const int ports=ports_read(port,MESH_PORTS,&node);
-  if(ports<0){printf("{\"up\":false,\"errno\":%d}\n",-ports);return 0;}
+  uint64_t hang[3]={0};
+  const int ports=ports_read(port,MESH_PORTS,&node,hang);
+  if(ports<0){printf("{\"up\":false,\"errno\":%d,",-ports);hang_say(hang);printf("}\n");return 0;}
   struct mesh_link_map map={0};
   int count=-ENOSPC;
   while(count==-ENOSPC){
@@ -47,6 +54,7 @@ int main(void){
   uint64_t region=0,unleased=0;
   if(mesh_region(&region,&unleased))region=unleased=0;
   printf("{\"up\":true,\"node\":%u,\"region\":%llu,\"unleased\":%llu,",node,(unsigned long long)region,(unsigned long long)unleased);
+  hang_say(hang);printf(",");
   printf("\"peers\":[");
   static const char *const phase_name[]={[MESH_UNKNOWN]="UNKNOWN",[MESH_PAIRING]="PAIRING",[MESH_PAIRED]="PAIRED",[MESH_STOPPED]="STOPPED"};
   for(int i=0;i<ports && i<(int)MESH_PORTS;i++)

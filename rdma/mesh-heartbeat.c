@@ -1,4 +1,4 @@
-/* design/transport.md section 2, "The heartbeat" */
+/* design/transport.md section 2, "The heartbeat"; section 16, "The watchdog" */
 #include "mesh-call.h"
 #include "mesh-observe.h"
 #include <fcntl.h>
@@ -18,7 +18,8 @@ extern char **environ;
 
 #define REOPEN_S 60u
 #define REPLACE_TICK_MS 1000
-enum { TIMER_OPEN=1, TIMER_END=2 };
+#define WATCH_MS 1000
+enum { TIMER_OPEN=1, TIMER_END=2, TIMER_WATCH=3 };
 enum { TAG_BRIDGE=1, TAG_HOLDER=2 };
 
 static void say(const char *format,...){ va_list arguments;va_start(arguments,format);mesh_say("heartbeat: ",format,arguments);va_end(arguments); }
@@ -204,6 +205,37 @@ static void close_bridge(int how,int signal_number){
   say("bridge %d asked to close (%s)\n",(int)bridge,signal_number==SIGHUP?"SIGHUP: restarted, its region kept":"SIGTERM: released");
   kill(bridge,signal_number);
 }
+static pid_t watched,killed;
+static uint64_t since,ticked;
+static int hanging;
+static uint64_t uptime(void){return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);}
+static void watch_turn(void){
+  if(bridge==watched)return;
+  watched=bridge;killed=0;ticked=uptime();since=child?ticked:0;hanging=0;
+  watch(TIMER_WATCH,EVFILT_TIMER,bridge?EV_ADD:EV_DELETE,0,WATCH_MS,0);
+}
+static void watchdog(void){
+  if(!bridge)return;
+  const uint64_t now=uptime();
+  size_t size=0;
+  struct hdr *m=region_map(&size,1);
+  struct mesh_bridge_pages *own=m?region_own(m,size):NULL;
+  const uint64_t turned=own?atomic_load(&own->turned):0,parties=own?atomic_load(&own->hung_from):0;
+  if(turned>since){
+    const uint64_t onset=parties>since && parties<turned+MESH_PLATFORM_NS?parties:turned+MESH_PLATFORM_NS;
+    atomic_fetch_add(&own->active,now-ticked);
+    if(onset<now)atomic_fetch_add(&own->hung,now-(onset>ticked?onset:ticked));
+    if(onset<now && !hanging)atomic_fetch_add(&own->hangs,1);
+    hanging=onset<now;
+    ticked=now;
+  }
+  if(m)munmap(m,size);
+  if(turned<=since || now<turned+MESH_PLATFORM_NS || killed==bridge || (!child && !mesh_holds(bridge,opened_at)))return;
+  killed=bridge;
+  say("bridge %d: its event loop has not turned for %.1f s: ended (SIGKILL), %s (design/transport.md section 16)\n",(int)bridge,
+      (double)(now-turned)/1e9,asked==ASKED_NONE?"as a bridge that ends unasked":"as it was asked to close");
+  kill(bridge,SIGKILL);
+}
 static void noted(int number){(void)number;}
 int main(int argc,char **argv){
   setvbuf(stderr,NULL,_IOLBF,0);
@@ -241,6 +273,7 @@ int main(int argc,char **argv){
   else open_bridge();
   int ending=0;
   for(;;){
+    watch_turn();
     struct kevent64_s ready[8];
     struct timespec tick={REPLACE_TICK_MS/1000,(long)(REPLACE_TICK_MS%1000)*1000000};
     const int count=kevent64(events,NULL,0,ready,8,0,replacing?&tick:NULL);
@@ -265,6 +298,7 @@ int main(int argc,char **argv){
         }
       }
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_OPEN){timer_open=0;turn();}
+      else if(e->filter==EVFILT_TIMER && e->ident==TIMER_WATCH)watchdog();
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
         say("bridge %d has not ended %.0f s after it was asked; the heartbeat ends without it\n",(int)bridge,
             (double)(3*MESH_PLATFORM_NS)/1e9);

@@ -7,14 +7,15 @@ static struct port ports[MESH_PORTS];
 static uint32_t port_count,device_count,ones=MESH_ABSENT,link_page[MESH_PORTS],terminations_told,map_page,map_pages,map_room,
                 known_count,child_asked;
 static int events=-1,listener=-1,hello=-1,network=-1,addresses=-1,unreleased,finding,find_wanted,child_halted;
-static uint64_t now,sequence,memory,held_pages,health_sent,owners[MESH_CLIENTS];
+static uint64_t now,sequence,memory,held_pages,health_sent,find_at,owners[MESH_CLIENTS];
 static int64_t stop_reason;
 static struct mesh_ctx bridge={.fd=-1};
 static dispatch_queue_t finder;
 static _Atomic int stalled,found,arrived_elsewhere;
 static _Atomic uint32_t terminated,terminations,arrived,faulted;
+static _Atomic int job_parked;
 static uintptr_t provider[2];
-static _Atomic uintptr_t retried;
+static _Atomic uintptr_t mapped,job_thread;
 static _Atomic uint64_t exit_at;
 static char devices[MESH_PORTS][32],self_path[PATH_MAX],model[MESH_MODEL_BYTES];
 static struct known known[MESH_KNOWN];
@@ -22,7 +23,7 @@ static struct mesh_health health;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 _Static_assert(MESH_PORTS<=32,"a bit a port");
 
-static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static uint32_t fnv(const void *bytes,size_t n){ uint32_t h=0;for(const unsigned char *b=bytes;n--;b++)h=(h*0x01000193u)^*b;return h; }
 static uint64_t backoff(uint32_t n){ return MIN(UINT64_C(60)<<MIN(n,6u),UINT64_C(3600)); }
 static void say(const char *format,...){ va_list arguments;va_start(arguments,format);mesh_say("",format,arguments);va_end(arguments); }
@@ -289,12 +290,14 @@ static void port_pass(struct port *port,int way){
 }
 /* design/transport.md section 14, "A progress thread with nothing to do" */
 static void *port_progress(void *argument){
-  struct port *port=((struct progress *)argument)->port;
-  const int way=((struct progress *)argument)->way;
+  struct progress *self=argument;
+  struct port *port=self->port;
+  const int way=self->way;
   pthread_setname_np(way?"mesh.rdma.receive":"mesh.rdma.send");
   stack_t alternate={.ss_sp=malloc(SIGSTKSZ),.ss_size=SIGSTKSZ};
   if(alternate.ss_sp)sigaltstack(&alternate,NULL);
-  while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
+  for(uint64_t pass=0;!atomic_load_explicit(&port->closing,memory_order_acquire);){
+    atomic_store_explicit(&self->passes,++pass,memory_order_relaxed);
     if(atomic_load_explicit(&port->link.served,memory_order_acquire)){port_pass(port,way);continue;}
     if(atomic_load_explicit(&faulted,memory_order_relaxed))wake();
     os_sync_wait_on_address_with_timeout(&port->link.served,0,sizeof port->link.served,OS_SYNC_WAIT_ON_ADDRESS_NONE,
@@ -311,7 +314,7 @@ static int port_threads(struct port *port){
   pthread_attr_init(&attributes);
   pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
   for(pthread_t created;port->threads<2 && !error;){
-    port->progress[port->threads]=(struct progress){port,port->threads};
+    port->progress[port->threads]=(struct progress){.port=port,.way=port->threads};
     if(!(error=pthread_create(&created,&attributes,port_progress,port->progress+port->threads)))port->threads++;
   }
   pthread_attr_destroy(&attributes);
@@ -669,6 +672,7 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
 static void job_run(struct port *port,int job){
   job_begin(port,job);
   dispatch_async(port->work,^{
+    atomic_store(&job_thread,(uintptr_t)pthread_self());
     int refused=0,result=job==CHILD_OPEN?device_up(&port->device,&refused):link_lapsed(port);
     if(!result)result=job==CHILD_OPEN?device_gid(&port->device,port->name):job==CHILD_MAKE?link_make(port):link_connect(port);
     if(!result && job==CHILD_CONNECT)result=port_threads(port);
@@ -691,15 +695,20 @@ static uint32_t own_lease(uint32_t *recorded,uint32_t pages){
   if(*recorded!=MESH_ABSENT)held_pages+=pages;
   return *recorded;
 }
-static void message_send(int fd,struct child_message said){
+static int message_send(int fd,struct child_message said){
   const char *at=(const char *)&said;
   size_t left=sizeof said;
-  while(fd>=0 && left){
-    const ssize_t sent=send(fd,at,left,0);
+  while(left){
+    const ssize_t sent=fd<0?-1:send(fd,at,left,0);
     if(sent<0 && errno==EINTR)continue;
-    if(sent<=0)return;
+    if(sent<=0)return -1;
     at+=sent;left-=(size_t)sent;
   }
+  return 0;
+}
+static int child_say(struct port *port,struct child_message said){
+  if(!port->deaf && message_send(port->child_fd,said))port->deaf=1;
+  return port->deaf;
 }
 static int message_read(int fd,unsigned char *in,uint32_t *held,struct child_message *heard){
   for(;;){
@@ -719,7 +728,7 @@ static void child_job(struct port *port,int job){
     memcpy(said.peer,l->peer,sizeof said.peer);said.lid=port->heard.lid;memcpy(said.gid,port->heard.gid,16);
     said.node=port->peer;
   }
-  message_send(port->child_fd,said);
+  if(child_say(port,said)){port->result=EPIPE;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
 }
 static void port_opened(struct port *port,int result);
 static void job_finish(struct port *port){
@@ -845,7 +854,7 @@ static void port_lost(struct port *port,int64_t code){
   atomic_store_explicit(&l->broken,0,memory_order_relaxed);
   atomic_store_explicit(&l->lost,0,memory_order_relaxed);
   if(port->child){
-    message_send(port->child_fd,(struct child_message){.kind=CHILD_HALT,.pairing=atomic_load(&l->pairing)});
+    child_say(port,(struct child_message){.kind=CHILD_HALT,.pairing=atomic_load(&l->pairing)});
     if(l->lanes && !stop){port->recycle=1;port->open=0;}
   }
   if(port->control>=0){close(port->control);port->control=-1;}
@@ -988,7 +997,7 @@ static void port_named(struct port *port,uint32_t index,const char *device){
 }
 static void ports_find(void){
   if(finding)return;
-  finding=1;
+  finding=1;find_at=now;
   dispatch_async(finder,^{
     struct ibv_device **list=ibv_get_device_list(NULL);
     uint32_t n=0;
@@ -1120,7 +1129,7 @@ static void terminations_turn(void){
   }
   for(uint32_t p=0;p<port_count;p++)if(lost>>p&1){
     port_log(ports+p,"its peer interface terminating: its link lost\n");
-    port_lost(ports+p,ETIMEDOUT);
+    port_lost(ports+p,ENXIO);
   }
   const uint32_t came=atomic_exchange(&arrived,0);
   for(uint32_t p=0;p<port_count;p++)if(came>>p&1 && ports[p].control<0){ports[p].opening=1;ports[p].retry_at=0;}
@@ -1140,7 +1149,7 @@ static int child_spawn(struct port *port){
     else if(holders[k].device==device && !watch((uint64_t)pid,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,TAG_CHILD|port->index)){
       port_log(port,"process %d, a child of its device from an earlier launch, holds its queue pairs until its exit; its own child spawned "
                "after it\n",(int)pid);
-      port->elsewhere=pid;
+      port->elsewhere=pid;port->elsewhere_start=holders[k].start;port->late_from=port->late_at=now+2*MESH_PLATFORM_NS;port->stage=0;
     }
   }
   if(port->elsewhere)return EBUSY;
@@ -1162,7 +1171,7 @@ static int child_spawn(struct port *port){
     posix_spawnattr_init(&attributes);
     posix_spawnattr_setflags(&attributes,POSIX_SPAWN_CLOEXEC_DEFAULT|POSIX_SPAWN_SETPGROUP);
     posix_spawnattr_setpgroup(&attributes,0);
-    error=posix_spawn(&pid,self_path,&actions,&attributes,arguments,*_NSGetEnviron());
+    error=fcntl(pair[0],F_SETFL,O_NONBLOCK)?errno:posix_spawn(&pid,self_path,&actions,&attributes,arguments,*_NSGetEnviron());
     posix_spawn_file_actions_destroy(&actions);posix_spawnattr_destroy(&attributes);
     close(pair[1]);
     if(error)close(pair[0]);
@@ -1172,7 +1181,7 @@ static int child_spawn(struct port *port){
     port->hold_to=now+MESH_PAUSE_NS;
     return error;
   }
-  port->child=pid;port->child_fd=pair[0];port->child_at=now;port->child_held=0;port->ending=0;
+  port->child=pid;port->child_fd=pair[0];port->child_at=now;port->child_held=0;port->ending=port->deaf=port->hung=port->stage=0;
   holders[entry]=(struct mesh_holder){(uint32_t)pid,device,mesh_started(pid)};
   port->holder=entry;
   port_log(port,"its child %d spawned\n",(int)pid);
@@ -1196,7 +1205,7 @@ static void child_heard(struct port *port){
       if(!heard.result && job==CHILD_MAKE){memcpy(l->qpn,heard.qpn,sizeof l->qpn);l->psn=heard.psn;l->share=(struct frames){heard.share};}
       atomic_store_explicit(&port->done,1,memory_order_release);
     }
-    else if(heard.kind==CHILD_FAULTED){port_log(port,"a fault of its provider's doorbell absorbed: its link lost\n");port->open=0;port_lost(port,ENETDOWN);}
+    else if(heard.kind==CHILD_FAULTED){port_log(port,"the provider's fault absorbed in the port's child: its link lost\n");port->open=0;port_lost(port,ENETDOWN);}
     else if(heard.kind==CHILD_BROKEN && current && l->state==LINK_UP){
       if(heard.result)atomic_store_explicit(&l->lost,heard.result,memory_order_relaxed);
       atomic_fetch_or(&l->broken,heard.broken);
@@ -1204,11 +1213,29 @@ static void child_heard(struct port *port){
   }
   if(got<0){close(port->child_fd);port->child_fd=-1;}
 }
+static uint64_t child_seen(const struct port *port){
+  return MAX(atomic_load_explicit(&mesh_bridge_pages(M)->progress[port->index],memory_order_relaxed),port->child_at);
+}
+static int child_may_end(const struct port *port){
+  return !port->job && now>=atomic_load(&port->quiet_at) && now>=atomic_load(&exit_at) && !atomic_load_explicit(&stalled,memory_order_relaxed);
+}
 static void child_turn(struct port *port){
-  if(!port->recycle || !port->child || port->ending || port->job || now<atomic_load(&port->quiet_at) ||
-     now<atomic_load(&exit_at) || atomic_load_explicit(&stalled,memory_order_relaxed))return;
-  message_send(port->child_fd,(struct child_message){.kind=CHILD_END});
-  port->ending=1;
+  const uint64_t seen=child_seen(port);
+  if(port->child && !port->ending && !port->hung && (port->deaf || now>=seen+MESH_PLATFORM_NS)){
+    port_log(port,"its child %d %s, its last progress %.1f s before: its link lost, and the child ended once its windows have passed "
+             "(design/transport.md section 16)\n",(int)port->child,port->deaf?"took no whole message":"made no progress",
+             (double)(int64_t)(now-seen)/1e9);
+    port->hung=1;port->open=0;port_lost(port,ETIMEDOUT);port->recycle=1;
+  }
+  const pid_t late=port->ending?port->child:port->elsewhere;
+  if(late && port->stage<2 && now>=port->late_at && child_may_end(port) && (port->ending || mesh_holds(late,port->elsewhere_start))){
+    port_log(port,"process %d, %s, has not ended: %s (design/transport.md section 16)\n",(int)late,
+             port->ending?"its child asked to end":"a child of an earlier launch",port->stage?"SIGKILL":"SIGSTOP, and SIGKILL once quiet");
+    kill(late,port->stage++?SIGKILL:SIGSTOP);port->late_at=now+MESH_PLATFORM_NS;
+  }
+  if(!port->recycle || !port->child || port->ending || !child_may_end(port))return;
+  child_say(port,(struct child_message){.kind=CHILD_END});
+  port->ending=1;port->late_from=port->late_at=now+MESH_PLATFORM_NS+MESH_PAUSE_NS;port->stage=0;
   port_log(port,"its child %d asked to end, its lanes released at its exit (design/transport.md section 14)\n",(int)port->child);
 }
 static void child_reaped(struct port *port){
@@ -1221,17 +1248,17 @@ static void child_reaped(struct port *port){
   port->child=0;
   if(port->holder<2*MESH_PORTS && mesh_bridge_pages(M)->child[port->holder].pid==(uint32_t)pid)
     mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};
-  const int asked=port->ending;
+  const int asked=port->ending && !port->hung;
   port->ending=port->recycle=0;
   if(asked){port->aborts=0;port_log(port,"its child %d ended\n",(int)pid);}
   else{
     port->aborts=now-port->child_at<MESH_CHILD_SETTLE_NS?port->aborts+1:0;
     const uint64_t hold=port->aborts>1?backoff(port->aborts-2):0;
     port->hold_to=now+hold*UINT64_C(1000000000);
-    port_log(port,"its child %d ended unbidden (%s %d); its next spawned in %llu s\n",(int)pid,WIFSIGNALED(status)?"signal":"status",
-             WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status),(unsigned long long)hold);
+    port_log(port,"its child %d ended %s (%s %d); its next spawned in %llu s\n",(int)pid,port->hung?"after its hang":"unbidden",
+             WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status),(unsigned long long)hold);
     port->open=0;
-    port_lost(port,ECHILD);
+    if(!port->hung)port_lost(port,ECHILD);
   }
   if(port->job){port->result=ECHILD;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
   streams_cancel(port);
@@ -1286,8 +1313,12 @@ static void fault_heard(int number,siginfo_t *info,void *context){
   if(pc>=provider[0] && pc<provider[1]){
     void *got=mmap((void *)page,vm_page_size,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
     if(got!=MAP_FAILED && got!=(void *)page)munmap(got,vm_page_size);
-    if(got==(void *)page || atomic_load(&faulted)){port_halt(ports,&faulted);return;}
-    if(atomic_exchange(&retried,page)!=page)return;
+    if(got==(void *)page)atomic_store(&mapped,page);
+    const int lands=atomic_load(&mapped)==page;
+    if(!lands && (uintptr_t)pthread_self()==atomic_load(&job_thread))atomic_store(&job_parked,1);
+    port_halt(ports,&faulted);
+    if(lands)return;
+    for(;;)pause();
   }
   struct sigaction fallback={.sa_handler=SIG_DFL};
   sigaction(number,&fallback,NULL);
@@ -1299,9 +1330,10 @@ static __attribute__((noreturn)) void child_leave(struct port *port,int asked){
   const uint64_t start=clock_ns(),bound=start+(asked?1:2)*MESH_PLATFORM_NS;
   for(;;){
     const uint64_t at=clock_ns(),windows=MAX(atomic_load(&exit_at),atomic_load(&port->quiet_at));
-    const uint64_t until=MIN(bound,MAX(asked?start:start+MESH_PLATFORM_NS,windows));
+    const uint64_t until=MIN(bound,MAX(asked?start:start+MESH_PLATFORM_NS,windows)),rest_ns=MIN(until-at,MESH_PAUSE_NS);
+    atomic_store_explicit(&mesh_bridge_pages(M)->progress[port->index],at,memory_order_relaxed);
     if(at>=until)break;
-    struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
+    struct timespec rest={(time_t)(rest_ns/1000000000u),(long)(rest_ns%1000000000u)};
     nanosleep(&rest,NULL);
   }
   exit(0);
@@ -1380,15 +1412,24 @@ static int child_main(int argc,char **argv){
   __atomic_store_n(&port_count,1,__ATOMIC_SEQ_CST);
   if((events=kqueue())<0 || watch(0,EVFILT_USER,EV_ADD|EV_CLEAR,0,UINT64_MAX) || watch(3,EVFILT_READ,EV_ADD,0,UINT64_MAX))die("child events");
   terminations_watch(0);
-  int told=0;
+  uint64_t passed[2]={0};
+  uint32_t serving=0;
   for(;;){
     now=clock_ns();
+    const int fault=atomic_load(&faulted)!=0;
+    if(port->job && atomic_load(&job_parked)){port->result=ECANCELED;port->refused=0;atomic_store_explicit(&port->done,1,memory_order_release);}
     child_jobs(port);
+    const uint64_t sent=atomic_load_explicit(&port->progress[0].passes,memory_order_relaxed),got=atomic_load_explicit(&port->progress[1].passes,memory_order_relaxed);
+    const uint32_t served=atomic_load_explicit(&port->link.served,memory_order_relaxed);
+    if(!served || served!=serving || (sent!=passed[0] && got!=passed[1])){
+      serving=served;passed[0]=sent;passed[1]=got;
+      atomic_store_explicit(&mesh_bridge_pages(M)->progress[port->index],now,memory_order_relaxed);
+    }
     const uint32_t broken=atomic_exchange_explicit(&port->link.broken,0,memory_order_acq_rel);
     if(broken)message_send(3,(struct child_message){.kind=CHILD_BROKEN,.pairing=child_asked,.broken=broken,
                                                    .result=atomic_exchange_explicit(&port->link.lost,0,memory_order_relaxed)});
     if(atomic_exchange(&terminated,0))child_halted=1;
-    if(!told && atomic_load(&faulted)){told=1;message_send(3,(struct child_message){.kind=CHILD_FAULTED});}
+    if(fault){message_send(3,(struct child_message){.kind=CHILD_FAULTED});child_leave(port,0);}
     struct kevent64_s ready[4];
     struct timespec tick={(time_t)(MESH_PAUSE_NS/1000000000u),(long)(MESH_PAUSE_NS%1000000000u)};
     const int count=kevent64(events,NULL,0,ready,4,0,&tick);
@@ -1460,6 +1501,19 @@ static void region_adopt(void){
     atomic_store(&M->map_nodes,0);
     atomic_store(&M->map_off,(uint64_t)(mesh_at(M,map_page)-(unsigned char *)M));
   }
+}
+/* design/transport.md section 16, "The watchdog" */
+static void turned(void){
+  struct mesh_bridge_pages *own=mesh_bridge_pages(M);
+  uint64_t from=finding?find_at+MESH_PLATFORM_NS:UINT64_MAX;
+  for(uint32_t p=0;p<port_count;p++){
+    const struct port *port=ports+p;
+    if(port->job && !atomic_load_explicit(&port->done,memory_order_acquire))from=MIN(from,port->job_at+MESH_PLATFORM_NS);
+    if(port->child)from=MIN(from,port->ending?port->late_from:child_seen(port)+MESH_PLATFORM_NS);
+    if(port->elsewhere)from=MIN(from,port->late_from);
+  }
+  atomic_store_explicit(&own->hung_from,from<=now && !stop?from:0,memory_order_relaxed);
+  atomic_store_explicit(&own->turned,now,memory_order_relaxed);
 }
 /* design/transport.md section 15, "Windows" */
 static inline void due_at(uint64_t *due,uint64_t at){ if(at>now && at<*due)*due=at; }
@@ -1571,6 +1625,7 @@ int main(int argc,char **argv){
     const int alive=now>=liveness;
     if(alive)liveness=now+MESH_PAUSE_NS;
     clients_turn(alive);
+    turned();
     struct kevent64_s ready[16];
     const uint64_t due=turn_due(liveness),at=clock_ns(),rest=due>at?due-at:0;
     struct timespec tick={(time_t)(rest/1000000000u),(long)(rest%1000000000u)};
@@ -1619,21 +1674,24 @@ int main(int argc,char **argv){
   say("bridge node %u: stopping (signal %lld%s)\n",node,(long long)stop_reason,stop_reason==SIGHUP?": its heartbeat restarts it":
       stop_reason==SIGTERM?": its heartbeat's release or stop":"");
   for(uint32_t p=0;p<port_count;p++){
-    message_send(ports[p].child_fd,(struct child_message){.kind=CHILD_HALT});
+    child_say(ports+p,(struct child_message){.kind=CHILD_HALT});
     if(ports[p].control>=0){close(ports[p].control);ports[p].control=-1;}
   }
   streams_cancel(NULL);
   atomic_store(&M->bridge_pid,0);
   const uint64_t held_to=clock_ns()+MESH_PLATFORM_NS;
   for(int told=0;;){
-    now=clock_ns();
+    now=clock_ns();turned();
     const uint64_t windows=windows_end(),latest=MIN(windows,held_to);
     if(latest<=now)break;
     if(!told++)say("bridge node %u: its exit held %.1f s, to its quiet windows' end (design/transport.md)\n",node,(double)(latest-now)/1e9);
     struct pollfd heard={.fd=network,.events=POLLIN};
-    if(poll(&heard,1,(int)((latest-now+999999)/1000000))>0){now=clock_ns();network_heard(1);}
+    if(poll(&heard,1,(int)((MIN(latest-now,MESH_PAUSE_NS)+999999)/1000000))>0){now=clock_ns();network_heard(1);}
   }
-  for(uint32_t p=0;p<port_count;p++)message_send(ports[p].child_fd,(struct child_message){.kind=CHILD_END});
+  for(uint32_t p=0;p<port_count;p++){
+    child_say(ports+p,(struct child_message){.kind=CHILD_END});
+    if(ports[p].stage==1)kill(ports[p].ending?ports[p].child:ports[p].elsewhere,SIGKILL);
+  }
   close(events);events=kqueue();
   for(uint32_t p=0;p<port_count;p++)if(ports[p].child)watch((uint64_t)ports[p].child,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,p);
   for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;;){
@@ -1642,11 +1700,12 @@ int main(int argc,char **argv){
       if(!waitpid(ports[p].child,NULL,WNOHANG))left++;
       else ports[p].child=0;
     }
-    const uint64_t at=clock_ns();
+    const uint64_t at=now=clock_ns(),wait=MIN(until-at,MESH_PAUSE_NS);
+    turned();
     if(!left || at>=until)break;
     struct kevent64_s ended;
-    struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
-    if(events<0 || (kevent64(events,NULL,0,&ended,1,0,&rest)<0 && errno!=EINTR))poll(NULL,0,(int)((until-at+999999)/1000000));
+    struct timespec rest={(time_t)(wait/1000000000u),(long)(wait%1000000000u)};
+    if(events<0 || (kevent64(events,NULL,0,&ended,1,0,&rest)<0 && errno!=EINTR))poll(NULL,0,(int)((wait+999999)/1000000));
   }
   return 0;
 }
