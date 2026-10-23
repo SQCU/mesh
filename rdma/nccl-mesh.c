@@ -2573,7 +2573,7 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
     else {
       void *command = status ? NULL : metal_retain(s->command);
       pthread_mutex_unlock(&group_lock);
-      if (command) { metal_completed(command); metal_release(command); }
+      if (command) { metal_completed(command, MESH_PAUSE_NS); metal_release(command); }
       else sched_yield();
       pthread_mutex_lock(&group_lock);
     }

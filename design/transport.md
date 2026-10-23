@@ -493,15 +493,16 @@ Every word below, with its one writer at a time and its readers:
   goes to its lane m modulo its lanes. Both ends of a hop compute it from the same records and the same key, so a
   tuple's runs spread over every lane of every cable of the hop by the cables' shares (version 138).
 - **What is posted.** A receiving child posts a key unit's receive on a lane only where a run is to come on it: a
-  started landing tuple of its node, neither complete nor ~0, whose sender's name the map holds and whose sender's
+  started landing tuple of its node, not complete (~0 included), whose sender's name the map holds and whose sender's
   node this port's peer is the way to, of whose runs placed on this lane (`placed_runs`) fewer have come than are placed (`arrival`, counted by the lane as
   each is placed: `lane_expects`), or, on every lane of a port, a registration at a node to
   which that port's peer routes through this node (the walker's `relaying`: the relays it may carry). After a run's
   pages are posted it posts the next key unit's receive only where that still holds. So a child whose node has no call
   in flight and relays nothing holds no receive posted, and a SEND toward it waits in its sender's credit (TN3205)
-  until the landing starts. A tuple stamped ~0 sends no more runs (section 10: the bridge sends none of its own), and
-  its landing posts no more receives; a run of it already taken, and a receive already posted for it, are the next
-  SEND's or receive's on that queue pair, or go at the queue pair's release.
+  until the landing starts. A send tuple stamped ~0 sends no more runs (section 10: the bridge sends none of its own).
+  A landing stamped ~0 goes on posting the receives of its runs still to come, each on its placed lane, and lands them
+  in the spare page until every run has come: its receiver's own deadline or revoke, or a lost cable of several, leaves
+  its sender sending, so no SEND waits in credit. A lane whose cable is lost goes with its queue pair.
 - **Sending.** Each child's send thread walks its node's live clients' queues. For each client it takes the started
   tables in the order of their k, and in each table the send tuples whose node its peer is the way to. It takes a run
   from a tuple once the tuple's word has reached its `need`, by a compare-and-swap of `posted` from what it read to that

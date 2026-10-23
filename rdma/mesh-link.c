@@ -506,15 +506,14 @@ static int lane_expects(struct port *port,struct walker *w,uint32_t lane){
   for(uint32_t i=0;i<s->arrivals;){
     const struct arrival *a=s->arrival+i;
     const uint64_t posted=atomic_load_explicit(&a->entry->posted,memory_order_acquire),done=atomic_load_explicit(&a->entry->done,memory_order_acquire);
-    if((uint32_t)(posted>>32)==k32(a->k) && done!=a->k && done!=MESH_STAMP_LOST)i++;
+    if((uint32_t)(posted>>32)==k32(a->k) && done!=a->k)i++;
     else s->arrival[i]=s->arrival[--s->arrivals];
   }
   for(uint32_t i=0;i<w->indexed;i++){
     const struct indexed *y=w->index+i;
     const uint64_t posted=atomic_load_explicit(&y->entry->posted,memory_order_acquire);
     const uint32_t from=name_node(w,y->entry->from),*runs=arrival_runs(s,y->entry,y->k);
-    if(atomic_load_explicit(&y->entry->done,memory_order_acquire)==MESH_STAMP_LOST || (uint32_t)(posted>>32)!=k32(y->k) ||
-       mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer)continue;
+    if((uint32_t)(posted>>32)!=k32(y->k) || mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer)continue;
     if(placed_runs(w,port,port->peer,y->key,(y->entry->pages+MESH_RUN-1)/MESH_RUN,lane)>(runs?*runs:0))return 1;
   }
   return 0;
