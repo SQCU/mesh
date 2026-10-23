@@ -19,7 +19,51 @@ with separate namespaces and separate interfaces:
 
 Kept apart, each kind is simpler, fails in fewer ways and runs faster than a mixture would.
 
-The operator, 10-20: "memory safety isn ot a requirement or even allowed for our code. we don't expose dangerous source level headers, functions, ontological objects, whatever. that's the limit and the only limit we are working with here."
+**What the bridge does (M), one process per node.**
+- At its launch, it maps the node's region and registers it once on every RDMA device.
+- On each link it keeps four streams toward the peer node, each on a lane pair of its own and named by an identity both bridges compute alike:
+  - It posts receives into the stream's in ring for the link's life.
+  - For each unit the holder declared, it posts a SEND when the unit's ready word is set. If the deadline passes or the holding ends first, it posts the same SEND from its all-ones block instead.
+  - It raises each landed word in order.
+  - When the link is lost, it writes ~0 into the landed words.
+- It retires the slot of a client whose process ended: it releases the client's rows and lets go of its stream.
+- It ends when a signal arrives, and its exit releases everything it holds of the devices. Its region outlives it, and
+  the next bridge adopts it, its clients' leases standing; a release is its heartbeat's: once the bridge has ended, the
+  region expires and is unlinked once none of its holders lives, so its memory returns to the system
+  (design/transport.md section 2, the heartbeat).
+- It never reads or writes a payload byte.
+
+**What the bridge cannot do: no API exists for it.**
+- Answer a request: it reads words and writes words.
+- Know a communicator, rank, call, collective, schedule, position or route.
+- Compute, combine or copy data.
+- Deliver a call or take a command.
+- Re-pair, reset, flush or destroy a queue pair, or declare a quiet peer lost.
+
+**What a client does (C), libnccl-mesh in its process.**
+- Attaches one slot of its node's region.
+- Takes rows of the region by compare-and-swap on the shared bitmaps (`ncclMemAlloc`).
+- Reads which nodes its bridge reaches.
+- Meets its peers through NCCL's bootstrap, on its own sockets.
+- Compiles the same schedule as every member.
+- Holds a stream toward each member's node, the one whose identity is free at both ends, by taking its owner word from 0, and hands its peers the stream's pages posted (the bridge's facts), whose difference it keeps as a statistic (0 on a live stream).
+- Lays positions as runs of stream units and declares them.
+- Writes units and their ready words, and reads landed words and the in ring.
+- Combines on the host or the GPU, and paces itself by NCCL's head credit.
+- Ends a communicator by destroy, which gives back its stream. A revoke, NCCL's, stops its groups and keeps the stream until the destroy.
+
+**What a client cannot reach: not in its headers or its link.**
+- Ports, links, cables, lanes, queue pairs, pairings, completion queues, work requests, scatter entries or keys.
+- No verbs call: libnccl-mesh and libmesh do not link the RDMA library, and mesh.h does not include its header.
+- A request to the bridge, or a way to wake its threads.
+- Another client's rows or slot.
+- The words only the bridge writes: landed, `live`, `posts`.
+- Its library's internals: libnccl-mesh exports NCCL's functions, their pnccl twins and its `ncclMesh` extensions, and
+  nothing else.
+
+**What data code (D) reaches:** the NCCL API, the device-function header and `ncclMemAlloc`. It reaches nothing of the bridge's or the region's.
+
+The region is mapped whole into every client, so nothing in the hardware enforces the lists above. Only the headers enforce them, which is why the headers expose nothing else (design/transport.md section 2). The operator, 10-20: "memory safety isn ot a requirement or even allowed for our code. we don't expose dangerous source level headers, functions, ontological objects, whatever. that's the limit and the only limit we are working with here."
 
 **For agents, subagents and reviewers:**
 1. Name the kind of every file a change touches, from the table under Quantities.
@@ -38,7 +82,8 @@ same job), the dimension says which ranks higher. It gives no score. The poles a
 code sits at either one, and between any two forms there may be a third. The poles are not neutral. The lower pole is a
 specific way of failing the code's dependants, and the upper pole a specific kind of success.
 
-The standards are literal statements about code.
+The standards are literal statements about code. Where the operator's words give both poles of a dimension, they are
+quoted as a pair. Where they give only one, neither is quoted, so that no dimension leans on rhetoric at one end.
 
 `A ≺ B` means A ranks below B. The quotations are the operator's, from this project's sessions.
 
@@ -184,7 +229,11 @@ contiguous view if an allocator or user says 'this one has to be contiguous'").
     those flush completions are polled.' you can do this and nothing else with error states and if and only if it is
     exactly what is supported by the literature. you'll notice the user rejects the notion of error states over and
     over and over again where claudes suggest hem on vague grounds ... claudes were using the possibility of
-    error-handling code to justify writing collective operations that *always* errored";
+    error-handling code to justify writing collective operations that *always* errored". It is not used: a holder's
+    halt frees every row outside W(t), the plan's in-flight window, at once, and W(t) ends as each unit completes or as
+    its port's child exits with its queue pairs, so the flush would only end W(t) early (design/extents-and-liveness.md,
+    d and "What follows for the mesh" 3; design/transport.md section 14, "A holding's end"). This ranking stands
+    unchanged;
   - a wait whose end depends on an event that may never come (a poll or socket read with no timeout, a refusal only
     another party's action lifts) ≺ every wait ending in finite time: "it is your own responsibility to write code which
     doesn't stallblock unboundedly. semaphores allow all waits in all programs to termiante in finite time, e.g. 0.1ms
@@ -734,10 +783,14 @@ The positions, in every kind, as ranked pairs:
      which is on a different thread than mesh. mesh_heartbeat uses polite opens and polite closes on the actual mesh
      service."
 
-   Ranked: a deliberate stop that leaves memory held until reboot ≺ a release that frees it; launchd relaunching a
-   stopped bridge ≺ a heartbeat that closes it and keeps it closed; a bridge ending its clients for a region change ≺
-   clients that receive the expiry as a value and let go; a restart policy of one second ≺ one bridge start a minute at
-   most (REOPEN_S).
+   So: a release stops the bridge (its children's exits free every device object) and expires its region; no party signals
+   a client for it; each client's next lease or communicator returns the expiry as a value (ncclRemoteError, and
+   ncclMeshRegionExpired), and the client frees what it holds of that region or ends; the region is unlinked, and its
+   memory the system's, once none of its holders lives. One supervisor (the heartbeat) opens and closes the bridge on kernel
+   events (a delay only bounds how soon a bridge that ended unasked opens again), and no second region is made beside a holder of the first. Ranked: a deliberate stop
+   that leaves memory held until reboot ≺ a release that frees it; launchd relaunching a stopped bridge ≺ a heartbeat
+   that closes it and keeps it closed; a bridge ending its clients for a region change ≺ clients that receive the expiry
+   as a value and let go; a restart policy of one second ≺ one bridge start a minute at most (REOPEN_S).
 
 ## Strings are messages
 
