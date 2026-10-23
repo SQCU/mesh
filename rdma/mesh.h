@@ -22,11 +22,13 @@
    pages and nothing else (no keepalive, no spare, no dud of the bridge's own), page p of the stream's sequence over
    its pairing on its lane p mod 2, posted in that order (design/transport.md section 14).  134: a holding ends with
    nothing outstanding on its stream's lanes, or the stream is never live again in the pairing (a link none of whose
-   streams is live is lost and pairs again from 0); no communicator presents filler */
-#define MESH_VERSION 134u
+   streams is live is lost and pairs again from 0); no communicator presents filler.  135: a node's stream spans every
+   cable joining the two nodes, a piece of MESH_SPREAD_PAGES pages or more cut evenly over them and a shorter one whole on
+   the first (design/transport.md section 14, "A stream over several cables") */
+#define MESH_VERSION 135u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 138u
+#define MESH_LAYOUT 139u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -146,8 +148,21 @@ struct mesh_stream {
   _Atomic uint32_t child;
   uint64_t child_start;
   struct mesh_posts posts[2];
+  /* design/transport.md section 14, "A stream over several cables": the bridge's words of a stream as a cable of a node's
+     stream, which no client reads.  Its own cable's, its port child's: the cable's identity (`cable`, alike at both
+     ends), the holding it serves (`serving`, 0 none), its pages over its pairing as its last holding ended, each way
+     (`base`), and its entries taken in the holding, each list (`walked`).  Its group's, the parent's: the group's first
+     stream (`lead`: 1 + its region index, 0 itself the first), a group being made again (`regroup`, set on each of its
+     streams) and, a first stream's, its cables (`cables`, their region streams in identity order in `member`), and the
+     holdings its first cable began (`begun`) and the cables stopped in the last (`stops`, a bit a cable) */
+  _Alignas(64) _Atomic uint64_t cable;
+  _Atomic uint64_t serving,base[2],walked[2];
+  _Alignas(64) _Atomic uint64_t begun;
+  _Atomic uint64_t stops;
+  _Atomic uint32_t lead,cables,regroup;
+  uint8_t member[8];
 };
-_Static_assert(sizeof(struct mesh_stream)==384,"mesh_stream");
+_Static_assert(sizeof(struct mesh_stream)==512,"mesh_stream");
 /* design/transport.md: a node's record, the newest of which every bridge floods to the mesh: its node and boot, the
    record's sequence in that boot, the bytes of its bridge's region its clients may hold (the region's arena less what the
    bridge holds itself: the map, the streams' pages and rings, the duds' block), the node's memory in bytes and hardware
