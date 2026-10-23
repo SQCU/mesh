@@ -96,11 +96,12 @@ Two documents are written for the four Mac Studios (M5 Ultra, 96 GiB, headless) 
 Mini's region is and one as the M5's.
 
 `m5ultra-headless.toml`, sized as the Mini's (the operator, 2026-10-15: "allocate essentially all of the memory on the
-entire device"): the most whole GiB that leaves a 2 GiB margin, 86 GiB. Beside it
-the node keeps 2.71 GiB: the region's tables (0.339 GiB, 347.2 MiB), base wired (1.6), macOS's anonymous memory (1.5), the
-rank's process (0.9) and the Neural Engine's own copy (2.95); 87 GiB would leave 1.71. It holds 26B-A4B whole at the
-engine's whole page geometry (81.11 GiB) on one Studio and 12B's (97.18 GiB) on any two members, and the six regions
-(four Studios at 86, the M5 at 14, the Mini at 16) hold 374 GiB.
+entire device"): the most whole GiB that leaves a 2 GiB margin, 82 GiB. Beside it
+the node keeps 2.98 GiB: the region's tables (0.323 GiB, 331.1 MiB), base wired (2.61, the Studios' reading on
+2026-10-23), macOS's anonymous memory (1.5), the rank's process (3.64, wired at the chain's run in m5ult2's panic of
+03:08 that day) and the Neural Engine's own copy (2.95); 83 GiB would leave 1.97. At 86 GiB those readings left -1.02,
+and both Studios reset. It holds 26B-A4B whole at the engine's whole page geometry (81.11 GiB) on one Studio and 12B's
+(97.18 GiB) on any two members, and the six regions (four Studios at 82, the M5 at 14, the Mini at 16) hold 358 GiB.
 
 `m5ultra-low.toml`, sized as the M5's (the operator, 2026-10-15, below: "the m5 system could even have a m5_low
 configuration that allocates less buffer than a m4 pro headless machine, since it has higher flops, higher bandwidth,
@@ -108,9 +109,9 @@ and benefits less from memoization than a flops starved and bandwidth starved pe
 its region is the least whole GiB
 that holds the whole E2B model alone at the engine's whole page geometry, 14 GiB (13.27 GiB counted by programs.py `plans`
 of a membership of one from the model file's header; 10.56 on the streamed codes export), and any part of E2B on any
-membership holds in it. Beside it the node keeps 74.99 GiB: the region's tables (0.056 GiB), base wired (1.6, the Mini's
-figure until a Studio's is read), macOS's anonymous memory (1.5), the rank's process (0.9) and the Neural Engine's own copy
-(at most every FFN column at fp16, 2.95). The Mini's sizing, the most that leaves a 2 GiB margin, gives 86 GiB. The larger
+membership holds in it. Beside it the node keeps 71.24 GiB: the region's tables (0.056 GiB), base wired (2.61, the Studios'
+reading), macOS's anonymous memory (1.5), the rank's process (3.64) and the Neural Engine's own copy
+(at most every FFN column at fp16, 2.95). The Mini's sizing, the most that leaves a 2 GiB margin, gives 82 GiB. The larger
 models alone at a call's own pages take more than 14 GiB (12B 16.46 GiB at 4,096 positions, 26B-A4B 28.25 GiB): a Studio
 holds its part of them on memberships whose regions together hold the whole, and the planner fits each member's part to
 its region; at the engine's whole page geometry they take 97.18 GiB (12B) and 81.11 GiB (26B-A4B), more than the six
@@ -121,8 +122,8 @@ metal-microbench tools/mesh/programs.py under `MESH_MODEL=e2b-engine` (12b, 26b-
 
 The region is the operator's: "will the user ever 'give permission' to pin 96gb of memory preemptively on a userspace
 machine for no reason? they *might not*" (2026-10-15, below). Each document states the arithmetic it follows from. A Studio's base wired
-memory and its devices' `max_mr` are read when it arrives: the pair's devices report `max_mr` 100, so each registers
-up to 100 of the bridge's 1 GiB extents, and a device
+memory and its devices' `max_mr` are read when it arrives: the pair's devices report `max_mr` 100, and a region
+registers as 2 GiB extents and a family shifted by half an extent (design/transport.md), 62 at 82 GiB, and a device
 that registers fewer than its region's extents pairs no port until the region is lowered (its refusal logged with the
 extent, above); the region is not clamped. Each of a node's devices registers the whole region, so a Studio cabled on
 several ports registers it once a device.
