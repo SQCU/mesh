@@ -390,7 +390,8 @@ the node's uplink.
 | `install.sh` | provision/converge a node, run by hand. Idempotent — re-running is the drift fix, and nothing reruns it. Each run sets the power policy, the firewall, sshd, screen sharing and NTP, runs the networks, fabric and tailnet inits and the health report, loads every unloaded `io.mesh.*` system daemon (one whose userspace provider runs excepted) and the admin user's LaunchAgents that declare the Background session type (into user/<uid>), and starts the beacon, telemetry and the observer where they are not running. It deletes `io.mesh.update`, `io.mesh.keeper`, `io.mesh.cartlane.learner` and `io.mesh.cartlane.viewer` where they remain, the update's bootout last since that job may be the run's own parent. It runs with root's home: macOS `sudo` keeps the caller's `HOME`, so the first hand-run install on the M5 Ultra Studio (2026-10-21) left uv's cache, Pythons and receipt root-owned in the admin's home, and the admin's own build (`mesh-user.sh`) could not open them. |
 | `bootstrap.sh` | one-shot entry for the physical visit. Opens sshd, then runs `install.sh`. |
 | `enable-autologin.sh` | boot into a GUI session so session-bound workloads survive a reboot. |
-| `CLAUDE.md` | where to start: `design/rubric-actionable.md`, then `THREAT-MODEL.md` and `design/pages-and-functions.md`. |
+| `CLAUDE.md` | where to start: `design/rubric-actionable.md`, then `THREAT-MODEL.md` and `INDEX.md`. |
+| `INDEX.md` | the documents that describe the current system, each with a short note. |
 | `THREAT-MODEL.md` | the operator's words on access, verbatim (2026-08-27). |
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | the nodes this node's bridge holds a record of, then the nodes announcing on the LAN, as a stream. Installed as `mesh-peers`. |
