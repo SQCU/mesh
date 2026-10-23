@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch_mesh
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh
 from torch_mesh import partition
 
 import chain
@@ -55,7 +55,7 @@ def main():
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     L, KIN, H = config['layers'], config['input_width'], config['width']
-    mesh = init_device_mesh('mps', (size,), mesh_dim_names=('tp',))
+    mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     even = [H // size + (r < H % size) for r in range(size)]
     partition.attach(mesh, tp=(even, even))
     blocks = partition.split(mesh, 'tp', H)
