@@ -1514,6 +1514,7 @@ static void turned(void){
   }
   atomic_store_explicit(&own->hung_from,from<=now && !stop?from:0,memory_order_relaxed);
   atomic_store_explicit(&own->turned,now,memory_order_relaxed);
+  atomic_store_explicit(&own->turned_by,own->bridge_start,memory_order_release);
 }
 /* design/transport.md section 15, "Windows" */
 static inline void due_at(uint64_t *due,uint64_t at){ if(at>now && at<*due)*due=at; }

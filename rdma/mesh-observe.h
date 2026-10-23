@@ -15,7 +15,7 @@ static inline struct mesh_link_info *mesh_links(struct hdr *m){ return (struct m
 struct mesh_holder { uint32_t pid,device; uint64_t start; };
 struct mesh_bridge_pages { uint32_t link[MESH_PORTS],lists[MESH_PORTS],ones,map,map_pages,padding; uint64_t bridge_start;
   struct mesh_holder child[2*MESH_PORTS];
-  _Atomic uint64_t turned,hung_from,progress[MESH_PORTS],active,hung,hangs; };
+  _Atomic uint64_t turned,hung_from,progress[MESH_PORTS],active,hung,hangs,turned_by; };
 _Static_assert(MESH_PORTS*sizeof(struct mesh_link_info)+sizeof(struct mesh_bridge_pages)<=MESH_BRIDGE_BYTES,"mesh_bridge_pages");
 static inline void mesh_say(const char *prefix,const char *format,va_list arguments){
   struct timespec t;clock_gettime(CLOCK_REALTIME,&t);

@@ -954,7 +954,8 @@ The words (rdma/mesh-observe.h `struct mesh_bridge_pages`, appended; each writte
 supervisor):
 - `turned`, the parent's: its clock at each turn of its event loop and at each pass of its stop's waits. The clock,
   the bridge's and the heartbeat's alike, is CLOCK_UPTIME_RAW (mach_absolute_time's), which stops while the system
-  sleeps.
+  sleeps. With it, after it, `turned_by`: the writer's start (`bridge_start`), so that a stamp is read only as the
+  stamp of the bridge that wrote it; the region outlives its bridges.
 - `progress[port]`, each child's: the clock at a turn of its main loop at which each of its progress threads that
   serves lanes has passed since the last such turn. A progress thread counts its passes on its own line (`struct
   progress`'s `passes`), one store a pass and no clock. A thread with no lane served waits on `served` and holds no unit
@@ -967,13 +968,13 @@ supervisor):
 
 What reads them, and what each reader does:
 - **The heartbeat** (a distinct process launchd keeps; it holds no device) reads `turned` each WATCH_MS while a bridge
-  is open, once that bridge has written it since its open (a bridge the heartbeat found serving, from its first word
-  on). The parent's loop always has a turn due at most
-  MESH_PAUSE_NS on (its liveness turn), with or without work, so a quiet bridge turns and is never ended; where `turned`
-  is MESH_PLATFORM_NS old, a turn due has not come, and the heartbeat logs it and sends SIGKILL (to a bridge it did not
-  spawn, only while that pid is still the process that started then, `mesh_holds`). The bridge's stop signals are
-  kqueue events and ignored as signals, so a loop that does not turn never reads SIGHUP or SIGTERM, and SIGKILL is the
-  signal that ends it from every state.
+  is open, where `turned_by` names that bridge's own start (`mesh_started` of its pid) and, for a bridge it spawned,
+  `turned` is later than the open. A stamp another bridge left in the region (a bridge found serving before its first
+  turn, a build without these words adopting a region a later one stamped, a pid given again) is never acted on. The
+  parent's loop always has a turn due at most MESH_PAUSE_NS on (its liveness turn), with or without work, so a quiet
+  bridge turns and is never ended; where `turned` is MESH_PLATFORM_NS old, a turn due has not come, and the heartbeat
+  logs it and sends SIGKILL. The bridge's stop signals are kqueue events and ignored as signals, so a loop that does not
+  turn never reads SIGHUP or SIGTERM, and SIGKILL is the signal that ends it from every state.
   It holds no device, so its exit releases no device object, wherever a termination stands. Its children see its socket
   end, halt their lanes and leave after their own windows (`child_leave`); the next bridge adopts the region. The
   heartbeat asks nothing of its own: where it had asked nothing, the end is an unasked end, and the bridge opens again

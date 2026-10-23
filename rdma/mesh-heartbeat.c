@@ -220,7 +220,9 @@ static void watchdog(void){
   size_t size=0;
   struct hdr *m=region_map(&size,1);
   struct mesh_bridge_pages *own=m?region_own(m,size):NULL;
-  const uint64_t turned=own?atomic_load(&own->turned):0,parties=own?atomic_load(&own->hung_from):0;
+  const uint64_t by=own?atomic_load(&own->turned_by):0;
+  const int ours=by && by==mesh_started(bridge);
+  const uint64_t turned=ours?atomic_load(&own->turned):0,parties=ours?atomic_load(&own->hung_from):0;
   if(turned>since){
     const uint64_t onset=parties>since && parties<turned+MESH_PLATFORM_NS?parties:turned+MESH_PLATFORM_NS;
     atomic_fetch_add(&own->active,now-ticked);
@@ -230,7 +232,7 @@ static void watchdog(void){
     ticked=now;
   }
   if(m)munmap(m,size);
-  if(turned<=since || now<turned+MESH_PLATFORM_NS || killed==bridge || (!child && !mesh_holds(bridge,opened_at)))return;
+  if(turned<=since || now<turned+MESH_PLATFORM_NS || killed==bridge)return;
   killed=bridge;
   say("bridge %d: its event loop has not turned for %.1f s: ended (SIGKILL), %s (design/transport.md section 16)\n",(int)bridge,
       (double)(now-turned)/1e9,asked==ASKED_NONE?"as a bridge that ends unasked":"as it was asked to close");
