@@ -6,6 +6,31 @@ be compeltely removed. no more rules anywhere in the documentation, memoryfiles,
 the rubric's constrained dialect is not evidence, is not a rule, is not justification, and does not reflect a sanctioned
 action supported by the user or by literature."
 
+## What we have (2026-10-22)
+
+1. Each node runs one launchd job, `mesh-heartbeat`, which opens the bridge (`mesh-flow`), opens it again at most once a
+   minute when it ends unasked, and closes it on SIGHUP (restart, region kept) or SIGUSR1 (release, region freed).
+2. The bridge maps one shared memory region for the node, registers it once with every Thunderbolt RDMA device, and
+   runs one child process per port, which alone holds that port's queue pairs.
+3. A child pairs its link once with the peer's child (hello, make, connect), keeps up to four streams on it, posts
+   receives and SENDs as clients' plans present them, raises landed words, writes ~0 into them when the link is lost,
+   and never touches a payload byte; its exit is the only release of its queue pairs.
+4. A lost link (link off, a termination, a failed completion, the control socket's end) ends that port's child after a
+   5 s quiet window, and a new child pairs again when the peer answers; other ports, clients and leases are untouched.
+5. A child absorbs the fault of a post racing a vanished cable, so that its exit does not fall inside the device's
+   termination: the kernel path that hung the Mini on 2026-09-05 and panicked the M5 on 2026-10-18.
+6. libnccl-mesh is each process's client: it takes rows of the region (`ncclMemAlloc`), holds a stream toward each
+   peer node, compiles each call's plan once and starts it again (MPI-4 persistent collectives), allocates every
+   start's send and landing pages as rows released by use count, and returns failures as values (`ncclRemoteError`).
+7. Kernels cross in-stream through the device-function header (`mesh_enter`, `mesh_leave`, landing, own and send
+   views), and host-path calls run the library's own combine kernels.
+8. torch-mesh is the `torch.distributed` backend over libnccl-mesh (`init_process_group(backend="mesh")`), and
+   `rdma/mesh_mpi.py` the NumPy binding.
+9. Data code (examples/, metal-microbench's engine, torch programs) passes tensors and views and reaches nothing of the
+   bridge or the region.
+10. In progress: routing through a third node while a link is down, a communicator re-peering itself after a loss, and
+    the heartbeat watching its bridge's progress.
+
 ## Recovery
 
 The operator, 2026-10-06, of reconnection and resumption: "lets split out reconnection and resumption logic into a
