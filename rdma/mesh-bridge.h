@@ -124,7 +124,6 @@ struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _At
    its next SEND 1.8-5 us late: metal-microbench docs/measurement.md, the quiet probe).  Both ends cut alike: a send
    entry and the landing entry it fills are of the same pages */
 #define MESH_SPREAD_PAGES 8u
-_Static_assert(MESH_PORTS<=sizeof(((struct mesh_stream *)0)->member),"a group's cables, a port each at most");
 static inline uint64_t spread_at(uint64_t pages,uint32_t cables,uint32_t c){ return pages<MESH_SPREAD_PAGES?(c?pages:0):c*pages/cables; }
 /* a walk's cursor over its entries taken: the entry `at`, and one cable's pages in the entries before it (`before`) */
 struct cursor { uint64_t at,before; };
@@ -182,9 +181,8 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    lane's SEND gate (`gate`: the frames posted and retired; its capacity, set as the lane connects), each data lane's
    progress (`lane`, struct lane_state), the arena page of the streams' lists and time rings (`lists`, leased as the
    port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream).  Each stream's holding at the progress thread: the
-   owner it serves (`held`), its state (`hold`), its group's first stream (`first`) and that stream's holdings begun as
-   this cable last served or joined it (`begun`), its own `lead` as it last read it, its send and landing walks
-   (`sending`, `landing`) and their time rings (`posted_at`, `landed_at`) */
+   owner it serves (`held`), its state (`hold`), its send and landing walks (`sending`, `landing`) and their time rings
+   (`posted_at`, `landed_at`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
@@ -197,9 +195,8 @@ struct link {
   struct send_gate gate[MESH_LINK_LANES];
   struct lane_state lane[MESH_LINK_LANES];
   uint64_t job_at;
-  uint64_t held[MESH_LINK_STREAMS],begun[MESH_LINK_STREAMS];
-  uint32_t hold[MESH_LINK_STREAMS],lead[MESH_LINK_STREAMS];
-  struct mesh_stream *first[MESH_LINK_STREAMS];
+  uint64_t held[MESH_LINK_STREAMS];
+  uint32_t hold[MESH_LINK_STREAMS];
   struct walk sending[MESH_LINK_STREAMS];
   _Atomic uint64_t *posted_at[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
