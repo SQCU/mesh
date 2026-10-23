@@ -51,7 +51,7 @@ interfaces" (714).
 
 | Dimension | Name | Ranks higher | rubrics.md line |
 |---|---|---|---|
-| C1 | Provenance | the form closer to NCCL's API and semantics and to the published algorithm it implements | 357 |
+| C1 | Provenance | the form that keeps NCCL's API and semantics as its interface and whose implementation is Pareto dominant to NCCL's: fewer transactions per collective operation, more sparsity, lower latency | 357 |
 | C2 | Invariance | the form whose one implementation serves more cablings, member counts, uneven counts and dtypes without a branch for any of them | 374 |
 | C3 | Routing as data | the form in which more of the route and the collective's form is a compiled object passed as an operand, and less is inferred where it runs | 388 |
 | C4 | Asynchrony | the form that issues earlier and waits later, and adds fewer waits between them | 398 |
