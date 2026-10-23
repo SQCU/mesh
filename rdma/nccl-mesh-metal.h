@@ -41,8 +41,6 @@ struct metal_result { int status; const char *message; };
 static inline struct metal_result metal_failed(int status) { return (struct metal_result){status, strerror(status)}; }
 
 void *metal_device(void);
-/* the default device's argument records encoded and the ring's capacity (nccl.h ncclMeshMetal4Records) */
-void metal_records(uint64_t *issued, uint64_t *capacity);
 void *metal_wrap(void *address, size_t bytes);
 void *metal_scratch(size_t bytes);
 /* a buffer of `bytes` the host and the GPU both read and write, zeroed (its address metal_contents') */

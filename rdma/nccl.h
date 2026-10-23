@@ -1049,30 +1049,6 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
    mesh_step_enter's and mesh_step_await's results are true (no kernel halts on a failure: rdma/NCCL.md "Bounded
    waits"), kept so that a kernel testing them compiles as it is. */
 const char* ncclMeshMetalPrelude(void);
-/* The argument records this process has encoded on the default device (the Metal 4 form's dispatches' and either form's
-   fused steps'; `issued`, counting from its first program) and how many its ring holds unread by the GPU at most
-   (`capacity`): an encode past that refuses with
-   EOVERFLOW mid-group (a failed group), so a caller that encodes several submissions ahead bounds each submission's records by it (the
-   records a step encodes, read across one step's encode). */
-void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
-/* The number comm's next group takes (*group): every group the communicator issues takes the next number, from 0 in
-   the order they are issued, whatever its elements and whether it crosses a link (each ncclGroupEnd, and each call
-   outside ncclGroupStart and ncclGroupEnd, a group of its own); a group refused as a value before it is issued (an
-   invalid group or argument, a revoked communicator, a lease's GPU work past the deadline) takes none.
-   ncclInvalidArgument where comm or group is NULL. */
-ncclResult_t ncclMeshPosition(ncclComm_t comm, uint64_t* group);
-/* For each of comm's groups in [first, first + count) (numbered as ncclMeshPosition gives them), issued[i] and
-   ended[i]: `issued`, the earliest time this node's bridge posted the first SEND of the group's first send entry on any
-   of its channels (where it sends none, its `ended`); `ended`, the later of `issued` and the latest time its last
-   landing entry on any channel wholly landed here; times are ns of this node's monotonic clock (CLOCK_UPTIME_RAW's),
-   converted here from the ticks its bridge stored in the holdings' time rings (design/transport.md section 14).  0 in
-   both where any of those entries is untimed (its bridge's time ring of 16,384 entries a list lapped it, or has not
-   stored it yet) or the group has left the record (the last 65,536 groups of the communicator; one not yet issued has
-   not entered it); a group that crosses no link (no elements, a member the tree does not join, a communicator of one
-   rank, a communicator without streams: a shrink's) records no entries and is 0 too.  Read as the counts are: no bridge
-   call, no request, no file.  ncclSuccess (ncclInvalidArgument where comm is NULL, or issued or ended is NULL and count
-   is not 0). */
-ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint64_t* issued, uint64_t* ended);
 /* The Metal buffer (an id<MTLBuffer>) over the whole lease (ncclMemAlloc) holding `ptr`, any byte of it, and ptr's offset
    in it: the library's, made at the lease's first such call and released by ncclMemFree, the buffer a tensor allocator
    or the caller's kernels bind over the lease (mesh 3981ca80^'s).  A Metal-path collective's buffers are leases, which

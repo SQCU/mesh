@@ -150,13 +150,6 @@ static struct ring *ring_of(id<MTLDevice> device, const char **message) {
   return &k->ring;
 }
 
-void metal_records(uint64_t *issued, uint64_t *capacity) {
-  const char *message = NULL;
-  struct ring *ring = ring_of(metal_device(), &message);
-  *issued = ring ? ring->next : 0;
-  *capacity = RECORDS - 1;
-}
-
 void *metal_wrap(void *address, size_t bytes) {
   return [(id<MTLDevice>)metal_device() newBufferWithBytesNoCopy:address length:bytes options:MTLResourceStorageModeShared deallocator:nil];
 }
