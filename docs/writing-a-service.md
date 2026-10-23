@@ -125,16 +125,12 @@ If each ring can hold the whole stream, a block is the whole stream, and no slot
 of the slots that fit: two blocks for the inputs and one for the sums. If `ring_bytes` cannot hold three slots, the
 service stops with an error. It never picks a depth of its own.
 
-The host may run ahead of the GPU, but never by more than the input ring. After each block's outputs are copied, one
-step into the next block, it puts a mark on the GPU's queue. At the start of a block, it waits for the newest mark, the
-one two blocks back, so one block is still queued. This wait is the program's own bound on its lead (`Pace.wait`), and
-so on the exchange's slots, which the library adds while the GPU has not read the ones before. The wait reads no
-clock. The marks are timing events, which the service reads after the run (below).
-
-There is a second bound, and today it is the tighter one. Metal's queue holds at most 64 command buffers not yet done,
-and torch makes the host wait when it is full. Today each publication and each copy ends a command buffer, so the host
-gets about 32 steps ahead and the ring's mark never waits. The host's time a step then includes that wait. Once the
-library ends a command buffer only when the GPU needs one, the ring's mark is the bound.
+The host may run ahead of the GPU. Each copy into the input ring and out of the output block goes on the GPU's own
+queue, after the steps encoded before it, so a block is filled again only after the steps that read it, whatever the
+host's lead. Metal's queue holds at most 64 command buffers not yet done, and torch makes the host wait when it is full.
+Today each publication and each copy ends a command buffer, so the host gets about 32 steps ahead, and the exchange
+holds a slot for each start the GPU has not finished. The host's time a step includes that wait. One step into the
+second block the service records a timing event, which it reads after the run (below).
 
 ## The step kernel
 
@@ -265,15 +261,15 @@ RANK=0 WORLD_SIZE=2 MASTER_ADDR=<rank 0's cable address> MASTER_PORT=29500 \
 
 Each rank prints one line at the end. It gives the parts, the rows, the steps, the block, the two rings' depths and the
 seconds. It gives the rows a second of all streams together and the steps a second of each stream. It gives three times a
-step: the whole step, the host's own time (with any wait inside torch and at the ring's mark), and a plain all-reduce
+step: the whole step, the host's own time (with any wait inside torch), and a plain all-reduce
 alone (the library's own kernels, not composed), the crossing the composed step no longer pays. It gives the bytes
 a rank's crossing moves a step (its part out to each of the n - 1 peers, and each peer's part in), and those bytes a
 second.
 
 The line also splits the run in two. The first block carries costs a run pays once, such as the library compiling its
 kernels the first time a collective runs. So the line gives the first block's time. It then gives the time a step of the later blocks takes, and the rows a second they reach. The first
-block's end is the GPU's time at its mark, one step into the next block, so the later steps counted are the ones after
-it. Each mark is a timing event on the stream (`torch.mps.Event`), and the service reads the events only after the run,
+block's end is the GPU's time at its timing event, one step into the next block, so the later steps counted are the ones
+after it. The event is on the stream (`torch.mps.Event`), and the service reads the events only after the run,
 so the step loop reads no clock and no wait is added to take the time. The whole-run times include the first block;
 these do not.
 

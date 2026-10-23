@@ -298,14 +298,18 @@ and `pages_from_word` at the region's words and a kernel's arguments; `pages_los
     send buffer.
   - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
     (`commandEncoder`) between the commands before and after it (a barrier before the first dispatch and after each),
-    every binding through that argument table (at least six buffer bindings; each dispatch's arguments a record of the
-    library's argument ring, never `setBytes`), on pipelines of the residency set's device, the library's buffers (its
+    every binding through that argument table (at least five buffer bindings; each dispatch's arguments a record in rows
+    of a plan's lease, never `setBytes`), on pipelines of the residency set's device, the library's buffers (its
     holdings' counts, its plans' pages) added to the caller's `residencySet` and the set committed where one was added;
     nothing is committed or signalled. Every collective and group takes the stream. A recorded program's replay calls
-    it at each crossing it marks (metal-microbench docs/kernels.md#any-program). `ncclMeshMetal4Records(&issued,
-    &capacity)` gives the argument records this process has encoded on the default device and how many the ring holds
-    unread by the GPU at most (65,535 of 65,536 records of 128 bytes): an encode past that refuses with EOVERFLOW
-    mid-group, so a caller that encodes several submissions ahead bounds each submission's records by it.
+    it at each crossing it marks (metal-microbench docs/kernels.md#any-program).
+  - **Argument records.** A program's argument records (each dispatch's on Metal 4, and the tracks' table on either
+    form) are rows of a plan's lease (`struct metal_rows`: its lease's pages, then further leases taken as its records
+    need them), the plan of a group the program encodes for. A plan's records are written again at each of its starts
+    from the first row (`plan_take`), and the plan is taken again only once idle: every program that encoded while it
+    was in flight has run its stamp, and a program stamps the plan whose rows hold its records last
+    (`program_end`), after every dispatch that reads them. So nothing accumulates across submissions, and an encode is
+    never refused for records the GPU has not yet read.
   - The calls of one group name one command buffer or encoder: the group's dispatches are one program.
   - A group on several communicators is a group of each communicator's calls, in the order the group first names them,
     progressing together: each is issued, and where the stream asks no issue all are completed through the greatest
@@ -545,8 +549,9 @@ its slots as its starts need them.
   mesh_crossing`) at buffer `index` of the caller's next dispatch on the stream's encoder: with `lands`, start − 1's
   landings and this rank's part of it; with `publishes`, start's send part and publication; `groups` the dispatch's
   threadgroups. On the classic form the record is `setBytes`, and its slots and the holdings' counts are declared
-  (`useResource`); on Metal 4 it is a record of the argument ring at the table's `index`, and its buffers join the
-  residency set.
+  (`useResource`); on Metal 4 it is a record in rows of the slot it publishes, else the slot it lands (released by
+  that slot's use count; a binding that names neither binds the library's one record of zeros), at the table's
+  `index`, and its buffers join the residency set.
 - `ncclMeshRequestFree(request)` is `MPI_Request_free`: each slot's lease returns once the slot is free, at the free
   or at a later start, plan or `ncclCommDestroy` of the communicator, whose streams are given back first so that a slot
   whose landing never came is free once its kernel has stamped it (a slot whose kernel has not, its lease returned with

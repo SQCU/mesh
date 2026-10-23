@@ -7,7 +7,7 @@
 #define STR(...) #__VA_ARGS__
 #define XSTR(...) STR(__VA_ARGS__)
 
-#define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 first, sent, at, sequence; U32 count, mask, channel; }
+#define ARGS(NAME, U64, U32) struct NAME { U64 dst, src, n, scalar, aux; U32 op, polls; U64 first, sent, at; U32 count, mask, channel; }
 
 static NSString *const STEPS =
   @"\nusing namespace metal;\n"
@@ -20,14 +20,13 @@ static NSString *const STEPS =
   "mesh_view<T> operator+(ulong k) const { return mesh_view<T>(at + k * sizeof(T)); } "
   "template <typename U> mesh_view<U> as() const { return mesh_view<U>(at); } "
   "private: device uchar *at; };\n"
-  XSTR(MESH_CROSSING(device mesh_table *, device uchar *, device ulong *, ulong, uint,
+  XSTR(MESH_CROSSING(device mesh_table *, device uchar *, uint,
                      friend void mesh_enter(constant mesh_crossing &, uint); friend void mesh_leave(constant mesh_crossing &, uint);
                      friend uint mesh_landings(constant mesh_crossing &);
                      template <typename T> friend mesh_view<T> mesh_landing(constant mesh_crossing &, uint);
                      template <typename T> friend mesh_view<T> mesh_own(constant mesh_crossing &);
                      template <typename T> friend mesh_view<T> mesh_send(constant mesh_crossing &); private:)) ";\n"
   "#define MESH_SYSTEM static_cast<thread_scope>(3)\n"
-  "static inline void mesh_step_enter(constant mesh_args &p, device ulong *progress, bool first) { if (p.sequence && first) *progress = p.sequence; }\n"
   "static inline bool mesh_step_claim(device uchar *vb) { "
   "return atomic_exchange_explicit((device atomic_uint *)(vb + 8), 1u, memory_order_relaxed) == 0u; }\n"
   "static inline bool mesh_step_failed(uint polls, device uchar *vb) { "
@@ -52,7 +51,6 @@ static NSString *const STEPS =
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(words + p.aux), p.scalar); }\n"
   "static inline device mesh_peer *mesh_peers(device mesh_table *t) { return (device mesh_peer *)(t + 1); }\n"
   "inline void mesh_enter(constant mesh_crossing &c, uint i) { "
-  "if (i == 0 && c.progress) *c.progress = c.sequence; "
   "for (uint q = 0; i == 0 && c.land && q < c.land->peers; q++) { device mesh_peer &e = mesh_peers(c.land)[q]; "
   "mesh_step_until(c.polls, e.landed_at, e.channel, e.landed, e.landed_target, c.failure); } "
   "threadgroup_barrier(mem_flags::mem_device); atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, MESH_SYSTEM); }\n"
@@ -76,16 +74,14 @@ static NSString *const STEPS =
 
 static NSString *const KERNELS =
   @"\n"
-  "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, device ulong *progress, uint i, uint g, uint l, threadgroup ulong *tg\n"
-  "#define ENTER(first) mesh_step_enter(p, progress, first);\n"
-  "#define ENTER_G if (i == 0) mesh_step_enter(p, progress, true);\n"
-  "#define HEAD(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]], uint l [[thread_position_in_threadgroup]]) { body_##name(d, s, p, a, vb, progress, i, g, l, nullptr); } static void body_##name(PARAMS)\n"
-  "#define GROUP(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, progress, i, g, i, tg); } static void body_##name(PARAMS)\n"
+  "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, uint i, uint g, uint l, threadgroup ulong *tg\n"
+  "#define HEAD(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]], uint l [[thread_position_in_threadgroup]]) { body_##name(d, s, p, a, vb, i, g, l, nullptr); } static void body_##name(PARAMS)\n"
+  "#define GROUP(name) static void body_##name(PARAMS); kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { threadgroup ulong tg[4]; body_##name(d, s, p, a, vb, i, g, i, tg); } static void body_##name(PARAMS)\n"
   "#define LOOP for (ulong k = i; k < p.n; k += g)\n"
   "#define AWAIT mesh_step_await(p, a, vb, l);\n"
   "#define COPY(Z, W) "
-  "HEAD(copy_plain_##Z) { ENTER(i == 0) device W *x = (device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; } "
-  "HEAD(copy_land_##Z) { ENTER(i == 0) device W *x = (device W *)(d + p.dst); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
+  "HEAD(copy_plain_##Z) { device W *x = (device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; } "
+  "HEAD(copy_land_##Z) { device W *x = (device W *)(d + p.dst); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
   "COPY(4, uint)\n"
   "COPY(1, uchar)\n"
   "template <typename T> T op_int(T a, T b, uint op) { return op == 0 ? T(ulong(a) + ulong(b)) : op == 1 ? T(ulong(a) * ulong(b)) : (op == 2 ? b > a : b < a) ? b : a; }\n"
@@ -95,18 +91,18 @@ static NSString *const KERNELS =
   "#define BODY(T, OP) device T *x = (device T *)(d + p.dst); volatile coherent(system) device const T *xs = (volatile coherent(system) device const T *)(d + p.dst); "
   "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
   "LOOP x[k] = OP(mesh_payload(xs + k), mesh_payload(y + k), p.op);\n"
-  "#define COMBINE(name, T, OP) HEAD(land_##name) { ENTER(i == 0) AWAIT BODY(T, OP) } "
+  "#define COMBINE(name, T, OP) HEAD(land_##name) { AWAIT BODY(T, OP) } "
   "HEAD(combine3_##name) { "
-  "ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *z = (device const T *)(a + p.aux); "
+  "device T *x = (device T *)(d + p.dst); device const T *z = (device const T *)(a + p.aux); "
   "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP x[k] = OP(z[k], mesh_payload(y + k), p.op); }\n"
   "#define INTEGER(name, T, SIGNED) COMBINE(name, T, op_int<T>) "
-  "HEAD(premul_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
-  "HEAD(truncdiv_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP { T v = mesh_payload(y + k); bool negative = SIGNED && v < T(0); "
+  "HEAD(premul_##name) { device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
+  "HEAD(truncdiv_##name) { device T *x = (device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP { T v = mesh_payload(y + k); bool negative = SIGNED && v < T(0); "
   "ulong m = negative ? 0UL - ulong(v) : ulong(v), q = m / p.scalar; x[k] = negative ? T(0UL - q) : T(q); } }\n"
   "#define FLOATING(name, T) COMBINE(name, T, op_float<T>) "
-  "HEAD(premul_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = T(float(y[k]) * c); }\n"
+  "HEAD(premul_##name) { device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = T(float(y[k]) * c); }\n"
   "#define FLOAT8(name, E5) COMBINE(name, uchar, op_f8<E5>) "
-  "HEAD(premul_##name) { ENTER(i == 0) device uchar *x = (device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
+  "HEAD(premul_##name) { device uchar *x = (device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
   "INTEGER(i8, char, true)\n"
   "INTEGER(u8, uchar, false)\n"
   "INTEGER(i32, int, true)\n"
@@ -118,10 +114,10 @@ static NSString *const KERNELS =
   "FLOATING(bf16, bfloat)\n"
   "FLOAT8(e4m3, false)\n"
   "FLOAT8(e5m2, true)\n"
-  "GROUP(publish) { ENTER_G mesh_step_release(p, d, i); }\n"
-  "GROUP(stamp) { ENTER_G threadgroup_barrier(mem_flags::mem_device); if (i == 0) { "
+  "GROUP(publish) { mesh_step_release(p, d, i); }\n"
+  "GROUP(stamp) { threadgroup_barrier(mem_flags::mem_device); if (i == 0) { "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, MESH_SYSTEM); atomic_fetch_add_explicit((device atomic_uint *)(d + p.aux), 1u, memory_order_relaxed); } }\n"
-  "GROUP(spin) { ENTER_G if (i == 0) mesh_step_counts(p, d, vb); }\n"
+  "GROUP(spin) { if (i == 0) mesh_step_counts(p, d, vb); }\n"
   "constant float PARTIAL_NONE = -3.4028234663852886e38f;\n"
   "static inline void merge_row(device float *x, volatile coherent(system) device const float *y, uint u) { "
   "volatile coherent(system) device const float *xs = (volatile coherent(system) device const float *)x; "
@@ -132,7 +128,7 @@ static NSString *const KERNELS =
   "for (uint j = 1; j < u; j++) x[j] = (a > 0.0f ? mesh_payload(xs + j) * a : 0.0f) + (b > 0.0f ? mesh_payload(y + j) * b : 0.0f); }\n"
   "#define MERGE device float *x = (device float *)(d + p.dst); volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
   "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
-  "HEAD(land_merge) { ENTER(i == 0) AWAIT MERGE }\n";
+  "HEAD(land_merge) { AWAIT MERGE }\n";
 
 enum { WORD_D = 1, WORD_A };
 #define KINDS_OF(X) \
@@ -150,7 +146,7 @@ enum { WORD_D = 1, WORD_A };
 #define KIND_ENUM(name, word) KIND_##name,
 #define KIND_NAME(name, word) #name,
 #define KIND_WORD(name, word) word,
-#define KIND_CASE(name, word) case KIND_##name: body_##name(o.d, o.s, o.p, o.a, o.v, progress, i, g, i, tg); break;
+#define KIND_CASE(name, word) case KIND_##name: body_##name(o.d, o.s, o.p, o.a, o.v, i, g, i, tg); break;
 
 enum { KINDS_OF(KIND_ENUM) KINDS, KIND_tracks = KINDS, PIPELINES };
 static const char *const NAME[PIPELINES] = {KINDS_OF(KIND_NAME) "tracks"};
@@ -163,7 +159,7 @@ static NSString *const TRACKS =
   "struct track_item { ulong position, need, target; device ulong *word; device uchar *v; uint first_op, ops, first_dep, deps, wait_op, cursor; };\n"
   "struct track_dep { ulong count; uint other, pad; };\n"
   "struct track { uint first[2], count[2]; };\n"
-  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint tracks, polls; };\n"
+  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off; uint tracks, polls; };\n"
   "static inline bool track_ready(constant track_item &it, constant track_dep *deps, volatile coherent(system) device ulong *count) { "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
     "for (uint k = 0; k < it.deps; k++) if (count[deps[it.first_dep + k].other] < deps[it.first_dep + k].count) return false; "
@@ -176,7 +172,7 @@ static NSString *const TRACKS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
   "v[0] = " XSTR(METAL_BOUND) "UL; v[4] = ulong(polls); mesh_publish(v + 2, it.position + 1); }\n";
 static NSString *const TRACK_KERNEL =
-  @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
+  @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *rows [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
   "uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { "
   "constant track_head &h = *(constant track_head *)base; "
   "if (t >= h.tracks) return; "
@@ -184,10 +180,9 @@ static NSString *const TRACK_KERNEL =
   "constant track_item *items = (constant track_item *)(base + h.items_off); "
   "constant track_op *ops = (constant track_op *)(base + h.ops_off); "
   "constant track_dep *deps = (constant track_dep *)(base + h.deps_off); "
-  "volatile coherent(system) device ulong *count = (volatile coherent(system) device ulong *)(ring + h.count_off); "
+  "volatile coherent(system) device ulong *count = (volatile coherent(system) device ulong *)(rows + h.count_off); "
   "threadgroup ulong tg[4]; threadgroup uint pick[2]; "
   "uint next0 = 0, next1 = 0; ulong looks = 0; bool expired = false; "
-  "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(ring + h.progress_off), h.sequence); "
   "for (;;) { "
   "if (i == 0) { uint chosen = ~0u, left = 0; "
   "if (next1 < tr.count[1]) { left = 1; constant track_item &c = items[tr.first[1] + next1]; "
@@ -203,7 +198,7 @@ static NSString *const TRACK_KERNEL =
   "const uint chosen = pick[0]; "
   "if (!pick[1]) return; "
   "if (chosen != ~0u) { constant track_item &it = items[chosen]; "
-  "for (uint k = 0; k < it.ops; k++) { constant track_op &o = ops[it.first_op + k]; device ulong *progress = (device ulong *)o.d; "
+  "for (uint k = 0; k < it.ops; k++) { constant track_op &o = ops[it.first_op + k]; "
   "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } "
   "threadgroup_barrier(mem_flags::mem_device); } "
   "if (it.cursor == 1 && i == 0) mesh_publish(count + t, it.position + 1); } "

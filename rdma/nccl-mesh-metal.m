@@ -20,23 +20,15 @@ static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_la
 
 ARGS(args, uint64_t, uint32_t);
 
-struct ring;
 struct recording;
 struct kernels;
 struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; int borrowed;
                        id<MTL4ComputeCommandEncoder> encoder4; id<MTL4ArgumentTable> table; id<MTLResidencySet> residency;
-                       id<MTLBuffer> violation; struct ring *ring; int added; struct recording *recording;
+                       id<MTLBuffer> violation; struct metal_rows *rows; int added; struct recording *recording;
                        struct kernels *kernels; };
 
-#define RECORDS 65536u
 #define RECORD 128u
-struct ring { id<MTLBuffer> records, progress; uint64_t next; };
-
-#define TRACK_RING (64u << 20)
-struct span { uint64_t sequence, first, end; };
-struct track_ring { id<MTLBuffer> buffer; uint64_t sequence, head; struct span *held; size_t helds, room; };
-struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; struct ring ring;
-                 struct track_ring tracks; };
+struct kernels { id<MTLDevice> device; id<MTLComputePipelineState> pipelines[PIPELINES]; id<MTLBuffer> empty; };
 _Static_assert(sizeof(struct args) <= RECORD, "an argument record");
 
 static id<MTLDevice> device_;
@@ -108,27 +100,11 @@ static struct kernels *program_kernels(struct metal_program *program, const char
   return program->kernels;
 }
 
-static struct ring *ring_of(id<MTLDevice> device, const char **message) {
+static id<MTLBuffer> empty_of(id<MTLDevice> device, const char **message) {
   struct kernels *k = kernels_of(device, message);
-  if (!k) return NULL;
-  if (!k->ring.records) {
-    k->ring.records = [device newBufferWithLength:(NSUInteger)RECORDS * RECORD options:MTLResourceStorageModeShared];
-    k->ring.progress = [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
-    if (!k->ring.records || !k->ring.progress) {
-      [k->ring.records release]; [k->ring.progress release]; k->ring.records = k->ring.progress = nil;
-      *message = say("the argument ring of %u records", RECORDS);
-      return NULL;
-    }
-    memset(k->ring.progress.contents, 0, 64);
-  }
-  return &k->ring;
-}
-
-void metal_records(uint64_t *issued, uint64_t *capacity) {
-  const char *message = NULL;
-  struct ring *ring = ring_of(metal_device(), &message);
-  *issued = ring ? ring->next : 0;
-  *capacity = RECORDS - 1;
+  if (k && !k->empty && (k->empty = [device newBufferWithLength:RECORD options:MTLResourceStorageModeShared])) memset(k->empty.contents, 0, RECORD);
+  if (k && !k->empty) *message = "a crossing record of no slot";
+  return k ? k->empty : nil;
 }
 
 void *metal_wrap(void *address, size_t bytes) {
@@ -162,18 +138,13 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *vio
 }
 
 struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, const char **message) {
-  struct ring *ring = ring_of(((id<MTLResidencySet>)residency).device, message);
-  if (!ring) return NULL;
   struct metal_program *program = calloc(1, sizeof *program);
   if (!program) { *message = "out of memory"; return NULL; }
   program->encoder4 = [(id<MTL4ComputeCommandEncoder>)encoder retain];
   program->table = [(id<MTL4ArgumentTable>)table retain];
   program->residency = [(id<MTLResidencySet>)residency retain];
   program->violation = [(id<MTLBuffer>)violation retain];
-  program->ring = ring;
   program->borrowed = 1;
-  metal_resident(program, ring->records);
-  metal_resident(program, ring->progress);
   metal_resident(program, violation);
   [program->encoder4 barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   return program;
@@ -184,6 +155,11 @@ void metal_resident(struct metal_program *program, void *buffer) {
   if (!program->residency || !buffer || [program->residency containsAllocation:(id<MTLBuffer>)buffer]) return;
   [program->residency addAllocation:(id<MTLBuffer>)buffer];
   program->added = 1;
+}
+
+struct metal_rows *metal_rows(struct metal_program *program, struct metal_rows *rows) {
+  if (!program->rows) program->rows = rows;
+  return program->rows;
 }
 
 void metal_gate(struct metal_program *program, void *violation) {
@@ -201,38 +177,37 @@ static void close_encoder(struct metal_program *program) {
   program->encoder = nil;
 }
 
-static struct metal_result ring_put(struct ring *ring, void *record, size_t bytes, size_t sequence_at, uint64_t *address) {
-  const uint64_t begun = *(volatile uint64_t *)ring->progress.contents;
-  if (ring->next - begun >= RECORDS - 1)
-    return (struct metal_result){EOVERFLOW, say("the GPU began none of the library's last %u dispatches (dispatch %llu written, %llu begun): "
-                                                "their command buffers are not committed, or that far behind", RECORDS - 1,
-                                                (unsigned long long)ring->next, (unsigned long long)begun)};
-  const uint64_t sequence = ++ring->next, at = ((sequence - 1) % RECORDS) * RECORD;
-  memcpy((char *)record + sequence_at, &sequence, sizeof sequence);
-  memcpy((char *)ring->records.contents + at, record, bytes);
-  *address = ring->records.gpuAddress + at;
+static struct metal_result row_put(struct metal_rows *rows, const void *record, size_t bytes, uint64_t *address, id<MTLBuffer> *held) {
+  void *buffer = NULL;
+  size_t at = 0;
+  const int status = metal_rows_take(rows, bytes, &buffer, &at);
+  if (status) return (struct metal_result){status, say("%zu bytes of rows for an argument record", bytes)};
+  memcpy((char *)((id<MTLBuffer>)buffer).contents + at, record, bytes);
+  *address = ((id<MTLBuffer>)buffer).gpuAddress + at;
+  *held = (id<MTLBuffer>)buffer;
   return METAL_DONE;
 }
 
 static struct metal_result record4(struct metal_program *program, id<MTLBuffer> d, id<MTLBuffer> s, id<MTLBuffer> a, id<MTLBuffer> words,
-                                   struct args p, uint64_t bound[6]) {
+                                   struct args p, uint64_t bound[5]) {
   id<MTLBuffer> v = words ? words : program->violation ? program->violation : d;
   p.polls = v != d ? MESH_POLLS : 0;
   uint64_t record = 0;
-  const struct metal_result put = ring_put(program->ring, &p, sizeof p, offsetof(struct args, sequence), &record);
+  id<MTLBuffer> held = nil;
+  const struct metal_result put = row_put(program->rows, &p, sizeof p, &record, &held);
   if (put.status) return put;
-  for (id<MTLBuffer> b in @[d, s ? s : d, a ? a : d, v]) metal_resident(program, b);
-  const uint64_t made[6] = {d.gpuAddress, (s ? s : d).gpuAddress, record, (a ? a : d).gpuAddress, v.gpuAddress, program->ring->progress.gpuAddress};
+  for (id<MTLBuffer> b in @[d, s ? s : d, a ? a : d, v, held]) metal_resident(program, b);
+  const uint64_t made[5] = {d.gpuAddress, (s ? s : d).gpuAddress, record, (a ? a : d).gpuAddress, v.gpuAddress};
   memcpy(bound, made, sizeof made);
   return METAL_DONE;
 }
 
 static struct metal_result dispatch4(struct metal_program *program, id<MTLComputePipelineState> state, id<MTLBuffer> d, id<MTLBuffer> s,
                                      id<MTLBuffer> a, id<MTLBuffer> words, struct args p, uint64_t units, int group) {
-  uint64_t bound[6];
+  uint64_t bound[5];
   const struct metal_result recorded = record4(program, d, s, a, words, p, bound);
   if (recorded.status) return recorded;
-  for (NSUInteger k = 0; k < 6; k++) [program->table setAddress:bound[k] atIndex:k];
+  for (NSUInteger k = 0; k < 5; k++) [program->table setAddress:bound[k] atIndex:k];
   id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
   [encoder setComputePipelineState:state];
   [encoder setArgumentTable:program->table];
@@ -266,7 +241,6 @@ static struct metal_result dispatch(struct metal_program *program, uint32_t kind
     [encoder setBytes:&p length:sizeof p atIndex:2];
     [encoder setBuffer:(id<MTLBuffer>)(a ? a : d) offset:0 atIndex:3];
     [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
-    [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:5];
     const NSUInteger most = group ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
     if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
@@ -342,14 +316,14 @@ struct metal_result metal_land(struct metal_program *program, int type, int op, 
   return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, wait_args(w, dst_offset, n, op), n, 0);
 }
 
-MESH_CROSSING(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, );
+MESH_CROSSING(uint64_t, uint64_t, uint32_t, );
 _Static_assert(sizeof(struct mesh_crossing) <= RECORD, "a crossing record");
 
 uint64_t metal_address(void *buffer) { return ((id<MTLBuffer>)buffer).gpuAddress; }
 
-struct metal_result metal_bind(void *encoder, void *table, void *residency, uint64_t land, uint64_t publish, void *violation, uint32_t groups,
-                               uint32_t index, void *const *buffers, size_t n) {
-  struct mesh_crossing c = {land, publish, metal_address(violation), 0, 0, groups, MESH_POLLS};
+struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, void *violation,
+                               uint32_t groups, uint32_t index, void *const *buffers, size_t n) {
+  struct mesh_crossing c = {land, publish, metal_address(violation), groups, MESH_POLLS};
   @autoreleasepool {
     if (!table) {
       id<MTLComputeCommandEncoder> e = (id<MTLComputeCommandEncoder>)encoder;
@@ -360,15 +334,15 @@ struct metal_result metal_bind(void *encoder, void *table, void *residency, uint
     }
     const char *message = NULL;
     id<MTLResidencySet> set = (id<MTLResidencySet>)residency;
-    struct ring *ring = ring_of(set.device, &message);
-    if (!ring) return (struct metal_result){EINVAL, message};
-    c.progress = ring->progress.gpuAddress;
     uint64_t record = 0;
-    const struct metal_result put = ring_put(ring, &c, sizeof c, offsetof(struct mesh_crossing, sequence), &record);
+    id<MTLBuffer> held = rows ? nil : empty_of(set.device, &message);
+    if (!rows && !held) return (struct metal_result){ENOMEM, message};
+    const struct metal_result put = rows ? row_put(rows, &c, sizeof c, &record, &held) : METAL_DONE;
     if (put.status) return put;
+    if (!rows) record = held.gpuAddress;
     int added = 0;
-    for (size_t k = 0; k < n + 3; k++) {
-      id<MTLBuffer> b = k < n ? (id<MTLBuffer>)buffers[k] : k == n ? ring->records : k == n + 1 ? ring->progress : (id<MTLBuffer>)violation;
+    for (size_t k = 0; k < n + 2; k++) {
+      id<MTLBuffer> b = k < n ? (id<MTLBuffer>)buffers[k] : k == n ? held : (id<MTLBuffer>)violation;
       if ([set containsAllocation:b]) continue;
       [set addAllocation:b];
       added = 1;
@@ -464,33 +438,15 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
   return METAL_DONE;
 }
 
-struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint32_t tracks, polls; };
+struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off; uint32_t tracks, polls; };
 struct track_rec { uint32_t first[2], count[2]; };
 struct track_item { uint64_t position, need, target, word, v; uint32_t first_op, ops, first_dep, deps, wait_op, cursor; };
 struct track_op { uint64_t d, s, a, v; struct args p; uint32_t kind, pad; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
-_Static_assert(sizeof(struct track_head) == 64 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
-               sizeof(struct track_op) == 136 && sizeof(struct track_dep) == 16, "the track records");
+_Static_assert(sizeof(struct track_head) == 48 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
+               sizeof(struct track_op) == 128 && sizeof(struct track_dep) == 16, "the track records");
 
 static uint64_t up(uint64_t x) { return (x + 255) & ~(uint64_t)255; }
-
-static uint64_t ring_take(struct track_ring *t, uint64_t sequence, uint64_t bytes) {
-  const uint64_t begun = *(volatile uint64_t *)t->buffer.contents;
-  size_t kept = 0;
-  for (size_t k = 0; k < t->helds; k++) if (t->held[k].sequence >= begun) t->held[kept++] = t->held[k];
-  t->helds = kept;
-  uint64_t first = t->head + bytes <= TRACK_RING ? t->head : 64;
-  if (first < 64) first = 64;
-  if (first + bytes > TRACK_RING) return UINT64_MAX;
-  for (size_t k = 0; k < t->helds; k++)
-    if (first < t->held[k].end && t->held[k].first < first + bytes) return UINT64_MAX;
-  struct span *held = more(t->held, &t->room, t->helds, sizeof *held);
-  if (!held) return UINT64_MAX;
-  t->held = held;
-  t->held[t->helds++] = (struct span){sequence, first, first + bytes};
-  t->head = first + bytes;
-  return first;
-}
 
 struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks, const uint64_t *consumed) {
   struct recording *r = program->recording;
@@ -501,26 +457,17 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     struct kernels *k = program_kernels(program, &message);
     if (!k) { recording_free(r); return (struct metal_result){EINVAL, message}; }
     id<MTLComputePipelineState> state = k->pipelines[KIND_tracks];
-    id<MTLDevice> device = k->device;
-    struct track_ring *ring = &k->tracks;
-    if (!ring->buffer) {
-      ring->buffer = [device newBufferWithLength:TRACK_RING options:MTLResourceStorageModeShared];
-      if (!ring->buffer) { recording_free(r); return (struct metal_result){ENOMEM, say("the track ring of %u bytes", TRACK_RING)}; }
-      memset(ring->buffer.contents, 0, 64);
-      ring->head = 64;
-    }
     const uint64_t T = r->tracks, at_tracks = up(sizeof(struct track_head)), at_items = up(at_tracks + T * sizeof(struct track_rec));
     const uint64_t at_ops = up(at_items + r->items * sizeof(struct track_item)), at_deps = up(at_ops + r->ops * sizeof(struct track_op));
     const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), bytes = up(at_count + T * sizeof(uint64_t));
-    const uint64_t sequence = ++ring->sequence, first = ring_take(ring, sequence, bytes);
-    if (first == UINT64_MAX) {
-      recording_free(r);
-      return (struct metal_result){EOVERFLOW, say("the track ring holds no %llu bytes free: the GPU has not begun the tracks that read it (their "
-                                                  "command buffers not committed, or that far behind)", (unsigned long long)bytes)};
-    }
-    unsigned char *base = (unsigned char *)ring->buffer.contents + first;
-    const uint64_t address = ring->buffer.gpuAddress;
-    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, first + at_count, sequence, 0, (uint32_t)T, MESH_POLLS};
+    void *rows = NULL;
+    size_t first = 0;
+    const int status = metal_rows_take(program->rows, bytes, &rows, &first);
+    if (status) { recording_free(r); return (struct metal_result){status, say("%llu bytes of rows for the tracks", (unsigned long long)bytes)}; }
+    id<MTLBuffer> held = (id<MTLBuffer>)rows;
+    unsigned char *base = (unsigned char *)held.contents + first;
+    const uint64_t address = held.gpuAddress;
+    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, first + at_count, (uint32_t)T, MESH_POLLS};
     struct track_rec *rec = (struct track_rec *)(base + at_tracks);
     struct track_item *item = (struct track_item *)(base + at_items);
     uint32_t placed = 0;
@@ -547,7 +494,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     for (uint32_t t = 0; t < T; t++) count[t] = t < tracks ? consumed[t] : 0;
     const NSUInteger width = state.maxTotalThreadsPerThreadgroup < 1024 ? state.maxTotalThreadsPerThreadgroup : 1024;
     if (program->encoder4) {
-      metal_resident(program, ring->buffer);
+      metal_resident(program, held);
       for (id b in r->named) metal_resident(program, (void *)b);
       [program->table setAddress:address + first atIndex:0];
       [program->table setAddress:address atIndex:1];
@@ -561,8 +508,8 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
       id<MTLComputeCommandEncoder> encoder = program->encoder;
       for (id b in r->named) [encoder useResource:(id<MTLBuffer>)b usage:MTLResourceUsageRead | MTLResourceUsageWrite];
       [encoder setComputePipelineState:state];
-      [encoder setBuffer:ring->buffer offset:first atIndex:0];
-      [encoder setBuffer:ring->buffer offset:0 atIndex:1];
+      [encoder setBuffer:held offset:first atIndex:0];
+      [encoder setBuffer:held offset:0 atIndex:1];
       [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     }
   }

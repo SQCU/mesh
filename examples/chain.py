@@ -1,4 +1,3 @@
-import collections
 import json
 from pathlib import Path
 
@@ -166,23 +165,6 @@ def ring(ring_bytes, steps, slot):
                          f'{(RING_BLOCKS + 1) * slot} bytes')
     return block, RING_BLOCKS, block
 
-
-class Pace:
-    # docs/writing-a-service.md#the-rings
-    def __init__(self):
-        self.marks, self.first = collections.deque(), None
-
-    # docs/writing-a-service.md#the-rings
-    def wait(self):
-        if len(self.marks) == RING_BLOCKS - 1:
-            self.marks.popleft().synchronize()
-
-    # docs/writing-a-service.md#the-rings
-    def mark(self):
-        self.marks.append(torch.mps.Event(enable_timing=True))
-        self.marks[-1].record()
-        if self.first is None:
-            self.first = self.marks[-1]
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data

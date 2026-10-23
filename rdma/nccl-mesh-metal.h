@@ -19,11 +19,13 @@ static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){wo
 
 #define MESH_PEER(P, U64, U32) struct mesh_peer { P landing; P landed; U64 landed_target, landed_at, published, ready_value; U32 channel, pad; }
 #define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; ATOMIC ended; U32 pad; }
-#define MESH_CROSSING(T, P, W, U64, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; P failure; W progress; U64 sequence; U32 groups, polls; }
+#define MESH_CROSSING(T, P, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; P failure; U32 groups, polls; }
 MESH_PEER(uint64_t, uint64_t, uint32_t);
 MESH_TABLE(uint64_t, uint64_t, uint32_t, uint32_t);
 enum { METAL_PLAIN, METAL_LAND };
 struct metal_program;
+struct metal_rows;
+int metal_rows_take(struct metal_rows *, size_t bytes, void **buffer, size_t *offset);
 
 struct metal_result { int status; const char *message; };
 #define METAL_DONE ((struct metal_result){0, NULL})
@@ -31,7 +33,6 @@ static inline struct metal_result metal_failed(int status) { return (struct meta
 
 void *metal_device(void);
 
-void metal_records(uint64_t *issued, uint64_t *capacity);
 void *metal_wrap(void *address, size_t bytes);
 uint64_t metal_address(void *buffer);
 
@@ -55,6 +56,7 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder, void *vio
 struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, const char **message);
 
 void metal_resident(struct metal_program *, void *buffer);
+struct metal_rows *metal_rows(struct metal_program *, struct metal_rows *);
 
 void metal_gate(struct metal_program *, void *violation);
 struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
@@ -81,8 +83,8 @@ struct metal_result metal_spin(struct metal_program *, const struct metal_wait *
 
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
 
-struct metal_result metal_bind(void *encoder, void *table, void *residency, uint64_t land, uint64_t publish, void *violation, uint32_t groups,
-                               uint32_t index, void *const *buffers, size_t n);
+struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, void *violation,
+                               uint32_t groups, uint32_t index, void *const *buffers, size_t n);
 
 void *metal_contents(void *buffer);
 

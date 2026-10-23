@@ -72,12 +72,11 @@ def shares(config, rank, size, held):
 
 # docs/writing-a-service.md#the-lstm
 def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
-    e, pace, L = [s for b in E for s in b.unbind(0)], chain.Pace(), tick.L
+    e, first, L = [s for b in E for s in b.unbind(0)], None, tick.L
     o = (None,) * block if O is None else O.unbind(0)
     landing = chain.fill(E, rank, inputs, 0, steps, block)
     for s in range(steps + L - 1):
         if s < steps and s % block == 0:
-            pace.wait()
             ahead = chain.fill(E, rank, inputs, s + block, steps, block) if s + block < steps else None
             landing.wait()
             landing = ahead
@@ -85,11 +84,12 @@ def lstm_stream(tick, rank, steps, block, E, O, inputs, outputs):
         tick(steps, e[min(s, steps - 1) % len(e)], o[t % block] if t >= 0 else None)
         if O is not None and t >= 0 and (t + 1) % block == 0:
             chain.drain(t + 1 - block, steps, block, O, outputs)
-        if s < steps and s % block == 0 and s:
-            pace.mark()
+        if s == block and s < steps:
+            first = torch.mps.Event(enable_timing=True)
+            first.record()
     tick.land(e[(steps - 1) % len(e)], o[(steps - 1) % block])
     chain.drain((steps - 1) // block * block, steps, block, O, outputs)
-    return pace.first
+    return first
 
 
 # docs/writing-a-service.md#the-lstm

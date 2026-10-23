@@ -250,10 +250,13 @@ struct ncclComm {
 };
 
 struct where { void *buffer; size_t offset; };
+struct row_chunk { void *pages, *buffer; size_t offset, bytes; };
+struct metal_rows { struct ncclComm *comm; struct row_chunk *chunk; size_t chunks, at, used; };
 struct plan {
   struct call *list;
   size_t n;
   struct schedule *plans;
+  struct metal_rows rows;
   void *pages, *buffer;
   struct where base;
   size_t word;
@@ -1778,10 +1781,18 @@ static int plan_direct(struct call *c);
 static int plan_idle(const struct plan *p) {
   return !p->flight && (!p->pages || __atomic_load_n((const uint32_t *)((const char *)p->pages + p->word), __ATOMIC_ACQUIRE) == p->reader);
 }
+static void rows_free(struct metal_rows *rows, int idle) {
+  for (size_t k = 0; idle && k < rows->chunks; k++) ncclMemFree(rows->chunk[k].pages);
+  free(rows->chunk);
+  *rows = (struct metal_rows){.comm = rows->comm};
+}
+
 static void plan_free(struct ncclComm *comm, struct plan *p) {
+  const int idle = plan_idle(p);
   calls_free(p->list, p->n);
   schedules_free(comm, p->plans);
-  if (p->pages && plan_idle(p)) ncclMemFree(p->pages);
+  if (p->pages && idle) ncclMemFree(p->pages);
+  rows_free(&p->rows, idle);
   free(p);
 }
 
@@ -1811,11 +1822,32 @@ static ncclResult_t lease_take(struct ncclComm *comm, size_t bytes, void **pages
   return result;
 }
 
+int metal_rows_take(struct metal_rows *rows, size_t bytes, void **buffer, size_t *offset) {
+  bytes = (bytes + 127) & ~(size_t)127;
+  while (rows->at < rows->chunks && rows->used + bytes > rows->chunk[rows->at].bytes) { rows->at++; rows->used = 0; }
+  if (rows->at == rows->chunks) {
+    struct row_chunk made = {.bytes = page_up(bytes > (64u << 10) ? bytes : (64u << 10), rows->comm->page)};
+    struct row_chunk *grown = realloc(rows->chunk, (rows->chunks + 1) * sizeof *grown);
+    if (grown) rows->chunk = grown;
+    if (!grown || lease_take(rows->comm, made.bytes, &made.pages, &made.buffer, &made.offset)) {
+      if (made.pages) ncclMemFree(made.pages);
+      return ENOMEM;
+    }
+    rows->chunk[rows->chunks++] = made;
+    rows->used = 0;
+  }
+  *buffer = rows->chunk[rows->at].buffer;
+  *offset = rows->chunk[rows->at].offset + rows->used;
+  rows->used += bytes;
+  return 0;
+}
+
 static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, size_t n, struct plan **out) {
   struct plan *p = calloc(1, sizeof *p);
   if (!p) return fail(ncclSystemError, "out of memory");
   ncclResult_t result = (p->list = calloc(n, sizeof *p->list)) && (p->plans = calloc(comm->count + 1, sizeof *p->plans)) ? ncclSuccess
                                                                                                                        : fail(ncclSystemError, "out of memory");
+  p->rows.comm = comm;
   size_t bytes = 0;
   for (size_t i = 0; i < n && !result; i++, p->n++) {
     struct call *c = p->list + i;
@@ -1839,7 +1871,7 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
   if (!result) result = schedule_group(comm, p->list, n, p->plans, &bytes);
   p->word = bytes;
   size_t offset = 0;
-  if (!result && bytes) result = lease_take(comm, bytes + sizeof(uint32_t), &p->pages, list[0].stream ? &p->buffer : NULL, &offset);
+  if (!result && (bytes || list[0].stream)) result = lease_take(comm, bytes + sizeof(uint32_t), &p->pages, list[0].stream ? &p->buffer : NULL, &offset);
   if (p->pages) memset((char *)p->pages + p->word, 0, sizeof(uint32_t));
   p->base = p->buffer ? (struct where){p->buffer, offset} : (struct where){NULL, (size_t)p->pages};
   if (result) { plan_free(comm, p); return result; }
@@ -1859,6 +1891,7 @@ static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n
   }
   const ncclResult_t result = p ? ncclSuccess : plan_make(comm, list, n, &p);
   if (result) return result;
+  p->rows.at = p->rows.used = 0;
   for (size_t i = 0; i < n; i++) {
     struct call *c = p->list + i, made = list[i];
     made.bound = c->bound; made.segments = c->segments; made.complement = c->complement; made.complements = c->complements;
@@ -2401,6 +2434,7 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
   const uint64_t out = through->end[h][0], in = through->end[h][1];
   ncclResult_t result = ncclSuccess;
   touch(comm);
+  metal_rows(program, &through->plan->rows);
   metal_gate(program, comm->violation);
   while (!result && (ch->published < out || ch->consumed < in)) {
     uint64_t upto = ch->published;
@@ -2452,7 +2486,10 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
     free(end);
     if (!(end = calloc((size_t)c->count + 1, sizeof *end))) { result = fail(ncclSystemError, "out of memory"); break; }
     for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group)
-      if (g->comm == c) memcpy(end, g->end, c->count * sizeof *end);
+      if (g->comm == c) {
+        memcpy(end, g->end, c->count * sizeof *end);
+        if (g->plan) metal_rows(program, &g->plan->rows);
+      }
     for (uint32_t h = 0; h < c->count && !result; h++) {
       struct channel *ch = c->channels + h;
       const uint32_t track = base[k] + h;
@@ -2497,6 +2534,7 @@ static ncclResult_t issue_group(struct metal_program *program, struct inflight *
   struct ncclComm *comm = g->comm;
   ncclResult_t result = ncclSuccess;
   touch(comm);
+  if (g->plan) metal_rows(program, &g->plan->rows);
   metal_gate(program, comm->violation);
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     const struct channel *ch = comm->channels + h;
@@ -2657,6 +2695,7 @@ static ncclResult_t retire(struct metal_program *program) {
       if (comm->channels[h].consumed < g->end[h][1] || comm->channels[h].published < g->end[h][0]) return ncclSuccess;
     if (!program && !g->composed) return ncclSuccess;
     if (program) touch(comm);
+    if (program && g->plan) metal_rows(program, &g->plan->rows);
     if (program) metal_gate(program, comm->violation);
     for (uint32_t h = 0; h < comm->count && !result && !g->composed; h++) {
       struct channel *ch = comm->channels + h;
@@ -2675,15 +2714,23 @@ static ncclResult_t retire(struct metal_program *program) {
   return result;
 }
 
+static void stamp(struct metal_program *program, struct ncclComm *comm, struct plan *p) {
+  if (p->buffer && metal_stamp(program, p->buffer, p->word).status) p->stale = comm->sweeps = 1;
+  p->reader += p->buffer != NULL;
+  p->flight = !p->leaving;
+  p->leaving = 0;
+}
+
 static ncclResult_t program_end(struct metal_program *program, int borrowed, ncclResult_t result) {
+  struct ncclComm *held_comm = NULL;
+  struct plan *held = NULL;
   for (struct ncclComm *comm = touching; comm; comm = comm->next_touched)
-    for (struct plan *p = comm->plans; p; p = p->next) {
-      if (!p->flight) continue;
-      if (p->buffer && metal_stamp(program, p->buffer, p->word).status) p->stale = comm->sweeps = 1;
-      p->reader += p->buffer != NULL;
-      p->flight = !p->leaving;
-      p->leaving = 0;
-    }
+    for (struct plan *p = comm->plans; p; p = p->next)
+      if (p->flight && p->buffer && metal_rows(program, &p->rows) == &p->rows) { held = p; held_comm = comm; }
+  for (struct ncclComm *comm = touching; comm; comm = comm->next_touched)
+    for (struct plan *p = comm->plans; p; p = p->next)
+      if (p->flight && p != held) stamp(program, comm, p);
+  if (held) stamp(program, held_comm, held);
   const uint64_t count = borrowed || result ? 0 : ++issued;
   void *command = count ? metal_command(program) : NULL;
   metal_end(program, count ? (finished ? finished : (finished = metal_event())) : NULL, count);
@@ -2757,6 +2804,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     return fail(ncclSystemError, "%s", message);
   }
   touch(comm);
+  metal_rows(program, &plan->rows);
   for (uint32_t h = 0; remote && h < comm->count; h++) metal_resident(program, comm->channels[h].buffer);
   if (plan->buffer) metal_resident(program, plan->buffer);
   const size_t r = (size_t)comm->rank;
@@ -2856,7 +2904,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
-struct slot { void *pages, *buffer; struct mesh_table *table; uint64_t row, start, *ends; uint32_t bound; int unbound; };
+struct slot { void *pages, *buffer; struct mesh_table *table; struct metal_rows rows; uint64_t row, start, *ends; uint32_t bound; int unbound; };
 struct peer_part { int rank, sends; uint32_t channel; size_t count, landing; };
 struct ncclMeshRequest {
   struct ncclComm *comm;
@@ -2902,7 +2950,7 @@ static struct slot *slot_of(struct ncclMeshRequest *r, uint64_t start) {
 }
 
 static ncclResult_t slot_make(struct ncclMeshRequest *r, uint32_t at) {
-  struct slot made = {0};
+  struct slot made = {.rows = {.comm = r->comm}};
   size_t offset = 0;
   ncclResult_t result = (made.ends = calloc(2 * (size_t)r->peers + 1, sizeof *made.ends)) ? lease_take(r->comm, r->bytes, &made.pages, &made.buffer, &offset)
                                                                                           : fail(ncclSystemError, "out of memory");
@@ -2931,7 +2979,7 @@ static int request_sweep(struct ncclMeshRequest *r, int end) {
     const int idle = slot_free(r, r->slots + k);
     if (r->slots[k].unbound && (idle || end)) { r->slots[k].unbound = 0; r->comm->unpublished--; }
     if (idle) ncclMemFree(r->slots[k].pages);
-    if (idle || end) free(r->slots[k].ends);
+    if (idle || end) { free(r->slots[k].ends); rows_free(&r->slots[k].rows, idle); }
     else r->slots[kept++] = r->slots[k];
   }
   if ((r->nslots = kept)) return 0;
@@ -3027,7 +3075,7 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   struct slot *s = result ? NULL : r->slots + k;
   struct mesh_table *t = s ? s->table : NULL;
   struct mesh_peer *peer = (struct mesh_peer *)(t + 1);
-  if (s) { comm->unpublished -= s->unbound; s->start = 0; s->unbound = 0; }
+  if (s) { comm->unpublished -= s->unbound; s->start = 0; s->unbound = 0; s->rows.at = s->rows.used = 0; }
   if (!result) group_numbered(comm);
   for (uint32_t e = 0; e < r->peers && !result; e++) {
     const uint32_t h = r->part[e].channel;
@@ -3097,7 +3145,8 @@ ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int pu
   ncclResult_t result = (lands && !land) || (publishes && !publish)
                           ? fail(ncclInvalidUsage, "ncclMeshBind: start %llu, or the one before it, is not one of this exchange's held starts",
                                  (unsigned long long)start)
-                          : gpu(metal_bind(on->commandEncoder, on->argumentTable, on->residencySet, land ? metal_address(land->buffer) + r->table : 0,
+                          : gpu(metal_bind(on->commandEncoder, on->argumentTable, on->residencySet, publish ? &publish->rows : land ? &land->rows : NULL,
+                                           land ? metal_address(land->buffer) + r->table : 0,
                                            publish ? metal_address(publish->buffer) + r->table : 0, r->comm->violation, groups, index, buffers, n),
                                 "a crossing's binding");
   if (!result && land) land->bound++;
@@ -3106,7 +3155,6 @@ ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int pu
   return result;
 }
 
-void ncclMeshMetal4Records(uint64_t *issued, uint64_t *capacity) { metal_records(issued, capacity); }
 
 static uint64_t time_of(const _Atomic uint64_t *ring, uint64_t e) {
   const _Atomic uint64_t *entry = ring + 2 * (e % MESH_STREAM_TIMES);

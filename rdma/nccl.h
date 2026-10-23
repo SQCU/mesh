@@ -479,8 +479,6 @@ ncclResult_t ncclMeshRequestFree(ncclMeshRequest_t request);
 
 const char* ncclMeshMetalPrelude(void);
 
-void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
-
 ncclResult_t ncclMeshPosition(ncclComm_t comm, uint64_t* group);
 
 ncclResult_t ncclMeshTimes(ncclComm_t comm, uint64_t first, uint64_t count, uint64_t* issued, uint64_t* ended);

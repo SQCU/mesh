@@ -56,34 +56,30 @@ def shares(config, rank, size, folds):
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def chain_stream(step, rank, steps, block, E, O, inputs, outputs):
-    e, pace = [s for b in E for s in b.unbind(0)], chain.Pace()
+    e, first = [s for b in E for s in b.unbind(0)], None
     o = (None,) * block if O is None else O.unbind(0)
     deep = len(e)
     landing = chain.fill(E, rank, inputs, 0, steps, block)
     for t in range(steps):
         if t % block == 0:
-            pace.wait()
             ahead = chain.fill(E, rank, inputs, t + block, steps, block) if t + block < steps else None
             landing.wait()
             landing = ahead
         step(e[t % deep], o[(t - 1) % block])
         if t % block == 0 and t:
             chain.drain(t - block, steps, block, O, outputs)
-            pace.mark()
+        if t == block:
+            first = torch.mps.Event(enable_timing=True)
+            first.record()
     step.land(e[(steps - 1) % deep], o[(steps - 1) % block])
     chain.drain((steps - 1) // block * block, steps, block, O, outputs)
-    return pace.first
+    return first
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
-def crossings(steps, block, P):
-    pace = chain.Pace()
+def crossings(steps, P):
     for t in range(steps):
-        if t % block == 0:
-            pace.wait()
         dist.all_reduce(P[t % len(P)])
-        if (t + 1) % block == 0 and t + 1 < steps:
-            pace.mark()
 
 
 # docs/writing-a-service.md#the-configuration
@@ -120,7 +116,7 @@ def main():
     dist.barrier()
     torch.mps.synchronize()
     began = time.perf_counter()
-    crossings(steps, block, P)
+    crossings(steps, P)
     torch.mps.synchronize()
     crossing = time.perf_counter() - began
     moved = 2 * (size - 1) * rows * width * torch.half.itemsize
