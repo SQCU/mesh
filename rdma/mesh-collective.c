@@ -1007,19 +1007,6 @@ int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count
   return 0;
 }
 
-static uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){
-  uint64_t at=0;
-  for(uint32_t r=0;r<q;r++)at+=segment[r];
-  return at;
-}
-uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps){
-  uint32_t k=0;
-  for(uint32_t q=0;q<2*nodes;q++)
-    if(q%nodes!=rank && segments[q])
-      steps[k++]=(struct mesh_step){q<nodes?MESH_STEP_SEND:MESH_STEP_COPY,q%nodes,0,q>=nodes,mesh_segment_first(segments+(q<nodes?0:nodes),q%nodes),
-                                    {element.type,element.element_bytes,segments[q]}};
-  return k;
-}
 uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
                         struct mesh_group_place *made,uint32_t *placed){
   *placed=0;

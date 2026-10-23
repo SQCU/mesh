@@ -8,10 +8,12 @@ own for it. This replaced the fused records of 2026-10-21 and 2026-10-22 (mesh 1
 ## The form
 
 **The library** (rdma/).
-- `ncclMeshExchangeInit` makes the request. A slot is one lease: this rank's send part, a landing area a peer and the slot's table. `ncclMeshStart` takes a free
-  slot (every kernel bound to it ended, its entries done), else makes one, presents its entries and writes its table:
-  each peer's landing area, `landed` word and target, and the word its send entry waits on and the value its
-  publication stores.
+- `ncclMeshExchangeInit` compiles the exchange every member passes (each rank's part and where it lands) into this
+  rank's legs, a member between two unlinked ones relaying ([NCCL.md](../NCCL.md), Persistent exchanges). A slot is one
+  lease: this rank's part, a landing area a landing leg and the slot's table. `ncclMeshStart` takes a free slot (every
+  kernel bound to it ended, its entries done), else makes one, presents its legs' entries and writes its table: each
+  landed part's area, `landed` word and target, the word its own send entries wait on and the value its publication
+  stores, and each relayed part's record.
 - `ncclMeshBind` binds one record at the kernel's crossing index: the landed start's table and the publishing start's,
   the communicator's failure words, the dispatch's threadgroups and the library's bound. On the classic form it is
   `setBytes`, and the slots' and holdings' buffers are declared with `useResource`, so Metal orders the kernel's pass
@@ -36,9 +38,9 @@ staging buffer. `mesh_leave` stores the landed slot's stamp once the last worker
 
 **Stage 2 of step t publishes start t.** The `Summand` epilogue stores the part through `mesh_send` (system-coherent),
 each worker its own columns, into the slot's own pages: the bridge sends those pages, nothing copied. `mesh_leave`:
-each worker fences and counts its arrival, and the last to arrive stores each peer's `published` (the word that peer's
-send entry waits on) after one system-scope fence, counts the kernel's end in the slot's table, and zeroes the count of
-arrivals for the slot's next use. No worker waits for another to publish.
+each worker fences and counts its arrival, and the last to arrive stores the slot's `published` (the word its send
+entries wait on) after one system-scope fence, publishes each part the rank relays once it has landed, counts the
+kernel's end in the slot's table, and zeroes the count of arrivals for the slot's next use. No worker waits for another to publish.
 
 Start t + 1 lands in other pages than start t whenever start t's are still held: no landing tensor is reused while a
 kernel may read it, and no send part while the NIC may read it. The kernel carries no guard and no binding of its own.

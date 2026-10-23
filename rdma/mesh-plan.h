@@ -66,8 +66,6 @@ struct mesh_group_place { uint32_t call,padding; struct mesh_place place; };
 uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
                         struct mesh_group_place *made,uint32_t *placed);
 
-uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps);
-
 struct mesh_routing { uint32_t nodes,routes; const uint32_t *pair,*start,*node; const double *share; };
 
 void mesh_routing_room(uint32_t nodes,uint32_t most,uint32_t *routes,uint32_t *hops);

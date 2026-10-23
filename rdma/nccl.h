@@ -470,8 +470,7 @@ uint64_t ncclMeshRetired(void);
 
 /* rdma/NCCL.md#persistent-exchanges: MPI-4.0 MPI_Neighbor_allgatherv_init, MPI_Start, MPI_Request_free */
 typedef struct ncclMeshRequest* ncclMeshRequest_t;
-ncclResult_t ncclMeshExchangeInit(size_t sendcount, const int* sendto, const size_t* recvcounts, ncclDataType_t datatype, ncclComm_t comm,
-                                  ncclMeshRequest_t* request);
+ncclResult_t ncclMeshExchangeInit(const size_t* parts, const int* lands, ncclDataType_t datatype, ncclComm_t comm, ncclMeshRequest_t* request);
 ncclResult_t ncclMeshStart(ncclMeshRequest_t request, const size_t* counts, cudaStream_t stream, uint64_t* start);
 ncclResult_t ncclMeshBind(ncclMeshRequest_t request, uint64_t start, int lands, int publishes, cudaStream_t stream, uint32_t index,
                           uint32_t groups);
@@ -492,8 +491,8 @@ ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size
 ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
                                     ncclComm_t comm, cudaStream_t stream);
 
-ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* sendcounts, void* recvbuff, const size_t* recvcounts, ncclDataType_t datatype,
-                               ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshAlltoAllV(const void* sendbuff, const size_t* counts, void* recvbuff, ncclDataType_t datatype, ncclComm_t comm,
+                               cudaStream_t stream);
 
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
                                      size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,

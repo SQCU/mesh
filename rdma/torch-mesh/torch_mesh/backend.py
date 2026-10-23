@@ -49,6 +49,15 @@ def span(tensors):
     return first.as_strided((at - first.storage_offset(),), (1,))
 
 
+def views(whole, parts):
+    out, at = [], 0
+    for t in parts:
+        count = 0 if t is None else t.numel()
+        out.append(whole[at:at + count] if whole is not None and count else None)
+        at += count
+    return out
+
+
 def packed(tensors, read):
     tensors = [t for t in tensors if t is not None]
     if not tensors:
@@ -157,10 +166,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
             _register_work(registered, work)
         return work
 
-    def _alltoall(self, sends, receives, result, opts):
+    def _alltoall(self, sends, receives, result, opts, matrix=None):
         (send, _), (receive, back) = packed(sends, True), packed(receives, False)
-        counts = [0 if t is None else t.numel() for t in (*sends, *receives)]
-        return self._issue([(ALLTOALL, [send], [receive], counts, 0, 0)], result, asynchronous(opts), [back] if back else ())
+        if matrix is not None:
+            calls = [(ALLTOALL, [send], [receive], matrix, 0, 0)]
+        else:
+            calls = [(SEND, [p], [], [], 0, q) for q, p in enumerate(views(send, sends)) if p is not None]
+            calls += [(RECV, [], [p], [], 0, q) for q, p in enumerate(views(receive, receives)) if p is not None]
+        return self._issue(calls, result, asynchronous(opts), [back] if back else ())
 
     def _rooted(self, root, tensor):
         return [tensor if q == root else None for q in range(self._size)]
@@ -221,15 +234,22 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def all_to_all_single(self, output, input, output_split_sizes, input_split_sizes, opts=None):
         def pieces(t, sizes):
             return list(t.split(list(sizes) or [t.shape[0] // self._size] * self._size))
-        return self._alltoall(pieces(input, input_split_sizes), pieces(output, output_split_sizes), output, opts)
+        sends = pieces(input, input_split_sizes)
+        equal = not input_split_sizes and not output_split_sizes
+        matrix = [sends[0].numel()] * self._size ** 2 if equal else None
+        return self._alltoall(sends, pieces(output, output_split_sizes), output, opts, matrix)
 
     def gather(self, outputs, inputs, opts=dist.GatherOptions()):
         receives = list(outputs[0]) if self._rank == opts.rootRank else [None] * self._size
-        return self._alltoall(self._rooted(opts.rootRank, inputs[0]), receives, outputs, opts)
+        n, root = self._size, opts.rootRank
+        matrix = [inputs[0].numel() if b == root else 0 for a in range(n) for b in range(n)]
+        return self._alltoall(self._rooted(root, inputs[0]), receives, outputs, opts, matrix)
 
     def scatter(self, outputs, inputs, opts=dist.ScatterOptions()):
         sends = list(inputs[0]) if self._rank == opts.rootRank else [None] * self._size
-        return self._alltoall(sends, self._rooted(opts.rootRank, outputs[0]), outputs, opts)
+        n, root = self._size, opts.rootRank
+        matrix = [outputs[0].numel() if a == root else 0 for a in range(n) for b in range(n)]
+        return self._alltoall(sends, self._rooted(root, outputs[0]), outputs, opts, matrix)
 
     def send(self, tensors, dst, tag):
         return self._issue([(SEND, [t], [], [], 0, dst) for t in tensors], tensors, True)

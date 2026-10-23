@@ -189,17 +189,17 @@ copy methods must always be used over access by copy"; "code which can't perform
 It last ran on the rings (mesh fba2af36^: ep at 27.5-27.7 ms a step, metal-microbench docs/measurement.md 2026-09-30
 part B). Rows whose counts the host holds move with `ncclMeshAlltoAllV`.
 
-**All-to-all with host counts.** `ncclMeshAlltoAllV(send, sendcounts, recv, recvcounts, type, comm, stream)` is
-MPI_Alltoallv with its counts on the host: rank r sends `sendcounts[q]` elements to rank q and receives
-`recvcounts[q]` from it, both packed in rank order (rank r's `sendcounts[q]` is rank q's `recvcounts[r]`; its own
-segment copied, the lesser of `sendcounts[rank]` and `recvcounts[rank]` elements). Its counts
-known to both ends, no count crosses, and each pair's elements move over their link as one entry of their own size, one call a group,
-each segment starting on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with every count `count`, and `ncclGather` and
-`ncclScatter` its rooted forms (every count 0 but toward or from the root), where they were each rank's sends and
-receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). Every member knows every block of those three, so
-they run along the communicator's routing table, each block cut among its pair's routes, through the members between two
-that no link joins; an `ncclMeshAlltoAllV`'s pairs are its two ranks' alone, each one entry over their link
-([Routes between unlinked ranks](#routes-between-unlinked-ranks)).
+**All-to-all with host counts.** `ncclMeshAlltoAllV(send, counts, recv, type, comm, stream)` is MPI_Alltoallv with
+its counts on the host, every member passing the same matrix: `counts[a x nranks + b]` elements go from rank a to rank
+b, packed in rank order in a's send buffer and in b's receive buffer (a rank's own block, `counts[r x nranks + r]`, is
+copied). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
+every count `count`, and `ncclGather` and `ncclScatter` its rooted forms (every count 0 but toward or from the root),
+where they were each rank's sends and receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). Every member
+knows every block of the four, so they run along the communicator's routing table, each block cut among its pair's
+routes, through the members between two that no link joins ([Routes between unlinked
+ranks](#routes-between-unlinked-ranks)). torch-mesh passes the matrix where torch's call gives it (an all-to-all of
+equal splits, a gather, a scatter) and lays torch's other all-to-alls as each pair's `ncclSend` and `ncclRecv` in one
+group.
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -464,7 +464,7 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`, `nccl
   counts (and an uneven call's segments), type and operator, whether it reads its send buffer in place, and whether it
   is on a stream (`call_same`). Its steps are planned (`plan_calls`: a collective's program, cut on the
   communicator's quantum by `mesh_program_steps_cut`; the hosted family's blocks along the routing table,
-  `mesh_exchange_steps`; an `ncclMeshAlltoAllV`'s pairs, `mesh_counted_steps`) and laid on each channel relative to the
+  `mesh_exchange_steps`) and laid on each channel relative to the
   channel's counts (`schedule_group`).
 - **Its pages.** A call's extra pages, f(n) pages for its n: a not-in-place collective's operand (a reduce-scatter's, a
   non-root reduce's, a one-rank group's), each scratch buffer its program names, each combine's landing area, and a
@@ -506,13 +506,18 @@ bridge post a run's last unit at its own length, is not a field of it.
 
 ## Persistent exchanges
 
-`ncclMeshExchangeInit(sendcount, sendto, recvcounts, type, comm, &request)` is MPI-4's
-`MPI_Neighbor_allgatherv_init` [MPI 4.1 section 8.8] over the adjacency the caller names (as
-`MPI_Dist_graph_create_adjacent` names one): this rank's part of `sendcount` elements goes to each rank q with
-`sendto[q]` set, and `recvcounts[q]` elements land from each q (0: none). The library allocates the buffers, as MPI's
-`MPI_Alloc_mem` and NCCL's `ncclMemAlloc` do for buffers a library registers: a slot is one lease holding the send part,
-a landing area a peer, and the slot's table (`struct mesh_table`, then a `struct mesh_peer` a peer). A request makes
-its slots as its starts need them.
+`ncclMeshExchangeInit(parts, lands, type, comm, &request)` is MPI-4's `MPI_Neighbor_allgatherv_init` [MPI 4.1 section
+8.8] over the adjacency the caller names (as `MPI_Dist_graph_create_adjacent` names one), every member passing the same
+exchange: rank a's part is `parts[a]` elements, and it lands at each rank b with `lands[a x nranks + b]` set. Each member
+compiles the whole exchange into its own legs at the init, with no message: for each pair (a, b) the route (their link
+where one joins them, else the routing table's route of fewest hops), and on each link of a route from a, a's part
+crosses once. A member's landing legs are the parts it lands on each channel, in rank order of their source, and its
+send legs the parts it sends on each channel in the same order: its own part, or the rows a landing leg of another
+member's part landed in. Both ends of a channel compile the same legs in the same order, so its entries pair. The
+library allocates the buffers, as MPI's `MPI_Alloc_mem` and NCCL's `ncclMemAlloc` do for buffers a library registers: a
+slot is one lease holding this rank's part, a landing area a landing leg, and the slot's table (`struct mesh_table`,
+then a `struct mesh_peer` for each part this rank lands, in rank order, then a `struct mesh_relay` for each part it
+sends on from its rows). A request makes its slots as its starts need them.
 
 - `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, takes a free slot,
   else the request makes one. A slot is released by use count: every kernel bound to it (`ncclMeshBind`, landing its
@@ -522,11 +527,11 @@ its slots as its starts need them.
   another start still holds, and a kernel writes no guard of its own (the operator, 2026-10-22: "programs overwrite
   each other in data processing by default with no extraneous lines of code written"; NCCL-style primitives "use
   explicit allocation per buffer or pageset that they operate against, rather than an attempt to make timed single
-  landings"). `counts` (nranks entries: this rank's part, then each peer's) moves fewer elements than declared
-  (partitioned communication's `MPI_Pready` [MPI 4.1 chapter 4]; design/extents-and-liveness.md, b); NULL moves the
-  declared counts. The start presents one send entry and one landing entry toward each peer. Its send entry is gated on
-  a word of its own, the peer's `published` in the slot's table (`struct mesh_entry` `word`, its region offset; `base`
-  0), which the start's publishing kernel stores (`mesh_leave`): the holding's `ready`, a count that every later
+  landings"). `counts` (nranks entries, each rank's part, every member passing the same) moves fewer elements than
+  declared (partitioned communication's `MPI_Pready` [MPI 4.1 chapter 4]; design/extents-and-liveness.md, b); NULL moves
+  the declared counts. The start presents each leg's entry. A send entry of this rank's part is gated on the table's
+  `published`, and one of a relayed part on its relay record's (`struct mesh_entry` `word`, its region offset; `base`
+  0), which a kernel bound to the start stores (`mesh_leave`): the holding's `ready`, a count that every later
   group's publication moves, never covers it (the bridge reads an entry's word, design/transport.md section 14). So a
   group or another start encoded before this start's publishing kernel sends nothing of the slot before it is written.
   A channel's entries are posted in their order, so that group's SENDs on the channel wait behind the start's until its
@@ -574,9 +579,13 @@ kernel:
   library's functions (`mesh_enter`, `mesh_leave`, the views), so a kernel names no holding's word and no slot's
   address (design/rubrics.md, What data code reaches; the operator: "nobody ever gives them a dereferenced anything");
 - `mesh_leave(crossing, tid)`, called by every thread of every threadgroup: each threadgroup fences its stores and
-  counts its arrival in the table's word, and the last to arrive stores each peer's `published` (the pages of this
-  start's send entry toward it) after one system-scope fence, stores the landed slot's stamp, and zeroes the arrival
-  word for the slot's next use.
+  counts its arrival in the table's word, and the last to arrive, after one system-scope fence, stores the published
+  slot's `published` (the pages of this start's part), then relays: it reads each relay record's landing count and
+  stores its `published` once that leg has landed, looking at all of them in turn up to the library's bound (so no
+  relay waits behind another), and after the bound stores the rest, so the channel's later entries go on. It counts the
+  kernel's end in the table of each slot it names and zeroes the arrival word for the slot's next use. The relays read
+  are those of the slot the kernel publishes, else of the slot it lands: a member that relays a part binds a kernel to
+  each start, as every member of a sum, a reduce or a broadcast does.
 
 The kernel's math is its own. A dispatch bound with neither `lands` nor `publishes` takes an empty record, and enter and
 leave do nothing in it. The compiled form was chosen over dispatches of the library's own: the in-kernel crossings
@@ -684,7 +693,9 @@ Porting:
 ## Routes between unlinked ranks
 
 A bridge posts only its own holders' entries (design/transport.md); members relay. A communicator's init holds a stream
-only toward the members whose nodes its bridge reaches and whose bridges reach its node, and its channels go only toward those members.
+only toward the members whose nodes its bridge reaches and whose bridges reach its node, so a channel joins two linked
+members, and the bytes between two members no link joins land in the rows of a member between them, which sends those
+rows on.
 Bytes between two members no link joins cross the members between them, along the communicator's routing table, in the
 calls where every member knows them: the operator, 10-21, "forwarding is REQUIRED"; "cabling is extremely dynamic from
 this point onwards and therefore all topologies must be supported forever without justification by current environment
@@ -730,9 +741,18 @@ mesh_entry` `word`) would send each page as it lands, with no wait or publicatio
 since a stream's counts start again at 0 when its link pairs again, and the bridge reads an entry's word only when it
 reaches the entry.
 
-**Pairwise calls** (`ncclSend` and `ncclRecv`, `ncclMeshAlltoAllV`, persistent exchanges) are known to their two ranks
-alone: no other member calls anything for them, and a point-to-point call's pairing is the two ends' order of their
-calls toward each other, nothing gathered.
+**Calls every member plans.** An `ncclMeshAlltoAllV` and a persistent exchange are passed alike at every member (the
+count matrix; each rank's part and where it lands), as the hosted family's blocks are known to every member, so each
+member compiles from the routing table the pairs that route through it, with no message (MSCCL's and TACCL's relay
+schedules, compiled at every rank [Cowan et al., ASPLOS 2023; Shah et al., NSDI 2023]). For a pair x to b through a:
+x's plan presents its pages as a send to a, a's plan presents those rows as a landing and then as a send to b, and b's
+plan lands them. An all-to-all's relay is the hosted family's (above: a send gated on the step's receive). An
+exchange's relay is a leg of a's slot: a's send of the rows its landing leg landed in, gated on the relay record's
+`published`, which a's kernel bound to the start stores once the landing has landed ([Persistent
+exchanges](#persistent-exchanges)); the slot's rows return by its use count once its entries are done.
+
+**Pairwise calls** (`ncclSend` and `ncclRecv`) are known to their two ranks alone: no other member calls anything for
+them, and a point-to-point call's pairing is the two ends' order of their calls toward each other, nothing gathered.
 
 ## Ranks, lists and streams
 
@@ -915,9 +935,7 @@ gathers, parses or joins bridge records itself.
   `relay` (at the next of the bytes it relays, each part from a multiple of the page, `relayed` their total) and
   sending it on from there; `pairwise`, the parts on longer routes are no rank's steps. A round's SENDs, then its
   receives, each in block, then route order, so a hop's SENDs at one end and its receives at the other are the same
-  parts in the same order (`mesh_lay`). `mesh_exchange_room` the most steps it makes at a rank. `mesh_counted_steps(nodes,
-  rank, segments, element, steps)`: an all-to-all whose counts both ends hold, one SEND to and one COPY from each other
-  rank.
+  parts in the same order (`mesh_lay`). `mesh_exchange_room` the most steps it makes at a rank.
 
 ## Environment
 

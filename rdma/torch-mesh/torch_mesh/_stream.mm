@@ -309,7 +309,7 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
     case ALLGATHER: result = ncclMeshAllGatherV(a.at, b, i.counts.data(), a.type, comm, s); break;
     case REDUCE_SCATTER: result = ncclMeshReduceScatterV(a.at, b, i.counts.data(), a.type, op, comm, s); break;
     case ALLTOALL:
-      result = ncclMeshAlltoAllV(a.at, i.counts.data(), b, i.counts.data() + i.counts.size() / 2, a.at ? a.type : i.receives[0].type, comm, s);
+      result = ncclMeshAlltoAllV(a.at, i.counts.data(), b, a.at ? a.type : i.receives[0].type, comm, s);
       break;
     case SEND: result = ncclSend(a.at, a.count, a.type, (int)i.root, comm, s); break;
     case RECV: result = ncclRecv(b, i.receives[0].count, i.receives[0].type, (int)i.root, comm, s); break;
@@ -672,12 +672,14 @@ static std::pair<int64_t, int64_t> exchange_init(const std::vector<int64_t> &siz
   TORCH_CHECK(sizes.size() == (size_t)ranks, "an exchange names each of the ", ranks, " ranks' parts, not ", sizes.size());
   const ncclDataType_t type = kind(like.scalar_type());
   const size_t scale = type == ncclNumTypes ? (size_t)like.element_size() : 1;
-  std::vector<size_t> landing(ranks, 0);
-  std::vector<int> to(ranks, 1);
-  for (int q = 0; q < ranks; q++) landing[q] = q == rank ? 0 : (size_t)sizes[q] * scale;
-  to[rank] = 0;
+  std::vector<size_t> parts(ranks, 0);
+  std::vector<int> lands((size_t)ranks * ranks, 1);
+  for (int q = 0; q < ranks; q++) {
+    parts[q] = (size_t)sizes[q] * scale;
+    lands[(size_t)q * ranks + q] = 0;
+  }
   ncclMeshRequest_t made = nullptr;
-  checked(ncclMeshExchangeInit((size_t)sizes[rank] * scale, to.data(), landing.data(), type == ncclNumTypes ? ncclUint8 : type, communicator(comm), &made));
+  checked(ncclMeshExchangeInit(parts.data(), lands.data(), type == ncclNumTypes ? ncclUint8 : type, communicator(comm), &made));
   return {(int64_t)(uintptr_t)made, (int64_t)scale};
 }
 
