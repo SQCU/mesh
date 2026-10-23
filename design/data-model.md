@@ -259,8 +259,9 @@ section has priced. Each is answered by what the document already shows.
   on the first cable (design/transport.md section 14). Another is half the GPU's cores for the chain's workers, chosen
   at width 1,024 (docs/writing-a-service.md, Workers). At width 16,384 on two nodes, the chain with it took 1,539 µs a
   step, where its record took 865, about 78% slower (output_data/hourly/log.jsonl, run 20261023T2305Z). A threshold on
-  size is a choice at run time, and the bridge does not care how big a write is (section 8). The demo is judged across shapes. The operator, 2026-10-23: "we don't care about artifacts tah only appear at one
-  tensor shape ever ... this is why the lstm-chain-demo demands that multiple shapes be run".
+  size is a choice at run time, and the bridge does not care how big a write is (section 8). The demo is judged across
+  shapes. The operator, 2026-10-23: "we don't care about artifacts tah only appear at one tensor shape ever ... this is
+  why the lstm-chain-demo demands that multiple shapes be run".
 - **A wait or a handshake between processes or threads.** Examples are other cables waiting on the first cable's count
   before they begin, and two threads in one port handing each holding between them. Each is a barrier inside
   networking code, in the operator's words above. The count is deleted, and a port has one progress thread
