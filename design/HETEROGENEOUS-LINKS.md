@@ -175,8 +175,8 @@ keepalive (section 10; design/transport.md section 5: "a link carries no keepali
 or lane 1. The plans stay as in this table, so the two ends' LINKs still match.
 
 - **Streams.** Streams beyond the plan's are never opened: not live, not free, never offered to a client
-  (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports
-  `bandwidth / MESH_LINK_STREAMS` as before, so the map's per-link figure is comparable across plans.
+  (`mesh_streams_free`), and never in the node's reach (`mesh_nodes_reached`). Each live stream reports its cable's
+  bandwidth (since layout 143; `bandwidth / MESH_LINK_STREAMS` before), so a cable's figure is comparable across plans.
 - **Completion queues.** Each stream lane's share of the two completion queues is `cqe` over the plan's stream lanes
   (mesh-link.c:603), so a two-lane link's lanes get 2048 frames each, against 512 on a ten-lane link's eight stream
   lanes. A stream lane's receive window is its share counted in pages, at most the queue pair's receive capacity

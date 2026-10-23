@@ -66,18 +66,16 @@ static int mesh_records_read(int health,struct mesh_record **out){
   return count;
 }
 /* design/transport.md section 3, RECORD; section 15, "The library" */
-int mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint64_t *bandwidth){
-  uint64_t slowest=0;
-  for(int end=0;end<2;end++){
-    const struct mesh_record *r=end?b:a;
-    const uint32_t node=end?a->node:b->node;
-    uint32_t i=0;
-    while(i<r->reached && i<MESH_STREAMS && r->reach[i].node!=node)i++;
-    if(i>=r->reached || i>=MESH_STREAMS)return 0;
-    if(r->reach[i].bandwidth && (!slowest || r->reach[i].bandwidth<slowest))slowest=r->reach[i].bandwidth;
-  }
-  *bandwidth=slowest;
-  return 1;
+uint32_t mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint64_t *bandwidth,uint32_t room){
+  uint32_t count=0;
+  for(uint32_t i=0;i<a->reached && i<MESH_STREAMS;i++)
+    for(uint32_t j=0;a->reach[i].node==b->node && j<b->reached && j<MESH_STREAMS;j++){
+      const struct mesh_reach *x=a->reach+i,*y=b->reach+j;
+      if(y->node!=a->node || (x->cable!=y->cable && x->cable && y->cable))continue;
+      if(count<room)bandwidth[count]=!x->bandwidth || (y->bandwidth && y->bandwidth<x->bandwidth)?y->bandwidth:x->bandwidth;
+      count++;
+    }
+  return count;
 }
 struct mesh_whole { struct mesh_link_map map; uint32_t *next; };
 static int mesh_node_order(const void *a,const void *b){
@@ -87,14 +85,17 @@ static int mesh_node_order(const void *a,const void *b){
 static void mesh_whole_free(struct mesh_whole *w){free(w->map.link);free(w->map.bandwidth);free(w->map.mark);free(w->next);}
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
-  const size_t joins=(size_t)n*(n?n-1:0)/2+1;
+  size_t joins=1;
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)joins+=mesh_joined(r+a,r+b,NULL,0);
   *w=(struct mesh_whole){.map={.kind=MESH_LINKS_GRAPH,.nodes=n,.link=malloc(joins*sizeof *w->map.link),.bandwidth=malloc(joins*sizeof *w->map.bandwidth),
     .mark=malloc(((size_t)n+1)*sizeof *w->map.mark)},.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
   if(!w->map.link || !w->map.bandwidth || !w->map.mark || !w->next)return ENOMEM;
   for(uint32_t a=0;a<n;a++){
     w->map.mark[a]=r[a].node;
     for(uint32_t b=a+1;b<n;b++)
-      if(mesh_joined(r+a,r+b,w->map.bandwidth+w->map.links)){w->map.link[w->map.links][0]=a;w->map.link[w->map.links++][1]=b;}
+      for(uint32_t k=mesh_joined(r+a,r+b,w->map.bandwidth+w->map.links,(uint32_t)(joins-w->map.links));k--;w->map.links++){
+        w->map.link[w->map.links][0]=a;w->map.link[w->map.links][1]=b;
+      }
   }
   const int error=n?mesh_routes(&w->map,w->next):0;
   if(!error)w->map.next=w->next;
@@ -370,20 +371,22 @@ uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room
   uint32_t count=0;
   for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
     const struct mesh_stream *x=mesh_stream_at(m,p);
-    const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed);
-    if(!node || !atomic_load_explicit(&x->live,memory_order_acquire))continue;
+    const int live=atomic_load_explicit(&x->live,memory_order_acquire);
+    const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed),cable=atomic_load_explicit(&x->cable,memory_order_relaxed);
+    if(!node || !live)continue;
     int seen=0;
-    for(uint32_t k=0;k<count;k++)seen|=reach[k].node==node;
-    if(!seen)reach[count++]=(struct mesh_reach){.node=node,.bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)};
+    for(uint32_t k=0;k<count;k++)seen|=reach[k].node==node && reach[k].cable==cable;
+    if(!seen)reach[count++]=(struct mesh_reach){.node=node,.cable=cable,.bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)};
   }
   return count;
 }
-uint32_t mesh_streams_free(struct hdr *m,uint32_t *node,uint64_t *wire,uint32_t room){
+uint32_t mesh_streams_free(struct hdr *m,uint32_t *node,uint64_t *wire,uint32_t *cable,uint32_t room){
   uint32_t count=0;
   for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
     const struct mesh_stream *x=mesh_stream_at(m,p);
     if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->owner,memory_order_relaxed))continue;
-    node[count]=atomic_load_explicit(&x->peer,memory_order_relaxed);wire[count++]=atomic_load_explicit(&x->wire,memory_order_relaxed);
+    node[count]=atomic_load_explicit(&x->peer,memory_order_relaxed);wire[count]=atomic_load_explicit(&x->wire,memory_order_relaxed);
+    cable[count++]=atomic_load_explicit(&x->cable,memory_order_relaxed);
   }
   return count;
 }

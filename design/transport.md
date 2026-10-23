@@ -412,7 +412,13 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   a stream's lanes is a whole page: page p of the stream's sequence over its pairing goes on its lane p mod 2, as unit
   p div 2 there, and each end posts the sequence in order.
 - Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
-  GID and queue pair number) and which no other stream between the two nodes has.
+  GID and queue pair number) and which no other stream between the two nodes has. Each stream also names its cable,
+  `cable` (layout 143): the `wire` of its link's first stream folded to 32 bits (`wire ^ wire >> 32`, 1 where 0). Both
+  bridges compute it alike, and it is distinct among the cables between two nodes to the same degree that `wire` is
+  among their streams. A client lists the free streams with their nodes, identities and cables (`mesh_streams_free`)
+  and the node's reach with one entry per cable (`mesh_nodes_reached`), so a communicator can take a stream on each
+  cable toward a node, as the operator's solver requires ("congestion, using all links"; "multiplex links in some pairs and
+  not in others").
 - A holding has two lists of entries the holder presents in order: a send list and a landing list. An entry is a
   range of the holder's rows (`struct mesh_entry {row, pages, word, base}`: `pages` rows from row `row`), each row a
   page, read in order through the page table: the range is the entry's block table (design/pages-and-functions.md).
@@ -661,7 +667,8 @@ citations of this document; what each part does is stated here and in the sectio
 - `MESH_LAYOUT` is the region's layout. 139 put each writer's words of a stream on a line of their own; 140 counted a
   lease's closures; 141 holds a lease's state and generation in `closed`; 142 deletes the header's `control` (the word
   a client's retirement rang to wake the bridge's watcher thread), `busy` and `idle_since` (read by the converger
-  alone, deleted with it in 5aafa852) and `stopping` (never read), and names each child's device in its holder entry.
+  alone, deleted with it in 5aafa852) and `stopping` (never read), and names each child's device in its holder entry;
+  143 names each stream's cable (`cable`, in the four bytes after `child`; no other offset moves).
 - `mesh_layout` places, each part rounded up to a page: the header; the row planes (`MESH_ROW_OWN`, `MESH_ROW_HOT`,
   `MESH_FREE`, a bit a row each); the arena's occupancy bitmap, a bit an arena page (an index space of its own, apart
   from the rows'); the page table (`struct mesh_page_entry` a row: the arena page it maps and that page's region
@@ -780,8 +787,9 @@ last such turn, it writes the clock to the region's `progress[port]` (section 16
   peer with EIO. It then makes a UC queue pair in INIT for each lane of the plan (d6dceac's verbs_up attributes), and
   the connect moves each to RTR, then RTS.
 - A stream's identity (`stream_wire`) is FNV-1a over its first lane's two ends (each port's GID and queue pair
-  number), the lesser end first, 1 where the hash is 0. A stream's bandwidth is the link's over MESH_LINK_STREAMS,
-  however many of the link's streams are live, so the map's figure for a link is alike for links of every plan.
+  number), the lesser end first, 1 where the hash is 0. A stream's bandwidth is its cable's (the link's
+  figure), however many of the link's streams are live, so a cable's figure is alike for links of every plan and the
+  same in the node's reach and in its record.
 - A child whose parent is gone halts its lanes and exits once MESH_PLATFORM_NS and its windows have passed
   (`child_leave`), at most twice MESH_PLATFORM_NS on.
 
@@ -820,8 +828,11 @@ heard (its boot and sequence), held apart from the map, so a record no newer tha
 record the map dropped is put back when heard again at that sequence (a new pairing's exchange of the map) or a newer
 one (its node's next change or health sample, at most MESH_HEALTH_NS on). A full table gives its longest-unheard entry's
 place. A record heard is copied up to this build's size, the rest 0
-(`struct mesh_record` is only appended to). A record's reach is every cable whose link is up toward a node with a
-stream in its plan, their bandwidths summed, so two nodes several cables join are one link of the map. Its health is
+(`struct mesh_record` is only appended to). A record's reach has one entry for each cable whose link is up with a
+stream in its plan: the peer node, the cable (its first stream's `cable`) and the link's bandwidth. So two nodes that
+several cables join are as many links of the map, one per cable. The entry's `cable` was 0 in every bridge before
+layout 143, whose entry was a node's cables with their bandwidths summed. The record keeps its form, and its version
+keeps its number (section 14, the field a version sends as 0). Its health is
 the node's boot time and its available memory (`kern.memorystatus_level` percent of `hw.memsize`), sampled at most
 MESH_HEALTH_NS (10 s) apart.
 
@@ -862,7 +873,9 @@ a 31-bit FNV hash of the host's UUID (drawn at random where none is read), 1 whe
   client's detach or the bridge's for a client gone) ends with that release of its client's own.
 - The map's readers (`mesh_map`, `mesh_nodes_health`, `mesh_map_wait`) wait on an odd serial at most MESH_PAUSE_NS a
   look, and return ESRCH where the bridge went meanwhile. `mesh_joined` is the one join of two records, the bridge's
-  map walk's and the readers' alike: each reaches the other, at the lesser bandwidth either reports.
+  map walk's and the readers' alike: a link for each pair of entries, one in each record toward the other's node,
+  that name the same cable or where either names 0 (an earlier bridge's). Each link is at the lesser bandwidth either
+  reports. It returns their count, and the map has one link per cable.
 - `mesh_stream_take` returns EBUSY where another client holds the stream or its last holding is still ending, and
   ENOLINK where no live stream has the identity. `mesh_stream_present` returns EAGAIN where MESH_STREAM_ENTRIES entries
   are presented and not taken, and EINVAL where an entry's rows leave the page table.
@@ -876,9 +889,10 @@ TIMER_WATCH each WATCH_MS) reads the bridge's `turned` and `hung_from`, adds to 
 loop has stopped (section 16).
 
 **mesh-stat** prints one JSON line: `up` (else the errno), the node, its ports by index (peer, phase, bandwidth), the
-map (nodes by bridge number; links as [node, node, bandwidth or null]), the region and its unleased bytes, and each
-node's record (region, memory, model, boot, available memory), and the hang statistic (`hang`: `active` and `hung` in
-nanoseconds, `hangs`, and `share`, hung over active: section 16), printed beside `up` false too (0 where no region stands).
+map (nodes by bridge number; links as [node, node, bandwidth or null], one per cable), the region and its unleased
+bytes, and each node's record (region, memory, model, boot, available memory), and the hang statistic (`hang`:
+`active` and `hung` in nanoseconds, `hangs`, and `share`, hung over active: section 16), printed beside `up` false too
+(0 where no region stands).
 
 **The disk floor** (rdma/mesh-disk.h). MESH_DISK_FLOOR_GIB is the free space a writer of the mesh stack leaves on its
 filesystem; rdma/mesh_disk.py and the services' scripts read the number from the header. The log cap beside it

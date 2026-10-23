@@ -400,8 +400,8 @@ static void map_put(const struct mesh_record *record){
   memcpy(next+at,record,sizeof *record);
   for(uint64_t k=0;k<count;k++)if(next[k].node==M->node){reached[k]=1;order[tail++]=(uint32_t)k;}
   while(head<tail){
-    uint32_t a=order[head++];uint64_t bandwidth;
-    for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,&bandwidth)){reached[b]=1;order[tail++]=(uint32_t)b;}
+    uint32_t a=order[head++];
+    for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,NULL,0)){reached[b]=1;order[tail++]=(uint32_t)b;}
   }
   for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
     struct known *gone=known_at(next[k].node);
@@ -424,7 +424,7 @@ static int record_links_same(const struct mesh_record *a,const struct mesh_recor
   int same=a->node==b->node && a->reached==b->reached && a->boot==b->boot &&
     a->region==b->region && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
   for(uint32_t k=0;same && k<a->reached && k<MESH_STREAMS;k++)
-    same=a->reach[k].node==b->reach[k].node && a->reach[k].bandwidth==b->reach[k].bandwidth;
+    same=a->reach[k].node==b->reach[k].node && a->reach[k].cable==b->reach[k].cable && a->reach[k].bandwidth==b->reach[k].bandwidth;
   return same;
 }
 static void record_put(struct mesh_record *held,const struct mesh_record *record){
@@ -436,17 +436,8 @@ static void record_put(struct mesh_record *held,const struct mesh_record *record
 static void record_changed(void){
   struct mesh_record own={.node=M->node,.boot=M->boot,.sequence=++sequence,.region=wire.length-held_pages*M->pgsz,.memory=memory,.health=health};
   memcpy(own.model,model,sizeof own.model);
-  for(uint32_t p=0;p<port_count;p++){
-    const struct port *port=ports+p;
-    if(port->link.state!=LINK_UP || !plan_streams(port->link.plan))continue;
-    uint32_t k=0;
-    while(k<own.reached && own.reach[k].node!=port->peer)k++;
-    if(k==own.reached){
-      if(own.reached==MESH_STREAMS)continue;
-      own.reach[own.reached++]=(struct mesh_reach){.node=port->peer};
-    }
-    own.reach[k].bandwidth+=port->bandwidth;
-  }
+  for(uint32_t p=0;p<port_count;p++)if(ports[p].link.state==LINK_UP && plan_streams(ports[p].link.plan))
+    own.reach[own.reached++]=(struct mesh_reach){.node=ports[p].peer,.cable=atomic_load(&stream_of(ports+p,0)->cable),.bandwidth=ports[p].bandwidth};
   record_put(record_held(M->node),&own);
   records_say(NULL,&own,0);
 }
@@ -644,6 +635,8 @@ static int link_connect(struct port *port){
 }
 static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
   struct link *l=&port->link;
+  uint32_t cable=(uint32_t)(l->wire[0]^l->wire[0]>>32);
+  cable+=!cable;
   for(uint32_t s=0;s<plan_streams(l->plan);s++){
     struct mesh_stream *x=stream_of(port,s);
     atomic_store_explicit(&x->owner,0,memory_order_release);
@@ -657,8 +650,9 @@ static void streams_open(struct port *port,uint32_t node,uint64_t bandwidth){
     x->child_start=mesh_started(getpid());
     atomic_store_explicit(&x->child,(uint32_t)getpid(),memory_order_release);
     atomic_store_explicit(&x->peer,node,memory_order_relaxed);
-    atomic_store_explicit(&x->bandwidth,bandwidth/MESH_LINK_STREAMS,memory_order_relaxed);
+    atomic_store_explicit(&x->bandwidth,bandwidth,memory_order_relaxed);
     atomic_store_explicit(&x->wire,l->wire[s],memory_order_relaxed);
+    atomic_store_explicit(&x->cable,cable,memory_order_relaxed);
     atomic_thread_fence(memory_order_release);
     atomic_store_explicit(&x->live,1,memory_order_release);
   }
@@ -1460,7 +1454,7 @@ static int region_open(const struct hdr *geometry,int *out){
 static void region_adopt(void){
   for(uint32_t s=0;s<MESH_STREAMS;s++){
     struct mesh_stream *x=mesh_stream_at(M,s);
-    atomic_store(&x->live,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);
+    atomic_store(&x->live,0);atomic_store(&x->peer,0);atomic_store(&x->wire,0);atomic_store(&x->cable,0);
     mesh_pages_store(&x->sent,MESH_PAGES_LOST);mesh_pages_store(&x->landed,MESH_PAGES_LOST);
   }
   struct mesh_link_info *links=mesh_links(M);

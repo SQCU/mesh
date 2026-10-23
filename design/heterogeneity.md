@@ -21,9 +21,9 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
   clock or torch's MPS stream (`torch_mesh/evidence.py`; metal-microbench `mesh_rank.m`). A collective's wait is in no
   stretch (R2). Stretches are the evidence the parts move on (R3). Node rates per operator class (`proj=u,v`,
   `attn=u,v`), which the rate derivation read, are read by no code since fa36bea6.
-- **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte. The bridges'
-  map joins two nodes by one link where each one's bridge reaches the other, at the lesser of the two ends' stream
-  bandwidths (mesh-plan.h `mesh_map`: β 8e9 over that bandwidth, mesh-dataflow.c `mesh_joined`).
+- **Link**: the cost of one direction of one cable between a pair of nodes, α (µs) per message plus β (ns) per byte.
+  The bridges' map joins two nodes by one link for each cable that both ends' records name, at the lesser of the two
+  ends' bandwidths for it (mesh-plan.h `mesh_map`: β 8e9 over that bandwidth, mesh-dataflow.c `mesh_joined`).
 - **Parts**: a mesh dimension's integers p_r ≥ 1, one per coordinate, of P = Σp units.
 - **Share**: rank r's part of an extent N, N·p_r/P.
 - **Grain**: N/P, the unit a share is counted in (a head, an expert, a tile). A program chooses the

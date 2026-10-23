@@ -12,7 +12,7 @@
 #define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
 #define MESH_VERSION 135u
-#define MESH_LAYOUT 142u
+#define MESH_LAYOUT 143u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_STREAMS 32
@@ -75,7 +75,7 @@ struct mesh_stream {
   _Atomic uint32_t live;
   uint64_t lists,posted_at,landed_at,rows;
   _Atomic uint64_t bandwidth,wire;
-  _Atomic uint32_t child;
+  _Atomic uint32_t child,cable;
   uint64_t child_start;
   _Alignas(MESH_LINE) _Atomic uint64_t owner;
   _Atomic uint64_t sends,lands;
