@@ -191,7 +191,7 @@ static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)com
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps);
 
-enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, COUNTED };
+enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, COUNTED, PAIRS };
 using Tensors = std::vector<std::optional<at::Tensor>>;
 using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t, int64_t>;
 
@@ -274,6 +274,7 @@ static Issue prepare(const Call &call, Group &g) {
   }
   case SEND: i.sends = {g.moving(tensor(sends, 0))}; break;
   case RECV: i.receives = {g.moving(tensor(receives, 0))}; break;
+  case PAIRS: i.counts.assign(counts.begin(), counts.end()); break;
   case COUNTED: {
     const at::Tensor &input = tensor(sends, 0), &output = tensor(receives, 0), &host = tensor(receives, 2);
     TORCH_CHECK(tensor(sends, 1).scalar_type() == at::kLong && tensor(receives, 1).scalar_type() == at::kLong, "all_to_all_counted: counts are int64");
@@ -312,6 +313,14 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
       result = ncclMeshAlltoAllV(a.at, i.counts.data(), b, a.at ? a.type : i.receives[0].type, comm, s);
       break;
     case SEND: result = ncclSend(a.at, a.count, a.type, (int)i.root, comm, s); break;
+    case PAIRS: {
+      const size_t count = i.counts.size() / 3;
+      std::vector<int> from(count), to(count);
+      std::vector<size_t> bytes(count);
+      for (size_t k = 0; k < count; k++) { from[k] = (int)i.counts[3 * k]; to[k] = (int)i.counts[3 * k + 1]; bytes[k] = i.counts[3 * k + 2]; }
+      result = ncclMeshGroupPairs(from.data(), to.data(), bytes.data(), (int)count, comm, s);
+      break;
+    }
     case RECV: result = ncclRecv(b, i.receives[0].count, i.receives[0].type, (int)i.root, comm, s); break;
     case COUNTED: {
       int64_t *words = (int64_t *)i.words;

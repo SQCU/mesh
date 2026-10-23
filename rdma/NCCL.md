@@ -193,14 +193,14 @@ b, packed in rank order in a's send buffer and in b's receive buffer (a rank's o
 copied). MPI_Alltoallv takes each rank's own `sendcounts` and `recvcounts`, a row and a column of this matrix; here
 every member passes the whole n x n matrix, so that every member plans every block (design/rubrics.md C7, at a C1
 cost). A program ported from MPI holds its own row and column; an SPMD program holds the matrix; torch-mesh, which is
-given torch's per-rank splits, lays such a call as each pair's `ncclSend` and `ncclRecv` (below). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
+given torch's per-rank splits, gathers every rank's row into metadata receive buffers (a host-path all-gather of n
+counts) and passes the matrix. Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
 every count `count`, and `ncclGather` and `ncclScatter` its rooted forms (every count 0 but toward or from the root),
 where they were each rank's sends and receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). Every member
 knows every block of the four, so they run along the communicator's routing table, each block cut among its pair's
 routes, through the members between two that no link joins ([Routes between unlinked
-ranks](#routes-between-unlinked-ranks)). torch-mesh passes the matrix where torch's call gives it (an all-to-all of
-equal splits, a gather, a scatter) and lays torch's other all-to-alls as each pair's `ncclSend` and `ncclRecv` in one
-group.
+ranks](#routes-between-unlinked-ranks)). torch-mesh passes the matrix torch's call gives (an all-to-all of equal splits,
+a gather, a scatter) or the one it gathers.
 
 **The partials merge.** `ncclMeshRedOpCreatePartials(&op, dim, ncclFloat32, comm)` makes a reduction operator, as
 `ncclRedOpCreatePreMulSum` makes one (freed by `ncclRedOpDestroy`): split-KV attention partials merged by their
@@ -773,8 +773,19 @@ exchange's relay is a leg of a's slot: a's send of the rows its landing leg of a
 `published`, which a's kernel bound to the start stores once the landing has landed ([Persistent
 exchanges](#persistent-exchanges)); the slot's rows return by its use count once its entries are done.
 
-**Pairwise calls** (`ncclSend` and `ncclRecv`) are known to their two ranks alone: no other member calls anything for
-them, and a point-to-point call's pairing is the two ends' order of their calls toward each other, nothing gathered.
+**Pairwise calls** (`ncclSend` and `ncclRecv`). `ncclMeshGroupPairs(from, to, bytes, count, comm, stream)`, called in a
+group by every member with the same list, names every message of the group's point-to-point calls: message i goes from
+rank `from[i]` to rank `to[i]`, `bytes[i]` bytes, the k-th message of a pair in the list being the sender's k-th
+`ncclSend` to that peer and the receiver's k-th `ncclRecv` from it. Every member then plans every message, as it plans
+an all-to-all's blocks: each message a demand of the solver (root its receiver, leaf its sender), cut among its routes
+by their shares, a member between two that no link joins landing it in its plan's relay rows and sending those rows on
+(the hosted family's relay, a send gated on the step's receive). The group's `ncclSend` and `ncclRecv` calls then give
+only their buffers. This departs from NCCL's point-to-point semantics, where only the two ranks of a message call
+anything (design/rubrics.md C1): the members between two unlinked ones must know the message before its bytes arrive,
+and C2 (every cabling served without a branch) and C7 (every position known a priori) rank that over C1. Without the
+list, a message is its two ranks' alone, on the cables joining them. torch-mesh gives the list for a batch
+(`batch_isend_irecv`, a coalescing manager): every rank of the group gathers each rank's sends, their peers and bytes,
+into metadata receive buffers (two host-path all-gathers) and passes the list.
 
 ## Ranks, lists and streams
 

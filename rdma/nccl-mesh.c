@@ -1208,6 +1208,7 @@ struct steps {
   int32_t *before;
   struct mesh_program program;
   int compiled;
+  uint32_t *pair_call;
 };
 
 struct call {
@@ -1216,6 +1217,8 @@ struct call {
   void *recv;
   size_t count, total;
   uint64_t *segments, *matrix;
+  struct pair { uint32_t from, to; uint64_t bytes; } *pairs;
+  uint32_t npairs;
 
   uint64_t *complement;
   uint32_t complements;
@@ -1270,7 +1273,8 @@ static uint64_t seg_first(const uint64_t *seg, int q) {
 
 static const char *call_name(const struct call *c) {
   static const char *const names[] = {"ncclAllReduce", "ncclBroadcast", "ncclReduce", "ncclReduceScatter", "ncclAllGather"};
-  return c->what == WHAT_SEND ? "ncclSend" : c->what == WHAT_RECV ? "ncclRecv" : !counted(c) ? names[c->what] : c->matrix ? "ncclMeshAlltoAllV"
+  return c->what == WHAT_SEND ? "ncclSend" : c->what == WHAT_RECV ? "ncclRecv" : !counted(c) ? names[c->what] : c->pairs ? "ncclMeshGroupPairs"
+         : c->matrix ? "ncclMeshAlltoAllV"
          : c->root >= 0 ? "ncclScatter" : c->peer >= 0 ? "ncclGather" : "ncclAlltoAll";
 }
 
@@ -1309,6 +1313,7 @@ static void steps_free(struct steps *s) {
   free(s->buffer); free(s->steps); free(s->done); free(s->channel); free(s->entry); free(s->before); free(s->reads); free(s->fresh);
   free(s->needed); free(s->cut); free(s->at);
   if (s->compiled) program_free(&s->program);
+  free(s->pair_call);
   free(s);
 }
 
@@ -1322,10 +1327,15 @@ static uint64_t hosted_count(const struct call *c, int a, int b) {
 static ncclResult_t hosted_steps(ncclComm_t comm, const struct call *c, const struct mesh_routing *g, struct mesh_operand operand,
                                  struct mesh_step **steps, uint32_t *count, uint64_t *relayed) {
   const int n = comm->nranks, me = comm->rank;
-  struct mesh_block *blocks = calloc((size_t)n * n + 1, sizeof *blocks);
+  struct mesh_block *blocks = calloc((size_t)n * n + c->npairs + 1, sizeof *blocks);
   uint32_t made = 0;
   if (!blocks) return fail(ncclSystemError, "out of memory");
-  for (int a = 0; a < n; a++)
+  for (uint32_t i = 0; c->pairs && i < c->npairs; i++) {
+    const struct pair *x = c->pairs + i;
+    if (x->from != x->to && x->bytes && x->from < (uint32_t)n && x->to < (uint32_t)n)
+      blocks[made++] = (struct mesh_block){x->from, x->to, 3 + i, 3 + i, operand.type, 1, 0, 0, x->bytes};
+  }
+  for (int a = 0; !c->pairs && a < n; a++)
     for (int b = 0; b < n; b++) {
       uint64_t first = 0, at = 0;
       for (int q = 0; q < b; q++) first += hosted_count(c, a, q);
@@ -1346,6 +1356,16 @@ static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, st
   const uint32_t n = (uint32_t)comm->nranks, words = (n + 63) / 64;
   const size_t z = SIZE[c->type];
   uint32_t made = 0;
+  if (counted(c) && c->pairs) {
+    for (uint32_t i = 0; i < c->npairs; i++) {
+      const struct pair *x = c->pairs + i;
+      if (x->from == x->to || !x->bytes || x->from >= n || x->to >= n) continue;
+      uint64_t *set = leaves + (size_t)made * words;
+      set[x->from / 64] |= UINT64_C(1) << (x->from % 64);
+      d[made++] = (struct mesh_demand){x->to, 0, x->bytes, 0, set};
+    }
+    return made;
+  }
   if (counted(c)) {
     for (uint32_t a = 0; a < n; a++)
       for (uint32_t b = 0; b < n; b++) {
@@ -1418,7 +1438,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   const uint32_t N = (uint32_t)comm->nranks, words = (N + 63) / 64;
   uint32_t *lo = calloc(n + 1, sizeof *lo), *hi = calloc(n + 1, sizeof *hi), room = 0, demands = 0;
   for (size_t i = 0; i < n; i++)
-    room += !crosses(list + i) || p2p(list + i) ? 0 : counted(list + i) ? N * N : N;
+    room += !crosses(list + i) || p2p(list + i) ? 0 : list[i].pairs ? list[i].npairs : counted(list + i) ? N * N : N;
   struct mesh_demand *d = calloc((size_t)room + 1, sizeof *d);
   uint64_t *leaves = calloc((size_t)room * words + 1, sizeof *leaves);
   struct flow f = {0, NULL, NULL, NULL, NULL};
@@ -1430,6 +1450,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     hi[i] = demands += demands_of(comm, c, d + demands, leaves + (size_t)demands * words);
   }
   if (!result) result = flow_solve(comm, d, demands, &f);
+  int paired = 0;
+  for (size_t i = 0; i < n; i++) paired |= list[i].pairs != NULL;
   for (size_t i = 0; i < n && !result; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
@@ -1449,7 +1471,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     if (counted(c) && (result = routed_of(comm, c, d, &f, lo[i], hi[i], operand, s))) break;
     const size_t most = (program ? program->first[program->nodes] : counted(c) ? s->count : MESH_STREAMS) + 1;
-    s->buffers = counted(c) ? 2 + (s->relayed != 0) : 1 + (program ? program->scratch : 0);
+    s->buffers = c->pairs ? 3 + c->npairs : counted(c) ? 2 + (s->relayed != 0) : 1 + (program ? program->scratch : 0);
     if ((!s->steps && !(s->steps = calloc(most, sizeof *s->steps))) || !(s->done = calloc(most, 1)) || !(s->channel = calloc(most, sizeof *s->channel)) ||
         !(s->entry = calloc(most, sizeof *s->entry)) || !(s->before = calloc(most, sizeof *s->before)) ||
         !(s->buffer = calloc(s->buffers, sizeof *s->buffer)) || !(s->at = calloc(s->buffers, sizeof *s->at)) || (nccl && !(s->cut = malloc((size_t)N * sizeof *s->cut)))) {
@@ -1458,7 +1480,21 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     }
     s->operand = operand;
     for (uint32_t r = 0; nccl && r < N; r++) s->cut[r] = (c->segments ? c->segments[r] : c->count) / u;
-    if (p2p(c)) {
+    if (c->pairs && !(s->pair_call = malloc((c->npairs + 1) * sizeof *s->pair_call))) { result = fail(ncclSystemError, "out of memory"); break; }
+    for (uint32_t m = 0; c->pairs && m < c->npairs; m++) {
+      const struct pair *x = c->pairs + m;
+      const int sends = x->from == (uint32_t)comm->rank, lands = x->to == (uint32_t)comm->rank;
+      uint32_t before = 0;
+      for (uint32_t e = 0; e < m; e++) before += c->pairs[e].from == x->from && c->pairs[e].to == x->to;
+      s->pair_call[m] = UINT32_MAX;
+      for (size_t j = 0, seen = 0; (sends || lands) && x->from != x->to && j < n; j++) {
+        const struct call *y = list + j;
+        if (y->comm != c->comm || !((sends && y->what == WHAT_SEND && y->peer == (int)x->to) || (lands && y->what == WHAT_RECV && y->peer == (int)x->from))) continue;
+        if (seen++ == before) { s->pair_call[m] = (uint32_t)j; break; }
+      }
+    }
+    if (p2p(c) && paired) s->count = 0;
+    else if (p2p(c)) {
       double share[MESH_STREAMS];
       uint64_t at[MESH_STREAMS], length[MESH_STREAMS];
       uint32_t ways = 0;
@@ -1648,7 +1684,8 @@ static int call_same(const struct call *a, const struct call *b) {
          a->combine == b->combine && a->post == b->post && a->premultiplied == b->premultiplied && a->unit == b->unit &&
          a->direct_ok == b->direct_ok && !a->matrix == !b->matrix && !a->stream == !b->stream && !a->segments == !b->segments &&
          (!a->segments || !memcmp(a->segments, b->segments, segs * sizeof *a->segments)) &&
-         (!a->matrix || !memcmp(a->matrix, b->matrix, (size_t)a->comm->nranks * a->comm->nranks * sizeof *a->matrix));
+         (!a->matrix || !memcmp(a->matrix, b->matrix, (size_t)a->comm->nranks * a->comm->nranks * sizeof *a->matrix)) &&
+         a->npairs == b->npairs && (!a->npairs || !memcmp(a->pairs, b->pairs, a->npairs * sizeof *a->pairs));
 }
 
 static ncclResult_t lease_take(struct ncclComm *comm, size_t bytes, void **pages, void **buffer, size_t *offset) {
@@ -1690,9 +1727,11 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
     const size_t segs = (counted(list + i) ? 2 : 1) * (size_t)comm->nranks;
     *c = list[i];
     const size_t cells = (size_t)comm->nranks * comm->nranks;
-    c->bound = NULL; c->complement = NULL; c->complements = 0; c->copy = NULL; c->segments = NULL; c->matrix = NULL; c->at = SIZE_MAX;
-    if ((list[i].segments && !(c->segments = malloc(segs * sizeof *c->segments))) || (list[i].matrix && !(c->matrix = malloc(cells * sizeof *c->matrix))))
+    c->bound = NULL; c->complement = NULL; c->complements = 0; c->copy = NULL; c->segments = NULL; c->matrix = NULL; c->pairs = NULL; c->at = SIZE_MAX;
+    if ((list[i].segments && !(c->segments = malloc(segs * sizeof *c->segments))) || (list[i].matrix && !(c->matrix = malloc(cells * sizeof *c->matrix))) ||
+        (list[i].npairs && !(c->pairs = malloc(list[i].npairs * sizeof *c->pairs))))
       result = fail(ncclSystemError, "out of memory");
+    if (c->pairs) memcpy(c->pairs, list[i].pairs, list[i].npairs * sizeof *c->pairs);
     if (c->segments) memcpy(c->segments, list[i].segments, segs * sizeof *c->segments);
     if (c->matrix) memcpy(c->matrix, list[i].matrix, cells * sizeof *c->matrix);
   }
@@ -1733,7 +1772,7 @@ static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n
   p->rows.at = p->rows.used = 0;
   for (size_t i = 0; i < n; i++) {
     struct call *c = p->list + i, made = list[i];
-    made.bound = c->bound; made.segments = c->segments; made.matrix = c->matrix; made.complement = c->complement; made.complements = c->complements;
+    made.bound = c->bound; made.segments = c->segments; made.matrix = c->matrix; made.pairs = c->pairs; made.complement = c->complement; made.complements = c->complements;
     made.direct = c->direct; made.at = c->at; made.copy = NULL;
     *c = made;
   }
@@ -2050,6 +2089,11 @@ static void operands_at(const struct plan *plan, struct call *c) {
   struct steps *st = c->bound;
   if (counted(c) && st) { st->buffer[0] = c->send_at; st->buffer[1] = c->recv_at; }
   if (counted(c) && st && st->relayed) st->buffer[2] = shifted(plan->base, st->at[2]);
+  for (uint32_t m = 0; c->pairs && st && m < c->npairs; m++)
+    if (st->pair_call[m] != UINT32_MAX) {
+      const struct call *y = plan->list + st->pair_call[m];
+      st->buffer[3 + m] = y->what == WHAT_SEND ? y->send_at : y->recv_at;
+    }
   if (p2p(c) && st) st->buffer[0] = c->what == WHAT_SEND ? c->send_at : c->recv_at;
   if (p2p(c) || counted(c)) return;
   c->sum = c->at == SIZE_MAX ? c->recv_at : shifted(plan->base, c->at);
@@ -2159,6 +2203,7 @@ static void call_parts_free(struct call *c) {
   free(c->copy);
   free(c->segments);
   free(c->matrix);
+  free(c->pairs);
   free(c->complement);
 }
 static void calls_free(struct call *list, size_t n) {
@@ -3248,7 +3293,7 @@ static ncclResult_t enqueue(struct call c) {
   if (call_count == call_capacity) {
     const size_t capacity = call_capacity ? 2 * call_capacity : 16;
     struct call *grown = realloc(calls, capacity * sizeof *grown);
-    if (!grown) { depth--; free(c.segments); free(c.matrix); return fail(ncclSystemError, "out of memory"); }
+    if (!grown) { depth--; free(c.segments); free(c.matrix); free(c.pairs); return fail(ncclSystemError, "out of memory"); }
     calls = grown; call_capacity = capacity;
   }
   calls[call_count++] = c;
@@ -3373,6 +3418,21 @@ static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *c
   }
   return enqueue(c);
 }
+ncclResult_t ncclMeshGroupPairs(const int *from, const int *to, const size_t *bytes, int count, ncclComm_t comm, cudaStream_t stream) {
+  if (!comm || count < 0 || (count && (!from || !to || !bytes))) return fail(ncclInvalidArgument, "ncclMeshGroupPairs's arguments");
+  struct call c = {.what = WHAT_COUNTED, .root = -1, .peer = -1, .type = ncclUint8, .op = ncclSum, .comm = comm, .stream = stream};
+  if (!(c.segments = calloc(2 * (size_t)comm->nranks + 1, sizeof *c.segments)) || (count && !(c.pairs = malloc((size_t)count * sizeof *c.pairs)))) {
+    free(c.segments);
+    return fail(ncclSystemError, "out of memory");
+  }
+  for (int i = 0; i < count; i++) {
+    c.pairs[i] = (struct pair){(uint32_t)from[i], (uint32_t)to[i], bytes[i]};
+    if (from[i] != to[i]) c.count += bytes[i];
+  }
+  c.npairs = (uint32_t)count;
+  return enqueue(c);
+}
+
 ncclResult_t ncclMeshAlltoAllV(const void *sendbuff, const size_t *counts, void *recvbuff, ncclDataType_t datatype, ncclComm_t comm,
                                cudaStream_t stream) {
   if (!counts) return fail(ncclInvalidArgument, "ncclMeshAlltoAllV: counts is NULL");

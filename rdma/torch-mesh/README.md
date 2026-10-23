@@ -33,7 +33,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
   exchange their nodes, the nodes their bridges reach and their streams' pages posted (kept as a statistic: equal on a
   live stream), and the group keeps the map its init made of them.
-- A bidirectional exchange with one peer pairs as one batch: `dist.batch_isend_irecv`, or a coalescing manager.
+- A bidirectional exchange with one peer pairs as one batch: `dist.batch_isend_irecv`, or a coalescing manager. Every rank
+  of the group takes part in a batch: the backend gathers each rank's sends (peer and bytes) and passes the group's
+  whole list (`ncclMeshGroupPairs`), so a member between two that no link joins relays their messages.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
   ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
 - A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
