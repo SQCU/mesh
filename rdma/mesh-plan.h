@@ -13,8 +13,6 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased);
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; uint64_t *bandwidth; uint32_t relays; uint32_t *next,*mark; };
 
-int mesh_link_map_check(const struct mesh_link_map *);
-
 int mesh_link_map_joined(const struct mesh_link_map *,uint32_t *apart);
 
 int mesh_routes(const struct mesh_link_map *,uint32_t *next);
@@ -30,8 +28,6 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
 
 struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const double *log_weight; };
-
-int mesh_trees_check(const struct mesh_link_map *,const struct mesh_trees *);
 
 uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight);
 
@@ -73,8 +69,6 @@ uint64_t mesh_group_lay(const struct mesh_group *,uint32_t rank,uint32_t peer,in
 uint32_t mesh_counted_steps(uint32_t nodes,uint32_t rank,const uint64_t *segments,struct mesh_operand element,struct mesh_step *steps);
 
 struct mesh_routing { uint32_t nodes,routes; const uint32_t *pair,*start,*node; const double *share; };
-
-int mesh_routing_check(const struct mesh_link_map *,const struct mesh_routing *);
 
 void mesh_routing_room(uint32_t nodes,uint32_t most,uint32_t *routes,uint32_t *hops);
 

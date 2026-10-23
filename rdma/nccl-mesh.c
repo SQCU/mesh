@@ -326,9 +326,8 @@ static int comm_routed(struct ncclComm *comm) {
   const int mapped = comm->map.nodes == n && comm->map.mark;
   uint32_t routes, hops;
   mesh_routing_room(n, n, &routes, &hops);
-  const int fits = mapped && comm->table.pair ? mesh_routing_check(&comm->map, &comm->table) : EINVAL;
-  comm->taken = !fits;
-  int status = fits == ENOMEM ? ENOMEM : comm->taken ? routing_copy(&comm->routing, &comm->table)
+  comm->taken = mapped && comm->table.pair;
+  int status = comm->taken ? routing_copy(&comm->routing, &comm->table)
                                                       : routing_room(&comm->routing, n, mapped ? routes : 0, mapped ? hops : 0);
   if (!status && !comm->taken && mapped &&
       mesh_routing_pack(&comm->map, 0, n, &comm->routing, (uint32_t *)comm->routing.pair, (uint32_t *)comm->routing.start,
@@ -482,8 +481,6 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
                   "bridges forward nothing, so a route through a node outside the communicator is refused", apart[0], comm->members[apart[0]],
                   apart[1], comm->members[apart[1]], comm->name);
     if (joined) return fail(ncclInternalError, "the members' map of %s: %s", comm->name, strerror(joined));
-    if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
-      return fail(ncclInvalidArgument, "the paths are not trees of the links of the members' map (mesh_trees_check)");
     if (!comm->paths.count) {
       uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
       double *weight = calloc(n + 1, sizeof *weight);
@@ -517,15 +514,7 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
 
 static ncclResult_t comm_compile(struct ncclComm *comm) {
   if (comm->compiled) return ncclSuccess;
-  ncclResult_t result = comm_routes(comm);
-  for (uint32_t e = 0; !result && e < comm->programs; e++) {
-    const struct mesh_program *x = &comm->entries[e].program;
-    for (uint32_t r = 0; !result && r < x->nodes; r++)
-      for (uint32_t m = x->first[r]; !result && m < x->first[r + 1]; m++)
-        if (!mesh_link_between(&comm->map, r, x->move[m].peer))
-          result = fail(ncclInvalidUsage, "program %u of %s moves between ranks %u and %u, which no link joins: a program's move crosses one "
-                        "link", e, comm->name, r, x->move[m].peer);
-  }
+  const ncclResult_t result = comm_routes(comm);
   if (result) { routes_free(comm, 0); return result; }
   comm->compiled = 1;
   return ncclSuccess;
@@ -1637,10 +1626,6 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1;
     } else if (!counted(c)) s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->cut, comm->page, s->steps);
-    for (uint32_t k = 0; k < s->count; k++)
-      if (piece_bytes(s->steps + k) && comm->toward[s->steps[k].peer] < 0)
-        return fail(ncclInvalidUsage, "%s on %s moves bytes between rank %d and rank %u (node %u), which no link of this node joins (rdma/NCCL.md, "
-                    "Routes between unlinked ranks)", call_name(c), comm->name, comm->rank, s->steps[k].peer, comm->members[s->steps[k].peer]);
   }
   return ncclSuccess;
 }
@@ -3020,8 +3005,6 @@ ncclResult_t ncclMeshExchangeInit(size_t sendcount, const int *sendto, const siz
   if (r) *r = (struct ncclMeshRequest){.comm = comm, .type = datatype, .count = sendcount, .bytes = page_up(sendcount * z, comm->page), .part = r->part};
   for (int q = 0; !result && q < comm->nranks; q++) {
     if (q == comm->rank || (!sendto[q] && !recvcounts[q])) continue;
-    const struct channel *ch = comm->toward[q] < 0 ? NULL : comm->channels + comm->toward[q];
-    if (!ch) { result = fail(ncclInvalidUsage, "an exchange of %s with rank %d, which no link of this node joins", comm->name, q); break; }
     r->part[r->peers++] = (struct peer_part){q, sendto[q] != 0, (uint32_t)comm->toward[q], recvcounts[q], r->bytes};
     r->bytes += page_up(recvcounts[q] * z, comm->page);
   }
@@ -3308,9 +3291,8 @@ ncclResult_t ncclGroupEnd(void) {
   return result;
 }
 
-static ncclResult_t admit(struct call *made) {
+static void locate(struct call *made) {
   struct call c = *made;
-  if (!c.comm) return fail(ncclInvalidArgument, "comm is NULL");
   if (c.stream) {
     const ncclMeshStream *stream = c.stream;
     c.command = stream->commandBuffer; c.encoder = stream->commandEncoder;
@@ -3320,26 +3302,10 @@ static ncclResult_t admit(struct call *made) {
     c.send_at = (struct where){NULL, (size_t)c.send}; c.recv_at = (struct where){NULL, (size_t)c.recv};
   }
   *made = c;
-  if ((unsigned)c.type >= ncclNumTypes) return fail(ncclInvalidArgument, "datatype %d", (int)c.type);
-  const ncclComm_t comm = c.comm;
-  if (reducing(c.what)) {
-    const int k = (int)c.op - ncclNumOps;
-    if ((int)c.op < 0 || (k >= 0 && (k >= (int)comm->nops || !comm->ops[k].used))) return fail(ncclInvalidArgument, "operator %d", (int)c.op);
-    const uint32_t u = k >= 0 ? comm->ops[k].unit : 0;
-    int rows = !u || !(c.count % u);
-    for (int r = 0; u && c.segments && r < comm->nranks; r++) rows &= !(c.segments[r] % u);
-    if (!rows) return fail(ncclInvalidArgument, "the partials merge's counts are whole rows of %u elements", u);
-  }
-  if ((c.what == MESH_REDUCE || c.what == MESH_BROADCAST) && (c.root < 0 || c.root >= comm->nranks))
-    return fail(ncclInvalidArgument, "root %d of %d ranks", c.root, comm->nranks);
-  if ((c.what == WHAT_SEND || c.what == WHAT_RECV) && (c.peer < 0 || c.peer >= comm->nranks))
-    return fail(ncclInvalidArgument, "peer %d of %d ranks", c.peer, comm->nranks);
-  return ncclSuccess;
 }
 
 static ncclResult_t enqueue(struct call c) {
-  const ncclResult_t refused = admit(&c);
-  if (refused) { free(c.segments); return refused; }
+  locate(&c);
   ncclGroupStart();
   if (call_count == call_capacity) {
     const size_t capacity = call_capacity ? 2 * call_capacity : 16;

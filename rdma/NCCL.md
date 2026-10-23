@@ -155,7 +155,7 @@ nodes the same way.
 
 The bridges' records are a map whatever reaches what: a node that still has a record may be reached by no bridge,
 and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it is.
-`mesh_link_map_check` refuses only what is no map; whether a map joins every two of its nodes is
+Whether a map joins every two of its nodes is
 `mesh_link_map_joined`, which names the first two it leaves apart. The trees and the
 collectives run only on a map that joins their members: a communicator's collective on a map that does not fails as a
 value naming two members no path between members joins (`ncclInvalidUsage`).
@@ -696,8 +696,8 @@ once: a Thunderbolt link moves far fewer bytes a second than a node's memory, th
 relays (the operator, 10-21, of single path against multipath: "a choice related to whether link bandwidth is higher or
 lower than SHM<->CPU bandwidth"). The table is the caller's (`ncclMeshCommSetRouting(comm, table)`, every member passing
 the same table at the same point between its groups, as forms are passed; NULL: none; a table of another count of nodes,
-or without its pairs and starts, is refused at that call as a value) where it fits the communicator's map
-(`mesh_routing_check`: each hop a link), and else the routing solver's on the map
+or without its pairs and starts, is refused at that call as a value) where one is given, and else the routing
+solver's on the map
 (`mesh_routing_pack`): the map's spanning trees packed by Garg and Könemann's maximum concurrent flow over its links'
 bandwidths [FOCS 1998], as Blink packs them [Wang et al., MLSys 2020], each pair's routes the paths from a up each of b's
 trees and each route's share the flow of the trees that give it (`mesh_routing_trees`); where no tree packs, each pair's
@@ -731,10 +731,7 @@ reaches the entry.
 
 **Pairwise calls** (`ncclSend` and `ncclRecv`, `ncclMeshAlltoAllV`, persistent exchanges) are known to their two ranks
 alone: no other member calls anything for them, and a point-to-point call's pairing is the two ends' order of their
-calls toward each other, nothing gathered. They cross a link: a pairwise call between two members no link joins fails as
-a value at the call, naming them (`ncclInvalidUsage`). Open: the relaying member's library carrying them as a proxy, with
-holdings of its own, which needs the pairwise block's size and order at the relay before its bytes arrive and, on an M5
-Ultra's link of one stream, no second stream to carry them apart from its communicator's own (design/HETEROGENEOUS-LINKS.md).
+calls toward each other, nothing gathered.
 
 ## Ranks, lists and streams
 
@@ -852,7 +849,7 @@ gathers, parses or joins bridge records itself.
   the bridges forward nothing). `mark` is each node's and relay's mark (its bridge's node number). `next` is the
   routing table, of N = nodes + relays: each node b's in-tree, `next[v x N + b]` v's parent in it. The route between a
   and b is the path up the in-tree of the one of the higher mark from the other, so a route and its reverse are one
-  path. `mesh_link_map_check` refuses only what is no map; `mesh_link_map_joined` names the first two nodes a map does
+  path. `mesh_link_map_joined` names the first two nodes a map does
   not join (ENOTCONN); `mesh_link_between` is whether the map links two of its nodes (with a table, their route crossing
   relays alone); `mesh_route_path` writes a route.
 - `mesh_routes(map, next)`: each node's in-tree of shortest routes toward it, by fewest links, then the least sum of its
@@ -867,8 +864,7 @@ gathers, parses or joins bridge records itself.
 - **Trees** (`struct mesh_trees`): tree t rooted at `root[t]`, node v's parent `parent[t x nodes + v]`, `log_weight[t]`
   its unnormalised log share of what its root gathers and sends; a root's trees split its elements by exp(weight), each
   the floor of its share and the first ones one element more. A reduction toward r runs up r's trees, a broadcast from
-  r down them, a message to r along its sender's path in r's heaviest tree. `mesh_trees_check` checks trees against a
-  map. `mesh_trees_shortest`: each member's in-tree of shortest paths over the members' hops, a parent among those one
+  r down them, a message to r along its sender's path in r's heaviest tree. `mesh_trees_shortest`: each member's in-tree of shortest paths over the members' hops, a parent among those one
   equal hop nearer the root chosen first by the least hash, then by four passes of local search on the sum of the
   squares of the physical links' loads (the potential of the congestion game [Rosenthal 1973], which every move
   lowers), the pass whose most loaded link carries fewest edges kept. `mesh_trees_pack(map, eps, most, ...)`: each
@@ -902,8 +898,7 @@ gathers, parses or joins bridge records itself.
 - **Routing tables** (`struct mesh_routing`): `nodes` nodes and `routes` routes; pair (a, b)'s routes are
   `[pair[a x nodes + b], pair[a x nodes + b + 1])` (`pair`: nodes x nodes + 1 entries, nondecreasing; none where a is
   b), route k the nodes `node[start[k] .. start[k + 1])` from a to b, every two consecutive ones linked and none twice,
-  and `share[k]`, above 0, its share. `mesh_routing_check(map, table)` is 0 where a table fits a map (EINVAL else);
-  `mesh_routing_room(nodes, most, &routes, &hops)` the room of a table of at most `most` routes a pair;
+  and `share[k]`, above 0, its share. `mesh_routing_room(nodes, most, &routes, &hops)` the room of a table of at most `most` routes a pair;
   `mesh_routing_trees(trees, ...)` a tree set's table (pair (a, b)'s routes the paths from a up each of b's trees, each
   share the weight of the trees that give it, ordered by their nodes so that the table is a function of the trees'
   paths and weights alone); `mesh_routing_pack(map, eps, most, ...)` the solver (`mesh_trees_pack`'s trees as such a

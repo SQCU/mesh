@@ -74,46 +74,7 @@ uint32_t mesh_route_path(const struct mesh_link_map *map,uint32_t a,uint32_t b,u
   return count;
 }
 
-int mesh_link_map_check(const struct mesh_link_map *map){
-  const uint32_t n=map->nodes,N=mesh_all(map);
-  uint32_t at,steps;
-  if(map->kind>MESH_LINKS_GRAPH || !n || (map->links && !map->link) || (map->relays && (!map->next || map->kind!=MESH_LINKS_GRAPH)))
-    return EINVAL;
-  for(uint32_t l=0;l<map->links;l++)if(map->link[l][0]>=N || map->link[l][1]>=N || map->link[l][0]==map->link[l][1])return EINVAL;
-  if(map->next){
-    for(uint32_t a=0;a<N;a++)for(uint32_t b=0;b<N;b++){
-      const uint32_t to=map->next[(size_t)a*N+b];
-      if(to>=N || (a==b && to!=a) || (to!=a && !mesh_joins(map,a,to)))return EINVAL;
-    }
-    return 0;
-  }
-  if(map->kind==MESH_LINKS_MESH || map->kind==MESH_LINKS_GRAPH)return 0;
-  uint32_t *up=malloc((size_t)n*sizeof *up);
-  if(!up)return ENOMEM;
-  int result=0;
-  for(uint32_t v=0;v<n;v++)up[v]=n;
-  for(uint32_t l=0;l<map->links && !result;l++){
-    if(up[map->link[l][1]]<n)result=EINVAL;
-    else up[map->link[l][1]]=map->link[l][0];
-  }
-  if(!result && map->kind==MESH_LINKS_RING){
-    at=0;steps=0;
-    do{at=up[at];steps++;}while(at<n && at && steps<n);
-    result=at==0 && steps==n?0:EINVAL;
-  }else if(!result){
-    if(map->links!=n-1)result=EINVAL;
-    for(uint32_t v=0;v<n && !result;v++){
-      for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
-      if(up[at]<n)result=EINVAL;
-    }
-  }
-  free(up);
-  return result;
-}
-
 int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
-  const int form=mesh_link_map_check(map);
-  if(form)return form;
   const uint32_t n=map->nodes;
   if(map->next){
     uint32_t path[mesh_all(map)+1];
@@ -292,27 +253,6 @@ static double mesh_log(double x){
   double term=s,sum=0;
   for(int i=1;i<=61;i+=2){sum+=term/i;term*=s2;}
   return 2*sum+e*0.693147180559945309417;
-}
-
-int mesh_trees_check(const struct mesh_link_map *map,const struct mesh_trees *trees){
-  const uint32_t n=trees->nodes;
-  if(!n || n!=map->nodes || (trees->count && (!trees->root || !trees->parent || !trees->log_weight)))return EINVAL;
-  for(uint32_t r=0;n>1 && r<n;r++){
-    uint32_t t=0;
-    while(t<trees->count && trees->root[t]!=r)t++;
-    if(t==trees->count)return EINVAL;
-  }
-  for(uint32_t t=0;t<trees->count;t++){
-    const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n;
-    if(r>=n || parent[r]!=r || !isfinite(trees->log_weight[t]))return EINVAL;
-    for(uint32_t v=0;v<n;v++){
-      if(v!=r && !mesh_link_between(map,v,parent[v]))return EINVAL;
-      uint32_t at=v,hops=0;
-      while(at!=r && hops<n){at=parent[at];hops++;}
-      if(at!=r)return EINVAL;
-    }
-  }
-  return 0;
 }
 
 static uint32_t mesh_trees_heaviest(const struct mesh_trees *trees,uint32_t r){
@@ -829,30 +769,6 @@ void mesh_routing_room(uint32_t nodes,uint32_t most,uint32_t *routes,uint32_t *h
   const uint64_t r=(uint64_t)nodes*(nodes?nodes-1:0)*(most?most:1);
   *routes=r>UINT32_MAX?UINT32_MAX:(uint32_t)r;
   *hops=r*nodes>UINT32_MAX?UINT32_MAX:(uint32_t)(r*nodes);
-}
-
-int mesh_routing_check(const struct mesh_link_map *map,const struct mesh_routing *g){
-  const uint32_t n=g->nodes;
-  if(!n || n!=map->nodes || !g->pair || (g->routes && (!g->start || !g->node || !g->share)) || g->pair[0] || g->pair[(size_t)n*n]!=g->routes ||
-     (g->routes && g->start[0]))
-    return EINVAL;
-  unsigned char *seen=malloc(n);
-  int status=seen?0:ENOMEM;
-  for(uint32_t a=0;!status && a<n;a++)for(uint32_t b=0;!status && b<n;b++){
-    const size_t p=(size_t)a*n+b;
-    if(g->pair[p+1]<g->pair[p] || (a==b && g->pair[p+1]!=g->pair[p]))status=EINVAL;
-    for(uint32_t k=g->pair[p];!status && k<g->pair[p+1];k++){
-      const uint32_t lo=g->start[k],hi=g->start[k+1];
-      if(hi<lo+2 || hi-lo>n || g->node[lo]!=a || g->node[hi-1]!=b || !(g->share[k]>0) || !isfinite(g->share[k])){status=EINVAL;break;}
-      memset(seen,0,n);
-      for(uint32_t i=lo;!status && i<hi;i++){
-        if(g->node[i]>=n || seen[g->node[i]] || (i>lo && !mesh_link_between(map,g->node[i-1],g->node[i])))status=EINVAL;
-        else seen[g->node[i]]=1;
-      }
-    }
-  }
-  free(seen);
-  return status;
 }
 
 static int mesh_route_before(const uint32_t *x,uint32_t xn,const uint32_t *y,uint32_t yn){

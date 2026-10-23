@@ -35,8 +35,8 @@ class LinkMap:
     and each one's bandwidth in bits a second in `bandwidth` (None: none given; 0: that link's unknown), the hardware
     fact the routes and the packed trees read, with `relays` more nodes (numbered from `nodes`, holding no rank), each
     node's `mark` (None: its number; the bridges mark a node by its node number) and the routing table `next` (each
-    node b's in-tree, next[v * N + b] v's parent in it, for N = nodes + relays; None: none), the storage held here;
-    refused where mesh_link_map_check refuses it (no map).  A graph need not join its nodes (the bridges' records while
+    node b's in-tree, next[v * N + b] v's parent in it, for N = nodes + relays; None: none), the storage held here.
+    A graph need not join its nodes (the bridges' records while
     a cable is out); mesh_link_map_joined says whether it does, and the trees and collectives run only where it does."""
 
     def __init__(self, kind, nodes, pairs, bandwidth=None, relays=0, next=None, mark=None):
@@ -53,10 +53,6 @@ class LinkMap:
         self.c.kind, self.c.nodes, self.c.links, self.c.link = KINDS.index(kind), nodes, len(pairs), self._link
         self.c.bandwidth = self._bandwidth
         self.c.relays, self.c.next, self.c.mark = relays, self._next, self._mark
-        status = lib.mesh_link_map_check(self.c)
-        if status:
-            raise ValueError(f'a {kind} of {nodes} nodes and {relays} relays with links {pairs} is not one its algorithms run on: '
-                             f'{os.strerror(status)}')
 
 
 def link_map(kind, nodes, pairs, bandwidth=None, relays=0, next=None, mark=None):
