@@ -32,7 +32,8 @@ congest. The pressure is inside the core, where all data shares one cache.
 
 The floors measured here are these. A GPU kernel that fences before each poll sees a store from outside the GPU in
 0.58 µs. A dispatch in an open command buffer costs 0.9-1.4 µs. A new command buffer costs 13.7-18.7 µs
-(measurement.md:414, 3233-3235). At width 16,384 a Studio streams the chain's weights at about 620 GB/s
+(measurement.md:414, 3233-3235). Apple gives the M5 Ultra 1.2 TB/s of memory bandwidth for its 80-core model, and no separate figure for the Studios'
+64-core model. At width 16,384 the chain's kernel streams its weights at about 620 GB/s, about half of that
 (output_data/chain-20261022/RESULTS.md). An H800 reads HBM at 1,861.5 GB/s (Luo et al. 2025).
 
 ## 2. From one GPU's memory to another's
@@ -48,8 +49,8 @@ or out of order until a CUDA sync call (NVIDIA, GPUDirect RDMA).
 
 On the M-series there is no HBM, no BAR and no PCIe peer-to-peer path. The CPU, the GPU and the RDMA engine use one DRAM
 (design/hardware-and-discipline.md). Each Thunderbolt controller sees memory through its own IOMMU (TN3205). The bridge
-registers one region with each device once, when the port comes up. A Studio wires 86 of its 96 GiB this way, as 86
-extents of 1 GiB registered in 0.165 s (facts.md; design/HETEROGENEOUS-LINKS.md section 1; etc/bridge/README.md).
+registers one region with each device once, when the port comes up. A Studio wires 82 of its 96 GiB this way, as 82
+extents of 1 GiB; 86 of them registered in 0.165 s (facts.md; design/HETEROGENEOUS-LINKS.md section 1; etc/bridge/README.md).
 Every page a program uses lies in that region, so nothing is pinned at a call. A SEND lands in the peer's DRAM about
 3.6 µs after it is posted (measurement.md:3238). A GPU kernel that fences before each poll sees a store from outside
 the GPU 0.58 µs after it is made (section 1). The GPU's plain stores reach the NIC only when their command buffer ends.
