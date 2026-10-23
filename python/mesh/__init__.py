@@ -3,8 +3,8 @@ program type B): higher-order functions over partial tensors and the partial ten
 asynchronous once the call graph is known.  The same contract as swift/Mesh.swift, spelled as Pallas spells it:
 Program.kernel_call over a grid with BlockSpecs, Refs to sections, Partial contribution sets that a function refuses
 before their sum completes unless it declares itself their combine, and the collective verbs (mesh.collective).  It
-holds no numerics: every kernel and combine is a supplied callable (examples/kernels.py and examples/nn.py, program
-type C, are compositions of it).
+holds no numerics: every kernel and combine is a supplied callable (its type C compositions, examples/kernels.py and
+examples/nn.py, were deleted 2026-10-22 with the other test code).
 
 A program is SPMD: every member records the same calls; `peer=` places a kernel, a copy's two ends and a collective's
 members place its crossings.  Recording builds the graph; realize() (start(), Swift's name) prepares it; then the
