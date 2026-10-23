@@ -378,8 +378,10 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 **The stream.**
 - Each link carries up to `MESH_LINK_STREAMS` (4) streams toward its peer node, each on a lane pair of its own (as
   many streams as the link's plan has lane pairs for: [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md)). Every unit on
-  a stream's lanes is a whole page: page p of the stream's sequence over its pairing goes on its lane p mod 2, as unit
-  p div 2 there, and each end posts the sequence in order.
+  a stream's lanes is a whole page. A stream toward a node spans the same stream of every cable joining the two
+  ("A stream over several cables", below): a holding's page q goes on lane (sum + q) mod span of their lanes, and each
+  end posts the holding's pages in order. On one cable this is page p of the stream's sequence over its pairing on its
+  lane p mod 2, as before version 135.
 - Each stream has an identity, `wire`, which both bridges compute alike from its first lane's two ends (each port's
   GID and queue pair number) and which no other stream between the two nodes has.
 - A holding has two lists of entries the holder presents in order: a send list and a landing list. An entry is a
@@ -423,10 +425,10 @@ code as possible and does as little as possible", which may tell consumers facts
 statistic, not a data dependent control flow for a collective verb or a bridge transaction").
 - Two invariants. (1) A stream's lanes carry its holders' entries' pages and nothing else: no keepalive, no spare
   receive between holdings, no dud of the bridge's own. (2) Both ends' lanes count from 0 when the port's child makes
-  its queue pairs, and each end posts the stream's pages in the sequence's order. So a SEND's n-th unit on a lane
-  fills the peer's n-th receive there (TN3205), and a page's place is a function of the two ends' entries alone.
-  Posting in order keeps both lanes' counts a function of one number, the stream's pages posted: two lanes posted
-  apart could leave a holding that ended at counts that no sequence of pages fills.
+  its queue pairs, and each end posts the holding's pages in order. So a SEND's n-th unit on a lane fills the peer's
+  n-th receive there (TN3205), and a page's place is a function of the two ends' entries and of each lane's count at
+  the holding's start, which a holding that ends with nothing outstanding at both ends leaves equal at both (one that
+  ends otherwise takes its stream out of the pairing: a holding's end, below).
 - A process holds a stream as it holds rows: it takes the owner word from 0 to its own by one compare-and-swap
   (`mesh_stream_take`), nothing awaited. The send thread then begins the holding, its walk at the stream's pages sent
   so far, and the receive thread its landing walk at the stream's pages posted so far: no unit of an earlier holding
@@ -446,6 +448,37 @@ statistic, not a data dependent control flow for a collective verb or a bridge t
   each end taking the stream of the least `wire` free at both. An init is refused (EBUSY) only where none is.
 - A SEND is posted when its row's word (`ready`) passes it; a receive when its row's word says its reader released it.
   Both are data, and neither has a deadline.
+
+**A stream over several cables** (version 135; the operator, 2026-10-23, of the collective's one stream a peer that
+left a second cable to the Mac mini carrying no page: "start from the fastest known data model"; "clients do not have
+cable identities and never will"). metal-microbench output_data/review-20261023/MULTICABLE.md is the finding.
+- Stream s toward a node spans lane pair s of every cable joining the two whose plan has it: one stream of the
+  client's, its lanes the cables' ordered by each cable's identity of the stream (`stream_wire`, which both ends
+  compute alike at pairing). Its identity is that cable's where it spans one, else FNV-1a over the cables' identities
+  in that order, so the two ends of a communicator take a stream of the same cables or none (an init is refused,
+  EBUSY, while one end spans a cable the other has not yet paired). Nothing crosses the wire for it but the cables'
+  own pairings: no header, no message, no negotiation.
+- Placement, both ends alike: a holding's page q goes on lane (sum + q) mod span of the stream's 2 n lanes, as the
+  next unit of that lane, sum being every one of those lanes' units posted before the holding (equal at both ends: a
+  holding's end, below), and each end posts the holding's pages in order on each lane (mesh-bridge.h struct walk,
+  mesh-link.c `walk_begin`). Receives are posted ahead on each lane in that order, into the pages the rows name.
+- Each cable's lanes are its port's child's, so each cable's child serves the holding's pages on its own lanes. One
+  region stream of the group is its head, the one clients see (its owner word, lists, `ready`, `sent`, `landed`,
+  `taken`); the others (members) are held `MESH_STREAM_GIVEN` alone, so no client takes them. A member's child
+  follows its head's holding (the head's `begun`, its owner, and the sum each way it read as it began), posts its own
+  pages, and tells its own pages through and entries taken in its group words (mesh-bridge.h struct stream_group,
+  bridge pages no client header names); the head's threads tell the holding's `sent`, `landed` and `taken` as the
+  least of its own and its members'. Each member's units are told in its own region stream's `posts` and `rows`, so
+  `mesh_pinned` sees them as any stream's.
+- A holding's end: a member stops as a head does and tells its head; the head frees the stream once every member
+  alive has stopped. A member whose lanes did not settle ends its own stream as a head's would; the head drops it.
+- Grouping happens while a stream is free and under its head's owner word held: the least port's free head toward a
+  node absorbs the other free heads of the same stream, and a head drops a member no longer alive (its link lost or
+  paired again). A member whose head is no longer alive becomes a free head of its own cable. A cable lost under a
+  holding leaves the pages on its lanes never through: the head tells `sent` and `landed` lost (~0), as a lost link's
+  are, and the holder's calls fail.
+- The client sees nodes and streams only (the interface table of design/rubrics.md): no cable, port, lane or queue
+  pair. The map's figures are unchanged (a stream's bandwidth its head's cable's share).
 
 **A holding's end** (version 134; the operator, 2026-10-22: "if we have a graph serializaiton that we know tells us
 that specific buffers used by a specific lcient have no future writes targeting them they can be freed earlier? ...
