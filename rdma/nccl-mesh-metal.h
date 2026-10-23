@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "mesh.h"
-/* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, What a client cannot reach) */
+/* the library's own: none is an ABI target of the libraries it is built into (design/rubrics.md, Three kinds of source: the interface table) */
 #pragma GCC visibility push(hidden)
 
 /* A count of a holding's pages (mesh.h struct mesh_stream `ready`, `sent` and `landed`; an entry's end): a type of its
