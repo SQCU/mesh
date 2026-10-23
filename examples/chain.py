@@ -233,33 +233,25 @@ def drain(first, steps, block, O, outputs):
 
 
 # docs/writing-a-service.md#the-configuration
-def _drawn(out, draw):
+def region(shape, dtype):
+    return torch_mesh.empty(shape, dtype=dtype, device='cpu').numpy()
+
+
+# docs/writing-a-service.md#the-configuration
+def _drawn(out, draw, scratch):
     flat = out.reshape(len(out), -1)
-    n = max(1, CHUNK // flat.shape[1])
+    n = max(1, len(scratch) // flat.shape[1])
     for i in range(0, len(flat), n):
-        flat[i:i + n] = draw(flat[i:i + n].shape)
+        part = flat[i:i + n]
+        part[...] = draw(scratch[:part.size]).reshape(part.shape)
     return out
 
 
 # docs/writing-a-service.md#the-configuration
-def _saved(path, shape, draw):
-    _drawn(np.lib.format.open_memmap(path, 'w+', np.float16, shape), draw).flush()
-
-
-# docs/writing-a-service.md#the-configuration
 def inputs(config, steps, rows):
-    g, w, n = np.random.default_rng(0), config['width'], sum(config['parts'])
-    _saved(config['input'], (steps, rows, w), g.standard_normal)
+    g, w, n, scratch = np.random.default_rng(0), config['width'], sum(config['parts']), region(CHUNK, torch.float64)
+    np.save(config['input'], _drawn(region((steps, rows, w), torch.half), lambda b: g.standard_normal(out=b), scratch))
     with open(config['weights'] + '.part', 'wb') as f:
-        np.savez(f, **{k: _drawn(np.empty((n, w), np.float16), lambda s: g.standard_normal(s) / np.sqrt(w)) for k in 'ab'})
+        scaled = lambda b: np.divide(g.standard_normal(out=b), np.sqrt(w), out=b)
+        np.savez(f, **{k: _drawn(region((n, w), torch.half), scaled, scratch) for k in 'ab'})
     os.replace(config['weights'] + '.part', config['weights'])
-
-
-# docs/writing-a-service.md#the-function
-def reference(e, a, b, carried):
-    x, out = e[0] + carried, []
-    for t in range(len(e)):
-        out.append(np.tanh(np.tanh(x @ a.T) @ b))
-        if t + 1 < len(e):
-            x = e[t + 1] + out[-1]
-    return np.stack(out)

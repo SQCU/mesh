@@ -28,7 +28,7 @@ rot₀ and rot₁ are normalized Hadamard rotations of an operand's columns, in 
 block, a power of two that divides the operand's width (x's width for rot₀, the sum of the parts for rot₁). A block of 1
 is no rotation, and a block of the whole width is the full Hadamard. A Hadamard H is linear, symmetric and orthogonal,
 so rot₀(x) Aᵀ = x (A H)ᵀ and rot₁(y) B = y (H B). Rank 0 holds the whole weights before it sends each rank its part, so
-it folds each rotation into them there, once (`rotated` in examples/chain-service.py). rot₁ spans every rank's columns
+it folds each rotation into them there, once, in region tensors (`rotated` in examples/chain-service.py). rot₁ spans every rank's columns
 of y, and it folds all the same: each rank's rows of H B are the rows its part of y meets. The step kernel never rotates
 anything, and a rotation costs no time a step.
 An operand would have to be rotated as it is made only where its parameters are stored rotated and quantized, so that
@@ -270,10 +270,8 @@ measures the calls writes the parts. Every Mac is always loaded fully.
 sample. Its `ring_bytes` holds three blocks of 512 steps, so the sample's rings wrap many times.
 
 `chain.inputs(configuration, steps, rows)` makes sample inputs and weights for it from a fixed seed: standard normal
-inputs, and A and B standard normal over the square root of the width, drawn a chunk at a time, so no float64 copy of a
-matrix is held. `chain.reference(e, a, b, carried)` is the function itself, in its operands' precision: from the inputs
-of a run of steps, the weights as rank 0 folds them, and the sum carried into the first step, it gives those steps'
-outputs.
+inputs, and A and B standard normal over the square root of the width. Each is composed in a CPU region tensor
+(`chain.region`), drawn into it a chunk at a time through a region scratch, and written to its file from there.
 
 ## Running it
 
@@ -329,9 +327,9 @@ zeros there, its h(-1). Rank 0 writes the top layer's landed h to the output sta
 
 **Configuration.** `input`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
 `shares` (one count of hidden units a rank, multiples of 8, their sum the width) and `capabilities`. The weights file
-holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, so `torch.nn.LSTM` is
-the reference. `lstm.inputs(configuration, steps, rows)` makes sample ones from a fixed seed, with torch's
-initialization. `weights` is a directory of one .npy file an array. Before the communicator exists, rank 0 reads them
+holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order.
+`lstm.inputs(configuration, steps, rows)` makes sample ones the same way, with torch's initialization. `weights` is
+a directory of one .npy file an array. Before the communicator exists, rank 0 reads them
 memory-mapped and writes each rank's gate rows, already tiled, into CPU region tensors, 64 tiles at a time. It then
 sends each rank its tiles, and each rank receives them into an MPS region tensor the kernel reads. Nothing the size of
 a weight matrix lives outside the region: a Studio's region wires 82 of its 96 GiB, and the rest is all that other

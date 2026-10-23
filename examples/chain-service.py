@@ -13,16 +13,20 @@ import chain
 
 # docs/writing-a-service.md#rotations
 def rotated(w, block, axis):
-    v = np.moveaxis(np.asarray(w, np.float64), axis, -1)
-    shape, n = v.shape, v.shape[-1]
+    n = w.shape[axis]
     if block < 1 or block & (block - 1) or n % block:
         raise ValueError(f'A rotation block is a power of two that divides its {n} columns, not {block}')
-    s = 1
+    v, spare, s = chain.region(w.shape, torch.float64), None, 1
+    v[...] = w
+    half = lambda t, i: t[(slice(None),) * (axis + 1) + (i,)]
     while s < block:
-        v = v.reshape(*shape[:-1], n // (2 * s), 2, s)
-        v = np.stack((v[..., 0, :] + v[..., 1, :], v[..., 0, :] - v[..., 1, :]), axis=-2) / np.sqrt(2.0)
-        s *= 2
-    return np.moveaxis(v.reshape(shape), -1, axis)
+        spare = chain.region(w.shape, torch.float64) if spare is None else spare
+        x, y = (t.reshape(*w.shape[:axis], n // (2 * s), 2, s, *w.shape[axis + 1:]) for t in (v, spare))
+        np.add(half(x, 0), half(x, 1), out=half(y, 0))
+        np.subtract(half(x, 0), half(x, 1), out=half(y, 1))
+        np.divide(spare, np.sqrt(2.0), out=spare)
+        v, spare, s = spare, v, s * 2
+    return v
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
@@ -32,8 +36,10 @@ def folded(config):
     if any(w.shape != (sum(config['parts']), config['width']) for w in full):
         raise ValueError('The weights a and b are [sum of the parts, width] each')
     blocks = config['rotation_blocks']
-    return tuple(np.ascontiguousarray(rotated(w, block, axis), dtype=np.float16)
-                 for w, block, axis in zip(full, blocks, (1, 0)))
+    held = tuple(chain.region(w.shape, torch.half) for w in full)
+    for h, w, block, axis in zip(held, full, blocks, (1, 0)):
+        h[...] = rotated(w, block, axis)
+    return held
 
 
 # docs/writing-a-service.md#how-the-example-moves-its-data
