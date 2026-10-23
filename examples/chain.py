@@ -1,6 +1,7 @@
 import collections
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -18,6 +19,7 @@ SOURCE = fused.steps() + argmax.SOURCE + '\n' + Path(__file__).with_name('chain.
 ARGS = ('TILE', 'K', 'S', 'G', 'RG', 'RB', 'THREADS', 'SIMD', 'PATIENCE', 'PEERS')
 PAGE = resource.getpagesize()
 RING_BLOCKS = 2
+CHUNK = 1 << 24
 _PIPELINES = {}
 
 
@@ -228,3 +230,36 @@ def drain(first, steps, block, O, outputs):
     if O is not None:
         held = span(first, steps, block, len(O))[0]
         torch.from_numpy(outputs[held]).copy_(O[:held.stop - held.start], non_blocking=True)
+
+
+# docs/writing-a-service.md#the-configuration
+def _drawn(out, draw):
+    flat = out.reshape(len(out), -1)
+    n = max(1, CHUNK // flat.shape[1])
+    for i in range(0, len(flat), n):
+        flat[i:i + n] = draw(flat[i:i + n].shape)
+    return out
+
+
+# docs/writing-a-service.md#the-configuration
+def _saved(path, shape, draw):
+    _drawn(np.lib.format.open_memmap(path, 'w+', np.float16, shape), draw).flush()
+
+
+# docs/writing-a-service.md#the-configuration
+def inputs(config, steps, rows):
+    g, w, n = np.random.default_rng(0), config['width'], sum(config['parts'])
+    _saved(config['input'], (steps, rows, w), g.standard_normal)
+    with open(config['weights'] + '.part', 'wb') as f:
+        np.savez(f, **{k: _drawn(np.empty((n, w), np.float16), lambda s: g.standard_normal(s) / np.sqrt(w)) for k in 'ab'})
+    os.replace(config['weights'] + '.part', config['weights'])
+
+
+# docs/writing-a-service.md#the-function
+def reference(e, a, b, carried):
+    x, out = e[0] + carried, []
+    for t in range(len(e)):
+        out.append(np.tanh(np.tanh(x @ a.T) @ b))
+        if t + 1 < len(e):
+            x = e[t + 1] + out[-1]
+    return np.stack(out)

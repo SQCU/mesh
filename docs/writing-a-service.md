@@ -253,15 +253,11 @@ measures the calls writes the parts. Every Mac is always loaded fully.
 [examples/chain-service.json](../examples/chain-service.json) is a sample. Its parts are equal only because it is a
 sample. Its `ring_bytes` holds three blocks of 512 steps, so the sample's rings wrap many times.
 
-These lines make sample inputs and weights for it:
-
-```python
-import numpy as np
-g = np.random.default_rng(0)
-np.save('chain-input.npy', g.standard_normal((4096, 8, 1024)).astype(np.float16))
-np.savez('chain-weights.npz', a=(g.standard_normal((1024, 1024)) / 32).astype(np.float16),
-         b=(g.standard_normal((1024, 1024)) / 32).astype(np.float16))
-```
+`chain.inputs(configuration, steps, rows)` makes sample inputs and weights for it from a fixed seed: standard normal
+inputs, and A and B standard normal over the square root of the width, drawn a chunk at a time, so no float64 copy of a
+matrix is held. `chain.reference(e, a, b, carried)` is the function itself, in its operands' precision: from the inputs
+of a run of steps, the weights as rank 0 folds them, and the sum carried into the first step, it gives those steps'
+outputs.
 
 ## Running it
 
@@ -317,10 +313,12 @@ zeros there, its h(-1). Rank 0 writes the top layer's landed h to the output sta
 
 **Configuration.** `input`, `output` and `ring_bytes` as the chain's. Also `input_width`, `layers`,
 `shares` (one count of hidden units a rank, multiples of 8, their sum the width) and `capabilities`. The weights file
-holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order. `weights` is a directory of one .npy file an array. Before the communicator exists, rank 0 reads them
+holds `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, so `torch.nn.LSTM` is
+the reference. `lstm.inputs(configuration, steps, rows)` makes sample ones from a fixed seed, with torch's
+initialization. `weights` is a directory of one .npy file an array. Before the communicator exists, rank 0 reads them
 memory-mapped and writes each rank's gate rows, already tiled, into CPU region tensors, 64 tiles at a time. It then
 sends each rank its tiles, and each rank receives them into an MPS region tensor the kernel reads. Nothing the size of
-a weight matrix lives outside the region: a Studio's region wires 86 of its 96 GiB, and the rest is all that other
+a weight matrix lives outside the region: a Studio's region wires 82 of its 96 GiB, and the rest is all that other
 memory has.
 
 ## What to read next

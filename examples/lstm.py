@@ -1,5 +1,7 @@
+import os
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch_mesh
 from torch_mesh import _stream, fused
@@ -129,3 +131,16 @@ class Tick:
                                    self.arrivals, self.landing],
                      words, 15, self.args['G'], 1, self.args['THREADS'], len(self.shares) - 1,
                      land=self.previous, publish=crossing)
+
+
+# docs/writing-a-service.md#the-lstm
+def inputs(config, steps, rows):
+    g, H, KIN, part = np.random.default_rng(0), sum(config['shares']), config['input_width'], config['weights'] + '.part'
+    k = 1 / np.sqrt(H)
+    chain._saved(config['input'], (steps, rows, KIN), g.standard_normal)
+    os.makedirs(part, exist_ok=True)
+    for l in range(config['layers']):
+        for name, columns in ((f'w_ih_{l}', KIN if l == 0 else H), (f'w_hh_{l}', H)):
+            chain._saved(f'{part}/{name}.npy', (4 * H, columns), lambda s: g.uniform(-k, k, s))
+        np.save(f'{part}/b_{l}.npy', (g.uniform(-k, k, 4 * H) + g.uniform(-k, k, 4 * H)).astype(np.float16))
+    os.replace(part, config['weights'])
