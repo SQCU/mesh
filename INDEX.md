@@ -20,6 +20,7 @@ other projects, such as a game bot, and old dated records; they are not listed h
 
 ## The bridge and transport
 
+- [design/data-model.md](design/data-model.md): the data model as main's code holds it, each word's writer and readers.
 - [design/transport.md](design/transport.md): the transport as the code holds it: the registered region, the page
   table, links, posted receives, SENDs and readiness words, and who owns each. It explains why SEND and RECV do not
   fail and what happens on a hang, a lost cable or a stopped bridge, and gives the data path (section 14), the source's
