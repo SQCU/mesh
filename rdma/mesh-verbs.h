@@ -214,7 +214,8 @@ static __attribute__((unused)) int pair_make(struct mesh_verbs *provider,int q){
 /* a UC queue pair in INIT for each lane of `plan` (a bit a lane, design/HETEROGENEOUS-LINKS.md), queue q lane q, against
    the device's usable queue pairs, on the provider's two completion queues: a link's, made once in its port child's life
    (design/transport.md section 14: no queue pair is moved to another state, destroyed or forgotten; the kernel releases
-   them at the child's exit).  0, or the error (ENOSPC: the device holds no more queue pairs). */
+   them at the child's exit, those holding work first flushed, mesh-link.c lanes_flush).  0, or the error (ENOSPC: the
+   device holds no more queue pairs). */
 static __attribute__((unused)) int pair_up(struct mesh_verbs *provider,uint32_t plan){
   struct mesh_device *device=provider->device;
   const uint32_t count=(uint32_t)__builtin_popcount(plan),entries=plan?32-(uint32_t)__builtin_clz(plan):0;
