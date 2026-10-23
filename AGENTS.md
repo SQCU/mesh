@@ -42,6 +42,23 @@ unchanged in the interim"; 2026-10-14: "connection recovery on spotty hardware (
 trustworthy at the physical substrate level) is required, rather than optional". The transport, how it fails and how it
 recovers: `design/transport.md`.
 
+The operator, 2026-10-22, the three kinds of failure the mesh handles, and no others ("we cannot and will not 'handle'
+wacky scary problems"):
+
+> one is that someone might stamp on a cable and break a port entirely by any sort of means. maybe all sends through
+> that cable fail. maybe that port stops working. maybe the connection is severed. i don't care what the entailment is;
+> i want for collectives trying to use the damaged connection to fail immediately rather than break phase or timing
+> with steady state operation, and for a resolve of the collective to forward around degraded or missing connections
+> at a new steady state speed instead of hanging forever, faulting, or trying to interact iwth something degraded.
+>
+> another problem is that a connection might be made during runtime, or a cable might be retethered during runtime.
+> this too must result in a fast failure and then a renegotiation of all connections. if a cable is unplugged from slot
+> 1 and moved to slot 3, the collective operations just need to deal with ti during the time untethered without any
+> consideration for when or hwo an alternate edge came back.
+>
+> a final kind of error is that a node is unresponsive. unresponsive nodes should become responsive in finite time, and
+> while they're not back, calculations where possible should ocntinue with fewer ranks at a different steady state.
+
 ## The hardware
 
 The operator, 2026-10-22; the measurements, literature and mechanisms behind each are in
