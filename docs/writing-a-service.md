@@ -129,8 +129,8 @@ than a few MiB. Only a kernel's few rows of scratch belong outside. Read inputs 
 `torch_mesh.cpu_view`, as the example does.
 
 `torch_mesh.memory()` gives this process's GPU memory outside the region (`outside`), the region's leases (`region`)
-and what the node can give without pressure (`available`: the kernel's `kern.memorystatus_level`, the figure each bridge
-publishes for its node, `mesh.nodes()`). `torch_mesh.check_memory()` warns, with an `OutsideRegionWarning`, where
+and what the node can give without pressure (`available`), as the node's bridge publishes it through the collective
+(`mesh.nodes()`); a program reads no system figure of its own. `torch_mesh.check_memory()` warns, with an `OutsideRegionWarning`, where
 `outside` is more than `available`: the program will probably take its node down with it. torch-mesh checks this
 itself when an exchange is made and when a collective is first given a tensor outside the region, which it also warns
 about as a copy.

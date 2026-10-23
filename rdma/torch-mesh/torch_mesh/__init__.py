@@ -70,21 +70,15 @@ class OutsideRegionWarning(UserWarning):
 
 def memory():
     """Bytes: `outside` this process's GPU memory outside the region (torch.mps.driver_allocated_memory less the region
-    tensors' leases, at least its live MPS tensors), `region` those leases, `available` what the kernel can give without
-    pressure (kern.memorystatus_level percent of the node's memory, the figure mesh.nodes() publishes) and `node` the
-    node's memory (docs/writing-a-service.md#memory-outside-the-region)."""
-    import ctypes
-
+    tensors' leases, at least its live MPS tensors), `region` those leases, and its node's `memory` and `available`
+    (what the kernel can give without pressure) as its bridge publishes them through the collective, mesh.nodes()
+    (docs/writing-a-service.md#memory-outside-the-region)."""
+    import mesh
     import torch
-
-    def read(name, value):
-        size = ctypes.c_size_t(ctypes.sizeof(value))
-        ctypes.CDLL(None).sysctlbyname(name, ctypes.byref(value), ctypes.byref(size), None, 0)
-        return value.value
-    node, level = read(b'hw.memsize', ctypes.c_uint64()), read(b'kern.memorystatus_level', ctypes.c_int())
+    own = next(n for n in mesh.nodes() if n['own'])
     region = sum(r['bytes'] for r in records())
     outside = max(torch.mps.current_allocated_memory(), torch.mps.driver_allocated_memory() - region)
-    return {'node': node, 'region': region, 'outside': outside, 'available': level * (node // 100)}
+    return {'memory': own['memory'], 'region': region, 'outside': outside, 'available': own['available']}
 
 
 def check_memory():
