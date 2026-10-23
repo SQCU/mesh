@@ -82,6 +82,8 @@ struct lane_state {
   uint32_t window;
   struct run landing;
   struct lane_record *record;
+  struct arrival *arrival;
+  uint32_t arrivals,arrival_room;
 };
 _Static_assert(offsetof(struct lane_state,posted)%MESH_LINE==0,"a thread's words a line of their own");
 static inline uint64_t *lane_posts(struct lane_state *s,int way){ return way?&s->posted:&s->sent; }
@@ -138,7 +140,8 @@ struct child_message {
 struct port;
 /* design/transport.md section 14, "Sending", "The index" and "Relays" */
 struct named { uint64_t name[2]; uint32_t node,padding; };
-struct joined { uint32_t count,cable[MESH_REACH]; uint64_t bandwidth[MESH_REACH],total; };
+struct joined { uint32_t count,cable[MESH_REACH]; uint64_t weight[MESH_REACH],cycle; };
+struct arrival { struct mesh_entry *entry; uint64_t k; uint32_t runs,padding; };
 struct indexed { uint64_t key[3]; struct mesh_plan *table; struct mesh_entry *entry; uint64_t k; };
 struct walker {
   uint64_t serial,told;

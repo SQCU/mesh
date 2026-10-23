@@ -126,13 +126,15 @@ static void routes_fresh(struct walker *w){
   }
   for(uint32_t b=0;self<n && b<n;b++){
     struct joined *c=joined+b;
-    c->count=b==self?0:MIN(mesh_joined(r+self,r+b,c->cable,c->bandwidth,MESH_REACH),(uint32_t)MESH_REACH);
+    uint64_t g=0;
+    c->count=b==self?0:MIN(mesh_joined(r+self,r+b,c->cable,c->weight,MESH_REACH),(uint32_t)MESH_REACH);
     for(uint32_t i=1;i<c->count;i++)
       for(uint32_t j=i;j && c->cable[j-1]>c->cable[j];j--){
-        const uint32_t id=c->cable[j];const uint64_t bits=c->bandwidth[j];
-        c->cable[j]=c->cable[j-1];c->bandwidth[j]=c->bandwidth[j-1];c->cable[j-1]=id;c->bandwidth[j-1]=bits;
+        const uint32_t id=c->cable[j];const uint64_t bits=c->weight[j];
+        c->cable[j]=c->cable[j-1];c->weight[j]=c->weight[j-1];c->cable[j-1]=id;c->weight[j-1]=bits;
       }
-    for(uint32_t i=0;i<c->count;i++)c->total+=c->bandwidth[i];
+    for(uint32_t i=0;i<c->count;i++)for(uint64_t x=c->weight[i],y;x;x=y)y=g%x,g=x;
+    for(uint32_t i=0;i<c->count;i++)c->cycle+=c->weight[i]=g?c->weight[i]/g:1;
   }
   for(uint32_t i=0;self<n && i<names;i++){
     uint32_t d=0;
@@ -171,17 +173,32 @@ static uint64_t key_mix(const uint64_t *key){
   h=(h^h>>30)*UINT64_C(0xbf58476d1ce4e5b9);h=(h^h>>27)*UINT64_C(0x94d049bb133111eb);
   return h^h>>31;
 }
-static int placed(const struct walker *w,const struct port *port,uint32_t hop,const uint64_t *key,uint32_t *lane){
+struct share { uint64_t base,cycle,lo,hi; uint32_t lanes; };
+static int share_of(const struct walker *w,const struct port *port,uint32_t hop,const uint64_t *key,struct share *s){
   uint32_t b=0,i=0;
   while(b<w->nodes && w->node[b]!=hop)b++;
   const struct joined *c=b<w->nodes?w->joined+b:NULL;
-  const uint32_t lanes=plan_lanes(port->link.plan);
-  const uint64_t h=key_mix(key);
-  if(!c || !c->total || !lanes)return 0;
-  for(uint64_t at=h%c->total;at>=c->bandwidth[i];i++)at-=c->bandwidth[i];
-  if(c->cable[i]!=port->link.cable)return 0;
-  *lane=(uint32_t)(h/c->total%lanes);
+  *s=(struct share){.lanes=plan_lanes(port->link.plan)};
+  while(c && i<c->count && c->cable[i]!=port->link.cable)s->lo+=c->weight[i++];
+  if(!c || i==c->count || !s->lanes || !c->weight[i])return 0;
+  s->hi=s->lo+c->weight[i];s->cycle=c->cycle;s->base=key_mix(key)%c->cycle;
   return 1;
+}
+static uint64_t share_runs(const struct share *s,uint64_t x){
+  const uint64_t r=x%s->cycle;
+  return x/s->cycle*(s->hi-s->lo)+(r>s->lo?MIN(r,s->hi)-s->lo:0);
+}
+static int placed(const struct walker *w,const struct port *port,uint32_t hop,const uint64_t *key,uint64_t run,uint32_t *lane){
+  struct share s;
+  if(!share_of(w,port,hop,key,&s) || (s.base+run)%s.cycle<s.lo || (s.base+run)%s.cycle>=s.hi)return 0;
+  *lane=(uint32_t)((share_runs(&s,s.base+run)-share_runs(&s,s.base))%s.lanes);
+  return 1;
+}
+static uint64_t placed_runs(const struct walker *w,const struct port *port,uint32_t hop,const uint64_t *key,uint64_t runs,uint32_t lane){
+  struct share s;
+  if(!share_of(w,port,hop,key,&s))return 0;
+  const uint64_t on=share_runs(&s,s.base+runs)-share_runs(&s,s.base);
+  return on>lane?(on-lane+s.lanes-1)/s.lanes:0;
 }
 /* design/transport.md section 14, "Completion" and "Lost" */
 static void tuple_count(struct mesh_plan *t,struct mesh_entry *e,uint64_t k,int way,uint64_t n){
@@ -319,10 +336,11 @@ static void tables_send(struct port *port,struct walker *w,uint32_t served){
         const uint64_t done=atomic_load_explicit(&x->done,memory_order_acquire);
         const uint32_t node=x->pages && done<k?name_node(w,x->key):0,hop=node?hop_of(w,node):0;
         uint32_t lane=MESH_LINK_LANES,first,n;
-        if(!hop || blocked(w,node,before) || hop!=port->peer || !placed(w,port,hop,x->key,&lane))continue;
+        if(!hop || blocked(w,node,before) || hop!=port->peer)continue;
         const _Atomic uint64_t *word=region_word(x->word);
         if(word && atomic_load_explicit(word,memory_order_acquire)<x->need){block(w,node);continue;}
-        while((served>>lane&1) && port->link.lane[lane].sending.state==RUN_NONE && (n=tuple_take(x,k,MESH_RUN,&first))){
+        while(placed(w,port,hop,x->key,mesh_called(atomic_load_explicit(&x->posted,memory_order_acquire))/MESH_RUN,&lane) && (served>>lane&1) &&
+              port->link.lane[lane].sending.state==RUN_NONE && (n=tuple_take(x,k,MESH_RUN,&first))){
           struct run *r=&port->link.lane[lane].sending;
           *r=(struct run){.table=t,.entry=x,.k=k,.first=x->row+first,.state=RUN_KEY,.kind=UNIT_PAGE};
           memcpy(r->unit.key,x->key,sizeof r->unit.key);r->unit.offset=first;r->unit.count=n;
@@ -347,7 +365,8 @@ static void relays_send(struct port *port,struct walker *w,uint32_t served){
       if(atomic_load_explicit(&x->state,memory_order_acquire)!=RELAY_READY)continue;
       const uint32_t hop=hop_of(w,x->node);
       uint32_t lane=MESH_LINK_LANES;
-      if(!hop || hop!=port->peer || !placed(w,port,hop,x->key,&lane) || !(served>>lane&1) || l->lane[lane].sending.state!=RUN_NONE)continue;
+      if(!hop || hop!=port->peer || !placed(w,port,hop,x->key,x->offset/MESH_RUN,&lane) || !(served>>lane&1) || l->lane[lane].sending.state!=RUN_NONE)
+        continue;
       int first=1;
       for(uint32_t j=0;first && j<MESH_RELAYS;j++){
         const uint32_t state=atomic_load_explicit(&relay[j].state,memory_order_acquire);
@@ -429,6 +448,20 @@ static void relays_free(struct port *port){
     atomic_store_explicit(&x->state,RELAY_FREE,memory_order_release);
   }
 }
+static uint32_t *arrival_runs(struct lane_state *s,const struct mesh_entry *entry,uint64_t k){
+  for(uint32_t i=0;i<s->arrivals;i++)if(s->arrival[i].entry==entry && s->arrival[i].k==k)return &s->arrival[i].runs;
+  return NULL;
+}
+static void arrival_add(struct lane_state *s,struct mesh_entry *entry,uint64_t k){
+  uint32_t *runs=arrival_runs(s,entry,k);
+  if(!runs && s->arrivals==s->arrival_room){
+    struct arrival *grown=realloc(s->arrival,(s->arrival_room?2*s->arrival_room:16)*sizeof *grown);
+    if(!grown)return;
+    s->arrival=grown;s->arrival_room=s->arrival_room?2*s->arrival_room:16;
+  }
+  if(!runs){s->arrival[s->arrivals]=(struct arrival){entry,k,0,0};runs=&s->arrival[s->arrivals++].runs;}
+  ++*runs;
+}
 /* design/transport.md section 14, "The index" */
 static void run_place(struct port *port,struct walker *w,uint32_t lane){
   struct run *r=&port->link.lane[lane].landing;
@@ -440,6 +473,7 @@ static void run_place(struct port *port,struct walker *w,uint32_t lane){
   if(u->count>MESH_RUN)r->kind=UNIT_SINK;
   else if(x && (uint64_t)u->offset+u->count<=x->entry->pages && (placed=tuple_post(x->entry,x->k,u->count))>0){
     r->kind=UNIT_PAGE;r->table=x->table;r->entry=x->entry;r->k=x->k;r->first=x->entry->row+u->offset;
+    arrival_add(port->link.lane+lane,x->entry,x->k);
     if(!mesh_rows_hold(M,(struct mesh_row){x->entry->row},(struct mesh_pages){x->entry->pages}))r->first=UINT64_MAX;
     run_note(port->link.lane+lane,1,port->link.lane[lane].posted);
   }
@@ -451,17 +485,24 @@ static void run_place(struct port *port,struct walker *w,uint32_t lane){
   else r->kind=UNIT_SINK;
 }
 static int lane_expects(struct port *port,struct walker *w,uint32_t lane){
-  uint32_t b=0,at=MESH_LINK_LANES;
+  struct lane_state *s=port->link.lane+lane;
+  uint32_t b=0;
   while(b<w->nodes && w->node[b]!=port->peer)b++;
   if(b<w->nodes && w->relaying[b])return 1;
   if(!w->fresh)index_make(w);
+  for(uint32_t i=0;i<s->arrivals;){
+    const struct arrival *a=s->arrival+i;
+    const uint64_t posted=atomic_load_explicit(&a->entry->posted,memory_order_acquire),done=atomic_load_explicit(&a->entry->done,memory_order_acquire);
+    if((uint32_t)(posted>>32)==k32(a->k) && done!=a->k && done!=MESH_STAMP_LOST)i++;
+    else s->arrival[i]=s->arrival[--s->arrivals];
+  }
   for(uint32_t i=0;i<w->indexed;i++){
     const struct indexed *y=w->index+i;
     const uint64_t posted=atomic_load_explicit(&y->entry->posted,memory_order_acquire);
-    const uint32_t from=name_node(w,y->entry->from);
+    const uint32_t from=name_node(w,y->entry->from),*runs=arrival_runs(s,y->entry,y->k);
     if(atomic_load_explicit(&y->entry->done,memory_order_acquire)==MESH_STAMP_LOST || (uint32_t)(posted>>32)!=k32(y->k) ||
-       mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer || !placed(w,port,port->peer,y->key,&at))continue;
-    if(at==lane)return 1;
+       mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer)continue;
+    if(placed_runs(w,port,port->peer,y->key,(y->entry->pages+MESH_RUN-1)/MESH_RUN,lane)>(runs?*runs:0))return 1;
   }
   return 0;
 }

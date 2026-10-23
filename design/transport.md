@@ -423,7 +423,7 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on its lanes served while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
 | What a client's traffic is named by | a stream: an owner word taken by an identity both ends compute, at most four a link, one communicator a stream (129-135) ≺ tuples in the client's own queue, each naming its rows and an opaque key (136) | M5, M2 |
-| Who chooses cables and queue pairs | the client, by holding a stream on each cable (129-135) ≺ the bridge alone, a tuple's runs taken by every port to its node as its lanes have room, a relay on the least-numbered cable (136) ≺ the bridge alone, each tuple placed on one cable and lane of each hop by its key and the cables' bandwidths, relays alike, both ends computing it (138) | M5, M9, M8 |
+| Who chooses cables and queue pairs | the client, by holding a stream on each cable (129-135) ≺ the bridge alone, a tuple's runs taken by every port to its node as its lanes have room, a relay on the least-numbered cable (136) ≺ the bridge alone, each run placed on a lane of a cable of each hop by its key and offset, by the cables' shares of bandwidth, relays alike, both ends computing it (138) | M5, M9, M8 |
 | What a child holds posted | a key unit's receive on every lane while it serves, idle or not (136-137: its release met its peers' at the 2026-10-23 install) ≺ a receive only where a run placed on that lane is to come, or where relays may come through its node (138) | M3, M4, M6 |
 | How a page finds its rows | in order on its stream: each end's i-th page (129-135) ≺ by its run's key unit, found in a sorted index of the started landing tuples, arrival order between runs irrelevant (136) | M9 |
 | How ranks meet | a TCP root, its listener, two gathers and phases bounded by the deadline (to 135) ≺ a registration in the client's queue, carried in its bridge's record, the members read from the map (136) | M2, C1 |
@@ -485,13 +485,17 @@ Every word below, with its one writer at a time and its readers:
   record of the map has held stays in its queue: no bridge sends it.
 - **The wire.** Every queue pair of a link carries runs. A run is a key unit (64 bytes: the key, the offset of its first
   page within the tuple, its count of pages) and then those pages, each a SEND of one whole page; a run is at most
-  `MESH_RUN` pages. A tuple's runs all travel one lane of one cable of each hop (`placed`): of the cables the two
-  nodes' records join between them (`mesh_joined`, sorted by `cable`), the one where SplitMix64's finalizer of the key,
-  modulo their bandwidths' sum, falls in the cable's share of that sum, and of that cable's lanes the quotient modulo
-  their count. Both ends of a hop compute it from the same records and the same key (version 138).
+  `MESH_RUN` pages, at the tuple's offsets 0, `MESH_RUN`, 2 `MESH_RUN` and on. Run i of a tuple travels one lane of one
+  cable of each hop (`placed`): the cables the two nodes' records join between them (`mesh_joined`, sorted by `cable`)
+  each hold a share of a cycle, their bandwidths divided by the bandwidths' greatest common divisor (one each where
+  none has a figure; none for a cable without a figure beside one with), and run i goes to the cable whose share holds
+  (b + i) modulo the cycle, b being SplitMix64's finalizer of the key modulo the cycle; a cable's m-th run of the tuple
+  goes to its lane m modulo its lanes. Both ends of a hop compute it from the same records and the same key, so a
+  tuple's runs spread over every lane of every cable of the hop by the cables' shares (version 138).
 - **What is posted.** A receiving child posts a key unit's receive on a lane only where a run is to come on it: a
-  started landing tuple of its node, not complete and not ~0, whose sender's node this port's peer is the way to, placed
-  on this lane, with pages not yet posted (`lane_expects`), or, on every lane of a port, a registration at a node to
+  started landing tuple of its node, not complete and not ~0, whose sender's node this port's peer is the way to, of
+  whose runs placed on this lane (`placed_runs`) fewer have come than are placed (`arrival`, counted by the lane as
+  each is placed: `lane_expects`), or, on every lane of a port, a registration at a node to
   which that port's peer routes through this node (the walker's `relaying`: the relays it may carry). After a run's
   pages are posted it posts the next key unit's receive only where that still holds. So a child whose node has no call
   in flight and relays nothing holds no receive posted, and a SEND toward it waits in its sender's credit (TN3205)
@@ -499,7 +503,8 @@ Every word below, with its one writer at a time and its readers:
 - **Sending.** Each child's send thread walks its node's live clients' queues. For each client it takes the started
   tables in the order of their k, and in each table the send tuples whose node its peer is the way to. It takes a run
   from a tuple once the tuple's word has reached its `need`, by a compare-and-swap of `posted` from what it read to that
-  plus the run's pages, and posts the key unit and the pages on its placed lane, a run at a time. A tuple not yet ready,
+  plus the run's pages, and posts the key unit and the pages on its placed lane: the child whose cable and lane the
+  tuple's next run is placed on takes it, so a tuple's runs are taken in their order. A tuple not yet ready,
   or not yet all taken, holds every later table of its client toward the same node, so a lane carries a client's calls
   toward a node in their order; the tuples of one table go on at once. A tuple for a node no cable reaches goes to the
   next node of the map's route (`mesh_routes`), placed on that hop's cables alike, so a call's tuples spread over every
