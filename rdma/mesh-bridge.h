@@ -95,10 +95,9 @@ struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; ui
 #define XMAGIC (0x4d595048u+131u+(1u<<12))
 struct wire_mapping { char *data; size_t length; };
 #define QD 4095
-#define MESH_BANK ((size_t)1<<32)
 struct mesh_device {
   char name[32];
-  struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **extent_mrs;
+  struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **extent_mrs,**shifted_mrs;
   uint32_t frame_capacity,pairs,max_pairs;
   struct ibv_port_attr port;
   union ibv_gid gid;

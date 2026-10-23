@@ -653,12 +653,16 @@ Porting:
   (`tbt_post_recv` keeps only an address's low 32 bits: `rdma/mesh-verbs.h`), so no page crosses an extent. So:
   - every crossing call's send buffer, and every buffer it sends from or lands in, is a lease's (in this node's region);
   - the program's own cuts lie on pages (`mesh_program_steps_cut`), and a cut NCCL's call fixes lies where it does.
-  The extents are a layout fact (`mesh_extent_pages`: the least power of two of pages at which the arena makes at most
-  `MESH_EXTENTS`, 100, the devices' `max_mr`; a port whose device allows fewer registers larger ones, whole multiples),
-  and the arena never lays a lease across an extent's line: a lease of at most an extent lies inside one, and a
-  larger one is whole extents (`mesh_arena_alloc`, layout 151). `max_sge` is 1 on every device measured
-  (design/HETEROGENEOUS-LINKS.md section 1), so a unit is one range. A unit at an offset across an inner line of a
-  lease of several extents is still sent as the all-ones page and landed in the spare page (mesh-link.c `entry_at`). An operand outside the region fails the call as
+  `max_sge` is 1 on every device measured (design/HETEROGENEOUS-LINKS.md section 1), so a unit is one range, named by
+  one memory region. Each port registers two families: extents of 2^k bytes from the region's start, and the same
+  extents shifted by half of one, each shifted one that lies within a 4 GiB bank (verbs allow overlapping
+  registrations), k the least at which both number no more than the device's `max_mr`: on a Studio's 86 GiB, max_mr
+  100, 43 extents of 2 GiB and 22 shifted ones, 65 regions. `max_mr_size` reads 16384000 but is not enforced (the
+  bridge registered 86 one-GiB extents). A unit, at most a page, lies within one extent or within the shifted one
+  across its line, and `span_of` names that one. No registration and no unit crosses a 4 GiB bank's line
+  (`tbt_post_recv` keeps an address's low 32 bits): the arena lays a lease of at most a bank inside one, and a larger
+  one from a bank's line (`mesh_arena_alloc`), and a call whose page would cross a bank's line inside a lease larger
+  than a bank fails as a value (`ncclInvalidUsage`, `bank_crossed`) before anything is presented. An operand outside the region fails the call as
   a value (`ncclInvalidUsage`, naming the piece and its buffer) before anything is presented; nothing is copied to make it
   fit.
 - Every crossing collective but a premultiplied one reads its send buffer and writes its result where they lie (the

@@ -1258,6 +1258,13 @@ static struct where buffer_at(const struct call *c, uint32_t b, size_t offset) {
   return offset >= first && offset < first + length * z ? shifted(c->recv_at, offset - first) : shifted(c->bound->buffer[b], offset);
 }
 
+static int bank_crossed(struct hdr *m, uint32_t row, uint64_t into, uint64_t bytes, uint64_t page) {
+  const uint64_t base = atomic_load_explicit(&mesh_page(m)[row].address, memory_order_relaxed) - m->data_off + into;
+  for (uint64_t line = (base / MESH_BANK + 1) * MESH_BANK; line < base + bytes; line += MESH_BANK)
+    if ((line - base) % page) return 1;
+  return 0;
+}
+
 static ncclResult_t place_group(struct ncclComm *comm, struct plan *plan) {
   const uint64_t page = comm->page;
   struct schedule *plans = plan->plans;
@@ -1276,6 +1283,11 @@ static ncclResult_t place_group(struct ncclComm *comm, struct plan *plan) {
         const struct lease *held = inside ? lease_at(address) : NULL;
         const uint64_t into = held ? (uint64_t)(address - (const unsigned char *)held->address) : 0;
         pthread_mutex_unlock(&attach_lock);
+        if (held && bank_crossed(comm->attach->context.M, held->row, into, x->bytes, page))
+          return fail(ncclInvalidUsage, "%s on communicator %s: the %zu bytes its %s rank %u %s (buffer %u, byte %zu) lie at byte %llu of their lease, so "
+                      "a page of them crosses a 4 GiB bank's line, which no SGE may cross (max_sge 1, and the provider keeps an address's low 32 bits)",
+                      call_name(x->c), comm->name, x->bytes, send ? "SEND to" : "receive from", step->peer, send ? "reads" : "lands in", step->buffer,
+                      x->offset, (unsigned long long)into);
         if (held) { x->row = held->row + into / page; x->skew = into % page; continue; }
         return fail(ncclInvalidUsage, "%s on communicator %s: the %zu bytes its %s rank %u %s (buffer %u, byte %zu) are in no lease of this process: "
                     "a crossing's pages are a lease's rows (ncclMemAlloc)", call_name(x->c), comm->name, x->bytes, send ? "SEND to" : "receive from",

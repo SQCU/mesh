@@ -270,7 +270,7 @@ static uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
-  return mesh_allocate(pages,align,mesh_extent_pages(c->M),mesh_arena_pages(c->M),bits,bits);
+  return mesh_allocate(pages,align,mesh_bank_pages(c->M),mesh_arena_pages(c->M),bits,bits);
 }
 uint32_t mesh_arena_free(struct hdr *m){
   const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);

@@ -73,7 +73,9 @@ static int row_at(struct mesh_row r,uint64_t *at){
   return 1;
 }
 static struct ibv_sge span_of(const struct port *port,uint64_t at,uint64_t bytes){
-  return (struct ibv_sge){.addr=(uintptr_t)wire.data+at,.length=(uint32_t)bytes,.lkey=port->device.extent_mrs[at>>port->device.extent_shift]->lkey};
+  const uint32_t shift=port->device.extent_shift;
+  const struct ibv_mr *mr=bytes && (at>>shift)!=((at+bytes-1)>>shift)?port->device.shifted_mrs[(at-((uint64_t)1<<(shift-1)))>>shift]:port->device.extent_mrs[at>>shift];
+  return (struct ibv_sge){.addr=(uintptr_t)wire.data+at,.length=(uint32_t)bytes,.lkey=mr?mr->lkey:0};
 }
 static const _Atomic uint64_t *region_word(uint64_t offset){
   return offset && offset<=M->length-8 && !(offset%8)?(const _Atomic uint64_t *)((char *)M+offset):NULL;
@@ -283,12 +285,10 @@ static uint64_t unit_bytes(const struct key_unit *u,uint32_t posted){
   const uint64_t at=((uint64_t)u->offset+posted)*page_bytes();
   return u->bytes>at?MIN(page_bytes(),u->bytes-at):page_bytes();
 }
-static int entry_at(const struct port *port,const struct mesh_entry *e,uint64_t unit,uint64_t bytes,uint64_t *at){
+static int entry_at(const struct mesh_entry *e,uint64_t unit,uint64_t *at){
   uint64_t base=0;
   if(!mesh_rows_hold(M,(struct mesh_row){e->row},(struct mesh_pages){mesh_entry_rows(M,e)}) || !row_at((struct mesh_row){e->row},&base))return 0;
-  const uint64_t first=base+e->offset+unit*page_bytes();
-  if(bytes && first>>port->device.extent_shift!=(first+bytes-1)>>port->device.extent_shift)return 0;
-  *at=first;
+  *at=base+e->offset+unit*page_bytes();
   return 1;
 }
 static uint64_t relay_at(const struct relay *x,uint32_t page){ return ((uint64_t)x->page+(uint64_t)page*M->block)*M->pgsz; }
@@ -309,7 +309,7 @@ static void run_send(struct port *port,uint32_t lane){
   while(r->state==RUN_PAGES && r->posted<r->unit.count && s->sent-s->done<s->sends){
     uint64_t at=(uint64_t)ones*M->pgsz;
     if(r->kind==UNIT_RELAY)at=relay_at(r->relay,r->posted);
-    else if(r->entry && region_word(r->entry->word))entry_at(port,r->entry,(uint64_t)r->unit.offset+r->posted,unit_bytes(&r->unit,r->posted),&at);
+    else if(r->entry && region_word(r->entry->word))entry_at(r->entry,(uint64_t)r->unit.offset+r->posted,&at);
     if(!post_send(port,lane,span_of(port,at,unit_bytes(&r->unit,r->posted)),unit_of(r)))return;
     r->posted++;
   }
@@ -504,7 +504,7 @@ static void run_place(struct port *port,struct walker *w,uint32_t lane){
   if(u->count>MESH_RUN)r->kind=UNIT_SINK;
   else if(x && (uint64_t)u->offset+u->count<=x->entry->pages && u->bytes<=x->entry->bytes && (placed=tuple_post(x->entry,x->k,u->count))>0){
     uint64_t at=0;
-    r->kind=UNIT_PAGE;r->table=x->table;r->entry=x->entry;r->k=x->k;r->first=entry_at(port,x->entry,0,0,&at)?x->entry->row:UINT64_MAX;
+    r->kind=UNIT_PAGE;r->table=x->table;r->entry=x->entry;r->k=x->k;r->first=entry_at(x->entry,0,&at)?x->entry->row:UINT64_MAX;
     run_note(port->link.lane+lane,1,port->link.lane[lane].posted);
   }
   else if((!x && node==M->node && !index_later(w,u->key)) || placed<0)r->state=RUN_HELD;
@@ -545,7 +545,7 @@ static void run_receive(struct port *port,struct walker *w,uint32_t lane){
   if(r->state==RUN_HELD)run_place(port,w,lane);
   while(r->state==RUN_PAGES && r->posted<r->unit.count && s->posted-s->got<s->window){
     uint64_t at=link_at(l);
-    if(r->kind==UNIT_PAGE && r->first!=UINT64_MAX)entry_at(port,r->entry,(uint64_t)r->unit.offset+r->posted,unit_bytes(&r->unit,r->posted),&at);
+    if(r->kind==UNIT_PAGE && r->first!=UINT64_MAX)entry_at(r->entry,(uint64_t)r->unit.offset+r->posted,&at);
     else if(r->kind==UNIT_RELAY)at=relay_at(r->relay,r->posted);
     if(!post_receive(port,lane,span_of(port,at,unit_bytes(&r->unit,r->posted)),unit_of(r)))return;
     r->posted++;
@@ -883,6 +883,15 @@ static int device_gid(struct mesh_device *device,const char *interface){
   device->gid=table[chosen];device->gid_index=(uint8_t)chosen;device->gid_matched=(uint8_t)matched;
   return 0;
 }
+static uint64_t region_mrs(uint32_t shift){
+  const uint64_t extent=(uint64_t)1<<shift,half=extent/2;
+  uint64_t count=0;
+  for(uint64_t first=0;first<wire.length;first+=extent){
+    const uint64_t shifted=first+half,span=wire.length>shifted?MIN(extent,wire.length-shifted):0;
+    count+=1+(span && shifted/MESH_BANK==(shifted+span-1)/MESH_BANK);
+  }
+  return count;
+}
 static int wire_map(struct wire_mapping *mapping,struct hdr *m,int file){
   mapping->length=(size_t)mesh_arena_pages(m)*m->pgsz;
   mapping->data=NULL;
@@ -910,21 +919,26 @@ static int device_up(struct mesh_device *device){
   if(ibv_query_device(device->context,&capabilities))return errno?errno:EIO;
   if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return errno?errno:EIO;
   if(!device->extent_mrs){
-    uint32_t shift=(uint32_t)__builtin_ctzll((uint64_t)mesh_extent_pages(M)*M->pgsz);
-    while(shift<32 && ((wire.length-1)>>shift)+1>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:1))shift++;
+    uint32_t shift=(uint32_t)__builtin_ctzll(page_bytes())+1;
+    while(shift<32 && region_mrs(shift)>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:1))shift++;
     device->extent_shift=(uint8_t)shift;
-    if(!(device->extent_mrs=calloc(((wire.length-1)>>shift)+1,sizeof *device->extent_mrs)))return ENOMEM;
+    if(!(device->extent_mrs=calloc(((wire.length-1)>>shift)+1,sizeof *device->extent_mrs)) ||
+       !(device->shifted_mrs=calloc(((wire.length-1)>>shift)+1,sizeof *device->shifted_mrs)))return ENOMEM;
   }
-  const size_t extent=(size_t)1<<device->extent_shift;
+  const size_t extent=(size_t)1<<device->extent_shift,half=extent/2;
   const uint32_t extents=(uint32_t)(((wire.length-1)>>device->extent_shift)+1);
   const uint64_t began=clock_ns();
   for(size_t e=0,first=0;e<extents;e++,first+=extent){
-    const size_t bytes=wire.length-first<extent?wire.length-first:extent;
+    const size_t bytes=wire.length-first<extent?wire.length-first:extent,shifted=first+half,over=wire.length>shifted?wire.length-shifted:0,
+                 span=over<extent?over:extent;
     if(!device->extent_mrs[e] && !(device->extent_mrs[e]=ibv_reg_mr(device->domain,wire.data+first,bytes,IBV_ACCESS_LOCAL_WRITE)))
       return errno?errno:EIO;
+    if(span && shifted/MESH_BANK==(shifted+span-1)/MESH_BANK && !device->shifted_mrs[e] &&
+       !(device->shifted_mrs[e]=ibv_reg_mr(device->domain,wire.data+shifted,span,IBV_ACCESS_LOCAL_WRITE)))
+      return errno?errno:EIO;
   }
-  say("%s: region of %zu bytes (%u extents of %zu bytes) registered in %.3f s\n",device->name,wire.length,extents,extent,
-      (double)(clock_ns()-began)/1e9);
+  say("%s: region of %zu bytes (%llu memory regions: extents of %zu bytes and their halves' shift) registered in %.3f s\n",device->name,
+      wire.length,(unsigned long long)region_mrs(device->extent_shift),extent,(double)(clock_ns()-began)/1e9);
   device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;

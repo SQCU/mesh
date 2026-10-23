@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 143u
+#define MESH_VERSION 145u
 #define MESH_LAYOUT 151u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
@@ -120,13 +120,9 @@ static inline struct mesh_plan *mesh_plan_at(struct hdr *m,uint64_t offset){
   return mesh_plan_bytes(t->sends,t->lands)<=m->length-offset?t:NULL;
 }
 static inline uint32_t mesh_arena_pages(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz))*m->block; }
-/* design/HETEROGENEOUS-LINKS.md section 1: max_mr 100, max_sge 1 */
-#define MESH_EXTENTS 100u
-static inline uint32_t mesh_extent_pages(const struct hdr *m){
-  uint32_t pages=1;
-  while(pages<m->block || (uint64_t)pages*MESH_EXTENTS<mesh_arena_pages(m))pages*=2;
-  return pages;
-}
+/* rdma/NCCL.md, Memory: tbt_post_recv keeps an address's low 32 bits */
+#define MESH_BANK ((size_t)1<<32)
+static inline uint32_t mesh_bank_pages(const struct hdr *m){ return (uint32_t)(MESH_BANK/m->pgsz); }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
 static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
