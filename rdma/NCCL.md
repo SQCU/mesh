@@ -89,8 +89,9 @@ landed in place (a COPY earlier in the group), and the landed bytes are the NIC'
   - The library compares none of these values across ranks. `ncclCommInitRank` is this call with no programs, small, name or config,
     and `ncclCommInitRankConfig` the same with its config.
 - Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
-  nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
-  it holds rows (the stream's owner word taken from 0 by one compare-and-swap). The second carries each rank's
+  cables its bridge reaches them by (one reach entry a cable: its node, its `cable` and its bandwidth); each rank then holds
+  one stream on every cable that joins it to another member, the least `wire` free at both ends on that cable, so both
+  ends take the same stream, as it holds rows (the stream's owner word taken from 0 by one compare-and-swap). The second carries each rank's
   holding's status and the pages each of its streams has posted each way as it took it: the bridge's facts
   (`mesh.h` `struct mesh_stream` `posts`, each lane's units), constant while no holder presents, since nothing is
   posted on a stream but its holders' pages. Each channel keeps the two ends' difference as a statistic, which nothing
@@ -692,9 +693,12 @@ including unseen ones in fast finite time is preferred".
   - A plan's all-to-all (the hosted family and `ncclMeshAlltoAllV`): a demand a block from a to b, root b, leaf a, `up`
     its bytes.
   - An exchange: a demand a rank's part, root its owner, the ranks that land it the leaves, `down` its bytes.
-  - The capacities are the communicator's map: each link's bandwidth in each direction, parallel links summed (a link
-    without a figure one unit), so a figure a cable drops in as one more link; and a per-hop latency (`hop`, seconds:
-    0, the bridges' records carrying no latency).
+  - The capacities are the communicator's map, one link a cable: each cable's bandwidth in each direction (a cable
+    without a figure one unit), every cable an edge of its own; and a per-hop latency (`hop`, seconds: 0, the bridges'
+    records carrying no latency). A tree's edge names its cable (`way`, the cable's place among the pair's cables in
+    cable order), so the load spreads over a pair's cables by their capacities, and every step carries the cable it
+    crosses (`struct mesh_step` `way`): the channel of that cable's stream. A point-to-point call between linked
+    members is cut among the pair's cables by their bandwidths in page quanta.
 - **Multiplicative weights** [Garg and Könemann, FOCS 1998; Fleischer, SIAM J. Discrete Math. 2000; the framework of
   Arora, Hazan and Kale, Theory of Computing 2012]: T = floor(ln m / ε²) + 1 rounds (m the directed links, ε
   `MESH_SOLVE_EPS`, 0.1). In each round a link's length is exp(ε (x_e − x_max) / ρ) / c_e, x_e its load so far over its
@@ -834,8 +838,9 @@ into a lease its groups named, for entries already presented, until `ncclCommDes
 A communicator's bytes of its node's region are its plans' and its exchanges' leases ([Plans](#plans),
 [Persistent exchanges](#persistent-exchanges)). The process
 holds one of its bridge's client slots (`mesh.h` `MESH_CLIENTS`) whatever its communicators; each communicator of two
-ranks or more holds a stream toward each member's node it is joined to from its init to its destruction, one
-communicator a stream (a holding's lists and counts are its holder's alone), of the up to four a link has.
+ranks or more holds a stream on every cable that joins it to another member from its init to its destruction, one
+communicator a stream (a holding's lists and counts are its holder's alone), of the up to four a cable has; a channel
+is one held stream.
 
 ## Group positions and times
 
@@ -869,8 +874,9 @@ as written (C, Objective-C, Swift's module map, torch-mesh's extension, and Pyth
 plain C declarations and integer constants. Every execution reads its node's bridge here when it starts; no consumer
 gathers, parses or joins bridge records itself.
 
-- `mesh_reached(out, capacity, &node)`: this node's bridge's node, and the nodes it reaches, each with the bandwidth of
-  its stream toward it in bits a second; their count (0: the node alone), or -errno where the bridge is unreachable. A
+- `mesh_reached(out, capacity, &node)`: this node's bridge's node, and the cables it reaches other nodes by, each entry a
+  node, its `cable` (both bridges compute it alike from the cable's first stream) and the cable's bandwidth in bits a
+  second; their count (0: the node alone), or -errno where the bridge is unreachable. A
   node is all a client names of the mesh (design/rubrics.md, Three kinds of source). `mesh_region(&bytes, &unleased)`:
   the region's arena and the bytes no lease holds. `mesh_nodes_health`: every node's record the bridge holds (its
   bridge's node, its region's bytes, the node's memory and `hw.model`, its boot and the memory available as its bridge

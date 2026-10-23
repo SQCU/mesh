@@ -454,7 +454,7 @@ typedef struct {
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
 
 typedef uint32_t (*ncclMeshSolver)(const struct mesh_link_map* map, const struct mesh_demand* demands, uint32_t count, uint32_t room,
-                                   uint32_t* demand, uint32_t* parent, double* share, void* context);
+                                   uint32_t* demand, uint32_t* parent, uint32_t* way, double* share, void* context);
 ncclResult_t ncclMeshCommSetSolver(ncclComm_t comm, ncclMeshSolver solver, void* context);
 
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);

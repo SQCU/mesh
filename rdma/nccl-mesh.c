@@ -209,7 +209,7 @@ struct channel {
   struct mesh_stream_view view;
   void *buffer;
   size_t ready, sent, landed;
-  uint64_t sends, lands, published, consumed, waited;
+  uint64_t sends, lands, published, consumed, waited, bandwidth;
   mesh_pages out, in, sent_waited;
   int64_t differ[2];
 };
@@ -324,21 +324,22 @@ static int has_root(int what) { return what == MESH_REDUCE || what == MESH_BROAD
 
 #define MESH_SOLVE_EPS 0.1
 static uint32_t solve_default(const struct mesh_link_map *map, const struct mesh_demand *demands, uint32_t count, uint32_t room, uint32_t *demand,
-                              uint32_t *parent, double *share, void *context) {
+                              uint32_t *parent, uint32_t *way, double *share, void *context) {
   (void)context;
-  return mesh_solve(map, MESH_SOLVE_EPS, 0, demands, count, room, demand, parent, share);
+  return mesh_solve(map, MESH_SOLVE_EPS, 0, demands, count, room, demand, parent, way, share);
 }
 
-struct flow { uint32_t count, *demand, *parent; double *share; };
+struct flow { uint32_t count, *demand, *parent, *way; double *share; };
 static void flow_free(struct flow *f) {
-  free(f->demand); free(f->parent); free(f->share);
-  *f = (struct flow){0, NULL, NULL, NULL};
+  free(f->demand); free(f->parent); free(f->way); free(f->share);
+  *f = (struct flow){0, NULL, NULL, NULL, NULL};
 }
 static ncclResult_t flow_solve(ncclComm_t comm, const struct mesh_demand *demands, uint32_t count, struct flow *f) {
   const uint32_t n = (uint32_t)comm->nranks, room = count ? mesh_solve_room(&comm->map, MESH_SOLVE_EPS, count) : 0;
-  *f = (struct flow){0, calloc((size_t)room + 1, sizeof *f->demand), calloc((size_t)room * n + 1, sizeof *f->parent), calloc((size_t)room + 1, sizeof *f->share)};
-  if (!f->demand || !f->parent || !f->share) { flow_free(f); return fail(ncclSystemError, "out of memory"); }
-  const uint32_t made = count ? (comm->solver ? comm->solver : solve_default)(&comm->map, demands, count, room, f->demand, f->parent, f->share,
+  *f = (struct flow){0, calloc((size_t)room + 1, sizeof *f->demand), calloc((size_t)room * n + 1, sizeof *f->parent),
+                     calloc((size_t)room * n + 1, sizeof *f->way), calloc((size_t)room + 1, sizeof *f->share)};
+  if (!f->demand || !f->parent || !f->way || !f->share) { flow_free(f); return fail(ncclSystemError, "out of memory"); }
+  const uint32_t made = count ? (comm->solver ? comm->solver : solve_default)(&comm->map, demands, count, room, f->demand, f->parent, f->way, f->share,
                                                                                comm->solver_context) : 0;
   if (made == UINT32_MAX) {
     flow_free(f);
@@ -397,7 +398,7 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
 
 struct lease { void *address; uint32_t row; size_t bytes; void *buffer; };
 
-struct hold { uint32_t node, stream, users, padding; struct mesh_stream_view view; uint64_t wire; };
+struct hold { uint32_t node, stream, users, cable; struct mesh_stream_view view; uint64_t wire; };
 struct attach {
   struct mesh_ctx context;
   struct lease *leases;
@@ -522,30 +523,38 @@ struct report {
   uint32_t node, count, frees, padding;
   struct mesh_reach reach[MESH_STREAMS];
   uint64_t posted[MESH_STREAMS][2], free_wire[MESH_STREAMS];
-  uint32_t free_node[MESH_STREAMS];
+  uint32_t free_node[MESH_STREAMS], free_cable[MESH_STREAMS];
 };
 
-static uint32_t reach_of(const struct report *x, uint32_t node) {
+static int same_cable(uint32_t x, uint32_t y) { return x == y || !x || !y; }
+static uint32_t reach_of(const struct report *x, uint32_t node, uint32_t cable) {
   uint32_t k = 0;
-  while (k < x->count && k < MESH_STREAMS && x->reach[k].node != node) k++;
+  while (k < x->count && k < MESH_STREAMS && !(x->reach[k].node == node && same_cable(x->reach[k].cable, cable))) k++;
   return k;
 }
-
-static uint32_t joined(const struct report *reports, uint32_t a, uint32_t b, uint64_t *bandwidth) {
-  const uint32_t j = reach_of(reports + a, reports[b].node), k = reach_of(reports + b, reports[a].node);
-  *bandwidth = 0;
-  if (j >= reports[a].count || k >= reports[b].count) return 0;
-  const uint64_t one = reports[a].reach[j].bandwidth, other = reports[b].reach[k].bandwidth;
-  *bandwidth = one && other ? (one < other ? one : other) : 0;
-  return 1;
+static uint32_t joined(const struct report *reports, uint32_t a, uint32_t b, uint32_t *cable, uint64_t *bandwidth) {
+  uint32_t count = 0;
+  for (uint32_t j = 0; j < reports[a].count && j < MESH_STREAMS; j++) {
+    const struct mesh_reach *x = reports[a].reach + j;
+    if (x->node != reports[b].node) continue;
+    const uint32_t k = reach_of(reports + b, reports[a].node, x->cable);
+    if (k >= reports[b].count) continue;
+    const uint64_t one = x->bandwidth, other = reports[b].reach[k].bandwidth;
+    uint32_t at = count++;
+    const uint32_t made = x->cable ? x->cable : reports[b].reach[k].cable;
+    while (at && cable[at - 1] > made) { cable[at] = cable[at - 1]; bandwidth[at] = bandwidth[at - 1]; at--; }
+    cable[at] = made;
+    bandwidth[at] = one && other ? (one < other ? one : other) : 0;
+  }
+  return count;
 }
 
 static int map_of(struct ncclComm *comm, const struct report *reports) {
   const uint32_t n = (uint32_t)comm->nranks;
-  uint32_t links = 0;
-  uint64_t bandwidth;
+  uint32_t links = 0, cable[MESH_STREAMS];
+  uint64_t bandwidth[MESH_STREAMS];
   for (uint32_t a = 0; a < n; a++)
-    for (uint32_t b = a + 1; b < n; b++) links += joined(reports, a, b, &bandwidth);
+    for (uint32_t b = a + 1; b < n; b++) links += joined(reports, a, b, cable, bandwidth);
   struct mesh_link_map *map = &comm->map;
   *map = (struct mesh_link_map){MESH_LINKS_GRAPH, n, links, calloc(links + 1, sizeof *map->link), calloc(links + 1, sizeof *map->bandwidth), 0,
                                 NULL, calloc(n + 1, sizeof *map->mark)};
@@ -554,8 +563,8 @@ static int map_of(struct ncclComm *comm, const struct report *reports) {
   for (uint32_t a = 0; a < n; a++) {
     map->mark[a] = reports[a].node;
     for (uint32_t b = a + 1; b < n; b++)
-      if (joined(reports, a, b, &bandwidth)) {
-        map->link[l][0] = a; map->link[l][1] = b; map->bandwidth[l] = bandwidth; l++;
+      for (uint32_t c = 0, cables = joined(reports, a, b, cable, bandwidth); c < cables; c++) {
+        map->link[l][0] = a; map->link[l][1] = b; map->bandwidth[l] = bandwidth[c]; l++;
       }
   }
   return 0;
@@ -753,13 +762,13 @@ static int gather(struct ncclComm *comm, int nranks, int rank, struct report *re
 static void reach_read(struct attach *a, struct report *report) {
   report->node = a->context.M->node;
   report->count = mesh_nodes_reached(a->context.M, report->reach, MESH_STREAMS);
-  report->frees = mesh_streams_free(a->context.M, report->free_node, report->free_wire, MESH_STREAMS);
+  report->frees = mesh_streams_free(a->context.M, report->free_node, report->free_wire, report->free_cable, MESH_STREAMS);
 }
 
-static uint64_t wire_between(const struct report *mine, const struct report *theirs) {
+static uint64_t wire_between(const struct report *mine, const struct report *theirs, uint32_t cable) {
   uint64_t least = 0;
   for (uint32_t i = 0; i < mine->frees && i < MESH_STREAMS; i++) {
-    if (mine->free_node[i] != theirs->node) continue;
+    if (mine->free_node[i] != theirs->node || !same_cable(mine->free_cable[i], cable)) continue;
     for (uint32_t j = 0; j < theirs->frees && j < MESH_STREAMS; j++)
       if (theirs->free_node[j] == mine->node && theirs->free_wire[j] == mine->free_wire[i] && (!least || mine->free_wire[i] < least))
         least = mine->free_wire[i];
@@ -791,22 +800,23 @@ static int comm_table(struct ncclComm *made, const ncclMeshProgram *programs, in
   return 0;
 }
 
-static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node) {
+static struct hold *comm_hold_toward(struct ncclComm *comm, uint32_t node, uint32_t cable) {
   for (uint32_t k = 0; k < MESH_STREAMS; k++)
-    if ((comm->held >> k & 1) && comm->attach->holds[k].node == node) return comm->attach->holds + k;
+    if ((comm->held >> k & 1) && comm->attach->holds[k].node == node && same_cable(comm->attach->holds[k].cable, cable)) return comm->attach->holds + k;
   return NULL;
 }
 
 static int comm_hold(struct ncclComm *comm, const struct report *reports, struct report *mine) {
   struct attach *a = comm->attach;
   const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
-  uint64_t bandwidth;
+  uint32_t cable[MESH_STREAMS];
+  uint64_t bandwidth[MESH_STREAMS];
   int status = 0;
   pthread_mutex_lock(&attach_lock);
-  for (uint32_t q = 0; !status && q < n; q++) {
-    if (q == me || !joined(reports, me, q, &bandwidth)) continue;
-    const uint32_t node = reports[q].node, k = reach_of(mine, node);
-    const uint64_t wire = wire_between(reports + me, reports + q);
+  for (uint32_t q = 0; !status && q < n; q++)
+   for (uint32_t c = 0, cables = q == me ? 0 : joined(reports, me, q, cable, bandwidth); !status && c < cables; c++) {
+    const uint32_t node = reports[q].node, k = reach_of(mine, node, cable[c]);
+    const uint64_t wire = wire_between(reports + me, reports + q, cable[c]);
     struct hold *h = NULL;
     uint32_t stream = 0;
     for (uint32_t s = 0; !h && s < MESH_STREAMS; s++)
@@ -816,7 +826,7 @@ static int comm_hold(struct ncclComm *comm, const struct report *reports, struct
     else if (!(status = mesh_stream_take(&a->context, wire, &stream))) {
       for (uint32_t j = 0; j < MESH_STREAMS; j++)
         if (a->holds + j != h && a->holds[j].users && a->holds[j].stream == stream) a->holds[j].wire = 0;
-      *h = (struct hold){.node = node, .stream = stream, .wire = wire};
+      *h = (struct hold){.node = node, .stream = stream, .cable = cable[c], .wire = wire};
     }
     if (status) break;
     const uint32_t index = (uint32_t)(h - a->holds);
@@ -845,21 +855,22 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
   struct mesh_ctx *context = &comm->attach->context;
   const struct hdr *m = context->M;
   const uint32_t n = (uint32_t)comm->nranks, me = (uint32_t)comm->rank, node = reports[me].node;
-  uint64_t bandwidth;
+  uint32_t cable[MESH_STREAMS];
+  uint64_t bandwidth[MESH_STREAMS];
   comm->page = (uint64_t)m->block * m->pgsz;
   int status = map_of(comm, reports);
-  if (!status && !(comm->channels = calloc((size_t)n + 1, sizeof *comm->channels))) status = ENOMEM;
-  for (uint32_t q = 0; !status && q < n; q++) {
-    if (q == me || !joined(reports, me, q, &bandwidth)) continue;
+  if (!status && !(comm->channels = calloc((size_t)MESH_STREAMS + 1, sizeof *comm->channels))) status = ENOMEM;
+  for (uint32_t q = 0; !status && q < n; q++)
+   for (uint32_t c = 0, cables = q == me ? 0 : joined(reports, me, q, cable, bandwidth); !status && c < cables; c++) {
     pthread_mutex_lock(&attach_lock);
-    struct hold *h = comm_hold_toward(comm, reports[q].node);
+    struct hold *h = comm_hold_toward(comm, reports[q].node, cable[c]);
     pthread_mutex_unlock(&attach_lock);
     if (!h) { status = EPROTO; break; }
-    comm->toward[q] = (int)comm->count;
+    if (!c) comm->toward[q] = (int)comm->count;
     struct channel *ch = comm->channels + comm->count++;
-    *ch = (struct channel){.peer = (int)q, .node = reports[q].node, .stream = h->stream, .wire = &h->wire, .view = h->view};
+    *ch = (struct channel){.peer = (int)q, .node = reports[q].node, .stream = h->stream, .wire = &h->wire, .view = h->view, .bandwidth = bandwidth[c]};
     if (!(status = channel_buffer(ch))) atomic_store(&comm->attach->wrapped, 1);
-    const uint64_t *own = reports[me].posted[reach_of(reports + me, reports[q].node)], *theirs = reports[q].posted[reach_of(reports + q, node)];
+    const uint64_t *own = reports[me].posted[reach_of(reports + me, reports[q].node, cable[c])], *theirs = reports[q].posted[reach_of(reports + q, node, cable[c])];
     ch->differ[0] = (int64_t)(theirs[1] - own[0]);
     ch->differ[1] = (int64_t)(theirs[0] - own[1]);
   }
@@ -1366,11 +1377,12 @@ static uint32_t demands_of(const struct ncclComm *comm, const struct call *c, st
 static ncclResult_t compiled_of(ncclComm_t comm, const struct call *c, const struct mesh_demand *d, const struct flow *f, uint32_t first,
                                 uint32_t last, struct steps *s) {
   const uint32_t n = (uint32_t)comm->nranks;
-  uint32_t *root = calloc((size_t)f->count + 1, sizeof *root), *parent = calloc((size_t)f->count * n + 1, sizeof *parent);
+  uint32_t *root = calloc((size_t)f->count + 1, sizeof *root), *parent = calloc((size_t)f->count * n + 1, sizeof *parent),
+           *way = calloc((size_t)f->count * n + 1, sizeof *way);
   double *weight = calloc((size_t)f->count + 1, sizeof *weight);
-  ncclResult_t result = root && parent && weight ? ncclSuccess : fail(ncclSystemError, "out of memory");
-  const struct mesh_trees trees = {n, result ? 0 : mesh_flow_trees(n, d, f->demand, f->parent, f->share, f->count, first, last, root, parent, weight),
-                                   root, parent, weight};
+  ncclResult_t result = root && parent && way && weight ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  const struct mesh_trees trees = {n, result ? 0 : mesh_flow_trees(n, d, f->demand, f->parent, f->way, f->share, f->count, first, last, root, parent, way,
+                                                                   weight), root, parent, weight, way};
   int whole;
   uint32_t chunks, parts = 0, moves = 0;
   form_of(comm, c->what, c->root, elements(c) * SIZE[c->type], &whole, &chunks);
@@ -1384,7 +1396,7 @@ static ncclResult_t compiled_of(ncclComm_t comm, const struct call *c, const str
     result = fail(ncclInternalError, "%s on %s: the solver's trees do not compile", call_name(c), comm->name);
   if (result) { free(segment); free(at); free(log_weight); free(move); }
   else s->compiled = 1;
-  free(root); free(parent); free(weight);
+  free(root); free(parent); free(way); free(weight);
   return result;
 }
 
@@ -1393,12 +1405,12 @@ static ncclResult_t routed_of(ncclComm_t comm, const struct call *c, const struc
   const uint32_t n = (uint32_t)comm->nranks;
   struct mesh_routing g = {0};
   uint32_t *pair = calloc((size_t)n * n + 1, sizeof *pair), *start = calloc((size_t)f->count + 2, sizeof *start),
-           *node = calloc((size_t)f->count * n + 1, sizeof *node);
+           *node = calloc((size_t)f->count * n + 1, sizeof *node), *way = calloc((size_t)f->count * n + 1, sizeof *way);
   double *weight = calloc((size_t)f->count + 1, sizeof *weight);
-  ncclResult_t result = pair && start && node && weight ? ncclSuccess : fail(ncclSystemError, "out of memory");
-  if (!result) mesh_flow_routing(n, d, f->demand, f->parent, f->share, f->count, first, last, &g, pair, start, node, weight);
+  ncclResult_t result = pair && start && node && way && weight ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  if (!result) mesh_flow_routing(n, d, f->demand, f->parent, f->way, f->share, f->count, first, last, &g, pair, start, node, way, weight);
   if (!result) result = hosted_steps(comm, c, &g, operand, &s->steps, &s->count, &s->relayed);
-  free(pair); free(start); free(node); free(weight);
+  free(pair); free(start); free(node); free(way); free(weight);
   return result;
 }
 
@@ -1409,7 +1421,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     room += !crosses(list + i) || p2p(list + i) ? 0 : counted(list + i) ? N * N : N;
   struct mesh_demand *d = calloc((size_t)room + 1, sizeof *d);
   uint64_t *leaves = calloc((size_t)room * words + 1, sizeof *leaves);
-  struct flow f = {0, NULL, NULL, NULL};
+  struct flow f = {0, NULL, NULL, NULL, NULL};
   ncclResult_t result = lo && hi && d && leaves ? ncclSuccess : fail(ncclSystemError, "out of memory");
   for (size_t i = 0; !result && i < n; i++) {
     struct call *c = list + i;
@@ -1436,7 +1448,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     const uint32_t u = unit_of(c);
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
     if (counted(c) && (result = routed_of(comm, c, d, &f, lo[i], hi[i], operand, s))) break;
-    const size_t most = (program ? program->first[program->nodes] : counted(c) ? s->count : 1) + 1;
+    const size_t most = (program ? program->first[program->nodes] : counted(c) ? s->count : MESH_STREAMS) + 1;
     s->buffers = counted(c) ? 2 + (s->relayed != 0) : 1 + (program ? program->scratch : 0);
     if ((!s->steps && !(s->steps = calloc(most, sizeof *s->steps))) || !(s->done = calloc(most, 1)) || !(s->channel = calloc(most, sizeof *s->channel)) ||
         !(s->entry = calloc(most, sizeof *s->entry)) || !(s->before = calloc(most, sizeof *s->before)) ||
@@ -1447,8 +1459,20 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     s->operand = operand;
     for (uint32_t r = 0; nccl && r < N; r++) s->cut[r] = (c->segments ? c->segments[r] : c->count) / u;
     if (p2p(c)) {
-      s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
-      s->count = 1;
+      double share[MESH_STREAMS];
+      uint64_t at[MESH_STREAMS], length[MESH_STREAMS];
+      uint32_t ways = 0;
+      for (uint32_t h = 0; h < comm->count && ways < MESH_STREAMS; h++)
+        if (comm->channels[h].peer == c->peer) share[ways++] = comm->channels[h].bandwidth ? (double)comm->channels[h].bandwidth : 1;
+      if (!ways) { share[0] = 1; ways = 1; }
+      mesh_cut_shares(operand.elements, operand.element_bytes, comm->page, share, ways, at, length);
+      s->count = 0;
+      for (uint32_t w = 0; w < ways; w++) {
+        struct mesh_operand piece = operand;
+        piece.elements = length[w];
+        if (length[w] || (!w && !operand.elements))
+          s->steps[s->count++] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, at[w], piece, w, 0};
+      }
     } else if (!counted(c)) s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->cut, comm->page, s->steps);
   }
   flow_free(&f);
@@ -1500,7 +1524,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
     if (!p->out || !p->in) { result = fail(ncclSystemError, "out of memory"); break; }
     for (int send = 1; send >= 0 && !result; send--) {
       uint32_t placed = 0;
-      mesh_group_lay(&group, me, (uint32_t)ch->peer, send, 0, scratch, made, &placed);
+      mesh_group_lay(&group, me, (uint32_t)ch->peer, h - (uint32_t)comm->toward[ch->peer], send, 0, scratch, made, &placed);
       mesh_pages end = {0};
       for (uint32_t k = 0; k < placed; k++) {
         const struct mesh_place *x = &made[k].place;
@@ -2825,7 +2849,7 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
   struct mesh_demand *d = calloc((size_t)n + 1, sizeof *d);
   uint64_t *leaves = calloc((size_t)n * words + 1, sizeof *leaves);
   uint32_t *source = calloc((size_t)n + 1, sizeof *source), demands = 0;
-  struct flow f = {0, NULL, NULL, NULL};
+  struct flow f = {0, NULL, NULL, NULL, NULL};
   struct ncclMeshRequest *r = calloc(1, sizeof *r);
   ncclResult_t result = d && leaves && source && r ? ncclSuccess : fail(ncclSystemError, "out of memory");
   for (uint32_t x = 0; !result && x < n; x++) {
@@ -2850,8 +2874,8 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
                   !(r->in = calloc((size_t)f.count + 1, sizeof *r->in)) || !(r->out = calloc((size_t)f.count * H + 1, sizeof *r->out)) ||
                   !(r->awaited = calloc((size_t)f.count + 1, sizeof *r->awaited))))
     result = fail(ncclSystemError, "out of memory");
-  uint32_t *tree = result ? NULL : calloc((size_t)f.count * n + 1, sizeof *tree);
-  if (!result && !tree) result = fail(ncclSystemError, "out of memory");
+  uint32_t *tree = result ? NULL : calloc((size_t)f.count * n + 1, sizeof *tree), *way = result ? NULL : calloc((size_t)f.count * n + 1, sizeof *way);
+  if (!result && (!tree || !way)) result = fail(ncclSystemError, "out of memory");
   for (uint32_t x = 0; !result && x < n; x++) { r->parts[x] = parts[x]; r->area[x] = SIZE_MAX; }
   for (uint32_t k = 0; !result && k < demands; k++) {
     const uint32_t x = source[k];
@@ -2859,6 +2883,7 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
     for (uint32_t t = 0; t < f.count; t++)
       if (f.demand[t] == k) {
         memcpy(tree + (size_t)r->pieces * n, f.parent + (size_t)t * n, n * sizeof *tree);
+        memcpy(way + (size_t)r->pieces * n, f.way + (size_t)t * n, n * sizeof *way);
         r->share[r->pieces++] = f.share[t];
       }
     r->count[x] = r->pieces - r->first[x];
@@ -2873,7 +2898,9 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
   for (uint32_t h = 0; !result && h < H; h++)
     for (uint32_t x = 0; x < n; x++)
       for (uint32_t j = 0; x != me && j < r->count[x]; j++)
-        if (tree[(size_t)(r->first[x] + j) * n + me] == (uint32_t)comm->channels[h].peer) r->in[r->ins++] = (struct leg){x, j, h, -1};
+        if (tree[(size_t)(r->first[x] + j) * n + me] == (uint32_t)comm->channels[h].peer &&
+            (uint32_t)comm->toward[comm->channels[h].peer] + way[(size_t)(r->first[x] + j) * n + me] == h)
+          r->in[r->ins++] = (struct leg){x, j, h, -1};
   for (uint32_t x = 0; !result && x < n; x++)
     if (x != me && lands[(size_t)x * n + me] && parts[x] && r->area[x] != SIZE_MAX) r->own[r->peers++] = x;
   for (uint32_t k = 0; !result && k < r->ins; k++)
@@ -2882,13 +2909,13 @@ ncclResult_t ncclMeshExchangeInit(const size_t *parts, const int *lands, ncclDat
     const uint32_t c = (uint32_t)comm->channels[h].peer;
     for (uint32_t x = 0; x < n; x++)
       for (uint32_t j = 0; j < r->count[x]; j++) {
-        if (c == x || tree[(size_t)(r->first[x] + j) * n + c] != me) continue;
+        if (c == x || tree[(size_t)(r->first[x] + j) * n + c] != me || (uint32_t)comm->toward[c] + way[(size_t)(r->first[x] + j) * n + c] != h) continue;
         const int32_t from = x == me ? -1 : leg_in(r, x, j);
         r->out[r->outs++] = (struct leg){x, j, h, from};
         r->relays += from >= 0;
       }
   }
-  free(tree); free(d); free(leaves); free(source); flow_free(&f);
+  free(tree); free(way); free(d); free(leaves); free(source); flow_free(&f);
   if (result) { if (r) request_parts_free(r); return result; }
   r->table = r->bytes;
   r->bytes += sizeof(struct mesh_table) + r->peers * sizeof(struct mesh_peer) + r->waits * sizeof(struct mesh_wait) + r->relays * sizeof(struct mesh_relay);
