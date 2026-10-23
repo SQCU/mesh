@@ -233,7 +233,7 @@ static void walk_begin(struct walk *w,const struct mesh_stream *h,struct mesh_st
     struct mesh_stream *m=mesh_stream_at(M,h->member[c]);
     const uint64_t g=atomic_load_explicit(&m->base[way],memory_order_relaxed);
     if(m==x)w->me=c;
-    w->cable[c]=(struct cable){.x=m,.base={m==x?a:(g+1)/2,m==x?b:g/2}};
+    w->cable[c]=(struct cable){.x=m,.base={m==x?a:lane_units(g,0),m==x?b:lane_units(g,1)}};
   }
 }
 /* this end's cable's pages before the holding (struct cable: its page g over the pairing on its lane g mod 2) */
@@ -244,13 +244,13 @@ static inline uint64_t walk_first(const struct walk *w){ return w->cable[w->me].
    cables' passes that complete pages at once the later reads both and stores the whole (walk_count); on one cable its
    pages are the holding's */
 static struct mesh_pages walk_through(struct walk *w,int way,uint64_t a,uint64_t b){
-  const uint64_t own=MIN(2*a,2*b+1)-walk_first(w);
+  const uint64_t own=lanes_through((const uint64_t[]){a,b})-walk_first(w);
   if(w->cables==1)return (struct mesh_pages){own};
   struct mesh_pages through=w->pages,q;
   for(uint32_t c=0;c<w->cables;c++){
     struct cable *k=w->cable+c;
-    const uint64_t x=c==w->me?0:atomic_load(&k->x->posts[way].done[0]),y=c==w->me?0:atomic_load(&k->x->posts[way].done[1]);
-    walk_place(w,&k->done,c,c==w->me?own:MIN(2*x,2*y+1)-k->base[0]-k->base[1],&q);
+    const uint64_t u[2]={c==w->me?0:atomic_load(&k->x->posts[way].done[0]),c==w->me?0:atomic_load(&k->x->posts[way].done[1])};
+    walk_place(w,&k->done,c,c==w->me?own:lanes_through(u)-k->base[0]-k->base[1],&q);
     through=mesh_pages_min(through,q);
   }
   return through;
@@ -420,9 +420,9 @@ static uint32_t stream_send(struct port *port,uint32_t t,uint32_t served){
   const struct frames each=frames_of(page_bytes());
   uint32_t posted=0;
   for(;;){
-    const uint32_t j=2*l->lane[k+1].sent+1<2*l->lane[k].sent,lane=k+j;
+    const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].sent)<lane_page(0,l->lane[k].sent),lane=k+j;
     struct mesh_pages q;
-    const struct taken *e=walk_place(w,&w->next,w->me,2*l->lane[lane].sent+j-walk_first(w),&q);
+    const struct taken *e=walk_place(w,&w->next,w->me,lane_page(j,l->lane[lane].sent)-walk_first(w),&q);
     if(!e)break;
     const struct mesh_pages i=mesh_pages_sub(q,e->page);
     struct ibv_sge span=ones_span(port,page_bytes()),page;
@@ -458,11 +458,11 @@ static void stream_post(struct port *port,uint32_t t,uint32_t served){
   struct mesh_stream *x=stream_of(port,t);
   struct walk *w=l->landing+t;
   for(;;){
-    const uint32_t j=2*l->lane[k+1].posted+1<2*l->lane[k].posted,lane=k+j;
+    const uint32_t j=MESH_STREAM_LANES>1 && lane_page(1,l->lane[k+1].posted)<lane_page(0,l->lane[k].posted),lane=k+j;
     struct lane_state *s=l->lane+lane;
     if(s->posted>=s->got+s->window)break;
     struct mesh_pages q;
-    const struct taken *e=walk_place(w,&w->next,w->me,2*s->posted+j-walk_first(w),&q);
+    const struct taken *e=walk_place(w,&w->next,w->me,lane_page(j,s->posted)-walk_first(w),&q);
     if(!e)break;
     if(e->word && mesh_pages_lt(mesh_pages_load(e->word),e->base))break;
     struct ibv_sge span=spare_span(port),page;
@@ -530,7 +530,7 @@ static void link_send(struct port *port,uint32_t served,uint32_t posted){
     if(l->hold[t]!=HOLD_SERVE)continue;
     struct walk *w=l->sending+t;
     struct mesh_pages sent;
-    if(posted&lanes && !w->me)walk_place(w,&w->next,0,MIN(2*s[0].sent,2*s[1].sent+1)-walk_first(w),&sent);
+    if(posted&lanes && !w->me)walk_place(w,&w->next,0,lanes_through((const uint64_t[]){s[0].sent,s[1].sent})-walk_first(w),&sent);
     for(;posted&lanes && !w->me && w->timed<w->taken;w->timed++){
       const struct taken *e=w->ring+w->timed%MESH_STREAM_ENTRIES;
       if(e->pages.n && !mesh_pages_lt(e->page,sent))break;

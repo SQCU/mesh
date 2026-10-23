@@ -131,6 +131,19 @@ struct cursor { uint64_t at,before; };
    nothing is outstanding between holdings) and its cursor at its first page not completed (mesh-link.c walk_through).
    A cable's pages go on its lanes in turn: its page g over the pairing is unit g div 2 of its lane g mod 2 */
 struct cable { struct mesh_stream *x; uint64_t base[2]; struct cursor done; };
+/* design/transport.md section 14: the lanes of its pair a stream's pages go on, a cable's page g over its pairing on
+   its lane g mod MESH_STREAM_LANES as that lane's unit g div MESH_STREAM_LANES (lane_page); a cable's pages done in
+   order run to the least of its lanes' next pages (lanes_through), and of its g pages before a holding, its lane j
+   holds lane_units(g, j) */
+#define MESH_STREAM_LANES 2u
+_Static_assert(MESH_STREAM_LANES>=1 && MESH_STREAM_LANES<=2*MESH_STREAM_PAIRS,"a stream's lanes, of its pair");
+static inline uint64_t lane_page(uint32_t j,uint64_t u){ return MESH_STREAM_LANES*u+j; }
+static inline uint64_t lane_units(uint64_t g,uint32_t j){ return (g+MESH_STREAM_LANES-1-j)/MESH_STREAM_LANES; }
+static inline uint64_t lanes_through(const uint64_t *u){
+  uint64_t g=lane_page(0,u[0]);
+  for(uint32_t j=1;j<MESH_STREAM_LANES;j++)g=MIN(g,lane_page(j,u[j]));
+  return g;
+}
 /* design/transport.md section 14: a holding's walk of one of its lists, its port's progress thread's: a ring of
    MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `timed` given a time, the
    list's pages so far (`pages`), the count last stored (`count`: `sent` or `landed`, in pages), its stream's cables
