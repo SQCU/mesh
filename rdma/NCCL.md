@@ -674,9 +674,8 @@ including unseen ones in fast finite time is preferred".
   - An exchange: a demand a rank's part, root its owner, the ranks that land it the leaves, `down` its bytes.
   - The capacities are the physical cables of the whole map, one edge a cable with its capacity (`struct mesh_uses`):
     a link of the communicator's map, a pair of members, is a weighted use of the cables along the bridges' route
-    between their nodes, every cable of the hop by its share of their capacities where the two are joined by cables,
-    and the least-numbered cable of each hop where the route crosses other nodes, as the bridges send them
-    (design/transport.md section 14, "Sending"). A pair's load is added to the cables it uses, so a cable that several
+    between their nodes, every cable of each hop by its share of that hop's capacities, as the bridges place a key's
+    runs (design/transport.md section 14, "The wire"). A pair's load is added to the cables it uses, so a cable that several
     pairs' routes share is counted once; and a per-hop latency (`hop`, seconds: 0, the bridges' records carrying no
     latency). A step names its peer alone. The per-cable `way` of trees, steps, routes and the solver's output, and the
     point-to-point cut among a pair's cables, are deleted.

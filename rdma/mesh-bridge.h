@@ -123,7 +123,7 @@ struct link {
   uint64_t pool_free[MESH_POOL_BLOCKS/64],order[MESH_LINK_LANES];
 };
 /* design/transport.md section 14, "A process a port"; section 15, "The children"; section 16 */
-#define MESH_CHILD_VERSION 9u
+#define MESH_CHILD_VERSION 10u
 enum { CHILD_OPEN=1, CHILD_MAKE, CHILD_CONNECT, CHILD_HALT, CHILD_END,
        CHILD_OPENED, CHILD_MADE, CHILD_CONNECTED, CHILD_BROKEN, CHILD_FAULTED, CHILD_NAMED };
 struct child_message {
@@ -138,15 +138,17 @@ struct child_message {
 struct port;
 /* design/transport.md section 14, "Sending", "The index" and "Relays" */
 struct named { uint64_t name[2]; uint32_t node,padding; };
+struct joined { uint32_t count,cable[MESH_REACH]; uint64_t bandwidth[MESH_REACH],total; };
 struct indexed { uint64_t key[3]; struct mesh_plan *table; struct mesh_entry *entry; uint64_t k; };
 struct walker {
   uint64_t serial,told;
   struct named *name;
-  uint32_t names,nodes,*node,*hop,*least,*path,*paths;
+  uint32_t names,nodes,*node,*hop,*relaying,*path,*paths;
+  struct joined *joined;
   struct indexed *index;
   uint32_t indexed,index_room,blocked[MESH_CLIENTS],blocks;
   struct mesh_plan **table;
-  uint32_t tables,table_room,turn;
+  uint32_t tables,table_room;
   int fresh;
 };
 struct progress { _Alignas(MESH_LINE) _Atomic uint64_t passes; struct port *port; int way; struct walker walker; };

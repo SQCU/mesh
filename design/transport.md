@@ -227,6 +227,7 @@ with a device's termination (section 9).
 | 2026-10-02 | a GPU kernel spinning with no bound on a word only another command queue wrote; the M5 crashed | ours |
 | 2026-10-17 | `pair_flush` spinning for `ib_drain_qp` markers the provider accepts and never completes | ours: waiting on something never promised |
 | to 2026-10-19 | unbounded host and GPU waits on landed words, waits on peers in call setup | ours |
+| 2026-10-23 | m5ult2's port children of version 137, booted out with every node's bridge at the 08:28 UTC install, in the release of their verbs objects (TH_UNINT in IORDMAFamily from AppleThunderboltRDMA, one through IOThunderboltFamily); the next children's opens behind them, watchdogd blocked 91 s; both Studios reset (wdog), the Mini up | the provider's release, entered by our exits with a receive posted on every lane toward peers exiting at once |
 
 The data path of Apple's provider (`post_send`, `post_recv`, `poll_cq`) always returned. Every infinite wait on record
 was ours, and the one kernel hang was entered through a call of ours.
@@ -287,6 +288,28 @@ handler only sets the flag), and cannot enter the October 18 deadlock, which nee
 The one exposure left is the kernel's own release of the device at the process's exit coinciding with a termination,
 which is what upgrades avoid by their timing: one node at a time, with no program running and the peer's bridge
 steady.
+
+What a port's child holds when it exits, and in what state (mesh-link.c; the kernel releases each at the exit, in the
+provider's order):
+- its device context, protection domain and the memory regions over the region's pages (`device_up`, `link_make`);
+  local to this node;
+- its two completion queues and a queue pair a lane (unreliable connected, in RTS toward the peer's), `link_make` and
+  `link_connect`;
+- the work requests posted on them and not completed: each lane's key unit receive and a placed run's page receives
+  (`post_receive`), and the key units and pages of runs taken (`post_send`), each SEND held by the hardware's credit
+  until the peer has a receive posted (TN3205); after `port_halt` (`served` 0, `closing`) nothing more is posted, and
+  nothing posted is taken back (no flush, section 5);
+- relay entries and pool pages, and the lane records (`struct relay`, `struct lane_record`), words of the region,
+  which the parent reaps after the exit (`lanes_reaped`, `relays_sent`): no kernel object.
+
+Of these, the release can wait on the peer for what crosses to it: a receive posted (the credit it gave the peer) and a
+SEND held in credit (the peer's receive it waits for). Where both ends of a link exit at once (every node's bridge
+booted out at one install), each end's release meets a peer that is releasing too. On 2026-10-23 at 08:28 UTC the
+children of version 137 did so with a key unit's receive posted on every lane of every link, as every idle child of
+versions 136 and 137 had (section 6), and the provider's release did not return. The bridge of a6f981f6 posted
+receives only while a stream was held, and its idle children, booted out alike at 08:05, ended. Since version 138 a
+child posts a receive only where a run is to come (section 14, "What is posted"), so a child with no call in flight
+and no relay through its node holds no work request at its exit.
 
 Nothing of the node's brings a fabric port down: a port whose cable link is up with no RDMA peer is logged and held
 (`bin/mesh-fabric-init.sh`), since a port taken down under the bridge's open device terminates the device beneath its
@@ -400,7 +423,8 @@ The algorithm analysis these rows rest on is metal-microbench `output_data/bridg
 | A progress thread with nothing to do | parked on a bell clients ring (127) ≺ spinning while the link serves, waiting on its lanes served while it serves nothing | M8 |
 | The binary changing | the bridge stops itself ≺ it stops on its heartbeat's SIGHUP alone | M3 |
 | What a client's traffic is named by | a stream: an owner word taken by an identity both ends compute, at most four a link, one communicator a stream (129-135) ≺ tuples in the client's own queue, each naming its rows and an opaque key (136) | M5, M2 |
-| Who chooses cables and queue pairs | the client, by holding a stream on each cable (129-135) ≺ the bridge alone, a tuple's runs taken by every port to its node as its lanes have room (136) | M5, M9 |
+| Who chooses cables and queue pairs | the client, by holding a stream on each cable (129-135) ≺ the bridge alone, a tuple's runs taken by every port to its node as its lanes have room, a relay on the least-numbered cable (136) ≺ the bridge alone, each tuple placed on one cable and lane of each hop by its key and the cables' bandwidths, relays alike, both ends computing it (138) | M5, M9, M8 |
+| What a child holds posted | a key unit's receive on every lane while it serves, idle or not (136-137: its release met its peers' at the 2026-10-23 install) ≺ a receive only where a run placed on that lane is to come, or where relays may come through its node (138) | M3, M4, M6 |
 | How a page finds its rows | in order on its stream: each end's i-th page (129-135) ≺ by its run's key unit, found in a sorted index of the started landing tuples, arrival order between runs irrelevant (136) | M9 |
 | How ranks meet | a TCP root, its listener, two gathers and phases bounded by the deadline (to 135) ≺ a registration in the client's queue, carried in its bridge's record, the members read from the map (136) | M2, C1 |
 | Pages for a node no cable reaches | none: the collective relayed through members, and pairs joined only through other nodes failed (to 135) ≺ the neighbour's bridge lands them and sends the same pages on (136) | M8, C2 |
@@ -461,22 +485,31 @@ Every word below, with its one writer at a time and its readers:
   record of the map has held stays in its queue: no bridge sends it.
 - **The wire.** Every queue pair of a link carries runs. A run is a key unit (64 bytes: the key, the offset of its first
   page within the tuple, its count of pages) and then those pages, each a SEND of one whole page; a run is at most
-  `MESH_RUN` pages. The receiving child keeps one key unit's receive posted on each lane, after the receives of the run
-  before it.
+  `MESH_RUN` pages. A tuple's runs all travel one lane of one cable of each hop (`placed`): of the cables the two
+  nodes' records join between them (`mesh_joined`, sorted by `cable`), the one where SplitMix64's finalizer of the key,
+  modulo their bandwidths' sum, falls in the cable's share of that sum, and of that cable's lanes the quotient modulo
+  their count. Both ends of a hop compute it from the same records and the same key (version 138).
+- **What is posted.** A receiving child posts a key unit's receive on a lane only where a run is to come on it: a
+  started landing tuple of its node, not complete and not ~0, whose sender's node this port's peer is the way to, placed
+  on this lane, with pages not yet posted (`lane_expects`), or, on every lane of a port, a registration at a node to
+  which that port's peer routes through this node (the walker's `relaying`: the relays it may carry). After a run's
+  pages are posted it posts the next key unit's receive only where that still holds. So a child whose node has no call
+  in flight and relays nothing holds no receive posted, and a SEND toward it waits in its sender's credit (TN3205)
+  until the landing starts.
 - **Sending.** Each child's send thread walks its node's live clients' queues. For each client it takes the started
   tables in the order of their k, and in each table the send tuples whose node its peer is the way to. It takes a run
   from a tuple once the tuple's word has reached its `need`, by a compare-and-swap of `posted` from what it read to that
-  plus the run's pages, and posts the key unit and the pages on its lanes in turn. A tuple not yet ready, or not yet all
-  taken, holds every later table of its client toward the same node, so a lane carries a client's calls toward a node in
-  their order. The children of every port whose peer is the tuple's node take runs of the same tuple, each as its lanes
-  have room, so the tuple's pages spread over every cable to that node by what each cable moves. A tuple for a node no
-  cable reaches goes to the next node of the map's route (`mesh_routes`), on the cable of least `cable` id to it
-  (`least_toward`), which the communicator's solver counts as the cable that hop uses (rdma/NCCL.md, Routing).
+  plus the run's pages, and posts the key unit and the pages on its placed lane, a run at a time. A tuple not yet ready,
+  or not yet all taken, holds every later table of its client toward the same node, so a lane carries a client's calls
+  toward a node in their order; the tuples of one table go on at once. A tuple for a node no cable reaches goes to the
+  next node of the map's route (`mesh_routes`), placed on that hop's cables alike, so a call's tuples spread over every
+  cable of each hop by what each cable moves, which the communicator's solver counts as each hop's use of each of its
+  cables (rdma/NCCL.md, Routing).
 - **The index.** Each port's receive thread, when a key unit it must place has landed, reads its node's live clients'
   started landing tuples into a sorted array (key → table, tuple, k), within one walk of the queues, and finds the key
   in it by binary search. A key unit that lands is placed:
   - a started landing tuple of the key: the run's receives go into the tuple's rows from the offset, each the page its
-    row gives in the page table, and then the next key unit's receive;
+    row gives in the page table, and then the next key unit's receive where one is to come (What is posted);
   - a registration of this node with no such tuple yet: the run waits on its lane, and its pages in the sender's credit
     (TN3205), until a table naming the key starts; the lane carries nothing past it meanwhile. It is not landed in free
     pages and bound to the landing's rows later, because a client reads a buffer at its address: a lease's pages are
@@ -490,9 +523,10 @@ Every word below, with its one writer at a time and its readers:
   - a registration no record holds: its pages land in the port's spare page.
 - **Relays.** A run whose registration another node holds lands in pages of the receiving port's pool (the bridge's own,
   `pool[port]` of its pages), and is a relay entry in that port's link pages: its key, offset and count, its pool pages,
-  its lane and its order on that lane. Once its pages have landed, the child of the port whose cable has the least id
-  toward the route's next node sends the same pages on, on the lane of the same index (modulo its lanes), each lane's entries in their order; the
-  receiving child takes its pool pages back once they are sent. Nothing is copied, and the entry is all the accounting.
+  its lane and its order on that lane. Once its pages have landed, the child of the port toward the route's next node
+  on which the key is placed sends the same pages on, on its placed lane, the entries of one receiving lane in their
+  order; the receiving child takes its pool pages back once they are sent. Nothing is copied, and the entry is all the
+  accounting.
 - **Completion.** A completion adds one to its tuple's `count`. The child whose add completes the tuple stores `done` =
   k by compare-and-swap from what it read (never over ~0), and adds one to the table's `completed` of that way; the child
   whose add completes the way stores `sent` or `landed` = k the same way.
@@ -940,6 +974,7 @@ The heartbeat (mesh-heartbeat.c):
 | 2026-10-17 | `pair_flush` waiting for drain markers | No flush and no drain exist: unreachable. |
 | to 2026-10-19 | host and GPU waits on landed words, waits on peers in setup | The collective's: a group's waits re-read the revoke, the bootstrap's phases end within the deadline. The bridge waits on no peer. |
 | 2026-10-16, 10-17 | the Mini's kernel data aborts at 0x98 seconds after its bridge stopped (a panic, not a hang) | Each stop then destroyed queue pairs while posts could be in flight. No queue pair is destroyed; a child's are released only by its exit, after it has halted its lanes (`served` 0, `closing`) and waited MESH_PLATFORM_NS and its windows (`child_leave`), so no post is in flight at the release. A child the watchdog ends cannot halt itself: it is stopped first (SIGSTOP stops every thread of it, so none posts), and killed MESH_PLATFORM_NS later, its device quiet as after a halt. The trigger is not established and the record stays open. A panic is the kernel's: no watchdog of ours runs through it; the node restarts, launchd starts the heartbeat, and peers pair again (M6). |
+| 2026-10-23 | port children of version 137 in the provider's release at an exit shared with every peer's, a receive posted on every lane | A receive is posted only where a run is to come (section 14, "What is posted"), so an idle child holds no work request (section 9). Left open: an exit in a call's flight, a node that relays while registrations route through it, and SENDs held in credit for a landing that never starts. |
 | this section's inventory | the parent blocked sending to a child that does not read (a blocking socketpair) | Non-blocking: a send that does not go whole marks the child deaf; its job, if that message was it, ends EPIPE at once (it never reached the child), nothing more is sent to it, and it is ended as a hung child. |
 | this section's inventory | a child asked to end that does not end (its main loop not reading CHILD_END, or its exit held): its port waits for it forever (`recycle`) | The watchdog: SIGSTOP MESH_PLATFORM_NS and MESH_PAUSE_NS after the ask (`child_leave` ends an asked child within MESH_PLATFORM_NS), then SIGKILL MESH_PLATFORM_NS later, each outside every window, its port with no job out and no port's job out past the deadline (`child_may_end`). |
 | this section's inventory | an earlier launch's child that does not end: its port's next child is never spawned (`elsewhere`) | The watchdog: the same, from twice MESH_PLATFORM_NS after it was found (its own `child_leave` ends within that), while it is still that process (its pid and start, `mesh_holds`). |

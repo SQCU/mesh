@@ -437,16 +437,7 @@ static void comm_leave(struct ncclComm *comm) {
   pthread_mutex_unlock(&attach_lock);
 }
 
-static uint64_t hop_capacity(const struct mesh_link_map *map, uint32_t u, uint32_t v, uint32_t *least) {
-  uint64_t sum = 0;
-  *least = UINT32_MAX;
-  for (uint32_t l = 0; l < map->edges; l++)
-    if ((map->edge[l].a == u && map->edge[l].b == v) || (map->edge[l].a == v && map->edge[l].b == u)) {
-      sum += map->edge[l].capacity;
-      if (*least == UINT32_MAX || map->edge[l].cable < map->edge[*least].cable) *least = l;
-    }
-  return sum;
-}
+static int hop_joins(const struct mesh_edge *e, uint32_t u, uint32_t v) { return (e->a == u && e->b == v) || (e->a == v && e->b == u); }
 
 static int map_of(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
@@ -485,14 +476,13 @@ static int map_of(struct ncclComm *comm) {
       uint64_t bottleneck = 0;
       const uint32_t at = uses;
       for (uint32_t h = 1; h < hops; h++) {
-        uint32_t least = UINT32_MAX;
-        const uint64_t sum = hop_capacity(&whole, path[h - 1], path[h], &least), used = hops == 2 ? sum : least == UINT32_MAX ? 0 : whole.edge[least].capacity;
-        if (h == 1 || used < bottleneck) bottleneck = used;
-        for (uint32_t c = 0; hops == 2 && c < whole.edges; c++)
-          if (whole.edge[c].capacity && ((whole.edge[c].a == path[0] && whole.edge[c].b == path[1]) || (whole.edge[c].a == path[1] && whole.edge[c].b == path[0]))) {
-            use[uses] = c << 1 | (whole.edge[c].a != path[0]); weight[uses++] = (double)whole.edge[c].capacity / (double)sum;
+        uint64_t sum = 0;
+        for (uint32_t c = 0; c < whole.edges; c++) sum += hop_joins(whole.edge + c, path[h - 1], path[h]) ? whole.edge[c].capacity : 0;
+        if (h == 1 || sum < bottleneck) bottleneck = sum;
+        for (uint32_t c = 0; c < whole.edges; c++)
+          if (whole.edge[c].capacity && hop_joins(whole.edge + c, path[h - 1], path[h])) {
+            use[uses] = c << 1 | (whole.edge[c].a != path[h - 1]); weight[uses++] = (double)whole.edge[c].capacity / (double)sum;
           }
-        if (hops > 2 && least != UINT32_MAX) { use[uses] = least << 1 | (whole.edge[least].a != path[h - 1]); weight[uses++] = 1; }
       }
       if (hops < 2 || !bottleneck) { uses = at; continue; }
       first[map->edges] = at;
