@@ -24,9 +24,10 @@ separates shared function metadata from each value's operands and uses.
 
 **The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library; program
 type B, the library, its kernels and layers `examples/kernels.py` and `examples/nn.py` type C, design/deliverables.md
-section 5): the same contract as `swift/Mesh.swift`, spelled as Pallas spells it. A `Program(backend, *, functions,
+section 5): a program surface spelled as Pallas spells it (the Swift module of the same contract, swift/Mesh.swift,
+was deleted in a8952de9). A `Program(backend, *, functions,
 group, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
-collective's members place the work. Recording builds the graph; `realize()` (`start()`, Swift's name) prepares it;
+collective's members place the work. Recording builds the graph; `realize()` (also `start`, python/mesh/__init__.py:795) prepares it;
 the host then writes its inputs (`write`) and reads its results (`export`, `Result.ready`, `consume`). The firing
 rule is the old executor's (design/deliverables.md L3): an edge per (writer, reader) pair of overlapping regions on a
 member, a token on it when the writer finishes, a call firing when every input edge holds a token and every output
@@ -46,114 +47,21 @@ puts the checkout's `python/` ahead of `rdma/` on its path before it imports tor
 The JAX authors, [BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html),
 and Apple [mmap](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mmap.2.html):
 references for indexed sections and virtual mappings of actual shared backing.
-`mesh_operand.load(at:as:)` applies that logical indexing to naturally aligned,
-fixed-width tensor scalars. Its C address calculation uses the operand's canonical
-mapping and realized page geometry. For byte offset b and transport
-extent C, it reads entry floor(b/C), then addresses b mod C within that backing.
-It does not allocate, check presence, scan pages or materialize the operand. The
-helper is inlined into supplied Swift numerical functions. Indexed operands carry
-one mapping pointer and one realized byte extent; the current operand is 48 bytes,
-including its prepared publication pointer.
-The first-page
-`data` pointer alone does not describe a discontiguous input of `bytes` length.
-Local outputs remain contiguous and retain their direct pointer interface.
-The indexed scalar API describes logical elements; neither its indices nor the
-caller function changes when the bridge's transport extent changes.
-ABI 63 removes ABI 58's redundant page-list offset and `mesh_buffer_pages`.
-Every list starts at its buffer's logical row, so chunk j is directly
-`mesh_page(m)[row + j]`. `mesh_row_page` selects that entry for existing native
-placement paths. Logical
-metadata extent is independent of payload-page extent, and retain/release acts
-on one buffer identity. The [compact-list derivation](transport.md)
-gives the address algebra, allocation counts and metadata cost. Neither the
-indexed scalar helper nor receive placement performs packing or allocation.
-The ABI-69 operand representation uses the canonical page array directly:
-`mesh_operand_address` implements arena base + page size × indexed page +
-in-block offset; `mesh_operand_page` selects that same first entry. The Swift
-`data` and `page` accessors use these operations, while `invocation` reads the
-prepared sequence address. These replace dispatch's cached address/page copies
-and per-operand sequence writes. See the
-[explicit address algebra and costs](transport.md).
-
-ABI 72's [prepared native view indices](transport.md)
-apply the same indexed-storage representation to backend view selection.
-`mesh_backing_bind` realizes local indices; receive placement supplies its already
-known pool index. A canonical 64-bit entry carries this result with its physical
-page, without an additional mapping table. `mesh_operand_view` loads its upper
-word, and `MeshBindings.index` replaces the stored Swift indexing closure with
-that direct read. Receive-pool return uses the same value. The mechanism is
-setup specialization of the Pallas-style indexed operands above and the existing
-registered-storage interface, independent of the supplied numerical function.
-
-ABI 75 extends that canonical entry with the terminal client address. Under the
-same Pallas/Apple mapping mechanism, local setup and receive placement compute
-`client_base + page_size * physical_page` once. `mesh_operand_data` reads that
-result; indexed reads add only their within-entry offset. The bridge receives
-the client's mapped base during setup and never dereferences the resulting
-client address. Native copy bindings precompute their source-entry pointers,
-destinations and extents. [Address preparation](transport.md)
-accounts for the added producer store, storage and remaining canonical read.
+The Swift accessor `mesh_operand.load(at:as:)` and the C operand ABI under it (ABI 63-75: `mesh_operand_address`,
+`mesh_operand_page`, `mesh_backing_bind`, `mesh_operand_view`, `MeshBindings.index`, `mesh_operand_data`) are in no
+source; swift/ was deleted in a8952de9. The Python surface's views and blocks are below.
 
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The operator, 2026-09-15 (UTC): "have a subagent literally write a refcounter which
 doesn't rely on users of buffers specifically and literally inlining some kind of 'please say im done using the
 resource' explicit free like we're in c."; 2026-09-14: "remember that garbage collection in this case simply means 'releasing' pages into
 the 'pool of pages you can write to if you wanna lol' without even needing to zero them lol".
-The implementation groups shared-input ownership by prepared function binding,
-while transient inputs retain one reference per indexed use. Native completion
-releases those input references after publishing outputs; downstream readers own
-the outputs separately. Each prepared call holds its frame's input countdown
-and output storage, selected by the realized consumer records.
-The [lifetime derivation](transport.md) describes
-completion, cancellation and destruction. This is an application of counted
-ownership to known lifetimes, not a new collection algorithm attributed to Collins.
-`TensorPart` contains primitive values and an optional C `mesh_section`, with no
-`MeshSection` object. The descriptor carries its receive channel, with
-`MESH_ABSENT` for local storage; the separate Swift receive-channel field and C
-receive boolean are removed. Setup owns one reference per allocated section in
-`MeshMemory.sections`. `releaseSections` drops those references after binding and
-empties the array; the same method returns outstanding setup ownership during
-destruction. There is no per-part ARC release on the numerical path and no
-descriptor-retention reference outside the declared dataflow. This changes
-ownership representation, not the numerical operand ABI or transport framing.
-Every retain occurs while setup still owns the section, so it is one relaxed
-increment; there is no attempt to resurrect a zero-reference value. Execution
-only releases declared uses. The retain CAS loop, rollback path, sealed flag and
-seal operation are deleted. ABI 49 also removes the reclamation claim, retry stack
-and collector thread. Refzero sets one row bit in the section free pool; setup
-consumes those entries without reading refcounts or zeroing payload. The bridge
-discharges abandoned positive counts at the device-close retirement event.
-ABI 66 arbitrates setup reclamation and forced retirement through the existing
-atomic buffer owner. The bridge publishes the free bit before restoring that
-owner; setup consumes the bit only after claiming the descriptor, and alone
-returns descriptor capacity. Allocation initializes atomic fields individually
-and publishes owner last. These are cold allocation/teardown operations, with
-no new reference category or claim on publication, consumption or RDMA progress.
-The [retirement mechanism and limits](transport.md)
-describe this handoff; it does not establish remote-value reuse or multi-client
-allocation.
-ABI 53 keeps received backing in its RX-owned pool, including when no live value
-occupies a row. Refzero notifies that RX thread; it returns backing through the
-canonical entries. ABI 64 keeps the prepared count in the buffer itself and
-removes the function's count array and the receive record's count copy.
-`mesh_buffer_reset` reinstalls the count and clears presence on final return,
-before another numerical launch or receive repost. The live count is an ordinary
-32-bit atomic; the retirement flag is separate. Reset uses a plain atomic store
-without erasing that flag, an occupancy query, or a retry. First-chunk receipt
-no longer adds ownership or clears presence; the first-chunk conditional and
-flag are deleted. Final-chunk publication stores the sequence before notifying
-consumers. Client/device retirement returns the entire
-receive pool, including zero-count posted rows, only after QP teardown.
-The [event derivation and limits](transport.md)
-distinguish this bitmap pool from the X5/N1 per-worker instance
-rings. Counted ownership follows Collins; the bitmap and teardown epoch are Mesh's
-representation, not a new algorithm attributed to that paper.
-Contiguous sections use chunk-indexed backing and relative numerical byte offsets,
-with one presence bit and ownership record per numerical value. The
-[address and ownership derivation](transport.md)
-shows the receive permutation and the producer's single initial reference.
-These are mesh's representation choices, not new algorithms attributed to Pallas
-or Collins. Transport chunk counts do not define tensor partitions.
+The counted ownership that cited it, the Swift module's `TensorPart` and `MeshMemory.sections` and libmesh's
+reference counts, free bitmaps and receive pools (ABI 49-66), is in no source. A page's lifetime is now its lease: a
+client's rows are its own until it returns them (`mesh_lease_return`, rdma/mesh-call.h:22) or its process ends, and a
+program that reuses a buffer guards it in its own source (design/transport.md section 14;
+[extents-and-liveness.md](extents-and-liveness.md)).
+
 The Berkeley/Apple [mmap specification](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2)
 provides shared mappings of file-backed pages. Apple's
 [pshm_mmap implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/posix_shm.c)
@@ -174,33 +82,21 @@ publication (`write`) and of `constant`.
 
 ## MeshError
 
-Saltzer, Reed and Clark's end-to-end argument, cited below, places recovery with
-the caller. The current `MeshError` reports native link/function failures and
-admission status. Its setup error `partialOperand` was deleted at `3bd1eaa`;
-the [restored L5](deliverables.md#l--library-core) remains unimplemented in Swift. See the
-[algebra and implementation account](transport.md).
-
-Restored 2026-10-17 with the module that cites it (swift/Mesh.swift, 71bced9e). The Python surface's `MeshError`
-(`python/mesh`) carries the same three kinds as an exception (`busy`, `link` with the member across it, `function`
-with the call's record index, each an errno), raised by a wait on a failed program; its L5 refusal is a TypeError at
-recording (`Partial`, design/algorithm-sources.md#programkernel_call), so L5 holds there while Swift's
-`partialOperand` stays deleted.
+Saltzer, Reed and Clark's end-to-end argument, cited below, places recovery with the caller. The Python surface's
+`MeshError` (python/mesh/__init__.py:65) is an exception whose `kind` is `link`, with the member across it, or
+`function`, with the call's record index, each with an errno (python/mesh/__init__.py:808); a wait on a failed program
+raises it. Its L5 refusal is a TypeError at recording (`Partial`, [Program.kernel_call](#programkernel_call),
+python/mesh/__init__.py:514), so the [restored L5](deliverables.md#l--library-core) holds there. The Swift
+`MeshError` it was restored from (swift/Mesh.swift, 71bced9e) was deleted with swift/ in a8952de9; its setup error
+`partialOperand` had gone at 3bd1eaa.
 
 ## Mesh.result
 
 Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
 (1984), motivates keeping recovery with the caller. Mesh records native errors;
 it does not retransmit an operation or make its consumers wait for recovery.
-ABI 62 uses one atomic 16-byte status snapshot inside the existing aligned
-32-byte frame record: `{value, completed}`. `value` retains the two kind bits,
-thirty function/link ordinal bits and thirty-two native-code bits. `completed`
-is the last successful invocation plus one, zero before success, or `UINT64_MAX`
-for completed static-only work. `mesh_calls_result` returns success for that
-completed invocation and otherwise returns the fault or busy. The Swift decoder
-is unchanged. The compile-time assertion requires a lock-free 16-byte snapshot;
-on this ARM64 compiler the acquire read is `ldp` plus `dmb ishld`, with register
-comparisons and no polling loop. This replaces ABI 61's single 64-bit code word,
-which could lose the prior success on link failure and therefore violated F10.
+ABI 62's status snapshot and `mesh_calls_result`, which the Swift decoder read, are in no source
+(`mesh_calls_result` deleted in f531113f, the decoder with swift/ in a8952de9).
 
 Submission records the invocation before publishing roots. RX records it in the
 buffer before publication, then copies it to the owning frame on storage return,
@@ -382,16 +278,8 @@ Neither this change nor these citations establish the latency target.
 
 ## Program.kernel_call
 
-The Swift project’s [calling convention](https://github.com/swiftlang/swift/blob/main/docs/ABI/CallingConvention.rst#closures),
-[ARM64 register summary](https://github.com/swiftlang/swift/blob/main/docs/ABI/CallingConventionSummary.rst),
-and [type layout](https://github.com/swiftlang/swift/blob/main/docs/ABI/TypeLayout.rst),
-together with Clang’s [`swiftcall` and `swift_context`](https://clang.llvm.org/docs/AttributeReference.html#swiftcall),
-supply the native invocation ABI. `meshInvocation` realizes ordinary Swift
-functions. `MeshLaunch` stores their concrete, nongeneric function values; setup
-extracts code/context pairs from that value and retains it in the existing
-`MeshMemory`. C calls the prepared target with the context in Swift’s context
-register. It does not invoke a C callback that discovers another Swift function.
-The same representation supplies the optional native rearm function.
+The Swift invocation ABI that this section cited (`meshInvocation`, `MeshLaunch`, a C call into Swift's context
+register) was deleted with swift/ in a8952de9.
 
 The engine's `MatrixOperations.multiply` now binds concrete operands before
 returning the numerical function, using Apple's
@@ -403,34 +291,6 @@ concrete operands. The source path and compiler comparison are recorded in
 [resolved matrix dispatch](../../../metal-microbench/docs/async_collectives.md#resolved-matrix-dispatch).
 The engine now also records its complete native decode step; see
 [Native Metal program](#native-metal-program).
-
-The invocation ABI passes only the existing call address. The worker no longer
-loads operand-array pointers and input counts to construct unused arguments for
-a resident command. Ordinary CPU/Metal and Core ML functions read the operands
-they consume; their input/output counts are already setup captures. Inline C
-field accessors expose the aligned record to Swift without a second descriptor
-or an out-of-line call. Binding allocates an operand array even for a zero-operand
-call, so its accessor's nonnull result needs no runtime check. The resident thunk
-reads only the frame index before selecting its prepared command. The index read
-moves from C to Swift; the unused operand-pointer/count reads are deleted, not
-deferred. The remaining use-record → call-record → command dependency depth is
-unchanged. This private ABI is shared by the C and Swift libraries.
-
-This is specific to the existing Darwin 64-bit Swift/Clang ABI. Reading a generic
-function value with `unsafeBitCast` is not equivalent: Swift can introduce an
-indirect-argument reabstraction thunk. Likewise, importing the launch as an Apple
-block introduces a context-retaining conversion thunk. Neither conversion is on
-the committed launch path. The call depends on the concrete stored representation
-agreeing with the generated register assignment.
-See [direct Swift dispatch](transport.md).
-
-The engine’s `encodePrefillOutput` extraction and `encodeDecodeOutput` binding
-reuse its existing normalization, projection, sampling and logprob functions.
-Their final Mesh call supplies the command buffer and operand dimensions. They
-introduce no numerical algorithm. Engine session ownership uses the existing
-Collins-style page references through Swift ARC; the
-[caller lifecycle](../../../metal-microbench/docs/compute_execution.md#mesh-output-and-session-lifetime)
-describes successful completion and the retained resources of failed work.
 
 The [direct return indices](transport.md)
 at ABI 74 apply Monsoon's explicit frame addressing to native-call reclamation.
@@ -458,23 +318,6 @@ its countdown reaching zero invokes the supplied function in the same frame.
 The invocation hash, join/free tables and independent native-slot ring are deleted.
 The [current lifetime contract](transport.md) supersedes
 the older slot-assignment descriptions below. N1 remains incomplete.
-
-Collins's reference counting releases a numerical input at the completion of its
-own declared use. `mesh_call_complete` performs those decrements directly for
-CPU, Metal and Core ML, after publishing outputs. Publication retains each
-output's existing producer reference through this cleanup, then completion
-releases those references. Final output return therefore implies that the
-callback has finished using its operand metadata, without an additional native
-completion notice or counter. The success-only completion wrapper is deleted;
-Swift passes zero to the implementation on success. Constants and RX publication
-also release their producer reference explicitly after publication. The worker
-drains publication notices before return cleanup and rearming; both use their
-existing indexed notification queues.
-Within publication, all declared TX notices precede the presence store and local
-consumer-mask load/notifications. Forwarded receives follow the same ordering;
-the wire-facing notification does not depend on local-consumer bookkeeping.
-The [chain and fan-out derivation](transport.md)
-distinguishes this local storage fact from unfinished global frame reuse.
 
 Gregory M. Papadopoulos and David E. Culler,
 [Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
@@ -505,16 +348,7 @@ does not read these stamps.
 
 Robert A. van de Geijn and Jerrell Watts,
 [SUMMA: Scalable Universal Matrix Multiplication Algorithm](https://www.cs.utexas.edu/~rvdg/abstracts/SUMMA.html)
-(1997), supplies the contraction decomposition into products of operand panels.
-The caller's `contract` in `examples/gram-chain.swift` declares each two-input
-product independently and combines K-panel contributions with `reduceScatter`.
-This uses SUMMA's panel algebra; it does not copy its MPI broadcast schedule.
-The supplied numerical function calls Accelerate's Level-3 BLAS `cblas_sgemm`;
-the supplied combine calls `vDSP_vadd`. The same composition implements the
-rectangular projections and both products of `R(RᵀH)`, with dimensions and
-transpose flags captured at declaration. Mesh contains none of that arithmetic.
-The [G1 derivation](transport.md) gives the
-operand identities, placements and repeated residual composition.
+(1997), supplied the panel algebra of `examples/gram-chain.swift`'s `contract`, deleted with swift/ in a8952de9.
 
 Apple's [Core ML Tools MIL builder](https://apple.github.io/coremltools/docs-guides/source/model-intermediate-language.html)
 and compiler create the supplied model artifacts in `examples/coreml-models.py`.
@@ -1025,22 +859,8 @@ chunks of less than a slot at their bytes, so it chose them where each costs a w
 output_data/libreview-20261015: up to 8.8 times off); this time equals the review's position-level simulator of the host
 path to the last bit on 1,520 candidates (output_data/library-20261015/pass2/sims/model_vs_review.json).
 
-Swift's `Topology` (swift/Topology.swift, restored 71bced9e) is that map as `Mesh.observe` reads it: its nodes and, on
-each unordered pair, the list of its links. Its anchors are restored (deleted in 604f210e and 224961a6):
-
-### Topology.Pair
-
-`Topology.Pair`: the [graph representation above](#topology), with the smaller endpoint first, gives both endpoint orders the same dictionary key.
-
-### Topology.links
-
-`Topology.links(between:_:)`: the [graph representation above](#topology) represents a missing edge by an empty list; dictionary subscripts remain optional.
-
-### Topology.merging
-
-`Topology.merging`: the [graph representation above](#topology) uses node-set union and per-pair list concatenation; the caller supplies observations and mesh exchanges none.
-Concatenation preserves repeated observations, including both endpoint descriptions
-of the same physical link; this operation does not deduplicate them.
+Swift's `Topology` (swift/Topology.swift, restored 71bced9e), with `Topology.Pair`, `Topology.links` and
+`Topology.merging`, was deleted with swift/ in a8952de9.
 
 ### Link
 
@@ -1050,23 +870,22 @@ Bandwidth is bits per second: speed codes 1/2/4/8/16/32/64/128 mean
 Unrecognized codes yield zero (unavailable), without withholding the link.
 The bridge publishes bandwidth before the paired phase; atomic scalar access also
 covers re-pairing. A link is named by its port's index; no device name leaves the
-bridge. Port bandwidth is an attribute, not measured payload throughput; a link's
-cost is `mesh_map`'s from it (mesh-plan.h `MESH_ALPHA_US`, `MESH_BETA_NS`).
+bridge. Port bandwidth is an attribute, not measured payload throughput, and it is the only fact of a link that
+routing reads (`mesh_map`; `MESH_ALPHA_US` and `MESH_BETA_NS` were deleted in cc8a6f8e).
 
 ### Mesh.observe
 
-`mesh_observe`, `mesh_map` and `mesh_map_wait`, the bridge's map reader (mesh-plan.h, mesh-dataflow.c): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
-`mesh_observe` copies the node's port table into plain `mesh_link_view` records, a
-port by its index, and returns the port count or negative errno. `mesh_map` copies
-the bridge's map (design/transport.md), every node's newest record, as
-the seqlock's reader (Boehm, MSPC 2012): the serial read with acquire, the records
-copied, the copy kept where the serial was even and is unchanged (`mesh_map_whole`),
-else copied again. From that copy it makes the whole map, two nodes linked where each
-one's record holds ports paired with the other, its table the routes the bridges
-forward along, and over the members the members' map of it (#topology).
-`mesh_map_wait` waits on the serial, within its bound, so a loop of executions
-takes the next map. The bridges keep their links paired with or without a client, so
-the map is current whether or not anything runs (design/transport.md).
+`mesh_reached`, `mesh_region`, `mesh_map`, `mesh_map_wait` and `mesh_nodes_health`, the bridge's map readers (mesh-plan.h, rdma/mesh-dataflow.c:26-150): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
+`mesh_reached` returns this node and the nodes its streams reach, each with its bandwidth, and `mesh_region` the
+region's bytes and those not leased. `mesh_map` copies the bridge's map (design/transport.md), every node's newest
+record, as the seqlock's reader (Boehm, MSPC 2012): the serial read with acquire once it is even, the records copied,
+the copy kept where the serial is unchanged (`mesh_map_whole`), else copied again. From that copy it makes the whole
+map, two nodes linked where each one's record reaches the other, at the lesser bandwidth (`mesh_joined`), its table the
+shortest routes (`mesh_routes`), and over the members the members' map of it (#topology). `mesh_nodes_health` reads
+the same records for each node's region, memory, model and health. `mesh_map_wait` waits on the serial, within its
+bound, so a loop of executions takes the next map. The bridges keep their links paired with or without a client, so
+the map is current whether or not anything runs (design/transport.md). `mesh_observe`, which copied the port table,
+became `mesh_reached` in f4b363ad, and Swift's `Mesh.observe` was deleted with swift/ in a8952de9.
 
 ## Program.write
 
@@ -1361,13 +1180,9 @@ and the MLX authors' [system-coherent Metal accesses](https://github.com/ml-expl
 provide the mechanisms used here. This is operand representation; numerical
 functions remain supplied by the caller.
 
-ABI 77 replaces the separate presence array with a 32-byte page-table entry:
-`{ mapping, hostAddress, deviceAddress, stamp }`, four 64-bit words in that order.
-The table begins at a VM-page boundary and its entry stride is 32 bytes, so every
-entry begins on a 32-byte boundary. The C type retains 16-byte alignment for Swift
-import; C and Metal check the size and C checks the field offsets. Logical rows,
-CPU consumers, constants, reclamation and explicit synchronization all use this
-same stamp. No parallel GPU page table is reconstructed.
+The page-table entry is 16 bytes, `{ mapping, address }`, 16-byte aligned, its size and offset checked by a static
+assertion (rdma/mesh.h:47-52). ABI 77's 32-byte entry `{ mapping, hostAddress, deviceAddress, stamp }`, whose C type
+kept 16-byte alignment for the Swift module's import, is in no source.
 
 `mesh_device_bind` resolves Metal addresses during setup. For a local operand it
 writes its canonical entries. For a receive pool it writes the address immediately
@@ -1463,13 +1278,6 @@ remote payload, and the supplied shader retains its remote visibility fences.
 during setup. The ordinary output encoders use the same prepared sampler. The
 existing numerical sampler entry point also uses this construction instead of
 retaining a second imperative implementation.
-
-Source review and optimized Swift SIL show five native calls in sampler rearm:
-encoder creation, two bulk resource declarations, range execution and encoder
-completion. All five ordinary and all five indexed pipelines compile with native
-indirect-command support. These are compilation and source observations, not
-numerical execution or latency evidence. The existing one-in-flight engine
-limitation is unchanged.
 
 The same construction records each complete FFN sequence in
 `DenseFFNWeights.bind`: normalization, the existing fused gate/up matrix operation

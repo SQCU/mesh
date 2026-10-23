@@ -17,12 +17,10 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 
 ## 1. Vocabulary
 
-- **Rate**: a node's time model for one operator class at one dtype, a function of the call's
-  shape, as that class's constants: `proj=u,v`, u ns per weight byte plus v ns per weight element
-  per row, for the engine's fp16 projections; `attn=u,v`, u + v·bs ns per byte of one cached
-  position read at batch bs. Another class (a program's fp32 MPS matmul, its attention) is measured
-  on each node and added as its own class (R3). A node has one rate per class and dtype, never one
-  speed.
+- **Stretch**: a rank's own work between two consecutive collectives, at the call's shape and dtype, timed on its own
+  clock or torch's MPS stream (`torch_mesh/evidence.py`; metal-microbench `mesh_rank.m`). A collective's wait is in no
+  stretch (R2). Stretches are the evidence the parts move on (R3). Node rates per operator class (`proj=u,v`,
+  `attn=u,v`), which the rate derivation read, are read by no code since fa36bea6.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte. The bridges'
   map joins two nodes by one link where each one's bridge reaches the other, at the lesser of the two ends' stream
   bandwidths (mesh-plan.h `mesh_map`: β 8e9 over that bandwidth, mesh-dataflow.c `mesh_joined`).
@@ -57,8 +55,8 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | | What the code does | Source | The overcorrection it avoids |
 |---|---|---|---|
 | R1 | No operand means stock PyTorch, bit for bit. Equal parts also mean stock, including `torch.chunk`'s ceil sizes (10 over 4 is 3,3,3,1, not largest remainder's 3,3,2,2). | [torch.chunk]; the regular operation is the irregular one's special case and no slower than it [Träff, Gropp & Thakur 2010; Hunold & Carpen-Amarie 2017, GL4] | a second "uniform" rule that silently changes programs that never set an operand |
-| R2 | What each node computes follows from the nodes' rates. How operands travel follows from the link map. The only coupling is R7's price of the collectives. | metal-microbench `docs/principles.md` §4; link-aware collectives [MagPIe 1999; BlueConnect 2019; Blink 2020] | a node's rate measured with its collectives inside it, so a slow link reads as a slow node; reshaping collectives to "fix" a slow node |
-| R3 | Rates are per node **and per operator class** at the program's dtype, taken at the call's shape (bytes and operations), from a functional model. | functional performance model [Lastovetsky & Reddy 2007]; [Roofline 2009]; per-device memory bandwidth and FLOPS in the cost model [HexGen 2024, App. B] | one speed per node applied to every operator; bandwidth-bound (decode) rates applied to compute-bound work; another class's or dtype's rate borrowed where the store has none |
+| R2 | What each node computes follows from the ranks' measured stretches, each its own work between two collectives, excluding the collective's wait (`torch_mesh/evidence.py`). How operands travel follows from the link map. No rate or price couples the two (fa36bea6). | metal-microbench `docs/principles.md` §4; link-aware collectives [MagPIe 1999; BlueConnect 2019; Blink 2020]; design/rubrics.md D6 | a node's time measured with its collectives inside it, so a slow link reads as a slow node; reshaping collectives to "fix" a slow node |
+| R3 | Evidence is per rank, per decision and per stretch, from the mesh's own calls at the program's shape and dtype: `allocate.Balancer` keeps each (decision, stretch, rank)'s measured points as a functional model and moves the parts between calls. The first parts are the program's own (`partition.attach`), and no price or table sets them. Every part whose bound holds a grain keeps at least one (`Balancer._floor`), so a loaded member gets less work, not none. | functional performance model, partially estimated [Lastovetsky & Reddy 2007; DFPA 2011]; design/rubrics.md D5, the operator: "the *second entire computer* is a resource" (10-17), and D6: "cost model inference inside of leaf closures" ≺ "iterative estimators which update between function calls" (10-05) | one speed per node applied to every operator; a price from a table, another class, another dtype or a solo-node measurement setting a share; a loaded member benched at 0% |
 | R4 | Counts are derived once per configuration, from shared configuration, by one deterministic procedure, so they are identical on every rank. | counts agree across ranks: recvcounts are the same on all members [MPI 4.1 §6.7, §6.10.2]; the distribution follows from a declared performance model [HeteroMPI 2006] | counts from each rank's own timing: ranks that disagree hang or corrupt |
 | R5 | Integer rounding minimises the largest finish time: each grain goes to the rank that finishes earliest with it. | [Beaumont et al. 2001, Alg. 3.1]; greedy allocation is optimal for nondecreasing costs [Ibaraki & Katoh 1988] | largest remainder rounding the slow rank up by a whole grain |
 | R6 | Tensors that meet in one operation split their shared extent alike, and every rank can invert its own split from its local extent and the capacities (`from_local`: global = local·P/c_r, R14). | the first GEMM's column split is the second's row split [Megatron-LM 2019, §3]; the literature's ratios are per tensor, `RaggedShard(local_units)` on each placement [pytorch#169320], and per layer [HAP 2024, §2.4] | rounding each extent separately, or splitting an extent the parts do not divide by `torch.chunk`: views and the inverse break, and ranks infer different global shapes |
@@ -155,7 +153,6 @@ evidence they moved on kept in the mesh's store (`rdma/store.py` 'configurations
 - FLUX: Chang, L.-W. et al. (2024). FLUX: fast software-based communication overlap on GPUs through kernel fusion. https://arxiv.org/abs/2406.06858
 - HAP: Zhang, S. et al. (2024). HAP: SPMD DNN training on heterogeneous GPU clusters with automated program synthesis. EuroSys. https://arxiv.org/abs/2401.05965
 - HeteroMPI: Lastovetsky, A. & Reddy, R. (2006). HeteroMPI: towards a message-passing library for heterogeneous networks of computers. JPDC 66(2). https://doi.org/10.1016/j.jpdc.2005.08.002
-- HexGen: Jiang, Y. et al. (2024). HexGen: generative inference of large language model over heterogeneous environment. ICML. https://arxiv.org/abs/2311.11514
 - Hockney, R. W. (1994). The communication challenge for MPP: Intel Paragon and Meiko CS-2. Parallel Computing 20(3). https://doi.org/10.1016/S0167-8191(06)80021-9
 - GSPMD: Xu, Y. et al. (2021). GSPMD: general and scalable parallelization for ML computation graphs. https://arxiv.org/abs/2105.04663
 - Hunold, S. & Carpen-Amarie, A. (2017). Tuning MPI collectives by verifying performance guidelines. https://arxiv.org/abs/1707.09965
@@ -170,7 +167,6 @@ evidence they moved on kept in the mesh's store (`rdma/store.py` 'configurations
 - Patarasuk, P. & Yuan, X. (2009). Bandwidth optimal all-reduce algorithms for clusters of workstations. JPDC 69(2). https://doi.org/10.1016/j.jpdc.2008.09.002
 - pytorch#169320: [DTensor] A new placement: RaggedShard. https://github.com/pytorch/pytorch/issues/169320
 - pytorch#198344: [c10d][NCCL] Uneven all_gather_into_tensor / reduce_scatter_tensor. https://github.com/pytorch/pytorch/issues/198344
-- Roofline: Williams, S., Waterman, A. & Patterson, D. (2009). Roofline: an insightful visual performance model for multicore architectures. CACM 52(4). https://doi.org/10.1145/1498765.1498785
 - Song, L. et al. (2020). AccPar: tensor partitioning for heterogeneous deep learning accelerators. HPCA. https://doi.org/10.1109/HPCA47549.2020.00036
 - Striped Attention: Brandon, W. et al. (2023). Striped attention: faster ring attention for causal transformers. https://arxiv.org/abs/2311.09431
 - torch.chunk. https://docs.pytorch.org/docs/stable/generated/torch.chunk.html
