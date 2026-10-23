@@ -869,40 +869,11 @@ a numeric constant or a typed operand; logging on a change found by comparing st
 
 ## Where HEAD sits (2026-10-20), as ranked pairs
 
-- **M2, M3, M4, M5:** v127's bridge (a binding protocol in client slots, links re-paired inside the process by RESET and
-  ERR, clients claiming lane pairs) ≺ HEAD's (version 128, 0e34c13e; the M5's bridge since 10-20 05:53 UTC): a stream a
-  link held by an owner word, queue pairs made and connected once, nothing a client asks of it.
-- **M3:** the deleted kill guard ≺ HEAD after its deletion.
-- **C1:** libnccl-mesh exporting its own Metal functions and including the planner in nccl.h ≺ HEAD's ABI of NCCL's
-  functions, their twins and its extensions (5312f9b2).
-- **C6, M8 (10-20):** communicators made again every call (metal-microbench 906726c, 21–34 ms a call) ≺ communicators
-  kept for as long as they work, a failed one reporting its failure through `ncclCommGetAsyncError` and made again
-  between calls: "1% overhead is not acceptable" (10-20).
-- **D7:** goal_a.swift reading its bridge's records to find its node ≺ the host's own name (metal-microbench 5e95b12);
-  mesh_rank.m asking libnccl-mesh for its node's fabric address ≺ the configured fabric address that binds here
-  (configs/driver.json and bind(2)); rank.swift polling `ncclMeshMemLive` each second, and timing init waits by
-  `ncclMeshInitWaits` ≺ a failed call that finds its leases stale through NCCL's `ncclMemAlloc` (the operator's choice,
-  10-20).
 - **D2, D3:** attention plans and instances derived in builders (before 2b75b6a and d3d0f4b) ≺ synthesized at load.
 - **C4, C7:** a group's completion as one serial order of dispatches that every rank had to build alike (order_group:
   a wait cycle among three or more ranks) ≺ each channel progressing on its own (264ce849, the operator's choice of
   10-20), the two computing one function on the pair (KL between their records 6.2 × 10⁻⁷).
 - **M4:** a dud's all-ones bytes read by its consumer as a failure of its own group ≺ a dud landed as bytes (fcb79df2,
   the operator 10-20: "'duds' are not sentinel values").
-- **M4, M6:** a link lost after it connected staying down until a person relaunched the bridge (version 129) ≺ a
-  process a port (version 130, 1f9be1d5): the lost link's child ends once its quiet window has passed, the next child
-  pairs it again with nobody acting, and calls in flight fail as values: on the pair, 10-20, the M5 paired again 7.4 s
-  after the Mini's bridge stopped.
-- **M3, M4:** a stream kept for a lost pairing's holder, bootstrap waits with no bound, and a member's stale leases
-  refusing its group until a call the refusal blocks (version 130) ≺ version 131 (9add4cbe, ab2e5192, metal-microbench
-  7b04f33): every stream new at a pairing, every bootstrap wait a slice within the platform deadline, and the refused
-  member retiring its residents at the refusal. A process holding leases of two regions (9add4cbe's P3) ≺ one region a
-  process: the former wired all of the Mini's memory and its watchdog panicked it (10-20 18:27 UTC). On the pair after
-  ab2e5192, the Mini's bridge restart failed one call and the next two committed, its wired memory steady.
-- **M3, M4, rubrics 6 (10-20):** a region unlinked and made again at every bridge start, its clients' leases left in a
-  dead region beside the new one (through version 131) ≺ a region adopted across a restart (923d73fd, layout 132: on
-  the pair the Mini's bridge restarted and the next call committed, wired memory 20.0 GB throughout) ≺ that, with a
-  release that frees it: a heartbeat opens and closes the bridge on kernel events, a release expires the region, each
-  client receives the expiry as a value and lets go or ends, and the heartbeat unlinks the region once none of its
-  holders (bridge, children, clients, recorded by pid and start) lives, before any bridge makes another; a bridge that
-  ended unasked opens again a minute later.
+- **M3, M4:** a process holding leases of two regions (9add4cbe's P3) ≺ one region a process: the former wired all of
+  the Mini's memory and its watchdog panicked it (10-20 18:27 UTC).
