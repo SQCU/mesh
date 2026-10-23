@@ -226,6 +226,7 @@ static uint32_t tuple_take(struct mesh_entry *e,uint64_t k,uint32_t most,uint32_
     if((uint32_t)(was>>32)!=k32(k) || taken>=e->pages)return 0;
     const uint32_t n=(uint32_t)MIN((uint64_t)most,e->pages-taken);
     if(!atomic_compare_exchange_weak_explicit(&e->posted,&was,was+n,memory_order_seq_cst,memory_order_seq_cst))continue;
+    if(atomic_load_explicit(&e->done,memory_order_seq_cst)==MESH_STAMP_LOST){atomic_fetch_add_explicit(&e->count,n,memory_order_seq_cst);return 0;}
     *first=taken;
     return n;
   }
@@ -293,8 +294,7 @@ static void run_send(struct port *port,uint32_t lane){
   while(r->state==RUN_PAGES && r->posted<r->unit.count && s->sent-s->done<s->sends){
     uint64_t at=(uint64_t)ones*M->pgsz;
     if(r->kind==UNIT_RELAY)at=relay_at(r->relay,r->posted);
-    else if(r->entry && region_word(r->entry->word) && atomic_load_explicit(&r->entry->done,memory_order_acquire)!=MESH_STAMP_LOST &&
-            mesh_rows_hold(M,(struct mesh_row){r->first},(struct mesh_pages){r->unit.count}))
+    else if(r->entry && region_word(r->entry->word) && mesh_rows_hold(M,(struct mesh_row){r->first},(struct mesh_pages){r->unit.count}))
       row_at((struct mesh_row){r->first+r->posted},&at);
     if(!post_send(port,lane,page_span(port,at),unit_of(r)))return;
     r->posted++;
@@ -341,11 +341,11 @@ static void tables_send(struct port *port,struct walker *w,uint32_t served){
       for(uint32_t e=0;e<t->sends;e++){
         struct mesh_entry *x=t->entry+e;
         const uint64_t done=atomic_load_explicit(&x->done,memory_order_acquire);
-        const uint32_t node=x->pages && (done<k || done==MESH_STAMP_LOST)?name_node(w,x->key):0,hop=node?hop_of(w,node):0;
+        const uint32_t node=x->pages && done<k?name_node(w,x->key):0,hop=node?hop_of(w,node):0;
         uint32_t lane=MESH_LINK_LANES,first,n;
         if(!hop || blocked(w,node,before) || hop!=port->peer)continue;
         const _Atomic uint64_t *word=region_word(x->word);
-        if(done!=MESH_STAMP_LOST && word && atomic_load_explicit(word,memory_order_acquire)<x->need){block(w,node);continue;}
+        if(word && atomic_load_explicit(word,memory_order_acquire)<x->need){block(w,node);continue;}
         while(placed(w,port,hop,x->key,mesh_called(atomic_load_explicit(&x->posted,memory_order_acquire))/MESH_RUN,&lane) && (served>>lane&1) &&
               port->link.lane[lane].sending.state==RUN_NONE && (n=tuple_take(x,k,MESH_RUN,&first))){
           struct run *r=&port->link.lane[lane].sending;
@@ -416,16 +416,22 @@ static void index_make(struct walker *w){
   }
   qsort(w->index,w->indexed,sizeof *w->index,indexed_order);
 }
-static struct indexed *index_find(struct walker *w,const uint64_t *key){
+static uint32_t index_at(struct walker *w,const uint64_t *key){
   if(!w->fresh)index_make(w);
   uint32_t lo=0,hi=w->indexed;
   while(lo<hi){
     const uint32_t mid=lo+(hi-lo)/2;
-    const int order=key_order(w->index[mid].key,key,3);
-    if(!order)return w->index+mid;
-    if(order<0)lo=mid+1;else hi=mid;
+    if(key_order(w->index[mid].key,key,3)<0)lo=mid+1;else hi=mid;
   }
-  return NULL;
+  return lo;
+}
+static struct indexed *index_find(struct walker *w,const uint64_t *key){
+  const uint32_t at=index_at(w,key);
+  return at<w->indexed && !key_order(w->index[at].key,key,3)?w->index+at:NULL;
+}
+static int index_later(struct walker *w,const uint64_t *key){
+  const uint32_t at=index_at(w,key);
+  return at<w->indexed && w->index[at].key[0]==key[0] && w->index[at].key[1]==key[1] && w->index[at].key[2]>>40==key[2]>>40;
 }
 static struct relay *relay_take(struct port *port,uint32_t lane,uint32_t node,const struct key_unit *unit){
   struct link *l=&port->link;
@@ -483,8 +489,8 @@ static void run_place(struct port *port,struct walker *w,uint32_t lane){
     if(!mesh_rows_hold(M,(struct mesh_row){x->entry->row},(struct mesh_pages){x->entry->pages}))r->first=UINT64_MAX;
     run_note(port->link.lane+lane,1,port->link.lane[lane].posted);
   }
-  else if((!x && node==M->node) || placed<0)r->state=RUN_HELD;
-  else if(!x && node && hop_of(w,node)){
+  else if((!x && node==M->node && !index_later(w,u->key)) || placed<0)r->state=RUN_HELD;
+  else if(!x && node && node!=M->node && hop_of(w,node)){
     r->kind=UNIT_RELAY;
     if(!(r->relay=relay_take(port,lane,node,u)))r->state=RUN_HELD;
   }
@@ -500,14 +506,15 @@ static int lane_expects(struct port *port,struct walker *w,uint32_t lane){
   for(uint32_t i=0;i<s->arrivals;){
     const struct arrival *a=s->arrival+i;
     const uint64_t posted=atomic_load_explicit(&a->entry->posted,memory_order_acquire),done=atomic_load_explicit(&a->entry->done,memory_order_acquire);
-    if((uint32_t)(posted>>32)==k32(a->k) && done!=a->k)i++;
+    if((uint32_t)(posted>>32)==k32(a->k) && done!=a->k && done!=MESH_STAMP_LOST)i++;
     else s->arrival[i]=s->arrival[--s->arrivals];
   }
   for(uint32_t i=0;i<w->indexed;i++){
     const struct indexed *y=w->index+i;
     const uint64_t posted=atomic_load_explicit(&y->entry->posted,memory_order_acquire);
     const uint32_t from=name_node(w,y->entry->from),*runs=arrival_runs(s,y->entry,y->k);
-    if((uint32_t)(posted>>32)!=k32(y->k) || mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer)continue;
+    if(atomic_load_explicit(&y->entry->done,memory_order_acquire)==MESH_STAMP_LOST || (uint32_t)(posted>>32)!=k32(y->k) ||
+       mesh_called(posted)>=y->entry->pages || !from || hop_of(w,from)!=port->peer)continue;
     if(placed_runs(w,port,port->peer,y->key,(y->entry->pages+MESH_RUN-1)/MESH_RUN,lane)>(runs?*runs:0))return 1;
   }
   return 0;

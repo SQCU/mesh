@@ -47,6 +47,7 @@ void *metal_retain(void *object);
 void *metal_command(const struct metal_program *);
 
 int metal_ended(void *command);
+void metal_completed(void *command);
 
 struct metal_program *metal_begin(void *command_buffer, void *encoder, const char **message);
 struct metal_program *metal_begin4(void *encoder, void *table, void *residency, const char **message);

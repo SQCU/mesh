@@ -478,8 +478,8 @@ and takes their rows (a Metal 4 binding's records), once (design/pages-and-funct
 point at other pages until the rows for NFE k are released"). No start or binding allocates.
 
 - `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, takes the slot of
-  its number modulo 2 once that slot is released, the groups' lock let go while it waits and the revoke read between
-  looks; where the kernels bound to that slot's last start are in a command buffer not yet committed, or one that ended
+  its number modulo 2 once that slot is released, waiting outside the groups' lock for the command buffer of the
+  kernels last bound to it to complete, then for the bridge's stamps, the revoke read between looks; where the kernels bound to that slot's last start are in a command buffer not yet committed, or one that ended
   in an error, it fails as a value naming it (torch-mesh commits torch's open buffer before each start). A slot is
   released by use count: every kernel bound to it (`ncclMeshBind`, landing its
   start or publishing it) counts its end in the slot's table (`ended`, the last threadgroup of `mesh_leave`), and the slot

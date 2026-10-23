@@ -2570,7 +2570,13 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
       result = fail(status < 0 ? ncclSystemError : ncclInvalidUsage, "ncclMeshStart %llu on %s: its pages are start %llu's, whose kernels' command buffer %s",
                     (unsigned long long)(r->starts + 1), comm->name, (unsigned long long)(r->starts - 1),
                     status < 0 ? "ended in an error" : "is not committed");
-    else { pthread_mutex_unlock(&group_lock); pthread_mutex_lock(&group_lock); }
+    else {
+      void *command = status ? NULL : metal_retain(s->command);
+      pthread_mutex_unlock(&group_lock);
+      if (command) { metal_completed(command); metal_release(command); }
+      else sched_yield();
+      pthread_mutex_lock(&group_lock);
+    }
   }
   if (result) s = NULL;
   struct mesh_table *t = s ? s->table : NULL;

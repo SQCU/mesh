@@ -493,16 +493,15 @@ Every word below, with its one writer at a time and its readers:
   goes to its lane m modulo its lanes. Both ends of a hop compute it from the same records and the same key, so a
   tuple's runs spread over every lane of every cable of the hop by the cables' shares (version 138).
 - **What is posted.** A receiving child posts a key unit's receive on a lane only where a run is to come on it: a
-  started landing tuple of its node, not complete (~0 included), whose sender's name the map holds and whose sender's
+  started landing tuple of its node, neither complete nor ~0, whose sender's name the map holds and whose sender's
   node this port's peer is the way to, of whose runs placed on this lane (`placed_runs`) fewer have come than are placed (`arrival`, counted by the lane as
   each is placed: `lane_expects`), or, on every lane of a port, a registration at a node to
   which that port's peer routes through this node (the walker's `relaying`: the relays it may carry). After a run's
   pages are posted it posts the next key unit's receive only where that still holds. So a child whose node has no call
   in flight and relays nothing holds no receive posted, and a SEND toward it waits in its sender's credit (TN3205)
-  until the landing starts. A tuple stamped ~0 goes on to its last run at both ends while both members' names are in
-  the map: its sender sends the rest of its runs on their placed lanes, each page the all-ones page and no word waited
-  for, and its receiver posts their receives and lands them in the spare page, so no SEND is left without its receive
-  and no receive without its SEND.
+  until the landing starts. A tuple stamped ~0 sends no more runs (section 10: the bridge sends none of its own), and
+  its landing posts no more receives; a run of it already taken, and a receive already posted for it, are the next
+  SEND's or receive's on that queue pair, or go at the queue pair's release.
 - **Sending.** Each child's send thread walks its node's live clients' queues. For each client it takes the started
   tables in the order of their k, and in each table the send tuples whose node its peer is the way to. It takes a run
   from a tuple once the tuple's word has reached its `need`, by a compare-and-swap of `posted` from what it read to that
@@ -518,8 +517,12 @@ Every word below, with its one writer at a time and its readers:
   in it by binary search. A key unit that lands is placed:
   - a started landing tuple of the key: the run's receives go into the tuple's rows from the offset, each the page its
     row gives in the page table, and then the next key unit's receive where one is to come (What is posted);
-  - a registration of this node with no such tuple yet: the run waits on its lane, and its pages in the sender's credit
-    (TN3205), until a table naming the key starts; the lane carries nothing past it meanwhile. It is not landed in free
+  - a registration of this node with no such tuple, where a started landing of the same channel (the key's
+    communicator, rank and sender) has a later position: the run is of a call already over, and lands in the spare
+    page (`index_later`; the key's position is the call's stamp on that channel, which both ends number alike, where k
+    is each process's own count);
+  - a registration of this node with no such tuple yet, and none later: the run waits on its lane, and its pages in the
+    sender's credit (TN3205), until a table naming the key starts; the lane carries nothing past it meanwhile. It is not landed in free
     pages and bound to the landing's rows later, because a client reads a buffer at its address: a lease's pages are
     fixed at its making (the arena pages under its rows, mapped once into the client), a Metal buffer made over a lease
     with no copy has its pages mapped into the GPU when it is made, and an NCCL receive buffer must hold the bytes at
@@ -550,8 +553,8 @@ Every word below, with its one writer at a time and its readers:
   ends at the map that shows its member or its route gone. The bridge's stop and its adoption of a region stamp every
   started tuple not yet complete, and a client's retirement its own (`mesh_tuples_lost`). A stamp is stored
   only over a value below k, so a call started since is not stamped. A child adds to `posted` (by compare-and-swap,
-  the call checked) before it posts; a receiving child that then reads ~0 counts what it took in `count` and lands it
-  in the spare page; where the call has moved on since its index was made, the run waits for the next index. A run whose key unit is out is sent whole while the lanes serve, and receives a run announced are posted
+  the call checked) before it posts and then reads `done`: where it reads ~0 it posts nothing and counts what it took
+  in `count`; where the call has moved on since its index was made, the run waits for the next index. A run whose key unit is out is sent whole while the lanes serve, and receives a run announced are posted
   whole, into the tuple's rows or the spare page. A run whose tuple is ~0 lands in the spare page (the index keeps ~0
   tuples), so no lane is held for a call that is lost.
 - **Rows.** A tuple holds its rows while its table is started and it is neither complete nor ~0, and while its `posted`
@@ -983,7 +986,7 @@ The heartbeat (mesh-heartbeat.c):
 | 2026-10-17 | `pair_flush` waiting for drain markers | No flush and no drain exist: unreachable. |
 | to 2026-10-19 | host and GPU waits on landed words, waits on peers in setup | The collective's: a group's waits re-read the revoke, the bootstrap's phases end within the deadline. The bridge waits on no peer. |
 | 2026-10-16, 10-17 | the Mini's kernel data aborts at 0x98 seconds after its bridge stopped (a panic, not a hang) | Each stop then destroyed queue pairs while posts could be in flight. No queue pair is destroyed; a child's are released only by its exit, after it has halted its lanes (`served` 0, `closing`) and waited MESH_PLATFORM_NS and its windows (`child_leave`), so no post is in flight at the release. A child the watchdog ends cannot halt itself: it is stopped first (SIGSTOP stops every thread of it, so none posts), and killed MESH_PLATFORM_NS later, its device quiet as after a halt. The trigger is not established and the record stays open. A panic is the kernel's: no watchdog of ours runs through it; the node restarts, launchd starts the heartbeat, and peers pair again (M6). |
-| 2026-10-23 | port children of version 137 in the provider's release at an exit shared with every peer's, a receive posted on every lane | A receive is posted only where a run is to come (section 14, "What is posted"), so an idle child holds no work request (section 9), and a stamped tuple's runs go on to its last at both ends (version 139). Left open: an exit in a call's flight; a node that relays while registrations route through it; SENDs in credit for a landing whose client is gone, and receives for a sender whose client is gone, until the map drops its name; runs already in flight when a hop's joined cables change, received where they were placed before; a client that starts a stamped table again before its tuples have drained. |
+| 2026-10-23 | port children of version 137 in the provider's release at an exit shared with every peer's, a receive posted on every lane | A receive is posted only where a run is to come (section 14, "What is posted"), so an idle child holds no work request (section 9); a run of a call already over lands in the spare page and holds no lane (version 139). Left open: an exit in a call's flight; a node that relays while registrations route through it; a run taken before its tuple's stamp, and a receive posted for a landing then stamped, until the next SEND or receive on that queue pair or the queue pair's release; runs already in flight when a hop's joined cables change. |
 | this section's inventory | the parent blocked sending to a child that does not read (a blocking socketpair) | Non-blocking: a send that does not go whole marks the child deaf; its job, if that message was it, ends EPIPE at once (it never reached the child), nothing more is sent to it, and it is ended as a hung child. |
 | this section's inventory | a child asked to end that does not end (its main loop not reading CHILD_END, or its exit held): its port waits for it forever (`recycle`) | The watchdog: SIGSTOP MESH_PLATFORM_NS and MESH_PAUSE_NS after the ask (`child_leave` ends an asked child within MESH_PLATFORM_NS), then SIGKILL MESH_PLATFORM_NS later, each outside every window, its port with no job out and no port's job out past the deadline (`child_may_end`). |
 | this section's inventory | an earlier launch's child that does not end: its port's next child is never spawned (`elsewhere`) | The watchdog: the same, from twice MESH_PLATFORM_NS after it was found (its own `child_leave` ends within that), while it is still that process (its pid and start, `mesh_holds`). |
