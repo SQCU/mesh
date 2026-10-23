@@ -118,16 +118,19 @@ static NSString *const KERNELS =
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, MESH_SYSTEM); atomic_fetch_add_explicit((device atomic_uint *)(d + p.aux), 1u, memory_order_relaxed); } }\n"
   "GROUP(spin) { if (i == 0) mesh_step_counts(p, d); }\n"
   "constant float PARTIAL_NONE = -3.4028234663852886e38f;\n"
-  "static inline void merge_row(device float *x, volatile coherent(system) device const float *y, uint u) { "
-  "volatile coherent(system) device const float *xs = (volatile coherent(system) device const float *)x; "
+  "static inline void merge_row(device float *x, volatile coherent(system) device const float *xs, volatile coherent(system) device const float *y, uint u) { "
   "const float m = mesh_payload(y), ly = mesh_payload(y + 1), mx = mesh_payload(xs), lx = mesh_payload(xs + 1); const bool mine = lx > 0.0f, theirs = ly > 0.0f; "
-  "if (mine && !theirs) return; "
+  "if (mine && !theirs) { for (uint j = 0; j < u; j++) x[j] = mesh_payload(xs + j); return; } "
   "if (!mine || !theirs) { for (uint j = 0; j < u; j++) x[j] = theirs ? mesh_payload(y + j) : j ? 0.0f : PARTIAL_NONE; return; } "
   "const float top = max(mx, m), a = exp(mx - top), b = exp(m - top); x[0] = top; "
   "for (uint j = 1; j < u; j++) x[j] = (a > 0.0f ? mesh_payload(xs + j) * a : 0.0f) + (b > 0.0f ? mesh_payload(y + j) * b : 0.0f); }\n"
   "#define MERGE device float *x = (device float *)(d + p.dst); volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
-  "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, y + r * p.op, p.op);\n"
-  "HEAD(land_merge) { AWAIT MERGE }\n";
+  "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, (volatile coherent(system) device const float *)x + r * p.op, y + r * p.op, p.op);\n"
+  "HEAD(land_merge) { AWAIT MERGE }\n"
+  "HEAD(combine3_merge) { device float *x = (device float *)(d + p.dst); "
+  "volatile coherent(system) device const float *z = (volatile coherent(system) device const float *)(a + p.aux); "
+  "volatile coherent(system) device const float *y = (volatile coherent(system) device const float *)(s + p.src); "
+  "for (ulong r = i; r < p.n; r += g) merge_row(x + r * p.op, z + r * p.op, y + r * p.op, p.op); }\n";
 
 enum { WORD_D = 1, WORD_A };
 #define KINDS_OF(X) \
@@ -141,7 +144,7 @@ enum { WORD_D = 1, WORD_A };
   X(land_f16, WORD_A) X(combine3_f16, 0) X(premul_f16, 0) X(land_f32, WORD_A) X(combine3_f32, 0) X(premul_f32, 0) \
   X(land_bf16, WORD_A) X(combine3_bf16, 0) X(premul_bf16, 0) X(land_e4m3, WORD_A) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
   X(land_e5m2, WORD_A) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
-  X(publish, 0) X(stamp, 0) X(spin, WORD_D) X(land_merge, WORD_A)
+  X(publish, 0) X(stamp, 0) X(spin, WORD_D) X(land_merge, WORD_A) X(combine3_merge, 0)
 #define KIND_ENUM(name, word) KIND_##name,
 #define KIND_NAME(name, word) #name,
 #define KIND_WORD(name, word) word,

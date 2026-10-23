@@ -118,30 +118,29 @@ static double arithmetic(ncclDataType_t t, double a, double b, int combine) {
 }
 
 #define INTEGER_LOOP(S, U) do { \
-    S *d = (S *)dst; const S *x = (const S *)src; \
+    S *d = (S *)dst; const S *w = (const S *)with, *x = (const S *)src; \
     for (size_t i = 0; i < n; i++) switch (combine) { \
-      case COMBINE_SUM: d[i] = (S)((U)d[i] + (U)x[i]); break; \
-      case COMBINE_PROD: d[i] = (S)((U)d[i] * (U)x[i]); break; \
-      case COMBINE_MAX: if (x[i] > d[i]) d[i] = x[i]; break; \
-      default: if (x[i] < d[i]) d[i] = x[i]; break; } } while (0)
+      case COMBINE_SUM: d[i] = (S)((U)w[i] + (U)x[i]); break; \
+      case COMBINE_PROD: d[i] = (S)((U)w[i] * (U)x[i]); break; \
+      case COMBINE_MAX: d[i] = x[i] > w[i] ? x[i] : w[i]; break; \
+      default: d[i] = x[i] < w[i] ? x[i] : w[i]; break; } } while (0)
 
 static const float PARTIAL_NONE = -3.4028234663852886e38f;
-static void merge_rows(float *x, const float *y, size_t rows, size_t unit) {
-  for (size_t r = 0; r < rows; r++, x += unit, y += unit) {
-    const int mine = x[1] > 0, theirs = y[1] > 0;
-    if (mine && !theirs) continue;
-    if (!mine || !theirs) {
-      for (size_t j = 0; j < unit; j++) x[j] = theirs ? y[j] : j ? 0.0f : PARTIAL_NONE;
+static void merge_rows(float *x, const float *z, const float *y, size_t rows, size_t unit) {
+  for (size_t r = 0; r < rows; r++, x += unit, z += unit, y += unit) {
+    const int mine = z[1] > 0, theirs = y[1] > 0;
+    if (!theirs || !mine) {
+      for (size_t j = 0; j < unit; j++) x[j] = mine ? z[j] : theirs ? y[j] : j ? 0.0f : PARTIAL_NONE;
       continue;
     }
-    const float top = x[0] > y[0] ? x[0] : y[0], a = expf(x[0] - top), b = expf(y[0] - top);
+    const float top = z[0] > y[0] ? z[0] : y[0], a = expf(z[0] - top), b = expf(y[0] - top);
     x[0] = top;
-    for (size_t j = 1; j < unit; j++) x[j] = (a > 0 ? x[j] * a : 0.0f) + (b > 0 ? y[j] * b : 0.0f);
+    for (size_t j = 1; j < unit; j++) x[j] = (a > 0 ? z[j] * a : 0.0f) + (b > 0 ? y[j] * b : 0.0f);
   }
 }
 
-static void combine_into(ncclDataType_t t, int combine, void *dst, const void *src, size_t n) {
-  if ((int)t == METAL_MERGE) { merge_rows(dst, src, n, (size_t)combine); return; }
+static void combine_from(ncclDataType_t t, int combine, void *dst, const void *with, const void *src, size_t n) {
+  if ((int)t == METAL_MERGE) { merge_rows(dst, with, src, n, (size_t)combine); return; }
   switch (t) {
   case ncclInt8: INTEGER_LOOP(int8_t, uint8_t); return;
   case ncclUint8: INTEGER_LOOP(uint8_t, uint8_t); return;
@@ -153,11 +152,10 @@ static void combine_into(ncclDataType_t t, int combine, void *dst, const void *s
   }
   const size_t z = SIZE[t];
   unsigned char *d = dst;
-  const unsigned char *x = src;
-  for (size_t i = 0; i < n; i++, d += z, x += z) {
-    const double a = load(t, d), b = load(t, x);
-    if (combine == COMBINE_MAX) { if (b > a) memcpy(d, x, z); }
-    else if (combine == COMBINE_MIN) { if (b < a) memcpy(d, x, z); }
+  const unsigned char *w = with, *x = src;
+  for (size_t i = 0; i < n; i++, d += z, w += z, x += z) {
+    const double a = load(t, w), b = load(t, x);
+    if (combine == COMBINE_MAX || combine == COMBINE_MIN) memmove(d, (combine == COMBINE_MAX ? b > a : b < a) ? x : w, z);
     else store(t, d, arithmetic(t, a, b, combine));
   }
 }
@@ -1458,7 +1456,13 @@ static void schedules_free(const struct ncclComm *comm, struct schedule *plans) 
   free(plans);
 }
 
-static struct where read_at(const struct call *c) { return (struct where){c->send_at.buffer, c->send_at.offset - c->bound->lo * SIZE[c->type]}; }
+static struct where read_at(const struct call *c) { return (struct where){c->send_at.buffer, c->send_at.offset - c->bound->lo * c->bound->operand.element_bytes}; }
+
+static struct where buffer_at(const struct call *c, uint32_t b, size_t offset) {
+  size_t length = 0;
+  const size_t z = SIZE[c->type], first = !b && c->direct && c->what == MESH_REDUCE_SCATTER ? segment_at(c, c->comm->rank, &length) * z : 0;
+  return offset >= first && offset < first + length * z ? shifted(c->recv_at, offset - first) : shifted(c->bound->buffer[b], offset);
+}
 
 static ncclResult_t place_group(struct ncclComm *comm, struct plan *plan) {
   const unsigned char *region = (const unsigned char *)comm->attach->context.M;
@@ -1470,9 +1474,9 @@ static ncclResult_t place_group(struct ncclComm *comm, struct plan *plan) {
         struct message *x = (send ? plans[h].out : plans[h].in) + k;
         const struct steps *st = x->c->bound;
         const struct mesh_step *step = st->steps + x->step;
-        if (send) x->data = shifted(st->reads && st->reads[x->step] ? read_at(x->c) : st->buffer[step->buffer], x->offset);
-        else if (step->op == MESH_STEP_REDUCE) x->data = shifted(plan->base, x->area);
-        else x->data = shifted(st->buffer[step->buffer], x->offset);
+        if (send && st->reads && st->reads[x->step]) x->data = shifted(read_at(x->c), x->offset);
+        else if (!send && step->op == MESH_STEP_REDUCE) x->data = shifted(plan->base, x->area);
+        else x->data = buffer_at(x->c, step->buffer, x->offset);
         const unsigned char *address = address_of(x->data);
         const int inside = in_region(comm, x->data, x->bytes);
         pthread_mutex_lock(&attach_lock);
@@ -1512,14 +1516,11 @@ static int in_place(const struct call *c) {
   return c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER || (c->what == MESH_REDUCE && c->root == c->comm->rank);
 }
 static int direct_ok(const struct call *c) {
-  if (p2p(c) || counted(c) || !crosses(c) || c->premultiplied || unit_of(c) > 1 || (c->what == MESH_BROADCAST && c->root != c->comm->rank)) return 0;
+  if (p2p(c) || counted(c) || !crosses(c) || c->premultiplied) return 0;
   size_t length = elements(c), before = 0;
   if (c->what == MESH_ALLGATHER) before = segment_at(c, c->comm->rank, &length);
-  const size_t z = SIZE[c->type], sent = length * z, made = elements(c) * z;
   const unsigned char *a = address_of(c->send_at), *b = address_of(c->recv_at);
-  if (!in_region(c->comm, c->send_at, sent)) return 0;
-  if (in_place(c) && b && a == b + before * z) return 2;
-  return !in_place(c) || (b && !(a < b + made && b < a + sent));
+  return in_place(c) && b && a == b + before * SIZE[c->type] ? 2 : 1;
 }
 static int call_same(const struct call *a, const struct call *b) {
   const size_t segs = (counted(a) ? 2 : 1) * (size_t)a->comm->nranks;
@@ -1585,6 +1586,8 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
     if (p2p(c) || counted(c)) continue;
     const size_t each = page_up(elements(c) * SIZE[c->type], comm->page);
     c->direct = st && plan_direct(c);
+    if (st && c->direct_ok && !c->direct)
+      result = fail(ncclInternalError, "%s on %s: its program reads a range it has partly written", call_name(c), comm->name);
     c->at = in_place(c) ? SIZE_MAX : (bytes += each) - each;
     for (uint32_t b = 1; st && b < st->buffers; b++) st->at[b] = c->direct && !st->needed[b] ? SIZE_MAX : (bytes += each) - each;
   }
@@ -1735,9 +1738,9 @@ static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
         if (stamp_lost(landed) || stamp_lost(sent)) return lost_fail(ch);
         if (landed < p->k || sent < p->k) break;
         if (step->op == MESH_STEP_REDUCE) {
-          unsigned char *to = address_of(st->buffer[step->buffer]) + m->offset;
-          if (st->fresh && st->fresh[m->step]) memmove(to, address_of(read_at(m->c)) + m->offset, m->bytes);
-          combine_into(ktype(m->c), kop(m->c), to, address_of(m->data), kcount(m->c, m->bytes));
+          unsigned char *to = address_of(buffer_at(m->c, step->buffer, m->offset));
+          const unsigned char *with = st->fresh && st->fresh[m->step] ? address_of(read_at(m->c)) + m->offset : to;
+          combine_from(ktype(m->c), kop(m->c), to, with, address_of(m->data), kcount(m->c, m->bytes));
         }
         st->done[m->step] = 1;
         ch->consumed++;
@@ -1791,12 +1794,12 @@ static void stage(const struct call *c, unsigned char *own) {
 }
 
 static void finish(const struct call *c) {
-  const size_t z = SIZE[c->type], n = c->count;
+  const size_t z = SIZE[c->type], n = c->count, e = c->bound ? c->bound->operand.element_bytes : z;
   const int nranks = c->comm->nranks;
   unsigned char *sum = address_of(c->sum), *recv = c->recv;
   for (uint32_t k = 0; k < c->complements; k++) {
     const uint64_t *x = c->complement + 3 * k;
-    memmove(address_of(shifted(c->sum, (size_t)x[0] * z)), address_of(shifted(c->send_at, (size_t)x[1] * z)), (size_t)x[2] * z);
+    memmove(address_of(buffer_at(c, 0, (size_t)x[0] * e)), address_of(shifted(c->send_at, (size_t)x[1] * e)), (size_t)x[2] * e);
   }
   if (!sum) return;
   if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == c->comm->rank)) {
@@ -1804,9 +1807,10 @@ static void finish(const struct call *c) {
     else if (sum != recv) memmove(recv, sum, n * z);
   } else if (c->what == MESH_REDUCE_SCATTER) {
     size_t length;
-    const size_t before = segment_at(c, c->comm->rank, &length);
-    if (c->post) truncdiv(c->type, recv, sum + before * z, length, (uint64_t)nranks);
-    else memmove(recv, sum + before * z, length * z);
+    const unsigned char *from = c->direct ? recv : sum + segment_at(c, c->comm->rank, &length) * z;
+    segment_at(c, c->comm->rank, &length);
+    if (c->post) truncdiv(c->type, recv, from, length, (uint64_t)nranks);
+    else if (from != recv) memmove(recv, from, length * z);
   } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && sum != recv) memmove(recv, sum, elements(c) * z);
 }
 
@@ -2060,13 +2064,13 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   const struct metal_wait wait = {g->plan->buffer, m->data.buffer, table_word(g, &s->t->entry[s->outs + m->rel_entry].done),
                                   sent ? table_word(g, sent) : 0, m->data.offset, s->k, sent ? s->k : 0};
   if (!result && step->op == MESH_STEP_REDUCE) {
-    const struct where to = shifted(st->buffer[step->buffer], m->offset);
+    const struct where to = buffer_at(m->c, step->buffer, m->offset);
     if (st->fresh && st->fresh[m->step]) {
       const struct where with = shifted(read_at(m->c), m->offset);
       result = gpu(metal_spin(program, &wait), "a wait");
       if (!result)
-        result = gpu(metal_combine3(program, m->c->type, m->c->combine, to.buffer, to.offset, m->data.buffer, m->data.offset, with.buffer, with.offset,
-                                    m->bytes / SIZE[m->c->type]), "a first combine");
+        result = gpu(metal_combine3(program, ktype(m->c), kop(m->c), to.buffer, to.offset, m->data.buffer, m->data.offset, with.buffer, with.offset,
+                                    kcount(m->c, m->bytes)), "a first combine");
     } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, kcount(m->c, m->bytes), &wait), "a landing");
   } else if (!result) result = gpu(metal_spin(program, &wait), "a wait");
   if (result) return result;
@@ -2209,7 +2213,8 @@ static int spans_add(struct spans *w, uint64_t lo, uint64_t hi) {
 
 static int plan_direct(struct call *c) {
   struct steps *st = c->bound;
-  uint64_t lo = 0, hi = elements(c);
+  const uint64_t u = unit_of(c);
+  uint64_t lo = 0, hi = elements(c) / u;
   if (!c->direct_ok || !st->count) return 0;
   if (c->what == MESH_ALLGATHER) { size_t length; lo = segment_at(c, c->comm->rank, &length); hi = lo + length; }
   const uint32_t B = st->buffers;
@@ -2230,7 +2235,7 @@ static int plan_direct(struct call *c) {
     }
   }
   uint64_t first = lo, last = hi;
-  if (c->what == MESH_REDUCE_SCATTER) { size_t length; first = segment_at(c, c->comm->rank, &length); last = first + length; }
+  if (c->what == MESH_REDUCE_SCATTER) { size_t length; first = segment_at(c, c->comm->rank, &length) / u; last = first + length / u; }
   if (c->what == MESH_REDUCE && c->root != c->comm->rank) last = first;
   if (direct && c->direct_ok != 2) {
     c->complement = calloc(3 * (w[0].count + 1), sizeof *c->complement);
@@ -2255,11 +2260,12 @@ static int plan_direct(struct call *c) {
 }
 
 static ncclResult_t complement_copy(struct metal_program *program, const struct call *c) {
-  const size_t z = SIZE[c->type];
+  const size_t z = c->bound ? c->bound->operand.element_bytes : SIZE[c->type];
   ncclResult_t result = ncclSuccess;
   for (uint32_t k = 0; k < c->complements && !result; k++) {
     const uint64_t *x = c->complement + 3 * k;
-    result = gpu(metal_copy(program, METAL_PLAIN, c->sum.buffer, c->sum.offset + x[0] * z, c->send_at.buffer, c->send_at.offset + x[1] * z, x[2] * z),
+    const struct where to = buffer_at(c, 0, x[0] * z);
+    result = gpu(metal_copy(program, METAL_PLAIN, to.buffer, to.offset, c->send_at.buffer, c->send_at.offset + x[1] * z, x[2] * z),
                  "the operand's own ranges");
   }
   return result;
@@ -2292,7 +2298,7 @@ static ncclResult_t epilogue(struct metal_program *program, const struct call *l
     else if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == comm->rank) || c->what == MESH_REDUCE_SCATTER) {
       size_t length = count;
       const size_t before = c->what == MESH_REDUCE_SCATTER ? segment_at(c, (int)r, &length) : 0;
-      const struct where from = {sum.buffer, sum.offset + before * z};
+      const struct where from = c->direct && c->what == MESH_REDUCE_SCATTER ? recv : (struct where){sum.buffer, sum.offset + before * z};
       if (c->post) result = gpu(metal_truncdiv(program, c->type, recv.buffer, recv.offset, from.buffer, from.offset, length, (uint64_t)comm->nranks), "the result");
       else if (!same(from, recv)) result = gpu(metal_copy(program, METAL_LAND, recv.buffer, recv.offset, from.buffer, from.offset, length * z), "the result");
     } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && !same(sum, recv))

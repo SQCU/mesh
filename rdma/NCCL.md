@@ -67,7 +67,7 @@ every kind's pipeline (`KINDS_OF`, the track kernel's among them) from the metal
 Each fails naming what failed, exit status 1. `KINDS_OF` is the one list of kernel kinds: the host's numbering of its
 steps, a device's pipelines' index and the track kernel's switch are all made from it by the preprocessor, so neither
 names a kind the other lacks. Each operator's arithmetic is written once in the kernels (`op_int`, `op_float`, `op_f8`,
-`merge_row`), and is the host's (`combine_into`, `merge_rows`, `premultiply`, `truncdiv`): the small floating types in
+`merge_row`), and is the host's (`combine_from`, `merge_rows`, `premultiply`, `truncdiv`): the small floating types in
 float32 rounded to nearest even, float8 decoded and encoded by `mesh.metal`'s `f8_to` and `f8_from` (OCP 8-bit floating
 point, 2023: E4M3 with no infinity and NaN S.1111.111, E5M2 IEEE-like, saturating to NaN and infinity), integers
 wrapping. A landing's combine loads both its operand and the landed bytes system-coherent: the operand may itself have
@@ -319,27 +319,13 @@ output_data/transport-buffers-20261021/LIBRARY.md ranks the changes of 2026-10-2
   count of polls, since a GPU spin with no end halts the node.
 - **The data function**: its own buffers and their order.
 
-### One track
+### Composed starts
 
-A completion whose groups all lie on one channel of one communicator (a two-rank collective, as each crossing of a
-two-rank decode is) is plain dispatches in the GPU command stream, and the stream's own order is the dependency
-(`nccl-mesh.c` `complete_track`). Whether a group lies on one channel is read from its schedule where the group is
-planned (`struct inflight` `lone`), the entries both ends lay alike; nothing at run time chooses the form. A
-persistent exchange's start is a composed group in flight: its sends count as published and its landings as
-consumed when it is started (the caller's kernels do both, encoded after the start), so a completion passes its
-entries (`consumed_past`).
-
-- The next send entries are published as soon as their steps' receives before them are consumed: a run of them is one
-  `publish` dispatch, one store of the table's `ready` past the last.
-- Each consumption is its own dispatch after that. A combine is one wide `land_*`: every threadgroup's thread 0 waits on
-  `landed`, then the threadgroup combines its share. A COPY is one `spin`. A first combine of a call reading its send
-  buffer in place is a `spin`, then `combine3_*`.
-- The two-rank all-reduce's SEND reads the operand its REDUCE combines into. The combine is encoded after the SEND's
-  publication, and its wait also awaits the SEND's entry stamp (`war`), so the SEND's bytes are read before the sum is made
-  and no scratch copy is made. At a group's last landing on the channel, with every SEND of the group there already
-  published, the wait awaits the table's `sent` too, so the group's end needs no wait of its own.
-- No track is recorded, no thread picks and no `tracks` dispatch runs: on one track the stream's order is the one
-  serial order every rank builds alike, and a wait on it holds no other channel.
+A persistent exchange's start is a composed group in flight: its sends count as published and its landings as consumed
+when it is started (the caller's kernels do both, encoded after the start), so a completion passes its entries
+(`consumed_past`). The one-track form (a completion on one channel of one communicator as plain dispatches in the
+stream's order, `complete_track`, chosen by the schedule's `lone`) was deleted 2026-10-22 (mesh 91e72125) as a second
+form of completion: every completion runs through the tracks below, a two-rank collective's on its one track.
 
 ### Per-channel progress
 
@@ -350,7 +336,11 @@ This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place 
   consumptions (landing entries), each in list order.
   - Nothing credits a publication.
   - A consumption runs once its landing came, and it is combined where it belongs; where it combines into bytes a SEND
-    of its channel reads, it runs once that publication has run (`need`), and its wait awaits that SEND's stamp.
+    of its channel reads (the two-rank all-reduce's SEND reads the operand its REDUCE combines into), it runs once that
+    publication has run (`need`), and its wait awaits that SEND's stamp (`war`), so the SEND's bytes are read before
+    the sum is made and no scratch copy is made.
+  - A first combine of a call reading its send buffer in place is a `spin`, then `combine3_*`; a later one a `land_*`;
+    a COPY a `spin`. The group's end waits for each channel's `sent` (`retire`).
   - A step's first event that has a receive before it (`mesh_group_before`) waits on that receive's channel having
     consumed it.
   - Neither cursor waits on the other beyond these.
@@ -643,14 +633,19 @@ Porting:
   send's or receive's buffer) that is not on a page, or an operand outside the region, fails the call as a value
   (`ncclInvalidUsage`, naming the piece and its buffer) before anything is presented; nothing is copied to make it
   fit.
-- A collective whose send buffer lies apart from its result reads it in place where its program allows: a SEND of a
-  range no step of the rank wrote reads the send buffer, the first combine of such a range writes send op piece
-  (`combine3_*`), the result's ranges no step writes are copied from it after the publications, and no scratch buffer
-  no step writes is made. A call in place (its send buffer its result, or an all-gather's own segment of it) sends from,
-  combines into and lands in that buffer, with no copy; a combine into a range a SEND of it reads waits for that SEND's
-  bytes to be sent ([One track](#one-track)). Otherwise its operand is made in the region: a premultiply (the
-  scaled operand is a new value), or a copy within the region where the send buffer and the result overlap apart from
-  in place. Reproduction target (metal-microbench
+- Every crossing collective but a premultiplied one reads its send buffer and writes its result where they lie (the
+  direct form): a SEND of a range no step of the rank wrote reads the send buffer; the first combine of such a range
+  writes send op piece (`combine3_*`, a partials merge's `combine3_merge` too; the host's `combine_from`, three
+  operands); a reduce-scatter's own segment is combined in its receive buffer; a broadcast's and an all-gather's landings
+  land in theirs, a non-root's too; the result's ranges no step writes are copied from the send buffer after the
+  publications (the call's out-of-place result); and no scratch buffer no step writes is made. A call in place (its
+  send buffer its result, or an all-gather's own segment of it) sends from, combines into and lands in that buffer; a
+  combine into a range a SEND of it reads waits for that SEND's bytes to be sent ([Per-channel
+  progress](#per-channel-progress)). A program's messages are not coalesced across parts (`mesh_compile`), so a step's
+  range is wholly written or wholly unwritten before it and the direct form holds for every program; a send buffer that
+  overlaps the result apart from in place is NCCL's undefined case and is not copied. A premultiplied call
+  (`ncclRedOpCreatePreMulSum`, a floating `ncclAvg`) still makes its scaled operand in its plan's pages, as does a call
+  that crosses nothing. Reproduction target (metal-microbench
   docs/measurement.md 2026-09-30 part A, 95967e6..42a16ed): per 16.8 MB all-reduce, the library's copies of the
   operand 16.78 MB to 0; tp 271.5-272.2 ms a step. The slot copy into the rings, which that left, is gone too.
 - The NIC reads a SEND's pages until its entry is stamped, so a group completes only once its SENDs are
@@ -905,8 +900,8 @@ gathers, parses or joins bridge records itself.
   down them, a reduce-scatter's segment s up s's trees and an all-gather's down them; an all-reduce single-phase (the
   whole operand reduced toward every node up its heaviest tree, a forwarding node's partial from scratch of its own; at
   two nodes the direct exchange, whose one SEND and one REDUCE meet in the operand, the combine after the SEND's bytes
-  are sent [Trivance 2026]). A round's SENDs come before its receives; a message coalesces with the next between the
-  same two nodes in the same round where their parts adjoin. The two-phase all-reduce, chunked trees and the
+  are sent [Trivance 2026]). A round's SENDs come before its receives; each part's message is its own (no message
+  coalesces adjoining parts, so a step's range has one history). The two-phase all-reduce, chunked trees and the
   contributors set had no caller once the forms operand went, and were deleted with it.
 - `mesh_program_steps_cut(program, rank, operand, segments, quantum, steps)`: a rank's steps for an operand, its
   segments the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts) or the program's own cut, every cut the

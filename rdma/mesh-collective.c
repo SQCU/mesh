@@ -274,17 +274,8 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,stru
   }
 
   qsort(message,messages,sizeof *message,mesh_message_order);
-  uint32_t kept=0;
-  for(uint32_t i=0;i<messages;i++){
-    struct mesh_message *last=kept?message+kept-1:NULL;
-    const struct mesh_message *m=message+i;
-    if(last && last->from==m->from && last->to==m->to && last->way==m->way && last->round==m->round && last->part+last->parts==m->part &&
-       last->out==m->out && last->in==m->in && last->op==m->op)last->parts+=m->parts;
-    else message[kept++]=*m;
-  }
-
   uint32_t moves=0;
-  for(uint32_t i=0;i<kept;i++){
+  for(uint32_t i=0;i<messages;i++){
     const struct mesh_message *m=message+i;
     ordered[moves++]=(struct mesh_ordered){m->from,m->round,0,m->to,m->key,{MESH_STEP_SEND,m->to,m->round,m->out,m->part,m->parts,m->way,0}};
     ordered[moves++]=(struct mesh_ordered){m->to,m->round,1,m->from,m->key,{m->op,m->from,m->round,m->in,m->part,m->parts,m->way,0}};

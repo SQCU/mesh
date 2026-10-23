@@ -13,7 +13,7 @@ enum { OP_LAND, OP_COMBINE3, OP_PREMUL, OP_TRUNCDIV, OPS };
 #define INTEGERS(op) KIND_##op##_i8, KIND_##op##_u8, KIND_##op##_i32, KIND_##op##_u32, KIND_##op##_i64, KIND_##op##_u64
 #define FLOATS(op) KIND_##op##_f16, KIND_##op##_f32, KINDS, KIND_##op##_bf16, KIND_##op##_e4m3, KIND_##op##_e5m2
 static const uint8_t TYPED[OPS][METAL_MERGE + 1] = {
-  {INTEGERS(land), FLOATS(land), KIND_land_merge}, {INTEGERS(combine3), FLOATS(combine3), KINDS}, {INTEGERS(premul), FLOATS(premul), KINDS},
+  {INTEGERS(land), FLOATS(land), KIND_land_merge}, {INTEGERS(combine3), FLOATS(combine3), KIND_combine3_merge}, {INTEGERS(premul), FLOATS(premul), KINDS},
   {INTEGERS(truncdiv), KINDS, KINDS, KINDS, KINDS, KINDS, KINDS, KINDS}};
 
 static const uint8_t COPY[2][METAL_LAND + 1] = {{KIND_copy_plain_4, KIND_copy_land_4}, {KIND_copy_plain_1, KIND_copy_land_1}};
