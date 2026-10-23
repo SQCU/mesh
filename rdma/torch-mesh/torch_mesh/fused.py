@@ -16,8 +16,6 @@ class Exchange:
         import torch.distributed as dist
         group = group or dist.distributed_c10d._get_default_group()
         self.handle, self.scale = _stream.exchange_init(list(sizes), torch.empty(0, dtype=dtype), group.handle)
-        from . import check_memory
-        check_memory()
 
     def start(self, sizes=None):
         return _stream.exchange_start(self.handle, [n * self.scale for n in sizes] if sizes else [])

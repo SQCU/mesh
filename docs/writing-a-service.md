@@ -128,12 +128,12 @@ So allocate every large tensor with `torch_mesh.empty`: operands, outputs, share
 than a few MiB. Only a kernel's few rows of scratch belong outside. Read inputs from files into region tensors through
 `torch_mesh.cpu_view`, as the example does.
 
-`torch_mesh.memory()` gives this process's GPU memory outside the region (`outside`), the region's leases (`region`)
-and what the node can give without pressure (`available`), as the node's bridge publishes it through the collective
-(`mesh.nodes()`); a program reads no system figure of its own. `torch_mesh.check_memory()` warns, with an `OutsideRegionWarning`, where
-`outside` is more than `available`: the program will probably take its node down with it. torch-mesh checks this
-itself when an exchange is made and when a collective is first given a tensor outside the region, which it also warns
-about as a copy.
+`torch_mesh.memory()` gives this process's GPU memory outside the region (`outside`) and its region tensors' leases
+(`region`), both the process's own figures. `torch_mesh.check_memory(budget)` warns, with an `OutsideRegionWarning`,
+where `outside` is more than `budget`, the bytes the program's configuration gives it beside the region (on a Studio,
+the rank's process figure of [etc/bridge/m5ultra-headless.toml](../etc/bridge/m5ultra-headless.toml)): the program will
+probably take its node down with it. A program calls it once, after it has made its tensors. Nothing of the bridge's or
+the node's is read for it.
 
 ## The step kernel
 
