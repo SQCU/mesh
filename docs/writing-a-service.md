@@ -51,8 +51,8 @@ queue pairs. It also owns the region, the shared memory that the devices may rea
 the region as ready to send, and the bridge sends them. When bytes arrive, the bridge marks them as landed. That is
 all it does with data.
 
-The bridge does not know what a model, a token, a layer or a step is. It runs no program and takes no request, it
-forwards nothing, and it starts no rank and picks no split. It runs whether or not a program is using it. To the bridge, a
+The bridge does not know what a model, a token, a layer or a step is. It runs no program and takes no request, and it
+starts no rank and picks no split. It runs whether or not a program is using it. To the bridge, a
 language model and this chain look the same: rows of bytes, sent and landed.
 
 ## Program two: the mesh collective client

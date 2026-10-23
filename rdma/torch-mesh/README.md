@@ -43,8 +43,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing or a lost link; a GPU
   wait also at its bound, and a host-path wait at a revoke. No clock ends a wait on a peer's data.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the
-  next one's node: the bridges forward nothing, and a group whose ranks no such path joins fails at its first
-  collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
+  next one's node: a route crosses ranks alone (a node it is to cross takes part as a rank, the identity where it has
+  no work), and a group whose ranks no such path joins fails at its first collective that crosses a link ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
   bridge's region (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the region is
