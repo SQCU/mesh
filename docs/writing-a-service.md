@@ -183,6 +183,12 @@ sharded weights, so the backend's dispatch gives each rank its own gate columns.
 then one ragged tensor (`RaggedShard(2)`), and `full_tensor()` gathers them to every rank: the backend's allgatherv,
 one crossing a tick. This is Megatron's split of a cell by hidden unit.
 
+**Blocks.** The program declares the units, `partition.attach(mesh, tp=H)`, and the backend splits them evenly at
+first. After each tick it calls `partition.rebalance(mesh, 'tp')`. That measures each rank's own work between its
+collectives, and every 8 ticks the Balancer moves the blocks by the residual between the ranks and attaches `tp`
+again. The tick then follows (`Tick.follow`, `partition.follow`): the gate rows and cell state that change rank
+cross once, by one all-to-all. The program never chooses a block.
+
 **Configuration.** `input`, `weights`, `output`, `input_width`, `width` (H) and `layers`. The weights directory holds
 `w_ih_<l>` [4H, its input], `w_hh_<l>` [4H, H] and `b_<l>` [4H] in torch's gate order, one .npy file an array.
 `lstm.inputs(configuration, steps, rows)` makes sample ones with torch's initialization. Rank 0 reads them

@@ -45,6 +45,13 @@ class Tick:
         self.tick = s + 1
         return self.h[self.L - 1]
 
+    # docs/writing-a-service.md#the-lstm
+    def follow(self):
+        split = [partition.RaggedShard(2, self.W[0].placements[0].key)]
+        self.W, self.b = [partition.follow(w) for w in self.W], [partition.follow(b) for b in self.b]
+        held = lambda t: partition.follow(partition.from_local(t, self.mesh, split)).to_local()
+        self.c, self.mine = held(self.c), held(self.mine)
+
 
 # docs/writing-a-service.md#the-lstm
 def inputs(config, steps, rows):

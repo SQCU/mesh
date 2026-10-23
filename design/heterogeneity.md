@@ -56,7 +56,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 |---|---|---|---|
 | R1 | No operand means stock PyTorch, bit for bit. Equal parts also mean stock, including `torch.chunk`'s ceil sizes (10 over 4 is 3,3,3,1, not largest remainder's 3,3,2,2). | [torch.chunk]; the regular operation is the irregular one's special case and no slower than it [Träff, Gropp & Thakur 2010; Hunold & Carpen-Amarie 2017, GL4] | a second "uniform" rule that silently changes programs that never set an operand |
 | R2 | What each node computes follows from the ranks' measured stretches, each its own work between two collectives, excluding the collective's wait (`torch_mesh/evidence.py`). How operands travel follows from the link map. No rate or price couples the two (fa36bea6). | metal-microbench `docs/principles.md` §4; link-aware collectives [MagPIe 1999; BlueConnect 2019; Blink 2020]; design/rubrics.md D6 | a node's time measured with its collectives inside it, so a slow link reads as a slow node; reshaping collectives to "fix" a slow node |
-| R3 | Evidence is per rank, per decision and per stretch, from the mesh's own calls at the program's shape and dtype: `allocate.Balancer` keeps each (decision, stretch, rank)'s measured points as a functional model and moves the parts between calls. The first parts are the program's own (`partition.attach`), and no price or table sets them. Every part whose bound holds a grain keeps at least one (`Balancer._floor`), so a loaded member gets less work, not none. | functional performance model, partially estimated [Lastovetsky & Reddy 2007; DFPA 2011]; design/rubrics.md D5, the operator: "the *second entire computer* is a resource" (10-17), and D6: "cost model inference inside of leaf closures" ≺ "iterative estimators which update between function calls" (10-05) | one speed per node applied to every operator; a price from a table, another class, another dtype or a solo-node measurement setting a share; a loaded member benched at 0% |
+| R3 | Evidence is per rank, per decision and per stretch, from the mesh's own calls at the program's shape and dtype: `allocate.Balancer` keeps each (decision, stretch, rank)'s measured points as a functional model and moves the parts between calls. The first parts are the backend's even split (`partition.attach`), and no program, price or table sets them. Every part whose bound holds a grain keeps at least one (`Balancer._floor`), so a loaded member gets less work, not none. | functional performance model, partially estimated [Lastovetsky & Reddy 2007; DFPA 2011]; design/rubrics.md D5, the operator: "the *second entire computer* is a resource" (10-17), and D6: "cost model inference inside of leaf closures" ≺ "iterative estimators which update between function calls" (10-05) | one speed per node applied to every operator; a price from a table, another class, another dtype or a solo-node measurement setting a share; a loaded member benched at 0% |
 | R4 | Counts are derived once per configuration, from shared configuration, by one deterministic procedure, so they are identical on every rank. | counts agree across ranks: recvcounts are the same on all members [MPI 4.1 §6.7, §6.10.2]; the distribution follows from a declared performance model [HeteroMPI 2006] | counts from each rank's own timing: ranks that disagree hang or corrupt |
 | R5 | Integer rounding minimises the largest finish time: each grain goes to the rank that finishes earliest with it. | [Beaumont et al. 2001, Alg. 3.1]; greedy allocation is optimal for nondecreasing costs [Ibaraki & Katoh 1988] | largest remainder rounding the slow rank up by a whole grain |
 | R6 | Tensors that meet in one operation split their shared extent alike, and every rank can invert its own split from its local extent and the capacities (`from_local`: global = local·P/c_r, R14). | the first GEMM's column split is the second's row split [Megatron-LM 2019, §3]; the literature's ratios are per tensor, `RaggedShard(local_units)` on each placement [pytorch#169320], and per layer [HAP 2024, §2.4] | rounding each extent separately, or splitting an extent the parts do not divide by `torch.chunk`: views and the inverse break, and ranks infer different global shapes |
@@ -86,8 +86,8 @@ program uses its functions where a partitioned dimension is meant, and torch's o
   `ring_attention` and `context_parallel_unshard` are torch's with the attached dimension's `RaggedShard`.
 
 **Operand.**
-- `partition.attach(mesh, tp=(capacity, parts))`, before the mesh is first used, the same on every
-  rank; a sub-mesh keeps its root's. `partition.write(mesh, tp=parts)` changes the parts between calls.
+- `partition.attach(mesh, tp=units)`, before the mesh is first used, the same on every rank; a sub-mesh keeps its
+  root's. The program declares the units and no parts.
 - `partition.distribute_tensor(x, mesh, [Shard(d)], src_data_rank=None).to_local()` and `partition.split(mesh, "tp",
   N)` give a program its own splits; `x.chunk(world)` gives equal ones.
 - `partition.from_local` without `shape=` means "a capacity block" (global = local·P/c_r).
@@ -98,9 +98,10 @@ program uses its functions where a partitioned dimension is meant, and torch's o
   mesh dimensions outer first, and an outer split's shares can differ by coordinate, so ranks would
   disagree about P dividing them. An inner dimension is partitioned on a mesh ordered with it first.
 
-**First parts.** The program states them: `partition.attach(mesh, tp=(capacity, parts))` takes the capacities and
-parts as operands, the same on every rank (`partition.py` `attach`), and metal-microbench `tools/torch_parallel/tp.py`
-takes them as `PARTITION`. No code in this repository derives them from node rates. Until 2026-10-17 a
+**First parts.** The backend's: `partition.attach(mesh, tp=units)` splits the units evenly over the coordinates in
+rank order, each part its coordinate's capacity (`partition.py` `attach`). No program or configuration states them (the
+operator, 2026-10-23: "configs shouldn't control shares due to mandate wrt callers not knowing anything about the
+ranks"). No code in this repository derives them from node rates. Until 2026-10-17 a
 derivation did: each rank's time for c units was a_r + b_r·c from its node's rates per operator class, the collectives
 on the dimension's critical path were added at the largest share by `mesh.program_time`, and
 `allocate.equal_finish(P, 1, low, high, a, b)` gave the integer parts. cc8a6f8e deleted `mesh_program_time` with
@@ -122,7 +123,9 @@ one Balancer step, identically on every rank (R4). A prepared call's stretches a
 at every crossing it issues on the host path, its work since its previous crossing ended and the crossing's own time,
 on its own clock (metal-microbench `mesh_rank.m`). Its parts stand once the evidence promises no gain past its resolution, so they change with the
 configuration and not with jitter (R11). A rank's work follows its capacity (R14: stock kernels compute the
-padding), so parts that move past the capacities are attached again at them; that is the one cost R11 weighs.
+padding), so each part is its capacity, and parts that move are attached again at them by `rebalance` itself; the
+program moves its sharded tensors onto them (`partition.follow`: one all-to-all a mesh dimension, only what changes rank
+crossing). That is the one cost R11 weighs.
 metal-microbench's calls run the same Balancer on those stretches (`tools/mesh/rates.py`), its parts and the
 evidence they moved on kept in the mesh's store (`rdma/store.py` 'configurations').
 

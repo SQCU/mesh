@@ -1,17 +1,14 @@
-"""A capacity-shaped partition operand: DTensor's Shard, tensor parallelism and context parallelism split a mesh
-dimension by parts that vary between calls, in local buffers whose shapes do not (design/heterogeneity.md §4 and R14).
+"""A partition operand the backend sets: DTensor's Shard, tensor parallelism and context parallelism split a mesh
+dimension by parts the backend moves between calls by the measured residual (design/heterogeneity.md §4, R3, R14).
 
-Stock PyTorch splits every sharded extent equally (Shard follows torch.chunk).  Here a mesh dimension carries a
-capacity c_r >= 1 per coordinate and parts p_r (1 <= p_r <= c_r) of P = sum(p) units, attached with the mesh:
-attach(mesh, tp=((15, 15), (4, 12))), the same on every rank.  An extent N that P divides (any other raises ValueError,
-on every rank alike) is split N p_r / P per coordinate in rank order, as the logical tensor reads, and rank r holds its
-share in a local buffer of c_r N / P along that dimension: its N p_r / P valid elements first, padding after.  Every
-shape follows the capacities, fixed for the attach (a coordinate's capacity is the largest share the configuration
-allows it, stated with the parts: design/heterogeneity.md §4).  The parts are a tensor operand (operand(mesh,
-"tp").parts), written between calls by write(mesh, tp=(5, 11)) and read by the ops below when they run, so a program
-recorded or compiled once is replayed across parts with no shape change, recompile or reallocation.  relay(t, full)
-writes a sharded tensor's local buffer from its logical value under the current parts (a program's weights, after each
-write).  On raw tensors split(mesh, "tp", N) gives the valid blocks in rank order, the ones the list collectives take
+Stock PyTorch splits every sharded extent equally (Shard follows torch.chunk).  Here a program declares a mesh
+dimension's P units, attach(mesh, tp=P), the same on every rank, and the backend gives coordinate r a part p_r >= 1 of
+them, an even split at first (rebalance moves them), and a capacity c_r, its part.  An extent N that P divides (any
+other raises ValueError, on every rank alike) is split N p_r / P per coordinate in rank order, as the logical tensor
+reads, and rank r holds its share in a local buffer of c_r N / P along that dimension: its N p_r / P valid elements
+first, padding after.  The parts are a tensor operand (operand(mesh, "tp").parts) read by the ops below when they run.
+follow(t) moves a sharded tensor onto the parts a rebalance attached.  On raw tensors split(mesh, "tp", N) gives the
+valid blocks in rank order, the ones the list collectives take
 (dist.all_gather into a list of unequal outputs, dist.reduce_scatter of a list of unequal inputs: MPI's v-collectives
 in torch's spelling).
 
@@ -27,7 +24,7 @@ Uneven partitioning as GSPMD does it [Xu et al. 2021, "GSPMD: general and scalab
 graphs", arXiv:2105.04663, §3.3: pad a dimension to the shards' size, and mask the padding to the identity of the next
 operation wherever its data could leak into valid results]:
 - Padding holds the identity of its next consumer, or garbage that nothing reads unmasked.  Sources keep the identity:
-  a local buffer is written with zeros past its valid extent (distribute_tensor, relay), and the collectives below
+  a local buffer is written with zeros past its valid extent (distribute_tensor, follow), and the collectives below
   write the identity past `valid`.
 - Before an op that reduces or contracts over a partitioned dimension of a local shard (its DTensor sharding has a
   Partial output on that mesh dimension: mm, bmm, addmm, baddbmm, dot, mv, sum, amax, amin and every other), each
@@ -96,12 +93,12 @@ their mesh dimension's group and coordinate, and the redistribution moves one me
 (NotImplementedError on every rank alike; the code past it computes even splits or indexes another dimension's
 capacities): _StridedShard (FSDP2 with TP, nested views), a flattened or unflattened partitioned dimension, a BlockMask
 (flex attention) and LocalTensor's RNG tracker on a RaggedShard.  from_local's run_check on a RaggedShard broadcasts its
-Replicate mesh dimensions, as torch's does, and compares no shape (a ragged one's differ by rank); relay writes a
-Partial mesh dimension's term as distribute_tensor does.
+Replicate mesh dimensions, as torch's does, and compares no shape (a ragged one's differ by rank).
 Left as they are: the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.
 Under torch.compile the SDPA ring is a graph break (UnsupportedOperatorException on fake tensors).
 
-rebalance(mesh, name, every) moves the parts by the evidence of the program's steps (allocate.Balancer)."""
+rebalance(mesh, name, every) moves the parts by the evidence of the program's steps (allocate.Balancer) and attaches
+the dimension again at them."""
 import contextlib
 import itertools
 import math
@@ -129,31 +126,16 @@ aten = torch.ops.aten
 
 
 class _Operand:
-    """A partitioned dimension's capacities (fixed) and parts (a CPU tensor, written between calls).  The masks and
-    indices ops read from the parts are cached per what they are, and a write rebuilds each in place (the same tensors,
-    their shapes fixed by the capacities), so a step recorded before it (torch_mesh.record) reads the new parts where it
-    reads the old ones: a parts change records nothing again."""
+    """A partitioned dimension's parts (a CPU tensor), each its coordinate's capacity, as the backend attached them;
+    the masks and indices ops read from them cached per what they are."""
 
-    def __init__(self, key, capacity, parts):
-        self.key, self.capacity, self.units = key, tuple(int(c) for c in capacity), sum(int(p) for p in parts)
-        self.parts, self.epoch, self.cache, self.builds = torch.zeros(len(self.capacity), dtype=torch.int64), 0, {}, {}
-        self.write(parts)
-
-    def write(self, parts):
-        parts = tuple(int(p) for p in parts)
-        if len(parts) != len(self.capacity) or sum(parts) != self.units or not all(1 <= p <= c for p, c in zip(parts, self.capacity)):
-            raise ValueError(f'mesh: parts {parts} of {self.units} units within the capacities {self.capacity}: one a '
-                             f'coordinate, each at least 1')
-        self.parts.copy_(torch.tensor(parts))
-        self.epoch += 1
-        for what, held in self.cache.items():
-            fresh, held = self.builds[what](parts), held if isinstance(held, tuple) else (held,)
-            for old, new in zip(held, fresh if isinstance(fresh, tuple) else (fresh,)):
-                old.copy_(new)
+    def __init__(self, key, parts):
+        self.key, self.capacity, self.units = key, tuple(int(p) for p in parts), sum(int(p) for p in parts)
+        self.parts, self.cache = torch.tensor(self.capacity, dtype=torch.int64), {}
 
     def cached(self, what, build):
         if what not in self.cache:
-            self.cache[what], self.builds[what] = build(self.parts.tolist()), build
+            self.cache[what] = build(self.parts.tolist())
         return self.cache[what]
 
 
@@ -177,7 +159,7 @@ def _blocks(o, N):
     return sizes, [sum(sizes[:r]) for r in range(len(sizes))]
 
 
-# The operand read when an op runs: masks and indices from the parts, cached per write.
+# The operand read when an op runs: masks and indices from the parts, cached per operand.
 def _valid(key, rank, length, device):
     """A local block of `length` of rank `rank`: which of its elements are valid (its first length p/c)."""
     o = _OPERANDS[key]
@@ -442,15 +424,22 @@ class RaggedShard(Shard):
 
 # The operand's API.
 def attach(mesh, **dims):
-    """Partition mesh dimensions by name: attach(mesh, tp=(capacity, parts)), a capacity and a part a coordinate, the
-    same on every rank.  Attaching a dimension again makes a new operand: tensors split by the old one keep it."""
-    for name, (capacity, parts) in dims.items():
-        if name not in (mesh.mesh_dim_names or ()) or len(capacity) != mesh.size(mesh.mesh_dim_names.index(name)):
-            raise ValueError(f'mesh: partition {name}: {len(capacity)} capacities, one a coordinate of a mesh dimension of '
-                             f'{mesh.mesh_dim_names}')
-        key = f'{name}#{next(_KEYS)}'
-        _OPERANDS[key] = _Operand(key, capacity, parts)
-        _NAMED[mesh, name] = key
+    """Partition mesh dimensions by name: attach(mesh, tp=units), the units every extent the program splits along the
+    dimension is a multiple of, the same on every rank.  The backend splits them evenly over the coordinates in rank
+    order (the first units mod n one more), and rebalance moves them from there."""
+    for name, units in dims.items():
+        n = mesh.size(mesh.mesh_dim_names.index(name)) if name in (mesh.mesh_dim_names or ()) else 0
+        if not 0 < n <= units:
+            raise ValueError(f'mesh: partition {name}: {units} units over a mesh dimension of {mesh.mesh_dim_names}, '
+                             f'at least one a coordinate')
+        _attach(mesh, name, [units // n + (r < units % n) for r in range(n)])
+
+
+def _attach(mesh, name, parts):
+    """`parts` attached to mesh dimension `name` as a new operand: tensors split by the old one keep it (follow)."""
+    key = f'{name}#{next(_KEYS)}'
+    _OPERANDS[key] = _Operand(key, parts)
+    _NAMED[mesh, name] = key
 
 
 def operand(mesh, name):
@@ -458,34 +447,32 @@ def operand(mesh, name):
     return _OPERANDS[_NAMED[mesh, name]]
 
 
-def write(mesh, **dims):
-    """New parts for partitioned dimensions, between calls: write(mesh, tp=(5, 11)).  Shapes do not change; the
-    tensors a program holds keep their old parts' layout until relay rewrites them."""
-    for name, parts in dims.items():
-        operand(mesh, name).write(parts)
+@torch.no_grad()
+def follow(tensor):
+    """DTensor `tensor` split along each partitioned mesh dimension by the operand attached there now (after a
+    rebalance moved it): the elements that change rank cross once, by one MPI_Alltoallv a mesh dimension
+    (dist.all_to_all_single: the backend's ncclMeshAlltoAllV), the rest staying where they lie."""
+    mesh, placements, local = tensor.device_mesh, list(tensor.placements), tensor.to_local()
+    for i, p in enumerate(placements):
+        key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
+        if not isinstance(p, RaggedShard) or key in (None, p.key):
+            continue
+        old, rank, group = _OPERANDS[p.key], mesh.get_coordinate()[i], mesh.get_group(i)
+        a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
+        g, n = _units(old, tensor.shape[p.dim]), len(old.capacity)
+        span = lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
+        sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
+        x = local.movedim(p.dim, 0)[:sum(sends)].contiguous()
+        y = _empty((sum(receives),) + x.shape[1:], x, group)
+        dist.all_to_all_single(y, x, receives, sends, group=group)
+        local, placements[i] = y.movedim(0, p.dim).contiguous(), RaggedShard(p.dim, key)
+    return from_local(local, mesh, placements)
 
 
 def split(mesh, name, N):
     """The valid blocks of an extent N along partitioned mesh dimension `name` under the current parts, in rank order."""
     o = operand(mesh, name)
     return [_units(o, N) * p for p in o.parts.tolist()]
-
-
-@torch.no_grad()
-def relay(tensor, full):
-    """Writes DTensor `tensor`'s local buffer from its logical value `full` under the current parts: on a partitioned
-    dimension its valid elements, zeros past them (a plain tensor: all of `full`); on a Partial mesh dimension this
-    coordinate's term, as torch's distribute_tensor writes one (Partial._partition_value: the value over the coordinates
-    for a sum, the value itself for avg, max and min).  In place: no reallocation."""
-    if not isinstance(tensor, DTensor):
-        return tensor.copy_(full)
-    mesh, value, coordinate = tensor.device_mesh, full, tensor.device_mesh.get_coordinate()
-    for i, p in enumerate(tensor.placements):
-        if p.is_partial():
-            value = p._partition_value(value, mesh, i)
-        if p.is_shard():
-            value = p._select_split_tensor(value, mesh.size(i), coordinate[i], with_padding=False, clone=False)
-    tensor._local_tensor.copy_(value)
 
 
 def _ragged(placements):
@@ -1247,7 +1234,7 @@ _BALANCING = {}
 
 
 def rebalance(mesh, name='tp', every=8):
-    """The parts of partitioned mesh dimension `name` that the evidence of its last `every` steps gives
+    """Whether the evidence of the last `every` steps moved the parts of partitioned mesh dimension `name`
     (design/heterogeneity.md R3, R5, R10, R11): call it once a step, after the step is issued, on every rank of the
     mesh alike.  The first call watches the dimension's group (torch_mesh.evidence: each rank's own work between its
     collectives there, one stretch a collective); every `every` steps after it the ranks' stretches are gathered to
@@ -1255,12 +1242,10 @@ def rebalance(mesh, name='tp', every=8):
     each at least 1, at most the units less one a peer, minimising the steps' time: the sum over their stretches of
     the slowest rank's, every stretch scaling with this dimension's parts.
 
-    A rank computes its whole buffer, its capacity, padding and all (R14: stock kernels), so its work follows its
-    capacity: the evidence measures parts where they are the capacities, and parts that move within capacities set
-    only what is valid.  Returns (parts, written): written where the parts moved and fit the capacities (then written
-    here, and the program relays its tensors, relay); parts that moved past a capacity are the program's to attach
-    again (capacities and parts both: the shapes change, which R11 weighs), whose dimension's group keeps this
-    balancer.  The parts stand once the evidence promises no gain past its resolution."""
+    A rank computes its whole buffer (R14: stock kernels), so each part is its capacity, and parts that move are
+    attached here again (the shapes change, which R11 weighs; the group keeps this balancer).  It returns True then,
+    and the program moves its sharded tensors onto them (follow).  The parts stand once the evidence promises no gain
+    past its resolution."""
     import allocate
     from . import evidence
     o = operand(mesh, name)
@@ -1274,11 +1259,11 @@ def rebalance(mesh, name='tp', every=8):
         _BALANCING[where] = {'balancer': allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n,
                                                                    'high': [o.units - n + 1] * n}}), 'steps': 0}
         evidence.watch(group, mesh.device_type)
-        return tuple(o.parts.tolist()), False
+        return False
     evidence.step(group)
     held['steps'] += 1
     if held['steps'] < every:
-        return tuple(held['balancer'].parts[name]), False
+        return False
     held['steps'] = 0
     everyone = [None] * dist.get_world_size(group)
     dist.all_gather_object(everyone, evidence.work(group), group=group)
@@ -1289,10 +1274,10 @@ def rebalance(mesh, name='tp', every=8):
                  for k in range(positions)}
     held['balancer'].decisions[name]['parts'] = o.parts.tolist()
     parts = held['balancer'].observe(stretches)[name]
-    written = parts != o.parts.tolist() and all(p <= c for p, c in zip(parts, o.capacity))
-    if written:
-        o.write(parts)
-    return tuple(parts), written
+    if parts == o.parts.tolist():
+        return False
+    _attach(mesh, name, parts)
+    return True
 
 
 def balancing(mesh, name='tp'):

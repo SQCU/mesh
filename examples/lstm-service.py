@@ -56,11 +56,9 @@ def main():
     rank, size = dist.get_rank(), dist.get_world_size()
     L, KIN, H = config['layers'], config['input_width'], config['width']
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
-    even = [H // size + (r < H % size) for r in range(size)]
-    partition.attach(mesh, tp=(even, even))
-    blocks = partition.split(mesh, 'tp', H)
+    partition.attach(mesh, tp=H)
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
-    W, b = weights(config, blocks, rank, size)
+    W, b = weights(config, partition.split(mesh, 'tp', H), rank, size)
     tick = lstm.Tick(mesh, W, b, rows, steps)
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
     if rank == 0:
@@ -77,6 +75,8 @@ def main():
         top = tick(X[min(s, steps - 1)])
         if O is not None and s >= L - 1:
             O[s - L + 1].copy_(top)
+        if partition.rebalance(mesh, 'tp'):
+            tick.follow()
         if s == half:
             middle.record()
     end.record()
@@ -86,8 +86,10 @@ def main():
     steady = middle.elapsed_time(end) / 1e3 / (ticks - 1 - half)
     if O is not None:
         np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))[:] = O.cpu().numpy()
-    summary = dict(rank=rank, size=size, blocks=blocks, layers=L, rows=rows, input_width=KIN, width=H, steps=steps,
-                   ticks=ticks, seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
+    blocks = partition.split(mesh, 'tp', H)
+    summary = dict(rank=rank, size=size, blocks=blocks, balancing=partition.balancing(mesh, 'tp'), layers=L, rows=rows,
+                   input_width=KIN, width=H, steps=steps, ticks=ticks, seconds=seconds,
+                   aggregate_rows_per_second=steps * rows / seconds,
                    steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
                    tick_microseconds=seconds / ticks * 1e6, steady_tick_microseconds=steady * 1e6,
                    host_microseconds=hosted / ticks * 1e6, latency_ticks=L,
