@@ -34,11 +34,11 @@ _Static_assert(sizeof(pthread_t)==8,"M17");
 
 /* design/transport.md section 14: a link's queue pairs, made once at its child's one pairing, are the lanes of its plan
    (link_plan, design/HETEROGENEOUS-LINKS.md), of this layout: lanes 0 and 1, on which nothing is posted, and from
-   MESH_LANE_FIRST pairs, stream s on pair s (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1).  Page p of a stream's sequence
-   over its pairing, the whole page, is unit p div 2 of the stream's lane MESH_LANE_FIRST + 2 s + p mod 2, posted in
-   the sequence's order at each end (stream_pages, stream_through, page_lane), sent from the page its row names and
-   landing in the page the receiver's row names (design/pages-and-functions.md); a lane's units land in the order its
-   SENDs were posted */
+   MESH_LANE_FIRST pairs, stream s on pair s (lanes MESH_LANE_FIRST + 2 s and + 2 s + 1).  A holding's page q, the
+   whole page, goes on lane (sum + q) mod span of its stream's lanes (struct walk: on one cable the stream's page p on
+   its lane p mod 2), posted in the holding's order at each end, sent from the page its row names and landing in the
+   page the receiver's row names (design/pages-and-functions.md); a lane's units land in the order its SENDs were
+   posted */
 #define MESH_LINK_LANES 10u
 #define MESH_LANE_FIRST 2u
 #define MESH_LANE_PAIRS ((MESH_LINK_LANES-MESH_LANE_FIRST)/2)
@@ -48,13 +48,6 @@ _Static_assert(MESH_STREAM_PAIRS && MESH_STREAM_PAIRS*MESH_LINK_STREAMS==MESH_LA
 _Static_assert(MESH_STREAM_PAIRS==1,"a stream one lane pair");
 static inline uint32_t lane_class(uint32_t k){ return (k-MESH_LANE_FIRST)&1; }
 static inline uint32_t lane_stream(uint32_t k){ return (k-MESH_LANE_FIRST)/2; }
-/* the one conversion between a stream's lanes' units and its pages: page p of the stream is unit p div 2 of its lane
-   p mod 2 (page_lane), and each end posts the stream's pages in order, so its pages posted are its two lanes' units
-   together (stream_pages: lane 0's count a, lane 1's b), and its pages completed in order run to the first page either
-   lane has not completed, lane 0's 2 a or lane 1's 2 b + 1 (stream_through) */
-static inline struct mesh_pages stream_pages(uint64_t a,uint64_t b){ return (struct mesh_pages){a+b}; }
-static inline struct mesh_pages stream_through(uint64_t a,uint64_t b){ return (struct mesh_pages){2*a<2*b+1?2*a:2*b+1}; }
-static inline uint32_t page_lane(struct mesh_pages p){ return (uint32_t)(p.n&1); }
 /* TN3205 (README.md): a SEND and the receive it fills cover the same number of frames of MESH_FRAME bytes, a SEND held by
    the hardware's credit until its receive is posted; the bridge's alone */
 #define MESH_FRAME 4096u
@@ -129,12 +122,20 @@ struct lane_state {
    where it is not the holder's to name (rows past the page table, or its word not one of the region): its pages go as
    duds, or land in the spare page */
 struct taken { struct mesh_row row; struct mesh_pages pages,base,page; const _Atomic uint64_t *word; uint32_t whole; };
+/* design/transport.md section 14: the lanes of a stream on another cable, posted by that cable's process: its region
+   stream's units posted and completed (`posts`), its pair among the holding's lanes (`place`) and its two lanes' units
+   as the holding began (`base`) */
+struct lanes { const struct mesh_posts *posts; uint32_t place; uint64_t base[2]; };
 /* design/transport.md section 14: a holding's walk of one of its lists, one progress thread's: a ring of
    MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `timed` given a time, `at` the
-   entry its next page is in, the list's pages so far (`pages`), the stream's pages posted at the holding's first
-   (`base`: the holding's page p is the stream's page base + p), and the count last stored (`count`: `sent` or
-   `landed`, in pages) */
-struct walk { struct taken *ring; uint64_t taken,done,timed,at; struct mesh_pages pages,base,count; };
+   entry its next page is in, the list's pages so far (`pages`), and the count last stored (`count`: `sent` or `landed`,
+   in pages).  Its geometry, fixed as the holding begins (mesh-link.c walk_begin): the holding's page q goes on lane
+   (shift + q) mod span of its stream's lanes; this end's lane j (0 or 1) takes the pages from `first` on, span apart,
+   its units from `base` on; the lanes on other cables are `other` (`others` of them; none on a stream of one cable) */
+struct walk { struct taken *ring; uint64_t taken,done,timed,at; struct mesh_pages pages,count;
+  uint32_t span,shift,others; uint64_t first[2],base[2]; struct lanes other[MESH_PORTS-1]; };
+/* the holding's page of unit u of this end's lane j */
+static inline uint64_t walk_at(const struct walk *w,uint32_t j,uint64_t u){ return w->first[j]+(uint64_t)w->span*(u-w->base[j]); }
 /* design/transport.md section 14: a holding's state on its stream at the send thread: none (`HOLD_NONE`); served
    (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the receive thread has stopped it too
    (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served on it again
