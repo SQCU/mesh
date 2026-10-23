@@ -230,7 +230,7 @@ struct plan {
   size_t n;
   struct schedule *plans;
   struct metal_rows rows;
-  void *pages, *buffer, *stage, *stage_buffer;
+  void *pages, *buffer, *stage, *stage_buffer, *command;
   struct where base;
   size_t word, stage_bytes, stage_offset;
   uint64_t stage_row;
@@ -1322,6 +1322,7 @@ static void plan_free(struct ncclComm *comm, struct plan *p) {
   for (uint32_t h = 0; h < comm->count; h++) table[h] = p->plans ? p->plans[h].t : NULL;
   if (p->pages) retire_locked(comm, p->pages, table, comm->count);
   if (p->stage) retire_locked(comm, p->stage, NULL, 0);
+  if (p->command) metal_release(p->command);
   calls_free(p->list, p->n);
   schedules_free(comm, p->plans);
   rows_free(&p->rows, 1);
@@ -1444,13 +1445,33 @@ static ncclResult_t plan_make(struct ncclComm *comm, const struct call *list, si
 }
 
 static int plan_quiet(struct ncclComm *comm, const struct plan *p);
+enum { SETS = 4 };
 static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n, struct plan **out) {
   release(comm);
   for (size_t i = 0; i < n; i++) list[i].direct_ok = direct_ok(list + i);
-  struct plan *p = comm->plans;
-  for (int same = 0; p && !same; p = same ? p : p->next) {
-    same = p->n == n && plan_idle(p) && plan_quiet(comm, p);
-    for (size_t i = 0; same && i < n; i++) same = call_same(p->list + i, list + i);
+  struct plan *p = NULL;
+  for (;;) {
+    struct plan *held = NULL;
+    uint32_t shaped = 0;
+    for (p = comm->plans; p; p = p->next) {
+      int same = p->n == n;
+      for (size_t i = 0; same && i < n; i++) same = call_same(p->list + i, list + i);
+      if (same && plan_idle(p) && plan_quiet(comm, p)) break;
+      shaped += same;
+      if (same && !p->flight && !held) held = p;
+    }
+    if (p || shaped < SETS || !held) break;
+    const int status = held->command ? metal_ended(held->command) : 0;
+    if (revoked(comm)) return revoked_fail(comm);
+    if (status == 2 || status < 0)
+      return fail(status < 0 ? ncclSystemError : ncclInvalidUsage, "%s on communicator %s: the %u plans of its shape are held by GPU work whose command "
+                  "buffer %s", call_name(list), comm->name, (unsigned)SETS, status < 0 ? "ended in an error" : "is not committed");
+    void *command = status ? NULL : metal_retain(held->command);
+    pthread_mutex_unlock(&group_lock);
+    if (command) { metal_completed(command, MESH_PAUSE_NS); metal_release(command); }
+    else sched_yield();
+    pthread_mutex_lock(&group_lock);
+    release(comm);
   }
   const ncclResult_t result = p ? ncclSuccess : plan_make(comm, list, n, &p);
   if (result) return result;
@@ -2169,6 +2190,8 @@ static ncclResult_t retire_groups(struct metal_program *program) {
 
 static ncclResult_t stamp(struct metal_program *program, struct plan *p) {
   const ncclResult_t result = p->buffer ? gpu(metal_stamp(program, p->buffer, p->word), "a plan's stamp") : ncclSuccess;
+  void *command = p->buffer ? metal_command(program) : NULL;
+  if (command) { metal_release(p->command); p->command = command; }
   p->reader += p->buffer != NULL;
   p->flight = !p->leaving;
   p->leaving = 0;
@@ -2325,7 +2348,6 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
-enum { SETS = 4 };
 struct slot { void *pages, *command; size_t offset; struct mesh_table *table; struct metal_rows rows; uint64_t row, start, landing, landing_k, *k, *kl; uint32_t bound; int unbound; };
 struct leg { uint32_t x, piece, channel, index; int32_t from; };
 struct ncclMeshRequest {

@@ -440,7 +440,12 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`). `ncc
   by the GPU, with no completion handler standing in for it), so the word equals `reader` once each of those programs has ended, in whatever order the caller
   commits them and on whatever queues, and once each of its tables' `sent` and `landed` has reached its last call
   (`plan_quiet`: the bridge has done with its pages and its table, ~0 stamps included once every tuple's `posted`
-  equals its `count`). Where every plan of these calls is held, a new one is made (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
+  equals its `count`). Where every plan of these calls is held, a new one is made, up to four for one shape of calls
+  (`SETS`, the exchange's window, one rule for both); where four are held by GPU work, the call waits outside the
+  groups' lock for the oldest's command buffer, in slices of MESH_PAUSE_NS with the revoke read between them, as
+  NCCL's bounded work FIFO blocks its host when full, and where that buffer is not committed (a C caller's), or ended in
+  an error, it fails as a value. torch-mesh commits its open buffer once it holds four of the library's programs, so
+  the wait is never on uncommitted work. So plans are made only while a program warms up (design/pages-and-functions.md, Freeing 6 and 7: the use count goes down when the reading program's stamp lands, and
   a page is written again only after release). The `stamp` dispatch is a system-scope fence, then the atomic add, so
   the pages' stores are visible before the count the host reads with acquire (design/hardware-and-discipline.md
   section 1); a stamp that cannot be encoded fails its program's call as a value.

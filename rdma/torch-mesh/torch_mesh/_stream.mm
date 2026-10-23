@@ -27,6 +27,8 @@ struct MeshStream {
   uint64_t committed = 0;
   id<MTLCommandBuffer> open = nil;
   bool streamed = false;
+  void *programmed = nullptr;
+  uint32_t programs = 0;
   std::unordered_map<int64_t, Exchanged> exchanged;
 
   explicit MeshStream(at::mps::MPSStream *stream) : mps(stream), progress([stream->device() newSharedEvent]) {}
@@ -129,7 +131,15 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   __block ncclMeshIssue issue = {0, 0};
   dispatch_sync(stream->queue(), ^{
     @autoreleasepool {
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), split ? &issue : nullptr};
+      void *root = (__bridge void *)stream->commandBuffer().rootCommandBuffer;
+      if (root != s->programmed) { s->programmed = root; s->programs = 0; }
+      if (s->programs >= 4) {
+        s->signalled(false);
+        s->programmed = (__bridge void *)stream->commandBuffer().rootCommandBuffer;
+        s->programs = 0;
+      }
+      s->programs++;
+      ncclMeshStream on{(__bridge void *)stream->commandBuffer().rootCommandBuffer, (__bridge void *)stream->commandEncoder(), split ? &issue : nullptr};
       result = (*encode)(&on);
       if (!split || issue.published) s->published();
     }
