@@ -498,10 +498,12 @@ Every word below, with its one writer at a time and its readers:
   whose add completes the way stores `sent` or `landed` = k the same way.
 - **Lost.** A port's threads, as its lanes halt (a link lost), stamp ~0 each tuple they have a request out on or a run
   taken and not yet posted (`done`, and the table's `sent` or `landed` below k: `lanes_halted`), and the parent stamps
-  each started landing whose sender's node is the lost link's peer or routed through it (`landings_from`, by the
-  landing's `from` and the map before the loss). At each map it publishes, the parent stamps each started tuple whose
-  member's name has left the map, or whose route to that member has moved: a landing, and a send with pages already
-  taken (`tuples_rerouted`); a send with none taken goes the new way. So a call waiting on data that can no longer come
+  each started landing whose sender's data comes over the lost link (`landings_from`, by the landing's `from` and the
+  map before the loss). At each map it publishes, the parent stamps each started tuple whose member's name has left
+  the map, and each whose route to that member has moved, comparing the whole path node by node: a landing, and a send
+  with pages already taken (`tuples_rerouted`); a send with none taken goes the new way. Every bridge orders the map's
+  records by node before it routes (`routes_fresh`, as `mesh_map` does), so all compute one table and a route is one
+  path both ways: the path a sender's data takes to this node is this node's path to the sender. So a call waiting on data that can no longer come
   ends at the map that shows its member or its route gone. The bridge's stop and its adoption of a region stamp every
   started tuple not yet complete, and a client's retirement its own (`mesh_tuples_lost`). A stamp is stored
   only over a value below k, so a call started since is not stamped. A child adds to `posted` (by compare-and-swap,

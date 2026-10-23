@@ -142,7 +142,7 @@ struct indexed { uint64_t key[3]; struct mesh_plan *table; struct mesh_entry *en
 struct walker {
   uint64_t serial,told;
   struct named *name;
-  uint32_t names,nodes,*node,*hop,*least;
+  uint32_t names,nodes,*node,*hop,*least,*path,*paths;
   struct indexed *index;
   uint32_t indexed,index_room,blocked[MESH_CLIENTS],blocks;
   struct mesh_plan **table;

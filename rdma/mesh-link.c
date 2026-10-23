@@ -95,6 +95,10 @@ static int key_order(const uint64_t *x,const uint64_t *y,int words){
   return 0;
 }
 static int named_order(const void *a,const void *b){ return key_order(((const struct named *)a)->name,((const struct named *)b)->name,2); }
+static int record_order(const void *a,const void *b){
+  const uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
+  return (x>y)-(x<y);
+}
 static void routes_fresh(struct walker *w){
   const uint64_t serial=atomic_load_explicit(&M->map,memory_order_acquire);
   if(serial==w->serial)return;
@@ -108,32 +112,38 @@ static void routes_fresh(struct walker *w){
   struct named *name=malloc((names+1)*sizeof *name);
   uint32_t *node=malloc((n+1)*sizeof *node),*hop=calloc(n+1,sizeof *hop),*least=calloc(n+1,sizeof *least),*next=malloc(((size_t)n*n+1)*sizeof *next),
            *mark=malloc((n+1)*sizeof *mark);
-  uint32_t edges=0,cable[MESH_REACH];
+  uint32_t edges=0,cable[MESH_REACH],*path=malloc(((size_t)n*n+1)*sizeof *path),*paths=calloc(n+1,sizeof *paths);
   uint64_t bandwidth[MESH_REACH];
   for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)edges+=mesh_joined(r+a,r+b,cable,bandwidth,MESH_REACH);
   struct mesh_edge *edge=malloc((edges+1)*sizeof *edge);
-  if(!name || !node || !hop || !least || !next || !mark || !edge){
-    free(r);free(named);free(name);free(node);free(hop);free(least);free(next);free(mark);free(edge);return;
+  if(!name || !node || !hop || !least || !next || !mark || !edge || !path || !paths){
+    free(r);free(named);free(name);free(node);free(hop);free(least);free(next);free(mark);free(edge);free(path);free(paths);return;
   }
   edges=0;
-  uint32_t self=n,at=0;
+  uint32_t self=n;
+  for(uint32_t a=0,at=0;a<n;a++)for(uint32_t j=0;named && j<r[a].names;j++,at++)name[at]=(struct named){{named[at][0],named[at][1]},r[a].node,0};
+  qsort(r,n,sizeof *r,record_order);
   for(uint32_t a=0;a<n;a++){
     node[a]=mark[a]=r[a].node;
     if(r[a].node==M->node)self=a;
-    for(uint32_t j=0;named && j<r[a].names;j++,at++)name[at]=(struct named){{named[at][0],named[at][1]},r[a].node,0};
     for(uint32_t b=a+1;b<n;b++)
       for(uint32_t c=0,cables=MIN(mesh_joined(r+a,r+b,cable,bandwidth,MESH_REACH),(uint32_t)MESH_REACH);c<cables;c++)
         edge[edges++]=(struct mesh_edge){a,b,cable[c],bandwidth[c]?bandwidth[c]:1};
   }
   qsort(name,names,sizeof *name,named_order);
   struct mesh_link_map map={.nodes=n,.edges=edges,.edge=edge,.next=next,.mark=mark};
-  uint32_t path[n+1];
   if(self<n && !mesh_routes(&map,next))
-    for(uint32_t b=0;b<n;b++)hop[b]=b!=self && mesh_route_path(&map,self,b,path)>=2?node[path[1]]:0;
+    for(uint32_t b=0;b<n;b++){
+      uint32_t *to=path+(size_t)b*n;
+      paths[b]=b!=self?mesh_route_path(&map,self,b,to):0;
+      for(uint32_t i=0;i<paths[b];i++)to[i]=node[to[i]];
+      hop[b]=paths[b]>=2?to[1]:0;
+    }
   for(uint32_t j=0;self<n && j<r[self].reached && j<MESH_REACH;j++)
     for(uint32_t b=0;b<n;b++)if(node[b]==r[self].reach[j].node && (!least[b] || r[self].reach[j].cable<least[b]))least[b]=r[self].reach[j].cable;
-  free(w->name);free(w->node);free(w->hop);free(w->least);
-  *w=(struct walker){.serial=serial,.name=name,.names=names,.nodes=n,.node=node,.hop=hop,.least=least,.index=w->index,.index_room=w->index_room,
+  free(w->name);free(w->node);free(w->hop);free(w->least);free(w->path);free(w->paths);
+  *w=(struct walker){.serial=serial,.name=name,.names=names,.nodes=n,.node=node,.hop=hop,.least=least,.path=path,.paths=paths,
+                     .index=w->index,.index_room=w->index_room,
                      .table=w->table,.table_room=w->table_room,.turn=w->turn,.fresh=w->fresh};
   free(r);free(named);free(next);free(mark);free(edge);
 }
@@ -150,6 +160,13 @@ static uint32_t name_node(const struct walker *w,const uint64_t *key){
 static uint32_t hop_of(const struct walker *w,uint32_t node){
   for(uint32_t i=0;i<w->nodes;i++)if(w->node[i]==node)return w->hop[i];
   return 0;
+}
+static int path_same(const struct walker *a,const struct walker *b,uint32_t node){
+  uint32_t i=0,j=0;
+  while(i<a->nodes && a->node[i]!=node)i++;
+  while(j<b->nodes && b->node[j]!=node)j++;
+  if(i==a->nodes || j==b->nodes || a->paths[i]!=b->paths[j])return 0;
+  return !memcmp(a->path+(size_t)i*a->nodes,b->path+(size_t)j*b->nodes,a->paths[i]*sizeof *a->path);
 }
 static int least_toward(const struct walker *w,const struct port *port,uint32_t hop){
   for(uint32_t i=0;i<w->nodes;i++)if(w->node[i]==hop)return w->least[i]==port->link.cable;
@@ -667,9 +684,9 @@ static void tuples_walk(const struct walker *now,uint32_t peer){
         const uint64_t *name=landing?x->from:x->key;
         const uint32_t was=name_node(&routes,name),is=now?name_node(now,name):was;
         if(!was || was==M->node)continue;
-        if(!now){if(landing && (was==peer || hop_of(&routes,was)==peer))tuple_stamped(t,x,k,landing);continue;}
-        const int moved=!is || hop_of(&routes,was)!=hop_of(now,is);
-        if(moved && (landing || mesh_called(atomic_load_explicit(&x->posted,memory_order_acquire))))tuple_stamped(t,x,k,landing);
+        if(!now){if(landing && hop_of(&routes,was)==peer)tuple_stamped(t,x,k,landing);continue;}
+        const int moved=!is || !path_same(&routes,now,was);
+        if(!is || (moved && (landing || mesh_called(atomic_load_explicit(&x->posted,memory_order_acquire)))))tuple_stamped(t,x,k,landing);
       }
     }
   }
@@ -679,8 +696,9 @@ static void landings_from(uint32_t peer){ tuples_walk(NULL,peer); }
 static void tuples_rerouted(void){
   struct walker now={0};
   routes_fresh(&now);
+  if(!now.serial)return;
   if(routes.serial && now.serial!=routes.serial)tuples_walk(&now,0);
-  free(routes.name);free(routes.node);free(routes.hop);free(routes.least);
+  free(routes.name);free(routes.node);free(routes.hop);free(routes.least);free(routes.path);free(routes.paths);
   routes=now;
 }
 static void map_publish(void){
