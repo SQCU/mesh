@@ -1458,14 +1458,14 @@ static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n
       for (size_t i = 0; same && i < n; i++) same = call_same(p->list + i, list + i);
       if (same && plan_idle(p) && plan_quiet(comm, p)) break;
       shaped += same;
-      if (same && !p->flight && !held) held = p;
+      if (same && !p->flight) held = p;
     }
-    if (p || shaped < SETS || !held) break;
-    const int status = held->command ? metal_ended(held->command) : 0;
+    const int status = held && held->command ? metal_ended(held->command) : 0;
+    if (p || shaped < SETS || !held || status == 2) break;
     if (revoked(comm)) return revoked_fail(comm);
-    if (status == 2 || status < 0)
-      return fail(status < 0 ? ncclSystemError : ncclInvalidUsage, "%s on communicator %s: the %u plans of its shape are held by GPU work whose command "
-                  "buffer %s", call_name(list), comm->name, (unsigned)SETS, status < 0 ? "ended in an error" : "is not committed");
+    if (status < 0)
+      return fail(ncclSystemError, "%s on communicator %s: the %u plans of its shape are held by GPU work whose command buffer ended in an error",
+                  call_name(list), comm->name, (unsigned)SETS);
     void *command = status ? NULL : metal_retain(held->command);
     pthread_mutex_unlock(&group_lock);
     if (command) { metal_completed(command, MESH_PAUSE_NS); metal_release(command); }
@@ -1530,7 +1530,7 @@ static uint64_t ready_need(uint64_t k, uint64_t index) { return (k << 32) + inde
 static void key_of(struct mesh_entry *e, uint64_t id, uint32_t to, uint32_t from, uint64_t space, uint64_t position) {
   e->key[0] = id; e->key[1] = to; e->key[2] = from; e->key[3] = space; e->key[4] = position;
 }
-static void table_begin(struct mesh_plan *t, uint64_t k) {
+static void table_begin(struct ncclComm *comm, struct mesh_plan *t, uint64_t k) {
   uint32_t empty[2] = {0, 0};
   for (uint32_t e = 0; e < t->sends + t->lands; e++) {
     struct mesh_entry *x = t->entry + e;
@@ -1542,6 +1542,7 @@ static void table_begin(struct mesh_plan *t, uint64_t k) {
   if (empty[0] == t->sends) atomic_store_explicit(&t->sent, k, memory_order_relaxed);
   if (empty[1] == t->lands) atomic_store_explicit(&t->landed, k, memory_order_relaxed);
   atomic_store_explicit(&t->start, k, memory_order_release);
+  mesh_queue_begun(comm->attach->context.M, comm->attach->context.client);
 }
 static void tables_start(struct ncclComm *comm, struct schedule *plans) {
   const uint32_t me = (uint32_t)comm->rank;
@@ -1563,7 +1564,7 @@ static void tables_start(struct ncclComm *comm, struct schedule *plans) {
       e->row = m->row; e->offset = m->skew; e->bytes = m->bytes; e->pages = pages_count(m->pages); e->word = 0; e->need = 0;
       key_of(e, comm->id, me, peer, 0, m->entry);
     }
-    table_begin(p->t, p->k);
+    table_begin(comm, p->t, p->k);
   }
 }
 
@@ -2496,7 +2497,7 @@ static void landings_post(struct ncclMeshRequest *r, struct slot *s, uint64_t m)
     key_of(x, comm->id, me, (uint32_t)comm->channels[l->channel].peer, r->seq, m * r->lands[l->channel] + l->index);
   }
   for (uint32_t h = 0; h < comm->count; h++)
-    if (r->ltab[h]) table_begin(slot_table(r, s, h, 1), s->kl[h]);
+    if (r->ltab[h]) table_begin(comm, slot_table(r, s, h, 1), s->kl[h]);
 }
 
 static void landing_settle(struct mesh_plan *t, struct mesh_entry *e, uint64_t k) {
@@ -2545,7 +2546,7 @@ static void sends_write(struct ncclMeshRequest *r, struct slot *s, uint64_t m, c
   }
   t->ready = ready;
   for (uint32_t h = 0; h < comm->count; h++)
-    if (r->tab[h]) table_begin(slot_table(r, s, h, 0), s->k[h]);
+    if (r->tab[h]) table_begin(comm, slot_table(r, s, h, 0), s->k[h]);
   s->start = m;
   s->unbound = ready != 0 || r->relays != 0;
   comm->unpublished += s->unbound;

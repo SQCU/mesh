@@ -9,8 +9,8 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 145u
-#define MESH_LAYOUT 151u
+#define MESH_VERSION 146u
+#define MESH_LAYOUT 152u
 #define MESH_LINE 128u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_PORTS 8u
@@ -91,8 +91,8 @@ struct mesh_record { uint32_t node,reached; uint64_t boot,sequence,region,memory
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
   uint64_t start;
-  _Atomic uint64_t queue;
-  uint64_t padding[5];
+  _Atomic uint64_t queue,begun;
+  uint64_t padding[4];
 };
 _Static_assert(sizeof(struct mesh_client)==64 && offsetof(struct mesh_client,start)==8,"a slot's owner and start where every layout has them");
 struct hdr {
@@ -105,6 +105,7 @@ _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07
 static inline struct mesh_record *mesh_records(struct hdr *m,uint64_t at){ return (struct mesh_record *)((char *)m+m->data_off+(at>>32)*m->pgsz); }
 static inline uint64_t (*mesh_map_names(struct hdr *m,uint64_t at))[2]{ return (uint64_t (*)[2])(mesh_records(m,at)+(uint32_t)at); }
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
+static inline void mesh_queue_begun(struct hdr *m,uint64_t client){ atomic_fetch_add_explicit(&mesh_client_at(m,client)->begun,1,memory_order_seq_cst); }
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline uint64_t mesh_entry_rows(const struct hdr *m,const struct mesh_entry *e){

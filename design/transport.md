@@ -452,6 +452,7 @@ Every word below, with its one writer at a time and its readers:
 | a client slot (`struct mesh_client`, 64 bytes; `owner` and `start` where every layout has them) | `owner` | the client, from 0 by compare-and-swap; its retirement stores 0 | the bridge, the heartbeat, a taker |
 | | `start` | the client | the heartbeat |
 | | `queue`: the region offset of the client's first table, 0 for none | the client; the bridge stores 0 in a vacant slot once no tuple of it is outstanding | the bridge's walks, `mesh_pinned` |
+| | `begun`: a count of the client's table links, unlinks and starts | the client, by a sequentially consistent add after each (`mesh_queue_begun`) | the children's walks |
 | a table (`struct mesh_plan`, in the client's own rows) | `next` | the client | the walks |
 | | `name[2]`: a registration, 0 0 for none | the client | the parent |
 | | `sends`, `lands`; each tuple's `row`, `pages`, `word`, `need`, `key[3]`, and a landing tuple's `from[2]` (its sender's registration) | the client, before the start that uses them | the children; the parent reads `key` and `from` to fail a call whose route moved |
@@ -463,6 +464,7 @@ Every word below, with its one writer at a time and its readers:
 | | `sent`, `landed`: k once each tuple of the way has completed, ~0 lost | the client where the way has no tuple of pages; else the child whose add completes the way; ~0 as `done` | the client's waits |
 | a record (`struct mesh_record`) | `names`, and that many registrations after it, on the wire and in the published map | the parent, from its live clients' tables | every bridge's map, `mesh_names_find`, `mesh_map_copy` |
 | the bridge's own pages (`struct mesh_bridge_pages`, appended) | `walking[port][way]`, and `walking[MESH_PORTS][0]` the parent's | each child thread: odd through each pass (it reads clients' queues and counts completions), even between; the parent: odd while it reads or stamps clients' queues; the parent makes a reaped child's even | a client giving a table back |
+| | `ended`: a count of the ways completed (`sent`, `landed` stored k) | the child whose add completes the way | the children's walks |
 | a port's link pages | its relay entries (`struct relay`) | the port's child; `state` sending (with the sender's port) and `sent` by the child that sends them on; the parent counts `sent` up at that child's reap | the children |
 | | its lanes' records (`struct lane_record`): each lane's requests posted and completed each way, what each was (`ring`, region offsets), and its run in hand (`run`: its tuple, its count, the index of its first page) | the port's child | the parent, after the child's exit |
 
@@ -528,9 +530,8 @@ Every word below, with its one writer at a time and its readers:
   next node of the map's route (`mesh_routes`), placed on that hop's cables alike, so a call's tuples spread over every
   cable of each hop by what each cable moves, which the communicator's solver counts as each hop's use of each of its
   cables (rdma/NCCL.md, Routing).
-- **The index.** Each port's receive thread, when a key unit it must place has landed, reads its node's live clients'
-  started landing tuples into a sorted array (key → table, tuple, k), within one walk of the queues, and finds the key
-  in it by binary search. A key unit that lands is placed:
+- **The index.** Each port's receive thread reads its node's live clients' started landing tuples into a sorted array
+  (key → table, tuple, k), within one walk of the queues, and finds a landed key unit's key in it by binary search. A key unit that lands is placed:
   - a started landing tuple of the key: the run's receives go into the tuple's rows from the offset, each the page its
     row gives in the page table, and then the next key unit's receive where one is to come (What is posted);
   - a registration of this node with no such tuple, where a started landing of the same communicator, receiver,
@@ -590,6 +591,12 @@ Every word below, with its one writer at a time and its readers:
   tuple comes before its stamps, in one pass, so the second walk's end follows them. The words are raised with a
   sequentially consistent add and a fence, so a pass that begins after the unlink reads the queue without the table
   (C11 7.17.3).
+- **The walk.** A pass begins (`tables_walk`) by reading `ended` and each slot's `owner` and `begun`; where none has
+  moved since its walk, it keeps that walk. Else it walks the live clients' queues once: the send thread lists each
+  started table with sends not yet sent, sorted by k within each client, and the receive thread indexes the started
+  landing tuples not yet complete. A pass then reads only the tables in flight; a tuple completed since the walk stays
+  in it, read as complete, until the next. `begun` is raised after the unlink's store, sequentially consistent as the
+  `walking` words are, so a pass that begins after an unlink walks again (C11 7.17.3).
 - **Duds.** A send tuple whose rows lie outside the page table, or a row with no page, or whose word lies outside the
   region, sends the all-ones page; a landing tuple's run into such rows lands in the spare page.
 - The streams of versions 129 to 135 are deleted with every word and call of them: `struct mesh_stream` and the region's
@@ -757,7 +764,7 @@ up to a tick late.
 (mesh.rdma.send) and `way` 1 for its receives (mesh.rdma.receive), the index of `walking[port][way]`. A pass
 (`port_pass`) reads the lanes served once, refreshes its copy of the map's names and routes where the map's count has
 moved (`routes_fresh`: names sorted for binary search, the next node toward each node on the map `mesh_whole_make` builds
-for `mesh_map`, each cable at its bandwidth / 8), polls that
+for `mesh_map`, each cable at its bandwidth / 8), keeps or makes its walk of the queues (section 14, "The walk"), polls that
 way's completion queue and counts each completion (`completed`), then serves each lane: the send thread goes on with
 its lane's run (`run_send`) and then takes new runs (`tables_send`, `relays_send`); the receive thread places or posts
 its lane's run (`run_receive`) and frees its sent relay entries (`relays_free`). A thread with no lane served waits on

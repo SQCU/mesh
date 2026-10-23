@@ -143,7 +143,7 @@ static void routes_fresh(struct walker *w){
     for(uint32_t b=0;d<n && d!=self && b<n;b++)relaying[b]|=b!=d && joined[b].count && whole.next[(size_t)b*n+d]==self;
   }
   routes_free(w);
-  made.index=w->index;made.index_room=w->index_room;made.table=w->table;made.table_room=w->table_room;made.fresh=w->fresh;
+  made.index=w->index;made.index_room=w->index_room;made.table=w->table;made.table_room=w->table_room;
   *w=made;
   free(r);free(named);mesh_whole_free(&whole);
 }
@@ -222,7 +222,8 @@ static void tuple_count(struct mesh_plan *t,struct mesh_entry *e,uint64_t k,int 
   if(mesh_called(ways)!=(way?t->lands:t->sends))return;
   _Atomic uint64_t *stamp=way?&t->landed:&t->sent;
   uint64_t was=atomic_load_explicit(stamp,memory_order_seq_cst);
-  if(was!=MESH_STAMP_LOST && was<k)atomic_compare_exchange_strong_explicit(stamp,&was,k,memory_order_seq_cst,memory_order_seq_cst);
+  if(was!=MESH_STAMP_LOST && was<k && atomic_compare_exchange_strong_explicit(stamp,&was,k,memory_order_seq_cst,memory_order_seq_cst))
+    atomic_fetch_add_explicit(&mesh_bridge_pages(M)->ended,1,memory_order_seq_cst);
 }
 static uint32_t tuple_take(struct mesh_entry *e,uint64_t k,uint32_t most,uint32_t *first){
   uint64_t was=atomic_load_explicit(&e->posted,memory_order_seq_cst);
@@ -325,33 +326,63 @@ static int table_order(const void *a,const void *b){
                  y=atomic_load_explicit(&(*(struct mesh_plan *const *)b)->start,memory_order_relaxed);
   return (x>y)-(x<y);
 }
-static void tables_send(struct port *port,struct walker *w,uint32_t served){
+static int indexed_order(const void *a,const void *b){ return key_order(((const struct indexed *)a)->key,((const struct indexed *)b)->key,5); }
+static int walk_room(void **list,uint32_t *room,uint32_t used,size_t size){
+  if(used<*room)return 1;
+  void *grown=realloc(*list,(*room?2*(size_t)*room:64)*size);
+  if(!grown)return 0;
+  *list=grown;*room=*room?2**room:64;
+  return 1;
+}
+/* design/transport.md section 14, "Walks" */
+static void tables_walk(struct walker *w,int way){
+  const uint64_t ended=atomic_load_explicit(&mesh_bridge_pages(M)->ended,memory_order_seq_cst);
+  int fresh=w->fresh && w->ended==ended;
   for(uint32_t c=0;c<MESH_CLIENTS;c++){
     const struct mesh_client *slot=mesh_slot(M,c);
-    if(!owned(atomic_load_explicit(&slot->owner,memory_order_acquire)))continue;
-    w->tables=0;
+    const uint64_t owner=atomic_load_explicit(&slot->owner,memory_order_seq_cst),begun=atomic_load_explicit(&slot->begun,memory_order_seq_cst);
+    fresh&=w->owner[c]==owner && w->begun[c]==begun;
+    w->owner[c]=owner;w->begun[c]=begun;
+  }
+  if(fresh)return;
+  w->fresh=1;w->ended=ended;w->tables=0;w->indexed=0;
+  for(uint32_t c=0;c<MESH_CLIENTS;c++){
+    w->from[c]=w->tables;
+    if(!owned(w->owner[c]))continue;
     uint32_t tables=mesh_rows(M);
-    for(struct mesh_plan *t=queue_first(slot);t && tables--;t=queue_next(t)){
-      const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire),sent=k?atomic_load_explicit(&t->sent,memory_order_acquire):0;
-      if((t->name[0] || t->name[1]) && w->told!=w->serial && name_node(w,t->name)!=M->node){
+    for(struct mesh_plan *t=queue_first(mesh_slot(M,c));t && tables--;t=queue_next(t)){
+      const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire),sent=k?atomic_load_explicit(&t->sent,memory_order_acquire):0,
+                     landed=k?atomic_load_explicit(&t->landed,memory_order_acquire):0;
+      if(!way && (t->name[0] || t->name[1]) && w->told!=w->serial && name_node(w,t->name)!=M->node){
         w->told=w->serial;
         atomic_store_explicit(&naming,1,memory_order_release);
         wake();
       }
-      if(!k || !t->sends || sent==k || sent==MESH_STAMP_LOST)continue;
-      if(w->tables==w->table_room){
-        struct mesh_plan **grown=realloc(w->table,(w->table_room?2*w->table_room:64)*sizeof *grown);
-        if(!grown)return;
-        w->table=grown;w->table_room=w->table_room?2*w->table_room:64;
+      if(!way && k && t->sends && sent!=k && sent!=MESH_STAMP_LOST){
+        if(!walk_room((void **)&w->table,&w->table_room,w->tables,sizeof *w->table)){w->fresh=0;break;}
+        w->table[w->tables++]=t;
       }
-      w->table[w->tables++]=t;
+      for(uint32_t e=0;way && k && landed!=k && e<t->lands;e++){
+        struct mesh_entry *x=t->entry+t->sends+e;
+        if(!x->pages || atomic_load_explicit(&x->done,memory_order_acquire)==k)continue;
+        if(!walk_room((void **)&w->index,&w->index_room,w->indexed,sizeof *w->index)){w->fresh=0;break;}
+        struct indexed *y=w->index+w->indexed++;
+        memcpy(y->key,x->key,sizeof y->key);y->table=t;y->entry=x;y->k=k;
+      }
     }
-    qsort(w->table,w->tables,sizeof *w->table,table_order);
+    if(w->tables>w->from[c]+1)qsort(w->table+w->from[c],w->tables-w->from[c],sizeof *w->table,table_order);
+  }
+  w->from[MESH_CLIENTS]=w->tables;
+  qsort(w->index,w->indexed,sizeof *w->index,indexed_order);
+}
+static void tables_send(struct port *port,struct walker *w,uint32_t served){
+  for(uint32_t c=0;c<MESH_CLIENTS;c++){
     w->blocks=0;
-    for(uint32_t i=0;i<w->tables;i++){
+    for(uint32_t i=w->from[c];i<w->from[c+1];i++){
       struct mesh_plan *t=w->table[i];
-      const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire);
+      const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire),sent=atomic_load_explicit(&t->sent,memory_order_acquire);
       const uint32_t before=w->blocks;
+      if(sent==k || sent==MESH_STAMP_LOST)continue;
       for(uint32_t e=0;e<t->sends;e++){
         struct mesh_entry *x=t->entry+e;
         const uint64_t done=atomic_load_explicit(&x->done,memory_order_acquire);
@@ -404,34 +435,7 @@ static void relays_send(struct port *port,struct walker *w,uint32_t served){
   }
 }
 /* design/transport.md section 14, "The index" */
-static int indexed_order(const void *a,const void *b){ return key_order(((const struct indexed *)a)->key,((const struct indexed *)b)->key,5); }
-static void index_make(struct walker *w){
-  w->fresh=1;
-  w->indexed=0;
-  for(uint32_t c=0;c<MESH_CLIENTS;c++){
-    const struct mesh_client *slot=mesh_slot(M,c);
-    if(!owned(atomic_load_explicit(&slot->owner,memory_order_acquire)))continue;
-    uint32_t tables=mesh_rows(M);
-    for(struct mesh_plan *t=queue_first(slot);t && tables--;t=queue_next(t)){
-      const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire),landed=k?atomic_load_explicit(&t->landed,memory_order_acquire):0;
-      if(!k || !t->lands || landed==k)continue;
-      for(uint32_t e=0;e<t->lands;e++){
-        struct mesh_entry *x=t->entry+t->sends+e;
-        if(!x->pages || atomic_load_explicit(&x->done,memory_order_acquire)==k)continue;
-        if(w->indexed==w->index_room){
-          struct indexed *grown=realloc(w->index,(w->index_room?2*w->index_room:64)*sizeof *grown);
-          if(!grown)break;
-          w->index=grown;w->index_room=w->index_room?2*w->index_room:64;
-        }
-        struct indexed *y=w->index+w->indexed++;
-        memcpy(y->key,x->key,sizeof y->key);y->table=t;y->entry=x;y->k=k;
-      }
-    }
-  }
-  qsort(w->index,w->indexed,sizeof *w->index,indexed_order);
-}
 static uint32_t index_at(struct walker *w,const uint64_t *key){
-  if(!w->fresh)index_make(w);
   uint32_t lo=0,hi=w->indexed;
   while(lo<hi){
     const uint32_t mid=lo+(hi-lo)/2;
@@ -520,7 +524,6 @@ static int lane_expects(struct port *port,struct walker *w,uint32_t lane){
   uint32_t b=0;
   while(b<w->nodes && w->node[b]!=port->peer)b++;
   if(b<w->nodes && w->relaying[b])return 1;
-  if(!w->fresh)index_make(w);
   for(uint32_t i=0;i<s->arrivals;){
     const struct arrival *a=s->arrival+i;
     const uint64_t posted=atomic_load_explicit(&a->entry->posted,memory_order_acquire),done=atomic_load_explicit(&a->entry->done,memory_order_acquire);
@@ -587,7 +590,7 @@ static void port_pass(struct port *port,int way,struct walker *w){
   if(!served)return;
   routes_fresh(w);
   walk_mark(port->index,way,1);
-  w->fresh=0;
+  tables_walk(w,way);
   struct ibv_wc done[16];
   const int count=l->provider.poll(way?l->provider.completion:l->provider.sent,16,done);
   int failed=count<0;

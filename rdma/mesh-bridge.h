@@ -150,7 +150,8 @@ struct walker {
   struct indexed *index;
   uint32_t indexed,index_room,blocked[MESH_CLIENTS],blocks;
   struct mesh_plan **table;
-  uint32_t tables,table_room;
+  uint32_t tables,table_room,from[MESH_CLIENTS+1];
+  uint64_t ended,owner[MESH_CLIENTS],begun[MESH_CLIENTS];
   int fresh;
 };
 struct progress { _Alignas(MESH_LINE) _Atomic uint64_t passes; struct port *port; int way; struct walker walker; };

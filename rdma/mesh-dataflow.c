@@ -388,6 +388,7 @@ void mesh_queue_link(struct mesh_ctx *context,struct mesh_plan *table){
   struct mesh_client *slot=mesh_client_at(context->M,context->client);
   atomic_store_explicit(&table->next,atomic_load_explicit(&slot->queue,memory_order_relaxed),memory_order_relaxed);
   atomic_store_explicit(&slot->queue,(uint64_t)((char *)table-(char *)context->M),memory_order_release);
+  mesh_queue_begun(context->M,context->client);
 }
 int mesh_queue_unlink(struct mesh_ctx *context,struct mesh_plan *table){
   struct hdr *m=context->M;
@@ -400,6 +401,7 @@ int mesh_queue_unlink(struct mesh_ctx *context,struct mesh_plan *table){
   }
   if(atomic_load_explicit(link,memory_order_relaxed)!=at)return ENOENT;
   atomic_store_explicit(link,atomic_load_explicit(&table->next,memory_order_relaxed),memory_order_seq_cst);
+  mesh_queue_begun(m,context->client);
   return 0;
 }
 void mesh_walks(struct hdr *m,struct mesh_walk *walk){
