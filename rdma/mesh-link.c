@@ -25,7 +25,6 @@ _Static_assert(MESH_PORTS<=32,"a bit a port");
 
 static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
 static uint32_t fnv(const void *bytes,size_t n){ uint32_t h=0;for(const unsigned char *b=bytes;n--;b++)h=(h*0x01000193u)^*b;return h; }
-static uint64_t backoff(uint32_t n){ return MIN(UINT64_C(60)<<MIN(n,6u),UINT64_C(3600)); }
 static void say(const char *format,...){ va_list arguments;va_start(arguments,format);mesh_say("",format,arguments);va_end(arguments); }
 static void port_log(const struct port *port,const char *format,...){
   char prefix[64];snprintf(prefix,sizeof prefix,"link %u (%s): ",port->index,port->name);
@@ -783,7 +782,7 @@ static void ports_stalled(void){
     const int out=port->job && !atomic_load_explicit(&port->done,memory_order_acquire) && now-port->job_at>=MESH_PLATFORM_NS;
     any|=out;
     if(port->stuck){
-      if(!out){port->stuck=0;if(port->job!=CHILD_OPEN)port->opening=1;}
+      if(!out)port->stuck=0;
       continue;
     }
     if(!out)continue;
@@ -885,9 +884,9 @@ static void hello_send(const struct port *port,const struct sockaddr_in6 *to){
 }
 static int child_spawn(struct port *port);
 static void port_open(struct port *port){
-  if(port->job || port->stuck || !port->opening || port->control>=0 || now<port->quiet_at || port->recycle || now<port->hold_to ||
+  if(port->job || port->stuck || !port->opening || port->control>=0 || now<port->quiet_at || port->recycle ||
      atomic_load_explicit(&stalled,memory_order_relaxed))return;
-  if(!port->child && child_spawn(port))return;
+  if(!port->child && child_spawn(port)){port->opening=0;return;}
   port->opening=0;
   port->interface=if_nametoindex(port->name);
   hello_join(port);
@@ -1141,7 +1140,7 @@ static int child_spawn(struct port *port){
     }
   }
   if(port->elsewhere)return EBUSY;
-  if(entry==2*MESH_PORTS){port->hold_to=now+MESH_PAUSE_NS;return EBUSY;}
+  if(entry==2*MESH_PORTS)return EBUSY;
   int error=socketpair(AF_UNIX,SOCK_STREAM,0,pair)?errno?errno:EIO:0;
   pid_t pid=0;
   if(!error){
@@ -1164,11 +1163,7 @@ static int child_spawn(struct port *port){
     close(pair[1]);
     if(error)close(pair[0]);
   }
-  if(error){
-    port_log(port,"its child not spawned: %s\n",strerror(error));
-    port->hold_to=now+MESH_PAUSE_NS;
-    return error;
-  }
+  if(error){port_log(port,"its child not spawned: %s\n",strerror(error));return error;}
   port->child=pid;port->child_fd=pair[0];port->child_at=now;port->child_held=0;port->ending=port->deaf=port->hung=port->stage=0;
   holders[entry]=(struct mesh_holder){(uint32_t)pid,device,mesh_started(pid)};
   port->holder=entry;
@@ -1238,13 +1233,10 @@ static void child_reaped(struct port *port){
     mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};
   const int asked=port->ending && !port->hung;
   port->ending=port->recycle=0;
-  if(asked){port->aborts=0;port_log(port,"its child %d ended\n",(int)pid);}
+  if(asked)port_log(port,"its child %d ended\n",(int)pid);
   else{
-    port->aborts=now-port->child_at<MESH_CHILD_SETTLE_NS?port->aborts+1:0;
-    const uint64_t hold=port->aborts>1?backoff(port->aborts-2):0;
-    port->hold_to=now+hold*UINT64_C(1000000000);
-    port_log(port,"its child %d ended %s (%s %d); its next spawned in %llu s\n",(int)pid,port->hung?"after its hang":"unbidden",
-             WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status),(unsigned long long)hold);
+    port_log(port,"its child %d ended %s (%s %d)\n",(int)pid,port->hung?"after its hang":"unbidden",
+             WIFSIGNALED(status)?"signal":"status",WIFSIGNALED(status)?WTERMSIG(status):WEXITSTATUS(status));
     port->open=0;
     if(!port->hung)port_lost(port,ECHILD);
   }
@@ -1513,7 +1505,7 @@ static uint64_t turn_due(uint64_t liveness){
   due_at(&due,atomic_load(&exit_at));
   for(uint32_t p=0;p<port_count;p++){
     const struct port *port=ports+p;
-    due_at(&due,atomic_load(&port->quiet_at));due_at(&due,port->hold_to);
+    due_at(&due,atomic_load(&port->quiet_at));
     if(port->open && port->control<0)due_at(&due,port->next);
     if(port->job)due_at(&due,port->job_at+MESH_PLATFORM_NS);
   }
@@ -1625,7 +1617,7 @@ int main(int argc,char **argv){
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_CHILD)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
         if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->child)child_reaped(port);
-        else if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->elsewhere)port->elsewhere=0;
+        else if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->elsewhere){port->elsewhere=0;port->opening=1;}
         else if(port && e->filter==EVFILT_READ && (int)e->ident==port->child_fd)child_heard(port);
       }
       else if(e->filter==EVFILT_PROC){

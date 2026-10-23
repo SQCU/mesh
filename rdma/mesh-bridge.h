@@ -136,7 +136,6 @@ struct child_message {
   uint8_t gid[16];
   uint64_t bandwidth;
 };
-#define MESH_CHILD_SETTLE_NS (UINT64_C(60)*1000000000)
 #define TAG_CHILD (UINT64_C(1)<<58)
 struct port;
 struct progress { _Alignas(MESH_LINE) _Atomic uint64_t passes; struct port *port; int way; };
@@ -159,9 +158,9 @@ struct port {
   pid_t child,elsewhere;
   uint32_t holder;
   int child_fd,recycle,ending;
-  uint32_t aborts,child_held;
+  uint32_t child_held;
   int deaf,hung,stage;
-  uint64_t child_at,hold_to,late_from,late_at,elsewhere_start;
+  uint64_t child_at,late_from,late_at,elsewhere_start;
   unsigned char child_in[sizeof(struct child_message)];
 };
 #define MESH_HEALTH_NS UINT64_C(10000000000)

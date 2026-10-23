@@ -594,12 +594,14 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   to end, reaps it and spawns the next, which opens the port and pairs with the peer whenever it answers. Nobody acts.
   Other ports' children and links, the clients and their leases are untouched.
 - A child that ends unbidden loses its link the same way and is spawned again once the port's quiet window has
-  passed; the k-th such end in a row within 60 s of its spawn, k from 2, holds the port's next spawn 60·2^(k−2) s, at
-  most an hour (the operator, rubric M6: "restarted, not crashing again of course"). A child that makes no progress for
-  MESH_PLATFORM_NS, or to which a message did not go whole, loses its link the same way, is asked to end once its
-  windows have passed, and counts as an unbidden end; a child asked to end that has not ended is stopped and then
-  killed, outside every window, its port with no job out and no port's job out past the deadline (section 16). A child whose parent is gone halts its
-  lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
+  passed, at the events that open any port (its child's end is one). A child that makes no progress for
+  MESH_PLATFORM_NS, or to which a message did not go whole, loses its link the same way and is asked to end once its
+  windows have passed; a child asked to end that has not ended is stopped and then killed, outside every window, its
+  port with no job out and no port's job out past the deadline (section 16). Nothing the bridge does next depends on
+  how often a child ended: the spawn backoff of 1f9be1d5 and 128d0e84 (the k-th unbidden end within 60 s of a spawn
+  holding the next 60·2^(k−2) s) is deleted, and so is the hold after a spawn that failed (a failed spawn waits for the
+  port's next open event). The operator, 2026-10-22: "this is not a real feature. delete it and anything like it". A
+  child whose parent is gone halts its lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one child's at
   a time and no make meets the device's ceiling. At the bridge's stop every child is halted, asked to end after the
   exit's hold, and awaited up to MESH_PLATFORM_NS.
@@ -624,8 +626,7 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   it, and when its last child has ended; an open port with no peer says its hello at once, again whenever an IPv6
   address of its interface is added or changed (the kernel's `KEV_INET6_SUBCLASS` events: a hello that left before the
   address could carry it), and every MESH_PAUSE_NS otherwise. The parent's event loop sleeps until the next event or
-  the next time its turn waits for (a quiet window's end, the exit window, a hold, a hello, a job's bound, the liveness
-  turn), at most MESH_PAUSE_NS; every other change it takes wakes it where the change is made (a
+  the next time its turn waits for (a quiet window's end, the exit window, a hello, a job's bound, the liveness turn), at most MESH_PAUSE_NS; every other change it takes wakes it where the change is made (a
   child of an earlier launch is awaited by its exit, EVFILT_PROC). Between a cable's loss and its next pairing stand the
   quiet window (MESH_PLATFORM_NS), the old child's exit (the kernel's release of its device's objects), the new child's
   open and the make and connect: the
@@ -701,9 +702,10 @@ makes no further verbs call and is dropped as it ends (`link_lapsed`). A port ha
 its child's alike (`job`: open, make or connect). A port whose job is still out
 MESH_PLATFORM_NS after it began is concluded around it once (`ports_stalled`: open 0, `port_lost` with ETIMEDOUT, no
 verbs call); while any job is so out, no port dispatches a job, no child is asked to end and the devices are not read
-(`stalled`), and the port stays `stuck` until its job returns, then opens again. The event loop's wait (`turn_due`)
+(`stalled`), and the port stays `stuck` until its job returns, and opens again at the events that open any port
+(d71970f8's reopening at the job's return, a heal keyed on the stall, is deleted). The event loop's wait (`turn_due`)
 ends at the earliest time a turn waits for (a liveness turn, a health sample, a window's end,
-a spawn hold, a hello, a job's bound), at most MESH_PAUSE_NS on; every other change wakes it where it
+a hello, a job's bound), at most MESH_PAUSE_NS on; every other change wakes it where it
 is made (`wake`, a socket, a signal, an exit). A fixed 250 ms tick had taken each such time
 up to a tick late.
 
@@ -993,8 +995,7 @@ What reads them, and what each reader does:
   any lost link, once its windows have passed, its port has no job out and no port's job is out past the deadline
   (`child_may_end`). A child asked to end that has not ended MESH_PLATFORM_NS and MESH_PAUSE_NS later (its own leave
   ends it within MESH_PLATFORM_NS), and an earlier launch's child twice MESH_PLATFORM_NS after it was found, is sent
-  SIGSTOP under the same gate, and SIGKILL MESH_PLATFORM_NS after that. A hung child's end counts toward its port's spawn backoff as an unbidden end does
-  (section 14); its loss stays booked ETIMEDOUT.
+  SIGSTOP under the same gate, and SIGKILL MESH_PLATFORM_NS after that. Its loss stays booked ETIMEDOUT.
 
 ### A thread in the kernel
 
