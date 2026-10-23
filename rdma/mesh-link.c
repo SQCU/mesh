@@ -910,7 +910,7 @@ static int device_up(struct mesh_device *device){
   if(ibv_query_device(device->context,&capabilities))return errno?errno:EIO;
   if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return errno?errno:EIO;
   if(!device->extent_mrs){
-    uint32_t shift=(uint32_t)__builtin_ctzll(page_bytes());
+    uint32_t shift=(uint32_t)__builtin_ctzll((uint64_t)mesh_extent_pages(M)*M->pgsz);
     while(shift<32 && ((wire.length-1)>>shift)+1>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:1))shift++;
     device->extent_shift=(uint8_t)shift;
     if(!(device->extent_mrs=calloc(((wire.length-1)>>shift)+1,sizeof *device->extent_mrs)))return ENOMEM;

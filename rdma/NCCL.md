@@ -653,8 +653,12 @@ Porting:
   (`tbt_post_recv` keeps only an address's low 32 bits: `rdma/mesh-verbs.h`), so no page crosses an extent. So:
   - every crossing call's send buffer, and every buffer it sends from or lands in, is a lease's (in this node's region);
   - the program's own cuts lie on pages (`mesh_program_steps_cut`), and a cut NCCL's call fixes lies where it does.
-  A unit at an offset that would cross one of this port's registered extents (1 GiB on the Studios) is sent as the
-  all-ones page and landed in the spare page (mesh-link.c `entry_at`). An operand outside the region fails the call as
+  The extents are a layout fact (`mesh_extent_pages`: the least power of two of pages at which the arena makes at most
+  `MESH_EXTENTS`, 100, the devices' `max_mr`; a port whose device allows fewer registers larger ones, whole multiples),
+  and the arena never lays a lease across an extent's line: a lease of at most an extent lies inside one, and a
+  larger one is whole extents (`mesh_arena_alloc`, layout 151). `max_sge` is 1 on every device measured
+  (design/HETEROGENEOUS-LINKS.md section 1), so a unit is one range. A unit at an offset across an inner line of a
+  lease of several extents is still sent as the all-ones page and landed in the spare page (mesh-link.c `entry_at`). An operand outside the region fails the call as
   a value (`ncclInvalidUsage`, naming the piece and its buffer) before anything is presented; nothing is copied to make it
   fit.
 - Every crossing collective but a premultiplied one reads its send buffer and writes its result where they lie (the

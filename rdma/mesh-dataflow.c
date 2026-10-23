@@ -235,9 +235,10 @@ static int mesh_claim(_Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t first
   for(uint32_t v=first/64;v<w;v++)atomic_fetch_and_explicit(&own[v],~mesh_word_mask(first,count,v),memory_order_acq_rel);
   return 0;
 }
-static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
+static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t extent,uint32_t begin,uint32_t end,
                           _Atomic uint64_t *own,_Atomic uint64_t *hot){
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
+    if(extent && (count>extent?first%extent!=0:first/extent!=(first+count-1)/extent)){first=((first/extent+1)*extent+align-1)/align*align;continue;}
     uint32_t next=first;
     for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
       uint64_t occupied=(atomic_load_explicit(&own[w],memory_order_acquire)|atomic_load_explicit(&hot[w],memory_order_acquire))&mesh_word_mask(first,count,w);
@@ -248,14 +249,14 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
   }
   return MESH_ABSENT;
 }
-static uint32_t mesh_allocate(uint32_t count,uint32_t align,uint32_t end,_Atomic uint64_t *own,_Atomic uint64_t *hot){
-  const uint32_t first=mesh_scan(count,align,0,end,own,hot);
+static uint32_t mesh_allocate(uint32_t count,uint32_t align,uint32_t extent,uint32_t end,_Atomic uint64_t *own,_Atomic uint64_t *hot){
+  const uint32_t first=mesh_scan(count,align,extent,0,end,own,hot);
   if(first==MESH_ABSENT)errno=ENOMEM;
   return first;
 }
 static uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   if(!count){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=mesh_allocate(count,1,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT));
+  uint32_t first=mesh_allocate(count,1,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT));
   if(first==MESH_ABSENT) return first;
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
@@ -269,7 +270,7 @@ static uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
-  return mesh_allocate(pages,align,mesh_arena_pages(c->M),bits,bits);
+  return mesh_allocate(pages,align,mesh_extent_pages(c->M),mesh_arena_pages(c->M),bits,bits);
 }
 uint32_t mesh_arena_free(struct hdr *m){
   const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);
