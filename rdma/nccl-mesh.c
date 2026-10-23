@@ -2856,7 +2856,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
-struct slot { void *pages, *buffer; struct mesh_table *table; uint64_t row, start, reader, *ends; int unbound; };
+struct slot { void *pages, *buffer; struct mesh_table *table; uint64_t row, start, *ends; uint32_t bound; int unbound; };
 struct peer_part { int rank, sends; uint32_t channel; size_t count, landing; };
 struct ncclMeshRequest {
   struct ncclComm *comm;
@@ -2886,7 +2886,7 @@ static int plan_quiet(struct ncclComm *comm, const struct plan *p) {
 }
 
 static int slot_free(const struct ncclMeshRequest *r, const struct slot *s) {
-  if (s->reader && __atomic_load_n(&s->table->stamp, __ATOMIC_ACQUIRE) < s->reader) return 0;
+  if (__atomic_load_n(&s->table->ended, __ATOMIC_ACQUIRE) < s->bound) return 0;
   for (uint32_t e = 0; e < r->peers; e++) {
     const struct channel *ch = r->comm->channels + r->part[e].channel;
     if (!entry_done(r->comm, ch, ch->view.sent, s->ends[2 * e]) || !entry_done(r->comm, ch, ch->view.landed, s->ends[2 * e + 1])) return 0;
@@ -3017,7 +3017,7 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   if (!result) result = comm_failure(comm);
   sweep(comm, 0, 0);
   uint32_t k = r->turn, looked = 0;
-  while (!result && looked < r->nslots && !slot_free(r, r->slots + k)) { k = (k + 1) % r->nslots; looked++; }
+  while (!result && looked < r->nslots && ((r->starts && r->slots[k].start == r->starts) || !slot_free(r, r->slots + k))) { k = (k + 1) % r->nslots; looked++; }
   if (!result && looked == r->nslots) result = slot_make(r, k = r->turn);
   for (uint32_t e = 0; e < r->peers && !result; e++)
     for (int list = 0; list < 2 && !result; list++) {
@@ -3066,9 +3066,9 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
     pthread_mutex_unlock(&group_lock);
     return result;
   }
-  *t = (struct mesh_table){metal_address(s->buffer), 0, r->peers, t->stamp, ++r->starts};
-  s->start = *start = r->starts;
-  s->reader = s->start;
+  *t = (struct mesh_table){metal_address(s->buffer), 0, r->peers, 0, 0};
+  s->start = *start = ++r->starts;
+  s->bound = 0;
   for (uint32_t e = 0; e < r->peers; e++) s->unbound |= peer[e].ready_value != 0;
   comm->unpublished += s->unbound;
   if (k == r->turn) r->turn = (k + 1) % r->nslots;
@@ -3100,6 +3100,8 @@ ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int pu
                           : gpu(metal_bind(on->commandEncoder, on->argumentTable, on->residencySet, land ? metal_address(land->buffer) + r->table : 0,
                                            publish ? metal_address(publish->buffer) + r->table : 0, r->comm->violation, groups, index, buffers, n),
                                 "a crossing's binding");
+  if (!result && land) land->bound++;
+  if (!result && publish && publish != land) publish->bound++;
   pthread_mutex_unlock(&group_lock);
   return result;
 }

@@ -18,7 +18,7 @@ static inline uint64_t pages_to_word(mesh_pages a) { return a.n; }
 static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){word}; }
 
 #define MESH_PEER(P, U64, U32) struct mesh_peer { P landing; P landed; U64 landed_target, landed_at, published, ready_value; U32 channel, pad; }
-#define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; U64 stamp, value; }
+#define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; ATOMIC ended; U32 pad; }
 #define MESH_CROSSING(T, P, W, U64, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; P failure; W progress; U64 sequence; U32 groups, polls; }
 MESH_PEER(uint64_t, uint64_t, uint32_t);
 MESH_TABLE(uint64_t, uint64_t, uint32_t, uint32_t);

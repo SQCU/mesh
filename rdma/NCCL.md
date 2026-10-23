@@ -392,7 +392,10 @@ This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place 
 Every GPU wait is bounded (design/transport.md; the operator, 2026-10-18: "you cannot be using a low level
 kernel like a dma or networking send/rcv channel for more than 5 seconds without something happening/concluding").
 The most loads of a count one wait makes (`rdma/mesh.metal` `mesh_wait_bounded`) is the library's own bound,
-`MESH_POLLS` (`nccl-mesh-metal.h`, 4.5 x 10^6): data code passes no bound and is shown none. A wait that reaches its
+`MESH_POLLS` (`nccl-mesh-metal.h`, 4.5 x 10^6), a constant of the library's build: no wait the library composes takes
+a bound from data code. A data kernel's own wait on a word its partner writes (the Neural Engine's, metal-microbench
+neural_engine.swift) is the prelude's `mesh_wait(word, target)`, `mesh_wait_bounded` at the same bound. A wait that
+reaches its
 bound records its entry, its channel and the bound in its communicator's failure words, and the group fails as a value
 after its command buffer (`ncclCommGetAsyncError`, or the communicator's next group: "not done within N polls of a GPU
 wait"). No kernel halts on the record: every later dispatch runs as encoded. But once
@@ -508,9 +511,10 @@ a landing area a peer, and the slot's table (`struct mesh_table`, then a `struct
 its slots as its starts need them.
 
 - `ncclMeshStart(request, counts, stream, &start)` is `MPI_Start`: the next start, numbered from 1, takes a free slot,
-  else the request makes one. A slot is free once the kernel bound to land its last start (each start is landed by one
-  kernel, bound with `lands`) has read it (its table's stamp holds that start) and the bridge's `sent` has passed its
-  last send entry on each channel. So no start reuses pages
+  else the request makes one. A slot is released by use count: every kernel bound to it (`ncclMeshBind`, landing its
+  start or publishing it) counts its end in the slot's table (`ended`, the last threadgroup of `mesh_leave`), and the slot
+  is free once that count reaches the binds made of it (`bound`) and the bridge's counts have passed its entries (below),
+  whatever kernels the caller binds or none. So no start reuses pages
   another start still holds, and a kernel writes no guard of its own (the operator, 2026-10-22: "programs overwrite
   each other in data processing by default with no extraneous lines of code written"; NCCL-style primitives "use
   explicit allocation per buffer or pageset that they operate against, rather than an attempt to make timed single
@@ -531,11 +535,12 @@ its slots as its starts need them.
   start.
 - A request's slots are a ring in start order: a start takes the first free slot from the oldest on, and else makes
   one, the newest, so where starts end in their order a start checks one slot and `ncclMeshBind` finds a start's slot
-  at its place in the ring (`slot_of`; else by a look at each slot). A slot is free
-  once the kernel bound to land its start has stamped it, and on each channel the holding's `sent` has passed its send
-  entry and `landed` its landing entry, or the count reads `~0`, or the stream is no longer the communicator's: a
-  landing entry not yet landed stays presented, and the bridge may post its receive into the slot until the holding
-  ends.
+  at its place in the ring (`slot_of`; else by a look at each slot). A slot is free once its bound kernels have ended
+  (above) and on each channel the holding's `sent` has passed its send entry and `landed` its landing entry, or the
+  count reads `~0`, or the stream is no longer the communicator's: a landing entry not yet landed stays presented, and
+  the bridge may post its receive into the slot until the holding ends. A start that only publishes is free once its
+  publishing kernel has ended and its SENDs are done; one whose landing no kernel reads, once it has landed. A start
+  never takes the slot of the start before it, whose landing a kernel bound with the new start's number reads.
 - `ncclMeshBind(request, start, lands, publishes, stream, index, groups)` binds the crossing record (`struct
   mesh_crossing`) at buffer `index` of the caller's next dispatch on the stream's encoder: with `lands`, start − 1's
   landings and this rank's part of it; with `publishes`, start's send part and publication; `groups` the dispatch's

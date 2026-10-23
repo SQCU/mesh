@@ -8,10 +8,10 @@ own for it. This replaced the fused records of 2026-10-21 and 2026-10-22 (mesh 1
 ## The form
 
 **The library** (rdma/).
-- `ncclMeshExchangeInit` makes the request and checks each part against the peer's page length. A slot is one lease:
-  this rank's send part, a landing area a peer and the slot's table. `ncclMeshStart` takes a free slot (its last start
-  landed and read, its last SENDs sent), else makes one, presents its entries and writes its table: each peer's landing
-  area, `landed` word and target, `ready` word and value.
+- `ncclMeshExchangeInit` makes the request. A slot is one lease: this rank's send part, a landing area a peer and the slot's table. `ncclMeshStart` takes a free
+  slot (every kernel bound to it ended, its entries done), else makes one, presents its entries and writes its table:
+  each peer's landing area, `landed` word and target, and the word its send entry waits on and the value its
+  publication stores.
 - `ncclMeshBind` binds one record at the kernel's crossing index: the landed start's table and the publishing start's,
   the communicator's failure words, the dispatch's threadgroups and the library's bound. On the classic form it is
   `setBytes`, and the slots' and holdings' buffers are declared with `useResource`, so Metal orders the kernel's pass
