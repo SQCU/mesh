@@ -407,8 +407,9 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
 - Every SEND and every receive is one whole page, the page its row names (the bridge reads the row's page as it posts
   it: one read a page). A send entry whose rows lie outside the page table, or a row that holds no page, goes as duds,
   and such a landing entry's pages land in the spare page (the port's link page). So a SEND always fills its receive
-  exactly (TN3205), ends whose lists differ garble their own pages and never fail the link, and neither end knows the
-  other's addresses.
+  exactly (TN3205), ends whose lists differ garble their own pages and never fail the link (on one cable; over several,
+  below, a send entry and the landing entry it fills are of the same pages), and neither end knows the other's
+  addresses.
 - A port's one progress thread posts a unit from its page once the entry's word says the page is ready, posts
   each receive straight into its page (at most a window ahead) once the entry's word says the page's reader released
   it (a page is written again only after release), and raises `landed` once every page before has landed, whichever
@@ -419,6 +420,48 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   lane each way) and the two time rings (`posted_at`: an entry's first SEND posted;
   `landed_at`: its last page landed; mach_absolute_time ticks read once at the end of the pass). The time rings are
   measurement and decide nothing.
+
+**A stream over several cables** (version 135, layout 139; the operator, 2026-10-23: "using 2 cables is faster than
+one cable with awareness of the data model"; "the bridge is the one that knows about queue pairs after all, so it might
+only possibly be the bridge's responsibility to decide how to swizzle and tile transactions which can use multiple links
+at a time to reach a target"). c6e34a20 put a holding's page q on lane (sum + q) mod span of every cable's lanes and
+measured slower (lstm-n3 84.1-84.4 us a tick against 71.6): a run of one-page crossings alternated cables, and a cable
+quiet for 200 us or more completes its next SEND 1.8-5 us late (metal-microbench docs/measurement.md, the quiet probe).
+So a piece is placed by its size, which both ends know before the call (data-model.md section 5):
+- **The group.** Stream s of every cable whose link is up toward a node (its plan having stream s, the stream not
+  ended) is one stream toward the node, its cables in the order of their identities (`cable`, stream_wire's, alike at
+  both ends). The first is the group's (`lead` 0): its words are the client's (owner, lists, `ready`, `sent`,
+  `landed`, `taken`, the time rings), its identity `wire` the first cable's where the group has one, else FNV-1a over
+  every cable's ascending (so two ends take a stream over the same cables or none), its bandwidth theirs together; the
+  others are not live, so no client takes one. The parent makes the groups on its event loop (groups_turn), a change
+  only while none of the streams it touches serves a holding or is held: it marks each `regroup` and reads after
+  whether any serves (`serving`, which each cable tells before it reads its mark: of the two, one sees the other's
+  word), and takes its marks off at once where one does. A client that takes a stream while its group is made reads its
+  holding gone (mesh_stream_held).
+- **Placement.** A piece (an entry) of P pages is cut evenly over the S cables, cable c taking its pages from
+  ceil(c P / S) to ceil((c + 1) P / S): cable 0 takes the larger share and every piece's first page, a piece of one page
+  whole. The cold first frame of a quiet cable (1.8-5 us) does not shape it (the operator, 2026-10-23: idiosyncrasies
+  "which do not affect the (throughput,latency) 2-coordinate pareto superiority or inferiority of kernels at all
+  plausible shapes"). Each cable's own pages go on its two lanes in turn, its page g over the pairing unit g div 2 of lane
+  g mod 2: on one cable, the stream's page p on its lane p mod 2 as before. A send entry and the landing entry it fills
+  being of the same pages (libnccl-mesh lays them so: mesh_lay), both ends cut alike.
+- **Counts.** Each cable's thread finds a cable's i-th page of the holding by a cursor over the entries it took
+  (walk_place). Its `sent` and `landed` are the least over the cables of each one's first page not completed: its own
+  from its lanes, each other's from that cable's `posts` read after its own were told, sequentially consistent, stored
+  by the greater of what the word holds (so of two cables completing at once, the later stores the whole, with no pass
+  more). `taken` is the least of every cable's `walked`, stored alike. On one cable, `sent` and `landed` are its lanes'
+  arithmetic, with no cursor.
+- **A holding's start and end.** The first cable begins a holding as one cable did, and counts it (`begun`); another
+  cable begins it as the count moves (a cable whose group changed serves from the next). Each cable's walk starts at its
+  own lanes' units and at each other cable's pages as its last holding ended (`base`). Each cable ends it at its give or
+  its client's retirement, as before, and tells its stop by its bit in the first stream's `stops`; the cable whose bit
+  completes them makes every cable's `walked` new and frees the stream, unless the first cable ended it with units
+  outstanding. A cable that ends with units outstanding takes its group's first stream out of service (not live) until
+  the parent makes the group again without it, and its link takes main's path. A cable lost has its stop told by the
+  parent (streams_cancel), the group's first stream not live and its counts ~0, so its holder reads the loss. Nothing
+  waits for another cable.
+- **What it costs.** A holding split over two cables ends when either is lost (a stripe's failure is both cables');
+  a holding of short pieces runs on cable 0 alone.
 
 **Holding it** (version 133; the operator, 2026-10-22, on the holding's start of 129-132: "something is sampled
 diachronically four times then we do a funny little guess ... this entire code path needs to be remove and rewritten
