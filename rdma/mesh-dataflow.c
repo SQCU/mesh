@@ -1,4 +1,5 @@
 #include "mesh-call.h"
+#include "mesh-observe.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -22,16 +23,6 @@ static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
   if(fd)*fd=file;
   return 0;
 }
-int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
-  struct hdr *m;size_t length;
-  int error=mesh_open(0,&m,&length,NULL);
-  if(error)return -error;
-  struct mesh_reach all[MESH_STREAMS];
-  const uint32_t count=mesh_nodes_reached(m,all,MESH_STREAMS);
-  for(uint32_t k=0;out && k<count && k<capacity;k++)out[k]=all[k];
-  if(node)*node=m->node;
-  munmap(m,length);return (int)count;
-}
 int mesh_region(uint64_t *bytes,uint64_t *unleased){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
@@ -39,10 +30,7 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
   *bytes=(uint64_t)mesh_arena_pages(m)*m->pgsz;*unleased=(uint64_t)mesh_arena_free(m)*m->pgsz;
   munmap(m,length);return 0;
 }
-static int mesh_records_read(struct mesh_record **out){
-  struct hdr *m;size_t length;
-  const int error=mesh_open(0,&m,&length,NULL);
-  if(error)return -error;
+static int mesh_records_copy(struct hdr *m,struct mesh_record **out){
   struct mesh_record *copy=NULL;
   uint32_t n=0;
   for(;;){
@@ -54,15 +42,51 @@ static int mesh_records_read(struct mesh_record **out){
     atomic_thread_fence(memory_order_acquire);
     if(atomic_load_explicit(&m->map,memory_order_relaxed)==before)break;
   }
-  munmap(m,length);
   *out=copy;
   return copy?(int)n:-ENOMEM;
+}
+static int mesh_records_read(struct mesh_record **out,uint32_t *node){
+  struct hdr *m;size_t length;
+  const int error=mesh_open(0,&m,&length,NULL);
+  if(error)return -error;
+  if(node)*node=m->node;
+  const int count=mesh_records_copy(m,out);
+  munmap(m,length);
+  return count;
+}
+int mesh_reached(struct mesh_reach *out,uint32_t capacity,uint32_t *node){
+  struct mesh_record *r=NULL;
+  uint32_t own=0;
+  const int count=mesh_records_read(&r,&own);
+  int reached=count<0?count:0;
+  for(int i=0;i<count;i++)if(r[i].node==own){
+    reached=(int)(r[i].reached<MESH_REACH?r[i].reached:MESH_REACH);
+    for(int k=0;out && k<reached && (uint32_t)k<capacity;k++)out[k]=r[i].reach[k];
+  }
+  if(node && count>=0)*node=own;
+  free(r);
+  return reached;
+}
+/* design/transport.md section 14, "A registration" */
+uint32_t mesh_names_find(struct hdr *m,const uint64_t (*name)[2],uint32_t count,uint32_t *node){
+  struct mesh_record *r=NULL;
+  const int records=mesh_records_copy(m,&r);
+  uint32_t found=0;
+  for(uint32_t i=0;i<count;i++){
+    node[i]=0;
+    for(int k=0;!node[i] && k<records;k++)
+      for(uint32_t j=0;j<r[k].names && j<MESH_NAMES;j++)
+        if(r[k].name[j][0]==name[i][0] && r[k].name[j][1]==name[i][1]){node[i]=r[k].node;break;}
+    found+=node[i]!=0;
+  }
+  free(r);
+  return found;
 }
 /* design/transport.md section 3, RECORD; section 15, "The library" */
 uint32_t mesh_joined(const struct mesh_record *a,const struct mesh_record *b,uint32_t *cable,uint64_t *bandwidth,uint32_t room){
   uint32_t count=0;
-  for(uint32_t i=0;i<a->reached && i<MESH_STREAMS;i++)
-    for(uint32_t j=0;a->reach[i].node==b->node && j<b->reached && j<MESH_STREAMS;j++){
+  for(uint32_t i=0;i<a->reached && i<MESH_REACH;i++)
+    for(uint32_t j=0;a->reach[i].node==b->node && j<b->reached && j<MESH_REACH;j++){
       const struct mesh_reach *x=a->reach+i,*y=b->reach+j;
       if(y->node!=a->node || x->cable!=y->cable)continue;
       if(count<room){cable[count]=x->cable;bandwidth[count]=x->bandwidth && y->bandwidth?(y->bandwidth<x->bandwidth?y->bandwidth:x->bandwidth):0;}
@@ -86,9 +110,9 @@ static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w
   for(uint32_t a=0;a<n;a++){
     w->map.mark[a]=r[a].node;
     for(uint32_t b=a+1;b<n;b++){
-      uint32_t cable[MESH_STREAMS];
-      uint64_t bandwidth[MESH_STREAMS];
-      for(uint32_t c=0,cables=mesh_joined(r+a,r+b,cable,bandwidth,MESH_STREAMS);c<cables && c<MESH_STREAMS;c++){
+      uint32_t cable[MESH_REACH];
+      uint64_t bandwidth[MESH_REACH];
+      for(uint32_t c=0,cables=mesh_joined(r+a,r+b,cable,bandwidth,MESH_REACH);c<cables && c<MESH_REACH;c++){
         if(!bandwidth[c])return EINVAL;
         w->map.edge[w->map.edges++]=(struct mesh_edge){a,b,cable[c],bandwidth[c]/8};
       }
@@ -115,14 +139,14 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
 }
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map){
   struct mesh_record *r=NULL;
-  const int count=mesh_records_read(&r);
+  const int count=mesh_records_read(&r,NULL);
   const int result=count<0?count:mesh_records_map(r,(uint32_t)count,members,n,node,map);
   free(r);
   return result;
 }
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   struct mesh_record *r=NULL;
-  const int count=mesh_records_read(&r);
+  const int count=mesh_records_read(&r,NULL);
   for(int i=0;i<count && (uint32_t)i<capacity;i++){
     out[i].node=r[i].node;
     out[i].region=r[i].region;out[i].memory=r[i].memory;
@@ -132,11 +156,25 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   free(r);
   return count;
 }
-/* design/transport.md section 2, the client slots */
+/* design/transport.md section 2, the client slots; section 14, "The queue" */
+static void mesh_queue_lost(struct hdr *m,struct mesh_client *slot){
+  uint32_t tables=mesh_rows(m);
+  for(struct mesh_plan *t=mesh_plan_at(m,atomic_load_explicit(&slot->queue,memory_order_acquire));t && tables--;
+      t=mesh_plan_at(m,atomic_load_explicit(&t->next,memory_order_acquire)))
+    mesh_plan_lost(t);
+}
+int mesh_plan_balanced(const struct mesh_plan *t){
+  for(uint32_t e=0;e<t->sends+t->lands;e++)if(!mesh_entry_balanced(t->entry+e))return 0;
+  return 1;
+}
+void mesh_tuples_lost(struct hdr *m,uint64_t client){
+  for(uint32_t s=0;s<MESH_CLIENTS;s++)if(!client || mesh_slot(m,s)==mesh_client_at(m,client))mesh_queue_lost(m,mesh_slot(m,s));
+}
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_client *slot=mesh_client_at(m,client);
   uint64_t own=client&~MESH_RETIRING;
   if(!own || (!(client&MESH_RETIRING) && !atomic_compare_exchange_strong(&slot->owner,&own,own|MESH_RETIRING)))return;
+  mesh_queue_lost(m,slot);
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==own){
@@ -144,7 +182,7 @@ void mesh_retire(struct hdr *m,uint64_t client){
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
   }
-  atomic_store_explicit(&slot->owner,0,memory_order_release);
+  atomic_store_explicit(&slot->owner,0,memory_order_seq_cst);
   mesh_retired_release(m,own);
 }
 static int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
@@ -152,7 +190,7 @@ static int mesh_slot_take(struct mesh_ctx *c,struct hdr *m){
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
     struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
     uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
-    if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
+    if(atomic_load_explicit(&slot->queue,memory_order_acquire) || !atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->start=mesh_started(getpid());
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     return 0;
@@ -281,27 +319,24 @@ static void mesh_lease_free(struct hdr *m,uint32_t row,uint32_t from){
   }
   mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),row,pages/m->block);
 }
-/* design/transport.md section 14, "A holding's end" and "Rows"; design/extents-and-liveness.md, d */
-static int mesh_named(const struct mesh_plan *t,uint32_t first,uint32_t count){
+/* design/transport.md section 14, "Rows"; design/extents-and-liveness.md, d */
+static int mesh_names_rows(const struct mesh_plan *t,uint32_t first,uint32_t count){
   const uint64_t k=atomic_load_explicit(&t->start,memory_order_acquire);
-  for(uint32_t e=0;k && e<t->sends+t->lands;e++){
+  for(uint32_t e=0;e<t->sends+t->lands;e++){
     const struct mesh_entry *x=t->entry+e;
-    const uint64_t done=atomic_load_explicit(&x->done,memory_order_acquire);
-    if((done<k || done==MESH_STAMP_LOST) && x->row<(uint64_t)first+count && first<x->row+x->pages)return 1;
+    if(x->row>=(uint64_t)first+count || first>=x->row+x->pages)continue;
+    const uint64_t done=atomic_load_explicit(&x->done,memory_order_seq_cst);
+    if((k && done<k) || !mesh_entry_balanced(x))return 1;
   }
   return 0;
 }
 static int mesh_pinned(struct hdr *m,uint32_t first,uint32_t count,uint64_t client){
-  const int gone=atomic_load_explicit(&mesh_client_at(m,client)->owner,memory_order_acquire)!=client;
-  for(uint32_t s=0;s<m->streams && s<MESH_STREAMS;s++){
-    const struct mesh_stream *x=mesh_stream_at(m,s);
-    const uint64_t owner=atomic_load_explicit(&x->owner,memory_order_acquire);
-    if(!mesh_holds((pid_t)atomic_load_explicit(&x->child,memory_order_acquire),x->child_start))continue;
-    if((owner&~MESH_STREAM_GIVEN)==client && ((owner&MESH_STREAM_GIVEN) || gone))return 1;
-    uint32_t tables=mesh_rows(m);
-    for(const struct mesh_plan *t=mesh_plan_at(m,atomic_load_explicit(&x->plans,memory_order_acquire));t && tables--;
-        t=mesh_plan_at(m,atomic_load_explicit(&t->next,memory_order_acquire)))
-      if(mesh_named(t,first,count))return 1;
+  const uint64_t lo=atomic_load_explicit(&mesh_page(m)[first].address,memory_order_relaxed),hi=lo+(uint64_t)count*m->block*m->pgsz;
+  uint32_t tables=mesh_rows(m);
+  for(const struct mesh_plan *t=mesh_plan_at(m,atomic_load_explicit(&mesh_client_at(m,client)->queue,memory_order_acquire));t && tables--;
+      t=mesh_plan_at(m,atomic_load_explicit(&t->next,memory_order_acquire))){
+    const uint64_t at=(uint64_t)((const char *)t-(const char *)m);
+    if((at>=lo && at<hi) || mesh_names_rows(t,first,count))return 1;
   }
   return 0;
 }
@@ -342,81 +377,32 @@ int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
   mesh_lease_free(m,row,MESH_LEASE_LIVE);
   return 0;
 }
-/* design/transport.md section 14, "Holding it" */
-uint32_t mesh_nodes_reached(struct hdr *m,struct mesh_reach *reach,uint32_t room){
-  uint32_t count=0;
-  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
-    const struct mesh_stream *x=mesh_stream_at(m,p);
-    const int live=atomic_load_explicit(&x->live,memory_order_acquire);
-    const uint32_t node=atomic_load_explicit(&x->peer,memory_order_relaxed),cable=atomic_load_explicit(&x->cable,memory_order_relaxed);
-    if(!node || !live)continue;
-    int seen=0;
-    for(uint32_t k=0;k<count;k++)seen|=reach[k].node==node && reach[k].cable==cable;
-    if(!seen)reach[count++]=(struct mesh_reach){.node=node,.cable=cable,.bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)};
-  }
-  return count;
+/* design/transport.md section 14, "The queue" and "Walks" */
+void mesh_queue_link(struct mesh_ctx *context,struct mesh_plan *table){
+  struct mesh_client *slot=mesh_client_at(context->M,context->client);
+  atomic_store_explicit(&table->next,atomic_load_explicit(&slot->queue,memory_order_relaxed),memory_order_relaxed);
+  atomic_store_explicit(&slot->queue,(uint64_t)((char *)table-(char *)context->M),memory_order_release);
 }
-uint32_t mesh_streams_free(struct hdr *m,uint32_t *node,uint64_t *wire,uint32_t *cable,uint32_t room){
-  uint32_t count=0;
-  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
-    const struct mesh_stream *x=mesh_stream_at(m,p);
-    if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->owner,memory_order_relaxed))continue;
-    node[count]=atomic_load_explicit(&x->peer,memory_order_relaxed);wire[count]=atomic_load_explicit(&x->wire,memory_order_relaxed);
-    cable[count++]=atomic_load_explicit(&x->cable,memory_order_relaxed);
-  }
-  return count;
-}
-int mesh_stream_take(struct mesh_ctx *context,uint64_t wire,uint32_t *stream){
-  if(!context || !context->client || !stream || !wire)return EINVAL;
+int mesh_queue_unlink(struct mesh_ctx *context,struct mesh_plan *table){
   struct hdr *m=context->M;
-  for(uint32_t p=0;p<m->streams && p<MESH_STREAMS;p++){
-    struct mesh_stream *x=mesh_stream_at(m,p);
-    if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->wire,memory_order_relaxed)!=wire)continue;
-    uint64_t vacant=0;
-    if(!atomic_compare_exchange_strong_explicit(&x->owner,&vacant,context->client,memory_order_acq_rel,memory_order_acquire))return EBUSY;
-    *stream=p;
-    return 0;
-  }
-  return ENOLINK;
-}
-static struct mesh_stream *stream_held(struct hdr *m,uint32_t stream){
-  return stream<m->streams && stream<MESH_STREAMS?mesh_stream_at(m,stream):NULL;
-}
-void mesh_stream_give(struct mesh_ctx *context,uint32_t stream){
-  if(!context || !context->client)return;
-  struct mesh_stream *x=stream_held(context->M,stream);
-  uint64_t mine=context->client;
-  if(x)atomic_compare_exchange_strong(&x->owner,&mine,mine|MESH_STREAM_GIVEN);
-}
-int mesh_stream_held(struct mesh_ctx *context,uint32_t stream,uint64_t wire){
-  const struct mesh_stream *x=context?stream_held(context->M,stream):NULL;
-  return x && context->client && atomic_load_explicit(&x->live,memory_order_acquire) &&
-         atomic_load_explicit(&x->owner,memory_order_acquire)==context->client && atomic_load_explicit(&x->wire,memory_order_relaxed)==wire;
-}
-/* design/transport.md section 14, "The plans" */
-int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,struct mesh_plan *table){
-  if(!context || !context->client || !table || mesh_plan_at(context->M,(uint64_t)((char *)table-(char *)context->M))!=table)return EINVAL;
-  struct mesh_stream *x=stream_held(context->M,stream);
-  const int error=!x || !atomic_load_explicit(&x->live,memory_order_acquire)?ENOLINK:
-                  atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client?EPERM:0;
-  if(error){mesh_plan_lost(table);return error;}
-  atomic_store_explicit(&table->next,atomic_load_explicit(&x->plans,memory_order_relaxed),memory_order_relaxed);
-  atomic_store_explicit(&x->plans,(uint64_t)((char *)table-(char *)context->M),memory_order_seq_cst);
-  if(atomic_load_explicit(&x->live,memory_order_seq_cst))return 0;
-  mesh_plan_lost(table);
-  return ENOLINK;
-}
-int mesh_stream_unlink(struct mesh_ctx *context,uint32_t stream,struct mesh_plan *table){
-  struct mesh_stream *x=context && context->client && table?stream_held(context->M,stream):NULL;
-  if(!x || atomic_load_explicit(&x->owner,memory_order_acquire)!=context->client)return EPERM;
-  const uint64_t at=(uint64_t)((char *)table-(char *)context->M);
-  _Atomic uint64_t *link=&x->plans;
-  for(uint32_t tables=mesh_rows(context->M);tables-- && atomic_load_explicit(link,memory_order_relaxed)!=at;){
-    struct mesh_plan *t=mesh_plan_at(context->M,atomic_load_explicit(link,memory_order_relaxed));
+  const uint64_t at=(uint64_t)((char *)table-(char *)m);
+  _Atomic uint64_t *link=&mesh_client_at(m,context->client)->queue;
+  for(uint32_t tables=mesh_rows(m);tables-- && atomic_load_explicit(link,memory_order_relaxed)!=at;){
+    struct mesh_plan *t=mesh_plan_at(m,atomic_load_explicit(link,memory_order_relaxed));
     if(!t)return ENOENT;
     link=&t->next;
   }
   if(atomic_load_explicit(link,memory_order_relaxed)!=at)return ENOENT;
   atomic_store_explicit(link,atomic_load_explicit(&table->next,memory_order_relaxed),memory_order_seq_cst);
-  return atomic_load_explicit(&x->live,memory_order_seq_cst)?0:ENOLINK;
+  return 0;
+}
+void mesh_walks(struct hdr *m,struct mesh_walk *walk){
+  const struct mesh_bridge_pages *own=mesh_bridge_pages(m);
+  for(uint32_t p=0;p<=MESH_PORTS;p++)for(int way=0;way<2;way++)walk->word[p][way]=atomic_load_explicit(&own->walking[p][way],memory_order_seq_cst);
+}
+int mesh_walked(struct hdr *m,const struct mesh_walk *walk){
+  const struct mesh_bridge_pages *own=mesh_bridge_pages(m);
+  for(uint32_t p=0;p<=MESH_PORTS;p++)for(int way=0;way<2;way++)
+    if((walk->word[p][way]&1) && atomic_load_explicit(&own->walking[p][way],memory_order_acquire)==walk->word[p][way])return 0;
+  return 1;
 }

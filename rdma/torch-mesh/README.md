@@ -30,19 +30,18 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   takes its index (`mps:0`).
 - One rank a node, launched as torchrun launches one (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); each node's
   bridge is its resident service, so a launch starts no bridge.
-- A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
-  exchange their nodes, the nodes their bridges reach and their streams' pages posted (kept as a statistic: equal on a
-  live stream), and the group keeps the map its init made of them.
+- A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): each rank
+  registers (the id, its rank) with its node's bridge and reads its members' nodes from the bridges' map, and the group
+  keeps the map its init made of them ([NCCL.md](../NCCL.md#communicators)).
 - A bidirectional exchange with one peer pairs as one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   `torch_mesh.batch_isend_irecv(ops, pairs)` is the batch with the group's whole message list from the caller's compiled
-  program (`ncclMeshGroupPairs`), every rank passing the same, so a member between two that no link joins relays them.
+  program (`ncclMeshGroupPairs`), every rank passing the same, so the solver may route a message through a member.
   An uneven `all_to_all` fails as a value; `torch_mesh.all_to_all(output, input, matrix)` takes every rank's counts.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair, and the library does not detect it
-  ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
-- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; no two
-  communicators hold one stream, and a link has up to four (one for each lane pair its plan holds), so the world group
-  and three subgroups use a node pair at once; one more is refused (EBUSY) until a group is destroyed
-  ([NCCL.md](../NCCL.md#ranks-lists-and-streams)).
+  ([NCCL.md](../NCCL.md#ranks-and-lists)).
+- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group; every
+  communicator shares every link, its traffic named by its own keys, and none is refused for the links others use
+  ([NCCL.md](../NCCL.md#ranks-and-lists)).
 - The group's `timeout` is not the library's to read: a collective's waits end at a landing or a lost link; a GPU
   wait also at its bound, and a host-path wait at a revoke. No clock ends a wait on a peer's data.
 - A group's collectives run where a path between its ranks joins every two of them, each rank's bridge reaching the

@@ -192,11 +192,11 @@ static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,struct mes
   for(uint32_t v=0;v<n;v++)if(v!=r)shape[parent[v]].inner=1;
 }
 
-struct mesh_message { uint32_t from,to,round,part,parts,out,in,op,key,way; };
+struct mesh_message { uint32_t from,to,round,part,parts,out,in,op,key; };
 static int mesh_message_order(const void *a,const void *b){
   const struct mesh_message *x=a,*y=b;
-  const uint32_t l[6]={x->from,x->to,x->way,x->round,x->key,x->part},r[6]={y->from,y->to,y->way,y->round,y->key,y->part};
-  for(int i=0;i<6;i++)if(l[i]!=r[i])return l[i]<r[i]?-1:1;
+  const uint32_t l[5]={x->from,x->to,x->round,x->key,x->part},r[5]={y->from,y->to,y->round,y->key,y->part};
+  for(int i=0;i<5;i++)if(l[i]!=r[i])return l[i]<r[i]?-1:1;
   return 0;
 }
 
@@ -251,7 +251,7 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,stru
         if(u==v)continue;
         const uint32_t w=parent[u];
         message[messages++]=(struct mesh_message){u,w,s[u].height,0,1,s[u].inner?buffer[(size_t)u*n+v]:buffer[(size_t)u*n+u],w==v?0:buffer[(size_t)w*n+v],
-                                                  MESH_STEP_REDUCE,v,trees->way?trees->way[(size_t)t*n+u]:0};
+                                                  MESH_STEP_REDUCE,v};
       }
     }
   }else{
@@ -267,8 +267,8 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,stru
       const struct mesh_shape *s=shape+(size_t)t*n;
       for(uint32_t u=0;u<n;u++){
         if(u==r)continue;
-        message[messages++]=up?(struct mesh_message){u,parent[u],s[u].height,p,1,0,0,MESH_STEP_REDUCE,p,trees->way?trees->way[(size_t)t*n+u]:0}
-                              :(struct mesh_message){parent[u],u,s[u].depth-1,p,1,0,0,MESH_STEP_COPY,p,trees->way?trees->way[(size_t)t*n+u]:0};
+        message[messages++]=up?(struct mesh_message){u,parent[u],s[u].height,p,1,0,0,MESH_STEP_REDUCE,p}
+                              :(struct mesh_message){parent[u],u,s[u].depth-1,p,1,0,0,MESH_STEP_COPY,p};
       }
     }
   }
@@ -277,8 +277,8 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,stru
   uint32_t moves=0;
   for(uint32_t i=0;i<messages;i++){
     const struct mesh_message *m=message+i;
-    ordered[moves++]=(struct mesh_ordered){m->from,m->round,0,m->to,m->key,{MESH_STEP_SEND,m->to,m->round,m->out,m->part,m->parts,m->way,0}};
-    ordered[moves++]=(struct mesh_ordered){m->to,m->round,1,m->from,m->key,{m->op,m->from,m->round,m->in,m->part,m->parts,m->way,0}};
+    ordered[moves++]=(struct mesh_ordered){m->from,m->round,0,m->to,m->key,{MESH_STEP_SEND,m->to,m->round,m->out,m->part,m->parts}};
+    ordered[moves++]=(struct mesh_ordered){m->to,m->round,1,m->from,m->key,{m->op,m->from,m->round,m->in,m->part,m->parts}};
   }
   qsort(ordered,moves,sizeof *ordered,mesh_move_order);
   for(uint32_t r=0,k=0;r<=n;r++){
@@ -362,48 +362,44 @@ uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank
       if(!elements)continue;
       struct mesh_operand piece=operand;
       piece.elements=elements;
-      steps[k++]=(struct mesh_step){m->op,m->peer,m->round,m->buffer,lo[m->part],piece,m->way,0};
+      steps[k++]=(struct mesh_step){m->op,m->peer,m->round,m->buffer,lo[m->part],piece};
     }
   }
   free(lo);free(count);
   return k;
 }
 
-static uint32_t mesh_edges(const struct mesh_link_map *map,uint32_t *from,uint32_t *to,double *cap,uint32_t *way){
+static uint32_t mesh_edges(const struct mesh_link_map *map,uint32_t *from,uint32_t *to,double *cap){
   const uint32_t n=map->nodes;
   uint32_t E=0;
   for(uint32_t l=0;l<map->edges;l++){
     const uint32_t a=map->edge[l].a,b=map->edge[l].b;
     if(a>=n || b>=n || a==b)continue;
-    if(from){
-      uint32_t w=0;
-      for(uint32_t e=0;e<E;e++)w+=(from[e]==a && to[e]==b) || (from[e]==b && to[e]==a);
-      from[E]=a;to[E]=b;way[E]=w;cap[E]=(double)map->edge[l].capacity;
-    }
+    if(from){from[E]=a;to[E]=b;cap[E]=(double)map->edge[l].capacity;}
     E++;
   }
   return E;
 }
 
 uint32_t mesh_solve_room(const struct mesh_link_map *map,double eps,uint32_t count){
-  const uint32_t edges=2*mesh_edges(map,NULL,NULL,NULL,NULL);
+  const uint32_t edges=2*mesh_edges(map,NULL,NULL,NULL);
   const double e=eps>0?eps:1;
   const uint64_t rounds=(uint64_t)(mesh_log(edges>1?(double)edges:2.0)/(e*e))+1,room=rounds*count;
   return room>=UINT32_MAX?UINT32_MAX-1:(uint32_t)room;
 }
 
 uint32_t mesh_solve(const struct mesh_link_map *map,double eps,double hop,const struct mesh_demand *demands,uint32_t count,uint32_t room,
-                    uint32_t *demand,uint32_t *parent,uint32_t *way,double *share){
-  const uint32_t n=map->nodes,E=mesh_edges(map,NULL,NULL,NULL,NULL);
+                    uint32_t *demand,uint32_t *parent,double *share){
+  const uint32_t n=map->nodes,E=mesh_edges(map,NULL,NULL,NULL);
   if(!n || !count)return 0;
-  uint32_t *from=calloc((size_t)E+1,sizeof *from),*to=calloc((size_t)E+1,sizeof *to),*ways=calloc((size_t)E+1,sizeof *ways);
+  uint32_t *from=calloc((size_t)E+1,sizeof *from),*to=calloc((size_t)E+1,sizeof *to);
   double *cap=calloc((size_t)E+1,sizeof *cap),*load=calloc(2*(size_t)E+1,sizeof *load),*add=calloc(2*(size_t)E+1,sizeof *add),
          *len=calloc(2*(size_t)E+1,sizeof *len),*dist=calloc((size_t)n+1,sizeof *dist);
   uint32_t *up=calloc((size_t)n+1,sizeof *up),*upl=calloc((size_t)n+1,sizeof *upl),*tree=calloc((size_t)n+1,sizeof *tree),
            *treel=calloc((size_t)n+1,sizeof *treel),*links=calloc((size_t)room*n+1,sizeof *links),*hits=calloc((size_t)room+1,sizeof *hits),made=0;
   unsigned char *done=calloc((size_t)n+1,1);
-  int failed=!from || !to || !ways || !cap || !load || !add || !len || !dist || !up || !upl || !tree || !treel || !links || !hits || !done || !(eps>0);
-  if(!failed)mesh_edges(map,from,to,cap,ways);
+  int failed=!from || !to || !cap || !load || !add || !len || !dist || !up || !upl || !tree || !treel || !links || !hits || !done || !(eps>0);
+  if(!failed)mesh_edges(map,from,to,cap);
   double least=0,total=0;
   for(uint32_t e=0;!failed && e<E;e++)if(!least || cap[e]<least)least=cap[e];
   for(uint32_t d=0;!failed && d<count;d++)total+=(double)demands[d].up+(double)demands[d].down;
@@ -457,32 +453,27 @@ uint32_t mesh_solve(const struct mesh_link_map *map,double eps,double hop,const 
     }
     for(size_t e=0;e<2*(size_t)E;e++)load[e]+=add[e];
   }
-  for(uint32_t k=0;!failed && k<made;k++){
-    share[k]=(double)hits[k]/rounds;
-    for(uint32_t v=0;v<n;v++)way[(size_t)k*n+v]=links[(size_t)k*n+v]==UINT32_MAX?0:ways[links[(size_t)k*n+v]];
-  }
-  free(from);free(to);free(ways);free(cap);free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(links);free(hits);
+  for(uint32_t k=0;!failed && k<made;k++)share[k]=(double)hits[k]/rounds;
+  free(from);free(to);free(cap);free(load);free(add);free(len);free(dist);free(up);free(upl);free(tree);free(treel);free(links);free(hits);
   free(done);
   return failed?UINT32_MAX:made;
 }
 
-uint32_t mesh_flow_trees(uint32_t nodes,const struct mesh_demand *demands,const uint32_t *demand,const uint32_t *parent,const uint32_t *way,
-                         const double *share,uint32_t count,uint32_t first,uint32_t last,uint32_t *root,uint32_t *tree,uint32_t *tree_way,
-                         double *log_weight){
+uint32_t mesh_flow_trees(uint32_t nodes,const struct mesh_demand *demands,const uint32_t *demand,const uint32_t *parent,const double *share,
+                         uint32_t count,uint32_t first,uint32_t last,uint32_t *root,uint32_t *tree,double *log_weight){
   uint32_t trees=0;
   for(uint32_t k=0;k<count;k++){
     if(demand[k]<first || demand[k]>=last)continue;
     root[trees]=demands[demand[k]].root;
     memcpy(tree+(size_t)trees*nodes,parent+(size_t)k*nodes,nodes*sizeof *tree);
-    memcpy(tree_way+(size_t)trees*nodes,way+(size_t)k*nodes,nodes*sizeof *tree_way);
     log_weight[trees++]=mesh_log(share[k]);
   }
   return trees;
 }
 
-uint32_t mesh_flow_routing(uint32_t nodes,const struct mesh_demand *demands,const uint32_t *demand,const uint32_t *parent,const uint32_t *way,
-                           const double *share,uint32_t count,uint32_t first,uint32_t last,struct mesh_routing *routing,uint32_t *pair,
-                           uint32_t *start,uint32_t *node,uint32_t *hop_way,double *weight){
+uint32_t mesh_flow_routing(uint32_t nodes,const struct mesh_demand *demands,const uint32_t *demand,const uint32_t *parent,const double *share,
+                           uint32_t count,uint32_t first,uint32_t last,struct mesh_routing *routing,uint32_t *pair,uint32_t *start,uint32_t *node,
+                           double *weight){
   uint32_t routes=0,hops=0;
   for(uint32_t a=0;a<nodes;a++)for(uint32_t b=0;b<nodes;b++){
     pair[(size_t)a*nodes+b]=routes;
@@ -491,7 +482,6 @@ uint32_t mesh_flow_routing(uint32_t nodes,const struct mesh_demand *demands,cons
       const uint32_t *up=parent+(size_t)k*nodes;
       start[routes]=hops;weight[routes]=share[k];
       for(uint32_t at=a,steps=0;steps<nodes;at=up[at],steps++){
-        hop_way[hops]=way[(size_t)k*nodes+at];
         node[hops++]=at;
         if(at==b || up[at]==UINT32_MAX)break;
       }
@@ -499,7 +489,7 @@ uint32_t mesh_flow_routing(uint32_t nodes,const struct mesh_demand *demands,cons
     }
   }
   pair[(size_t)nodes*nodes]=routes;start[routes]=hops;
-  *routing=(struct mesh_routing){nodes,routes,pair,start,node,weight,hop_way};
+  *routing=(struct mesh_routing){nodes,routes,pair,start,node,weight};
   return routes;
 }
 
@@ -601,13 +591,11 @@ uint32_t mesh_exchange_steps(const struct mesh_routing *g,uint32_t rank,const st
         const uint64_t relay_at=place[first[i]+j];
         if(!receive && r==round && r+1<h){
           if(block)block[k]=i;
-          steps[k++]=(struct mesh_step){MESH_STEP_SEND,g->node[lo+r+1],round,r?relay:x->source,r?relay_at:x->first+y->first,piece,
-                                        g->way?g->way[lo+r]:0,0};
+          steps[k++]=(struct mesh_step){MESH_STEP_SEND,g->node[lo+r+1],round,r?relay:x->source,r?relay_at:x->first+y->first,piece};
         }
         if(receive && r && r-1==round){
           if(block)block[k]=i;
-          steps[k++]=(struct mesh_step){MESH_STEP_COPY,g->node[lo+r-1],round,r+1<h?relay:x->target,r+1<h?relay_at:x->at+y->first,piece,
-                                        g->way?g->way[lo+r-1]:0,0};
+          steps[k++]=(struct mesh_step){MESH_STEP_COPY,g->node[lo+r-1],round,r+1<h?relay:x->target,r+1<h?relay_at:x->at+y->first,piece};
         }
       }
     }
@@ -623,10 +611,10 @@ static int mesh_rounds_sorted(const struct mesh_step *steps,uint32_t count){
   return 1;
 }
 
-uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,uint32_t way,int send,uint64_t at,struct mesh_place *made,uint32_t *placed){
+uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int send,uint64_t at,struct mesh_place *made,uint32_t *placed){
   const int sorted=mesh_rounds_sorted(steps,count);
   uint32_t rounds=0;
-#define MESH_LAID(k) (steps[k].peer==peer && steps[k].way==way && mesh_step_bytes(steps+(k)) && (steps[k].op==MESH_STEP_SEND)==(send!=0))
+#define MESH_LAID(k) (steps[k].peer==peer && mesh_step_bytes(steps+(k)) && (steps[k].op==MESH_STEP_SEND)==(send!=0))
   for(uint32_t k=0;sorted && k<count;k++)if(MESH_LAID(k))made[(*placed)++]=(struct mesh_place){k,send!=0,at++};
   for(uint32_t k=0;!sorted && k<count;k++)if(MESH_LAID(k) && steps[k].round+1>rounds)rounds=steps[k].round+1;
   for(uint32_t r=0;!sorted && r<rounds;r++)
@@ -661,14 +649,14 @@ int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count
   return 0;
 }
 
-uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,uint32_t way,int send,uint64_t at,struct mesh_place *scratch,
+uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,int send,uint64_t at,struct mesh_place *scratch,
                         struct mesh_group_place *made,uint32_t *placed){
   *placed=0;
   for(uint32_t pass=0;pass<2;pass++)for(uint32_t i=0;i<g->calls;i++){
     const struct mesh_group_call *c=g->call+i;
     if(c->kind==MESH_GROUP_POINT || (c->kind==MESH_GROUP_HOSTED)!=pass)continue;
     uint32_t laid=0;
-    at=mesh_lay(c->steps[rank],c->count[rank],peer,way,send,at,scratch,&laid);
+    at=mesh_lay(c->steps[rank],c->count[rank],peer,send,at,scratch,&laid);
     for(uint32_t k=0;k<laid;k++)made[(*placed)++]=(struct mesh_group_place){i,0,scratch[k]};
   }
   for(uint32_t i=0;i<g->calls;i++){
@@ -676,7 +664,7 @@ uint64_t mesh_group_lay(const struct mesh_group *g,uint32_t rank,uint32_t peer,u
     if(c->kind!=MESH_GROUP_POINT)continue;
     for(uint32_t k=0;k<c->count[rank];k++){
       const struct mesh_step *step=c->steps[rank]+k;
-      if(step->peer==peer && step->way==way && mesh_step_bytes(step) && (step->op==MESH_STEP_SEND)==(send!=0))
+      if(step->peer==peer && mesh_step_bytes(step) && (step->op==MESH_STEP_SEND)==(send!=0))
         made[(*placed)++]=(struct mesh_group_place){i,0,{k,send!=0,at++}};
     }
   }

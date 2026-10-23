@@ -24,12 +24,13 @@ uint32_t mesh_retired_release(struct hdr *,uint64_t client);
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
-/* design/transport.md section 14, "Holding it" */
-uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
-uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t *cable,uint32_t room);
-int mesh_stream_take(struct mesh_ctx *,uint64_t wire,uint32_t *stream);
-void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
-int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
-int mesh_stream_present(struct mesh_ctx *,uint32_t stream,struct mesh_plan *table);
-int mesh_stream_unlink(struct mesh_ctx *,uint32_t stream,struct mesh_plan *table);
+/* design/transport.md section 14, "The queue" */
+static inline struct mesh_client *mesh_slot(struct hdr *m,uint32_t s){ return (struct mesh_client *)((char *)m+m->client_off)+s; }
+void mesh_queue_link(struct mesh_ctx *,struct mesh_plan *);
+int mesh_queue_unlink(struct mesh_ctx *,struct mesh_plan *);
+struct mesh_walk { uint64_t word[MESH_PORTS+1][2]; };
+void mesh_walks(struct hdr *,struct mesh_walk *);
+int mesh_walked(struct hdr *,const struct mesh_walk *);
+int mesh_plan_balanced(const struct mesh_plan *);
+uint32_t mesh_names_find(struct hdr *,const uint64_t (*name)[2],uint32_t count,uint32_t *node);
 #endif
