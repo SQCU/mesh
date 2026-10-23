@@ -19,7 +19,7 @@ extern char **environ;
 #define REOPEN_S 60u
 #define REPLACE_TICK_MS 1000
 #define WATCH_MS 1000
-enum { TIMER_OPEN=1, TIMER_END=2, TIMER_WATCH=3 };
+enum { TIMER_OPEN=1, TIMER_WATCH=3 };
 enum { TAG_BRIDGE=1, TAG_HOLDER=2 };
 
 static void say(const char *format,...){ va_list arguments;va_start(arguments,format);mesh_say("heartbeat: ",format,arguments);va_end(arguments); }
@@ -273,7 +273,6 @@ int main(int argc,char **argv){
     say("bridge %d found serving region %s; watched\n",(int)serving,MESH_NAME);
   }
   else open_bridge();
-  int ending=0;
   for(;;){
     watch_turn();
     struct kevent64_s ready[8];
@@ -294,19 +293,9 @@ int main(int argc,char **argv){
         wanted=0;
         if(!bridge){region_expire();replace_turn();say("signal %d: the heartbeat ends\n",(int)e->ident);return 0;}
         close_bridge(ASKED_END,SIGTERM);
-        if(!ending){
-          ending=1;
-          watch(TIMER_END,EVFILT_TIMER,EV_ADD|EV_ONESHOT,0,(int64_t)(3*MESH_PLATFORM_NS/1000000),0);
-        }
       }
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_OPEN){timer_open=0;turn();}
       else if(e->filter==EVFILT_TIMER && e->ident==TIMER_WATCH)watchdog();
-      else if(e->filter==EVFILT_TIMER && e->ident==TIMER_END){
-        say("bridge %d has not ended %.0f s after it was asked; the heartbeat ends without it\n",(int)bridge,
-            (double)(3*MESH_PLATFORM_NS)/1e9);
-        region_expire();
-        return 0;
-      }
       else if(e->filter==EVFILT_PROC && e->udata==TAG_BRIDGE && (pid_t)e->ident==bridge)bridge_ended();
       else if(e->filter==EVFILT_PROC && e->udata==TAG_HOLDER)turn();
     }

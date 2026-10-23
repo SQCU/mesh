@@ -513,9 +513,9 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   thread's read of the slot (`owned`) finds it not the holder's, as a give would; `mesh_pinned` reads a stream of a
   client gone as given. The send thread ends the
   holding at the first pass that reads the give, or its client's retirement: nothing more of it is posted, its entries
-  taken and not posted are dropped, and the receive thread is told (`ended`). Each progress thread reads whether the
-  holding is still its holder's (its owner word not given, its client's slot its own) once a pass, not once a unit
-  (mesh-link.c `holding_kept`). Each unit is told before it is posted: its row in its lane's ring, then its lane's
+  taken and not posted are dropped, and the receive thread is told (`ended`). The send thread reads whether the
+  holding is still its holder's (its owner word not given, its client's slot its own) once a pass, not once a unit; the
+  receive thread serves the holding until that thread's `ended`, and reads no owner word of its own. Each unit is told before it is posted: its row in its lane's ring, then its lane's
   count, with release (`unit_told`); nothing is read back and nothing awaited. Until layout 139 each unit took a
   sequentially consistent store and loads, so the core waited for its store to be seen.
   The holding's end orders the rest: the receive thread stores `stopped` after its last post of the holding, and the
@@ -609,8 +609,9 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   port's next open event). The operator, 2026-10-22: "this is not a real feature. delete it and anything like it". A
   child whose parent is gone halts its lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
   its device lives (one of the launch before, whose parent ended unbidden), so a device's queue pairs are one child's at
-  a time and no make meets the device's ceiling. At the bridge's stop every child is halted, asked to end after the
-  exit's hold, and awaited up to MESH_PLATFORM_NS.
+  a time and no make meets the device's ceiling. At the bridge's stop each child is asked to end (it leaves after its own
+  windows, `child_leave`), a child the watchdog had stopped is killed, and the bridge exits: it holds no device, and its
+  children's own windows, not its exit, are what a termination holds.
 - Streams across children. A port's streams' lists, rings and words are the parent's, leased once. Each stream names
   the child that posts on it (`child`, `child_start`), and its units count only while that process lives: a child's
   exit, whether this launch reaps it or it is an earlier launch's, releases every row its units named, by no port
@@ -641,14 +642,15 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   "a bridge crashing on a computer two hops down should result in the bridge being restarted, not crashing again of
   course, and becoming available again as a resource for collectives with nothing but an error channel indicating that
   calls-in-flight failed and ought to be retried" (the operator, 10-20).
-- XMAGIC marks a message as the mesh's, at the value version 131 sends, fixed: no version enters it, so bridges of any
-  version pair (the operator, 2026-10-21: "rejection filter removal. categorical. all of them without sanction in
+- XMAGIC marks a multicast HELLO as the mesh's, at the value version 131 sends, fixed: no version enters it, so bridges
+  of any version pair, and no reader of the control socket tests it (the operator, 2026-10-21: "rejection filter removal. categorical. all of them without sanction in
   rubric"). A message states its sender's MESH_VERSION in `version`, which no reader tests. A client reads a region
   only at the layout it was built for (MESH_LAYOUT): every field of another layout lies at other offsets, so a client
   writing it would write the bridge's words at random; that is a bound on memory, not a version check.
   A change that keeps every exchange of a version's meaning and adds information only in a field that version sends
-  as 0 keeps the version: the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) ride a HELLO's `count`, a
-  peer's 0 there meaning a bridge before them, which makes every lane, and two ends that both hold ten pair as before.
+  as 0 keeps the version: the lane budgets of [HETEROGENEOUS-LINKS.md](HETEROGENEOUS-LINKS.md) ride a HELLO's `count`
+  (1 + the queue pairs its device holds for a link); a peer's 0 there (a bridge before them) wraps to no bound, so the
+  plan is this end's, and two ends that both hold ten pair as before.
 
 ## 15. The source
 
@@ -704,15 +706,14 @@ write.
 **Windows.** A port's `quiet_at` lies MESH_PLATFORM_NS past its last loss or past a peer interface's termination heard
 (`quiet_all` moves every port's and the exit's `exit_at`), and moves only later (`quiet_until`), by any thread. Before
 a port's window ends no job is dispatched on it; before every window ends (`windows_end`) the devices are not read
-again and the bridge does not exit. A job of a pairing since lost (`pairing` moved by a loss or a halt, `port_halt`)
+again. A job of a pairing since lost (`pairing` moved by a loss or a halt, `port_halt`)
 makes no further verbs call and is dropped as it ends (`link_lapsed`). A port has one job at a time, the parent's and
 its child's alike (`job`: open, make or connect). A port whose job is still out
 MESH_PLATFORM_NS after it began is concluded around it once (`ports_stalled`: open 0, `port_lost` with ETIMEDOUT, no
 verbs call); while any job is so out, no port dispatches a job, no child is asked to end and the devices are not read
 (`stalled`), and the port stays `stuck` until its job returns, and opens again at the events that open any port
 (d71970f8's reopening at the job's return, a heal keyed on the stall, is deleted). The event loop's wait (`turn_due`)
-ends at the earliest time a turn waits for (a liveness turn, a health sample, a window's end,
-a hello, a job's bound), at most MESH_PAUSE_NS on; every other change wakes it where it
+ends at the earliest time a turn waits for (a liveness turn, a window's end, a hello, a job's bound), at most MESH_PAUSE_NS on; every other change wakes it where it
 is made (`wake`, a socket, a signal, an exit). A fixed 250 ms tick had taken each such time
 up to a tick late.
 
@@ -723,8 +724,8 @@ up to a tick late.
 A thread with no lane served waits on `served`, at most MESH_PAUSE_NS a wait, and reads `closing` between waits.
 - The two threads hand a holding over by its number: the send thread begins holding n (`begun`) and ends it (`ended`)
   at the first pass that reads its give or its client's retirement, and frees or ends the stream once the receive
-  thread has stored `stopped` = n after its last post of it. The receive thread serves holding `rnumber` of owner
-  `rheld` (the send thread's `held` as it began), and passes over a holding that ended before it began.
+  thread has stored `stopped` = n after its last post of it. The receive thread serves holding `rnumber` until the
+  send thread's `ended` names it, and passes over a holding that ended before it began.
 - A walk (`struct walk`) takes a list's presented entries into a ring of its own (`walk_take`: each entry copied once
   and typed as `struct taken`, `whole` 0 where its rows lie outside the page table or a send entry's word lies outside
   the region), finds the entry holding a page (`walk_page`), stores its count (`walk_count`: `sent` or `landed`, with
@@ -747,10 +748,11 @@ A thread with no lane served waits on `served`, at most MESH_PAUSE_NS a wait, an
 
 **Completions.** The device completes every SEND, signalled or not, so a SEND's completion is its queue's retirement.
 The census of e2a29067 (requests counted against completions) had no reader once its log was removed, and is deleted.
-A completion's status and opcode are read as one 8-byte word (`struct ibv_wc`'s status at offset 8 and opcode at 12:
-mesh-bridge.h's static assertion). A completion on a lane no longer served is dropped; a failed one, or a failed poll,
-ends serving on every lane of the link, and a failed post on its lane (`lanes_lost`), which the event loop then loses
-(`broken`).
+Every completion is counted on its lane: each completion queue is its link's own, made with its queue pairs
+(`pair_up`), every lane's queue pair number is recorded at the connect before any post (`link_connect`), and a receive
+queue's completions are receives, so none is passed over (verbs: a work completion names the queue pair its request was
+posted on). A failed one, or a failed poll, ends serving on every lane of the link, and a failed post on its lane
+(`lanes_lost`), which the event loop then loses (`broken`).
 
 **The SEND gate.** `ibv_post_send` accepts posts past the queue's frames and corrupts later, so the send thread posts a
 lane's SEND only while that lane's SENDs posted less those completed (`sent` − `done`) are fewer than its `sends`. The
@@ -809,9 +811,8 @@ queue pair's connection with EIO. The M5 Ultra Studio's macOS 27 rdma_en3 (2026-
 23ff:9f:174a:401d:8d37:9dff:16ac:4594, [1] its interface's fe80:: link-local address and [2] its fd6d ULA, and the Mini
 (macOS 26) failed every lane's connection toward [0] with EIO.
 
-**The control socket** (`port_say`, `control_heard`). A message is a header and its `bytes` (at most 64 MiB), queued
-behind what the socket has not taken, with no bound: a peer that reads nothing holds a record a change or a health
-sample of each node until the queue cannot grow. A failed send, or a queue that cannot grow, loses the link. An open
+**The control socket** (`port_say`, `control_heard`). A message is a header and its `bytes`, as its sender wrote them, queued
+behind what the socket has not taken, with no bound: a peer that reads nothing holds a record a change of each node until the queue cannot grow. A failed send, or a queue that cannot grow, loses the link. An open
 port with no peer multicasts HELLO to ff02::1 on its interface every MESH_PAUSE_NS, and again as an IPv6 address of
 its interface is added or changed (`addresses_heard`, matching the event's interface family and unit to the port's,
 read once from its name; another Ethernet-family interface of the same unit counts as the port's). The lower node dials
@@ -826,15 +827,15 @@ record put in is kept only where a paired path from this node reaches its node (
 `mesh_joined`); one the walk drops is logged unreachable. `known` is RFC 2328 s13's database: each node's newest record
 heard (its boot and sequence), held apart from the map, so a record no newer than one heard is not flooded again; a
 record the map dropped is put back when heard again at that sequence (a new pairing's exchange of the map) or a newer
-one (its node's next change or health sample, at most MESH_HEALTH_NS on). A full table gives its longest-unheard entry's
+one (its node's next change). A full table gives its longest-unheard entry's
 place. A record heard is copied up to this build's size, the rest 0
 (`struct mesh_record` is only appended to). A record's reach has one entry for each cable whose link is up with a
 stream in its plan: the peer node, the cable (its first stream's `cable`) and the link's bandwidth. So two nodes that
 several cables join are as many links of the map, one per cable. The entry's `cable` was 0 in every bridge before
 layout 143, whose entry was a node's cables with their bandwidths summed. The record keeps its form, and its version
 keeps its number (section 14, the field a version sends as 0). Its health is
-the node's boot time and its available memory (`kern.memorystatus_level` percent of `hw.memsize`), sampled at most
-MESH_HEALTH_NS (10 s) apart.
+the node's boot time and its available memory (`kern.memorystatus_level` percent of `hw.memsize`), sampled as the
+record is made (`record_changed`); no timer re-records or re-sends it.
 
 **Terminations and faults.** IOKit tells a Thunderbolt RDMA peer interface's termination in its first phase
 (kIOTerminatedNotification), on a queue of its own: every window is held MESH_PLATFORM_NS from then before any property
@@ -883,8 +884,7 @@ a 31-bit FNV hash of the host's UUID (drawn at random where none is read), 1 whe
 **The heartbeat** (rdma/mesh-heartbeat.c). Its signal set (`heard_set`) is built in one place for its mask, its spawn's
 defaults and its re-raise. Before it runs its image again it blocks its signals and raises again each
 one its kqueue heard since its last read, so the signal is pending across the exec. While an expired region waits for
-its holders, the slots are read every second for a client that lets go and lives on. A bridge asked to end that has
-not ended 3·MESH_PLATFORM_NS later is left, and the heartbeat ends. While a bridge is open its watchdog (`watchdog`,
+its holders, the slots are read every second for a client that lets go and lives on. While a bridge is open its watchdog (`watchdog`,
 TIMER_WATCH each WATCH_MS) reads the bridge's `turned` and `hung_from`, adds to the statistic and ends a bridge whose
 loop has stopped (section 16).
 
@@ -928,8 +928,7 @@ The parent (mesh-link.c `main`):
 | the device list's read (the `mesh.ports` queue) | the kernel | its return | not ours to bound: read only outside every window and while no job is out past the deadline; past the deadline it counts as hung |
 | the IOKit notifications (`peer_terminated`, `peer_arrived`, `peer_port`) | the kernel | its return | not ours to bound |
 | `waitpid` in `child_reaped` | the child's exit | the exit | called on NOTE_EXIT, or where that registration failed |
-| the stop's hold (`poll` on the link events) | the windows' end | its bound | MESH_PLATFORM_NS in all, each wait at most MESH_PAUSE_NS |
-| the stop's wait for its children (`kevent64`) | their NOTE_EXITs | its bound | MESH_PLATFORM_NS in all, each wait at most MESH_PAUSE_NS; a child it had stopped (below) is sent SIGKILL first |
+| the stop (`main` after its loop) | nothing | its end | CHILD_END to each child, SIGKILL to a child it had stopped (below), its streams cancelled, exit; no wait |
 | the log (`say`) | the log file | the write | launchd's StandardErrorPath, a regular file |
 
 A port's child (`child_main`):
@@ -950,7 +949,7 @@ The heartbeat (mesh-heartbeat.c):
 | `kevent64` | signals, NOTE_EXITs, its timers | the event | while a bridge is open its watchdog ticks each WATCH_MS; while a region waits for its holders, each REPLACE_TICK_MS |
 | `waitpid` in `bridge_ended` | the bridge's exit | the exit | on NOTE_EXIT, or a failed registration of a bridge just spawned (`open_bridge`, the block-quoted spawn, unchanged), which is ESRCH where the bridge has exited |
 | `run_again`'s drain | pending events | at once | a zero timeout |
-| a bridge it asked to close | its NOTE_EXIT | its exit, or the watchdog | TIMER_END ends an end's wait after 3·MESH_PLATFORM_NS; the watchdog ends every ask's bridge that stops turning |
+| a bridge it asked to close | its NOTE_EXIT | its exit, or the watchdog | the bridge's stop has no wait; the watchdog ends every ask's bridge that stops turning |
 
 ### The hang modes on record
 
@@ -965,7 +964,7 @@ The heartbeat (mesh-heartbeat.c):
 | this section's inventory | the parent blocked sending to a child that does not read (a blocking socketpair) | Non-blocking: a send that does not go whole marks the child deaf; its job, if that message was it, ends EPIPE at once (it never reached the child), nothing more is sent to it, and it is ended as a hung child. |
 | this section's inventory | a child asked to end that does not end (its main loop not reading CHILD_END, or its exit held): its port waits for it forever (`recycle`) | The watchdog: SIGSTOP MESH_PLATFORM_NS and MESH_PAUSE_NS after the ask (`child_leave` ends an asked child within MESH_PLATFORM_NS), then SIGKILL MESH_PLATFORM_NS later, each outside every window, its port with no job out and no port's job out past the deadline (`child_may_end`). |
 | this section's inventory | an earlier launch's child that does not end: its port's next child is never spawned (`elsewhere`) | The watchdog: the same, from twice MESH_PLATFORM_NS after it was found (its own `child_leave` ends within that), while it is still that process (its pid and start, `mesh_holds`). |
-| this section's inventory | the heartbeat waiting forever for a bridge it asked to restart or release | The watchdog: the stop's waits turn the progress word, and a stop that stops turning is ended. |
+| this section's inventory | the heartbeat waiting forever for a bridge it asked to restart or release | The bridge's stop has no wait; a stop that does not end is a loop that does not turn, and the watchdog ends it. |
 | review of b53804bf (finding 6) | the provider's fault, absorbed in the port's child, recurring in it until its parent ended it, and holding a job of it out | Absorbed in the port's child, and ended within the child's own life: a job it ended is answered ECANCELED, and the child ends itself as a child whose parent is gone does, at most twice MESH_PLATFORM_NS on; the parent loses the port as at a link's going off and does nothing else. |
 | any | a parent whose event loop stops turning; a child with no job out whose main loop stops, or whose progress thread stops passing while its link serves | The watchdog (below). |
 
@@ -973,7 +972,7 @@ The heartbeat (mesh-heartbeat.c):
 
 The words (rdma/mesh-observe.h `struct mesh_bridge_pages`, appended; each written by one process, read by its
 supervisor):
-- `turned`, the parent's: its clock at each turn of its event loop and at each pass of its stop's waits. The clock,
+- `turned`, the parent's: its clock at each turn of its event loop. The clock,
   the bridge's and the heartbeat's alike, is CLOCK_UPTIME_RAW (mach_absolute_time's), which stops while the system
   sleeps. With it, after it, `turned_by`: the writer's start (`bridge_start`), so that a stamp is read only as the
   stamp of the bridge that wrote it; the region outlives its bridges.
@@ -1000,7 +999,7 @@ What reads them, and what each reader does:
   end, halt their lanes and leave after their own windows (`child_leave`); the next bridge adopts the region. The
   heartbeat asks nothing of its own: where it had asked nothing, the end is an unasked end, and the bridge opens again
   REOPEN_S after it, at most once a minute, as after a crash; where it had asked a restart, a release or an end, that
-  ask is carried out. The heartbeat's reopen, backoff, spawn settings, signal branches, end timer and log format are as
+  ask is carried out. The heartbeat's reopen, backoff, spawn settings, signal branches and log format are as
   they were (the operator's block quote, 2026-10-21). The heartbeat acts on the parent's own loop alone: a port's stall
   is the parent's to end, by ending that port's child, which it spawns again; the whole bridge is never ended for it.
 - **The parent** reads each child's `progress[port]` at each turn (`child_turn`). A child with no progress for
@@ -1137,8 +1136,8 @@ Each design point, by design/rubrics.md, the operator's words behind it, and the
   failure"; M3; "Failure across interfaces" 4). The fault recurring in the child until its parent ended it, a job of
   it held out and with it every port's jobs (b53804bf; the review of it, finding 6) ≺ the fault absorbed in the port's
   child and ended within its own life, its parent seeing a link lost and nothing more.
-- **The bridge's own bounded waits** (M3). A wait of the bridge's bounded at MESH_PLATFORM_NS while it is watched (the
-  stop's single waits, a leaving child's), which its watchdog would read as a hang ≺ each bounded at MESH_PAUSE_NS, the
+- **The bridge's own bounded waits** (M3). A wait of the bridge's bounded at MESH_PLATFORM_NS while it is watched (a
+  leaving child's), which its watchdog would read as a hang ≺ each bounded at MESH_PAUSE_NS, the
   progress word written between.
 - **The statistic** (Quantities). A hang known from a log line ≺ counters a reader takes whole: "a measurement without
   those values ≺ one with them"; "a channel 5 s without anything happening on it ≺ one that is never so long quiet".

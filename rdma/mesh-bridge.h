@@ -53,9 +53,7 @@ static inline uint32_t link_plan(uint32_t budget){
 }
 static inline uint32_t plan_lanes(uint32_t plan){ return (uint32_t)__builtin_popcount(plan); }
 static inline uint32_t plan_streams(uint32_t plan){ return (uint32_t)__builtin_popcount(plan>>MESH_LANE_FIRST)/(2*MESH_STREAM_PAIRS); }
-/* design/transport.md section 15, "Completions" */
-_Static_assert(sizeof(struct ibv_wc)==48 && offsetof(struct ibv_wc,status)==8 && offsetof(struct ibv_wc,opcode)==12 &&
-  sizeof(((struct ibv_wc *)0)->status)==4 && sizeof(((struct ibv_wc *)0)->opcode)==4,"M11");
+/* design/transport.md section 14, "Plug to link, at the hardware's pace" */
 union mesh_network_event {
   struct kern_event_msg header;
   unsigned char bytes[KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data)];
@@ -80,7 +78,6 @@ enum { HOLD_NONE, HOLD_SERVE, HOLD_END, HOLD_GONE };
 enum { HELLO=1, RECORD=3, LINK };
 struct message { uint32_t magic,kind,node,count; uint64_t boot; int64_t code; uint32_t block,port,bytes;
   uint16_t lid,version; uint8_t gid[16]; uint32_t pair[MESH_LINK_LANES][2]; };
-static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_LINK_LANES; }
 #define XMAGIC (0x4d595048u+131u+(1u<<12))
 struct wire_mapping { char *data; size_t length; };
 #define QD 4095
@@ -118,7 +115,7 @@ struct link {
   _Atomic uint64_t begun[MESH_LINK_STREAMS],ended[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
   _Alignas(MESH_LINE) _Atomic uint64_t stopped[MESH_LINK_STREAMS];
-  uint64_t rnumber[MESH_LINK_STREAMS],rheld[MESH_LINK_STREAMS];
+  uint64_t rnumber[MESH_LINK_STREAMS];
   struct walk landing[MESH_LINK_STREAMS];
   _Atomic uint64_t *landed_at[MESH_LINK_STREAMS];
 };
@@ -163,7 +160,6 @@ struct port {
   uint64_t child_at,late_from,late_at,elsewhere_start;
   unsigned char child_in[sizeof(struct child_message)];
 };
-#define MESH_HEALTH_NS UINT64_C(10000000000)
 struct known { uint32_t node; uint64_t heard,gone,boot,sequence; };
 #define MESH_KNOWN 256
 #endif
