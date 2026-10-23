@@ -124,9 +124,8 @@ static void reopen_later(void){
 
 /* design/transport.md section 2: an expired region (magic, layout version 0) unlinked once none of its holders lives:
    its bridge (`bridge_pid`, `bridge_start`), each child its bridges recorded, and each client slot's process (its
-   owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder, and one in its
-   exit, which may not end, still is).  Until then they are watched (their exits as events, the slots read every
-   REPLACE_TICK_MS for a client that lets go and lives on, and for a holder already in its exit, which takes no filter)
+   owner's pid, `start`), each identified by its pid and start (mesh_holds, so a reused pid is no holder).  Until then
+   they are watched (their exits as events, the slots read every REPLACE_TICK_MS for a client that lets go and lives on)
    and named as they change.  A region that is live, or none, ends the replacement */
 static void replace_turn(void){
   size_t size=0;

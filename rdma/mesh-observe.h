@@ -20,11 +20,9 @@ static inline struct mesh_link_info *mesh_links(struct hdr *m){ return (struct m
    map's pages (MESH_ABSENT where none); and the processes of the bridge that hold the region, each by its pid and start
    (mesh_started): the bridge's own start (beside the header's `bridge_pid`) and each child, which registers the region
    and holds it until its exit, in an entry no live child holds (twice the ports: an earlier launch's child that has not
-   ended keeps its entry), so the heartbeat unlinks an expired region only once none of them lives, and a port's next
-   child opens its device only once no earlier child of that device lives (mesh-link.c child_elsewhere): a child's
-   device by its interface's unit, one more (`unit`: rdma_en<N>'s N + 1; 0, as bridges before it wrote, any device).
-   Fields are only ever appended */
-struct mesh_holder { uint32_t pid,unit; uint64_t start; };
+   ended keeps its entry), so the heartbeat unlinks an expired region only once none of them lives.  Fields are only
+   ever appended */
+struct mesh_holder { uint32_t pid,padding; uint64_t start; };
 struct mesh_bridge_pages { uint32_t link[MESH_PORTS],lists[MESH_PORTS],ones,map,map_pages,padding; uint64_t bridge_start;
   struct mesh_holder child[2*MESH_PORTS]; };
 _Static_assert(MESH_PORTS*sizeof(struct mesh_link_info)+sizeof(struct mesh_bridge_pages)<=MESH_BRIDGE_BYTES,"mesh_bridge_pages");
