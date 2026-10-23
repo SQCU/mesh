@@ -15,7 +15,7 @@ own for it. This replaced the fused records of 2026-10-21 and 2026-10-22 (mesh 1
   landed part's area, `landed` word and target, the word its own send entries wait on and the value its publication
   stores, and each relayed part's record.
 - `ncclMeshBind` binds one record at the kernel's crossing index: the landed start's table and the publishing start's,
-  the communicator's failure words, the dispatch's threadgroups and the library's bound. On the classic form it is
+  the dispatch's threadgroups and the library's bound. On the classic form it is
   `setBytes`, and the slots' and holdings' buffers are declared with `useResource`, so Metal orders the kernel's pass
   against the passes that name them. No residency set is needed on the classic form.
 - The device header (`STEPS`, `ncclMeshMetalPrelude`): `mesh_enter`, `mesh_leave` and the views `mesh_landing`,

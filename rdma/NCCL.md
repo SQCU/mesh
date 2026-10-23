@@ -192,7 +192,10 @@ part B). Rows whose counts the host holds move with `ncclMeshAlltoAllV`.
 **All-to-all with host counts.** `ncclMeshAlltoAllV(send, counts, recv, type, comm, stream)` is MPI_Alltoallv with
 its counts on the host, every member passing the same matrix: `counts[a x nranks + b]` elements go from rank a to rank
 b, packed in rank order in a's send buffer and in b's receive buffer (a rank's own block, `counts[r x nranks + r]`, is
-copied). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
+copied). MPI_Alltoallv takes each rank's own `sendcounts` and `recvcounts`, a row and a column of this matrix; here
+every member passes the whole n x n matrix, so that every member plans every block (design/rubrics.md C7, at a C1
+cost). A program ported from MPI holds its own row and column; an SPMD program holds the matrix; torch-mesh, which is
+given torch's per-rank splits, lays such a call as each pair's `ncclSend` and `ncclRecv` (below). Each segment starts on a page of its buffer (else the call fails as a value). NCCL's `ncclAlltoAll` is it with
 every count `count`, and `ncclGather` and `ncclScatter` its rooted forms (every count 0 but toward or from the root),
 where they were each rank's sends and receives in a group (NCCL's own lowering, `classifyCollToP2pTasks`). Every member
 knows every block of the four, so they run along the communicator's routing table, each block cut among its pair's
@@ -322,9 +325,9 @@ and `pages_from_word` at the region's words and a kernel's arguments; `pages_los
     fence (`mesh.metal` `mesh_wait_bounded`; without it a running kernel saw the host's store milliseconds late:
     metal-microbench tools/poll_probe.m, 2026-10-21), and one more fence after the observed count before the landed
     bytes are read (`mesh_step_await`), each byte loaded coherent (`mesh_payload`). The bridge sets the counts `~0`
-    where the link is lost; the library's bound ends the wait ([Bounded waits](#bounded-waits)). No kernel stops at a
-    stop word, and no kernel halts on a failure; a wait ends early only once another wait on the same failure words has
-    failed ([Bounded waits](#bounded-waits), [Failures](#failures)).
+    where the link is lost; the library's bound ends the wait ([Bounded waits](#bounded-waits)). No kernel halts on a
+    failure: each wait ends at its count or at its bound ([Bounded
+    waits](#bounded-waits), [Failures](#failures)).
   - Metal orders a compute pass after the passes that write (or, for a write, read) a tracked buffer only where both
     name it. So a publication declares the operands its SEND reads (`metal_uses`, `useResource`) on the classic
     encoder, and a persistent exchange's binding declares its slots and the holdings' counts; otherwise a publish could
@@ -382,14 +385,14 @@ This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place 
   - Neither cursor waits on the other beyond these.
 - **On the GPU.** The tracks are one dispatch, one thread group per track. Thread 0 picks the next item whose
   conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a consumption
-  raises its track's count. A group that can pick nothing for `polls` passes records its blocked items' failures, as
-  a wait does, and ends; a track reads no other track's failure.
+  raises its track's count. A group that can pick nothing for `polls` passes ends there, its later items not run; the
+  channel's next publication covers the pages it left, a holding's `ready` being a count.
 - **What ranks share.** No rank orders anything for another rank to share. The two ends of each list agree on its
   entries (`mesh_group_lay`) and nothing else, so groups of any calls among any number of ranks complete wherever
   their steps' dependencies do.
 - **Not completion.** Issuing a group (`issue`) encodes no wait and is unchanged.
 - **Residency.** Thread groups of one dispatch wait on each other only through a step's receive before it. Metal does
-  not promise they are all resident; a wait on one that is not reaches its bound and fails as a value.
+  not promise they are all resident; a wait on one that is not reaches its bound.
 
 ### Bounded waits
 
@@ -399,29 +402,16 @@ The most loads of a count one wait makes (`rdma/mesh.metal` `mesh_wait_bounded`)
 `MESH_POLLS` (`nccl-mesh-metal.h`, 4.5 x 10^6), a constant of the library's build: no wait the library composes takes
 a bound from data code. A data kernel's own wait on a word its partner writes (the Neural Engine's, metal-microbench
 neural_engine.swift) is the prelude's `mesh_wait(word, target)`, `mesh_wait_bounded` at the same bound. A wait that
-reaches its
-bound records its entry, its channel and the bound in its communicator's failure words, and the group fails as a value
-after its command buffer (`ncclCommGetAsyncError`, or the communicator's next group: "not done within N polls of a GPU
-wait"). No kernel halts on the record: every later dispatch runs as encoded. But once
-one wait has recorded a failure, every other wait on the same failure words ends: a later one at once
-(`mesh_step_failed`, read before each wait), and one under way within 2^10 loads (`mesh_wait_bounded`'s stop word, the
-failure claim). So a dispatch's waits hold the GPU about one bound in all, whatever its width: a wide landing's
-threadgroups run in waves where the grid passes the GPU's co-residency, and each wave's threadgroups wait on their own.
-The bound is a count of polls and nothing else: it exists because a GPU spin with no end halts the node (the Mini's
-watchdog reset, 2026-10-21), not to guard any buffer.
-
-The failure words are one page of the communicator's (`violation`), which the host reads after the command buffer and
-on which no kernel halts: [0] the cause (`METAL_BOUND` the bound reached, `METAL_LOST` the link's `~0`,
-`METAL_REVOKED` the bound reached once a revoke set [6]; a landing is never a failure, whatever its bytes), [1] the
-claim (its low 32 bits exchanged for 1 by every wait that fails, the one that found 0 recording the others:
-`mesh_step_claim`), [2] 1 + the entry, stored last by the claimant, [3] the channel, [4] the bound, and [6] the host's
-stop (a revoke's), which a failed wait reads to name its cause. A dispatch with no failure words records nothing, and
-its wait makes one load. A wait's poll is `mesh_wait_bounded`: the word once it holds at least the target, or as it is
+reaches its bound ends there, and its kernel goes on with the bytes the area holds: nothing is recorded, and no other wait
+changes (the operator, 2026-10-22: "the collective code does not detect mend, heal, or prevent any kind of error. it is
+not stateful with respect to errors"). Each wait of a dispatch reaches its bound alone: a wide landing's threadgroups
+run in waves where the grid passes the GPU's co-residency, and each wave's threadgroups wait on their own. The bound is
+a count of polls and nothing else: it exists because a GPU spin with no end halts the node (the Mini's watchdog reset,
+2026-10-21), not to guard any buffer. A wait's poll is `mesh_wait_bounded`: the word once it holds at least the target, or as it is
 after the bound, each load after a system-scope fence (without it a running kernel sees a store of the NIC's or the
 host's late: on the M4 Pro about 3.2 ms in nearly every wait, on the M5 Max 2.3 ms at the 99th percentile, while the
 fence costs at most 0.13 us a wait: metal-microbench tools/poll_probe.m, 2026-10-21, unfenced 3198 us median on the Mini
-and 0.50 us with a 2308 us p99 on the M5, fenced 0.58 us on both; a poll 0.23-0.26 us either way); with a stop word it
-also ends once that word is not 0, read every 2^10 loads. A reader orders its later loads after the observation with a
+and 0.50 us with a 2308 us p99 on the M5, fenced 0.58 us on both; a poll 0.23-0.26 us either way). A reader orders its later loads after the observation with a
 system-scope fence of its own, after the barrier that gives the observation to its threads (`mesh_step_await`).
 `mesh_payload` loads a landed value through `volatile coherent(system)` in the widest words that divide it;
 `mesh_publish` stores a count after a system-scope fence, so every system-coherent store before it (the bytes a SEND
@@ -483,7 +473,7 @@ NCCL's user-buffer registration finds a registered buffer (`ncclMemAlloc`, `nccl
   a page is written again only after release). On Metal 4 the end is the `stamp` dispatch: a system-scope fence, then
   the atomic add, so the pages' stores are visible before the count the host reads with acquire (design/
   hardware-and-discipline.md section 1).
-- A plan whose group was lost with its communicator, failed on the host path, or was made before `ncclMeshCommForms`
+- A plan whose group failed on the host path, whose communicator was destroyed with it in flight, or that was made before `ncclMeshCommForms`
   changed the table is never started again. Its lease is returned once it is idle and quiet (`sweep`, `plan_quiet`):
   idle, every program that named its pages has ended; quiet, on each channel the holding's `landed` has passed the
   plan's last landing entry and `sent` its last send entry, or the count reads `~0` (the link lost), or the stream is
@@ -535,13 +525,14 @@ sends on from its rows). A request makes its slots as its starts need them.
   group's publication moves, never covers it (the bridge reads an entry's word, design/transport.md section 14). So a
   group or another start encoded before this start's publishing kernel sends nothing of the slot before it is written.
   A channel's entries are posted in their order, so that group's SENDs on the channel wait behind the start's until its
-  publishing kernel has run: a GPU wait that needs them reaches its bound and fails as a value, and a host-path group
+  publishing kernel has run: a GPU wait that needs them reaches its bound, and a host-path group
   fails as a value at its call while a start is not yet bound to the kernel that publishes it (`ncclMeshBind`
   `publishes`), as it does while the communicator's GPU groups are issued and not complete (MPI's persistent request:
   its buffer is the request's between `MPI_Start` and its completion). The start first completes any earlier group of
   the communicator with a send not yet published on a channel where it sends. It is then in flight as a composed group,
   whose sends count as published and whose landings as consumed: the caller's kernels do both, encoded after the
-  start.
+  start. Where its bridge refuses an entry (its link lost), the start still lays every leg, stores its own and its
+  relays' `published` at once so that its channels go on, and returns the refusal as its value.
 - A request's slots are a ring in start order: a start takes the first free slot from the oldest on, and else makes
   one, the newest, so where starts end in their order a start checks one slot and `ncclMeshBind` finds a start's slot
   at its place in the ring (`slot_of`; else by a look at each slot). A slot is free once its bound kernels have ended
@@ -570,7 +561,7 @@ communication fused into the GEMM's prologue and epilogue, 2024). The device hea
 kernel:
 
 - `mesh_enter(crossing, tid)`, called by every thread: thread 0 of each threadgroup awaits each peer's `landed` past the
-  landed start's entry (bounded, a failure recorded in the failure words), then a barrier and one system-scope fence;
+  landed start's entry (bounded), then a barrier and one system-scope fence;
 - the views: `mesh_landing<T>(crossing, q)` (the q-th peer's part, in rank order, q below `mesh_landings(crossing)`),
   `mesh_own<T>(crossing)` (this rank's part of the landed start) and `mesh_send<T>(crossing)` (this start's part), each
   a `mesh_view<T>` whose `[k]` loads system-coherent and whose `store(k, v)` stores system-coherent; `view + k` is the
@@ -633,9 +624,7 @@ system call".
   `ncclCommDestroy`), or ended, the library lets that region go and its next lease attaches the bridge's next region;
   a process that held a communicator or a lease's `ncclMeshMemBuffer` ends instead, since the library made Metal
   buffers over the region for them, which its GPU work and residency set may hold; the library releases none of a
-  caller's own Metal buffers over a lease, nor their residency. A process never holds two regions. A communicator whose
-  streams a restart or a new pairing opened again reports its failure through `ncclCommGetAsyncError` before any group
-  runs on it, and is made again. The operator, 2026-10-14: "functions can fail from any one operand
+  caller's own Metal buffers over a lease, nor their residency. A process never holds two regions. The operator, 2026-10-14: "functions can fail from any one operand
   becoming invalidatd, servers should not fail when any operand is invalidated (ideally)"; "within call failures
   cannot be resume and instead must return an error (which a caller can presumably retry against immediately if that's
   what they want)".
@@ -735,7 +724,7 @@ look, or a GPU wait and then the publication), so the relay sends no page before
 is lost, the relay's call fails as a value at that receive. On the Metal path its later dispatches run as encoded
 ([Bounded waits](#bounded-waits)): the SEND is published once the wait has ended, and the next hop lands the bytes the
 relay's rows hold, its own positions being on a link that was not lost. On the host path the relay's group returns at
-the loss, its SEND unpublished. A relay's group ends once its SENDs are done, so its plan's pages are started again only
+the loss and publishes its remaining SENDs as their rows are. A relay's group ends once its SENDs are done, so its plan's pages are started again only
 after the bytes it relays have gone on. Gating the relay's SEND on the incoming holding's `landed` itself (`struct
 mesh_entry` `word`) would send each page as it lands, with no wait or publication of the relay's; it is not this form,
 since a stream's counts start again at 0 when its link pairs again, and the bridge reads an entry's word only when it
@@ -786,19 +775,16 @@ its group, or that failed, is waited for, a host-path group's wait on it until a
 and run again is the caller's (the operator, 2026-09-10, design/pages-and-functions.md: "recovery is something which is
 only sanctioned through the mechanism of a totally feed forward nfe computation callgraph being re-run by the calling
 process because they don't like the results they got"). A holding given with units still outstanding takes its stream out of its link's pairing, and a
-link none of whose streams is live is lost and paired again from 0 (design/transport.md section 14). The failure is
-returned:
-
-- by the group, or
-- by `ncclCommGetAsyncError` for work already enqueued, and for a communicator whose bridge stopped or one of whose
-  streams is no longer its own (its link lost and paired again opens every stream new: design/transport.md section 14),
-  before any group runs on it,
-
-and `ncclGetLastError` names what failed: the node of the channel where a landing failed. A link lost under a group
-fails the group (nothing resumes it), and a member whose group failed sends nothing more: the failure stays with the
-member that failed, and its peers' groups end at their caller's revoke. A communicator whose group failed fails its later groups: the caller makes it again (`ncclCommDestroy`, then an
-init) on the map as it is then (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of
-returning if the link topo changed mid function execution"). A communicator keeps the map its init made, so a change
+link none of whose streams is live is lost and paired again from 0 (design/transport.md section 14). A failure is
+the value of the call it happened in, and `ncclGetLastError` names it (the node of the channel); nothing of it is kept,
+and no later call reads it (the operator, 2026-10-22: "the collective code does not detect mend, heal, or prevent any
+kind of error. it is not stateful with respect to errors"). A host-path group that fails publishes its remaining SENDs
+as their rows are and counts its remaining landings consumed, and an entry its bridge refuses fails its call while the
+group's other entries are laid, so every channel's later entries stay in step with its peer's. A GPU wait that ends at
+a count's `~0` or at its bound records nothing; its kernel goes on with the bytes the area holds
+([Bounded waits](#bounded-waits)). `ncclCommGetAsyncError` gives a non-blocking init's state and result (the operator,
+2026-10-14: "it's okay for a function call ... to fail instead of returning if the link topo changed mid function
+execution"). A communicator keeps the map its init made, so a change
 that leaves its links working (a link lost elsewhere, a node that joins) reaches the next communicator
 (metal-microbench makes each call's communicators at the call's start). A rank that departed is left out with
 `ncclCommShrink` ([Communicators](#communicators)), and a joining one taken in with `ncclCommGetUniqueId`
@@ -806,13 +792,12 @@ and `ncclCommGrow`, an init at the id comm's root broadcasts on comm, holding st
 alone: its operations in flight are revoked and its resources kept (its streams stay held, and its bridge sends what
 its groups published and nothing else); an init
 still running (a non-blocking one's) ends as a value, its host-path groups return at their next look, its GPU waits
-end at their landings or their bounds, or once another wait on the communicator's failure words has failed (no kernel
-stops at the revoke; a wait that reaches its bound after it names it as its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
+end at their landings or their bounds (no kernel stops at the revoke), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
 streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. `ncclCommDestroy` awaits the command buffer of the last GPU program the library committed for the communicator until its
 status is Completed or Error (the platform's watchdog ends one that overruns), with no clock and the groups' lock
 released meanwhile; one not committed is not awaited; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
-may take. Likewise, while a revoked or failed communicator still holds its streams, its bridge may still post receives
+may take. Likewise, while a revoked communicator still holds its streams, its bridge may still post receives
 into a lease its groups named, for entries already presented, until `ncclCommDestroy` gives the streams back
 (design/transport.md section 14, "A holding's end"): the library keeps its own such leases (plans, slots) until then
 ([Plans](#plans)), and the bridge may post into a caller's lease that a lost group named until then too.

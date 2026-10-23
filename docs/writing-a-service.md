@@ -61,8 +61,9 @@ language model and this chain look the same: rows of bytes, sent and landed.
 The collective client is a library inside your process. It is `libnccl-mesh` ([rdma/NCCL.md](../rdma/NCCL.md)), and
 it is reached through torch-mesh ([rdma/torch-mesh/README.md](../rdma/torch-mesh/README.md)), `mesh_mpi.py` or
 `python/mesh`. It rents rows of the region for your tensors and opens groups of ranks. It turns calls like all-reduce,
-broadcast and send into work on the bridge's streams. Its waits end when data lands, or at their bound: a GPU wait's
-loads, or a host wait's platform deadline, 5 s in which nothing moves. Then the call fails as a value.
+broadcast and send into work on the bridge's streams. A host wait ends when its data lands, when the link is lost (its
+count reads ~0) or when its stream is no longer the communicator's, and the call then fails as a value; no clock ends
+it. A GPU wait ends when its data lands or at its bound of loads, and its kernel goes on with the bytes it finds.
 
 The client does not own the devices, and it does not know your function or where your inputs come from. It does not
 pick how the work is split, and it is not a process of its own. It lives and dies with the service that loads it, and nothing
@@ -151,10 +152,10 @@ of tanh(z) too), and calls `mesh_leave`, which marks the landed pages read once 
 makes y = tanh(x Aᵀ) for the rank's rows of A, each worker some of the columns. The third, bound to publish the step's
 start, makes the rank's part of z from y and its rows of B. x and y cross a dispatch boundary, so they are plain
 memory, and `simdgroup_load` reads them as the products' operands. Each worker of the third stage writes its slice of
-the part through `mesh_send`, each element once (a system-coherent store: the bridge sends as soon as `ready` passes,
-while the kernel's command buffer still runs), into the start's own pages. Then `mesh_leave`: each worker fences its
-stores and counts its arrival, and the last to arrive releases the part to every peer, one system fence and then a store
-of each peer's `ready`, after which the bridge sends those pages down each link. That is the order the release needs
+the part through `mesh_send`, each element once (a system-coherent store: the bridge sends as soon as the slot's
+`published` passes, while the kernel's command buffer still runs), into the start's own pages. Then `mesh_leave`: each
+worker fences its stores and counts its arrival, and the last to arrive releases the part to every peer, one system
+fence and then a store of the slot's `published`, after which the bridge sends those pages down each link. That is the order the release needs
 and no more: each worker's stores, its arrival, one release fence, the stores. Nothing is copied. Within a block, no
 kernel of the library's runs between two steps. A step's publication is committed as torch-mesh commits every caller's
 (torch-mesh README, Performance). While the GPU still holds enough of the stream's buffers, it joins the open command

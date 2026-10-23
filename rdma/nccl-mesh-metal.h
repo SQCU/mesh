@@ -17,11 +17,11 @@ static inline int pages_lost(mesh_pages a) { return a.n == UINT64_MAX; }
 static inline uint64_t pages_to_word(mesh_pages a) { return a.n; }
 static inline mesh_pages pages_from_word(uint64_t word) { return (mesh_pages){word}; }
 
-#define MESH_PEER(P, U64, U32) struct mesh_peer { P landing; P landed; U64 landed_target, landed_at; U32 channel, pad; }
+#define MESH_PEER(P, U64) struct mesh_peer { P landing; P landed; U64 landed_target; }
 #define MESH_RELAY(P, U64) struct mesh_relay { P landed; U64 landed_target, published, ready; }
 #define MESH_TABLE(P, U64, U32, ATOMIC) struct mesh_table { P part; ATOMIC arrivals; U32 peers; ATOMIC ended; U32 relays; U64 published, ready; }
-#define MESH_CROSSING(T, P, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; P failure; U32 groups, polls; }
-MESH_PEER(uint64_t, uint64_t, uint32_t);
+#define MESH_CROSSING(T, U32, ...) struct mesh_crossing { __VA_ARGS__ T land; T publish; U32 groups, polls; }
+MESH_PEER(uint64_t, uint64_t);
 MESH_RELAY(uint64_t, uint64_t);
 MESH_TABLE(uint64_t, uint64_t, uint32_t, uint32_t);
 enum { METAL_PLAIN, METAL_LAND };
@@ -50,17 +50,12 @@ void *metal_command(const struct metal_program *);
 
 int metal_ended(void *command);
 
-#define METAL_BOUND 1
-#define METAL_LOST 2
-#define METAL_REVOKED 4
-
-struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, const char **message);
-struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, const char **message);
+struct metal_program *metal_begin(void *command_buffer, void *encoder, const char **message);
+struct metal_program *metal_begin4(void *encoder, void *table, void *residency, const char **message);
 
 void metal_resident(struct metal_program *, void *buffer);
 struct metal_rows *metal_rows(struct metal_program *, struct metal_rows *);
 
-void metal_gate(struct metal_program *, void *violation);
 struct metal_result metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
 
 #define METAL_MERGE 12
@@ -72,7 +67,7 @@ struct metal_result metal_premultiply(struct metal_program *, int type, void *ds
 struct metal_result metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n,
                                    uint64_t divisor);
 
-struct metal_wait { void *words, *violation, *data; size_t word, sent_word, data_offset; mesh_pages target, sent_target; uint64_t at; uint32_t channel; };
+struct metal_wait { void *words, *data; size_t word, sent_word, data_offset; mesh_pages target, sent_target; };
 
 struct metal_release { void *words; size_t word; mesh_pages value; };
 struct metal_result metal_publish(struct metal_program *, const struct metal_release *);
@@ -85,8 +80,8 @@ struct metal_result metal_spin(struct metal_program *, const struct metal_wait *
 
 struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
 
-struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, void *violation,
-                               uint32_t groups, uint32_t index, void *const *buffers, size_t n);
+struct metal_result metal_bind(void *encoder, void *table, void *residency, struct metal_rows *rows, uint64_t land, uint64_t publish, uint32_t groups,
+                               uint32_t index, void *const *buffers, size_t n);
 
 void *metal_contents(void *buffer);
 

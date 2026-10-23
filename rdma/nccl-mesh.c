@@ -230,19 +230,17 @@ struct ncclComm {
   int nranks, rank, listed, compiled, binding, touched, sweeps, unpublished;
   char name[NCCL_UNIQUE_ID_BYTES + 1], id[NCCL_UNIQUE_ID_BYTES + 1];
   struct redop *ops;
-  ncclResult_t async, failed;
+  ncclResult_t async;
   pthread_mutex_t guard;
   int revoked, *peers, initing, *toward;
   double until;
   pthread_t init;
-  struct said why, failure;
+  struct said why;
   struct attach *attach;
   uint32_t held;
   struct channel *channels;
   struct plan *plans;
   struct ncclMeshRequest *freed;
-  _Atomic uint64_t *words;
-  void *violation;
   uint64_t last, groups, (*timed)[2];
   void *command;
   struct ncclComm *next_touched;
@@ -377,7 +375,6 @@ static void comm_free(struct ncclComm *comm) {
   bootstrap_close(comm);
   routes_free(comm, 1);
   for (uint32_t h = 0; h < comm->count; h++) metal_release(comm->channels[h].buffer);
-  if (comm->violation) metal_release(comm->violation);
   metal_release(comm->command);
   comm_leave(comm);
   free(comm->channels); free(comm->toward); free(comm->timed);
@@ -1052,8 +1049,6 @@ static int comm_join(struct ncclComm *comm, const struct report *reports) {
   uint64_t bandwidth;
   comm->page = (uint64_t)m->block * m->pgsz;
   int status = map_of(comm, reports);
-  if (!status && !(comm->violation = metal_shared((size_t)getpagesize()))) status = ENOMEM;
-  if (!status) comm->words = metal_contents(comm->violation);
   if (!status && !(comm->channels = calloc((size_t)n + 1, sizeof *comm->channels))) status = ENOMEM;
   for (uint32_t q = 0; !status && q < n; q++) {
     if (q == me || !joined(reports, me, q, &bandwidth)) continue;
@@ -1164,15 +1159,13 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
 
 ncclResult_t ncclCommFinalize(ncclComm_t comm) { return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL"); }
 
-static void inflight_lose(struct ncclComm *comm);
-static ncclResult_t comm_failure(struct ncclComm *comm);
+static void inflight_drop(struct ncclComm *comm);
 
 static void comm_stop(struct ncclComm *comm) {
   pthread_mutex_lock(&comm->guard);
   __atomic_store_n(&comm->revoked, 1, __ATOMIC_SEQ_CST);
   for (int r = 0; comm->peers && r < comm->nranks; r++)
     if (comm->peers[r] >= 0) shutdown(comm->peers[r], SHUT_RDWR);
-  if (comm->words) atomic_store_explicit(comm->words + 6, 1, memory_order_release);
   pthread_mutex_unlock(&comm->guard);
 }
 
@@ -1195,7 +1188,7 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
     pthread_mutex_lock(&group_lock);
   }
   gpu_wait(comm, 0);
-  inflight_lose(comm);
+  inflight_drop(comm);
   pthread_mutex_unlock(&group_lock);
   comm_free(comm);
   return ncclSuccess;
@@ -1207,11 +1200,7 @@ ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
   if (!comm || !asyncError) return fail(ncclInvalidArgument, "comm or asyncError is NULL");
   const ncclResult_t async = __atomic_load_n(&comm->async, __ATOMIC_ACQUIRE);
   if (async != ncclInProgress && comm->why.id) told(async, &comm->why);
-  if (async) { *asyncError = async; return ncclSuccess; }
-  if (revoked(comm)) { *asyncError = ncclSuccess; return ncclSuccess; }
-  pthread_mutex_lock(&group_lock);
-  *asyncError = comm_failure(comm);
-  pthread_mutex_unlock(&group_lock);
+  *asyncError = async;
   return ncclSuccess;
 }
 
@@ -1381,50 +1370,6 @@ static double now_s(void) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return now.tv_sec + now.tv_nsec * 1e-9;
-}
-
-static ncclResult_t comm_told(struct ncclComm *comm) {
-  inflight_lose(comm);
-  return told(comm->failed, &comm->failure);
-}
-
-static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) __attribute__((format(printf, 3, 4)));
-static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const char *format, ...) {
-  if (!comm->failed) {
-    va_list arguments;
-    va_start(arguments, format);
-    vsnprintf(comm->failure.text, sizeof comm->failure.text, format, arguments);
-    va_end(arguments);
-    comm->failure.id = keep();
-    comm->failed = result;
-  }
-  return comm_told(comm);
-}
-
-static ncclResult_t comm_failure(struct ncclComm *comm) {
-  if (comm->failed) return comm_told(comm);
-  if (revoked(comm))
-    return comm_fail(comm, ncclInvalidUsage, "its communicator %s was revoked (ncclCommRevoke): no group runs on it before ncclCommDestroy", comm->name);
-  _Atomic uint64_t *v = comm->words;
-  const uint64_t at = v ? atomic_load_explicit(v + 2, memory_order_acquire) : 0;
-  if (at) {
-    const uint64_t cause = atomic_load_explicit(v, memory_order_relaxed), h = atomic_load_explicit(v + 3, memory_order_relaxed);
-    const uint32_t node = h < comm->count ? comm->channels[h].node : UINT32_MAX;
-    if (cause == METAL_LOST)
-      return comm_fail(comm, ncclRemoteError, "the link to node %u was lost (its holding's counts ~0) at entry %llu", node,
-                       (unsigned long long)(at - 1));
-    return comm_fail(comm, ncclRemoteError, "entry %llu on the channel to node %u was not done within %llu polls of a GPU wait (the "
-                     "library's bound): its bytes had not landed or been sent, the peer's work there beginning that "
-                     "much later, or its link was lost", (unsigned long long)(at - 1), node,
-                     (unsigned long long)atomic_load_explicit(v + 4, memory_order_relaxed));
-  }
-  struct attach *a = comm->attach;
-  for (uint32_t k = 0; comm->held && k < MESH_STREAMS; k++)
-    if ((comm->held >> k & 1) && !mesh_stream_held(&a->context, a->holds[k].stream, a->holds[k].wire))
-      return comm_fail(comm, ncclRemoteError, "the link to node %u was lost and paired again: communicator %s's stream there is no "
-                       "longer its own (design/transport.md section 14); it is made again (ncclCommDestroy, then an init)",
-                       a->holds[k].node, comm->name);
-  return ncclSuccess;
 }
 
 static int same(struct where a, struct where b) { return a.buffer == b.buffer && a.offset == b.offset; }
@@ -1889,7 +1834,7 @@ static ncclResult_t plan_take(struct ncclComm *comm, struct call *list, size_t n
 
 static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans);
 static void commit_group(struct ncclComm *comm, const struct schedule *plans);
-static ncclResult_t plan_start(struct ncclComm *comm, struct plan *plan) {
+static ncclResult_t plan_start(struct ncclComm *comm, struct plan *plan, ncclResult_t *refused) {
   for (size_t i = 0; i < plan->n; i++) {
     struct steps *st = plan->list[i].bound;
     for (uint32_t k = 0; st && k < st->count; k++) st->done[k] = st->steps[k].op != MESH_STEP_SEND && !piece_bytes(st->steps + k);
@@ -1913,10 +1858,11 @@ static ncclResult_t plan_start(struct ncclComm *comm, struct plan *plan) {
       m->c->bound->entry[m->step] = m->entry;
     }
   }
-  ncclResult_t result = place_group(comm, plan);
-  if (!result) result = present_group(comm, plan->plans);
-  if (!result) commit_group(comm, plan->plans);
-  return result;
+  const ncclResult_t result = place_group(comm, plan);
+  if (result) return result;
+  *refused = present_group(comm, plan->plans);
+  commit_group(comm, plan->plans);
+  return ncclSuccess;
 }
 
 static struct ncclComm *touching;
@@ -1946,7 +1892,7 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
   pthread_mutex_lock(&group_lock);
   atomic_fetch_sub(&comm->runs, 1);
   if (mine) touch(comm);
-  return result ? result : comm_failure(comm);
+  return result;
 }
 
 static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans) {
@@ -1964,6 +1910,7 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
         if (result) return result;
       }
     }
+  ncclResult_t refused = ncclSuccess;
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;
     const struct schedule *p = plans + h;
@@ -1974,11 +1921,11 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
     }
     for (size_t k = 0; !status && k < p->ins; k++)
       status = mesh_stream_present(context, ch->stream, 1, (struct mesh_entry){p->in[k].row, pages_to_word(p->in[k].pages), 0, 0});
-    if (status)
-      return comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
-                       "presented to its bridge: %s", comm->name, ch->node, strerror(status));
+    if (status && !refused)
+      refused = fail(status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an entry toward node %u "
+                     "presented to its bridge: %s", comm->name, ch->node, strerror(status));
   }
-  return ncclSuccess;
+  return refused;
 }
 
 static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
@@ -2003,7 +1950,7 @@ static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel 
               "stream is no longer its own: its link lost and paired again, or its bridge restarted; design/transport.md section 14)",
               comm->name, ch->node);
 }
-static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
+static ncclResult_t run_group(struct ncclComm *comm, struct schedule *plans) {
   const mesh_pages none = {0};
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
@@ -2063,6 +2010,22 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
     if (plans[h].outs) comm->channels[h].sent_waited = comm->channels[h].out;
   }
   return ncclSuccess;
+}
+
+static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
+  const ncclResult_t result = run_group(comm, plans);
+  for (uint32_t h = 0; result && h < comm->count; h++) {
+    struct channel *ch = comm->channels + h;
+    const struct schedule *p = plans + h;
+    if (p->outs && ch->published < p->first[0] + p->outs) {
+      atomic_thread_fence(memory_order_release);
+      atomic_store_explicit(ch->view.ready, pages_to_word(p->out[p->outs - 1].end), memory_order_release);
+      ch->published = p->first[0] + p->outs;
+    }
+    if (p->ins && ch->consumed < p->first[1] + p->ins) ch->consumed = p->first[1] + p->ins;
+    ch->waited = ch->consumed;
+  }
+  return result;
 }
 
 static void stage(const struct call *c, unsigned char *own) {
@@ -2167,7 +2130,7 @@ static ncclResult_t gpu_finished(struct ncclComm *comm) {
   case GPU_HOLDING:
     return fail(ncclRemoteError, "communicator %s: a holding of its streams ended before its host-path group (design/transport.md section 14)",
                 comm->name);
-  default: return comm_failure(comm);
+  default: return ncclSuccess;
   }
 }
 
@@ -2197,8 +2160,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
     if (list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
   pthread_mutex_lock(&group_lock);
   group_numbered(comm);
-  if (remote) result = comm_failure(comm);
-  if (!result && remote && comm_issued(comm))
+  if (remote && comm_issued(comm))
     result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete), or "
                   "an exchange's start is not bound to the kernel that publishes it (ncclMeshBind)");
   if (!result && remote && finished && comm->last) result = gpu_finished(comm);
@@ -2220,15 +2182,16 @@ static ncclResult_t launch(struct call *list, size_t n) {
     for (uint32_t b = 1; c->bound && b < c->bound->buffers; b++)
       if (c->bound->at[b] != SIZE_MAX) memcpy(address_of(c->bound->buffer[b]), address_of(c->sum), bytes);
   }
-  if (!result && remote && !(result = plan_start(comm, plan))) atomic_fetch_add(&comm->runs, 1);
+  ncclResult_t refused = ncclSuccess;
+  if (!result && remote && !(result = plan_start(comm, plan, &refused))) atomic_fetch_add(&comm->runs, 1);
   const int running = remote && !result;
   pthread_mutex_unlock(&group_lock);
   if (running && (result = run(comm, plan->plans))) {
     pthread_mutex_lock(&group_lock);
     plan->stale = comm->sweeps = 1;
-    comm_fail(comm, result, "%s", last.text);
     pthread_mutex_unlock(&group_lock);
   }
+  if (!result) result = refused;
   if (running) atomic_fetch_sub(&comm->runs, 1);
   for (size_t i = 0, self = 0; i < n && !result; i++) {
     struct call *c = calls + i;
@@ -2280,8 +2243,6 @@ static struct inflight *inflight, *inflight_last;
 static uint64_t tickets;
 static _Atomic uint64_t retired;
 
-static struct loss { uint64_t ticket; ncclResult_t result; char reason[256]; } *losses;
-static size_t lost;
 
 static void call_parts_free(struct call *c) {
   steps_free(c->bound);
@@ -2308,17 +2269,11 @@ static int comm_issued(const struct ncclComm *comm) {
   return comm->unpublished > 0;
 }
 
-static void inflight_lose(struct ncclComm *comm) {
+static void inflight_drop(struct ncclComm *comm) {
   inflight_last = NULL;
   for (struct inflight **at = &inflight; *at;) {
     struct inflight *g = *at;
     if (g->comm != comm) { inflight_last = g; at = &g->next_group; continue; }
-    struct loss *grown = realloc(losses, (lost + 1) * sizeof *grown);
-    if (grown) {
-      losses = grown;
-      losses[lost] = (struct loss){g->ticket, comm->failed ? comm->failed : ncclRemoteError, {0}};
-      snprintf(losses[lost++].reason, sizeof grown->reason, "%s", comm->failed ? comm->failure.text : "its communicator was destroyed");
-    }
     *at = g->next_group;
     inflight_free(g, 0);
   }
@@ -2382,7 +2337,7 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
   mesh_pages sent = m->sent;
   const mesh_pages last = g->end[h][0] > g->start[h][0] ? out_at(g, h, g->end[h][0] - 1)->end : (mesh_pages){0};
   if (fold && at + 1 == g->end[h][1] && ch->published >= g->end[h][0] && pages_below(sent, last)) sent = last;
-  const struct metal_wait wait = {ch->buffer, comm->violation, m->data.buffer, ch->landed, ch->sent, m->data.offset, m->end, sent, at, h};
+  const struct metal_wait wait = {ch->buffer, m->data.buffer, ch->landed, ch->sent, m->data.offset, m->end, sent};
   if (!result && step->op == MESH_STEP_REDUCE) {
     const struct where to = shifted(st->buffer[step->buffer], m->offset);
     if (st->fresh && st->fresh[m->step]) {
@@ -2420,7 +2375,6 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
   ncclResult_t result = ncclSuccess;
   touch(comm);
   metal_rows(program, &through->plan->rows);
-  metal_gate(program, comm->violation);
   while (!result && (ch->published < out || ch->consumed < in)) {
     uint64_t upto = ch->published;
     while (upto < out && publishable(comm, h, upto)) upto++;
@@ -2467,7 +2421,6 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
   for (size_t k = 0; k < comms && !result; k++) {
     struct ncclComm *const c = comm[k];
     touch(c);
-    metal_gate(program, c->violation);
     free(end);
     if (!(end = calloc((size_t)c->count + 1, sizeof *end))) { result = fail(ncclSystemError, "out of memory"); break; }
     for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group)
@@ -2520,7 +2473,6 @@ static ncclResult_t issue_group(struct metal_program *program, struct inflight *
   ncclResult_t result = ncclSuccess;
   touch(comm);
   if (g->plan) metal_rows(program, &g->plan->rows);
-  metal_gate(program, comm->violation);
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     const struct channel *ch = comm->channels + h;
     if (ch->published < g->start[h][0] || ch->published >= g->end[h][0]) continue;
@@ -2681,13 +2633,12 @@ static ncclResult_t retire(struct metal_program *program) {
     if (!program && !g->composed) return ncclSuccess;
     if (program) touch(comm);
     if (program && g->plan) metal_rows(program, &g->plan->rows);
-    if (program) metal_gate(program, comm->violation);
     for (uint32_t h = 0; h < comm->count && !result && !g->composed; h++) {
       struct channel *ch = comm->channels + h;
       if (g->end[h][0] == g->start[h][0]) continue;
       const mesh_pages last = out_at(g, h, g->end[h][0] - 1)->end;
       if (!pages_below(ch->sent_waited, last)) continue;
-      const struct metal_wait wait = {ch->buffer, comm->violation, NULL, 0, ch->sent, 0, (mesh_pages){0}, last, g->end[h][0] - 1, h};
+      const struct metal_wait wait = {ch->buffer, NULL, 0, ch->sent, 0, (mesh_pages){0}, last};
       if (!(result = gpu(metal_spin(program, &wait), "a wait for the group's SENDs"))) ch->sent_waited = last;
     }
     if (!result && g->n) result = epilogue(program, g->list, g->n);
@@ -2731,27 +2682,6 @@ static ncclResult_t program_end(struct metal_program *program, int borrowed, ncc
   return result;
 }
 
-static void walk_failed(struct ncclComm *comm, uint64_t ticket, ncclResult_t result) {
-  char why[sizeof last.text];
-  snprintf(why, sizeof why, "%s", last.text);
-  for (; comm || (inflight && inflight->ticket <= ticket); comm = NULL) comm_fail(comm ? comm : inflight->comm, result, "%s", why);
-  fail(result, "%s", why);
-}
-
-static ncclResult_t losses_through(uint64_t ticket) {
-  for (struct inflight *g = inflight; g && g->ticket <= ticket;)
-    if (comm_failure(g->comm)) g = inflight;
-    else g = g->next_group;
-  ncclResult_t result = ncclSuccess;
-  size_t kept = 0;
-  for (size_t i = 0; i < lost; i++)
-    if (losses[i].ticket > ticket) losses[kept++] = losses[i];
-    else if (!result) result = fail(losses[i].result, "the group was lost with its communicator: %s", losses[i].reason);
-  lost = kept;
-  return result;
-}
-
-
 static ncclResult_t launch_metal(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclMeshIssue *const issue = list[0].issue;
@@ -2773,16 +2703,14 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && revoked(comm)) result = revoked_fail(comm);
   pthread_mutex_lock(&group_lock);
   if (!result) group_numbered(comm);
-  if (!result && remote) result = comm_failure(comm);
   if (!result) result = operands_check(list, n);
   struct plan *plan = NULL;
   if (!result) result = plan_take(comm, list, n, &plan);
   if (result) { pthread_mutex_unlock(&group_lock); calls_free(list, n); return result; }
   struct call *const calls = plan->list;
-  void *const violation = remote ? comm->violation : NULL;
   const char *message = NULL;
-  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, &message)
-                                         : metal_begin(list[0].command, list[0].encoder, violation, &message);
+  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, &message)
+                                         : metal_begin(list[0].command, list[0].encoder, &message);
   if (!program) {
     plan->flight = 0;
     pthread_mutex_unlock(&group_lock); calls_free(list, n);
@@ -2797,12 +2725,13 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   struct inflight *g = NULL;
   int published = 0;
   uint64_t ticket = 0;
+  ncclResult_t refused = ncclSuccess;
   if (!result && remote) {
     if (!(g = calloc(1, sizeof *g)) || !(g->start = calloc(2 * (size_t)comm->count + 1, sizeof *g->start))) result = fail(ncclSystemError, "out of memory");
     else {
       *g = (struct inflight){.comm = comm, .plan = plan, .list = plan->list, .n = n, .plans = plan->plans, .start = g->start, .end = g->start + comm->count};
       for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
-      result = plan_start(comm, plan);
+      result = plan_start(comm, plan, &refused);
     }
     if (result && g) { free(g->start); free(g); g = NULL; }
     if (!result) {
@@ -2841,18 +2770,15 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   }
   if (!result && g) {
     result = walk(program, issue ? g : NULL, issue ? NULL : g, &published);
-    metal_gate(program, violation);
     for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, calls + i);
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, calls, n);
   plan->leaving = !g;
   result = program_end(program, list[0].encoder != NULL, result);
-  if (result && g) walk_failed(comm, issue ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   pthread_mutex_unlock(&group_lock);
   calls_free(list, n);
-  if (result) comm->async = result;
-  return result;
+  return result ? result : refused;
 }
 
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int *published) {
@@ -2861,15 +2787,14 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
   if (!stream || (!stream->commandBuffer && !(stream->argumentTable && stream->commandEncoder && stream->residencySet)))
     return fail(ncclInvalidArgument, "ncclMeshComplete without a command buffer or a Metal 4 encoder, argument table and residency set");
   pthread_mutex_lock(&group_lock);
-  const ncclResult_t loss = losses_through(ticket);
   ncclResult_t result = ncclSuccess;
   if (inflight && ticket >= inflight->ticket) {
     struct inflight *through = inflight;
     while (through->next_group && through->next_group->ticket <= ticket) through = through->next_group;
       const char *message = NULL;
     struct metal_program *program = stream->argumentTable
-      ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->comm->violation, &message)
-      : metal_begin(stream->commandBuffer, stream->commandEncoder, inflight->comm->violation, &message);
+      ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, &message)
+      : metal_begin(stream->commandBuffer, stream->commandEncoder, &message);
     if (!program) result = fail(ncclSystemError, "%s", message);
     else {
       for (struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group) {
@@ -2879,12 +2804,11 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
       result = walk(program, NULL, through, &any);
       if (!result) result = retire(program);
       result = program_end(program, stream->commandEncoder != NULL, result);
-      if (result) walk_failed(NULL, ticket, result);
     }
   }
   pthread_mutex_unlock(&group_lock);
   if (published) *published = any;
-  return result ? result : loss;
+  return result;
 }
 
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
@@ -3081,9 +3005,9 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
     if (counts[q] > r->parts[q]) return fail(ncclInvalidArgument, "ncclMeshStart: %zu elements of rank %d, past the %zu its exchange declared", counts[q], q, r->parts[q]);
   if (revoked(comm)) return revoked_fail(comm);
   struct inflight *g = calloc(1, sizeof *g);
-  uint64_t *target = calloc((size_t)r->ins + 1, sizeof *target), *at = calloc((size_t)r->ins + 1, sizeof *at);
-  if (!g || !target || !at || !(g->start = calloc(2 * (size_t)comm->count + 1, sizeof *g->start))) {
-    free(g); free(target); free(at);
+  uint64_t *target = calloc((size_t)r->ins + 1, sizeof *target);
+  if (!g || !target || !(g->start = calloc(2 * (size_t)comm->count + 1, sizeof *g->start))) {
+    free(g); free(target);
     return fail(ncclSystemError, "out of memory");
   }
   *g = (struct inflight){.comm = comm, .start = g->start, .end = g->start + comm->count, .composed = 1};
@@ -3099,7 +3023,6 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   pthread_mutex_unlock(&group_lock);
   ncclResult_t result = met ? ncclMeshComplete(met, on, NULL) : ncclSuccess;
   pthread_mutex_lock(&group_lock);
-  if (!result) result = comm_failure(comm);
   sweep(comm, 0, 0);
   uint32_t k = r->turn, looked = 0;
   while (!result && looked < r->nslots && ((r->starts && r->slots[k].start == r->starts) || !slot_free(r, r->slots + k))) { k = (k + 1) % r->nslots; looked++; }
@@ -3120,26 +3043,24 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
     for (uint32_t h = 0; h < comm->count; h++) s->ends[2 * h] = s->ends[2 * h + 1] = 0;
   }
   if (!result) group_numbered(comm);
+  ncclResult_t refused = ncclSuccess;
   for (uint32_t e = 0; e < r->ins && !result; e++) {
     const struct leg *l = r->in + e;
     struct channel *ch = comm->channels + l->channel;
     const mesh_pages in = pages_of(leg_count(r, counts, l->x) * z, comm->page);
     if (!in.n) continue;
     const int status = mesh_stream_present(context, ch->stream, 1, (struct mesh_entry){s->row + l->area / comm->page, pages_to_word(in), 0, 0});
-    if (status) {
-      result = comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an exchange's entry toward "
-                         "node %u presented to its bridge: %s", comm->name, ch->node, strerror(status));
-      break;
-    }
+    if (status && !refused)
+      refused = fail(status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an exchange's entry toward node %u "
+                     "presented to its bridge: %s", comm->name, ch->node, strerror(status));
     ch->in = pages_add(ch->in, in);
     target[e] = s->ends[2 * l->channel + 1] = pages_to_word(ch->in);
-    at[e] = ch->lands;
     comm->timed[((comm->groups - 1) % GROUP_TIMES) * comm->count + l->channel][1] = ++ch->lands;
   }
   for (uint32_t e = 0; e < r->peers && !result; e++) {
     const struct leg *l = r->in + r->own[e];
     const struct channel *ch = comm->channels + l->channel;
-    peer[e] = (struct mesh_peer){metal_address(s->buffer) + l->area, metal_address(ch->buffer) + ch->landed, target[r->own[e]], at[r->own[e]], l->channel, 0};
+    peer[e] = (struct mesh_peer){metal_address(s->buffer) + l->area, metal_address(ch->buffer) + ch->landed, target[r->own[e]]};
   }
   uint64_t ready = 0;
   for (uint32_t e = 0, j = 0; e < r->outs && !result; e++) {
@@ -3156,18 +3077,16 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
     if (!out.n) continue;
     const int status = mesh_stream_present(context, ch->stream, 0, (struct mesh_entry){s->row + (l->from < 0 ? 0 : r->in[l->from].area / comm->page),
                                                                                         pages_to_word(out), (uint64_t)((char *)word - (char *)context->M), 0});
-    if (status) {
-      result = comm_fail(comm, status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an exchange's entry toward "
-                         "node %u presented to its bridge: %s", comm->name, ch->node, strerror(status));
-      break;
-    }
+    if (status && !refused)
+      refused = fail(status == ENOLINK || status == EPERM ? ncclRemoteError : ncclSystemError, "communicator %s: an exchange's entry toward node %u "
+                     "presented to its bridge: %s", comm->name, ch->node, strerror(status));
     uint64_t *timed = comm->timed[((comm->groups - 1) % GROUP_TIMES) * comm->count + l->channel];
     ch->out = pages_add(ch->out, out);
     s->ends[2 * l->channel] = pages_to_word(ch->out);
     if (!timed[0]) timed[0] = ch->sends + 1;
     ch->published = ++ch->sends;
   }
-  free(target); free(at);
+  free(target);
   if (result) {
     free(g->start); free(g);
     pthread_mutex_unlock(&group_lock);
@@ -3176,7 +3095,9 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
   t->ready = ready;
   s->start = *start = ++r->starts;
   s->bound = 0;
-  s->unbound = ready != 0 || r->relays != 0;
+  s->unbound = !refused && (ready != 0 || r->relays != 0);
+  for (uint32_t j = 0; refused && j < r->relays; j++) __atomic_store_n(&relay[j].published, relay[j].ready, __ATOMIC_RELEASE);
+  if (refused) __atomic_store_n(&t->published, ready, __ATOMIC_RELEASE);
   comm->unpublished += s->unbound;
   if (k == r->turn) r->turn = (k + 1) % r->nslots;
   g->ticket = ++tickets;
@@ -3186,7 +3107,7 @@ ncclResult_t ncclMeshStart(ncclMeshRequest_t r, const size_t *counts, cudaStream
     if (comm->channels[h].consumed == g->start[h][1]) comm->channels[h].consumed = consumed_past(comm, h, comm->channels[h].consumed);
   retire(NULL);
   pthread_mutex_unlock(&group_lock);
-  return ncclSuccess;
+  return refused;
 }
 
 ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int publishes, cudaStream_t stream, uint32_t index, uint32_t groups) {
@@ -3206,7 +3127,7 @@ ncclResult_t ncclMeshBind(ncclMeshRequest_t r, uint64_t start, int lands, int pu
                                  (unsigned long long)start)
                           : gpu(metal_bind(on->commandEncoder, on->argumentTable, on->residencySet, held ? &held->rows : NULL,
                                            land ? metal_address(land->buffer) + r->table : 0,
-                                           publish ? metal_address(publish->buffer) + r->table : 0, r->comm->violation, groups, index, buffers, n),
+                                           publish ? metal_address(publish->buffer) + r->table : 0, groups, index, buffers, n),
                                 "a crossing's binding");
   if (!result && land) land->bound++;
   if (!result && publish && publish != land) publish->bound++;
@@ -3271,7 +3192,6 @@ ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
 static ncclResult_t launch_one(struct call *list, size_t n) {
   if (list[0].stream) return launch_metal(list, n);
   const ncclResult_t result = launch(list, n);
-  if (result) list[0].comm->async = result;
   calls_free(list, n);
   return result;
 }

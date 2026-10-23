@@ -4,20 +4,14 @@
 #include <metal_stdlib>
 
 template <typename W>
-__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls,
-                                                                  device metal::atomic_uint *stop) {
+__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
     W seen;
     uint k = 0u;
     do {
         metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
         seen = *word;
-    } while (seen < target && ++k < polls && ((k & 1023u) != 0u || !stop || metal::atomic_load_explicit(stop, metal::memory_order_relaxed) == 0u));
+    } while (seen < target && ++k < polls);
     return seen;
-}
-
-template <typename W>
-__attribute__((always_inline)) static inline W mesh_wait_bounded(volatile coherent(system) device const W *word, ulong target, uint polls) {
-    return mesh_wait_bounded(word, target, polls, nullptr);
 }
 
 template <typename T>
