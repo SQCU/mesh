@@ -1,5 +1,12 @@
 # AGENTS.md: the operator's words for this repo
 
+The rubric, before everything else: mesh `design/rubrics.md`, its procedure at lines 69-77 (name each file's kind; rank
+the change against the form it replaces, dimension by dimension, `old ≺ new`, with the code that decides it; a new
+mechanism is ranked against none). The operator, 2026-10-20: "the thing called a rubric is not metaphorical. all code
+needs to be reviewed in terms of the rubric before being built and compiled from this point onwards"; 2026-10-22: "the
+rubric document clearly exists to unambiguously absorb and displace an unconditional or repo-antagonistic expectation
+to review and document changes."
+
 `THREAT-MODEL.md` holds the operator's words on access, verbatim (2026-08-27). Code is ranked by `design/rubrics.md`.
 The operator, 2026-10-22: "rubric supersedes rules. rubric lines addressed this topic. attempts to write rules must now
 be compeltely removed. no more rules anywhere in the documentation, memoryfiles, anywhere. anything not expressible in
