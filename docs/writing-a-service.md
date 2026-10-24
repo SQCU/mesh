@@ -86,8 +86,10 @@ input's shape and broadcasts two numbers, the steps and the rows, so every rank 
 
 Rank 0 distributes A and B as ragged shards of their rows (`partition.distribute_tensor` with `Shard(0)` on the mesh
 dimension `tp`: the backend's scatter, MPI_Scatterv), so each rank holds the block of rows the backend's partition gives
-it ([The step](#the-step)). The inputs are one operand, [steps, rows, width]. Rank 0 copies them from its file into a
-region tensor and broadcasts it whole to every rank before the first step. The outputs are one operand of the same shape
+it ([The step](#the-step)). The inputs are one operand, [steps, rows, width], declared once as replicated from rank 0
+(`partition.declare`). Rank 0 copies them from its file into a region tensor, and at the run's start `partition.deliver`
+sends them to every rank by pages, waiting for nothing. Each step reads its row with `partition.row`, which waits on
+the GPU for that row's pages alone and advances a cursor of its own. The outputs are one operand of the same shape
 on every rank. Each step writes its tanh(z) there, and after the last step rank 0 copies it into the output file's
 memory. Within a step only the step's sum crosses between ranks.
 

@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch_mesh
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import Replicate
 from torch_mesh import partition
 
 import chain
@@ -55,12 +56,15 @@ def main():
     k = config['steps_per_replay']
     at, b = chain.weights(mesh, folds, width)
     del folds
-    E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
-    o, t = torch_mesh.empty(rows, width, dtype=torch.half).zero_(), torch.zeros(1, dtype=torch.int64, device='mps')
-    recording = torch_mesh.record(chain.stepper(E, O, o, t, at, b), k)
+    E = partition.declare(torch_mesh.empty(steps, rows, width, dtype=torch.half), mesh, [Replicate()], src_data_rank=0)
+    O = torch_mesh.empty(steps, rows, width, dtype=torch.half)
+    o = torch_mesh.empty(rows, width, dtype=torch.half).zero_()
+    t, cursor = (torch.zeros(1, dtype=torch.int64, device='mps') for _ in range(2))
+    recording = torch_mesh.record(chain.stepper(E, cursor, O, o, t, at, b), k)
     torch_mesh.replay(recording, min(steps, k + steps % k))
     o.zero_()
     t.zero_()
+    cursor.zero_()
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
@@ -69,7 +73,7 @@ def main():
     half = steps // k // 2 * k
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()
-    dist.broadcast(E, src=0)
+    partition.deliver(E)
     torch_mesh.plan(mesh.get_group('tp'), [partition.summed(o, mesh.get_group('tp'))])
     recording.issue(half)
     middle.record()
