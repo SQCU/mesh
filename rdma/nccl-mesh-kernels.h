@@ -111,19 +111,10 @@ static NSString *const STEPS =
    float8 decoded and encoded by mesh.metal's f8_to and f8_from, integers wrapping.  A landing's combine loads both its
    operand and the landed bytes system-coherent: the operand may itself have landed in place (a COPY earlier in the
    group, mesh-plan.h mesh_compile's node outside the contributors), and the landed bytes are the NIC's.  Every kernel but
-   publish, spin and a landing is wide (its threads over the elements).  A landing is page by page (PAGES): each
-   threadgroup that runs it (as many as nccl-mesh-metal.m workers_of gives, a dispatch's or a track's) claims the
-   entry's next page (the word after its landed pages' count, in the page past its landed bytes), awaits that page's
-   landing, combines it four elements a thread at a time, and once every page before it is summed stores the count of
-   pages summed (the word past the landed bytes, which a SEND that sends the sum on names as its supplied count:
-   nccl-mesh.c forwards), so the sum overlaps the landing and a relay forwards each page's sum as it is made; a
-   threadgroup that is not running claims none, so no threadgroup waits on one that is not resident */
+   publish and spin is wide (its threads over the elements); a wide landing's every threadgroup awaits its counts (l,
+   its thread in its threadgroup), each ending at once after any has failed (mesh_step_counts), and a track runs its body in one threadgroup (l its thread there) */
 static NSString *const KERNELS =
   @"\n"
-  "static inline void mesh_pages_summed(device atomic_uint *next, device atomic_uint *slots, device atomic_uint *at, device uchar *done, uint count) { "
-  "uint least = min(atomic_load_explicit(next, memory_order_relaxed), count); atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); const uint n = atomic_load_explicit(slots, memory_order_relaxed); atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); "
-  "for (uint j = 0; j < n; j++) least = min(least, atomic_load_explicit(at + j, memory_order_relaxed)); "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); atomic_fetch_max_explicit((device atomic_uint *)done, least, memory_order_relaxed); }\n"
   "#define PARAMS device uchar *d, device uchar *s, constant mesh_args &p, device uchar *a, device uchar *vb, device ulong *progress, uint i, uint g, uint l, threadgroup ulong *tg\n"
   "#define ENTER(first) mesh_step_enter(p, vb, progress, first);\n"
   "#define ENTER_G if (i == 0) mesh_step_enter(p, vb, progress, true);\n"
@@ -143,30 +134,7 @@ static NSString *const KERNELS =
   "#define BODY(T, OP) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); volatile coherent(system) device const T *xs = (volatile coherent(system) device const T *)(d + p.dst); "
   "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
   "LOOP x[k] = OP(mesh_payload(xs + k), mesh_payload(y + k), p.op);\n"
-  "#define PAGES(T, OP) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); "
-  "volatile coherent(system) device const T *xs = (volatile coherent(system) device const T *)(d + p.dst); "
-  "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
-  "device uchar *done = s + p.src + p.count * p.mask; device atomic_uint *next = (device atomic_uint *)(done + 8), *slots = next + 1, "
-  "*at = next + 2; const ulong per = p.mask / sizeof(T); "
-  "if (l == 0) { tg[2] = atomic_fetch_add_explicit(slots, 1u, memory_order_relaxed); atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); } threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "const uint mine = uint(tg[2]); "
-  "for (;;) { if (l == 0) { const uint from = atomic_load_explicit(next, memory_order_relaxed); atomic_store_explicit(at + mine, from, memory_order_relaxed); atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device); "
-  "const ulong landed = *(volatile coherent(system) device const ulong *)(a + p.aux), have = landed + 1 > p.scalar ? landed + 1 - p.scalar : 0; "
-  "const uint run = max(1u, uint(have > from ? (have - from) / max(1u, atomic_load_explicit(slots, memory_order_relaxed)) : 0)); "
-  "tg[0] = atomic_fetch_add_explicit(next, run, memory_order_relaxed); tg[3] = min(tg[0] + run, ulong(p.count)); "
-  "if (tg[0] < p.count) { atomic_store_explicit(at + mine, uint(tg[0]), memory_order_relaxed); "
-  "if (!mesh_step_failed(p, vb)) mesh_step_check(p, mesh_step_wait(p, a + p.aux, p.scalar + tg[3] - 1, vb), p.scalar + tg[3] - 1, vb); } } "
-  "threadgroup_barrier(mem_flags::mem_device); const ulong k = tg[0], end = tg[3]; if (k >= p.count) break; "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); const ulong lo = k * per, hi = min(end * per, p.n), four = lo + (hi - lo) / 4 * 4; "
-  "for (ulong e = lo + 4 * l; e < four; e += 4 * g) { const vec<T, 4> u = mesh_payload((volatile coherent(system) device const vec<T, 4> *)(xs + e)), "
-  "w = mesh_payload((volatile coherent(system) device const vec<T, 4> *)(y + e)); vec<T, 4> r; for (int c = 0; c < 4; c++) r[c] = OP(u[c], w[c], p.op); "
-  "*(volatile coherent(system) device vec<T, 4> *)(x + e) = r; } "
-  "for (ulong e = four + l; e < hi; e += g) x[e] = OP(mesh_payload(xs + e), mesh_payload(y + e), p.op); "
-  "threadgroup_barrier(mem_flags::mem_device); "
-  "if (l == 0) { atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); atomic_store_explicit(at + mine, uint(end), memory_order_relaxed); mesh_pages_summed(next, slots, at, done, p.count); } } "
-  "if (l == 0) { atomic_store_explicit(at + mine, ~0u, memory_order_relaxed); mesh_pages_summed(next, slots, at, done, p.count); "
-  "if (!mesh_step_failed(p, vb)) mesh_step_wait(p, done, p.count, vb); } threadgroup_barrier(mem_flags::mem_device);\n"
-  "#define COMBINE(name, T, OP) GROUP(land_##name) { ENTER_G PAGES(T, OP) } "
+  "#define COMBINE(name, T, OP) HEAD(land_##name) { ENTER(i == 0) AWAIT BODY(T, OP) } "
   "HEAD(combine3_##name) { "
   "ENTER(i == 0) volatile coherent(system) device T *x = (volatile coherent(system) device T *)(d + p.dst); device const T *z = (device const T *)(a + p.aux); "
   "volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); LOOP x[k] = OP(z[k], mesh_payload(y + k), p.op); }\n"
@@ -209,18 +177,18 @@ static NSString *const KERNELS =
    library's lookup takes, once a process (nccl-mesh-metal.m kernels_of) and once an install (nccl-mesh-kernels.m)
    (newFunctionWithName, an interface the library does not implement: design/rubrics.md, Strings are messages) and whose body the switch calls, and the word a consumption's item awaits in it (record_step:
    WORD_D a spin's, in its d; WORD_A a landing's, in its a; 0 none) */
-enum { WORD_D = 1, WORD_A, WORD_P };
+enum { WORD_D = 1, WORD_A };
 #define KINDS_OF(X) \
   X(copy_plain_4, 0) X(copy_land_4, 0) X(copy_plain_1, 0) X(copy_land_1, 0) \
-  X(land_i8, WORD_P) X(combine3_i8, 0) X(premul_i8, 0) X(truncdiv_i8, 0) \
-  X(land_u8, WORD_P) X(combine3_u8, 0) X(premul_u8, 0) X(truncdiv_u8, 0) \
-  X(land_i32, WORD_P) X(combine3_i32, 0) X(premul_i32, 0) X(truncdiv_i32, 0) \
-  X(land_u32, WORD_P) X(combine3_u32, 0) X(premul_u32, 0) X(truncdiv_u32, 0) \
-  X(land_i64, WORD_P) X(combine3_i64, 0) X(premul_i64, 0) X(truncdiv_i64, 0) \
-  X(land_u64, WORD_P) X(combine3_u64, 0) X(premul_u64, 0) X(truncdiv_u64, 0) \
-  X(land_f16, WORD_P) X(combine3_f16, 0) X(premul_f16, 0) X(land_f32, WORD_P) X(combine3_f32, 0) X(premul_f32, 0) \
-  X(land_bf16, WORD_P) X(combine3_bf16, 0) X(premul_bf16, 0) X(land_e4m3, WORD_P) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
-  X(land_e5m2, WORD_P) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
+  X(land_i8, WORD_A) X(combine3_i8, 0) X(premul_i8, 0) X(truncdiv_i8, 0) \
+  X(land_u8, WORD_A) X(combine3_u8, 0) X(premul_u8, 0) X(truncdiv_u8, 0) \
+  X(land_i32, WORD_A) X(combine3_i32, 0) X(premul_i32, 0) X(truncdiv_i32, 0) \
+  X(land_u32, WORD_A) X(combine3_u32, 0) X(premul_u32, 0) X(truncdiv_u32, 0) \
+  X(land_i64, WORD_A) X(combine3_i64, 0) X(premul_i64, 0) X(truncdiv_i64, 0) \
+  X(land_u64, WORD_A) X(combine3_u64, 0) X(premul_u64, 0) X(truncdiv_u64, 0) \
+  X(land_f16, WORD_A) X(combine3_f16, 0) X(premul_f16, 0) X(land_f32, WORD_A) X(combine3_f32, 0) X(premul_f32, 0) \
+  X(land_bf16, WORD_A) X(combine3_bf16, 0) X(premul_bf16, 0) X(land_e4m3, WORD_A) X(combine3_e4m3, 0) X(premul_e4m3, 0) \
+  X(land_e5m2, WORD_A) X(combine3_e5m2, 0) X(premul_e5m2, 0) \
   X(publish, 0) X(spin, WORD_D) X(land_merge, WORD_A)
 #define KIND_ENUM(name, word) KIND_##name,
 #define KIND_NAME(name, word) #name,
@@ -249,8 +217,7 @@ static NSString *const TRACKS =
   "struct track_item { ulong position, need, target; device ulong *word; device uchar *v; uint first_op, ops, first_dep, deps, wait_op, cursor; };\n"
   "struct track_dep { ulong count; uint other, pad; };\n"
   "struct track { uint first[2], count[2]; };\n"
-  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint tracks, polls, workers, pad; };\n"
-  "enum { WORD_D = 1, WORD_A, WORD_P }; constant uchar WORDS[] = { " XSTR(KINDS_OF(KIND_WORD)) " };\n"
+  "struct track_head { ulong tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint tracks, polls; };\n"
   "static inline bool track_ready(constant track_item &it, constant track_dep *deps, volatile coherent(system) device ulong *count) { "
   "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
     "for (uint k = 0; k < it.deps; k++) if (count[deps[it.first_dep + k].other] < deps[it.first_dep + k].count) return false; "
@@ -266,20 +233,13 @@ static NSString *const TRACK_KERNEL =
   @"kernel void tracks(constant uchar *base [[buffer(0)]], device uchar *ring [[buffer(1)]], uint t [[threadgroup_position_in_grid]], "
   "uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]]) { "
   "constant track_head &h = *(constant track_head *)base; "
+  "if (t >= h.tracks) return; "
+  "constant track &tr = ((constant track *)(base + h.tracks_off))[t]; "
   "constant track_item *items = (constant track_item *)(base + h.items_off); "
   "constant track_op *ops = (constant track_op *)(base + h.ops_off); "
   "constant track_dep *deps = (constant track_dep *)(base + h.deps_off); "
   "volatile coherent(system) device ulong *count = (volatile coherent(system) device ulong *)(ring + h.count_off); "
   "threadgroup ulong tg[4]; threadgroup uint pick[2]; "
-  "if (t >= h.tracks) { if (t >= h.tracks * h.workers) return; "
-  "volatile coherent(system) device ulong *go = count + h.tracks + 2 * ((t - h.tracks) % h.tracks); ulong seen = 0; "
-  "for (;;) { if (i == 0) { tg[2] = mesh_wait_bounded(go, seen + 1, h.polls); atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); tg[3] = go[1]; } "
-  "threadgroup_barrier(mem_flags::mem_device); const ulong at = tg[2], which = tg[3]; threadgroup_barrier(mem_flags::mem_threadgroup); "
-  "if (at <= seen || which == ~0UL) return; seen = at; "
-  "constant track_op &o = ops[which]; device ulong *progress = (device ulong *)o.d; "
-  "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } threadgroup_barrier(mem_flags::mem_device); } } "
-  "constant track &tr = ((constant track *)(base + h.tracks_off))[t]; "
-  "volatile coherent(system) device ulong *go = count + h.tracks + 2 * t; ulong sent = 0; "
   "uint next0 = 0, next1 = 0; ulong looks = 0; bool expired = false; "
   "if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(ring + h.progress_off), h.sequence); "
   "for (;;) { "
@@ -295,10 +255,9 @@ static NSString *const TRACK_KERNEL =
   "pick[0] = chosen; pick[1] = left; } "
   "threadgroup_barrier(mem_flags::mem_threadgroup); "
   "const uint chosen = pick[0]; "
-  "if (!pick[1]) { if (i == 0 && h.workers > 1) { go[1] = ~0UL; mesh_publish(go, ++sent); } return; } "
+  "if (!pick[1]) return; "
   "if (chosen != ~0u) { constant track_item &it = items[chosen]; "
   "for (uint k = 0; k < it.ops; k++) { constant track_op &o = ops[it.first_op + k]; device ulong *progress = (device ulong *)o.d; "
-  "if (i == 0 && h.workers > 1 && WORDS[o.kind] == WORD_P) { go[1] = it.first_op + k; mesh_publish(go, ++sent); } "
   "switch (o.kind) { " XSTR(KINDS_OF(KIND_CASE)) " default: break; } "
   "threadgroup_barrier(mem_flags::mem_device); } "
   "if (it.cursor == 1 && i == 0) mesh_publish(count + t, it.position + 1); } "
