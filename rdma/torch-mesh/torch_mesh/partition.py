@@ -6,9 +6,9 @@ dimension's P units, attach(mesh, tp=P), the same on every rank, and the backend
 them, an even split at first (rebalance moves them), and a capacity c_r, its part.  An extent N that P divides (any
 other raises ValueError, on every rank alike) is split N p_r / P per coordinate in rank order, as the logical tensor
 reads, and rank r holds its share, N p_r / P elements along that dimension, with no padding: the blocks laid end to
-end in rank order are the logical tensor.  The parts are a tensor operand (operand(mesh, "tp").parts) read by the ops below when they run.
-follow(t) moves a sharded tensor onto the parts a rebalance attached.  On raw tensors split(mesh, "tp", N) gives the
-valid blocks in rank order, the ones the list collectives take
+end in rank order are the logical tensor.  The parts are a tensor operand (operand(mesh, "tp").parts) read by the ops
+below when they run.  follow(*ts) moves sharded tensors onto the parts the Balancer attached, one group a move.  On raw
+tensors split(mesh, "tp", N) gives the valid blocks in rank order, the ones the list collectives take
 (dist.all_gather into a list of unequal outputs, dist.reduce_scatter of a list of unequal inputs: MPI's v-collectives
 in torch's spelling).
 
@@ -450,32 +450,44 @@ def operand(mesh, name):
 
 
 @torch.no_grad()
-def follow(tensor):
-    """DTensor `tensor` split along each partitioned mesh dimension by the operand attached there now (after a
-    rebalance moved it): the elements that change rank cross once, by one MPI_Alltoallv a mesh dimension
-    (dist.all_to_all_single: the backend's ncclMeshAlltoAllV), each piece in a region lease on whole pages of its own
-    (_paged: the library places each segment on a page), the rest staying where they lie."""
-    mesh, placements, local = tensor.device_mesh, list(tensor.placements), tensor.to_local()
-    for i, p in enumerate(placements):
+def follow(*tensors):
+    """DTensors `tensors` (of one mesh), each split along each partitioned mesh dimension by the operand attached there
+    now (after the Balancer moved it), as a list.  A mesh dimension's move is one coalesced group (the backend's) of one
+    MPI_Alltoallv a tensor (ncclMeshAlltoAllV) of the rows that change rank alone, each piece a segment of whole pages
+    (_paged: the library places each segment on a page) of a region lease, sent once and copied once into its place in
+    the tensor's new block, a region tensor; the rows that stay are copied into their place there, crossing nothing."""
+    mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape] for t in tensors]
+    for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
-        if not isinstance(p, RaggedShard) or key in (None, p.key):
+        moving = [h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)]
+        if not moving:
             continue
-        old, rank, group = _OPERANDS[p.key], mesh.get_coordinate()[i], mesh.get_group(i)
-        a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
-        g, n = _units(old, tensor.shape[p.dim]), len(old.capacity)
-        span = lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
-        sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
-        rows = local.movedim(p.dim, 0)
-        row = math.prod(rows.shape[1:])
-        out, out_at = _paged([c * row for c in sends], rows.element_size(), group)
-        into, into_at = _paged([c * row for c in receives], rows.element_size(), group)
-        x, y = _empty((out_at[-1],), rows, group), _empty((into_at[-1],), rows, group)
-        for q, first in enumerate(itertools.accumulate(sends[:-1], initial=0)):
-            x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rows.shape[1:]).copy_(rows[first:first + sends[q]])
-        dist.all_to_all_single(y, x, into, out, group=group)
-        landed = torch.cat([y[into_at[r]:into_at[r] + receives[r] * row] for r in range(n)])
-        local, placements[i] = landed.view((sum(receives),) + rows.shape[1:]).movedim(0, p.dim).contiguous(), RaggedShard(p.dim, key)
-    return from_local(local, mesh, placements)
+        rank, group, landed = mesh.get_coordinate()[i], mesh.get_group(i), []
+        with dist._coalescing_manager(group=group, device=moving[0][1].device):
+            for h in moving:
+                p, rows = h[0][i], h[1].movedim(h[0][i].dim, 0)
+                old, rest = _OPERANDS[p.key], rows.shape[1:]
+                a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
+                g, n, row = _units(old, h[2][p.dim]), len(old.capacity), math.prod(rest)
+                span = lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
+                sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
+                first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
+                out, out_at = _paged([0 if q == rank else c * row for q, c in enumerate(sends)], rows.element_size(), group)
+                land, land_at = _paged([0 if r == rank else c * row for r, c in enumerate(receives)], rows.element_size(), group)
+                x, y, new = _empty((out_at[-1],), rows, group), _empty((land_at[-1],), rows, group), _empty((into[-1],) + rest, rows, group)
+                new[into[rank]:into[rank + 1]].copy_(rows[first[rank]:first[rank + 1]])
+                for q in range(n):
+                    if q != rank:
+                        x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rest).copy_(rows[first[q]:first[q + 1]])
+                dist.all_to_all_single(y, x, land, out, group=group)
+                landed.append((h, new, y, land_at, into, receives, row))
+        for h, new, y, land_at, into, receives, row in landed:
+            for r in range(len(receives)):
+                if r != rank:
+                    new[into[r]:into[r + 1]].view(-1).copy_(y[land_at[r]:land_at[r] + receives[r] * row])
+            h[0][i] = RaggedShard(h[0][i].dim, key)
+            h[1] = new.movedim(0, h[0][i].dim)
+    return [from_local(local, mesh, placements) for placements, local, _ in held]
 
 
 def calls(tensor):
