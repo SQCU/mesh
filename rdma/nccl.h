@@ -1035,7 +1035,11 @@ ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
    outside one its own group), issued `repeat` times in a row (its first call's; 0 as 1).  `fused` (not 0): the call is
    issued on a fused stream (ncclMeshStream fused). It uses the same physical striping and routed-write
-   representation as other calls; fusion changes publication/consumption encoding, not available cables. */
+   representation as other calls; fusion changes publication/consumption encoding, not available cables.  `send` and
+   `recv` (not named: {NULL, 0}) the call's buffers as its call takes them (sendbuff and recvbuff: on the Metal path an
+   ncclMeshBuffer, a Metal buffer and a byte offset in it; on the host path {NULL, the address}), the same at every
+   issue; a group whose calls name them is bound (ncclMeshCommPlan).  `depth` (its group's first call's; 0 as 1): the
+   most issues of a bound group issued and not complete at once. */
 enum { ncclMeshCallSend = 16, ncclMeshCallRecv = 17, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
 typedef struct {
   int what, peer;
@@ -1047,6 +1051,8 @@ typedef struct {
   uint32_t repeat;
   int destination;
   int fused;
+  ncclMeshBuffer send, recv;
+  uint32_t depth;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the repeats' sum), the number of the communicator's group the order starts at (`first`: its groups
@@ -1067,7 +1073,18 @@ typedef struct {
    Every rank passes its own calls (its own peers), the same groups in the same order, at the same point between its
    groups.  The plan is comm's until the next call or its destroy, *plan (may be NULL) its view; count 0 drops it, each
    group then compiled at its call.  A form set after it (ncclMeshCommForms) changes no planned group.  A declared call
-   that would fail at its call fails the plan as a value (ncclInvalidArgument, ncclInvalidUsage), comm's plan kept. */
+   that would fail at its call fails the plan as a value (ncclInvalidArgument, ncclInvalidUsage), comm's plan kept.
+   A declared group whose calls name their buffers (ncclMeshCall send, recv) is bound: each of its calls crosses a link
+   and every buffer it sends from or lands in is resolved here, once, into `depth` issues of its own, each with its
+   operand, scratch and landing area held (leases of comm's pool, given back to it when the plan is let go: at the next
+   call, or comm's destroy, once no issue of the plan is in flight), whether each call reads its send buffer in place,
+   each entry's rows (a lease's, starting on a page), each landing's gate and each relay's landing, each crossing
+   call's send buffer checked (in the region) and a declared fused crossing's form (one the library fuses) decided; a
+   failure of any of these fails the plan as a value.  Its k-th issue takes its (k mod depth)-th issue's, stamps each
+   entry with the channels' counts (its repeats' with the stream's fused stride: ncclMeshFused) and presents them,
+   reading none of the issued calls' arguments but their stream's (a group that is not its declaration is the
+   program's error, undefined, as above); on a communicator whose plan binds every group, no call's arguments but its
+   stream's are read at all.  Another declared group is compiled here as above, its buffers placed at its issue. */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count, const ncclMeshPlan** plan);
 /* Configuration boundary only: suspend the cached function order for feedback or
    placement; resuming begins at its first group without dropping the plan. */

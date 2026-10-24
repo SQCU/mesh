@@ -347,7 +347,7 @@ static void bootstrap_close(struct ncclComm *comm) {
 }
 
 static void comm_leave(struct ncclComm *comm);
-static void plan_free(const struct ncclComm *comm, struct plan *plan);
+static void plan_release(struct ncclComm *comm, struct plan *plan);
 static void paths_free(struct mesh_paths *paths) {
   free((void *)paths->first); free((void *)paths->cable); free((void *)paths->log_weight);
   *paths = (struct mesh_paths){0};
@@ -370,7 +370,7 @@ static void comm_free(struct ncclComm *comm) {
   if (comm->violation) metal_release(comm->violation);
   metal_release(comm->command);
   comm_leave(comm);
-  plan_free(comm, comm->plan);
+  plan_release(comm, comm->plan);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
   free(comm->cable_weights);
   for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
@@ -625,7 +625,7 @@ ncclResult_t ncclMeshCommRoutes(ncclComm_t comm, const struct mesh_trees *trees,
     }
   }
   pthread_mutex_lock(&group_lock);
-  plan_free(comm, comm->plan); comm->plan = NULL;
+  plan_release(comm, comm->plan); comm->plan = NULL;
   routes_free(comm, 0); trees_free(&comm->paths);
   free(comm->forms); comm->forms = NULL; comm->form_count = 0;
   free(comm->cable_weights); comm->cable_weights = held; comm->paths = made;
@@ -660,7 +660,7 @@ ncclResult_t ncclMeshCommWriteRelease(ncclComm_t comm, const double *seconds) {
   memcpy(copy, seconds, (size_t)comm->nranks * sizeof *copy);
   pthread_mutex_lock(&group_lock);
   free(comm->write_release); comm->write_release = copy;
-  plan_free(comm, comm->plan); comm->plan = NULL;
+  plan_release(comm, comm->plan); comm->plan = NULL;
   pthread_mutex_unlock(&group_lock);
   return ncclSuccess;
 }
@@ -682,7 +682,7 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
   }
   struct mesh_paths *to = comm->writes + source * comm->nranks + destination;
   paths_free(to); *to = (struct mesh_paths){P, first, cable, weights};
-  plan_free(comm, comm->plan); comm->plan = NULL;
+  plan_release(comm, comm->plan); comm->plan = NULL;
   pthread_mutex_unlock(&group_lock);
   return ncclSuccess;
 }
@@ -1813,7 +1813,7 @@ struct call {
   unsigned char pre[8];
   /* a premultiplier in device memory (ncclScalarDevice), read into `pre` when its group runs on the host */
   const void *scalar_at;
-  int premultiplied, direct;
+  int premultiplied, direct, declaring;
   struct steps *bound;
   unsigned char *result, *copy;
   cudaStream_t stream;
@@ -2054,14 +2054,16 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
    value its list's count reaches once it is whole (`end`), its piece's byte offset in its buffer and its bytes, where
    its bytes lie (a SEND's source, a COPY's destination, a combine's landing area: `data`) and the first of the rows
    they lie in (`row`); a landing's `need` (the send entries a combine into bytes an earlier SEND of its call on its
-   channel reads waits to be published: that entry + 1, 0 none) */
-struct message { struct call *c; uint32_t step; uint64_t entry; mesh_pages pages, end; uint64_t need; size_t offset, bytes;
+   channel reads waits to be published: that entry + 1, 0 none); a SEND's relay (`from`: the channel + 1 whose landing
+   it sends on as it lands, 0 none; `after`, that channel's landed count its bytes are whole at: depend) */
+struct message { struct call *c; uint32_t step, from; uint64_t entry; mesh_pages pages, end, after; uint64_t need; size_t offset, bytes;
                  struct where data; uint64_t row; double priority; };
 /* a group's entries on one channel, each list in its order from its first (`first`: [0] the send list's, [1] the
-   landing list's), its landing entries' gate (`word` a region offset, 0 none; `base` the value it reaches: a page
-   count of the holding's `ready`, or the number of a group at the communicator's gate word: gate_of), and each list's
-   pages a repeat (`each`: group_bound) */
-struct schedule { struct message *out, *in; size_t outs, ins; uint64_t first[2], word, base; mesh_pages each[2]; };
+   landing list's), its landing entries' gate (`gated`: 0 none, 1 the holding's `ready`, 2 the communicator's gate
+   word; `word` its region offset; `base` the value it reaches: a page count of `ready`, from the group's own first
+   until stamped, or the number of a group at the gate word: gate_of, stamp), and each list's pages a repeat (`each`:
+   group_bound) */
+struct schedule { struct message *out, *in; size_t outs, ins; uint64_t first[2], word, base; mesh_pages each[2]; int gated; };
 
 /* a group's calls as mesh-plan.h's group, which mesh_group_lay lays (the one layout both ends make): call i's kind and
    its steps at rank r, steps[i * N + r] and count[i * N + r] (none where the rank's are not known) */
@@ -2107,7 +2109,7 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     const struct channel *ch = comm->channels + h;
     struct schedule *p = plans + h;
-    *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, {0, 0}, 0, 0, {{0}, {0}}};
+    *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, {0, 0}, 0, 0, {{0}, {0}}, 0};
     if (!p->out || !p->in) { result = fail(ncclSystemError, "out of memory"); break; }
     for (int send = 1; send >= 0; send--) {
       uint32_t placed = 0;
@@ -2266,18 +2268,30 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
   return result;
 }
 
+/* a bound group's issue of its own (nccl.h ncclMeshCommPlan: a declared group whose calls name their buffers, each
+   crossing a link): its calls (each with its steps, its operand in place or a lease of the communicator's pool and its
+   scratch leases, and whether it reads its send buffer in place: plan_direct), its entries on each channel from each
+   list's 0, each placed (place_group), its landings' gate (gate_of) and its relays (depend) found, the leases of the
+   pool it holds (`leases`, and on the Metal path their Metal buffers, `buffers`, made resident on each issue's
+   encoder), and the channel its entries lie on alone (`lone`: lone_on) */
+struct instance { struct call *calls; struct schedule *plans; void **leases, **buffers; uint32_t nleases, lone; };
 /* a declared group compiled once (ncclMeshCommPlan): its calls (`calls`, `n`, each with its steps), issued `repeat`
    times in a row, and its entries on each channel from each list's 0 (`plans`, each message's call one of `calls`);
-   a communicator's plan: the caller's view (`view`), its declared groups in order (`group`) and each one's entries
-   (`entries`, the view's) */
-struct compiled { struct call *calls; size_t n; uint32_t repeat; struct schedule *plans, *write_plans; };
-struct plan { ncclMeshPlan view; struct compiled *group; uint64_t (*entries)[2]; int active; };
+   a bound one's `depth` issues of its own (`bound`, the k-th issue of it taking the (k mod depth)-th: `issued` its
+   issues), each crossing call's buffers checked (operands_check) and its fused crossing's form (`fused`: fusable)
+   decided there; a communicator's plan: the caller's view (`view`), its declared groups in order (`group`), each one's
+   entries (`entries`, the view's), whether every group is bound (`all`: no issued call's arguments are read), whether
+   it binds the groups issued now (`active`: ncclMeshCommPlanActive), and its holders (`refs`: the communicator's, until
+   its next plan or its end, and each bound group's in flight) */
+struct compiled { struct call *calls; size_t n; uint32_t repeat, depth; uint64_t issued; struct schedule *plans, *write_plans;
+                  struct instance *bound; int fused; };
+struct plan { ncclMeshPlan view; struct compiled *group; uint64_t (*entries)[2]; int all, active; uint32_t refs; };
 
 /* the plan's group that the communicator's group numbered `holder` is: its place in the plan's order, repeated from
    the plan's first group */
-static const struct compiled *group_at(const struct plan *plan, uint64_t holder) {
+static struct compiled *group_at(const struct plan *plan, uint64_t holder) {
   uint64_t at = (holder - plan->view.first) % plan->view.issues;
-  const struct compiled *x = plan->group;
+  struct compiled *x = plan->group;
   while (at >= x->repeat) at -= x++->repeat;
   return x;
 }
@@ -2295,7 +2309,7 @@ static struct message repeat_of(const struct message *m, size_t n, size_t k, siz
    ncclMeshCommPlan), else, with no plan, compiled here (compile_group).  Under group_lock */
 static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, uint32_t repeats, size_t stride,
                                 struct schedule **plans) {
-  struct compiled own = {list, n, 1, NULL, NULL};
+  struct compiled own = {.calls = list, .n = n, .repeat = 1};
   const struct compiled *x = comm->plan && comm->plan->active ? group_at(comm->plan, holder) : &own;
   struct schedule *made = calloc(comm->count + 1, sizeof *made);
   ncclResult_t result = made ? ncclSuccess : fail(ncclSystemError, "out of memory");
@@ -2308,7 +2322,7 @@ static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t
     struct schedule *q = made + h;
     *q = (struct schedule){malloc((p->outs * repeats + 1) * sizeof *p->out), malloc((p->ins * repeats + 1) * sizeof *p->in), p->outs * repeats,
                            p->ins * repeats, {0, 0}, 0, 0, {p->outs ? p->out[p->outs - 1].end : p->each[0],
-                           p->ins ? p->in[p->ins - 1].end : p->each[1]}};
+                           p->ins ? p->in[p->ins - 1].end : p->each[1]}, 0};
     if (!q->out || !q->in) { result = fail(ncclSystemError, "out of memory"); break; }
     for (size_t k = 0; k < q->outs; k++) q->out[k] = repeat_of(p->out, p->outs, k, stride, list, x->calls);
     for (size_t k = 0; k < q->ins; k++) q->in[k] = repeat_of(p->in, p->ins, k, stride, list, x->calls);
@@ -2319,11 +2333,36 @@ static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t
   return result;
 }
 
-/* the group's entries laid from each channel's last scheduled entry and page (its compiled ones are from each list's
-   0), each step's channel and entry kept; each landing that combines into bytes an earlier SEND of its call on its
-   channel reads (mesh_compile's two-node direct exchange; a SEND that reads the send buffer in place reads none,
-   plan_direct) with that SEND's publication entry (struct message `need`) */
-static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
+/* the group's entries from each list's 0 laid on its steps: each step's channel and entry kept, and each landing that
+   combines into bytes an earlier SEND of its call on its channel reads (mesh_compile's two-node direct exchange; a
+   SEND that reads the send buffer in place reads none, plan_direct) with that SEND's entry + 1 (struct message `need`) */
+static void lay(struct ncclComm *comm, struct schedule *plans) {
+  for (uint32_t h = 0; h < comm->count; h++) {
+    struct schedule *p = plans + h;
+    for (int send = 1; send >= 0; send--)
+      for (size_t k = 0; k < (send ? p->outs : p->ins); k++) {
+        const struct message *m = (send ? p->out : p->in) + k;
+        m->c->bound->channel[m->step] = h; m->c->bound->entry[m->step] = m->entry;
+      }
+    for (size_t k = 0; k < p->ins; k++) {
+      struct message *m = p->in + k;
+      const struct steps *st = m->c->bound;
+      m->need = 0;
+      if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
+      for (size_t j = 0; j < p->outs; j++) {
+        const struct message *o = p->out + j;
+        if (o->c != m->c || o->step >= m->step || (st->read && named(st->read[o->step])) || !meet(st->steps + o->step, st->steps + m->step)) continue;
+        if (o->entry + 1 > m->need) m->need = o->entry + 1;
+      }
+    }
+  }
+}
+
+/* the group's entries stamped: laid from each channel's last scheduled entry and page (each step's entry kept), each
+   combine's `need` and each relay's `after` from those of its channels, and each landing gate's word and value
+   (gate_of: the holding's `ready` past the group's first send page, or the communicator's gate word at the group's
+   number of it, *gate then set: the group's first dispatch stores it) */
+static void stamp(struct ncclComm *comm, struct schedule *plans, int *gate) {
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;
     struct schedule *p = plans + h;
@@ -2333,18 +2372,12 @@ static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
         struct message *m = (send ? p->out : p->in) + k;
         m->entry += p->first[!send];
         m->end = pages_add(send ? ch->out : ch->in, m->end);
-        m->c->bound->channel[m->step] = h; m->c->bound->entry[m->step] = m->entry;
+        m->c->bound->entry[m->step] = m->entry;
+        if (!send && m->need) m->need += p->first[0];
+        if (send && m->from) m->after = pages_add(comm->channels[m->from - 1].in, m->after);
       }
-    for (size_t k = 0; k < p->ins; k++) {
-      struct message *m = p->in + k;
-      const struct steps *st = m->c->bound;
-      if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
-      for (size_t j = 0; j < p->outs; j++) {
-        const struct message *o = p->out + j;
-        if (o->c != m->c || o->step >= m->step || (st->read && named(st->read[o->step])) || !meet(st->steps + o->step, st->steps + m->step)) continue;
-        if (o->entry + 1 > m->need) m->need = o->entry + 1;
-      }
-    }
+    if (p->gated == 1) { p->word = ch->ready_at; p->base = pages_to_word(pages_add(ch->out, pages_from_word(p->base))); }
+    if (p->gated == 2) { p->word = comm->gate_at; p->base = comm->gates + 1; *gate = 1; }
   }
 }
 
@@ -2371,23 +2404,33 @@ static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder) {
   best->holder = holder;
   return best->address;
 }
+/* the lease of comm's pool at `address` made free (a plan's, at its end) */
+static void spare_free(struct ncclComm *comm, const void *address) {
+  for (uint32_t k = 0; k < comm->nspares; k++)
+    if (comm->spares[k].address == address) comm->spares[k].holder = 0;
+}
 /* GPU program bookkeeping releases the holder. spare_take separately proves
    local DMA completion before overwriting any source bytes. */
 static void spares_give(struct ncclComm *comm, uint64_t holder) {
   for (uint32_t k = 0; holder && k < comm->nspares; k++)
     if (comm->spares[k].holder == holder) comm->spares[k].holder = 0;
 }
-/* a lease of comm's pool (spare_take) as a where: on the Metal path its Metal buffer (lease_buffer, made resident
-   through the program's residency set where it has one), on the host path its address; {NULL, 0} where none was had,
-   the failure formatted */
-static struct where spare_where(struct metal_program *program, struct ncclComm *comm, size_t bytes, uint64_t holder) {
+/* a lease of comm's pool (spare_take) as a where: on the Metal path (`metal`) its Metal buffer (lease_buffer, made
+   resident through the program's residency set where one is encoding), on the host path its address; kept by
+   instance `keep` where a plan binds it; {NULL, 0} where none was had, the failure formatted */
+static struct where spare_where(struct metal_program *program, int metal, struct ncclComm *comm, size_t bytes, uint64_t holder,
+                                struct instance *keep) {
   void *address = spare_take(comm, bytes ? bytes : 1, holder), *buffer = NULL;
   size_t offset = 0;
   if (!address) return (struct where){NULL, 0};
-  if (!program) return (struct where){NULL, (size_t)address};
-  if (lease_buffer(address, &buffer, &offset)) { fail(ncclSystemError, "no Metal buffer over a lease of the communicator's"); return (struct where){NULL, 0}; }
-  metal_resident(program, buffer);
-  return (struct where){buffer, offset};
+  if (metal && lease_buffer(address, &buffer, &offset)) { fail(ncclSystemError, "no Metal buffer over a lease of the communicator's"); return (struct where){NULL, 0}; }
+  void **leases = keep ? realloc(keep->leases, (keep->nleases + 1) * sizeof *leases) : NULL;
+  void **buffers = leases ? realloc(keep->buffers, (keep->nleases + 1) * sizeof *buffers) : NULL;
+  if (leases) keep->leases = leases;
+  if (keep && !buffers) { spare_free(comm, address); fail(ncclSystemError, "out of memory"); return (struct where){NULL, 0}; }
+  if (keep) { keep->buffers = buffers; keep->leases[keep->nleases] = address; keep->buffers[keep->nleases++] = buffer; }
+  if (program && buffer) metal_resident(program, buffer);
+  return metal ? (struct where){buffer, offset} : (struct where){NULL, (size_t)address};
 }
 
 static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + page - 1) / page * page); }
@@ -2398,7 +2441,8 @@ static size_t page_up(size_t bytes, uint64_t page) { return (size_t)((bytes + pa
    table; the bridge reads each row's page in the range's order).  0, else the
    call fails as a value, naming the piece (ncclInvalidUsage: the piece's buffer is no lease, or its cut, NCCL's, does
    not lie on a page; nothing is copied to move it), nothing presented */
-static ncclResult_t place_group(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder) {
+static ncclResult_t place_group(struct metal_program *program, int metal, struct ncclComm *comm, struct schedule *plans, uint64_t holder,
+                                struct instance *keep) {
   const struct hdr *m = comm->attach->context.M;
   const unsigned char *region = (const unsigned char *)m;
   const uint64_t page = comm->page;
@@ -2407,7 +2451,8 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
     for (size_t k = 0; k < plans[h].ins; k++)
       if (plans[h].in[k].c->bound->steps[plans[h].in[k].step].op == MESH_STEP_REDUCE) landing += page_up(plans[h].in[k].bytes, page);
   struct where area = {NULL, 0};
-  if (landing && !named(area = spare_where(program, comm, landing, holder))) return fail(ncclSystemError, "the group's landing area: %s", last.text);
+  if (landing && !named(area = spare_where(program, metal, comm, landing, holder, keep)))
+    return fail(ncclSystemError, "the group's landing area: %s", last.text);
   for (uint32_t h = 0; h < comm->count; h++)
     for (int send = 1; send >= 0; send--)
       for (size_t k = 0; k < (send ? plans[h].outs : plans[h].ins); k++) {
@@ -2437,20 +2482,36 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
    entry's word and base), so no receive lands in pages the stream's earlier work still reads or writes (the caller's
    buffers; a lease of the pool an earlier group combines from): on each channel, the holding's `ready` past the first
    page of the group's first send entry there where that entry's step waits on no receive (published at the group's
-   start, issue_group; one system fence before it), else the communicator's gate word at the group's value of it, which
-   the group's first dispatch stores (*gate) */
-static void gate_of(struct ncclComm *comm, struct schedule *plans, int *gate) {
+   start, issue_group; one system fence before it; `gated` 1, its value from the group's first: stamp), else the
+   communicator's gate word at the group's value of it, which the group's first dispatch stores (`gated` 2) */
+static void gate_of(struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++) {
     struct schedule *p = plans + h;
     if (!p->ins) continue;
     const struct message *first = p->outs ? p->out : NULL;
-    if (first && first->c->bound->prior_first[first->step] == first->c->bound->prior_first[first->step + 1]) {
-      p->word = comm->channels[h].ready_at;
-      p->base = pages_to_word(pages_add(pages_sub(first->end, first->pages), (mesh_pages){1}));
-      continue;
-    }
-    p->word = comm->gate_at; p->base = comm->gates + 1; *gate = 1;
+    p->gated = first && first->c->bound->prior_first[first->step] == first->c->bound->prior_first[first->step + 1] ? 1 : 2;
+    if (p->gated == 1) p->base = pages_to_word(pages_add(pages_sub(first->end, first->pages), (mesh_pages){1}));
   }
+}
+
+/* each SEND that sends on a landing as it lands (a relay: forwards, or a one-way write's hop past its source) with that
+   landing's channel (`from`) and the count it reaches once this SEND's bytes are whole (`after`, from the group's own
+   first until stamped), from each list's 0 laid (lay): a fused stream's repeat r on repeat r's landing (each step's
+   entry the last repeat's) */
+static void depend(struct ncclComm *comm, struct schedule *plans) {
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (size_t k = 0; k < plans[h].outs; k++) {
+      struct message *m = plans[h].out + k;
+      const struct steps *s = m->c->bound;
+      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
+      m->from = 0;
+      if (dependency < 0) continue;
+      const struct schedule *received = plans + s->channel[dependency];
+      const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
+      const struct message *from = received->in + s->entry[dependency] - (repeats - 1 - k / (plans[h].outs / repeats)) * (received->ins / repeats);
+      m->from = s->channel[dependency] + 1;
+      m->after = pages_add(pages_sub(from->end, from->pages), pages_of(m->offset - from->offset, comm->page));
+    }
 }
 
 /* the communicators a program touched, each once, until its end (program_end); a program holds group_lock from its
@@ -2540,18 +2601,8 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
     for (size_t k = 0; !status && k < p->outs; k++) {
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->row, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
-      const struct steps *s = m->c->bound;
-      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
-      if (dependency >= 0) {
-        const uint32_t incoming = s->channel[dependency];
-        const struct schedule *received = plans + incoming;
-        const uint32_t repeats = m->c->fused && m->c->fused->repeats ? m->c->fused->repeats : 1;
-        const size_t repeat = k / (p->outs / repeats);
-        const struct message *from = received->in + s->entry[dependency] - received->first[1] -
-                                     (repeats - 1 - repeat) * (received->ins / repeats);
-        entry.word = (uint64_t)((char *)comm->channels[incoming].view.landed - (char *)context->M);
-        entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), pages_of(m->offset - from->offset, comm->page)));
-      }
+      if (m->from) entry = (struct mesh_entry){m->row, pages_to_word(m->pages), (uint64_t)((char *)comm->channels[m->from - 1].view.landed -
+                                               (char *)context->M), pages_to_word(m->after)};
       status = mesh_stream_present(context, ch->stream, 0, entry);
     }
     for (size_t k = 0; !status && k < p->ins; k++)
@@ -2573,16 +2624,22 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
   }
 }
 
-/* the group's compiled entries (group_bound) laid from each channel's last scheduled entry and page (schedule_laid), its
-   bytes placed and checked (place_group), its landings gated where the group is the Metal path's (`program` not NULL:
-   gate_of, *gate whether its first dispatch stores the communicator's gate), presented (present_group) and counted
-   (commit_group); a failure before any entry is presented is the call's alone, one after it the communicator's (its
-   lists stand mid-group) */
+/* the group's compiled entries (group_bound, from each list's 0) laid on its steps (lay), its bytes placed and checked
+   (place_group), its landings gated where the group is the Metal path's (`program` not NULL: gate_of) and its relays
+   found (depend), where it is no bound group's (`bound`: its plan made these, bind_group); then stamped from each
+   channel's last scheduled entry and page (stamp: *gate whether its first dispatch stores the communicator's gate),
+   presented (present_group) and counted (commit_group); a failure before any entry is presented is the call's alone,
+   one after it the communicator's (its lists stand mid-group) */
 static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder, int *gate,
-                             int immutable_writes) {
-  schedule_laid(comm, plans);
-  ncclResult_t result = place_group(program, comm, plans, holder);
-  if (!result && program && !immutable_writes) gate_of(comm, plans, gate);
+                             int immutable_writes, int bound) {
+  ncclResult_t result = ncclSuccess;
+  if (!bound) {
+    lay(comm, plans);
+    result = place_group(program, program != NULL, comm, plans, holder, NULL);
+    if (!result && program && !immutable_writes) gate_of(comm, plans);
+    if (!result) depend(comm, plans);
+  }
+  if (!result) stamp(comm, plans, gate);
   if (!result) result = present_group(comm, plans);
   if (result) return result;
   if (*gate) comm->gates++;
@@ -2792,28 +2849,83 @@ static ncclResult_t gpu_finished(struct ncclComm *comm) {
   default: return comm_failure(comm);
   }
 }
-/* one group on the host: its communicator not failed (comm_failure) and its GPU work finished (gpu_finished); its calls
-   planned, each crossing call's send buffer a lease
-   (operands_check), its operand made in place (in recvbuff where the call holds the whole operand, else a lease of the
-   communicator's pool, plan_direct reading the send buffer in place where it may) and its scratch leases of the pool;
-   its entries presented (schedule), run with the groups' lock released (run), then finished; a run's failure the
-   communicator's (comm_fail: its lists stand mid-group) */
+/* each crossing call's buffers as its steps name them (struct steps buffer), made where it is issued, or where its plan
+   binds it (`keep`, its instance): a one-way write's lease itself, a point-to-point call's and an all-to-all's own
+   buffers, a collective's operand recvbuff where it holds the whole operand (an all-reduce's, a root's reduce, a
+   broadcast's, an all-gather's), else a lease of comm's pool (a reduce-scatter's, a non-root's reduce), its send buffer
+   read in place where it may (plan_direct), and its scratch leases of the pool (a program's scratch, a tree's or a
+   ring's, mesh-plan.h mesh_compile; none that no step writes where it reads in place: its SENDs read them; the
+   two-node direct exchange has none, its SEND reading the operand its REDUCE combines into, nothing ordering the
+   combine after the NIC's read: rdma/NCCL.md "One track"), each held by `holder`; `metal` the Metal path's (`program`,
+   where one is encoding, makes the pool's resident).  A call that crosses no link is its path's (launch, launch_metal);
+   a refused lease fails the group as a value */
+static ncclResult_t operands(struct metal_program *program, int metal, struct ncclComm *comm, struct call *list, size_t n, uint64_t holder,
+                             struct instance *keep) {
+  for (size_t i = 0; i < n; i++) {
+    struct call *c = list + i;
+    struct steps *st = c->bound;
+    const size_t bytes = elements(c) * SIZE[c->type];
+    if (!st) continue;
+    if (c->target) { c->sum = c->recv_at; c->direct = 1; st->buffer[0] = comm->rank == c->root ? c->send_at : c->recv_at; continue; }
+    if (counted(c)) { st->buffer[0] = c->send_at; st->buffer[1] = c->recv_at; continue; }
+    if (p2p(c)) { st->buffer[0] = c->what == WHAT_SEND ? c->send_at : c->recv_at; continue; }
+    const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
+                         (c->what == MESH_REDUCE && c->root == comm->rank);
+    struct where own = c->recv_at;
+    if (!in_place && !named(own = spare_where(program, metal, comm, bytes, holder, keep))) return fail(ncclSystemError, "its operand: %s", last.text);
+    c->sum = own;
+    c->direct = plan_direct(c, own);
+    st->buffer[0] = own;
+    for (uint32_t b = 1; b < st->buffers; b++)
+      if (!(c->direct && !st->needed[b]) && !named(st->buffer[b] = spare_where(program, metal, comm, bytes, holder, keep)))
+        return fail(ncclSystemError, "a scratch buffer: %s", last.text);
+  }
+  return ncclSuccess;
+}
+
+/* the declared group bound to the communicator's group numbered comm->groups + 1 (comm's plan's, group_at), and its
+   issue's instance: the (k mod depth)-th where it is the declared group's k-th issue; none (NULL) where comm has no plan
+   active (ncclMeshCommPlanActive) or that declared group is not bound.  Under group_lock */
+static struct instance *bound_next(struct ncclComm *comm, struct compiled **x) {
+  *x = comm->plan && comm->plan->active ? group_at(comm->plan, comm->groups + 1) : NULL;
+  return *x && (*x)->bound ? (*x)->bound + (*x)->issued % (*x)->depth : NULL;
+}
+static void plan_release(struct ncclComm *comm, struct plan *plan);
+static ncclResult_t bound_lay(const struct ncclComm *comm, const struct instance *in, uint32_t repeats, size_t stride, struct schedule **plans);
+/* a bound group's issue begun: its declared group's count of issues and its plan's holders one more, and each of its
+   instance's steps as its compiled ones are before any is run (struct steps done: receives of no bytes done) */
+static void bound_begin(struct compiled *x, struct instance *in) {
+  x->issued++;
+  for (size_t i = 0; i < x->n; i++) memcpy(in->calls[i].bound->done, x->calls[i].bound->done, x->calls[i].bound->count);
+}
+
+/* one group on the host: its communicator not failed (comm_failure) and its GPU work finished (gpu_finished); a bound
+   group (its plan's: bound_next) laid from its instance (bound_lay), its calls, operands and scratch its plan's; another
+   planned, each crossing call's send buffer a lease (operands_check), its operands and scratch made (operands; a call
+   that crosses no link its own result, a send to itself's copy); each operand made in place (stage) and each scratch
+   its copy where a call reads no send buffer in place; its entries presented (schedule), run with the groups' lock
+   released (run), then finished; a run's failure the communicator's (comm_fail: its lists stand mid-group) */
 static int comm_issued(const struct ncclComm *comm);
 static void calls_free(struct call *list, size_t n);
 static ncclResult_t launch(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclResult_t result = ncclSuccess;
   int remote = 0;
-  for (size_t i = 0; i < n; i++) {
+  pthread_mutex_lock(&group_lock);
+  struct plan *const plan = comm->plan;
+  struct compiled *x = NULL;
+  struct instance *const inst = bound_next(comm, &x);
+  for (size_t i = 0; i < n && !result && !inst; i++) {
     /* a call on a stream is ordered by that stream's GPU work, which the host path cannot follow */
-    if (list[i].stream) return fail(ncclInvalidUsage, "a group on several streams");
-    if (reducing(list[i].what) && (result = reduction(list + i))) return result;
+    if (list[i].stream) result = fail(ncclInvalidUsage, "a group on several streams");
+    else if (reducing(list[i].what)) result = reduction(list + i);
     remote |= crosses(list + i);
   }
-  if (revoked(comm)) return revoked_fail(comm);
+  if (!result && revoked(comm)) result = revoked_fail(comm);
+  if (result) { pthread_mutex_unlock(&group_lock); return result; }
+  if (inst) { list = inst->calls; n = x->n; remote = 1; bound_begin(x, inst); plan->refs++; }
   for (size_t i = 0; i < n; i++)
     if (list[i].scalar_at) memcpy(list[i].pre, list[i].scalar_at, SIZE[list[i].type]);
-  pthread_mutex_lock(&group_lock);
   const uint64_t holder = ++comm->groups;
   if (remote) result = comm_failure(comm);
   if (!result && remote && comm_issued(comm))
@@ -2821,43 +2933,34 @@ static ncclResult_t launch(struct call *list, size_t n) {
   if (!result && remote && finished && comm->last) result = gpu_finished(comm);
   if (!result && remote && finished) metal_collect(finished);
   struct schedule *plans = NULL;
-  if (!result) result = group_bound(comm, list, n, holder, 1, 0, &plans);
-  if (!result) result = operands_check(list, n);
-  for (size_t i = 0; i < n && !result; i++) {
+  if (!result) result = inst ? bound_lay(comm, inst, 1, 0, &plans) : group_bound(comm, list, n, holder, 1, 0, &plans);
+  if (!result && !inst) result = operands_check(list, n);
+  for (size_t i = 0; i < n && !result && !inst; i++) {
     struct call *c = list + i;
-    struct steps *s = c->bound;
     const size_t bytes = elements(c) * SIZE[c->type];
-    if (c->target) {
-      c->sum = c->recv_at; c->direct = 1;
-      if (s) s->buffer[0] = comm->rank == c->root ? c->send_at : c->recv_at;
-    } else if (c->what == WHAT_SEND && c->peer == comm->rank) {
+    if (c->bound) continue;
+    if (c->target) { c->sum = c->recv_at; c->direct = 1; }
+    else if (c->what == WHAT_SEND && c->peer == comm->rank) {
       if (!(c->copy = malloc(bytes ? bytes : 1))) result = fail(ncclSystemError, "out of memory");
       else memcpy(c->copy, c->send, bytes);
-    } else if (c->what == WHAT_SEND) { if (s) s->buffer[0] = c->send_at; }
-    else if (c->what == WHAT_RECV) { if (s) s->buffer[0] = c->recv_at; }
-    else if (counted(c)) { if (s) { s->buffer[0] = c->send_at; s->buffer[1] = c->recv_at; } }
-    else {
+    } else if (!p2p(c) && !counted(c)) {
       const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
                            (c->what == MESH_REDUCE && c->root == comm->rank);
-      struct where own = c->recv_at;
-      if (!in_place && s && !named(own = spare_where(NULL, comm, bytes, holder))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
-      if (!in_place && !s) {
-        if (!(c->result = malloc(bytes ? bytes : 1))) { result = fail(ncclSystemError, "out of memory"); break; }
-        own = (struct where){NULL, (size_t)c->result};
-      }
-      c->sum = own;
-      c->direct = s && plan_direct(c, own);
-      if (!c->direct) stage(c, address_of(own));
-      if (s) s->buffer[0] = own;
-      for (uint32_t b = 1; s && b < s->buffers && !result; b++) {
-        if (c->direct && !s->needed[b]) continue;
-        if (!named(s->buffer[b] = spare_where(NULL, comm, bytes, holder))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
-        else if (!c->direct) memcpy(address_of(s->buffer[b]), address_of(own), bytes);
-      }
+      if (!in_place && !(c->result = malloc(bytes ? bytes : 1))) result = fail(ncclSystemError, "out of memory");
+      c->sum = in_place ? c->recv_at : (struct where){NULL, (size_t)c->result};
+      c->direct = 0;
     }
   }
+  if (!result && !inst) result = operands(NULL, 0, comm, list, n, holder, NULL);
+  for (size_t i = 0; i < n && !result; i++) {
+    struct call *c = list + i;
+    if (c->target || p2p(c) || counted(c) || c->direct) continue;
+    stage(c, address_of(c->sum));
+    for (uint32_t b = 1; c->bound && b < c->bound->buffers; b++)
+      memcpy(address_of(c->bound->buffer[b]), address_of(c->sum), elements(c) * SIZE[c->type]);
+  }
   int gate = 0, running = 0;
-  if (!result && remote && !(result = schedule(NULL, comm, plans, holder, &gate, 0))) { running = 1; atomic_fetch_add(&comm->runs, 1); }
+  if (!result && remote && !(result = schedule(NULL, comm, plans, holder, &gate, 0, inst != NULL))) { running = 1; atomic_fetch_add(&comm->runs, 1); }
   pthread_mutex_unlock(&group_lock);
   if (running) {
     if ((result = run(comm, plans))) {
@@ -2883,6 +2986,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
   }
   pthread_mutex_lock(&group_lock);
   spares_give(comm, holder);
+  if (inst) plan_release(comm, plan);
   pthread_mutex_unlock(&group_lock);
   return result;
 }
@@ -2897,8 +3001,9 @@ static ncclResult_t gpu(struct metal_result step, const char *what) {
 /* a group issued and not complete: its communicator, its calls, its schedule, its entries [start, end) of each list on
    each of its communicator's channels ([h][0] the send list's, [h][1] the landing list's), the one channel they lie on
    (`lone`: lone_of, read where the group is planned; comm->count where it has none, METAL_NONE where they lie on two
-   or more), its number (`holder`: the leases of its communicator's pool it holds), whether it is a fused crossing, and
-   its repeats; the groups in flight are in issue order, a communicator's holding consecutive entries on every list */
+   or more), its number (`holder`: the leases of its communicator's pool it holds), whether it is a fused crossing, its
+   repeats, and a bound group's plan (`plan`: its calls are its instance's, held until it retires); the groups in flight
+   are in issue order, a communicator's holding consecutive entries on every list */
 struct inflight {
   uint64_t ticket, holder;
   struct ncclComm *comm;
@@ -2908,16 +3013,17 @@ struct inflight {
   uint64_t (*start)[2], (*end)[2];
   uint32_t lone, repeats;
   int fused;
+  struct plan *plan;
   struct inflight *next_group;
 };
 
 /* the channel all of a group's entries lie on (struct inflight `lone`): a function of its schedule alone, the entries
    both ends of each channel lay alike (schedule_group, mesh-plan.h mesh_group_lay) */
-static uint32_t lone_of(const struct inflight *g) {
-  uint32_t lone = g->comm->count;
-  for (uint32_t h = 0; h < g->comm->count; h++)
-    if (g->end[h][0] > g->start[h][0] || g->end[h][1] > g->start[h][1]) {
-      if (lone != g->comm->count) return METAL_NONE;
+static uint32_t lone_on(const struct ncclComm *comm, const struct schedule *plans) {
+  uint32_t lone = comm->count;
+  for (uint32_t h = 0; h < comm->count; h++)
+    if (plans[h].outs || plans[h].ins) {
+      if (lone != comm->count) return METAL_NONE;
       lone = h;
     }
   return lone;
@@ -2942,12 +3048,14 @@ static void calls_free(struct call *list, size_t n) {
   free(list);
 }
 
-/* a group done with: its schedule, its calls, and the leases of its communicator's pool it held made free */
+/* a group done with: its schedule, its calls (a bound group's plan let go instead), and the leases of its communicator's
+   pool it held made free */
 static void inflight_free(struct inflight *g) {
   spares_give(g->comm, g->holder);
   schedules_free(g->comm, g->plans);
   free(g->start);
-  calls_free(g->list, g->n);
+  if (g->plan) plan_release(g->comm, g->plan);
+  else calls_free(g->list, g->n);
   free(g);
 }
 
@@ -3569,118 +3677,130 @@ static int fused_writes_disjoint(const struct call *list, size_t n) {
   return 1;
 }
 
-/* one group on the stream's command buffer (or, the Metal 4 form, its Metal 4 encoder: nccl-mesh-metal.h metal_begin4),
-   taking its calls: each crossing call's send buffer a lease (operands_check), each collective's operand recvbuff
-   itself where it holds the whole operand (an all-reduce's, a root's reduce, a broadcast's, an all-gather's), else a
-   lease of the communicator's pool (a reduce-scatter's, a non-root's reduce), its scratch leases of the pool, read in
-   place where it may (plan_direct); then the group scheduled and its entries presented (schedule: a piece off a page or
-   outside the region fails the call as a value, nothing presented), its operands made in place, its gate stored where
-   its landings wait on the communicator's (gate_of), in flight after the others, issued (with issue; a fused one is
-   completed at once, its steps the caller's kernels') or completed with every group before it, its waits bounded by
-   its calls' greatest polls; its results into recvbuff as it completes; the program's end signals `finished` where the
-   library made its encoder.  The Metal 4 form makes its channels' counts and the pool's leases resident through the
+/* one group on the stream's command buffer (or, the Metal 4 form, its Metal 4 encoder: nccl-mesh-metal.h metal_begin4):
+   a bound group (its plan's: bound_next) laid from its instance (bound_lay), its calls, operands, scratch, entries'
+   rows and gates, its checks and its fused crossing's form its plan's (bind_group), its pool's leases made resident;
+   another taking its calls: each crossing call's send buffer a lease (operands_check), its fused crossing's form
+   (fusable), its operands and scratch made (operands; a call that crosses no link its scratch the stream's workspace);
+   then the group scheduled and its entries presented (schedule: a piece off a page or outside the region fails the
+   call as a value, nothing presented), its operands made in place, its gate stored where its landings wait on the
+   communicator's (gate_of), in flight after the others, issued (with issue; a fused one is completed at once, its steps
+   the caller's kernels') or completed with every group before it, its waits bounded by its calls' greatest polls (a
+   bound group's, its stream's); its results into recvbuff as it completes; the program's end signals `finished` where
+   the library made its encoder.  The Metal 4 form makes its channels' counts and the pool's leases resident through the
    stream's residency set.  A fused group on the classic form takes the stream's residency set too (metal_begin),
    through which the buffers its deferred steps' bindings name are made resident for the caller's kernels. */
-static ncclResult_t launch_metal(struct call *list, size_t n) {
-  const ncclComm_t comm = list[0].comm;
-  ncclMeshIssue *const issue = list[0].issue;
+/* the unplanned path's issue on the Metal path (a group no bound declaration names: nccl.h ncclMeshCommPlan), each piece
+   deleted once every program declares its groups bound.  Its calls taken (calls_taken): its waits' bound (`polls`: its
+   calls' greatest; 0, the most: nccl.h NCCL_MESH_POLLS, any 0 among them), whether any crosses a link, each refused
+   where it would run in another command buffer or encoder (a group's dispatches are one program: a call encoded into
+   another would be ordered by neither) or reduce float64 (Metal has no 64-bit floating type on Apple GPUs; a float64 call
+   that combines nothing moves its bytes), its operator taken (reduction).  Its steps planned (calls_planned): compiled,
+   or its plan's copied (group_bound), each crossing call's send buffer a lease (operands_check), and its fused
+   crossing's form (fusable): a group on a fused stream that crosses a link and is no fused crossing (ncclSend and
+   ncclRecv toward each peer, an in-place broadcast or all-gather, at most one SEND and one landing of a whole buffer
+   each, forwarding nothing) refused, since its caller's kernels write the bytes it sends after it is issued and read the
+   bytes it lands as they await them (torch_mesh/fused.py: one the library does not fuse raises, no slower form in its
+   place), and one that crosses no link has no record.  Its buffers placed (calls_placed): a call that crosses no link
+   its scratch the stream's workspace, the others' operands and scratch (operands).  Under group_lock */
+static ncclResult_t calls_taken(struct call *list, size_t n, const struct call *on, uint32_t *polls, int *remote) {
   ncclResult_t result = ncclSuccess;
-  int remote = 0;
-  /* the group's waits' bound: its calls' greatest (0, the most: nccl.h NCCL_MESH_POLLS, any 0 among them) */
-  uint32_t polls = list[0].polls;
-  if (issue) *issue = (ncclMeshIssue){0, 0};
   for (size_t i = 0; i < n && !result; i++) {
-    polls = !polls || !list[i].polls ? 0 : polls > list[i].polls ? polls : list[i].polls;
-    /* a group's dispatches are one program in one command buffer or encoder: a call encoded into another would be
-       ordered by neither */
-    if (list[i].command != list[0].command || list[i].encoder != list[0].encoder)
+    *polls = !*polls || !list[i].polls ? 0 : *polls > list[i].polls ? *polls : list[i].polls;
+    if (list[i].command != on->command || list[i].encoder != on->encoder)
       result = fail(ncclInvalidUsage, "a group on several command buffers or encoders");
-    /* Metal's shading language has no 64-bit floating type on Apple GPUs: a float64 combine has no kernel (a float64
-       call that combines nothing moves its bytes) */
     else if (reducing(list[i].what) && !on_gpu(list[i].type))
       result = fail(ncclInvalidArgument, "a float64 reduction on the Metal path (Apple GPUs have no float64 arithmetic)");
     else if (reducing(list[i].what)) result = reduction(list + i);
-    remote |= crosses(list + i);
+    *remote |= crosses(list + i);
   }
-  const int metal4 = list[0].table != NULL;
-  if (!result && metal4 && (!list[0].encoder || !list[0].residency))
+  return result;
+}
+static ncclResult_t calls_planned(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, uint32_t repeats, int remote,
+                                  struct schedule **plans, int *kind) {
+  ncclResult_t result = group_bound(comm, list, n, holder, repeats, list[0].fused ? list[0].fused->stride : 0, plans);
+  if (!result) result = operands_check(list, n);
+  *kind = !result && list[0].fused && remote ? fusable(list, n) : 0;
+  if (!result && *kind && all_writes(list, n) && !fused_writes_disjoint(list, n))
+    result = fail(ncclInvalidUsage, "fused writes require disjoint landing ranges and immutable source ranges");
+  if (!result && list[0].fused && remote && !*kind)
+    result = fail(ncclInvalidUsage, "a deferred crossing must lower to immutable SEND/COPY fragments; combine arithmetic belongs in the producer or consumer");
+  for (size_t i = 0; i < n && !result && !*kind; i++) list[i].fused = NULL;
+  return result;
+}
+static ncclResult_t calls_placed(struct metal_program *program, struct ncclComm *comm, struct call *list, size_t n, uint64_t holder) {
+  for (size_t i = 0; i < n; i++) {
+    struct call *c = list + i;
+    /* a WRITE sends the producer's lease itself, not a broadcast's staging copy, which would run before a deferred
+       producer makes data */
+    if (c->bound || counted(c) || p2p(c)) continue;
+    if (c->target) { c->sum = c->recv_at; c->direct = 1; continue; }
+    const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
+                         (c->what == MESH_REDUCE && c->root == comm->rank);
+    void *scratch = in_place ? NULL : workspace(program, c, elements(c) * SIZE[c->type]);
+    if (!in_place && !scratch) return fail(ncclSystemError, "out of GPU memory");
+    c->sum = in_place ? c->recv_at : (struct where){scratch, 0}; c->direct = 0;
+  }
+  return operands(program, 1, comm, list, n, holder, NULL);
+}
+
+/* one group on the stream's command buffer (or, the Metal 4 form, its Metal 4 encoder: nccl-mesh-metal.h metal_begin4):
+   a bound group (its plan's: bound_next) laid from its instance (bound_lay), every other fact of it its plan's
+   (bind_group: its calls, operands, scratch, entries' rows, gates and relays, its checks and its fused crossing's form),
+   its pool's leases made resident, nothing of its issued calls read but their stream's; another taken, planned and
+   placed at its issue (calls_taken, calls_planned, calls_placed).  Then its entries stamped and presented (schedule),
+   its operands made in place, its gate stored where its landings wait on the communicator's (gate_of), in flight after
+   the others, issued (with issue; a fused one is completed at once, its steps the caller's kernels') or completed with
+   every group before it, its waits bounded by its calls' greatest polls (a bound group's, its stream's); its results
+   into recvbuff as it completes; the program's end signals `finished` where the library made its encoder.  The Metal 4
+   form makes its channels' counts and the pool's leases resident through the stream's residency set.  A fused group on
+   the classic form takes the stream's residency set too (metal_begin), through which the buffers its deferred steps'
+   bindings name are made resident for the caller's kernels. */
+static ncclResult_t launch_metal(struct call *list, size_t n) {
+  const ncclComm_t comm = list[0].comm;
+  const struct call on = list[0];
+  ncclMeshIssue *const issue = on.issue;
+  ncclResult_t result = ncclSuccess;
+  uint32_t polls = on.polls;
+  if (issue) *issue = (ncclMeshIssue){0, 0};
+  pthread_mutex_lock(&group_lock);
+  struct plan *const plan = comm->plan;
+  struct compiled *x = NULL;
+  struct instance *const inst = bound_next(comm, &x);
+  int remote = inst != NULL, fused_kind = 0;
+  if (!inst) result = calls_taken(list, n, &on, &polls, &remote);
+  const int metal4 = on.table != NULL;
+  if (!result && metal4 && (!on.encoder || !on.residency))
     result = fail(ncclInvalidArgument, "a Metal 4 ncclMeshStream (argumentTable) without its encoder or residency set");
-  else if (!result && !metal4 && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
-  else if (!result && !metal4 && list[0].fused && !list[0].residency)
+  else if (!result && !metal4 && !on.command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
+  else if (!result && !metal4 && on.fused && !on.residency)
     result = fail(ncclInvalidArgument, "a fused crossing on a classic ncclMeshStream without its residency set (the caller's kernels reach "
                                        "the library's buffers by address)");
   if (!result && revoked(comm)) result = revoked_fail(comm);
-  const uint32_t repeats = list[0].fused && list[0].fused->repeats ? list[0].fused->repeats : 1;
-  pthread_mutex_lock(&group_lock);
+  const uint32_t repeats = on.fused && on.fused->repeats ? on.fused->repeats : 1;
   const uint64_t holder = result ? comm->groups : (comm->groups += repeats) - repeats + 1;
   if (!result && remote) result = comm_failure(comm);
   struct schedule *plans = NULL;
-  if (!result) result = group_bound(comm, list, n, holder, repeats, list[0].fused ? list[0].fused->stride : 0, &plans);
-  if (!result) result = operands_check(list, n);
-  if (result) { pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n); return result; }
-  /* Fused producers run after the descriptors are bound. A lowering needing
-     library arithmetic cannot fall back and read that unpublished source. */
-  const int fused_kind = list[0].fused && remote ? fusable(list, n) : 0;
-  ncclMeshFused *const fused = fused_kind ? list[0].fused : NULL;
-  if (fused_kind && all_writes(list, n) && !fused_writes_disjoint(list, n)) {
-    pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
-    return fail(ncclInvalidUsage, "fused writes require disjoint landing ranges and immutable source ranges");
-  }
-  if (list[0].fused && remote && !fused) {
-    pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
-    return fail(ncclInvalidUsage, "a deferred crossing must lower to immutable SEND/COPY fragments; combine arithmetic belongs in the producer or consumer");
-  }
-  if (list[0].fused && !fused) list[0].fused->publishes = list[0].fused->lands = 0;
-  for (size_t i = 0; i < n && !fused; i++) list[i].fused = NULL;
-  if (finished) metal_collect(finished);
+  if (!result && inst) { result = bound_lay(comm, inst, repeats, on.fused ? on.fused->stride : 0, &plans); fused_kind = on.fused ? x->fused : 0; }
+  else if (!result) result = calls_planned(comm, list, n, holder, repeats, remote, &plans, &fused_kind);
+  ncclMeshFused *const fused = fused_kind ? on.fused : NULL;
+  if (!result && on.fused && !fused) on.fused->publishes = on.fused->lands = 0;
+  if (!result && finished) metal_collect(finished);
   void *const violation = remote ? comm->violation : NULL;
   const char *message = NULL;
-  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, polls, &message)
-                                         : metal_begin(list[0].command, list[0].encoder, fused ? list[0].residency : NULL, violation,
-                                                       polls, &message);
-  if (!program) {
-    pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
-    return fail(ncclSystemError, "%s", message);
-  }
+  struct metal_program *program = result ? NULL
+                                 : metal4 ? metal_begin4(on.encoder, on.table, on.residency, violation, polls, &message)
+                                          : metal_begin(on.command, on.encoder, fused ? on.residency : NULL, violation, polls, &message);
+  if (!result && !program) result = fail(ncclSystemError, "%s", message);
+  if (result) { pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n); return result; }
+  if (inst) { calls_free(list, n); list = inst->calls; n = x->n; bound_begin(x, inst); plan->refs++; }
   comm->scratch_used = 0;
   if (remote) touch(comm);
   for (uint32_t h = 0; remote && h < comm->count; h++) metal_resident(program, comm->channels[h].buffer);
   if (remote && comm->gate) metal_resident(program, comm->gate);
+  for (uint32_t k = 0; inst && k < inst->nleases; k++) metal_resident(program, inst->buffers[k]);
   const size_t r = (size_t)comm->rank;
-  for (size_t i = 0; i < n && !result; i++) {
-    struct call *c = list + i;
-    struct steps *st = c->bound;
-    const size_t bytes = elements(c) * SIZE[c->type];
-    if (c->target) {
-      /* A WRITE sends the producer's lease itself. It is not a broadcast's
-         staging copy, which would run before a deferred producer makes data. */
-      c->sum = c->recv_at; c->direct = 1;
-      if (st) st->buffer[0] = comm->rank == c->root ? c->send_at : c->recv_at;
-      continue;
-    }
-    if (counted(c)) { if (st) { st->buffer[0] = c->send_at; st->buffer[1] = c->recv_at; } continue; }
-    if (p2p(c)) { if (st) st->buffer[0] = c->what == WHAT_SEND ? c->send_at : c->recv_at; continue; }
-    const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
-                         (c->what == MESH_REDUCE && c->root == comm->rank);
-    struct where own = c->recv_at;
-    if (!in_place && st && !named(own = spare_where(program, comm, bytes, holder))) { result = fail(ncclSystemError, "its operand: %s", last.text); break; }
-    if (!in_place && !st) {
-      void *scratch = workspace(program, c, bytes);
-      if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
-      own = (struct where){scratch, 0};
-    }
-    c->sum = own;
-    c->direct = plan_direct(c, own);
-    if (st) st->buffer[0] = own;
-    /* a program's scratch, a tree's or a ring's (mesh-plan.h mesh_compile: a forwarding node's partials, and its own
-       operand where it sends that to two nodes or more), leases of the pool: its SENDs read them; the two-node direct
-       exchange has none, its SEND reading the operand its REDUCE combines into, nothing ordering the combine after the
-       NIC's read (rdma/NCCL.md "One track") */
-    for (uint32_t b = 1; st && b < st->buffers && !result; b++) {
-      if (c->direct && !st->needed[b]) continue;
-      if (!named(st->buffer[b] = spare_where(program, comm, bytes, holder))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);
-    }
-  }
+  if (!inst) result = calls_placed(program, comm, list, n, holder);
   struct inflight *g = NULL, *before = NULL;
   int gate = 0, published = 0, scheduled = 0;
   uint64_t ticket = 0;
@@ -3693,15 +3813,15 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       /* Indexed writes carry immutable source/landing generations. Their
          destinations need no local publication handshake, whether the GPU
          producer is fused or was encoded before this call. */
-      if (!(result = schedule(program, comm, plans, holder, &gate, fused_kind != 0 || all_writes(list, n)))) {
+      if (!(result = schedule(program, comm, plans, holder, &gate, fused_kind != 0 || all_writes(list, n), inst != NULL))) {
         g->plans = plans; plans = NULL;
       }
     }
     if (result && g) { free(g->start); free(g); g = NULL; }
     if (!result) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
-      g->lone = lone_of(g);
-      g->list = list; g->n = n; g->ticket = ticket = ++tickets;
+      g->lone = inst ? inst->lone : lone_on(comm, g->plans);
+      g->list = list; g->n = n; g->ticket = ticket = ++tickets; g->plan = inst ? plan : NULL;
       before = inflight_last;
       if (inflight_last) inflight_last->next_group = g; else inflight = g;
       inflight_last = g;
@@ -3742,7 +3862,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;
-    for (uint32_t h = 0; h < comm->count; h++) {
+    for (uint32_t h = 0; h < comm->count && !inst; h++) {
       publishes += g->fused ? g->end[h][0] > g->start[h][0] : (uint32_t)((g->end[h][0] - g->start[h][0]) / repeats);
       lands += g->fused ? own_landing(g, h) > g->start[h][1] : (uint32_t)((g->end[h][1] - g->start[h][1]) / repeats);
     }
@@ -3759,7 +3879,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       fusing.published = fusing.landed = 0;
     }
     if (!result) result = walk(program, issuing ? g : NULL, issuing ? NULL : g, &published);
-    if (!result && g->fused && (fusing.published != publishes || fusing.landed != lands))
+    if (!result && !inst && g->fused && (fusing.published != publishes || fusing.landed != lands))
       result = fail(ncclInvalidUsage, "a fused crossing whose program is not this rank's publications and landings of its whole operands");
     if (g->fused) { fusing.out->publishes = fusing.published; fusing.out->lands = fusing.landed; }
     fusing.out = NULL;
@@ -3767,13 +3887,14 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, list, n);
-  program_end(program, list[0].encoder != NULL, result);
+  program_end(program, on.encoder != NULL, result);
   if (result && scheduled) walk_failed(comm, issue && !fused ? 0 : ticket, result);
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   if (!scheduled) spares_give(comm, holder);
+  if (!scheduled && inst) plan_release(comm, plan);
   pthread_mutex_unlock(&group_lock);
   schedules_free(comm, plans);
-  if (!scheduled) calls_free(list, n);
+  if (!scheduled && !inst) calls_free(list, n);
   if (result) comm->async = result;
   return result;
 }
@@ -3959,7 +4080,9 @@ ncclResult_t ncclGroupEnd(void) {
   return result;
 }
 
-/* a call refused before it joins its group: its arguments, the stream's form taken into it */
+/* a call refused before it joins its group: its arguments, the stream's form taken into it; on a communicator whose
+   plan binds every group (struct plan `all`) the stream's form alone, no argument of a call being read (its group's
+   calls are its plan's) */
 static ncclResult_t admit(struct call *made) {
   struct call c = *made;
   if (!c.comm) return fail(ncclInvalidArgument, "comm is NULL");
@@ -3973,6 +4096,7 @@ static ncclResult_t admit(struct call *made) {
     c.send_at = (struct where){NULL, (size_t)c.send}; c.recv_at = (struct where){NULL, (size_t)c.recv};
   }
   *made = c;
+  if (c.comm->plan && c.comm->plan->all && c.comm->plan->active && !c.declaring) return ncclSuccess;
   if ((unsigned)c.type >= ncclNumTypes) return fail(ncclInvalidArgument, "datatype %d", (int)c.type);
   const ncclComm_t comm = c.comm;
   if (reducing(c.what)) {
@@ -4010,15 +4134,17 @@ static ncclResult_t enqueue(struct call c) {
 }
 
 /* a declared call (nccl.h ncclMeshCall) as the call its function makes (collective, enqueue_counts, routed: a V form's
-   counts its own copy), admitted and its operator taken (admit, reduction), with no buffers; one declared `fused` names
-   `fused_declared` as its fused stream's records, so plan_calls compiles its steps as that stream's call's (no records
-   are written to it: a group's are its issued stream's) */
+   counts its own copy), admitted and its operator taken (admit, reduction), with the buffers it names (a Metal
+   buffer's, as an ncclMeshBuffer its call takes, or {NULL, a host address}: struct where's forms); one declared `fused`
+   names `fused_declared` as its fused stream's records, so plan_calls compiles its steps as that stream's call's (no
+   records are written to it: a group's are its issued stream's) */
 static ncclMeshFused fused_declared;
 static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call *c) {
   const int n = comm->nranks, me = comm->rank,
             v = !d->counts ? 0 : d->what == WHAT_COUNTED ? 2 * n : d->what == MESH_ALLGATHER || d->what == MESH_REDUCE_SCATTER ? n : 0;
   *c = (struct call){.what = d->what, .root = d->peer, .peer = d->peer, .count = d->count, .type = d->type, .op = d->op, .comm = comm,
-                     .fused = d->fused ? &fused_declared : NULL};
+                     .fused = d->fused ? &fused_declared : NULL, .send = d->send.buffer ? NULL : (const void *)d->send.offset,
+                     .recv = d->recv.buffer ? NULL : (void *)d->recv.offset, .declaring = 1};
   if (d->what == ncclMeshCallWrite && (d->destination < 0 || d->destination >= n))
     return fail(ncclInvalidArgument, "a declared write's destination must belong to the fabric");
   if (d->what == ncclMeshCallWrite) { c->what = MESH_BROADCAST; c->target = d->destination + 1; }
@@ -4030,22 +4156,138 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
   if (v && d->what != WHAT_COUNTED) c->count = d->counts[me];
   if (d->what == WHAT_COUNTED) c->count = c->total - c->segments[me] - c->segments[n + me];
   const ncclResult_t refused = admit(c);
+  if (d->send.buffer) c->send_at = (struct where){d->send.buffer, d->send.offset};
+  if (d->recv.buffer) c->recv_at = (struct where){d->recv.buffer, d->recv.offset};
+  c->declaring = 0;
   return refused || !reducing(c->what) ? refused : reduction(c);
 }
 
-/* a plan's own: its groups' calls and entries */
-static void plan_free(const struct ncclComm *comm, struct plan *plan) {
-  for (uint32_t g = 0; plan && g < plan->view.groups; g++) {
-    calls_free(plan->group[g].calls, plan->group[g].n);
-    schedules_free(comm, plan->group[g].plans); schedules_free(comm, plan->group[g].write_plans);
+/* a holder of `plan` gone (struct plan `refs`: comm at its next plan or its end, or a bound group retired); the last's
+   frees it: its groups' calls and entries, and its bound groups' instances, whose leases of comm's pool are made free
+   (spare_free: a later group takes one once its own start is gated past this plan's last group's work, as spares_give
+   says).  Under group_lock */
+static void plan_release(struct ncclComm *comm, struct plan *plan) {
+  if (!plan || --plan->refs) return;
+  for (uint32_t g = 0; g < plan->view.groups && plan->group; g++) {
+    struct compiled *x = plan->group + g;
+    for (uint32_t d = 0; x->bound && d < x->depth; d++) {
+      struct instance *in = x->bound + d;
+      if (in->calls) calls_free(in->calls, x->n);
+      schedules_free(comm, in->plans);
+      for (uint32_t k = 0; k < in->nleases; k++) spare_free(comm, in->leases[k]);
+      free(in->leases); free(in->buffers);
+    }
+    free(x->bound);
+    calls_free(x->calls, x->n);
+    schedules_free(comm, x->plans); schedules_free(comm, x->write_plans);
   }
-  if (plan) { free(plan->group); free(plan->entries); }
+  free(plan->group); free(plan->entries);
   free(plan);
 }
 
+/* a bound group's issue laid from instance `in` (its entries from each list's 0, placed: bind_group): `repeats` times,
+   repeat j's entries after repeat j - 1's on each list (repeat_of), its bytes j x `stride` bytes on (whole pages: its
+   rows j x stride / page on), its combines' `need` and its relays' `after` on repeat j's; *plans NULL where it failed */
+static ncclResult_t bound_lay(const struct ncclComm *comm, const struct instance *in, uint32_t repeats, size_t stride, struct schedule **plans) {
+  struct schedule *made = calloc(comm->count + 1, sizeof *made);
+  ncclResult_t result = made ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (uint32_t h = 0; h < comm->count && !result; h++) {
+    const struct schedule *p = in->plans + h;
+    struct schedule *q = made + h;
+    *q = *p;
+    q->outs = p->outs * repeats; q->ins = p->ins * repeats;
+    q->out = malloc((q->outs + 1) * sizeof *q->out); q->in = malloc((q->ins + 1) * sizeof *q->in);
+    if (!q->out || !q->in) { result = fail(ncclSystemError, "out of memory"); break; }
+    for (int send = 1; send >= 0; send--)
+      for (size_t k = 0; k < (send ? q->outs : q->ins); k++) {
+        const size_t each = send ? p->outs : p->ins, j = k / each;
+        struct message m = repeat_of(send ? p->out : p->in, each, k, stride, in->calls, in->calls);
+        m.row += j * stride / comm->page; m.data.offset += j * stride;
+        if (m.need) m.need += j * p->outs;
+        if (m.from) m.after = pages_add(m.after, (mesh_pages){j * in->plans[m.from - 1].each[1].n});
+        (send ? q->out : q->in)[k] = m;
+      }
+  }
+  if (result) { schedules_free(comm, made); made = NULL; }
+  *plans = made;
+  return result;
+}
+
+/* a lease of comm's pool a plan holds (struct spare holder): never a group's number */
+#define PLANNED UINT64_MAX
+/* declared group x bound where its calls name their buffers (nccl.h ncclMeshCommPlan; none: 0, x unbound): each of
+   its calls crossing a link, each crossing call's send buffer a lease (operands_check), a Metal path's reduction a
+   type and operator its kernels take, a declared fused crossing one the library fuses (fusable, fused_writes_disjoint);
+   then x->depth instances of it (struct instance), each its calls with their steps (steps_copy), operands and scratch
+   (operands, leases of comm's pool the plan holds), its entries from each list's 0 laid (lay), placed (place_group:
+   each a lease's rows, starting on a page), its landings gated on the Metal path (gate_of) and its relays found
+   (depend).  A failure fails the plan as a value, naming the declared call; what x made is the plan's (plan_release).
+   Under group_lock */
+static ncclResult_t bind_group(struct ncclComm *comm, struct compiled *x) {
+  int metal = 0, any = 0;
+  for (size_t i = 0; i < x->n; i++) {
+    const struct call *c = x->calls + i;
+    any |= named(c->send_at) || named(c->recv_at);
+    metal |= c->send_at.buffer || c->recv_at.buffer;
+  }
+  if (!any) return ncclSuccess;
+  for (size_t i = 0; i < x->n; i++) {
+    const struct call *c = x->calls + i;
+    if (!crosses(c)) return fail(ncclInvalidUsage, "a declared %s on communicator %s names its buffers and crosses no link: a group whose calls "
+                                 "name their buffers is bound, each call one that crosses a link", call_name(c), comm->name);
+    if (metal && reducing(c->what) && (!on_gpu(c->type) || c->scalar_at))
+      return fail(ncclInvalidArgument, "a declared %s on the Metal path reduces float64 or by a scalar in device memory, which no kernel of "
+                  "the library takes", call_name(c));
+  }
+  ncclResult_t result = operands_check(x->calls, x->n);
+  x->fused = !result && x->calls[0].fused ? fusable(x->calls, x->n) : 0;
+  if (!result && x->calls[0].fused && !x->fused)
+    result = fail(ncclInvalidUsage, "a declared fused crossing the library does not fuse: not ncclSend and ncclRecv of a whole buffer toward "
+                  "each peer, one SEND and one landing each, forwarding nothing (fusable)");
+  if (!result && x->fused && all_writes(x->calls, x->n) && !fused_writes_disjoint(x->calls, x->n))
+    result = fail(ncclInvalidUsage, "declared fused writes require disjoint landing ranges and immutable source ranges");
+  if (!result && !(x->bound = calloc(x->depth, sizeof *x->bound))) result = fail(ncclSystemError, "out of memory");
+  const struct schedule *compiled = x->fused && x->write_plans ? x->write_plans : x->plans;
+  for (uint32_t d = 0; d < x->depth && !result; d++) {
+    struct instance *in = x->bound + d;
+    if (!(in->calls = calloc(x->n, sizeof *in->calls)) || !(in->plans = calloc(comm->count + 1, sizeof *in->plans))) {
+      result = fail(ncclSystemError, "out of memory");
+      break;
+    }
+    for (size_t i = 0; i < x->n && !result; i++) {
+      const struct call *from = x->calls + i;
+      struct call *c = in->calls + i;
+      *c = *from;
+      c->bound = NULL; c->segments = NULL; c->complement = NULL; c->complements = 0; c->result = NULL; c->copy = NULL;
+      const size_t v = !from->segments ? 0 : counted(from) ? 2 * (size_t)comm->nranks : (size_t)comm->nranks;
+      if ((v && !(c->segments = malloc(v * sizeof *c->segments))) || !(c->bound = steps_copy(from->bound)))
+        result = fail(ncclSystemError, "out of memory");
+      else if (v) memcpy(c->segments, from->segments, v * sizeof *c->segments);
+    }
+    if (!result) result = operands(NULL, metal, comm, in->calls, x->n, PLANNED, in);
+    for (uint32_t h = 0; h < comm->count && !result; h++) {
+      const struct schedule *p = compiled + h;
+      struct schedule *q = in->plans + h;
+      *q = (struct schedule){malloc((p->outs + 1) * sizeof *p->out), malloc((p->ins + 1) * sizeof *p->in), p->outs, p->ins, {0, 0}, 0, 0,
+                             {p->outs ? p->out[p->outs - 1].end : p->each[0], p->ins ? p->in[p->ins - 1].end : p->each[1]}, 0};
+      if (!q->out || !q->in) { result = fail(ncclSystemError, "out of memory"); break; }
+      for (size_t k = 0; k < p->outs; k++) q->out[k] = repeat_of(p->out, p->outs, k, 0, in->calls, x->calls);
+      for (size_t k = 0; k < p->ins; k++) q->in[k] = repeat_of(p->in, p->ins, k, 0, in->calls, x->calls);
+    }
+    if (!result) {
+      lay(comm, in->plans);
+      result = place_group(NULL, metal, comm, in->plans, PLANNED, in);
+    }
+    if (!result && metal && !x->fused && !all_writes(x->calls, x->n)) gate_of(comm, in->plans);
+    if (!result) { depend(comm, in->plans); in->lone = lone_on(comm, in->plans); }
+  }
+  return result;
+}
+
 /* nccl.h ncclMeshCommPlan: the declared groups (consecutive calls of one number each) made as their calls (declared),
-   then compiled under group_lock (compile_group, as a group with no plan is at its call), the plan taken from comm's
-   next group on in place of the one before (freed); a failure frees what it made */
+   then compiled under group_lock (compile_group, as a group with no plan is at its call) and each whose calls name
+   their buffers bound (bind_group), the plan taken from comm's next group on in place of the one before (let go:
+   plan_release); a failure lets go what it made */
 ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int count, const ncclMeshPlan **plan) {
   if (plan) *plan = NULL;
   if (!comm || count < 0 || (count && !calls)) return fail(ncclInvalidArgument, "ncclMeshCommPlan's arguments");
@@ -4054,13 +4296,14 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   struct plan *made = groups ? calloc(1, sizeof *made) : NULL;
   ncclResult_t result = !groups || (made && (made->group = calloc(groups, sizeof *made->group)) && (made->entries = calloc(groups, sizeof *made->entries)))
                         ? ncclSuccess : fail(ncclSystemError, "out of memory");
-  if (made) made->view.groups = groups;
+  if (made) { made->view.groups = groups; made->refs = 1; made->all = 1; }
   for (int i = 0, g = -1; i < count && !result; i++) {
     if (!i || calls[i].group != calls[i - 1].group) {
       struct compiled *x = made->group + ++g;
       int n = 1;
       while (i + n < count && calls[i + n].group == calls[i].group) n++;
       x->repeat = calls[i].repeat ? calls[i].repeat : 1;
+      x->depth = calls[i].depth ? calls[i].depth : 1;
       made->view.issues += x->repeat;
       if (!(x->calls = calloc((size_t)n, sizeof *x->calls))) { result = fail(ncclSystemError, "out of memory"); break; }
     }
@@ -4073,6 +4316,8 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     result = compile_group(comm, x->calls, x->n, &x->plans);
     if (!result && all_writes(x->calls, x->n)) result = ordered_writes(comm, x->calls, x->n, x->plans, &x->write_plans);
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
+    if (!result) result = bind_group(comm, x);
+    made->all &= x->bound != NULL;
   }
   if (!result) {
     struct plan *was = comm->plan;
@@ -4081,8 +4326,8 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
     made = was;
     if (plan) *plan = comm->plan ? &comm->plan->view : NULL;
   }
+  plan_release(comm, made);
   pthread_mutex_unlock(&group_lock);
-  plan_free(comm, made);
   return result;
 }
 
@@ -4166,6 +4411,7 @@ ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcoun
 /* MPI_Allgatherv and MPI_Reduce_scatter (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV): equal counts are NCCL's own
    call; others the call's own copy of them, its program's segments cut by them (mesh 3981ca80^ enqueue_counts) */
 static ncclResult_t enqueue_counts(struct call c, const size_t *counts) {
+  if (c.comm && c.comm->plan && c.comm->plan->all && c.comm->plan->active) return enqueue(c);
   if (!c.comm || !counts) return fail(ncclInvalidArgument, "%s is NULL", c.comm ? "counts" : "comm");
   const int n = c.comm->nranks;
   int equal = 1;
@@ -4200,6 +4446,8 @@ ncclResult_t ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int
 static ncclResult_t routed(const void *sendbuff, void *recvbuff, const size_t *sendcounts, const size_t *recvcounts, size_t count, int from, int to,
                            ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
   if (!comm) return fail(ncclInvalidArgument, "comm is NULL");
+  if (comm->plan && comm->plan->all && comm->plan->active)
+    return enqueue((struct call){.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .comm = comm, .stream = stream});
   const int n = comm->nranks, me = comm->rank, root = from < 0 ? to : from;
   if (root < -1 || root >= n) return fail(ncclInvalidArgument, "root %d of %d ranks", root, n);
   struct call c = {.what = WHAT_COUNTED, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm, .stream = stream};

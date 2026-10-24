@@ -1234,28 +1234,34 @@ static void fused_release(int64_t comm) {
   for (auto f = fused_forms_->begin(); f != fused_forms_->end();) f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
 }
 
+// form f's two leases' slots for batches of `repeats` (made once a repeats, both leases taken before either is laid out;
+// made again each batch where a rank's share is 0: without every rank's natural return publication there is no two-slot
+// recurrence proof, so fresh generations retire through local DMA ownership)
+static FusedForm::Ring &fused_ring_of(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
+  FusedForm::Ring &ring = f.rings[repeats];
+  if (std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; })) ring = FusedForm::Ring{};
+  if (ring.slots[0].empty()) {
+    const at::Tensor leases[2] = {region_empty({repeats * f.slot}, xc, true), region_empty({repeats * f.slot}, xc, true)};
+    for (int h = 0; h < 2; h++)
+      for (int64_t r = 0; r < repeats; r++) {
+        const at::Tensor slot = leases[h].narrow(0, r * f.slot, f.slot);
+        ring.slots[h].push_back(slot);
+        std::vector<at::Tensor> segments;
+        for (int64_t q = 0; q < f.ranks; q++) segments.push_back(slot.narrow(0, f.starts[q], f.counts[q]));
+        ring.segments[h].push_back(segments);
+      }
+  }
+  return ring;
+}
+
 // a call's repeat j of `repeats` in form f (its calls since its last batch), and at j 0 the batch: its two leases' slots
-// (made once a repeats, both leases taken before either is laid out), the half taken in turn, the exchange of its
-// segments and the records' binding words.  The form's counters advance only once the leases are taken and the exchange
-// is made, so a refused lease leaves the form as it was and no peer exchanged with
+// (fused_ring_of), the half taken in turn, the exchange of its segments and the records' binding words.  The form's
+// counters advance only once the leases are taken and the exchange is made, so a refused lease leaves the form as it
+// was and no peer exchanged with
 static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
   const int64_t j = f.j, channels = f.channels;
   if (j == 0) {
-    FusedForm::Ring &ring = f.rings[repeats];
-    // Without every rank's natural return publication there is no two-slot
-    // recurrence proof. Fresh generations retire through local DMA ownership.
-    if (std::any_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; })) ring = FusedForm::Ring{};
-    if (ring.slots[0].empty()) {
-      const at::Tensor leases[2] = {region_empty({repeats * f.slot}, xc, true), region_empty({repeats * f.slot}, xc, true)};
-      for (int h = 0; h < 2; h++)
-        for (int64_t r = 0; r < repeats; r++) {
-          const at::Tensor slot = leases[h].narrow(0, r * f.slot, f.slot);
-          ring.slots[h].push_back(slot);
-          std::vector<at::Tensor> segments;
-          for (int64_t q = 0; q < f.ranks; q++) segments.push_back(slot.narrow(0, f.starts[q], f.counts[q]));
-          ring.segments[h].push_back(segments);
-        }
-    }
+    FusedForm::Ring &ring = fused_ring_of(f, xc, repeats);
     const int64_t half = f.turn % 2;
     const auto made = fused_gather(ring.slots[half][0], f.counts, f.comm, f.polls, repeats, f.slot * (int64_t)xc.element_size());
     f.pbind.clear(), f.lbind.clear();
@@ -1328,6 +1334,41 @@ static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor
 static void fused_step_out(const at::Tensor &x, const std::optional<at::Tensor> &w, at::Tensor out, int64_t dim,
                            std::vector<int64_t> sizes, std::string group, bool adds, int64_t repeats) {
   fused_step_impl(x, w, dim, std::move(sizes), std::move(group), adds, repeats, out);
+}
+
+// The buffers a fused crossing's batches issue from (torch_mesh::fused_step's form, made now if not yet: fused_form_of,
+// fused_ring_of), so a program names them in its plan (ProcessGroupMesh.plan, each Call's send and recv; nccl.h
+// ncclMeshCommPlan's bound groups) before its first batch: for each of the two halves its batches take in turn, the
+// next batch's first, repeat 0's slot and this rank's segment of it (the in-place ncclMeshAllGatherV fused_gather
+// issues), then each rank's count in the slot and the bytes from one repeat's slot to the next (ncclMeshFused stride).
+// Declared between two batches (after a batch's `repeats` calls, or before the first); a form with a rank's share 0
+// makes its ring again each batch, so it has none to name.
+static std::tuple<std::vector<std::pair<at::Tensor, at::Tensor>>, std::vector<int64_t>, int64_t> fused_ring(
+    const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes, std::string group, bool adds,
+    int64_t repeats) {
+  TORCH_CHECK(repeats >= 1, "torch_mesh fused_ring: repeats ", repeats, ", where a batch is one crossing or more");
+  const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
+  std::unique_lock<std::mutex> held(*fused_lock_);
+  FusedForm &f = fused_form_of(xc, w, dim, sizes, group, adds, held);
+  TORCH_CHECK(f.j == 0, "torch_mesh fused_ring: declared inside a batch (", f.j, " of its ", repeats, " repeats issued)");
+  TORCH_CHECK(std::none_of(f.counts.begin(), f.counts.end(), [](int64_t n) { return n == 0; }),
+              "torch_mesh fused_ring: a rank's share is 0, so the ring is made again each batch and has no buffers to declare");
+  const FusedForm::Ring &ring = fused_ring_of(f, xc, repeats);
+  std::vector<std::pair<at::Tensor, at::Tensor>> halves;
+  for (int64_t k = 0; k < 2; k++) {
+    const int64_t half = (f.turn + k) % 2;
+    halves.emplace_back(ring.slots[half][0], ring.segments[half][0][f.rank]);
+  }
+  return {halves, f.counts, f.slot * (int64_t)xc.element_size()};
+}
+
+// A tensor as a declared call names its buffer (nccl.h ncclMeshCall send, recv; ProcessGroupMesh.plan): an MPS
+// tensor's storage's Metal buffer and its byte offset there (ncclMeshBuffer, as Group passes it), a host tensor's
+// {0, its address}; contiguous, as Group takes it.
+static std::pair<int64_t, int64_t> located(const at::Tensor &t) {
+  TORCH_CHECK(t.is_contiguous(), "a declared call's buffer is a contiguous region tensor (torch_mesh.empty)");
+  if (!t.is_mps()) return {0, (int64_t)(uintptr_t)t.data_ptr()};
+  return {(int64_t)(uintptr_t)(__bridge void *)at::native::mps::getMTLBufferStorage(t), (int64_t)(t.storage_offset() * t.element_size())};
 }
 
 // A declared set of routed writes. Bindings name physical channels, including
@@ -1486,4 +1527,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              pybind11::arg("comm"), pybind11::arg("polls"), pybind11::arg("repeats") = 1, pybind11::arg("stride") = 0);
   module.def("encode_many", &encode_many);
   module.def("fused_published", &fused_published);
+  module.def("fused_ring", &fused_ring);
+  module.def("located", &located);
 }

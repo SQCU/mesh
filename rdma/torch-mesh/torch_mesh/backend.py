@@ -37,8 +37,18 @@ OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.
 # a call's kind (_stream.mm Kind)
 ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, WRITE = range(9)
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
-# all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused', defaults=(0, ReduceOp.SUM, None, 0, False))
+# all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each); the tensors it
+# sends from and lands in (`send`, `recv`: region tensors, the same at every issue; a group whose calls name them is
+# bound, nccl.h ncclMeshCommPlan) and its group's issues in flight at once (`depth`, its first call's; 0 as 1)
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused send recv depth',
+                              defaults=(0, ReduceOp.SUM, None, 0, False, None, None, 0))
+
+
+def located(tensor):
+    """A declared call's buffer (nccl.h ncclMeshBuffer): an MPS tensor's storage's Metal buffer and byte offset, a host
+    tensor's {NULL, its address} (_stream.mm located), none {NULL, 0}."""
+    buffer, offset = (0, 0) if tensor is None else _stream.located(tensor)
+    return {'buffer': ffi.cast('void *', buffer), 'offset': offset}
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, SEND: LIB.ncclMeshCallSend,
         RECV: LIB.ncclMeshCallRecv, WRITE: LIB.ncclMeshCallWrite}
@@ -217,8 +227,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
         """This group's collectives declared once, in their order (nccl.h ncclMeshCommPlan): `groups` the groups its
         calls issue, each a list of Calls (one torch collective is one group), or (that list, repeat) issued repeat
         times in a row, the order repeated from this group's next collective on.  Each is compiled now, so none is
-        planned where it is issued, and none is compared with its declaration.  [] drops the plan.  Returns each
-        declared group's (send entries, landing entries) on this rank's lists."""
+        planned where it is issued, and none is compared with its declaration; one whose Calls name their tensors
+        (send, recv) is bound: its buffers, leases and entries resolved now, its issues reading none of their tensors.
+        [] drops the plan.  Returns each declared group's (send entries, landing entries) on this rank's lists."""
         rows = [(g, *(group if isinstance(group, tuple) else (group, 1))) for g, group in enumerate(groups)]
         rows = [(g, repeat, call) for g, calls, repeat in rows for call in calls]
         made, kept = [], []
@@ -230,7 +241,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 code = LIB.ncclMax if code == LIB.ncclSum else LIB.ncclMin if code == LIB.ncclProd else code
             kept.append(ffi.new('size_t[]', [n * per for n in c.counts]) if c.counts is not None else ffi.NULL)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'counts': kept[-1], 'type': nccl, 'op': code,
-                         'group': g, 'repeat': repeat, 'destination': c.destination, 'fused': int(c.fused)})
+                         'group': g, 'repeat': repeat, 'destination': c.destination, 'fused': int(c.fused), 'send': located(c.send),
+                         'recv': located(c.recv), 'depth': c.depth})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made), view))
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
