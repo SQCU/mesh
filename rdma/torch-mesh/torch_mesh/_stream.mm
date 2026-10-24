@@ -930,6 +930,7 @@ struct RegionShape {
 
 // Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed.
 static std::multimap<size_t, void *> held_;
+static std::atomic<int64_t> held_hits_{0}, held_misses_{0};  // the lease-order probe: held requests the pool served, and those it did not
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) {
   const at::ScalarType dtype = like.scalar_type();
@@ -943,6 +944,7 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
       held_.erase(found);
     }
   }
+  if (held) (memory ? held_hits_ : held_misses_)++;
   if (!memory) {
     checked(ncclMemAlloc(&memory, bytes));
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
@@ -1401,6 +1403,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_exchange", &fused_exchange);
   module.def("fused_maker", &fused_maker);
+  module.def("lease_counts", []() { return std::make_tuple(held_hits_.load(), held_misses_.load(), (int64_t)held_.size()); });
   module.def("fused_release", &fused_release);
   module.def("fused_writes", &fused_writes);
   module.def("fused_published", &fused_published);
