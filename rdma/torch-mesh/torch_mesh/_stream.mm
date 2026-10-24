@@ -1229,10 +1229,8 @@ static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor
   const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
   std::unique_lock<std::mutex> held(*fused_lock_);
   FusedForm &f = fused_form_of(xc, w, dim, sizes, group, adds, held);
-  // the output leased first: a lease the region refuses raises before the batch's exchange, so no peer waits on a
-  // publication that never comes
-  const at::Tensor out = region_empty(f.shape, xc, true, true);
   const int64_t j = fused_turn(f, xc, repeats);
+  const at::Tensor out = region_empty(f.shape, xc, true, true);  // the lease-order test: leased after the turn, as before
   const FusedForm::Ring &ring = *f.ring;
   const std::vector<at::Tensor> &segments = ring.segments[f.half][j];
   std::vector<int64_t> pwords = f.pwords, lwords = f.lwords;
