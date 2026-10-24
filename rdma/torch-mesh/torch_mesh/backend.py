@@ -105,6 +105,15 @@ def _flat(value):
     return [value] if isinstance(value, torch.Tensor) else [t for v in value for t in _flat(v)]
 
 
+def _lease_counts():
+    hits, misses, pooled, waits, now, peak = _stream.lease_counts()
+    print(f'LEASES held hits {hits} misses (fresh ncclMemAlloc) {misses} pooled at exit {pooled} paced waits {waits} '
+          f'region MiB at exit {now / 2**20:.1f} at most {peak / 2**20:.1f}', flush=True)
+
+
+__import__('atexit').register(_lease_counts)  # the held-pool probe (not for main)
+
+
 class ProcessGroupMesh(dist.ProcessGroup):
     supports_coalescing = True
     supports_splitting = False
