@@ -555,60 +555,68 @@ def operand(mesh, name):
 
 
 @torch.no_grad()
+def _copy(dst, src):
+    """Every copy a re-lay makes: direct where either side is contiguous, refused where both are strided (torch's MPS copy
+    would take a temporary of their size, from 10 MiB a 1 GiB heap; _reserve and follow's staging route those)."""
+    if not (dst.is_contiguous() or src.is_contiguous()):
+        raise RuntimeError(f'mesh: a re-lay copy strided on both sides {tuple(dst.shape)}: route it through a contiguous lease')
+    return dst.copy_(src)
+
+
 def follow(*tensors):
-    """DTensors `tensors` (of one mesh), each split along each partitioned mesh dimension by the operand attached there
-    now (after the Balancer moved it), as a list.  A mesh dimension's move is one group (the backend's) a tensor, in
-    turn, of one MPI_Alltoallv (ncclMeshAlltoAllV) of the rows that change rank alone, each piece a segment of whole
-    pages (_paged: the library places each segment on a page) of a staging lease, sent once and copied once into its
-    place in the tensor's new block, a region tensor contiguous in the tensor's own layout; the rows that stay are
-    copied into their place there, crossing nothing.  The staging is two pairs of leases taken for the move, each grown
-    to the largest need, the tensors taking them in turn, a pair written again (or returned) only after every peer has
-    landed this rank's sends: after each tensor's alltoall every rank issues a one-word all-gather once it has landed
-    the tensor, so landing every peer's word proves its own sends were read (a 1-D re-partition need not receive from
-    the peers it sends to, so a later tensor's landing proves nothing); the staging is returned with the move: the
-    move's own memory is its new blocks and the staging, not every tensor's staging at once.  The rows that stay pass
-    through the staging too, so no copy has both sides strided (torch's MPS copy makes such a copy through a temporary
-    of its size, from 10 MiB a 1 GiB heap).  Each is returned at its logical shape and that shape's contiguous strides
-    (a moved block's leading extents of one may carry any stride, which from_local's inference would refuse)."""
-    mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape] for t in tensors]
+    """`tensors` re-laid in place on the parts attached now and returned at their logical shapes: each new block is its
+    capacity lease's prefix (_reserve), so a move takes no lease, and a scratch tensor is only that.  Another's rows
+    that change rank cross by one alltoall a tensor through the communicator's staging, from the old block (every read
+    of it encoded before any write of the new, which shares its lease; no copy strided on both sides, _copy); a staging
+    pair is written again only after a one-word all-gather each rank issues once it has landed the tensor.  A share past
+    the capacity raises."""
+    mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape, t] for t in tensors]
     for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
-        moving = [h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)]
-        rank, group, stage, word = mesh.get_coordinate()[i], mesh.get_group(i), [[None, None], [None, None]], None
-        for k, h in enumerate(moving):
-            p, d = h[0][i], h[0][i].dim % h[1].ndim
-            rows = h[1].movedim(d, 0)
-            old, rest = _OPERANDS[p.key], rows.shape[1:]
+        rank, group = mesh.get_coordinate()[i], mesh.get_group(i)
+        stage = getattr(group, '_staging', None) or [[None, None], [None, None], None]
+        for k, h in enumerate(h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)):
+            p, d, t = h[0][i], h[0][i].dim % h[1].ndim, h[3]
+            rows, old, es = h[1].movedim(d, 0), _OPERANDS[p.key], h[1].element_size()
             a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
-            g, n, row = _units(old, h[2][p.dim]), len(old.capacity), math.prod(rest)
-            span = lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
+            g, n, rest = _units(old, h[2][p.dim]), len(old.capacity), rows.shape[1:]
+            row, span = math.prod(rest), lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
             sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
             first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
-            out, out_at = _paged([0 if q == rank else c * row for q, c in enumerate(sends)], rows.element_size(), group)
-            land, land_at = _paged([0 if r == rank else c * row for r, c in enumerate(receives)], rows.element_size(), group)
-            pair, sizes = stage[k % 2], ((out_at[-1] + sends[rank] * row) * rows.element_size(), land_at[-1] * rows.element_size())
+            shape = h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:]
+            if getattr(t, '_capacity', None) is None:
+                high = _BALANCING.get((mesh, mesh.mesh_dim_names[i]), {}).get('high', old.units - n + 1)
+                t._capacity = _empty((max(math.prod(shape), high * g * row),), rows, group)
+            if math.prod(shape) > t._capacity.numel():
+                raise RuntimeError(f'mesh: a share of {into[-1]} past the capacity of {tuple(shape)} (the Balancer\'s bounds)')
+            new = t._capacity[:math.prod(shape)].view(shape)
+            h[0][i], h[1] = RaggedShard(p.dim, key), new
+            if getattr(t, '_scratch', False):
+                continue
+            kept = first[rank] == into[rank] and math.prod(shape[:d]) == 1 and rows.data_ptr() == new.data_ptr()
+            out, out_at = _paged([0 if q == rank else c * row for q, c in enumerate(sends)], es, group)
+            land, land_at = _paged([0 if r == rank else c * row for r, c in enumerate(receives)], es, group)
+            pair, sizes = stage[k % 2], ((out_at[-1] + (0 if kept else sends[rank] * row)) * es, land_at[-1] * es)
             for s, need in enumerate(sizes):
                 if pair[s] is None or pair[s].numel() < need:
                     pair[s] = _empty((max(need, 1),), rows, group, torch.uint8)
             x, y = (pair[s][:need].view(rows.dtype) for s, need in enumerate(sizes))
-            x, stay = x[:out_at[-1]], x[out_at[-1]:].view((sends[rank],) + rest)
-            new = _empty(h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:], rows, group)
-            block = new.movedim(d, 0)
-            block[into[rank]:into[rank + 1]].copy_(stay.copy_(rows[first[rank]:first[rank + 1]]))
+            x, stay = x[:out_at[-1]], x[out_at[-1]:].view((0 if kept else sends[rank],) + rest)
             for q in range(n):
-                if q != rank:
-                    x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rest).copy_(rows[first[q]:first[q + 1]])
+                if q != rank or not kept:
+                    _copy(stay if q == rank else x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rest), rows[first[q]:first[q + 1]])
             dist.all_to_all_single(y, x, land, out, group=group)
+            block = new.movedim(d, 0)
             for r in range(n):
-                if r != rank:
-                    block[into[r]:into[r + 1]].copy_(y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
-            if word is None:
+                if r != rank or not kept:
+                    _copy(block[into[r]:into[r + 1]], stay if r == rank else y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
+            if stage[2] is None:
                 counts, starts = _paged([1] * n, 4, group)
-                word = (_empty((starts[-1],), rows, group, torch.int32), counts, starts)
-            dist.all_gather(list(word[0].split(word[1])), word[0][word[2][rank]:word[2][rank + 1]], group=group)
-            h[0][i], h[1] = RaggedShard(h[0][i].dim, key), new
+                stage[2] = (_empty((starts[-1],), rows, group, torch.int32), counts, starts)
+            word, counts, starts = stage[2]
+            dist.all_gather(list(word.split(counts)), word[starts[rank]:starts[rank + 1]], group=group)
     contiguous = lambda shape: torch.empty(shape, device='meta').stride()
-    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape in held]
+    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape, _ in held]
 
 
 # The tensors partition split along each partitioned mesh dimension, re-laid in place where the balancer moves its
@@ -631,26 +639,64 @@ def _registered(t):
     return any((r := held.get(id(t))) is not None and r() is t for held in _SPLIT.values())
 
 
-def empty(mesh, name, shape, dim, dtype=None):
+def empty(mesh, name, shape, dim, dtype=None, scratch=False):
     """A program's buffer declared by its whole extent: a RaggedTensor of logical `shape` split along `dim` by
     partitioned mesh dimension `name`, its local block a region lease of this rank's share (_empty), registered, so
-    it is re-laid in place where the shares move between evaluations.  The program takes its local view (to_local, no
-    copy) inside its step."""
+    it is re-laid in place where the shares move between evaluations; a `scratch` one (its contents dead between
+    evaluations) only re-viewed at the new share, nothing copied or sent.  The program takes its local view (to_local,
+    no copy) inside its step."""
     placements = [Replicate()] * mesh.ndim
     placements[mesh.mesh_dim_names.index(name)] = Shard(dim)
     local = distribute_tensor(torch.empty(shape, dtype=dtype, device='meta'), mesh, placements, src_data_rank=None).to_local()
-    held = _empty(local.shape, torch.empty(0, dtype=local.dtype, device=mesh.device_type), mesh.get_group(name))
-    return from_local(held, mesh, placements)
+    held = from_local(_empty(local.shape, torch.empty(0, dtype=local.dtype, device=mesh.device_type), mesh.get_group(name)), mesh, placements)
+    held._scratch = scratch
+    return held
 
 
 def _relay(mesh, name):
     """Every live tensor split along mesh dimension `name` moved onto the parts attached now, in place (its local
-    block and spec replaced, the object kept, so a module's parameters move under it): one follow, one coalesced
-    group."""
+    block and spec replaced, the object kept, so a module's parameters move under it): one follow."""
     held = [t for r in list(_SPLIT.get((mesh, name), {}).values()) if (t := r()) is not None]
     if held:
         for t, moved in zip(held, follow(*held)):
             t._local_tensor, t._spec = moved._local_tensor, moved._spec
+
+
+def _reserve(mesh, name, held, group):
+    """The contiguity solver, once, before a dimension's Balancer: each tensor split along `name` gets a capacity lease of
+    this rank's `high` units (its block copied to the prefix) and the communicator its staging, so follow moves in
+    place.  `high` is bisected from the share held to units - n + 1: the most whose leases the region grants with
+    headroom, one more lease of the largest block taken and returned at once, for the leases a program takes after the
+    reserve (held outputs at new shapes, the ring's, a replan's).  Every rank's, exchanged once, is returned: the
+    Balancer's bounds."""
+    o, rank, n = operand(mesh, name), mesh.get_local_rank(name), len(operand(mesh, name).capacity)
+    ts = [t for r in list(_SPLIT.get((mesh, name), {}).values()) if (t := r()) is not None]
+    dims = [t.placements[mesh.mesh_dim_names.index(name)].dim % t.ndim for t in ts]
+    per = [_units(o, t.shape[d]) * (t.to_local().numel() // max(t.to_local().shape[d], 1)) for t, d in zip(ts, dims)]
+    page = group.page if getattr(group, 'handle', 0) else resource.getpagesize()
+    wide = max([e * t.element_size() for t, e in zip(ts, per)], default=0)
+    leases = lambda p: [_empty((max(p * e, 1),), t.to_local(), group) for t, e in zip(ts, per)] + [
+        _empty((p * wide + n * page,), ts[0].to_local(), group, torch.uint8) for _ in range(4)]
+
+    def fits(p):
+        try:
+            return bool(leases(p) + [_empty((max([t.to_local().nbytes for t in ts]),), ts[0].to_local(), group, torch.uint8)])
+        except RuntimeError:
+            return False
+        finally:
+            torch.mps.synchronize() if mesh.device_type == 'mps' else None
+    lo, hi = int(o.parts[rank]), o.units - n + 1
+    while ts and lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if fits(mid) else (lo, mid - 1)
+    held['high'], caps = lo, leases(lo) if ts else []
+    for t, cap in zip(ts, caps):
+        prefix = cap[:t.to_local().numel()].view(t.to_local().shape)
+        t._capacity, t._local_tensor = cap, prefix if getattr(t, '_scratch', False) else _copy(prefix, t.to_local())
+    if getattr(group, 'handle', 0) and ts:
+        counts, starts = _paged([1] * n, 4, group)
+        group._staging = [caps[-4:-2], caps[-2:], (_empty((starts[-1],), ts[0].to_local(), group, torch.int32), counts, starts)]
+    return [int(w[0]) for w in _shared(held, group, [float(lo)])]
 
 
 def calls(tensor):
@@ -703,7 +749,7 @@ def evaluations(mesh, name, count):
     held = _BALANCING.setdefault((mesh, name), {})
     if 'balancer' not in held:
         n = len(o.capacity)
-        held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': [o.units - n + 1] * n}}),
+        held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': _reserve(mesh, name, held, group)}}),
                     closed=0, read=0, skip=0)
         evidence.watch(group, mesh.device_type)
     for k in range(count):
@@ -755,6 +801,17 @@ def _shared(held, group, words):
     mine[:1 + len(words)] = torch.tensor([float(len(words))] + [float(w) for w in words], dtype=torch.float64)
     dist.all_gather_into_tensor(every, mine, group=group)
     return [row[1:1 + int(row[0])] for row in every.view(n, held['page']).tolist()]
+
+
+def counts(src, dst):
+    """The split sizes (elements; output, input) of the all_to_all_single moving `src`'s blocks into `dst`'s, one logical
+    shape split along two dimensions by one partitioned mesh dimension: each rank sends every rank the part of its
+    block the other's holds, received source after source."""
+    (i, p), = [(i, p) for i, p in enumerate(src.placements) if isinstance(p, RaggedShard)]
+    o, e, d, rank = _OPERANDS[p.key], p.dim % src.ndim, dst.placements[i].dim % src.ndim, src.device_mesh.get_coordinate()[i]
+    s, t = ([_units(o, src.shape[c]) * q for q in o.parts.tolist()] for c in (e, d))
+    rest = src.numel() // (src.shape[e] * src.shape[d])
+    return [s[r] * t[rank] * rest for r in range(len(s))], [s[rank] * t[q] * rest for q in range(len(s))]
 
 
 def split(mesh, name, N):
