@@ -431,6 +431,11 @@ def _(x, w, bias=None, act=0, x1=None):
     return x.new_empty(x.shape[0], w.shape[0])
 
 
+@torch.library.register_fake('torch_mesh::cell_step')
+def _(x, x1, w, bias, c, dim, sizes, group_name, repeats):
+    return x[0].new_empty((c.shape[0], c.shape[1], sum(sizes))), c.new_empty(c.shape)
+
+
 def create(opts, options):
     """The group (torch's extended creator: `opts` its store, rank and size; `options`, the caller's pg_options, not
     read: a group's map is its bridges')."""
