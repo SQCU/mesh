@@ -704,7 +704,7 @@ def evaluations(mesh, name, count):
     if 'balancer' not in held:
         n = len(o.capacity)
         held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': [o.units - n + 1] * n}}),
-                    closed=0, read=0, skip=0)
+                    closed=0, read=0, skip=1)
         evidence.watch(group, mesh.device_type)
     for k in range(count):
         if k:
@@ -714,7 +714,8 @@ def evaluations(mesh, name, count):
 
 def _balance(mesh, name, held, group):
     """One boundary between evaluations: the evaluation just issued closed (evidence.step), the closed evaluations the
-    GPU has passed read (those issued before the last move dropped: they ran on the old parts), this rank's work in
+    GPU has passed read (those issued before the last move dropped, they ran on the old parts, and the first at any
+    parts, the warm-up of its shapes, which the re-lay falls inside), this rank's work in
     each (the sum of its stretches) exchanged with every rank's, and, once every rank has some, one step of the
     Balancer on them (its robust median and error a rank; the same on every rank, from the same words); a move
     attaches its parts, re-lays and replans."""
@@ -734,7 +735,7 @@ def _balance(mesh, name, held, group):
     parts = [int(p) for p in balancer.observe({'evaluation': {'scales': {name: [1.0] * len(words)}, 'times': words}})[name]]
     if parts == o.parts.tolist():
         return
-    held['skip'] = held['closed'] - held['read']
+    held['skip'] = held['closed'] - held['read'] + 1
     _attach(mesh, name, parts)
     _relay(mesh, name)
     _replan(mesh, name)
