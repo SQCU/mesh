@@ -703,13 +703,20 @@ class exchange:
         return [p.view(shape(s)) for p, s in zip(local.reshape(-1).split([math.prod(shape(s)) for s in self.s]), self.s)]
 
 
-def attention(mesh, name, shape, causal=True, halves=1, dtype=None):
+class attention:
     """The ring attention a program runs on `name`, declared by its query's logical shape [batch, sequence, heads,
-    dim] (causal or not, its halves), so the reserve sizes its leases for every share up to the bounds; its output, a
-    scratch buffer of that shape split along the sequence, returned."""
-    out = empty(mesh, name, shape, 1, dtype, scratch=True)
-    _declarable(mesh, name)['attention'] = (tuple(shape), halves, out.dtype, out, causal)
-    return out
+    dim], causal or not, its halves, so the reserve sizes its leases for every share up to the bounds: called on
+    (query, key, value), with the declaration's causality and halves, into its output (a scratch buffer of that shape
+    split along the sequence): (output, each row's logsumexp)."""
+
+    def __init__(self, mesh, name, shape, causal=True, halves=1, dtype=None):
+        self.mesh, self.name, self.causal, self.halves = mesh, name, causal, halves
+        self.out = empty(mesh, name, shape, 1, dtype, scratch=True)
+        _declarable(mesh, name)['attention'] = (tuple(shape), halves, self.out.dtype)
+
+    def __call__(self, query, key, value, scale=None):
+        return _ring_attention(self.mesh.get_group(self.name), operand(self.mesh, self.name).key, query, key, value,
+                               self.causal, scale, self.halves, self.out.to_local())
 
 
 def unshard(mesh, name, shape, dim, dtype=None):
@@ -1616,11 +1623,9 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
     """This rank's query block's attention over every rank's keys and values, the blocks along dimension 2 (the
     sequence) as context_parallel_buffers made them over partitioned mesh dimension `name`: (output, each query row's
     logsumexp), padded query rows garbage that the unshard drops."""
-    o, declared = operand(mesh, name), _BALANCING.get((mesh, name), {}).get('attention')
+    o = operand(mesh, name)
     S = query.size(2) * o.units // o.capacity[mesh.get_local_rank(name)]
-    assert not declared or (declared[1], declared[4]) == (_halves(o, S, load_balance), is_causal), 'mesh: a ring unlike its declaration'
-    return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance),
-                           declared[3] if declared else None)
+    return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance))
 
 
 SCORES = 1 << 26
