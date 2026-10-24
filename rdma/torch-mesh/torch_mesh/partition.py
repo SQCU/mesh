@@ -559,7 +559,9 @@ def follow(*tensors):
     now (after the Balancer moved it), as a list.  A mesh dimension's move is one coalesced group (the backend's) of one
     MPI_Alltoallv a tensor (ncclMeshAlltoAllV) of the rows that change rank alone, each piece a segment of whole pages
     (_paged: the library places each segment on a page) of a region lease, sent once and copied once into its place in
-    the tensor's new block, a region tensor; the rows that stay are copied into their place there, crossing nothing."""
+    the tensor's new block, a region tensor; the rows that stay are copied into their place there, crossing nothing.
+    Each is returned at its logical shape and that shape's contiguous strides (a moved block's leading extents of one
+    may carry any stride, which from_local's inference would refuse)."""
     mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape] for t in tensors]
     for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
@@ -591,7 +593,8 @@ def follow(*tensors):
                     new[into[r]:into[r + 1]].view(-1).copy_(y[land_at[r]:land_at[r] + receives[r] * row])
             h[0][i] = RaggedShard(h[0][i].dim, key)
             h[1] = new.movedim(0, h[0][i].dim)
-    return [from_local(local, mesh, placements) for placements, local, _ in held]
+    contiguous = lambda shape: torch.empty(shape, device='meta').stride()
+    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape in held]
 
 
 # The tensors partition split along each partitioned mesh dimension, re-laid in place where the balancer moves its
