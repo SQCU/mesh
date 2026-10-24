@@ -136,6 +136,99 @@ def compiler(gm, example_inputs):
             node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
             node.meta.pop('eager_input_vals', None)
 
+    def lstm_cell(z, c):
+        """torch's LSTMCell of gates z [..., 4 HR] (i, f, g and o, each over the HR units) and state c [..., HR]: h and
+        the new c.  The search pattern of the fold below (celled), traced from this code."""
+        i, f, g, o = z.float().unflatten(-1, (4, -1)).unbind(-2)
+        c1 = torch.sigmoid(f) * c + torch.sigmoid(i) * torch.tanh(g)
+        return torch.sigmoid(o) * torch.tanh(c1), c1
+
+    def cell_pattern():
+        """lstm_cell's pattern (Inductor's gen_pattern of its forward trace), each view in it also a reshape (the graph
+        this pass sees keeps the program's reshapes, the trace makes views of them)."""
+        from torch._inductor.pattern_matcher import CallFunction, fwd_only, gen_pattern
+        pattern = gen_pattern(lstm_cell, [torch.empty(2, 8, 256, dtype=torch.half), torch.empty(2, 8, 64)], fwd_only)
+        seen = set()
+
+        def widen(p):
+            if id(p) in seen or not hasattr(p, 'args'):
+                return
+            seen.add(id(p))
+            if isinstance(p, CallFunction) and aten.view.default in p.fns:
+                p.fns = list(p.fns) + [aten.reshape.default]
+                p.fns_set = set(p.fns)
+            for a in list(p.args) + list(getattr(p, 'kwargs', {}).values()):
+                widen(a)
+        for out in pattern.outputs:
+            widen(out)
+        return pattern
+
+    def celled(graph, gather, pattern):
+        """An LSTM tick's gather of its cells' h into a destination on a mesh group of two ranks or more (allgatherv_out,
+        functionalized: auto_functionalized_v2 of it, its destination's new value its second output): h copied into
+        this rank's block, h and the new c torch's LSTMCell (lstm_cell's pattern) of a grouped product's gates stacked
+        by layer (torch_mesh::linears, no activation, its outputs cat and reshaped [L, R, 4 HR]) and the state c, folded
+        with them into torch_mesh::cell_step_out, functionalized alike: one native call encoding the products'
+        dispatch, the cell on their gates with h written into the gather's send segment (linear.metal cell_publish) and
+        the landing into the destination (gather_land's).  The new c is cell_step_out's; the block, where anything else
+        reads it, this rank's units of the destination's new value.  Any other form, no fold.  The fold's node, or
+        None."""
+        import operator
+
+        import torch.distributed as dist
+        from torch._higher_order_ops.auto_functionalize import auto_functionalized_v2
+        given = dict(gather.kwargs)
+        block, dim, sizes, group = given['x'], given['dim'], given['sizes'], given['group_name']
+        resolved = dist.distributed_c10d._resolve_process_group(group)
+        if not isinstance(resolved, backend.ProcessGroupMesh) or resolved.size() < 2 or dim != 2:
+            return None
+        h = block.args[1] if block.target is aten.copy.default else block
+        match = pattern.match(h)
+        if not match:
+            return None
+        z, c = match.kwargs['z'], match.kwargs['c']
+        new = h.args[1].args[0]
+        if z.target not in (aten.reshape.default, aten.view.default):
+            return None
+        cat = z.args[0]
+        if cat.target is not aten.cat.default or len(cat.users) != 1 or (cat.args[1:] or (0,))[0] != 0:
+            return None
+        parts = list(cat.args[0])
+        product = parts[0].args[0] if parts and parts[0].target is operator.getitem else None
+        if (product is None or product.target is not torch.ops.torch_mesh.linears.default or len(product.args[1]) != len(parts)
+                or any(p.target is not operator.getitem or p.args[0] is not product or p.args[1] != i or len(p.users) != 1
+                       for i, p in enumerate(parts))
+                or len(product.users) != len(parts) or any(a != 0 for a in product.args[3])):
+            return None
+        xs, ws, bs, acts, x1s = product.args
+        landed = [u for u in gather.users if u.target is operator.getitem and u.args[1] == 1]
+        if len(landed) != len(gather.users) or len(landed) > 1:
+            return None
+        bases = {k: v for k, v in given.items() if k.startswith('_')}
+        with graph.inserting_before(gather):
+            made = graph.call_function(auto_functionalized_v2, (torch.ops.torch_mesh.cell_step_out.default,),
+                                       dict(x=list(xs), x1=list(x1s), w=list(ws), bias=list(bs), c=c, dim=dim, sizes=list(sizes),
+                                            group_name=group, repeats=given['repeats'], **bases))
+            state = graph.call_function(operator.getitem, (made, 0))
+            into = graph.call_function(operator.getitem, (made, 1))
+        made.meta['val'] = (new.meta['val'], *gather.meta['val'][1:])
+        state.meta['val'], into.meta['val'] = new.meta['val'], gather.meta['val'][1]
+        for u in landed:
+            u.replace_all_uses_with(into)
+            graph.erase_node(u)
+        graph.erase_node(gather)
+        new.replace_all_uses_with(state)
+        if block.users:
+            start = sum(sizes[:resolved.rank()])
+            with graph.inserting_after(into):
+                own = graph.call_function(aten.slice.Tensor, (into, 2, start, start + sizes[resolved.rank()]))
+            own.meta['val'] = block.meta['val']
+            block.replace_all_uses_with(own)
+        for node in reversed(list(graph.nodes)):
+            if not node.users and node in set(match.nodes) | {block, h, new, z, cat, product} | set(parts):
+                graph.erase_node(node)
+        return made
+
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
@@ -185,9 +278,20 @@ def compiler(gm, example_inputs):
                         told(n, len(nodes))
             for node in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
                 native(node)
+            from torch._higher_order_ops.auto_functionalize import auto_functionalized_v2
+            gathers = [n for n in graph.nodes if n.target is auto_functionalized_v2 and n.args[0] is torch.ops.torch_mesh.allgatherv_out.default]
+            if gathers:
+                pattern = cell_pattern()
+                folded = [made for made in (celled(graph, node, pattern) for node in gathers) if made is not None]
+                # the folds of one form on one group told their count as their repeats, one batch of crossings a graph
+                forms = {(len(m.kwargs['x']), tuple(m.kwargs['c'].meta['val'].shape), tuple(m.kwargs['sizes']), m.kwargs['group_name'])
+                         for m in folded}
+                if len(folded) > 1 and len(forms) == 1:
+                    for m in folded:
+                        m.kwargs = {**m.kwargs, 'repeats': len(folded)}
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv native'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv native celled_out'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 

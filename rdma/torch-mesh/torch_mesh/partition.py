@@ -336,15 +336,15 @@ def _gather_kernel(kernel, *arguments):
     return _GATHER_KERNELS[name]
 
 
-def _linear_kernel(*arguments):
-    """linear.metal's linear_publish at `arguments`, compiled once after the library's steps (fused.steps) and
-    argmax.metal's arrival count."""
+def _linear_kernel(*arguments, kernel='linear_publish'):
+    """linear.metal's `kernel` (linear_publish, cell_publish) at `arguments`, compiled once after the library's steps
+    (fused.steps) and argmax.metal's arrival count."""
     from pathlib import Path
 
     from . import _stream, fused
     from .argmax import SOURCE
     from .streamed import instance
-    name, line = instance('linear_publish', *arguments)
+    name, line = instance(kernel, *arguments)
     if name not in _GATHER_KERNELS:
         text = (Path(__file__).parent / 'linear.metal').read_text()
         _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + text + '\n' + line + '\n', name)
@@ -413,6 +413,8 @@ def _fused_form(x, w, dim, sizes, group_name, adds, channels):
 from . import _stream as _native  # noqa: E402  (torch_mesh::fused_step's library)
 
 _native.fused_maker(_fused_form)
+# torch_mesh::cell_step_out's publication (_stream.mm cell_maker): linear.metal's cell_publish for its channels
+_native.cell_maker(lambda channels: _linear_kernel(channels, kernel='cell_publish'))
 
 
 @torch.library.register_fake('torch_mesh::fused_step')

@@ -185,4 +185,37 @@ kernel void linear_publish(device const half* x [[buffer(0)]], device const half
         mesh_arrival_reset(arrivals, 0, tid);
     }
 }
+
+// The LSTM's cell on a grouped product's gates, published (torch_mesh::cell_step_out: after torch_mesh::linears' dispatch,
+// in the same turn of torch's queue): thread i one unit of one row of one layer of the gather's block [L, R, HR], its
+// four gates i, f, g and o HR apart in that row of z [L, R, 4 HR] (as linear stores them: fp16, the bias added) and its
+// state c; torch's LSTMCell's arithmetic on them, the new c written and h into this rank's send segment of the gather's
+// crossing (mesh_step_write); the last threadgroup to arrive releases it at repeat j, as linear_publish does.
+template <uint CHANNELS>
+struct cell_publish_words { uint L, R, HR, j; mesh_step_binding land[CHANNELS], publish[CHANNELS]; };
+
+inline float cell_sigmoid(float v) { return 1.0f / (1.0f + exp(-v)); }
+
+template <uint CHANNELS>
+kernel void cell_publish(device const half* z [[buffer(0)]], device const float* c [[buffer(1)]], device float* c1 [[buffer(2)]],
+                         device uchar* send [[buffer(3)]], device atomic_uint* arrivals [[buffer(4)]],
+                         constant cell_publish_words<CHANNELS>& p [[buffer(15)]], uint i [[thread_position_in_grid]],
+                         uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+                         uint groups [[threadgroups_per_grid]]) {
+    threadgroup uint last;
+    for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
+        mesh_step_enter(*p.publish[q].p, p.publish[q].v, p.publish[q].progress, tg == 0 && tid == 0);
+    if (i < p.L * p.R * p.HR) {
+        device const half* gates = z + ulong(i / p.HR) * 4 * p.HR + i % p.HR;
+        const float cn = cell_sigmoid(float(gates[p.HR])) * c[i] + cell_sigmoid(float(gates[0])) * tanh(float(gates[2 * p.HR]));
+        c1[i] = cn;
+        mesh_step_write<half>(send, i, half(cell_sigmoid(float(gates[3 * p.HR])) * tanh(cn)));
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
+        for (uint q = 0; q < CHANNELS; q++) if (p.publish[q].p)
+            mesh_step_release(*p.publish[q].p, p.publish[q].a, tid, p.j);
+        mesh_arrival_reset(arrivals, 0, tid);
+    }
+}
 #endif
