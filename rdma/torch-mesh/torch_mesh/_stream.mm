@@ -132,8 +132,8 @@ struct MeshStream {
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
-  // complete in the stream's order once encoded, whose workspace returns to torch's allocator here, where later work
-  // reuses it after the group's), and the workspace of every group retired by now released.
+  // complete in the stream's order once encoded, whose workspace's lease is held again here, where later work reuses
+  // it after the group's), and the workspace of every group retired by now released.
   void retire(uint64_t ticket, std::vector<at::Tensor> held) {
     if (ticket) holders[ticket] = std::move(held);
     holders.erase(holders.begin(), holders.upper_bound(ncclMeshRetired()));
@@ -182,15 +182,18 @@ static void commit() {
   for (MeshStream *s : streams_made()) host_wait(*s, false);
 }
 
-// The library's workspace allocator: an MPS tensor of torch's caching allocator, kept in the MeshStream's scratch
-// (`context`) until the group is complete in the stream's order (MeshStream::retire); NULL where torch's allocator
-// throws, which fails the group as a value (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through
-// the library.  It runs on torch's queue, where an allocator that frees cached buffers would enter that queue again
-// (MPSAllocator release_cached_buffers): rdma/torch-mesh/README.md, the stream's commit state.
+// The library's workspace allocator: a region lease (region_empty, held: taken again by the next workspace of its size
+// once the stream is done with it), kept in the MeshStream's scratch (`context`) until the group is complete in the
+// stream's order (MeshStream::retire); NULL where the region refuses one, which fails the group as a value
+// (nccl-mesh.c: "out of GPU memory") instead of an exception thrown through the library.  Not torch's caching allocator:
+// on unified memory it serves a tensor of about 10 MiB or more from a 1 GiB heap the GPU wires whole (metal-microbench
+// docs/facts.md), and a partials reduce-scatter's workspace wired the Mini's last free GiB under cp.  It runs on torch's
+// queue, and takes nothing of torch's allocator there (rdma/torch-mesh/README.md, the stream's commit state).
+static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held);
 static void *workspace(size_t bytes, void *context) {
   auto *s = static_cast<MeshStream *>(context);
   try {
-    s->scratch.push_back(at::empty({(int64_t)bytes}, at::TensorOptions().dtype(at::kByte).device(at::kMPS)));
+    s->scratch.push_back(region_empty({(int64_t)bytes}, at::empty({0}, at::TensorOptions().dtype(at::kByte)), true, true));
   } catch (...) {
     return nullptr;
   }
