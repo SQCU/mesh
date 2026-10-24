@@ -41,7 +41,9 @@ mesh_step_read<T>(l.d + l.p->dst, k), loaded system-coherent (the NIC wrote it).
 every crossing: its receive is posted only once this rank's publication toward that peer has stored `ready`, after the
 kernel that read it before.  That holds because every channel of an all_reduce publishes; a channel that only lands (a
 reduce's root, a broadcast's receiver: nccl.h ncclMeshFused) is gated at the call, so there the kernel that reads the
-previous landing is encoded before the next call.  polls bounds each wait in loads (0:
+previous landing is encoded before the next call.  The send tensor may be written again once the landing of each peer's
+next crossing, which depends on this one, has come: nothing waits for a publication's SENDs, so a write before that may
+reach a peer in this crossing's place.  polls bounds each wait in loads (0:
 NCCL_MESH_POLLS; _stream.polls is that bound, which holds a GPU at most the platform's 5 seconds: rdma/NCCL.md "Bounded
 waits").
 

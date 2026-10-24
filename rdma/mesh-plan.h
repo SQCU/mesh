@@ -191,9 +191,9 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves
                            a node forwarding its partial for another from a scratch buffer of its own and its own
                            operand from a copy, or, where it sends that to one node only and forwards nothing (two
                            nodes, the direct exchange), from the operand itself: its one SEND and its one REDUCE
-                           then meet in the operand on one channel, and the executors combine into it only
-                           once the bridge has sent the SEND's bytes (libnccl-mesh, the holding's `sent`), so the SEND
-                           reads the operand before the sum is made in it (its dependent crossings the heaviest trees'
+                           then meet in the operand on one channel, unordered: the executors combine into it
+                           once the peer's bytes land, and nothing orders that after the NIC's read of the SEND, so
+                           the peer may receive the partial sum in the SEND's last pages (its dependent crossings the heaviest trees'
                            height, 1 where they are stars, the direct exchange; each node
                            sends the whole operand once for every other) [single-phase all-reduce: Trivance 2026].
    A tree's part is one move a hop, uncut: a node that sends on unchanged what it received (a COPY, the identity at a

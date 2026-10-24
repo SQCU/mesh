@@ -420,7 +420,8 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int 
        where it has children there, else its own operand, from buffer[u * n + u]: the operand itself (buffer 0) where u
        sends it to one node only and forwards nothing (a connected map's two nodes: the direct exchange, in which u's one
        SEND and its one REDUCE, of its peer's operand, are each at round 0 and lie at the same positions of one channel,
-       each position published before it is combined into: libnccl-mesh complete_track, sends_what_lands), else its copy
+       each position published before it is combined into, and the combine unordered with the NIC's read of the SEND:
+       libnccl-mesh complete_track, sends_what_lands), else its copy
        (scratch 1), which nothing changes; one part */
     parts=1;
     segment[0]=0;log_weight[0]=0;
@@ -818,7 +819,7 @@ int mesh_group_before(uint32_t kind,const struct mesh_step *steps,uint32_t count
    entry for entry; the sender publishes its entries in order (its holding's `ready`, one count), the receiver consumes
    them in order, each once it has landed (`landed`, one count); a step's first event, published or consumed, waits until
    the receive before it in its call (mesh_steps_before) is consumed; a combine into bytes a SEND of the same rank on the
-   same channel reads waits until that SEND's bytes are sent (`sent`), after its publication.  Nothing else orders them:
+   same channel reads runs after that SEND's publication, unordered with the NIC's read of it.  Nothing else orders them:
    no credit, no fillers (the hardware's credit holds a SEND until its receive is posted, design/transport.md). */
 static uint64_t mesh_segment_first(const uint64_t *segment,uint32_t q){
   uint64_t at=0;

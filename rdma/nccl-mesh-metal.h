@@ -2,8 +2,7 @@
    buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A channel's holding (mesh-call.h mesh_stream_view: its
    three page counts) is one buffer over the region's page that holds them, and the bytes it sends and lands are the
    client's own pages.  A wait for a landing is rdma/mesh.metal's mesh_wait_bounded (nccl-mesh-kernels.h
-   mesh_step_wait) on the holding's `landed` until it covers the entry, and where a write meets bytes a SEND reads, on
-   its `sent`; it ends at the count, at the link's loss (the bridge's ~0) or at its program's bound (metal_begin's
+   mesh_step_wait) on the holding's `landed` until it covers the entry, and on no other count; it ends at the count, at the link's loss (the bridge's ~0) or at its program's bound (metal_begin's
    polls), and reads no other word.  A publication is one system fence and one store of the holding's `ready`. */
 #ifndef NCCL_MESH_METAL_H
 #define NCCL_MESH_METAL_H
@@ -133,7 +132,7 @@ void metal_uses(struct metal_program *, void *const *buffers, size_t n, int writ
 /* A communicator's gate word (at `word` in `words`) stored `value` after one system fence, as metal_publish stores: the
    number of the group whose landings it opens (nccl-mesh.c gate_of), a count of groups and no holding's. */
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
-/* the wait alone (a COPY's landing in place, a group's end on `sent`), one threadgroup */
+/* the wait alone (a COPY's landing in place), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
 /* the wait, then every threadgroup's piece of the landed bytes combined into dst (an ncclDataType_t or METAL_MERGE, op as
    above), n elements (the merge's rows), each threadgroup awaiting the counts on its own (nccl-mesh-kernels.h
@@ -143,7 +142,7 @@ struct metal_result metal_land(struct metal_program *, int type, int op, void *d
    a residency set): each one's record written to the device's argument ring as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
    5 progress), nothing dispatched; EINVAL on a program with no ring.  The publication: d its operand (at dst), a the
-   holding's counts (mesh_step_release stores `ready`; mesh_step_sent awaits `sent`).  The landing: d and s its landing
+   holding's counts (mesh_step_release stores `ready`).  The landing: d and s its landing
    buffer (at dst), a the holding's counts (mesh_step_await), v the communicator's failure words. */
 struct metal_result metal_send_deferred(struct metal_program *, void *operand, size_t offset, const struct metal_release *, uint64_t bound[6]);
 struct metal_result metal_land_deferred(struct metal_program *, void *landing, size_t offset, const struct metal_wait *, uint64_t bound[6]);
@@ -156,7 +155,7 @@ void *metal_contents(void *buffer);
    `track`, in place of their dispatches, until the next metal_record; track METAL_NONE ends the recording, and the
    steps after it are dispatched as ever.  An item runs once every metal_depend of it holds (track `other` has consumed
    `count`), and a consumption's once its track's publications have passed send entry `need` - 1 (0: none; a combine
-   into bytes a SEND of its channel reads, nccl-mesh.c meeting) and the landing its first wait awaits came (or its
+   into bytes a SEND of its channel reads, nccl-mesh.c schedule_laid, unordered with the NIC's read of it) and the landing its first wait awaits came (or its
    bound passed: the link's ~0 is a count too); a consumption's end raises its track's count to `position` + 1.  A
    publication's `need` is 0: nothing credits it.  Each cursor runs its items in order, and neither waits on the other
    but by `need`.  metal_tracks: the tracks recorded since the last, track t's count from consumed[t], encoded (one

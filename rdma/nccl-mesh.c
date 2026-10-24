@@ -2111,7 +2111,7 @@ static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t
 /* the group's entries laid from each channel's last scheduled entry and page (its compiled ones are from each list's
    0), each step's channel and entry kept; each landing that combines into bytes an earlier SEND of its call on its
    channel reads (mesh_compile's two-node direct exchange; a SEND that reads the send buffer in place reads none,
-   plan_direct) with that SEND's entry and end (struct message `need`, `sent`) */
+   plan_direct) with that SEND's entry (struct message `need`) */
 static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;
@@ -2158,8 +2158,9 @@ static void *spare_take(struct ncclComm *comm, size_t bytes, uint64_t holder) {
   best->holder = holder;
   return best->address;
 }
-/* every lease of comm's pool the group numbered `holder` held made free (a later group takes one only once its own
-   start is gated past this group's work: gate_of).  Under group_lock */
+/* every lease of comm's pool the group numbered `holder` held made free, at its retire: a later group takes one once
+   its own start is gated past this group's work (gate_of), which orders nothing after the NIC's reads, so a SEND of
+   this group still in credit may send the later group's bytes (rdma/NCCL.md "Memory").  Under group_lock */
 static void spares_give(struct ncclComm *comm, uint64_t holder) {
   for (uint32_t k = 0; holder && k < comm->nspares; k++)
     if (comm->spares[k].holder == holder) comm->spares[k].holder = 0;
@@ -2370,12 +2371,12 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
 /* every channel's entries published and consumed on the host: a SEND's published by `ready` (a release store past it,
    its step's receive before it consumed), a combine's landing combined into its buffer (its first one, a call reading
    its send buffer in place, writing send op landed), a COPY's consumed once landed (it landed in place); a combine
-   into bytes an earlier SEND of its call on its channel reads waits for `sent` past that SEND (struct message `sent`);
-   then every send entry's bytes sent, so the caller may write its send buffer again.  Every wait ends at an event: its
+   into bytes an earlier SEND of its call on its channel reads runs once that SEND is published, unordered with the
+   NIC's read of it; nothing waits for the SENDs, so the call returns while the NIC may still read them.  Every wait
+   ends at an event: its
    count, a count's ~0 (the link lost, the bridge stopped), the end of its holding with work left (its stream no
    longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge restarted), or a revoke,
-   each read at every look, and each of the two waits (the landings and publications, then the SENDs) ends by its
-   deadline, MESH_PLATFORM_NS from its start, past which the program ends (the operator, 2026-10-23: "no wait may ever
+   each read at every look, and the wait ends by its deadline, MESH_PLATFORM_NS from its start, past which the program ends (the operator, 2026-10-23: "no wait may ever
    run longer than a deadline operand presented at the time the wait was constructed"; design/data-model.md section
    6).  Every look spins: nothing parks */
 static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel *ch) {
@@ -2813,7 +2814,7 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
    past it; a combine's landed bytes combined
    into its buffer (its first one, a call reading its send buffer in place, after a wait: with op landed), a COPY's
    wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
-   (metal_land_deferred: its wait for `sent` past the group's send there); a receive's first event after the receive
+   (metal_land_deferred); a receive's first event after the receive
    before it (as a track's item, metal_depend: that receive's channel, track `base` + its index, consumed past it; in
    the stream, consumed before it) */
 static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base) {
@@ -2871,7 +2872,7 @@ static uint32_t one_track(const struct inflight *through) {
    one serial order every rank builds alike: the next send entries published as soon as their steps' receives before
    them are consumed (a run of them one release; the fused crossing's alone), else the next landing consumed (its
    step's receive before it consumed, and a combine into bytes an earlier SEND of its call reads only once that SEND is
-   published: its wait then awaits `sent` past it); a program whose SEND waits on a receive that waits on that SEND
+   published, unordered with the NIC's read of it); a program whose SEND waits on a receive that waits on that SEND
    fails here.  No track is recorded, no thread picks, and no tracks dispatch runs: no wait on one track can hold
    another channel's */
 static ncclResult_t complete_track(struct metal_program *program, struct inflight *through, uint32_t h, int *published) {
@@ -3193,10 +3194,8 @@ static ncclResult_t epilogue(struct metal_program *program, const struct call *l
   return result;
 }
 
-/* the groups in flight whose entries are all published and consumed, in issue order: on each channel where the group
-   sent, a wait for `sent` past its sends unless a wait encoded has awaited it (a fused crossing's, its caller's
-   kernel's: nccl-mesh-kernels.h mesh_step_await, mesh_step_sent), so the caller and the next group may write what it
-   sent; their results; and they are complete */
+/* the groups in flight whose entries are all published and consumed, in issue order: their results, and they are
+   complete, with no wait for their SENDs (their pool leases free again while a SEND may still read them: spares_give) */
 static ncclResult_t retire(struct metal_program *program) {
   ncclResult_t result = ncclSuccess;
   while (inflight && !result) {
@@ -3388,7 +3387,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (st) st->buffer[0] = own;
     /* a program's scratch, a tree's or a ring's (mesh-plan.h mesh_compile: a forwarding node's partials, and its own
        operand where it sends that to two nodes or more), leases of the pool: its SENDs read them; the two-node direct
-       exchange has none, its SEND reading the operand its REDUCE combines into once its bytes are sent (meeting) */
+       exchange has none, its SEND reading the operand its REDUCE combines into, nothing ordering the combine after the
+       NIC's read (rdma/NCCL.md "One track") */
     for (uint32_t b = 1; st && b < st->buffers && !result; b++) {
       if (c->direct && !st->needed[b]) continue;
       if (!named(st->buffer[b] = spare_where(program, comm, bytes, holder))) result = fail(ncclSystemError, "a scratch buffer: %s", last.text);

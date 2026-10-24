@@ -85,14 +85,15 @@
    waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
    which the program ends: design/data-model.md section 6), and its holding's end with units outstanding takes its stream out of its link's pairing
    (design/transport.md section 14).  A publication
-   raises the holding's `ready` past the entry; a landing is awaited on its `landed`; a write over bytes a SEND reads
-   waits for its `sent`.  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
+   raises the holding's `ready` past the entry; a landing is awaited on its `landed`, and nothing waits on `sent`: a
+   write over bytes a SEND still reads is ordered after it by nothing.  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
    payload is checked, so calls that do not pair (unequal counts, different collectives or orders) are the caller's
    error and are not detected.  Uneven segments are their own calls
    (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
 
    Host path: a NULL stream.  Buffers are host pointers into this node's region (a lease's: Memory, below), sent from
-   and landed in in place and combined on the host; every call returns once its group has run and its SENDs are done.  Metal path: a stream that
+   and landed in in place and combined on the host; every call returns once its group has run and its landings are
+   consumed, its SENDs perhaps not yet done.  Metal path: a stream that
    is an ncclMeshStream.  The group is encoded into its commandBuffer (the caller commits it), every buffer argument an
    ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type, a
    crossing's over a lease (Memory, below); float64 moves as its bytes, and a float64 reduction there fails as a value
@@ -121,9 +122,11 @@
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
    (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
    reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
-   in pages the stream's earlier work still reads; its end waits until its SENDs are done (`sent`), so the caller may
-   write its send buffer again.  A wait is a kernel polling its holding's `landed` count, and `sent` where a write meets
-   bytes a SEND reads, and nothing else (rdma/mesh.metal mesh_wait_bounded), which the bridge sets ~0 where the link is
+   in pages the stream's earlier work still reads.  Its completion, in the stream or on return, does not wait for its
+   SENDs: a buffer a SEND read may be written once a later landing from each peer it went to depends on that SEND, and
+   before that the peer may receive the later bytes (numerics corrupted rather than a wait: design/data-model.md
+   section 6).  A wait is a kernel polling its holding's `landed` count and nothing else (rdma/mesh.metal
+   mesh_wait_bounded), which the bridge sets ~0 where the link is
    lost; every wait is bounded: the stream's `polls` is the most loads of a count a wait makes,
    the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
    period of one load on the node's GPU: rdma/NCCL.md "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is
@@ -188,8 +191,10 @@
    send buffer lies apart from its result reads it in place where its program allows (a SEND of a range no step of the
    rank wrote reads it, the first combine of such a range writes send op piece, the ranges of the result no step writes
    are copied from it after the publications, and no scratch buffer no step writes is made); else its operand is made in
-   place in the region (a premultiply, or a copy within the region).  The NIC reads a SEND's pages until its `sent`
-   passes them, so a group completes only once its SENDs are done, and the caller then frees or rewrites its buffers.
+   place in the region (a premultiply, or a copy within the region).  The NIC reads a SEND's pages until the SEND is
+   done, and a group completes without waiting for that: a buffer a SEND read may be rewritten once a later landing from
+   each peer it went to depends on that SEND, else the peer may receive the later bytes; a lease freed while a SEND
+   still names it is released by the bridge once none does.
    ncclCommRegister refuses a buffer outside the region.  Design: design/transport.md.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and a
@@ -1052,10 +1057,10 @@ uint64_t ncclMeshRetired(void);
    done: the caller's own count of arrivals) calls mesh_step_release on each publication's a, one system fence and one
    store of that holding's `ready`; it is encoded after the call returns.  The landing: the
    kernel after it calls mesh_step_enter and mesh_step_await on a (every threadgroup may: each its own bounded wait for
-   the holding's `landed` past the landing, and its `sent` past the group's send, so that once it returns the send
-   buffer may be written again; each ends at once after any wait on its failure words has failed), then reads the landed bytes from d + record.dst (its landing buffer) with
-   mesh_step_read and combines them with its own part where it reduces.  A kernel that writes the send buffer again
-   with no landing after the publication calls mesh_step_sent on the publication's bindings first.  The call encodes no
+   the holding's `landed` past the landing; each ends at once after any wait on its failure words has failed), then reads the landed bytes from d + record.dst (its landing buffer) with
+   mesh_step_read and combines them with its own part where it reduces.  Nothing waits for the publication's SENDs: the
+   send buffer may be written again once a later landing from each peer it went to depends on them (that peer's next
+   crossing), and before that the peer may receive the later bytes.  The call encodes no
    dispatch of either fused step, so the caller's kernels are ordered by its stream alone: on the classic form, its
    queue's order (a serial compute encoder's dispatches, its command buffers in commit order).  A group on such a stream
    that is not a fused crossing (one that crosses no link; more than one SEND or landing toward a peer, a combine or a
@@ -1079,10 +1084,10 @@ uint64_t ncclMeshRetired(void);
    installed library), and needs no path to one.  The steps' text is the argument record (struct mesh_args), a fused
    step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's order, a classic kernel's form of
    them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
-   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_sent, mesh_step_release and mesh_step_read (any element type: a landed
+   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_release and mesh_step_read (any element type: a landed
    element, loaded system-coherent from the caller's own landing buffer), on a holding's counts (`ready` to store,
-   `landed` and `sent` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.
-   Every thread of the threadgroup calls mesh_step_await, mesh_step_sent and mesh_step_release (each holds a barrier);
+   `landed` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.
+   Every thread of the threadgroup calls mesh_step_await and mesh_step_release (each holds a barrier);
    mesh_step_enter's and mesh_step_await's results are true (no kernel halts on a failure: rdma/NCCL.md "Bounded
    waits"), kept so that a kernel testing them compiles as it is. */
 const char* ncclMeshMetalPrelude(void);
@@ -1090,8 +1095,9 @@ const char* ncclMeshMetalPrelude(void);
    in it: the library's, made at the lease's first such call and released by ncclMemFree, the buffer a tensor allocator
    or the caller's kernels bind over the lease (mesh 3981ca80^'s).  A Metal-path collective's buffers are leases, which
    its bridge sends from and lands in and its kernels read in place (Memory, above); once its group is complete in the
-   stream's order (its landings landed, its SENDs done) nothing reads or writes the lease for it, and ncclMemFree may
-   return its pages.  ncclInvalidArgument where ptr is in no lease of this process. */
+   stream's order (its landings landed) nothing the library encoded reads or writes the lease for it, though the NIC
+   may still read it for a SEND not yet done; ncclMemFree may return its pages, which the bridge releases once no
+   request names them.  ncclInvalidArgument where ptr is in no lease of this process. */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
 /* The bytes of a page of comm's region (its block of pages, the unit of a lease and of an entry: design/
    pages-and-functions.md), on which each segment of a V collective and each entry starts (Memory, above).

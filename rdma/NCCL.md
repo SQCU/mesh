@@ -235,7 +235,8 @@ bridge sends each page as one SEND from the page its row names, and posts each r
 library never learns a lane, a frame or a queue pair (design/transport.md section 14).
 
 - **Host path.** A NULL stream: host pointers into the region (leases), sent from and landed in in place, combined on
-  the host. Each call is synchronous and returns once its SENDs are done. It works for any lease on any node whose
+  the host. Each call is synchronous and returns once its landings are consumed, its SENDs perhaps not yet done
+  ([Failures](#failures)). It works for any lease on any node whose
   bridge runs (NumPy, CPU region tensors). It is functional, not the measured path.
 - **Metal path.** An `ncclMeshStream`: the group is encoded into a Metal command buffer, and every buffer is an
   `ncclMeshBuffer` (an `MTLBuffer` and a byte offset into it). A publication is one kernel's system fence and one store
@@ -252,9 +253,9 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     previous landing in the same buffer is encoded before the call. A channel that also publishes is gated on its
     publication, which the caller's publishing kernel stores from its last threadgroup, so there the reading kernel may
     be the publishing kernel itself, encoded after the call (torch_mesh/fused.py's step kernel).
-  - **Group end.** The NIC reads a SEND's pages until the holding's `sent` passes them. So a group's end waits for its
-    SENDs: folded into its last wait where it can be, else one wait on `sent`. The caller may then write its send
-    buffer again.
+  - **Group end.** Nothing waits for a group's SENDs: its completion, in the stream or on return, may come while the
+    NIC still reads a SEND's pages. A buffer a SEND read may be written once a later landing from each peer it went to
+    depends on that SEND; before that, the peer may receive the later bytes ([Failures](#failures)).
   - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
     (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
@@ -316,7 +317,7 @@ output_data/transport-buffers-20261021/LIBRARY.md ranks the changes of 2026-10-2
   collectives in the same order on every rank; the library delivers correct bytes. So the order of every read and
   write of a group is known from the programs every rank compiled, and the library encodes it in the stream's order.
   It names its own pages and four counts, credits nothing (TN3205's credit holds a SEND until its receive is posted),
-  publishes with one fence, waits for `sent` only where a write meets bytes a SEND reads, and bounds each wait by a
+  publishes with one fence, waits on `landed` alone (never on `sent`), and bounds each wait by a
   count of polls, since a GPU spin with no end halts the node.
 - **The data function**: its own buffers and their order.
 
@@ -334,10 +335,12 @@ stream's order, its steps records the caller's kernels run and no dispatch (`ncc
 - Each consumption is its own dispatch after that. A combine is one wide `land_*`: every threadgroup's thread 0 waits on
   `landed`, then the threadgroup combines its share. A COPY is one `spin`. A first combine of a call reading its send
   buffer in place is a `spin`, then `combine3_*`.
-- The two-rank all-reduce's SEND reads the operand its REDUCE combines into. The combine is encoded after the SEND's
-  publication, and its wait also awaits `sent` past it (`meeting`), so the SEND's bytes are read before the sum is made
-  and no scratch copy is made. At a group's last landing on the channel, with every SEND of the group there already
-  published, the wait awaits `sent` past them too, so the group's end needs no wait of its own.
+- The two-rank all-reduce's SEND reads the operand its REDUCE combines into, and no scratch copy is made. The combine
+  is encoded after the SEND's publication (`need`), and they meet unordered: nothing orders the combine after the NIC's
+  read. Where this rank publishes first, its SEND waits in credit until the peer posts its receive, and the peer's bytes
+  may land and be combined into the operand before the SEND's last pages are read; the peer then receives the partial
+  sum in those pages, and its result there differs from this rank's. That is accepted rather than a wait or a copy
+  (the operator, 2026-10-23: "we always corrupt data processing code's numerics if it's a choice between that, running slower, faulting, or hanging").
 - No track is recorded, no thread picks and no `tracks` dispatch runs: on one track the stream's order is the one
   serial order every rank builds alike, and a wait on it holds no other channel.
 
@@ -350,7 +353,8 @@ This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place 
   consumptions (landing entries), each in list order.
   - Nothing credits a publication.
   - A consumption runs once its landing came, and it is combined where it belongs; where it combines into bytes a SEND
-    of its channel reads, it runs once that publication has run (`need`), and its wait awaits `sent`.
+    of its channel reads, it runs once that publication has run (`need`), unordered with the NIC's read of it
+    ([One track](#one-track)).
   - A step's first event that has a receive before it (`mesh_group_before`) waits on that receive's channel having
     consumed it.
   - Neither cursor waits on the other beyond these.
@@ -424,7 +428,10 @@ system call".
   communicator. Its slot owns the process's leases and holds the streams its communicators use. A communicator leases
   a page for its gate, and a pool of leases for the pages its groups send from and land in that are not the caller's
   (a reduce-scatter's operand, a tree's scratch, a combine's landing area). A lease of the pool is held by a group until
-  it completes, then reused by a later group (gated on that group's start), and returned at `ncclCommDestroy`.
+  it retires, then reused by a later group (gated on that group's start), and returned at `ncclCommDestroy`. It goes
+  back at the retire while the group's SENDs may still read it: a later group may write it before a late peer's receive
+  takes the earlier bytes, and that peer then receives the later ones. That is accepted rather than a wait or a kept
+  lease ([Failures](#failures)).
 - `ncclMemAlloc(ptr, size)` is the lease, the system call: whole pages of the region covering `size` (one page for 0),
   already registered; a lease registers nothing. Its bookkeeping is the region's (the lease's rows are owned by the
   client's slot), so when the process exits or dies its bridge returns the pages as it returns every retired client's
@@ -493,12 +500,14 @@ Porting:
   (`combine3_*`), the result's ranges no step writes are copied from it after the publications, and no scratch buffer
   no step writes is made. Otherwise its operand is made in place in the region: a premultiply, or a copy within the
   region. The two-rank all-reduce in place makes no copy: its program sends the operand from the operand itself, and
-  the combine waits for the SEND's bytes to be sent ([One track](#one-track)). Reproduction target (metal-microbench
+  nothing orders the combine after the SEND's read ([One track](#one-track)). Reproduction target (metal-microbench
   docs/measurement.md 2026-09-30 part A, 95967e6..42a16ed): per 16.8 MB all-reduce, the library's copies of the
   operand 16.78 MB to 0; tp 271.5-272.2 ms a step. The slot copy into the rings, which that left, is gone too.
-- The NIC reads a SEND's pages until the holding's `sent` passes them, so a group completes only once its SENDs are
-  done. Once it has completed in the stream's order, nothing reads or writes its leases for it, and `ncclMemFree` may
-  return their pages.
+- The NIC reads a SEND's pages until the SEND is done, and a group completes without waiting for that: a buffer a SEND
+  read may be rewritten once a later landing from each peer it went to depends on that SEND, else the peer may receive
+  the later bytes (the operator, 2026-10-23: "we always corrupt data processing code's numerics if it's a choice between that, running slower, faulting, or hanging"). Once a group has completed in the stream's order, nothing the library
+  encoded reads or writes its leases, and `ncclMemFree` may return their pages: the bridge releases a page once no
+  request names it.
 - A host-path group waits for its own communicator's GPU groups alone and fails while one of them is issued and not
   complete; it spins on its landings, never parks, and holds no lock another communicator's groups take, so a rank
   waiting in a host-path collective (an `ncclBroadcast` from a peer) does not stop its other communicators.
