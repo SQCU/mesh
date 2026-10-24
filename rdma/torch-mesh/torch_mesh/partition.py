@@ -500,7 +500,8 @@ def operand(mesh, name):
 def follow(tensor):
     """DTensor `tensor` split along each partitioned mesh dimension by the operand attached there now (after a
     rebalance moved it): the elements that change rank cross once, by one MPI_Alltoallv a mesh dimension
-    (dist.all_to_all_single: the backend's ncclMeshAlltoAllV), the rest staying where they lie."""
+    (dist.all_to_all_single: the backend's ncclMeshAlltoAllV), each piece in a region lease on whole pages of its own
+    (_paged: the library places each segment on a page), the rest staying where they lie."""
     mesh, placements, local = tensor.device_mesh, list(tensor.placements), tensor.to_local()
     for i, p in enumerate(placements):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
@@ -511,10 +512,16 @@ def follow(tensor):
         g, n = _units(old, tensor.shape[p.dim]), len(old.capacity)
         span = lambda r, q: g * max(0, min(a[r + 1], b[q + 1]) - max(a[r], b[q]))
         sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
-        x = local.movedim(p.dim, 0)[:sum(sends)].contiguous()
-        y = _empty((sum(receives),) + x.shape[1:], x, group)
-        dist.all_to_all_single(y, x, receives, sends, group=group)
-        local, placements[i] = y.movedim(0, p.dim).contiguous(), RaggedShard(p.dim, key)
+        rows = local.movedim(p.dim, 0)
+        row = math.prod(rows.shape[1:])
+        out, out_at = _paged([c * row for c in sends], rows.element_size())
+        into, into_at = _paged([c * row for c in receives], rows.element_size())
+        x, y = _empty((out_at[-1],), rows, group), _empty((into_at[-1],), rows, group)
+        for q, first in enumerate(itertools.accumulate(sends[:-1], initial=0)):
+            x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rows.shape[1:]).copy_(rows[first:first + sends[q]])
+        dist.all_to_all_single(y, x, into, out, group=group)
+        landed = torch.cat([y[into_at[r]:into_at[r] + receives[r] * row] for r in range(n)])
+        local, placements[i] = landed.view((sum(receives),) + rows.shape[1:]).movedim(0, p.dim).contiguous(), RaggedShard(p.dim, key)
     return from_local(local, mesh, placements)
 
 
