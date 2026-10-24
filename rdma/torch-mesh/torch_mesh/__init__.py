@@ -35,7 +35,9 @@ def compiler(gm, example_inputs):
     collectives are.  The graph the backend is handed is a forward (a training graph's backward runs from autograd,
     under the same rule).  Its all-reduces are torch_mesh::all_reduce (backend.all_reduce), which Inductor calls rather
     than lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
-    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory)."""
+    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory).  Inductor's run-time
+    size, alignment and scalar asserts are off: each is a check at every call of what the compile fixed (design/
+    data-model.md section 6)."""
     import torch
     from torch._dynamo import lookup_backend
     from torch._inductor import config
@@ -51,7 +53,7 @@ def compiler(gm, example_inputs):
 
         def uuid(self):
             return 'torch_mesh::all_reduce'
-    with config.patch(post_grad_custom_pre_pass=Leased()):
+    with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
 
