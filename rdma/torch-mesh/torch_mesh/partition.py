@@ -720,7 +720,9 @@ class attention:
         _declarable(mesh, name).setdefault('declared', []).append(self)
 
     def compile(self):
-        """At the reserve and every move: the partials zeroed (a row no block writes stays 0), the ring planned."""
+        """At the reserve and every move: the partials zeroed (a row no block writes stays 0), the ring planned.  A
+        limit: at a move the zeroing is ordered after the last call's merge only by the move's own crossings, so on a
+        dimension with no tensor but scratch ones (none crossing) it may race that merge's last sends."""
         self.leases['ring partials'].zero_()
         q, k, v = (t.to_local().transpose(1, 2) for t in (self.q, self.k, self.v))
         self.ring = _ring(self.group, operand(self.mesh, self.name).key, q, k, v, self.causal, None, self.halves,
@@ -1658,7 +1660,8 @@ SCORES = 1 << 26
 def _holding(group, name):
     """What partition holds for partitioned mesh dimension `name` on its communicator's object, gone with it (each
     dimension its own, two meshes on one communicator apart): its declarations and Balancer, the reserve's leases (name
-    None: those _held keeps for undeclared calls); None on a group of another backend, which holds nothing."""
+    None: those _held keeps for undeclared calls); None on a group of another backend, which holds nothing.  A limit:
+    two meshes on one communicator with a dimension of the same name share its holding."""
     if not getattr(group, 'handle', 0):
         return None
     if getattr(group, '_partition_leases', None) is None:
