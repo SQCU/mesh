@@ -279,41 +279,39 @@ def _in_region(y):
 
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> torch.Tensor:
-    """The blocks gathered from x's block (contiguous along dim), an opaque op, so a compiled graph calls it as torch's
+    """The blocks gathered along `dim` from x's block, an opaque op, so a compiled graph calls it as torch's
     functional collectives are called.  On the mesh backend the list is a split of `out`, so it is one MPI_Allgatherv
     into `out` in place (ncclMeshAllGatherV: backend.py allgather).  Where the output is a region tensor (_region_backed),
-    it is the shape's held lease (_gathering), each rank's segment on a page of its own; this rank's block is copied
-    into its segment and gathered from there, the call in place (nccl.h: sendbuff rank's segment of recvbuff; mesh
-    f9898875), and the blocks' elements are taken out of the segments in one pass; else out of place from x's block."""
+    it is the shape's held lease (_gathering), each rank's segment on a page of its own holding its block as the block
+    lies, in x's layout; this rank's block is copied into its segment and gathered from there, the call in place (nccl.h:
+    sendbuff rank's segment of recvbuff; mesh f9898875), and the segments are joined along `dim` in one pass, so a
+    gather along any dimension the data declares makes no transposing copy; else out of place from x's block."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     if not _region_backed(x, group):
         y = x.movedim(dim, 0).contiguous()
         out = _empty((sum(sizes),) + y.shape[1:], y)
         dist.all_gather(list(out.split(sizes)), y, group=group)
         return out.movedim(0, dim).contiguous()
-    y = x.movedim(dim, 0)
-    out, counts, starts, index = _gathering(y, sizes, group)
-    rank = dist.get_rank(group)
-    mine = out[starts[rank]:starts[rank] + counts[rank]]
-    mine[:y.numel()].view(y.shape).copy_(y)
-    dist.all_gather(list(out.split(counts)), mine, group=group)
-    return out.index_select(0, index).view((sum(sizes),) + y.shape[1:]).movedim(0, dim).contiguous()
+    out, counts, starts = _gathering(x, dim, sizes, group)
+    rank, shape = dist.get_rank(group), lambda s: x.shape[:dim] + (s,) + x.shape[dim + 1:]
+    out[starts[rank]:starts[rank] + x.numel()].view(x.shape).copy_(x)
+    dist.all_gather(list(out.split(counts)), out[starts[rank]:starts[rank] + counts[rank]], group=group)
+    return torch.cat([out[a:a + math.prod(shape(s))].view(shape(s)) for a, s in zip(starts, sizes)], dim)
 
 
 _GATHERS = {}
 
 
-def _gathering(y, sizes, group):
-    """allgatherv's output for blocks like `y` (the gathered dimension first) of `sizes` on `group`, leased once for
-    the shape and held (design/rubrics.md D8): each rank's segment its block's elements padded to whole pages, since the
-    library places each segment on a page of its own and the bridge moves whole pages (rdma/nccl.h, Memory;
-    design/data-model.md section 8); with the segments' counts and starts and the index of the blocks' elements."""
-    key = (tuple(y.shape[1:]), y.dtype, tuple(sizes), group.group_name)
+def _gathering(x, dim, sizes, group):
+    """allgatherv's output for blocks like `x` along `dim` of `sizes` on `group`, leased once for the shape and held
+    (design/rubrics.md D8): each rank's segment its block's elements padded to whole pages, since the library places
+    each segment on a page of its own and the bridge moves whole pages (rdma/nccl.h, Memory; design/data-model.md
+    section 8); with the segments' counts and starts."""
+    key = (tuple(x.shape[:dim]), tuple(x.shape[dim + 1:]), x.dtype, tuple(sizes), group.group_name)
     if key not in _GATHERS:
-        row = math.prod(y.shape[1:])
-        counts, starts = _paged([s * row for s in sizes], y.element_size())
-        index = torch.cat([torch.arange(a, a + s * row) for a, s in zip(starts, sizes)]).to(y.device)
-        _GATHERS[key] = _empty((starts[-1],), y, group), counts, starts, index
+        row = math.prod(x.shape) // max(1, x.shape[dim])
+        counts, starts = _paged([s * row for s in sizes], x.element_size())
+        _GATHERS[key] = _empty((starts[-1],), x, group), counts, starts
     return _GATHERS[key]
 
 
@@ -452,8 +450,11 @@ class RaggedShard(Shard):
         return _reduce_scatterv(padded, self.dim, sizes, coordinate[mesh_dim], reduce_op, mesh.get_group(mesh_dim))
 
     def _to_replicate_tensor(self, local_tensor, mesh, mesh_dim, current_logical_shape):
-        sizes = _blocks(self._operand(mesh.size(mesh_dim)), current_logical_shape[self.dim])[0]
-        return pack(_allgatherv(local_tensor, self.dim, sizes, mesh.get_group(mesh_dim)), self.dim, self.key).contiguous()
+        """The blocks gathered (allgatherv), packed to the valid elements where a capacity exceeds its part; where
+        every part is its capacity, as the backend attaches them, the blocks laid end to end are the logical tensor."""
+        o = self._operand(mesh.size(mesh_dim))
+        gathered = _allgatherv(local_tensor, self.dim, _blocks(o, current_logical_shape[self.dim])[0], mesh.get_group(mesh_dim))
+        return gathered if o.cached('whole', lambda parts: tuple(parts) == o.capacity) else pack(gathered, self.dim, self.key).contiguous()
 
     def _to_partial_tensor(self, local_tensor, mesh, mesh_dim, current_logical_shape):
         """Shard to Partial("sum"): this rank's valid elements at their logical places, zeros elsewhere."""

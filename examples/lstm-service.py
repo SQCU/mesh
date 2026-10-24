@@ -74,7 +74,7 @@ def main():
     for s in range(ticks):
         top = tick(X[min(s, steps - 1)])
         if O is not None and s >= L - 1:
-            O[s - L + 1].copy_(top.T)
+            O[s - L + 1].copy_(top)
         if partition.rebalance(mesh, 'tp'):
             tick.follow()
         if s == half:
