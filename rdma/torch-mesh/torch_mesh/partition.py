@@ -1272,9 +1272,11 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     owner's rows of the partials (_block, in place in the region; keys past their valid extents masked, a causal one by
     the logical positions of its queries and keys, a half of the block attending only to the halves of this rank's keys
     it can see, none where it sees none); and the partials reduce-scattered by the library's partials operator, each
-    owner's rows merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV), the
-    output O / l and the logsumexp m + log l read from the merged lease in place.  This rank's own block is computed
-    while the gather is in flight.  Padded query rows compute garbage that the unshard drops.  Forward only."""
+    owner's rows merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV); the
+    partials' rows laid out position-major (each position's heads together), so the output O / l is one gather of the
+    merged rows into a region lease laid out [batch, positions, heads, dim] and divided there in place (a caller's
+    view of it as [batch, positions, heads x dim] is no copy), the logsumexp m + log l.  This rank's own block is computed while the gather is in flight.
+    Padded query rows compute garbage that the unshard drops.  Forward only."""
     from .backend import ProcessGroupMesh
     if not isinstance(group, ProcessGroupMesh):
         raise TypeError('mesh: the ring\'s merge is the mesh backend\'s partials operator (torch_mesh::merge_partials)')
@@ -1298,7 +1300,8 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
 
     def owned(j):
         """Block j's queries' attention over this rank's keys, as owner j's rows of the partials."""
-        into, q = owners[j].view(lead + (lengths[j], width)), blocks[j].view(lead + (lengths[j],) + query.shape[3:])
+        into = owners[j].view(lead[0], lengths[j], lead[1], width).transpose(1, 2)
+        q = blocks[j].view(lead + (lengths[j],) + query.shape[3:])
         queries, height = _positions(key_name, j, S, halves, query.device)[0], lengths[j] // halves
         for a, (_, hi) in enumerate(_spans(o, j, S, halves)):
             seen = [b for b, (lo, _) in enumerate(mine) if not is_causal or lo < hi]
@@ -1313,6 +1316,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
             owned(j)
     merged = _empty((rows[rank], width), query, group, torch.float32)
     group.merge_partials(merged, packed, rows)
-    m, l, out = (t.view(lead + (lengths[rank],) + t.shape[1:]) for t in (merged[:, 0], merged[:, 1], merged[:, 2:]))
-    lse = torch.where(l > 0, m + l.log(), -math.inf)
-    return out.div_(l[..., None]).masked_fill_((l == 0)[..., None], 0).to(query.dtype), lse
+    m, l = (t.view(lead[0], lengths[rank], lead[1]) for t in (merged[:, 0], merged[:, 1]))
+    out = _empty((lead[0], lengths[rank], lead[1], value.size(-1)), query, group)
+    out.view(-1, value.size(-1)).copy_(merged[:, 2:]).view(out.shape).div_(l[..., None]).masked_fill_((l == 0)[..., None], 0)
+    return out.transpose(1, 2), torch.where(l > 0, m + l.log(), -math.inf).transpose(1, 2)
