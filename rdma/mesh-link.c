@@ -1511,7 +1511,7 @@ static int child_spawn(struct port *port){
     if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)){if(errno==ESRCH)wake();return EBUSY;}
     say("link %u (%s): process %d, a child of its device from an earlier launch, holds its queue pairs until its exit; its "
         "own child spawned after it\n",port->index,port->name,(int)elsewhere);
-    port->elsewhere=elsewhere;port->awaited_by=now+MESH_PLATFORM_NS;
+    port->elsewhere=elsewhere;
     return EBUSY;
   }
   /* design/transport.md section 2: the child's entry among the region's holders, one no live child holds; where every
@@ -1618,21 +1618,12 @@ static void child_heard(struct port *port){
   }
 }
 /* a port whose link was lost once its lanes were asked for (`recycle`) asks its child to end once its quiet window and
-   the exit's have ended (B9, B9b: no release inside a termination) and no job of its own is out (B12), and awaits its
-   exit 2 MESH_PLATFORM_NS at most (child_leave's bound and one more for the kernel's release); a child's exit awaited
-   past its deadline (`awaited_by`: this one, or an earlier launch's, child_spawn) ends this bridge at once, the wait
-   named */
+   the exit's have ended (B9, B9b: no release inside a termination) and no job of its own is out (B12) */
 static void child_turn(struct port *port){
-  if(port->awaited_by && now>=port->awaited_by){
-    say("bridge: link %u (%s): process %d has not ended by its deadline (%s); this bridge exits\n",port->index,port->name,
-        (int)(port->elsewhere?port->elsewhere:port->child),port->elsewhere?"child_spawn's wait on an earlier launch's child":
-        "child_turn's wait on its child asked to end");
-    exit(EX_SOFTWARE);
-  }
   if(!port->recycle || !port->child || port->ending || port->job || port->link.job || now<atomic_load(&port->quiet_at) ||
      now<atomic_load(&exit_at))return;
   child_send(port,(struct child_message){.kind=CHILD_END});
-  port->ending=1;port->awaited_by=now+2*MESH_PLATFORM_NS;
+  port->ending=1;
   say("link %u (%s): its child %d asked to end, its lanes released at its exit (design/transport.md section 14)\n",
       port->index,port->name,(int)port->child);
 }
@@ -1649,17 +1640,8 @@ static void child_reaped(struct port *port){
   int status=0;
   if(port->child_fd>=0)child_heard(port);
   if(port->child_fd>=0){close(port->child_fd);port->child_fd=-1;}
-  for(const uint64_t until=clock_ns()+MESH_PLATFORM_NS;;){
-    const pid_t got=waitpid(pid,&status,WNOHANG);
-    if(got==pid || (got<0 && errno!=EINTR))break;
-    if(clock_ns()>=until){
-      say("bridge: link %u (%s): its child %d not reaped %.0f s after its end was heard (child_reaped's waitpid); this bridge "
-          "exits\n",port->index,port->name,(int)pid,(double)MESH_PLATFORM_NS/1e9);
-      exit(EX_SOFTWARE);
-    }
-    poll(NULL,0,1);
-  }
-  port->child=0;port->awaited_by=0;
+  while(waitpid(pid,&status,0)<0 && errno==EINTR){}
+  port->child=0;
   if(port->holder<2*MESH_PORTS && mesh_bridge_pages(M)->child[port->holder].pid==(uint32_t)pid)
     mesh_bridge_pages(M)->child[port->holder]=(struct mesh_holder){0};
   const int asked=port->ending;
@@ -1681,15 +1663,13 @@ static void child_reaped(struct port *port){
   port->opening=1;
 }
 
-/* design/transport.md: the clients' control word, watched for the event loop, each wait MESH_PAUSE_NS at most and the
-   stop read after it */
+/* design/transport.md: the clients' control word, watched for the event loop */
 static void *control_watch(void *unused){
   (void)unused;
   while(!stop){
     uint64_t seen=atomic_load_explicit(&M->control,memory_order_acquire);
     wake();
-    os_sync_wait_on_address_with_timeout(&M->control,seen,sizeof M->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-                                         OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS);
+    os_sync_wait_on_address(&M->control,seen,sizeof M->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
   }
   return NULL;
 }
@@ -1970,7 +1950,7 @@ static uint64_t turn_due(uint64_t liveness){
   due_at(&due,atomic_load(&exit_at));
   for(uint32_t p=0;p<port_count;p++){
     const struct port *port=ports+p;
-    due_at(&due,atomic_load(&port->quiet_at));due_at(&due,port->hold_to);due_at(&due,port->awaited_by);
+    due_at(&due,atomic_load(&port->quiet_at));due_at(&due,port->hold_to);
     if(port->opening)due_at(&due,port->retry_at);
     if(port->open && port->control<0)due_at(&due,port->next);
     if(port->job)due_at(&due,port->job_at+MESH_PLATFORM_NS);
@@ -2109,7 +2089,7 @@ int main(int argc,char **argv){
       else if(e->udata!=UINT64_MAX && (e->udata&TAG_CHILD)){
         struct port *port=(e->udata&0xff)<port_count?ports+(e->udata&0xff):NULL;
         if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->child)child_reaped(port);
-        else if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->elsewhere)port->elsewhere=port->awaited_by=0;
+        else if(port && e->filter==EVFILT_PROC && (pid_t)e->ident==port->elsewhere)port->elsewhere=0;
         else if(port && e->filter==EVFILT_READ && (int)e->ident==port->child_fd)child_heard(port);
       }
       else if(e->filter==EVFILT_PROC){
@@ -2191,12 +2171,7 @@ int main(int argc,char **argv){
       else ports[p].child=0;
     }
     const uint64_t at=clock_ns();
-    if(!left)break;
-    if(at>=until){
-      say("bridge node %u: %u of its children not ended %.0f s after they were asked (the stop's await); this bridge exits\n",
-          node,left,(double)MESH_PLATFORM_NS/1e9);
-      exit(EX_SOFTWARE);
-    }
+    if(!left || at>=until)break;
     struct kevent64_s ended;
     struct timespec rest={(time_t)((until-at)/1000000000u),(long)((until-at)%1000000000u)};
     if(exits<0 || (kevent64(exits,NULL,0,&ended,1,0,&rest)<0 && errno!=EINTR))poll(NULL,0,(int)((until-at+999999)/1000000));

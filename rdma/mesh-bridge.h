@@ -274,14 +274,13 @@ struct port {
   /* the parent's: the port's child (design/transport.md section 14, "A process a port"): its process (0 none) and
      socket, the hold a spawn that failed sets before the next (`hold_to`), whether the port's link, lost once its lanes
      were asked for, waits to end its child (`recycle`) and whether that end was asked (`ending`), the part of its
-     child's next message read (`child_in`, `child_held` bytes of it), a child of its device from an earlier launch
-     last found alive (`elsewhere`: mesh-link.c child_elsewhere), and the deadline of the port's wait on a child's exit,
-     its own asked to end or that earlier one (`awaited_by`, 0 none: mesh-link.c child_turn) */
+     child's next message read (`child_in`, `child_held` bytes of it), and a child of its device from an earlier launch
+     last found alive (`elsewhere`: mesh-link.c child_elsewhere) */
   pid_t child,elsewhere;
   uint32_t holder;
   int child_fd,recycle,ending;
   uint32_t child_held;
-  uint64_t hold_to,awaited_by;
+  uint64_t hold_to;
   unsigned char child_in[sizeof(struct child_message)];
 };
 

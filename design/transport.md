@@ -100,12 +100,7 @@ NOTE_EXIT), never inferred from a delay. It is the one process that unlinks an e
 
 A bridge that ends unasked opens again 60 s later, so the mesh is never restarted more than once a minute (rubrics 6: "do
 not stop meshes hundreds of times per second, minute, or hour"); nothing else is built for a crash (rubrics position
-5). A bridge that ended finding its region expired opens again once the heartbeat has unlinked that region. Each of
-the heartbeat's waits has a deadline set as it begins: a bridge asked to close, 3 MESH_PLATFORM_NS; an expired region's
-holders, 2 MESH_PLATFORM_NS (a port child's own bound after its bridge has ended); a bridge's exit status,
-MESH_PLATFORM_NS. Past one the heartbeat exits at once, naming the wait, and launchd starts it again ThrottleInterval
-(60 s) later; the end of a release asked by SIGTERM or SIGINT exits 0. A heartbeat started again opens a bridge, so a
-release whose holders outlive their deadline is opened again once they have ended. A job whose
+5). A bridge that ended finding its region expired opens again once the heartbeat has unlinked that region. A job whose
 definition predates the heartbeat runs the bridge directly until the job's next load (launchd keeps a loaded
 definition): its stops keep the region as ever, and it has no release.
 
@@ -532,12 +527,10 @@ W(t) those requests already handed to the hardware reference, the plan's window 
   lanes and exits MESH_PLATFORM_NS later, its own windows held; a port's child is spawned only while no other child of
   its device lives (one of the launch before, whose parent ended unbidden; one in its exit is not seen), so a device's
   queue pairs are one child's at a time and no make meets the device's ceiling. At the bridge's stop every child is halted before the
-  farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS. Every wait on a child has a
-  deadline set as it begins, and past it the bridge exits at once, naming the wait (the operator, 2026-10-23: "no wait
-  may ever run longer than a deadline operand presented at the time the wait was constructed; the presumed default is 5
-  seconds"): a message to a child, or a child's to its parent (whose own process exits), MESH_PLATFORM_NS; a child
-  asked to end, 2 MESH_PLATFORM_NS (its leave's bound and one more for the kernel's release); an earlier launch's child,
-  a child's exit status and the stop's await, MESH_PLATFORM_NS each.
+  farewell, asked to end after the exit's hold, and awaited up to MESH_PLATFORM_NS. A message to a child, or a child's
+  to its parent, goes whole within MESH_PLATFORM_NS of its send, and a peer that takes none by then ends the sending
+  process at once, the wait named (the operator, 2026-10-23, of the blocking send: "forbidden. no wait may ever run
+  longer than a deadline operand presented at the time the wait was constructed; the presumed default is 5 seconds").
 - Streams across children. A port's streams' lists, rings and words are the parent's, leased once. Each stream names
   the child that posts on it (`child`, `child_start`), and its units count only while that process lives: a child's
   exit, whether this launch reaps it or it is an earlier launch's, releases every row its units named, by no port
