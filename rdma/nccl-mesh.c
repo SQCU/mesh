@@ -2274,7 +2274,19 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
    list's 0, each placed (place_group), its landings' gate (gate_of) and its relays (depend) found, the leases of the
    pool it holds (`leases`, and on the Metal path their Metal buffers, `buffers`, made resident on each issue's
    encoder), and the channel its entries lie on alone (`lone`: lone_on) */
-struct instance { struct call *calls; struct schedule *plans; void **leases, **buffers; uint32_t nleases, lone; };
+/* a bound group's dispatch, compiled at its plan (compile_ops) in the order its issue encodes it: a copy (OP_COPY: an
+   operand made in place, a scratch's copy, an all-to-all's own segment, a range of the result no step writes, a result
+   into recvbuff), a premultiply (OP_PREMUL) or a postdivision (OP_TRUNCDIV) of `n` elements of `type` by `value`; the
+   gate stored (OP_GATE); a channel's sends published through its group's `n`-th (OP_PUBLISH) or its next landing
+   consumed (OP_CONSUME); a fused group completed as its own (OP_COMPLETE: complete's records, its caller's kernels'
+   to run) */
+enum { OP_COPY, OP_PREMUL, OP_TRUNCDIV, OP_GATE, OP_PUBLISH, OP_CONSUME, OP_COMPLETE };
+struct op { int kind, mode, type; uint32_t channel; struct where dst, src; size_t n; uint64_t value; };
+/* ... and its dispatches (`ops`): those its issue encodes whether or not it completes ([0, body): its operands made in
+   place, its gate, its ranges no step writes), its publications that need no wait ([body, wait)), the rest of its
+   completion ([wait, epilogue)), and its results, at its retire ([epilogue, nops)) */
+struct instance { struct call *calls; struct schedule *plans; void **leases, **buffers; uint32_t nleases, lone; struct op *ops;
+                  uint32_t nops, room, body, wait, epilogue; };
 /* a declared group compiled once (ncclMeshCommPlan): its calls (`calls`, `n`, each with its steps), issued `repeat`
    times in a row, and its entries on each channel from each list's 0 (`plans`, each message's call one of `calls`);
    a bound one's `depth` issues of its own (`bound`, the k-th issue of it taking the (k mod depth)-th: `issued` its
@@ -3014,6 +3026,7 @@ struct inflight {
   uint32_t lone, repeats;
   int fused;
   struct plan *plan;
+  struct instance *in;
   struct inflight *next_group;
 };
 
@@ -3347,6 +3360,56 @@ static ncclResult_t complete(struct metal_program *program, struct inflight *thr
   return result;
 }
 
+/* bound group g's dispatches [from, to) of its instance's (struct op) encoded: each copy, premultiply and postdivision
+   as compiled, its gate at the communicator's gate count, and its channels' publications and consumptions through
+   publish and consume; a publication made where its channel's earlier groups' are all made (its `ready` covers them),
+   and passed where it already is */
+static ncclResult_t run_ops(struct metal_program *program, struct inflight *g, uint32_t from, uint32_t to, int *published) {
+  struct ncclComm *comm = g->comm;
+  ncclResult_t result = ncclSuccess;
+  for (uint32_t k = from; k < to && !result; k++) {
+    const struct op *o = g->in->ops + k;
+    struct channel *ch = comm->channels + o->channel;
+    const uint64_t upto = g->start[o->channel][0] + o->n;
+    switch (o->kind) {
+    case OP_COPY: result = gpu(metal_copy(program, o->mode, o->dst.buffer, o->dst.offset, o->src.buffer, o->src.offset, o->n), "a copy"); break;
+    case OP_PREMUL:
+      result = gpu(metal_premultiply(program, o->type, o->dst.buffer, o->dst.offset, o->src.buffer, o->src.offset, o->n, o->value), "the operand");
+      break;
+    case OP_TRUNCDIV:
+      result = gpu(metal_truncdiv(program, o->type, o->dst.buffer, o->dst.offset, o->src.buffer, o->src.offset, o->n, o->value), "the result");
+      break;
+    case OP_GATE:
+      for (uint32_t h = 0; h < comm->count; h++)
+        for (size_t j = 0; j < g->plans[h].ins; j++) metal_uses(program, &g->plans[h].in[j].data.buffer, 1, 1);
+      result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
+      break;
+    case OP_PUBLISH: if (ch->published >= g->start[o->channel][0] && ch->published < upto) result = publish(program, comm, o->channel, upto, published); break;
+    case OP_CONSUME: result = consume(program, comm, o->channel, METAL_NONE); break;
+    case OP_COMPLETE: result = complete(program, g, published); break;
+    }
+  }
+  return result;
+}
+
+/* every group in flight through `through` completed where each is bound and runs as its plan compiled it (struct
+   inflight `in`): each in issue order, its dispatches from its publications on (run_ops); 0 where one is not (complete
+   then completes them, generic) */
+static int bound_through(const struct inflight *through) {
+  for (const struct inflight *g = inflight; g; g = g == through ? NULL : g->next_group)
+    if (!g->in) return 0;
+  return 1;
+}
+static ncclResult_t complete_bound(struct metal_program *program, struct inflight *through, int *published) {
+  ncclResult_t result = ncclSuccess;
+  for (struct inflight *g = inflight; g && !result; g = g == through ? NULL : g->next_group) {
+    touch(g->comm);
+    metal_gate(program, g->comm->violation);
+    result = run_ops(program, g, g->in->body, g->in->epilogue, published);
+  }
+  return result;
+}
+
 /* a group's publications that need no wait, each channel's in order, a run of them one release: its earlier entries
    published, its steps' receives before them consumed */
 static ncclResult_t issue_group(struct metal_program *program, struct inflight *g, int *published) {
@@ -3370,8 +3433,10 @@ static ncclResult_t issue_group(struct metal_program *program, struct inflight *
 static ncclResult_t walk(struct metal_program *program, struct inflight *issuing, struct inflight *through, int *published) {
   ncclResult_t result = ncclSuccess;
   struct inflight *g = issuing;
-  if (through) { result = complete(program, through, published); g = through->next_group; }
-  for (; g && !result; g = g->next_group) result = issue_group(program, g, published);
+  if (through) { result = bound_through(through) ? complete_bound(program, through, published) : complete(program, through, published); g = through->next_group; }
+  for (; g && !result; g = g->next_group)
+    if (!g->in) result = issue_group(program, g, published);
+    else { touch(g->comm); metal_gate(program, g->comm->violation); result = run_ops(program, g, g->in->body, g->in->wait, published); }
   return result;
 }
 
@@ -3572,7 +3637,8 @@ static ncclResult_t retire(struct metal_program *program) {
     for (uint32_t h = 0; h < comm->count; h++)
       if (comm->channels[h].consumed < g->end[h][1] || comm->channels[h].published < g->end[h][0]) return ncclSuccess;
     metal_gate(program, comm->violation);
-    if (!result) result = epilogue(program, g->list, g->n);
+    int none = 0;
+    if (!result) result = g->in ? run_ops(program, g, g->in->epilogue, g->in->nops, &none) : epilogue(program, g->list, g->n);
     inflight = g->next_group;
     if (!inflight) inflight_last = NULL;
     atomic_store(&retired, g->ticket);
@@ -3822,6 +3888,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       for (uint32_t h = 0; h < comm->count; h++) { g->end[h][0] = comm->channels[h].sends; g->end[h][1] = comm->channels[h].lands; }
       g->lone = inst ? inst->lone : lone_on(comm, g->plans);
       g->list = list; g->n = n; g->ticket = ticket = ++tickets; g->plan = inst ? plan : NULL;
+      g->in = inst && fused_kind == x->fused && (repeats == 1 || fused_kind) ? inst : NULL;
       before = inflight_last;
       if (inflight_last) inflight_last->next_group = g; else inflight = g;
       inflight_last = g;
@@ -3831,7 +3898,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   /* the operands made in place, after the group's entries are presented and before its gate opens or anything is
      published: a premultiply, or a copy within the region, where a call reads no send buffer in place; a scratch's
      copy; an all-to-all's own segment */
-  for (size_t i = 0; i < n && !result; i++) {
+  if (!result && g && g->in) result = run_ops(program, g, 0, g->in->body, &published);
+  for (size_t i = 0; i < n && !result && !(g && g->in); i++) {
     struct call *c = list + i;
     struct steps *st = c->bound;
     const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
@@ -3857,9 +3925,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (uint32_t b = 1; st && b < st->buffers && !result && !c->direct; b++)
       result = gpu(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset, own.buffer, own.offset, bytes), "a scratch copy");
   }
-  for (uint32_t h = 0; !result && gate && g && h < comm->count; h++)
+  for (uint32_t h = 0; !result && gate && g && !g->in && h < comm->count; h++)
     for (size_t k = 0; k < g->plans[h].ins; k++) metal_uses(program, &g->plans[h].in[k].data.buffer, 1, 1);
-  if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
+  if (!result && gate && !(g && g->in)) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;
     for (uint32_t h = 0; h < comm->count && !inst; h++) {
@@ -3884,7 +3952,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (g->fused) { fusing.out->publishes = fusing.published; fusing.out->lands = fusing.landed; }
     fusing.out = NULL;
     metal_gate(program, violation);
-    for (size_t i = 0; i < n && !result; i++) result = complement_copy(program, list + i);
+    for (size_t i = 0; i < n && !result && !g->in; i++) result = complement_copy(program, list + i);
     if (!result) result = retire(program);
   } else if (!result) result = epilogue(program, list, n);
   program_end(program, on.encoder != NULL, result);
@@ -4175,7 +4243,7 @@ static void plan_release(struct ncclComm *comm, struct plan *plan) {
       if (in->calls) calls_free(in->calls, x->n);
       schedules_free(comm, in->plans);
       for (uint32_t k = 0; k < in->nleases; k++) spare_free(comm, in->leases[k]);
-      free(in->leases); free(in->buffers);
+      free(in->leases); free(in->buffers); free(in->ops);
     }
     free(x->bound);
     calls_free(x->calls, x->n);
@@ -4211,6 +4279,110 @@ static ncclResult_t bound_lay(const struct ncclComm *comm, const struct instance
   if (result) { schedules_free(comm, made); made = NULL; }
   *plans = made;
   return result;
+}
+
+/* op `o` appended to instance in's dispatches; ENOMEM where it cannot be */
+static int op_add(struct instance *in, struct op o) {
+  if (in->nops == in->room) {
+    const uint32_t room = in->room ? 2 * in->room : 16;
+    struct op *grown = realloc(in->ops, room * sizeof *grown);
+    if (!grown) return ENOMEM;
+    in->ops = grown; in->room = room;
+  }
+  in->ops[in->nops++] = o;
+  return 0;
+}
+
+/* instance in's dispatches (struct op), each decision its issue's walk would make made once here.  Its operands made in
+   place (launch_metal's: an all-to-all's own segment, a premultiply or a copy of the operand, each scratch's copy, where
+   a call reads no send buffer in place), its gate where a landing waits on the communicator's (gate_of), its ranges no
+   step writes (complement_copy); then its completion: a fused group's its own (complete: its records, a one-way write
+   group's among them), any other's one fixed order (rdma/NCCL.md "One track"), each channel's runs of sends published as soon
+   as their receives before them are consumed (a relay's as its landing is), else the next landing consumed whose
+   receives before it are and whose combine's SEND is published, of the least round (a step's hop) of any channel's, then
+   the least channel: what lands from a later round waits on what this rank sends at an earlier one, never the reverse;
+   last its results into recvbuff (epilogue's).  A schedule that admits no order fails the plan as a value */
+static ncclResult_t compile_ops(struct ncclComm *comm, const struct compiled *x, struct instance *in) {
+  int status = 0;
+  for (size_t i = 0; i < x->n && !status; i++) {
+    const struct call *c = in->calls + i;
+    const struct steps *st = c->bound;
+    const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
+    const struct where send = c->send_at, own = c->sum;
+    if (c->target || p2p(c)) continue;
+    if (counted(c)) {
+      size_t sent, landed, part = own_segment(c, &sent, &landed);
+      if (part && !same(shifted(send, sent), shifted(c->recv_at, landed)))
+        status = op_add(in, (struct op){OP_COPY, METAL_PLAIN, 0, 0, shifted(c->recv_at, landed), shifted(send, sent), part, 0});
+      continue;
+    }
+    size_t length = c->count;
+    const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, comm->rank, &length) : 0;
+    if (!c->direct && reducing(c->what) && c->premultiplied)
+      status = op_add(in, (struct op){OP_PREMUL, 0, c->type, 0, own, send, all, scalar_bits(c)});
+    else if (!c->direct && (reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) &&
+             !same(shifted(own, before * z), send))
+      status = op_add(in, (struct op){OP_COPY, METAL_PLAIN, 0, 0, shifted(own, before * z), send, reducing(c->what) ? bytes : length * z, 0});
+    for (uint32_t b = 1; b < st->buffers && !status && !c->direct; b++)
+      status = op_add(in, (struct op){OP_COPY, METAL_PLAIN, 0, 0, st->buffer[b], own, bytes, 0});
+  }
+  for (uint32_t h = 0, gated = 0; h < comm->count && !status && !gated; h++)
+    if ((gated = in->plans[h].gated == 2)) status = op_add(in, (struct op){.kind = OP_GATE});
+  for (size_t i = 0; i < x->n && !status; i++) {
+    const struct call *c = in->calls + i;
+    for (uint32_t k = 0; k < c->complements && !status && !(c->target && comm->rank != c->target - 1); k++) {
+      const uint64_t *r = c->complement + 3 * k;
+      status = op_add(in, (struct op){OP_COPY, METAL_PLAIN, 0, 0, {c->sum.buffer, (size_t)r[0]}, {c->send_at.buffer, (size_t)r[1]}, (size_t)r[2], 0});
+    }
+  }
+  in->body = in->nops;
+  uint64_t *sent = calloc(comm->count + 1, sizeof *sent), *taken = calloc(comm->count + 1, sizeof *taken);
+  if (!status && (!sent || !taken)) status = ENOMEM;
+  if (!status && x->fused) status = op_add(in, (struct op){.kind = OP_COMPLETE});
+  in->wait = in->nops;
+  for (int sending = 1; !status && !x->fused;) {
+    int moved = 0, left = 0;
+    for (uint32_t h = 0; h < comm->count && !status; h++) {
+      const struct schedule *q = in->plans + h;
+      size_t run = sent[h];
+      while (run < q->outs && ready(q->out[run].c->bound, q->out[run].step)) run++;
+      if (run > sent[h]) { status = op_add(in, (struct op){.kind = OP_PUBLISH, .channel = h, .n = run}); sent[h] = run; moved = 1; }
+      left |= sent[h] < q->outs || taken[h] < q->ins;
+    }
+    if (sending && moved) in->wait = in->nops;
+    if (status || moved) continue;
+    if (!left) break;
+    sending = 0;
+    uint32_t best = comm->count, round = UINT32_MAX;
+    for (uint32_t h = 0; h < comm->count; h++) {
+      const struct schedule *q = in->plans + h;
+      const struct message *m = taken[h] < q->ins ? q->in + taken[h] : NULL;
+      if (m && ready(m->c->bound, m->step) && sent[h] >= m->need && m->c->bound->steps[m->step].round < round) {
+        best = h; round = m->c->bound->steps[m->step].round;
+      }
+    }
+    if (best == comm->count) { status = EDEADLK; break; }
+    const struct message *m = in->plans[best].in + taken[best]++;
+    m->c->bound->done[m->step] = 1;
+    status = op_add(in, (struct op){.kind = OP_CONSUME, .channel = best});
+  }
+  for (size_t i = 0; i < x->n; i++) memcpy(in->calls[i].bound->done, x->calls[i].bound->done, x->calls[i].bound->count);
+  free(sent); free(taken);
+  in->epilogue = in->nops;
+  for (size_t i = 0; i < x->n && !status; i++) {
+    const struct call *c = in->calls + i;
+    size_t length = c->count;
+    if (c->target || p2p(c) || counted(c)) continue;
+    if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == comm->rank) || c->what == MESH_REDUCE_SCATTER) {
+      const struct where from = shifted(c->sum, (c->what == MESH_REDUCE_SCATTER ? segment_at(c, comm->rank, &length) : 0) * SIZE[c->type]);
+      if (c->post) status = op_add(in, (struct op){OP_TRUNCDIV, 0, c->type, 0, c->recv_at, from, length, (uint64_t)comm->nranks});
+      else if (!same(from, c->recv_at)) status = op_add(in, (struct op){OP_COPY, METAL_LAND, 0, 0, c->recv_at, from, length * SIZE[c->type], 0});
+    } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && !same(c->sum, c->recv_at))
+      status = op_add(in, (struct op){OP_COPY, METAL_LAND, 0, 0, c->recv_at, c->sum, elements(c) * SIZE[c->type], 0});
+  }
+  if (status == EDEADLK) return fail(ncclInvalidUsage, "a declared group on communicator %s whose entries admit no order of their sends and landings",
+                                     comm->name);
+  return status ? fail(ncclSystemError, "out of memory") : ncclSuccess;
 }
 
 /* a lease of comm's pool a plan holds (struct spare holder): never a group's number */
@@ -4280,6 +4452,7 @@ static ncclResult_t bind_group(struct ncclComm *comm, struct compiled *x) {
     }
     if (!result && metal && !x->fused && !all_writes(x->calls, x->n)) gate_of(comm, in->plans);
     if (!result) { depend(comm, in->plans); in->lone = lone_on(comm, in->plans); }
+    if (!result) result = compile_ops(comm, x, in);
   }
   return result;
 }
