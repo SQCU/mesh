@@ -1958,8 +1958,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
         free(uncut); free(striped);
         return fail(ncclInvalidUsage, "compiling physical transfers for %s: %s", comm->name, strerror(-count));
       }
-      for (int j = 0; j < (c->fused && count ? 1 : count); j++) {
-        s->steps[s->count] = c->fused ? uncut[k] : striped[j].step;
+      for (int j = 0; j < (count ? 1 : count); j++) {
+        s->steps[s->count] = uncut[k];
         s->cable[s->count++] = striped[j].cable;
       }
     }
