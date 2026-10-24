@@ -1980,14 +1980,17 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
   return x->buffer == y->buffer && x->first < y->first + y->piece.elements && y->first < x->first + x->piece.elements;
 }
 
-/* the receive whose bytes SEND step k sends on unchanged, page by page as they land (design/data-model.md section 9: a
-   relay is the identity at a rank), or -1: the last receive before it that meets its piece, a COPY into the same
-   buffer whose piece holds its own, from a page of it (step k not reading the send buffer in place) */
-static int32_t forwards(const struct steps *s, uint32_t k, uint64_t page) {
+/* the receive whose bytes SEND step k sends on page by page as they are made (design/data-model.md section 9: a relay
+   is the identity at a rank, or the sum where it adds partials as they pass), or -1: the last receive before it that
+   meets its piece, a COPY into the same buffer (each page as it lands) or a combine there (`summed`, the call's sum
+   page by page: each page once summed, nccl-mesh-kernels.h PAGES; not a first combine reading the send buffer in
+   place), whose piece holds its own, from a page of it (step k not reading the send buffer in place) */
+static int32_t forwards(const struct steps *s, uint32_t k, uint64_t page, int summed) {
   if (s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
   const uint32_t r = s->prior[s->prior_first[k + 1] - 1];
   const struct mesh_step *a = s->steps + r, *b = s->steps + k;
-  return a->op == MESH_STEP_COPY && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements &&
+  const int made = a->op == MESH_STEP_COPY || (summed && a->op == MESH_STEP_REDUCE && !(s->fresh && s->fresh[r]));
+  return made && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements &&
          (b->first - a->first) * b->piece.element_bytes % page == 0 ? (int32_t)r : -1;
 }
 
@@ -2193,7 +2196,7 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
   size_t landing = 0, used = 0;
   for (uint32_t h = 0; h < comm->count; h++)
     for (size_t k = 0; k < plans[h].ins; k++)
-      if (plans[h].in[k].c->bound->steps[plans[h].in[k].step].op == MESH_STEP_REDUCE) landing += page_up(plans[h].in[k].bytes, page);
+      if (plans[h].in[k].c->bound->steps[plans[h].in[k].step].op == MESH_STEP_REDUCE) landing += page_up(plans[h].in[k].bytes, page) + page;
   struct where area = {NULL, 0};
   if (landing && !named(area = spare_where(program, comm, landing, holder))) return fail(ncclSystemError, "the group's landing area: %s", last.text);
   for (uint32_t h = 0; h < comm->count; h++)
@@ -2203,7 +2206,14 @@ static ncclResult_t place_group(struct metal_program *program, struct ncclComm *
         const struct steps *st = x->c->bound;
         const struct mesh_step *step = st->steps + x->step;
         if (send) x->data = shifted(st->read && named(st->read[x->step]) ? st->read[x->step] : st->buffer[step->buffer], x->offset);
-        else if (step->op == MESH_STEP_REDUCE) { x->data = shifted(area, used); used += page_up(x->bytes, page); }
+        else if (step->op == MESH_STEP_REDUCE) {
+          /* its landed bytes, then a page that counts its pages summed and their claims (metal_land), its first 512 bytes
+             made 0 before the landing is summed: here on the host path, in the stream on the GPU path (launch_metal),
+             since an earlier group's kernels may still be summing in this lease when it is taken again */
+          x->data = shifted(area, used); used += page_up(x->bytes, page);
+          if (!program) memset(address_of(shifted(area, used)), 0, 512);
+          used += page;
+        }
         else x->data = shifted(st->buffer[step->buffer], x->offset);
         const unsigned char *address = address_of(x->data);
         const int inside = in_region(comm, x->data, x->bytes);
@@ -2314,13 +2324,16 @@ static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans)
       const struct message *m = p->out + k;
       struct mesh_entry entry = {m->row, pages_to_word(m->pages), 0, pages_to_word(pages_sub(m->end, m->pages))};
       const struct steps *s = m->c->bound;
-      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]] : forwards(s, m->step, comm->page);
+      const int32_t dependency = m->c->target && comm->rank != m->c->root ? (int32_t)s->prior[s->prior_first[m->step]]
+                                                                           : forwards(s, m->step, comm->page, 0);
       if (dependency >= 0) {
         const uint32_t incoming = s->channel[dependency];
         const struct schedule *received = plans + incoming;
         const struct message *from = received->in + s->entry[dependency] - received->first[1];
-        entry.word = (uint64_t)((char *)comm->channels[incoming].view.landed - (char *)context->M);
-        entry.base = pages_to_word(pages_add(pages_sub(from->end, from->pages), pages_of(m->offset - from->offset, comm->page)));
+        const int summed = s->steps[dependency].op == MESH_STEP_REDUCE;
+        const char *word = summed ? (const char *)address_of(from->data) + page_up(from->bytes, comm->page) : (const char *)comm->channels[incoming].view.landed;
+        entry.word = (uint64_t)(word - (const char *)context->M);
+        entry.base = pages_to_word(pages_add(summed ? (mesh_pages){0} : pages_sub(from->end, from->pages), pages_of(m->offset - from->offset, comm->page)));
       }
       status = mesh_stream_present(context, ch->stream, 0, entry);
     }
@@ -2414,6 +2427,7 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
           unsigned char *to = address_of(st->buffer[step->buffer]) + m->offset;
           if (st->fresh && st->fresh[m->step]) memmove(to, address_of(st->read[m->step]) + m->offset, m->bytes);
           combine_into(ktype(m->c), kop(m->c), to, address_of(m->data), kcount(m->c, m->bytes));
+          atomic_store_explicit((_Atomic uint64_t *)(address_of(m->data) + page_up(m->bytes, comm->page)), pages_to_word(m->pages), memory_order_release);
         }
         st->done[m->step] = 1;
         ch->consumed++;
@@ -2839,7 +2853,7 @@ static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm
       if (!result)
         result = gpu(metal_combine3(program, m->c->type, m->c->combine, to.buffer, to.offset, m->data.buffer, m->data.offset, with.buffer, with.offset,
                                     m->bytes / SIZE[m->c->type]), "a first combine");
-    } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, kcount(m->c, m->bytes), &wait), "a landing");
+    } else result = gpu(metal_land(program, ktype(m->c), kop(m->c), to.buffer, to.offset, kcount(m->c, m->bytes), m->pages, comm->page, &wait), "a landing");
   } else if (!result && g->fused) {
     if (fusing.landed >= fusing.room[1])
       return fail(ncclInvalidUsage, "a fused crossing's landings past the %u its ncclMeshFused has room for (ncclMeshPlan's entries)", fusing.room[1]);
@@ -3502,6 +3516,18 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     for (uint32_t b = 1; st && b < st->buffers && !result && !c->direct; b++)
       result = gpu(metal_copy(program, METAL_PLAIN, st->buffer[b].buffer, st->buffer[b].offset, own.buffer, own.offset, bytes), "a scratch copy");
   }
+  /* each combine's count of pages summed and its claims made 0 in the stream, after every earlier group's kernels
+     (place_group: a lease of the pool may be taken again while an earlier group's kernels still sum in it) */
+  static void *zeros;
+  if (!result && g && !zeros && !(zeros = metal_shared(512))) result = fail(ncclSystemError, "out of memory");
+  if (!result && g) metal_resident(program, zeros);
+  for (uint32_t h = 0; !result && g && h < comm->count; h++)
+    for (size_t k = 0; !result && k < g->plans[h].ins; k++) {
+      const struct message *m = g->plans[h].in + k;
+      if (m->c->bound->steps[m->step].op == MESH_STEP_REDUCE)
+        result = gpu(metal_copy(program, METAL_PLAIN, m->data.buffer, m->data.offset + page_up(m->bytes, comm->page), zeros, 0, 512),
+                     "a combine's count of pages summed");
+    }
   for (uint32_t h = 0; !result && gate && g && h < comm->count; h++)
     for (size_t k = 0; k < g->plans[h].ins; k++) metal_uses(program, &g->plans[h].in[k].data.buffer, 1, 1);
   if (!result && gate) result = gpu(metal_open_gate(program, comm->gate, 0, comm->gates), "the group's gate");

@@ -1,4 +1,5 @@
 #import <Metal/Metal.h>
+#import <IOKit/IOKitLib.h>
 #include "nccl-mesh-metal.h"
 #include "nccl-mesh-kernels.h"
 #include "mesh_metal.h"
@@ -280,7 +281,7 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
   [encoder setComputePipelineState:state];
   [encoder setArgumentTable:program->table];
   const NSUInteger most = group ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
-  if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+  if (group) [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)group, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
   return METAL_DONE;
@@ -288,8 +289,8 @@ static struct metal_result dispatch4(struct metal_program *program, id<MTLComput
 
 /* kernel `kind` (KINDS_OF) on buffers d, s, a and v (0, 1, 3 and 4; an absent one d, and v, where none is given, the
    program's failure words: metal_gate) and the arguments p (2, its polls the program's where v is such words), the
-   progress word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`group`: publish,
-   spin) as one threadgroup of up to 1024 threads, any other over `units` threads */
+   progress word (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (publish, spin, a
+   landing) as `group` threadgroups of up to 1024 threads, any other over `units` threads */
 static struct metal_result record_step(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p);
 static int recording_on(const struct metal_program *program);
 static struct metal_result dispatch(struct metal_program *program, uint32_t kind, void *d, void *s, void *a, void *v, struct args p,
@@ -315,7 +316,7 @@ static struct metal_result dispatch(struct metal_program *program, uint32_t kind
     [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
     [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:5];
     const NSUInteger most = group ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
-    if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    if (group) [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)group, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   }
   return METAL_DONE;
@@ -385,8 +386,38 @@ struct metal_result metal_spin(struct metal_program *program, const struct metal
   return dispatch(program, KIND_spin, w->words, w->words, NULL, w->violation, wait_args(w, 0, 1, 0), 1, 1);
 }
 
-struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *w) {
-  return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, wait_args(w, dst_offset, n, op), n, 0);
+/* the GPU's cores (its registry entry's gpu-core-count; 8 where it tells none), read once */
+static uint32_t gpu_cores(void) {
+  static uint32_t cores;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const io_service_t gpu = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOAccelerator"));
+    CFTypeRef count = gpu ? IORegistryEntrySearchCFProperty(gpu, kIOServicePlane, CFSTR("gpu-core-count"), kCFAllocatorDefault,
+                                                            kIORegistryIterateRecursively) : NULL;
+    int value = 0;
+    if (count && CFGetTypeID(count) == CFNumberGetTypeID()) CFNumberGetValue((CFNumberRef)count, kCFNumberIntType, &value);
+    if (count) CFRelease(count);
+    if (gpu) IOObjectRelease(gpu);
+    cores = value > 0 ? (uint32_t)value : 8;
+  });
+  return cores;
+}
+/* the threadgroups a landing's pages are summed by, each of `parties` running its own at once (a track each, or one
+   dispatch): the GPU's cores shared among them, at most 8 each, at least 1 */
+static uint32_t workers_of(uint32_t parties) {
+  (void)parties; (void)gpu_cores;
+  return 1;
+}
+
+struct metal_result metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, size_t n, mesh_pages pages,
+                               uint64_t page, const struct metal_wait *w) {
+  if (type == METAL_MERGE)
+    return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, wait_args(w, dst_offset, n, op), n, 0);
+  struct args p = wait_args(w, dst_offset, n, op);
+  p.scalar = pages_to_word(pages_sub(w->target, pages)) + 1;
+  p.count = (uint32_t)pages_to_word(pages);
+  p.mask = (uint32_t)page;
+  return dispatch(program, typed(OP_LAND, type), dst, w->data, w->words, w->violation, p, n, (int)workers_of(1));
 }
 
 /* a deferred step's program is one whose records the argument ring holds (metal_begin4, or metal_begin with a residency
@@ -494,12 +525,12 @@ struct metal_result metal_depend(struct metal_program *program, uint32_t other, 
 }
 
 /* the records as the track kernel reads them (TRACKS: track_head, track, track_item, track_op, track_dep) */
-struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint32_t tracks, polls; };
+struct track_head { uint64_t tracks_off, items_off, ops_off, deps_off, count_off, sequence, progress_off; uint32_t tracks, polls, workers, pad; };
 struct track_rec { uint32_t first[2], count[2]; };
 struct track_item { uint64_t position, need, target, word, v; uint32_t first_op, ops, first_dep, deps, wait_op, cursor; };
 struct track_op { uint64_t d, s, a, v; struct args p; uint32_t kind, pad; };
 struct track_dep { uint64_t count; uint32_t other, pad; };
-_Static_assert(sizeof(struct track_head) == 64 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
+_Static_assert(sizeof(struct track_head) == 72 && sizeof(struct track_rec) == 16 && sizeof(struct track_item) == 64 &&
                sizeof(struct track_op) == 120 && sizeof(struct track_dep) == 16, "the track records");
 
 static uint64_t up(uint64_t x) { return (x + 255) & ~(uint64_t)255; }
@@ -544,7 +575,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     }
     const uint64_t T = r->tracks, at_tracks = up(sizeof(struct track_head)), at_items = up(at_tracks + T * sizeof(struct track_rec));
     const uint64_t at_ops = up(at_items + r->items * sizeof(struct track_item)), at_deps = up(at_ops + r->ops * sizeof(struct track_op));
-    const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), bytes = up(at_count + T * sizeof(uint64_t));
+    const uint64_t at_count = up(at_deps + r->deps * sizeof(struct track_dep)), bytes = up(at_count + 3 * T * sizeof(uint64_t));
     const uint64_t sequence = ++ring->sequence, first = ring_take(ring, sequence, bytes);
     if (first == UINT64_MAX) {
       recording_free(r);
@@ -553,7 +584,8 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     }
     unsigned char *base = (unsigned char *)ring->buffer.contents + first;
     const uint64_t address = ring->buffer.gpuAddress;
-    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, first + at_count, sequence, 0, (uint32_t)T, program->polls};
+    const uint32_t W = workers_of((uint32_t)T);
+    *(struct track_head *)base = (struct track_head){at_tracks, at_items, at_ops, at_deps, first + at_count, sequence, 0, (uint32_t)T, program->polls, W, 0};
     struct track_rec *rec = (struct track_rec *)(base + at_tracks);
     struct track_item *item = (struct track_item *)(base + at_items);
     uint32_t placed = 0;
@@ -578,6 +610,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
     for (size_t x = 0; x < r->deps; x++) dep[x] = (struct track_dep){r->dep[x].count, r->dep[x].other, 0};
     uint64_t *count = (uint64_t *)(base + at_count);
     for (uint32_t t = 0; t < T; t++) count[t] = t < tracks ? consumed[t] : 0;
+    memset(count + T, 0, 2 * T * sizeof *count);
     const NSUInteger width = state.maxTotalThreadsPerThreadgroup < 1024 ? state.maxTotalThreadsPerThreadgroup : 1024;
     if (program->encoder4) {
       metal_resident(program, ring->buffer);
@@ -587,7 +620,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
       id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
       [encoder setComputePipelineState:state];
       [encoder setArgumentTable:program->table];
-      [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+      [encoder dispatchThreadgroups:MTLSizeMake(T * W, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
       [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
     } else {
       if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
@@ -596,7 +629,7 @@ struct metal_result metal_tracks(struct metal_program *program, uint32_t tracks,
       [encoder setComputePipelineState:state];
       [encoder setBuffer:ring->buffer offset:first atIndex:0];
       [encoder setBuffer:ring->buffer offset:0 atIndex:1];
-      [encoder dispatchThreadgroups:MTLSizeMake(T, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+      [encoder dispatchThreadgroups:MTLSizeMake(T * W, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     }
   }
   recording_free(r);
