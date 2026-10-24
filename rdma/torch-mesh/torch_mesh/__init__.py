@@ -33,9 +33,26 @@ def compiler(gm, example_inputs):
     nothing wrapped around its run.  A compiled collective's publication is committed by the same rule as an eager
     one's (_stream.mm, the commit rule; README, Performance), so how a program is written does not decide how fast its
     collectives are.  The graph the backend is handed is a forward (a training graph's backward runs from autograd,
-    under the same rule)."""
+    under the same rule).  Its all-reduces are torch_mesh::all_reduce (backend.all_reduce), which Inductor calls rather
+    than lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
+    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory)."""
+    import torch
     from torch._dynamo import lookup_backend
-    return lookup_backend('inductor')(gm, example_inputs)
+    from torch._inductor import config
+    from torch._inductor.custom_graph_pass import CustomGraphPass
+
+    from . import backend  # noqa: F401  (torch_mesh::all_reduce)
+
+    class Leased(CustomGraphPass):
+        def __call__(self, graph):
+            for node in graph.nodes:
+                if node.target is torch.ops._c10d_functional.all_reduce.default:
+                    node.target = torch.ops.torch_mesh.all_reduce.default
+
+        def uuid(self):
+            return 'torch_mesh::all_reduce'
+    with config.patch(post_grad_custom_pre_pass=Leased()):
+        return lookup_backend('inductor')(gm, example_inputs)
 
 
 def empty(*size, dtype=None, device='mps'):

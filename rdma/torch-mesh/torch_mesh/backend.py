@@ -378,6 +378,18 @@ def _(partials, root, group_name):
     return torch.empty_like(partials)
 
 
+@torch.library.custom_op('torch_mesh::all_reduce', mutates_args=())
+def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str) -> torch.Tensor:
+    """torch's functional all_reduce as an op a compiled graph calls (torch_mesh.compiler): its result the functional
+    kernel's region lease (_stream.mm functional), its work waited where the graph waits on it (wait_tensor)."""
+    return torch.ops._c10d_functional.all_reduce.default(input, reduce_op, group_name)
+
+
+@all_reduce.register_fake
+def _(input, reduce_op, group_name):
+    return torch.empty_like(input)
+
+
 def create(opts, options):
     """The group (torch's extended creator: `opts` its store, rank and size; `options`, the caller's pg_options, not
     read: a group's map is its bridges')."""
