@@ -646,10 +646,98 @@ def calls(tensor):
 
 def plan(mesh, name, groups):
     """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
-    `groups` from the ops' own (calls, gathered, scattered), as a step issues them; again after each move, whose
-    new parts are new shapes."""
+    `groups` from the ops' own (calls, gathered, scattered), as a step issues them, or a function of no arguments
+    giving them from the parts attached now, which is called again where the balancer moves the parts (a list
+    declared is dropped there: its counts are the old parts')."""
     from . import plan as declare
-    return declare(mesh.get_group(name), groups)
+    _PLANS[mesh, name] = groups
+    return declare(mesh.get_group(name), groups() if callable(groups) else groups)
+
+
+_PLANS = {}
+
+
+def _replan(mesh, name):
+    """The plan declared on `name` (plan) compiled again on the parts attached now, or dropped where it was a list."""
+    groups = _PLANS.get((mesh, name))
+    if groups is not None:
+        from . import plan as declare
+        declare(mesh.get_group(name), groups() if callable(groups) else [])
+
+
+# The balancer between evaluations (design/data-model.md section 9: "Between one evaluation and the next, the balancer
+# sets the shares ... A new share is then a new compiled plan ... Within an evaluation, nothing about the shares is
+# chosen"; the operator, 2026-10-23: "it is the collective's job to use every rank to the maximum extent possible and
+# measure the residual in completion time between ranks to allow for cross-function-evaluation rebalancings").
+_BALANCING = {}
+
+
+def evaluations(mesh, name, count):
+    """The program's `count` evaluations over partitioned mesh dimension `name`, one a yield (its index): the program
+    declares where its evaluations are, as it declares its tensors and its plan, and never sees a share.  Between two,
+    the collective balances `name` (_balance): the dimension's Balancer (allocate.Balancer, made at the first call
+    for the group's life, in memory) steps on each rank's work between its collectives in the evaluations the GPU has
+    passed (torch_mesh.evidence, watched from here and read without a wait), every rank's exchanged once on the host
+    path (_shared); where it moves the parts, every tensor partition split along `name` is re-laid in place
+    (_relay) and the declared plan compiled again (_replan)."""
+    import allocate
+    from . import evidence
+    group, o = mesh.get_group(name), operand(mesh, name)
+    held = _BALANCING.setdefault((mesh, name), {})
+    if 'balancer' not in held:
+        n = len(o.capacity)
+        held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': [o.units - n + 1] * n}}),
+                    closed=0, read=0, skip=0)
+        evidence.watch(group, mesh.device_type)
+    for k in range(count):
+        if k:
+            _balance(mesh, name, held, group)
+        yield k
+
+
+def _balance(mesh, name, held, group):
+    """One boundary between evaluations: the evaluation just issued closed (evidence.step), the closed evaluations the
+    GPU has passed read (those issued before the last move dropped: they ran on the old parts), this rank's work in
+    each (the sum of its stretches) exchanged with every rank's, and, once every rank has some, one step of the
+    Balancer on them (its robust median and error a rank; the same on every rank, from the same words); a move
+    attaches its parts, re-lays and replans."""
+    from . import evidence
+    o = operand(mesh, name)
+    evidence.step(group)
+    held['closed'] += 1
+    steps = evidence.work(group)
+    held['read'] += len(steps)
+    drop = min(held['skip'], len(steps))
+    held['skip'] -= drop
+    words = _shared(held, group, [sum(s) for s in steps[drop:]])
+    if not all(words):
+        return
+    balancer = held['balancer']
+    balancer.decisions[name]['parts'] = o.parts.tolist()
+    parts = [int(p) for p in balancer.observe({'evaluation': {'scales': {name: [1.0] * len(words)}, 'times': words}})[name]]
+    if parts == o.parts.tolist():
+        return
+    held['skip'] = held['closed'] - held['read']
+    _attach(mesh, name, parts)
+    _relay(mesh, name)
+    _replan(mesh, name)
+
+
+def _shared(held, group, words):
+    """Each rank's `words` (float64) on every rank, through the backend on the host path: each rank's segment whole
+    pages of a CPU region lease (the library sends only leases and places each segment on a page: rdma/nccl.h Memory;
+    torch's memory on a group of another backend), sized at the first exchange from its words and held, grown where a
+    later one's need more (every rank's alike), its words' count then the words, all gathered by one
+    all_gather_into_tensor; a host-path call, complete where it returns, with nothing of torch's stream waited for."""
+    from . import empty as lease
+    n, need = dist.get_world_size(group), _paged([1 + len(words)], 8, group)[0][0]
+    if held.get('page', 0) < need:
+        made = lease if getattr(group, 'handle', 0) else lambda size, dtype, device: torch.empty(size, dtype=dtype, device=device)
+        held['page'], held['pages'] = need, (made(need, dtype=torch.float64, device='cpu'), made(n * need, dtype=torch.float64, device='cpu'))
+    mine, every = held['pages']
+    mine[:1 + len(words)] = torch.tensor([float(len(words))] + [float(w) for w in words], dtype=torch.float64)
+    dist.all_gather_into_tensor(every, mine, group=group)
+    return [row[1:1 + int(row[0])] for row in every.view(n, held['page']).tolist()]
 
 
 def split(mesh, name, N):
