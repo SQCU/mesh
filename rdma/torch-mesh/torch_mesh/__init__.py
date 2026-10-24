@@ -35,23 +35,68 @@ def compiler(gm, example_inputs):
     collectives are.  The graph the backend is handed is a forward (a training graph's backward runs from autograd,
     under the same rule).  Its all-reduces are torch_mesh::all_reduce (backend.all_reduce), which Inductor calls rather
     than lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
-    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory)."""
+    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory).  Its products of a
+    few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
+    a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
+    torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
+    product's one use folded into it.  Inductor's run-time size, alignment and scalar asserts are off: each is a check
+    at every call of what the compile fixed (design/data-model.md section 6)."""
+    from pathlib import Path
+
     import torch
     from torch._dynamo import lookup_backend
     from torch._inductor import config
     from torch._inductor.custom_graph_pass import CustomGraphPass
 
-    from . import backend  # noqa: F401  (torch_mesh::all_reduce)
+    from . import _stream, backend  # noqa: F401  (torch_mesh::all_reduce)
+    from .streamed import node
+    _stream.linear_source((Path(__file__).parent / 'linear.metal').read_text(), node()[1])
+
+    aten = torch.ops.aten
+
+    def rows(x, w):
+        """Whether x @ w is linear's: fp16, x [R <= 8, K] contiguous, w the transposed view of a [N, K] whose rows lie
+        apart by K or more."""
+        x, w = x.meta.get('val'), w.meta.get('val')
+        return (x is not None and w is not None and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
+                and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
     class Leased(CustomGraphPass):
         def __call__(self, graph):
-            for node in graph.nodes:
+            for node in list(graph.nodes):
                 if node.target is torch.ops._c10d_functional.all_reduce.default:
                     node.target = torch.ops.torch_mesh.all_reduce.default
+                    made = node.args[0]
+                    if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
+                            and made.args[2:] in ((), (None,))):
+                        with graph.inserting_before(node):
+                            summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2]))
+                        summed.meta['val'] = node.meta['val']
+                        node.replace_all_uses_with(summed)
+                        graph.erase_node(node)
+                        graph.erase_node(made)
+                    continue
+                mm = node.target is aten.mm.default and rows(*node.args)
+                addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
+                         and node.args[0].meta['val'].dim() == 1)
+                if mm or addmm:
+                    x, w = node.args[-2:]
+                    with graph.inserting_before(node):
+                        weight = graph.call_function(aten.permute.default, (w, [1, 0]))
+                        weight.meta['val'] = w.meta['val'].permute(1, 0)
+                        made = graph.call_function(torch.ops.torch_mesh.linear.default, (x, weight, node.args[0] if addmm else None))
+                    made.meta['val'] = node.meta['val']
+                    node.replace_all_uses_with(made)
+                    graph.erase_node(node)
+                    users = list(made.users)
+                    if len(users) == 1 and users[0].target is aten.tanh.default:
+                        made.args = made.args + (1,)
+                        users[0].replace_all_uses_with(made)
+                        graph.erase_node(users[0])
 
         def uuid(self):
-            return 'torch_mesh::all_reduce'
-    with config.patch(post_grad_custom_pre_pass=Leased()):
+            return 'torch_mesh::all_reduce torch_mesh::linear'
+    with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
 
