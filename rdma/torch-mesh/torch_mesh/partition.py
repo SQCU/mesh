@@ -453,11 +453,14 @@ def deliver(tensor):
         raise ValueError('mesh: deliver sends a tensor of a whole number of 16-bit words')
     publish, land = _stream.fused_broadcast(tensor, src, group.handle, _stream.polls)
     crossing = fused.Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
-    if group.rank() == src:
+    if group.rank() == src and publish:
         n, threads = len(publish), _GATHER_THREADS
         arrivals = torch.zeros(1, dtype=torch.int32, device=tensor.device)
         fused.encode(_deliver_kernel('deliver_publish', n, threads), [tensor, tensor, arrivals], [tensor.nbytes // 2, 0], 15,
                      max(1, min(64, -(-tensor.nbytes // 2 // (threads * 8)))), 1, threads, n, publish=crossing)
+    if group.rank() == src or not land:
+        # the source, or a group the library ran unfused (no records: its own steps encoded in the stream, the landing
+        # awaited there whole), so no read waits on its pages
         _stream.delivered(tensor, None, [], [], 0)
         return
     held = torch.empty(len(land) * 128, dtype=torch.uint8, device=tensor.device)
