@@ -155,9 +155,9 @@ for its reduce and broadcast; every link in use, each tree's part its flow's sha
 - the reduce-scatter and the all-gather, segment s up and down s's trees;
 - each root's reduce and broadcast, up and down the root's own packed trees, toward its min cut.
 
-Each tree's part is cut into 4 chunks, so a member forwards a chunk as it lands and an all-reduce's all-gather of a
-chunk follows its reduce-scatter; a step's piece is one entry of its holding's list, which the bridge alone cuts into
-SENDs. A program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) lie on the region's pages
+Each is uncut: a step's piece is one entry of its holding's list, any size, which the bridge alone cuts into SENDs (in
+4 chunks the all-gather, the reduce-scatter and the all-reduce ran 15 to 50% slower from 256 KiB to 4 MiB on three
+nodes, and no faster above). A program's own cuts (a two-phase all-reduce's segments, a tree's shares, chunks) lie on the region's pages
 (`mesh_program_steps_cut`), so every piece starts on a page wherever its buffer does ([Memory](#memory)). A call runs
 its table's first program of its collective (and root) whose size bound its operand is under. Nothing about a program
 is decided where a call runs.

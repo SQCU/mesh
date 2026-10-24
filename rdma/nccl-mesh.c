@@ -500,15 +500,15 @@ static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees 
    share, so a part crosses every route and the routes end together [Garg & Konemann 1998; Blink, Wang et al. 2020]),
    the all-reduce two-phase (the reduce-scatter and then the all-gather over every pair [Patarasuk & Yuan 2009]), the
    reduce-scatter and the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, each tree's
-   part in CHUNKS chunks, so a member forwards a chunk as it lands and the all-gather's chunk follows the reduce-scatter's,
-   a chunk never under a page (mesh_program_steps_cut), of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table,
-   its entries along the routes): a
+   part uncut, one entry the bridge cuts into SENDs (in 4 chunks on three nodes, the all-gather, the reduce-scatter and
+   the all-reduce ran 15 to 50% slower from 256 KiB to 4 MiB and no faster above: metal-microbench
+   output_data/route-20261023/explore-0013), of any size (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries
+   along the routes): a
    call takes the first entry that fits it (program_of), so a collective no form names, or a size past every form's
    bound, runs the caller's program or the default.  Where trees are compiled (a form, or no programs listed), a map
    whose links do not join its members fails it, naming two: a route crosses ranks alone, each sending on what lands
    (a rank with no work: the identity, mesh-plan.h mesh_compile's contributors), so a node a route is to cross takes
    part as a rank */
-#define CHUNKS 4
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
   if (n < 2) return ncclSuccess;
@@ -554,11 +554,11 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
     comm->entries[comm->programs++].below = comm->given[e].below;
   }
   if (comm->listed) return ncclSuccess;
-  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, CHUNKS, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, CHUNKS, 0) ||
-      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, CHUNKS, 0))
+  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 0, 1, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 1, 0) ||
+      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 1, 0))
     return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
   for (uint32_t r = 0; r < n; r++)
-    if (compile_entry(comm, rooted, MESH_REDUCE, r, 0, CHUNKS, 0) || compile_entry(comm, rooted, MESH_BROADCAST, r, 0, CHUNKS, 0))
+    if (compile_entry(comm, rooted, MESH_REDUCE, r, 0, 1, 0) || compile_entry(comm, rooted, MESH_BROADCAST, r, 0, 1, 0))
       return fail(ncclInternalError, "the reduce or broadcast of root %u along the communicator's trees does not compile", r);
   return ncclSuccess;
 }
