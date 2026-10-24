@@ -68,7 +68,7 @@ int mesh_link_map_check(const struct mesh_link_map *);
 int mesh_link_map_joined(const struct mesh_link_map *,uint32_t *apart);
 /* The routing table of a map's links (into next, N x N as struct mesh_link_map's; map->next is not read): each node
    b's in-tree of shortest routes toward it, by fewest links, then the least sum of their hops' inverse bandwidths
-   (a pair's n parallel links together: 8e15 over n times the slowest one's bits a second, in whole fs a byte; a hop
+   (a pair's parallel links together: 8e15 over their summed bits a second, in whole fs a byte; a hop
    with no bandwidth counts none), each node's parent among its equals the one of the least hash of its mark, the parent's
    and the root's (equal-cost multipath by a hash, as ECMP spreads flows [RFC 2992]): routes of equal length spread
    over the links rather than piling onto the lowest-numbered node, every bridge and member that holds the same
@@ -151,6 +151,19 @@ struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
    in a round is that peer's k-th receive from it in the round. */
 enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
 struct mesh_step { uint32_t op,peer,round,buffer; uint64_t first; struct mesh_operand piece; };
+
+/* design/whole-function.md#fabric */
+struct mesh_cable { uint64_t wire,bandwidth; uint32_t node[2]; };
+struct mesh_fabric { uint32_t nodes,cables; const struct mesh_cable *cable; };
+struct mesh_transfer { struct mesh_step step; uint32_t cable,padding; };
+int mesh_fabric_check(const struct mesh_fabric *);
+int mesh_fabric_stripe(const struct mesh_fabric *,uint32_t rank,const struct mesh_step *,uint64_t page,
+                       const double *weights,struct mesh_transfer *,uint32_t room);
+struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const double *log_weight; };
+int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
+int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,uint32_t destination,
+                        const struct mesh_paths *,struct mesh_operand,uint64_t page,uint32_t chunk_pages,
+                        struct mesh_transfer *,uint32_t room);
 
 /* A compiled collective, the operand a call runs: every rank's moves, as MSCCL-IR is the program the MSCCL runtime
    interprets [Cowan et al., ASPLOS 2023].  `what` it computes (MESH_*), its `root` (a reduce's or a broadcast's) and

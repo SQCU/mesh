@@ -251,6 +251,7 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
     const Deadline deadline("on_stream: a turn of torch's queue, a group encoded");
     dispatch_sync(stream->queue(), ^{
       @autoreleasepool {
+        stream->synchronize(at::mps::SyncType::COMMIT);
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
         result = (*encode)(&on);
         if (!split || issue.published) s->published();
@@ -330,7 +331,7 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
 // all-reduce's, reduce's or broadcast's sends alone where it is in place), its counts (a V call's segment a rank, an
 // all-to-all's elements to each rank then from each, in its tensors' elements), its operator (an ncclRedOp_t: a
 // built-in or one the library made, as the partials merge) and its root (a send's or receive's peer).
-enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV };
+enum Kind : int64_t { ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, WRITE };
 using Tensors = std::vector<std::optional<at::Tensor>>;
 using Call = std::tuple<int64_t, Tensors, Tensors, std::vector<int64_t>, int64_t, int64_t>;
 
@@ -401,6 +402,11 @@ static Issue prepare(const Call &call, Group &g) {
     if (!receives.empty()) i.receives = {g.reducing(tensor(receives, 0), i.op)};
     break;
   case BROADCAST: i.sends = {g.moving(tensor(sends, 0))}; break;
+  case WRITE:
+    i.sends = {g.moving(tensor(sends, 0))}; i.receives = {g.moving(tensor(receives, 0))};
+    TORCH_CHECK(counts.size() == 1, "a one-way write names one destination");
+    i.counts = {(size_t)counts[0]};
+    break;
   case ALLGATHER: case REDUCE_SCATTER: {
     // MPI_Allgatherv and MPI_Reduce_scatter (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV): rank r's segment is
     // counts[r] elements, the segments packed in rank order in the whole operand (the receive's, the send's), counted
@@ -444,6 +450,7 @@ static ncclResult_t encoded(const std::vector<Issue> &issues, ncclComm_t comm, n
     case ALLREDUCE: result = ncclAllReduce(a.at, b, a.count, a.type, op, comm, s); break;
     case REDUCE: result = ncclReduce(a.at, b, a.count, a.type, op, (int)i.root, comm, s); break;
     case BROADCAST: result = ncclBroadcast(a.at, b, a.count, a.type, (int)i.root, comm, s); break;
+    case WRITE: result = ncclMeshWrite(a.at, b, a.count, a.type, (int)i.root, (int)i.counts[0], comm, s); break;
     case ALLGATHER: result = ncclMeshAllGatherV(a.at, b, i.counts.data(), a.type, comm, s); break;
     case REDUCE_SCATTER: result = ncclMeshReduceScatterV(a.at, b, i.counts.data(), a.type, op, comm, s); break;
     case ALLTOALL:

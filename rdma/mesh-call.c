@@ -1,4 +1,5 @@
 #include "mesh-call.h"
+#include "mesh-observe.h"
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -29,6 +30,20 @@ uint32_t mesh_streams_free(struct hdr *m,uint32_t *node,uint64_t *wire,uint32_t 
     const struct mesh_stream *x=mesh_stream_at(m,p);
     if(!atomic_load_explicit(&x->live,memory_order_acquire) || atomic_load_explicit(&x->owner,memory_order_relaxed))continue;
     node[count]=atomic_load_explicit(&x->peer,memory_order_relaxed);wire[count++]=atomic_load_explicit(&x->wire,memory_order_relaxed);
+  }
+  return count;
+}
+/* design/whole-function.md#fabric */
+uint32_t mesh_endpoints(struct hdr *m,struct mesh_endpoint *out,uint32_t room){
+  uint32_t count=0;
+  for(uint32_t p=0;m && p<m->streams && p<MESH_STREAMS && count<room;p++){
+    const struct mesh_stream *x=mesh_stream_at(m,p);
+    if(!atomic_load_explicit(&x->live,memory_order_acquire))continue;
+    out[count++]=(struct mesh_endpoint){
+      .wire=atomic_load_explicit(&x->wire,memory_order_relaxed),
+      .bandwidth=atomic_load_explicit(&x->bandwidth,memory_order_relaxed)*MESH_LINK_STREAMS,
+      .node=atomic_load_explicit(&x->peer,memory_order_relaxed),.bundle=p/MESH_LINK_STREAMS,
+      .available=!atomic_load_explicit(&x->owner,memory_order_relaxed)};
   }
   return count;
 }
@@ -71,8 +86,7 @@ int mesh_stream_view(struct mesh_ctx *context,uint32_t stream,struct mesh_stream
   char *m=(char *)context->M;
   struct mesh_entry *lists=(struct mesh_entry *)(m+x->lists);
   *view=(struct mesh_stream_view){.list={lists,lists+MESH_STREAM_ENTRIES},.presented={&x->sends,&x->lands},.taken={&x->taken[0],&x->taken[1]},
-    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed,
-    .posted_at=(_Atomic uint64_t *)(m+x->posted_at),.landed_at=(_Atomic uint64_t *)(m+x->landed_at)};
+    .ready=&x->ready,.sent=&x->sent,.landed=&x->landed};
   return 0;
 }
 int mesh_stream_present(struct mesh_ctx *context,uint32_t stream,int land,struct mesh_entry entry){

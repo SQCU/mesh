@@ -51,7 +51,7 @@ bridge stopped by SIGHUP (its heartbeat's restart, a deploy) or ended by a crash
 bridge adopts the region, the same memory, where its layout is that bridge's:
 - clients' slots, rows and leases stand, and the GPU buffers over them stay valid;
 - the port children register the same pages again, so nothing is wired twice and nothing is reloaded;
-- the bridge's own pages (each port's link pages, its streams' lists and time rings, the duds' block, the map) are
+- the bridge's own pages (each port's link pages, its streams' lists and rings of rows, the duds' block, the map) are
   recorded in the region and taken again;
 - every stream is set not live and held by none, its landed words ~0, so a communicator of the old pairing fails and is
   made again, and the next pairing opens each stream new;
@@ -404,9 +404,8 @@ bridge. A client naming its own pages holds no DMA state, and needs no ring.
   the credit, and nothing else paces a holding (no lag).
 - The words only the bridge writes: `live`, `sent`, `landed`, `taken`, `posts` (each of the stream's two lanes' units
   over its pairing each way, posted and completed), `rows` (the rings of the row each unit names, `MESH_LANE_UNITS` a
-  lane each way) and the two time rings (`posted_at`: an entry's first SEND posted;
-  `landed_at`: its last page landed; mach_absolute_time ticks read once at the end of the pass). The time rings are
-  measurement and decide nothing.
+  lane each way). The two time rings each stream had (`posted_at`, `landed_at`: an entry's first SEND posted and its
+  last page landed), which the bridge wrote every pass, are deleted with their last reader (mesh 670349e1).
 
 **Holding it** (version 133; the operator, 2026-10-22, on the holding's start of 129-132: "something is sampled
 diachronically four times then we do a funny little guess ... this entire code path needs to be remove and rewritten

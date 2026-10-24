@@ -126,9 +126,9 @@ kernels: .build/libnccl-mesh.metallib
 	mkdir -p .build
 	cc -fobjc-arc -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation
-.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh.h mesh-plan.h Makefile
+.build/libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-fabric.c mesh.h mesh-plan.h Makefile
 	mkdir -p .build
-	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
+	cc -fblocks -O2 $(WARN) -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c mesh-fabric.c
 # the built images; never an installed image (the launchd job's binary and the libraries clients map)
 clean:
 	rm -rf $(IMAGES:%=.build/%) .build/nccl-mesh-kernels .build/libnccl-mesh.metal .build/libnccl-mesh.sha256 \

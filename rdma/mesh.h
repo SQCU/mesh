@@ -29,7 +29,7 @@
 #define MESH_VERSION 134u
 /* the region's layout (struct hdr `version`), apart from the wire's MESH_VERSION: a bridge adopts the region a bridge
    before it left where its layout is this one (design/transport.md section 2, the region outlives its bridge) */
-#define MESH_LAYOUT 138u
+#define MESH_LAYOUT 153u
 #define MESH_ABSENT UINT32_MAX
 /* design/transport.md section 14: the region's streams (several toward each node a bridge reaches), and its client
    slots; and the bytes of the bridge's own pages, which it publishes for its own observation tools and no client reads
@@ -38,14 +38,13 @@
 #define MESH_CLIENTS 64
 #define MESH_BRIDGE_BYTES (MESH_STREAMS*32u)
 #define MESH_RETIRING (UINT64_C(1)<<63)
-/* design/transport.md section 14: the entries each of a stream's two lists holds, and the entries of each of its two
-   time rings; an owner word leaves bit 63 clear (its generation is 25 bits, mesh-dataflow.c mesh_slot_take), and a
-   stream's owner word has it set once its holder gave it (MESH_STREAM_GIVEN) */
+/* design/transport.md section 14: the entries each of a stream's two lists holds; an owner word leaves bit 63 clear
+   (its generation is 25 bits, mesh-dataflow.c mesh_slot_take), and a stream's owner word has it set once its holder
+   gave it (MESH_STREAM_GIVEN) */
 #define MESH_STREAM_ENTRIES 4096u
-#define MESH_STREAM_TIMES 16384u
 #define MESH_STREAM_GIVEN (UINT64_C(1)<<63)
 _Static_assert(38+25<=63,"an owner word");
-_Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)) && !(MESH_STREAM_TIMES&(MESH_STREAM_TIMES-1)),"a ring a power of two");
+_Static_assert(!(MESH_STREAM_ENTRIES&(MESH_STREAM_ENTRIES-1)),"a ring a power of two");
 /* design/transport.md: the pause between a port's hellos and between the bridge's liveness turns */
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 /* design/transport.md, the operator's deadline (2026-10-18): no DMA or network send/receive channel of the
@@ -156,14 +155,13 @@ static inline _Atomic uint32_t *mesh_unit_row(void *m,uint64_t rows,int way,int 
    then the landing list), then `sends` or `lands` (entries presented) past it, a slot reusable once `taken` (the
    bridge's, per list) is past it.  Three page counts over the holding, each in its list's order and all of it before:
    `ready`, the holder's, of the send list produced; `sent`, the bridge's, of the send list whose SENDs have completed;
-   `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  The two time rings
-   (`posted_at`, `landed_at`, region offsets) of MESH_STREAM_TIMES entries of two words: entry e's, slot e mod
-   MESH_STREAM_TIMES, 1 + e and the ticks (mach_absolute_time) at which its first SEND was posted, or its last page
-   landed; its first word 0 while its second is stored.  Nothing in it names a frame or a queue pair */
+   `landed`, the bridge's, of the landing list landed; `sent` and `landed` ~0 once the link is lost.  Its `wire` is
+   one cable's stream's identity, made from its first lane's two queue pair numbers and the two ends' GIDs (mesh-link.c
+   stream_wire), and clients read it (mesh-call.h mesh_streams_free, mesh_stream_held) */
 struct mesh_stream {
   _Alignas(64) _Atomic uint32_t peer;
   _Atomic uint32_t live;
-  uint64_t lists,posted_at,landed_at,rows;
+  uint64_t lists,rows;
   _Atomic uint64_t bandwidth,wire;
   _Alignas(64) _Atomic uint64_t owner;
   _Atomic uint64_t sends,lands;

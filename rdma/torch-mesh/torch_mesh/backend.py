@@ -35,13 +35,13 @@ ffi, LIB, check = mesh.ffi, mesh.lib, mesh.check
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
 # a call's kind (_stream.mm Kind)
-ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV = range(8)
+ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, WRITE = range(9)
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
-Call = collections.namedtuple('Call', 'kind count dtype root op counts', defaults=(0, ReduceOp.SUM, None))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination', defaults=(0, ReduceOp.SUM, None, 0))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, SEND: LIB.ncclMeshCallSend,
-        RECV: LIB.ncclMeshCallRecv}
+        RECV: LIB.ncclMeshCallRecv, WRITE: LIB.ncclMeshCallWrite}
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
          torch.uint32: LIB.ncclUint32, torch.int64: LIB.ncclInt64, torch.uint64: LIB.ncclUint64, torch.float16: LIB.ncclFloat16,
          torch.float32: LIB.ncclFloat32, torch.float64: LIB.ncclFloat64, torch.bfloat16: LIB.ncclBfloat16,
@@ -216,10 +216,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 code = LIB.ncclMax if code == LIB.ncclSum else LIB.ncclMin if code == LIB.ncclProd else code
             kept.append(ffi.new('size_t[]', [n * per for n in c.counts]) if c.counts is not None else ffi.NULL)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'counts': kept[-1], 'type': nccl, 'op': code,
-                         'group': g, 'repeat': repeat})
+                         'group': g, 'repeat': repeat, 'destination': c.destination})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made), view))
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
+
+    def write(self, source_buffer, landing_buffer, source, destination, async_op=False):
+        """design/whole-function.md#one-way-writes"""
+        return self._issue([(WRITE, [source_buffer], [landing_buffer], [destination], 0, source)], landing_buffer, async_op)
 
     def _alltoall(self, sends, receives, result, opts):
         """MPI_Alltoallv (ncclMeshAlltoAllV): sends[q] to rank q and receives[q] from it, None moving none."""

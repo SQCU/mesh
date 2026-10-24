@@ -129,11 +129,11 @@ static inline uint64_t lanes_through(const uint64_t *u){
   return g;
 }
 /* design/transport.md section 14: a holding's walk of one of its lists, its port's progress thread's: a ring of
-   MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `timed` given a time, `at` the
+   MESH_STREAM_ENTRIES entries taken (`taken`) of which `done` have all gone (or landed), `at` the
    entry its next page is in, the list's pages so far (`pages`), the stream's pages posted at the holding's first
    (`base`: the holding's page p is the stream's page base + p), and the count last stored (`count`: `sent` or
    `landed`, in pages) */
-struct walk { struct taken *ring; uint64_t taken,done,timed,at; struct mesh_pages pages,base,count; };
+struct walk { struct taken *ring; uint64_t taken,done,at; struct mesh_pages pages,base,count; };
 /* design/transport.md section 14: a holding's state on its stream at its port's progress thread: none (`HOLD_NONE`);
    served (`HOLD_SERVE`); ended (its owner word given, or its client retired), until the next pass has taken its lanes'
    completions (`HOLD_END`); ended with units outstanding on the stream's lanes, the stream not live and nothing served
@@ -174,10 +174,9 @@ static inline uint32_t hello_budget(uint32_t count){ return count?count-1:MESH_L
    parent hears the peer's HELLO and told the child with the make; its lanes left out have no queue pair and their
    `qpn` UINT32_MAX, no queue pair's number).  Each
    lane's SEND gate (`gate`: the frames posted and retired; its capacity, set as the lane connects), each data lane's
-   progress (`lane`, struct lane_state), the arena page of the streams' lists and time rings (`lists`, leased as the
-   port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream).  Each stream's holding at the progress thread: the
-   owner it serves (`held`), its state (`hold`), its send and landing walks (`sending`, `landing`) and their time
-   rings (`posted_at`, `landed_at`) */
+   progress (`lane`, struct lane_state), the arena page of the streams' lists and rings of rows (`lists`, leased as
+   the port first pairs, MESH_ABSENT none: mesh.h struct mesh_stream).  Each stream's holding at the progress thread: the
+   owner it serves (`held`), its state (`hold`) and its send and landing walks (`sending`, `landing`) */
 enum { LINK_DOWN, LINK_MADE, LINK_CONNECTING, LINK_UP };
 enum { LINK_JOB_MAKE=1, LINK_JOB_CONNECT };
 struct link {
@@ -193,10 +192,8 @@ struct link {
   uint64_t held[MESH_LINK_STREAMS];
   uint32_t hold[MESH_LINK_STREAMS];
   struct walk sending[MESH_LINK_STREAMS];
-  _Atomic uint64_t *posted_at[MESH_LINK_STREAMS];
   uint64_t wire[MESH_LINK_STREAMS];
   struct walk landing[MESH_LINK_STREAMS];
-  _Atomic uint64_t *landed_at[MESH_LINK_STREAMS];
 };
 /* design/transport.md section 14, "A process a port": the messages between the bridge's parent and a port's child on
    their socket pair (a stream, AF_UNIX having no SOCK_SEQPACKET here: each a whole struct child_message).  The

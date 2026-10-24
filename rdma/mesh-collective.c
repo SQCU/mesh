@@ -22,29 +22,21 @@ static int mesh_joins(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   return 0;
 }
 
-/* The links of the map joining u and x (either way, parallel where the map lists several): their count, and *slowest
-   the least bandwidth the map gives any of them (0: none given) */
-static uint32_t mesh_parallel(const struct mesh_link_map *map,uint32_t u,uint32_t x,uint64_t *slowest){
+/* design/whole-function.md#fabric: parallel physical capacities add. */
+static uint32_t mesh_parallel(const struct mesh_link_map *map,uint32_t u,uint32_t x,uint64_t *capacity){
   uint32_t count=0;
-  *slowest=0;
+  *capacity=0;
   for(uint32_t l=0;l<map->links;l++)
     if((map->link[l][0]==u && map->link[l][1]==x) || (map->link[l][0]==x && map->link[l][1]==u)){
-      const uint64_t b=map->bandwidth?map->bandwidth[l]:0;
-      if(b && (!*slowest || b<*slowest))*slowest=b;
+      *capacity+=map->bandwidth?map->bandwidth[l]:0;
       count++;
     }
   return count;
 }
-/* A pair's hop over its n parallel links of the map, which together carry n times the slowest one's bandwidth: its
-   inverse bandwidth in whole fs a byte, 8e15 over n times its slowest link's bits a second; 0 where the map gives none
-   of them a bandwidth */
 static uint64_t mesh_hop_inverse(const struct mesh_link_map *map,uint32_t u,uint32_t x){
-  uint64_t slowest;
-  const uint32_t n=mesh_parallel(map,u,x,&slowest);
-  if(!slowest)return 0;
-  double inverse=8e9/(double)slowest;
-  if(n>1)inverse/=n;
-  return (uint64_t)llround(inverse*1e6);
+  uint64_t capacity;
+  mesh_parallel(map,u,x,&capacity);
+  return capacity?(uint64_t)llround(8e15/(double)capacity):0;
 }
 
 /* A node's mark (the map's, else its number) */
@@ -686,12 +678,12 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
   uint32_t *crossing=malloc(((size_t)m*N+1)*sizeof *crossing),*hop=malloc((size_t)N*N*sizeof *hop),*uses=calloc((size_t)m*N+1,sizeof *uses);
   double *capacity=malloc(((size_t)m*N+1)*sizeof *capacity),*length=malloc(((size_t)m*N+1)*sizeof *length),*weight=malloc((m+1)*sizeof *weight);
   uint32_t *parallel=malloc(((size_t)m*N+1)*sizeof *parallel);
-  uint64_t *slowest=malloc(((size_t)m*N+1)*sizeof *slowest);
+  uint64_t *aggregate=malloc(((size_t)m*N+1)*sizeof *aggregate);
   int32_t *chosen=malloc(n*sizeof *chosen);
   struct mesh_packed *packed=NULL;
   size_t trees=0,room=0;
   uint32_t written=0,path[N+1];
-  if(!from || !to || !through || !crossing || !hop || !uses || !capacity || !length || !weight || !chosen || !parallel || !slowest)goto done;
+  if(!from || !to || !through || !crossing || !hop || !uses || !capacity || !length || !weight || !chosen || !parallel || !aggregate)goto done;
   for(size_t k=0;k<(size_t)N*N;k++)hop[k]=UINT32_MAX;
   m=0;through[0]=0;
   for(uint32_t v=0;v<n;v++)for(uint32_t w=0;w<n;w++)if(mesh_link_between(map,v,w)){
@@ -700,20 +692,19 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
     for(uint32_t i=0;i+1<hops;i++){
       uint32_t *k=hop+(size_t)path[i]*N+path[i+1];
       if(*k==UINT32_MAX){
-        const uint32_t c=mesh_parallel(map,path[i],path[i+1],slowest+P);
+        const uint32_t c=mesh_parallel(map,path[i],path[i+1],aggregate+P);
         parallel[P]=c?c:1;*k=P++;
       }
       crossing[through[m+1]++]=*k;
     }
     from[m]=w;to[m]=v;m++;
   }
-  /* a directed hop's capacity in bytes a ns: its parallel links' count times the slowest one's bandwidth where the map
+  /* a directed hop's capacity in bytes a ns: its parallel links' summed bandwidth where the map
      gives every hop one, else its parallel links' count (every link alike) */
   int known=P>0;
-  for(uint32_t k=0;k<P;k++)known=known && slowest[k];
+  for(uint32_t k=0;k<P;k++)known=known && aggregate[k];
   for(uint32_t k=0;k<P;k++){
-    double inverse=known?8e9/(double)slowest[k]:1;
-    if(parallel[k]>1)inverse/=parallel[k];
+    double inverse=known?8e9/(double)aggregate[k]:1.0/parallel[k];
     capacity[k]=1/inverse;
   }
   const double delta=mesh_exp(-mesh_log(P/(1-eps))/eps);
@@ -772,7 +763,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,const uint64_t *roots,d
 done:
   for(size_t t=0;t<trees;t++)free(packed[t].parent);
   free(packed);free(from);free(to);free(through);free(crossing);free(hop);free(uses);free(capacity);free(length);free(weight);free(chosen);
-  free(parallel);free(slowest);
+  free(parallel);free(aggregate);
   return written;
 }
 

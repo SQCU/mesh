@@ -14,6 +14,9 @@ uint32_t mesh_nodes_reached(struct hdr *,struct mesh_reach *,uint32_t room);
    (struct mesh_stream: its identity, alike at both its ends), at most `room`; their count.  The two ends of a
    communicator take the stream of one wire between their nodes, one free at both: its init exchanges these */
 uint32_t mesh_streams_free(struct hdr *,uint32_t *node,uint64_t *wire,uint32_t room);
+/* design/whole-function.md#fabric */
+struct mesh_endpoint { uint64_t wire,bandwidth; uint32_t node,bundle,available,padding; };
+uint32_t mesh_endpoints(struct hdr *,struct mesh_endpoint *,uint32_t room);
 /* design/transport.md section 14: the live stream of identity `wire`, held by this client as its rows are: its owner
    word taken from 0 to the client's own by one compare-and-swap, `*stream` its index: 0, EINVAL, ENOLINK where no live
    stream has the identity (one whose last holding ended with units outstanding is not live), EBUSY where another
@@ -27,11 +30,11 @@ void mesh_stream_give(struct mesh_ctx *,uint32_t stream);
    stream of the link new (no owner): a holding of the lost pairing reads 0 here, and its holder starts no group on it */
 int mesh_stream_held(struct mesh_ctx *,uint32_t stream,uint64_t wire);
 /* design/transport.md section 14: a held stream's words as its holder uses them (mesh.h struct mesh_stream): its two
-   lists (0 the send list, 1 the landing list) and their counts presented and taken, its three page counts and its
-   time rings; 0, EINVAL, EPERM where the client does not hold it, or ENOLINK */
+   lists (0 the send list, 1 the landing list) and their counts presented and taken, and its three page counts; 0,
+   EINVAL, EPERM where the client does not hold it, or ENOLINK */
 struct mesh_stream_view {
   struct mesh_entry *list[2];
-  _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed,*posted_at,*landed_at;
+  _Atomic uint64_t *presented[2],*taken[2],*ready,*sent,*landed;
 };
 int mesh_stream_view(struct mesh_ctx *,uint32_t stream,struct mesh_stream_view *);
 /* design/transport.md section 14: `entry` presented on held stream `stream`'s send list (`land` 0) or landing list

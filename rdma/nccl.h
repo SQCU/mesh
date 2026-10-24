@@ -976,6 +976,16 @@ typedef struct {
    by size class), named by the caller's configuration where a price chose them: the caller's configuration document
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
+/* design/whole-function.md#interface */
+struct mesh_fabric;
+ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);
+ncclResult_t ncclMeshCommRoutes(ncclComm_t comm, const struct mesh_trees* trees, const double* cable_weights);
+struct mesh_paths;
+ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths, uint32_t chunk_pages);
+ncclResult_t ncclMeshWrite(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
+                          int source, int destination, ncclComm_t comm, cudaStream_t stream);
+struct ncclMeshCableSample { uint64_t wire,ready,sent,landed; uint32_t cable,peer; };
+ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample* samples, int room, int* count);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
    MESH_REDUCE_SCATTER, MESH_ALLGATHER, or ncclMeshCallSend, ncclMeshCallRecv, ncclMeshCallAlltoAllV), its `peer` (a
    send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's
@@ -983,7 +993,7 @@ ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int c
    and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type`, `op` (a
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
    outside one its own group), issued `repeat` times in a row (its first call's; 0 as 1). */
-enum { ncclMeshCallSend = 16, ncclMeshCallRecv = 17, ncclMeshCallAlltoAllV = 18 };
+enum { ncclMeshCallSend = 16, ncclMeshCallRecv = 17, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
 typedef struct {
   int what, peer;
   size_t count;
@@ -992,6 +1002,7 @@ typedef struct {
   ncclRedOp_t op;
   int group;
   uint32_t repeat;
+  int destination;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the repeats' sum), the number of the communicator's group the order starts at (`first`: its groups
