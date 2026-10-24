@@ -562,17 +562,19 @@ def follow(*tensors):
     pages (_paged: the library places each segment on a page) of a staging lease, sent once and copied once into its
     place in the tensor's new block, a region tensor contiguous in the tensor's own layout; the rows that stay are
     copied into their place there, crossing nothing.  The staging is two pairs of leases taken for the move, each grown
-    to the largest need, the tensors taking them in turn (a pair written again only after a later tensor's call has
-    landed), and returned with the move: the move's own memory is its new blocks and the staging, not every tensor's
-    staging at once.  The rows that stay pass through the staging too, so no copy has both sides strided (torch's MPS
-    copy makes such a copy through a temporary of its size, from 10 MiB a 1 GiB heap).  Each is returned at its logical
-    shape and that shape's contiguous strides (a moved block's leading extents of one may carry any stride, which
-    from_local's inference would refuse)."""
+    to the largest need, the tensors taking them in turn, a pair written again (or returned) only after every peer has
+    landed this rank's sends: after each tensor's alltoall every rank issues a one-word all-gather once it has landed
+    the tensor, so landing every peer's word proves its own sends were read (a 1-D re-partition need not receive from
+    the peers it sends to, so a later tensor's landing proves nothing); the staging is returned with the move: the
+    move's own memory is its new blocks and the staging, not every tensor's staging at once.  The rows that stay pass
+    through the staging too, so no copy has both sides strided (torch's MPS copy makes such a copy through a temporary
+    of its size, from 10 MiB a 1 GiB heap).  Each is returned at its logical shape and that shape's contiguous strides
+    (a moved block's leading extents of one may carry any stride, which from_local's inference would refuse)."""
     mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape] for t in tensors]
     for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
         moving = [h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)]
-        rank, group, stage = mesh.get_coordinate()[i], mesh.get_group(i), [[None, None], [None, None]]
+        rank, group, stage, word = mesh.get_coordinate()[i], mesh.get_group(i), [[None, None], [None, None]], None
         for k, h in enumerate(moving):
             p, d = h[0][i], h[0][i].dim % h[1].ndim
             rows = h[1].movedim(d, 0)
@@ -600,6 +602,10 @@ def follow(*tensors):
             for r in range(n):
                 if r != rank:
                     block[into[r]:into[r + 1]].copy_(y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
+            if word is None:
+                counts, starts = _paged([1] * n, 4, group)
+                word = (_empty((starts[-1],), rows, group, torch.int32), counts, starts)
+            dist.all_gather(list(word[0].split(word[1])), word[0][word[2][rank]:word[2][rank + 1]], group=group)
             h[0][i], h[1] = RaggedShard(h[0][i].dim, key), new
     contiguous = lambda shape: torch.empty(shape, device='meta').stride()
     return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape in held]
