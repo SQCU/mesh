@@ -1306,39 +1306,44 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
 
 
 SCORES = 1 << 26
-_SCORES = {}
+_HELD = {}
 
 
-def _scores(like, group):
-    """The ring's scores: one float32 region lease of SCORES elements, held for the group (_block writes it in place)."""
-    if group.group_name not in _SCORES:
-        _SCORES[group.group_name] = _empty((SCORES,), like, group, torch.float32)
-    return _SCORES[group.group_name]
+def _held(group, what, shape, like, dtype=None):
+    """A region lease held for the group, by what it holds and its shape (the ring's scores, and each chunk's mask, row
+    maxima, sums and outputs): made at its first use and written again by every later one, so a step queued behind the
+    GPU holds no memory of its own (torch's MPS allocator keeps every queued step's temporaries until its command
+    buffer completes)."""
+    key = (group.group_name, what, tuple(shape), dtype or like.dtype)
+    if key not in _HELD:
+        _HELD[key] = _empty(shape, like, group, dtype)
+    return _HELD[key]
 
 
-def _block(query, key, value, into, scores, scale=None, queries=None, keys=None, valid=None):
+def _block(query, key, value, into, group, scale=None, queries=None, keys=None, valid=None):
     """Each query row's attention over these keys as the library's partials, written into `into` (rows of [m, l, O]:
     the row's greatest score, its sum of exponentials and its unnormalized output, nccl.h ncclMeshRedOpCreatePartials;
-    l 0 where it sees no key), the scores SCORES at a time in `scores` (_scores), every pass over them in place: keys
-    where `valid` (a bool a key) is False masked, and where `queries` (each query's logical position) is given each key
-    past its query (`keys`: each key's)."""
+    l 0 where it sees no key), the scores SCORES at a time, every pass over them in place, and every result of a chunk
+    in a lease held for the group (_held): keys where `valid` (a bool a key) is False masked, and where `queries` (each
+    query's logical position) is given each key past its query (`keys`: each key's)."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     lead, rows, n = query.shape[:-2], query.shape[-2], key.shape[-2]
-    step = max(1, SCORES // (math.prod(lead) * n))
-    kt = key.transpose(-2, -1)
+    step, kt = max(1, SCORES // (math.prod(lead) * n)), key.transpose(-2, -1)
+    scores = _held(group, 'scores', (SCORES,), query, torch.float32)
     for at in range(0, rows, step):
         q, part = query[..., at:at + step, :], into[..., at:at + step, :]
-        s = scores[:math.prod(lead) * q.shape[-2] * n].view(lead + (q.shape[-2], n))
+        c = q.shape[-2]
+        s = scores[:math.prod(lead) * c * n].view(lead + (c, n))
         torch.matmul(q, kt, out=s) if q.dtype == s.dtype else s.copy_(q @ kt)
         s.mul_(scale)
         if queries is not None:
-            s.masked_fill_(keys > queries[at:at + step, None], -math.inf)
+            s.masked_fill_(torch.gt(keys, queries[at:at + step, None], out=_held(group, 'mask', (c, n), query, torch.bool)), -math.inf)
         if valid is not None:
             s.masked_fill_(~valid, -math.inf)
-        top = s.amax(-1, keepdim=True)
-        part[..., :1] = top.masked_fill_(top == -math.inf, 0)
-        part[..., 1:2] = s.sub_(top).exp_().sum(-1, keepdim=True)
-        part[..., 2:] = s.to(value.dtype) @ value
+        top, total = (_held(group, what, lead + (c, 1), query, torch.float32) for what in ('top', 'total'))
+        part[..., :1] = torch.amax(s, -1, keepdim=True, out=top).masked_fill_(top == -math.inf, 0)
+        part[..., 1:2] = torch.sum(s.sub_(top).exp_(), -1, keepdim=True, out=total)
+        part[..., 2:] = torch.matmul(s.to(value.dtype), value, out=_held(group, 'out', lead + (c, value.size(-1)), value))
 
 
 _RINGS = {}
@@ -1390,7 +1395,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     gathered = dist.all_gather(blocks, blocks[rank], group=group, async_op=True)
     owners = list(packed.split(rows))
     keys, valid = _positions(key_name, rank, S, halves, query.device)
-    mine, step, scores = _spans(o, rank, S, halves), lengths[rank] // halves, _scores(query, group)
+    mine, step = _spans(o, rank, S, halves), lengths[rank] // halves
 
     def owned(j):
         """Block j's queries' attention over this rank's keys, as owner j's rows of the partials."""
@@ -1401,7 +1406,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
             seen = [b for b, (lo, _) in enumerate(mine) if not is_causal or lo < hi]
             if seen:
                 at, cols = slice(a * height, (a + 1) * height), slice(seen[0] * step, (seen[-1] + 1) * step)
-                _block(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], scores, scale,
+                _block(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], group, scale,
                        queries[at] if is_causal else None, keys[cols], valid[cols])
     owned(rank)
     gathered.wait()
