@@ -792,6 +792,60 @@ TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) {
   m.impl("linears", &linears);
 }
 
+// torch_mesh::row (partition.py declare, deliver and row): x's row at the cursor `at` (an int64 MPS tensor of one
+// element; past the last row, the last), a new contiguous tensor of torch's, and `at` advanced past it (by the
+// dispatch's last threadgroup, after every one has read it: an arrival count of x's own), one dispatch of partition's
+// row_copy encoded in torch's open compute encoder: of a tensor delivered here (partition.deliver: `delivered`, its landings' counts and failure
+// words by address and their records held in a tensor of its own), once the pages that row lies in have landed
+// (mesh_step_await_pages), loaded system-coherent; else as it is.  Its kernels, one a count of landings, are
+// partition's, compiled there and named here (row_pipeline) before a row is read.
+struct Delivered { at::Tensor held; std::vector<uint64_t> a, v; int64_t page = 0; };
+// (held past the process's static destructors: a tensor freed after torch's MPS allocator ended aborts the exit)
+static std::map<const void *, Delivered> &delivered_ = *new std::map<const void *, Delivered>;
+static std::map<const void *, at::Tensor> &row_arrivals_ = *new std::map<const void *, at::Tensor>;
+static std::map<int64_t, int64_t> row_pipelines_;
+
+static void row_pipeline(int64_t lands, int64_t handle) { row_pipelines_[lands] = handle; }
+
+static void delivered(const at::Tensor &x, const std::optional<at::Tensor> &held, const std::vector<int64_t> &a,
+                      const std::vector<int64_t> &v, int64_t page) {
+  if (!held) {
+    delivered_.erase(x.data_ptr());
+    return;
+  }
+  TORCH_CHECK(a.size() == v.size() && !a.empty(), "delivered: a landing's counts and failure words for each landing");
+  delivered_[x.data_ptr()] = {*held, std::vector<uint64_t>(a.begin(), a.end()), std::vector<uint64_t>(v.begin(), v.end()), page};
+}
+
+static at::Tensor row(const at::Tensor &x, const at::Tensor &at) {
+  TORCH_CHECK(x.dim() >= 1 && x.size(0) > 0 && x.is_contiguous() && x.nbytes() / x.size(0) % 2 == 0 && at.scalar_type() == at::kLong &&
+                  at.numel() == 1 && at.is_mps(),
+              "torch_mesh::row takes a contiguous x of rows of whole 16-bit words and an int64 MPS cursor of one element");
+  const auto found = delivered_.find(x.data_ptr());
+  const Delivered *d = found == delivered_.end() ? nullptr : &found->second;
+  const size_t lands = d ? d->a.size() : 0, bound = std::max<size_t>(lands, 1);
+  const auto kernel = row_pipelines_.find((int64_t)bound);
+  TORCH_CHECK(kernel != row_pipelines_.end(), "torch_mesh::row: no row kernel for ", bound, " landings (partition.declare loads it)");
+  const int64_t row_bytes = (int64_t)(x.nbytes() / x.size(0)), offset = x.storage_offset() * x.element_size();
+  std::vector<int64_t> words = {x.size(0), row_bytes, d ? d->page : 1, (int64_t)lands, offset & 0xFFFFFFFF, offset >> 32};
+  for (size_t q = 0; q < bound; q++)
+    for (const uint64_t address : {lands ? d->a[q] : 0, lands ? d->v[q] : 0}) {
+      words.push_back((int64_t)(address & 0xFFFFFFFF));
+      words.push_back((int64_t)(address >> 32));
+    }
+  auto arrivals = row_arrivals_.find(x.data_ptr());
+  if (arrivals == row_arrivals_.end()) arrivals = row_arrivals_.emplace(x.data_ptr(), at::zeros({1}, x.options().dtype(at::kInt))).first;
+  at::Tensor out = at::empty(x.sizes().slice(1), x.options());
+  constexpr int64_t threads = 256;
+  const int64_t groups = std::max<int64_t>(1, std::min<int64_t>(16, (row_bytes / 16 + threads - 1) / threads));
+  encode(kernel->second, {x, at, out, lands ? std::optional<at::Tensor>(d->held) : std::optional<at::Tensor>(x), arrivals->second}, words, 15,
+         groups, 1, threads, lands > 0);
+  return out;
+}
+
+TORCH_LIBRARY_FRAGMENT(torch_mesh, m) { m.def("row(Tensor x, Tensor(a!) at) -> Tensor"); }
+TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) { m.impl("row", &row); }
+
 // The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
 // GPU time (GPUEndTime - GPUStartTime), the measure the engine's kernel harness reports.  Torch's stream is synchronized
 // by the caller first.
@@ -1063,6 +1117,56 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   return {published, landed};
 }
 
+// The fused in-place broadcast of `tensor` from `root`: the root's SEND of it toward each other rank, and each other
+// rank's landing of it in place from the root, in one group on torch's stream, the stream's `fused` set (nccl.h: an
+// in-place broadcast fuses where every receiver is one hop from the root); each publication's bindings (the root's)
+// and each landing's (a receiver's), in physical channel order, as fused_exchange's.  Nothing is committed here.
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_broadcast(
+    const at::Tensor &tensor, int64_t root, int64_t comm, int64_t polls) {
+  int rank = 0, ranks = 0;
+  checked(ncclCommUserRank(communicator(comm), &rank));
+  checked(ncclCommCount(communicator(comm), &ranks));
+  TORCH_CHECK(root >= 0 && root < ranks, "fused broadcast: root ", root, " is not one of the ", ranks, " ranks");
+  TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused broadcast: polls ", polls, " is not a 32-bit count of loads");
+  int channels = 0;
+  checked(ncclMeshCommSample(communicator(comm), nullptr, 0, &channels));
+  Group g{true};
+  const Operand x = g.moving(tensor);
+  std::vector<std::array<uint64_t, 6>> publish(channels), land(channels);
+  ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
+                         (uint32_t)channels, (uint32_t)channels};
+  ncclMeshFused *const records = &steps;
+  __block ncclResult_t result = ncclSuccess;
+  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  MeshStream *s = &stream_of(stream);
+  id<MTLResidencySet> residency = fused_residency(stream);
+  const ncclComm_t c = communicator(comm);
+  {
+    const Deadline deadline("fused_broadcast: a turn of torch's queue, a group encoded");
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
+                             nullptr, (__bridge void *)residency, (uint32_t)polls, records};
+        ncclResult_t made = ncclGroupStart();
+        for (int q = 0; q < ranks && !made; q++) {
+          if (q == root) continue;
+          if (rank == root) made = ncclSend(x.at, x.count, x.type, q, c, &on);
+          else if (rank == q) made = ncclRecv((void *)x.at, x.count, x.type, root, c, &on);
+        }
+        const ncclResult_t ended = ncclGroupEnd();
+        result = made ? made : ended;
+      }
+    });
+  }
+  s->streamed = true;
+  s->retire(0, std::exchange(s->scratch, {}));
+  checked(result);
+  std::vector<std::vector<uint64_t>> published, landed;
+  for (uint32_t k = 0; k < steps.publishes; k++) published.emplace_back(publish[k].begin(), publish[k].end());
+  for (uint32_t k = 0; k < steps.lands; k++) landed.emplace_back(land[k].begin(), land[k].end());
+  return {published, landed};
+}
+
 // A declared set of routed writes. Bindings name physical channels, including
 // parallel cables; relay readiness stays in the compiled stream entries.
 static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes(
@@ -1159,6 +1263,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_exchange", &fused_exchange);
+  module.def("fused_broadcast", &fused_broadcast);
+  module.def("row_pipeline", &row_pipeline);
+  module.def("delivered", &delivered);
   module.def("fused_writes", &fused_writes);
   module.def("fused_published", &fused_published);
 }

@@ -146,9 +146,11 @@ struct metal_result metal_land(struct metal_program *, int type, int op, void *d
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
    5 progress), nothing dispatched; EINVAL on a program with no ring.  The publication: d its operand (at dst), a the
    holding's counts (mesh_step_release stores `ready`).  The landing: d and s its landing
-   buffer (at dst), a the holding's counts (mesh_step_await), v the communicator's failure words. */
+   buffer (at dst, `bytes` of it: n, which mesh_step_await_pages reads), a the holding's counts (mesh_step_await), v
+   the communicator's failure words. */
 struct metal_result metal_send_deferred(struct metal_program *, void *operand, size_t offset, const struct metal_release *, uint64_t bound[6]);
-struct metal_result metal_land_deferred(struct metal_program *, void *landing, size_t offset, const struct metal_wait *, uint64_t bound[6]);
+struct metal_result metal_land_deferred(struct metal_program *, void *landing, size_t offset, size_t bytes, const struct metal_wait *,
+                                        uint64_t bound[6]);
 /* metal_contents: a shared buffer's host address (NULL: none, a private buffer's) */
 void *metal_contents(void *buffer);
 /* Tracks (rdma/NCCL.md "Per-channel progress"): a completion's work on two or more channels, recorded and then run with

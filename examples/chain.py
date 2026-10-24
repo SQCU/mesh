@@ -30,9 +30,9 @@ def step(x, at, b, out):
 
 
 # docs/writing-a-service.md#the-step
-def stepper(E, O, o, t, at, b):
+def stepper(E, cursor, O, o, t, at, b):
     def one():
-        step(E.index_select(0, t)[0] + o, at, b, o)
+        step(partition.row(E, cursor) + o, at, b, o)
         O.index_copy_(0, t, o[None])
         t.add_(1)
     return one
