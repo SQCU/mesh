@@ -380,8 +380,16 @@ def _(partials, root, group_name):
 
 @torch.library.custom_op('torch_mesh::all_reduce', mutates_args=())
 def all_reduce(input: torch.Tensor, reduce_op: str, group_name: str) -> torch.Tensor:
-    """torch's functional all_reduce as an op a compiled graph calls (torch_mesh.compiler): its result the functional
-    kernel's region lease (_stream.mm functional), its work waited where the graph waits on it (wait_tensor)."""
+    """torch's functional all_reduce as an op a compiled graph calls (torch_mesh.compiler).  A sum of MPS tensors on a
+    mesh group is a fused crossing (partition._fused, as allgatherv's): this rank's part published from a held lease by
+    a kernel of partition's own, every peer's awaited and all of them added in rank order by another, the host issuing
+    the crossing and two encodes; any other its functional kernel's, its work waited where the graph waits on it
+    (wait_tensor)."""
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    if reduce_op == 'sum' and isinstance(group, ProcessGroupMesh) and input.device.type == 'mps':
+        from .partition import _fused
+        x = input.contiguous().view(-1)
+        return _fused(x, 0, [x.numel()] * group.size(), group, True).view(input.shape)
     return torch.ops._c10d_functional.all_reduce.default(input, reduce_op, group_name)
 
 

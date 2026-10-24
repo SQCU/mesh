@@ -180,7 +180,7 @@ def _in_region(y):
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> torch.Tensor:
     """The blocks gathered along `dim` from x's block, an opaque op, so a compiled graph calls it as torch's
-    functional collectives are called.  On the mesh backend (_region_backed) it is a fused crossing (_fused_gather):
+    functional collectives are called.  On the mesh backend (_region_backed) it is a fused crossing (_fused):
     this rank's block copied once into its page-padded segment of a held lease and published by partition's own
     kernel, every peer's landing waited for and the segments joined along `dim` by another, the library encoding no
     dispatch; else out of place from x's block by dist.all_gather."""
@@ -190,16 +190,17 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> 
         out = _empty((sum(sizes),) + y.shape[1:], y)
         dist.all_gather(list(out.split(sizes)), y, group=group)
         return out.movedim(0, dim).contiguous()
-    return _fused_gather(x.contiguous(), dim, sizes, group)
+    return _fused(x.contiguous(), dim, sizes, group, False)
 
 
-# The all-gather as a fused crossing (rdma/nccl.h ncclMeshFused; torch_mesh/fused.py): one SEND toward each peer from
-# this rank's segment and one landing from each peer into its own, the segments page-padded in a held lease (two,
-# taken in turn: no wait reads a send's completion, so a segment is written again only after a later call has landed);
-# the library encodes no step of it, and two dispatches of partition's own run them: gather_publish copies the block
-# into its segment (mesh_step_write) and releases it (mesh_step_release), gather_land waits for every landing
-# (mesh_step_await) and joins the segments along the gathered dimension into the output.  The host issues the
-# crossing and encodes the two; it waits for nothing.
+# The all-gather and the all-reduce as a fused crossing (rdma/nccl.h ncclMeshFused; torch_mesh/fused.py): one SEND
+# toward each peer from this rank's segment and one landing from each peer into its own, the segments page-padded in a
+# held lease (two, taken in turn: no wait reads a send's completion, so a segment is written again only after a later
+# call has landed); the library encodes no step of it, and two dispatches of partition's own run them: gather_publish
+# copies the block into its segment (mesh_step_write) and releases it (mesh_step_release); gather_land waits for every
+# landing (mesh_step_await) and joins the segments along the gathered dimension into the output, sum_land adds them,
+# every rank's in rank order, so every rank holds the same sum.  The host issues the crossing and encodes the two; it
+# waits for nothing.
 _GATHER_SOURCE = r"""
 template <uint N>
 struct gather_words { uint count, pre, post, rank; uint sizes[N], starts[N]; mesh_step_binding land[N - 1], publish[N - 1]; };
@@ -240,40 +241,62 @@ kernel void gather_land(device const uchar* lease [[buffer(0)]], device ushort* 
         out[e] = r == w.rank ? ((device const ushort*)lease)[from] : mesh_step_read<ushort>(lease, from);
     }
 }
+
+template <uint BYTES, uint N, uint THREADS>
+[[max_total_threads_per_threadgroup(THREADS)]]
+kernel void sum_land(device const uchar* lease [[buffer(0)]], device metal::conditional_t<BYTES == 2, half, float>* out [[buffer(1)]],
+                     constant gather_words<N>& w [[buffer(15)]], uint tid [[thread_index_in_threadgroup]],
+                     uint g [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]]) {
+    using T = metal::conditional_t<BYTES == 2, half, float>;
+    for (uint q = 0; q + 1 < N; q++) {
+        mesh_step_enter(*w.land[q].p, w.land[q].v, w.land[q].progress, g == 0 && tid == 0);
+        mesh_step_await(*w.land[q].p, w.land[q].a, w.land[q].v, tid);
+    }
+    for (uint k = g * THREADS + tid; k < w.count * 2 / BYTES; k += groups * THREADS) {
+        float sum = 0.0f;
+        for (uint r = 0; r < N; r++)
+            sum += float(r == w.rank ? ((device const T*)lease)[w.starts[r] + k] : mesh_step_read<T>(lease, w.starts[r] + k));
+        out[k] = T(sum);
+    }
+}
 """
 _FUSED, _GATHER_KERNELS, _GATHER_THREADS = {}, {}, 256
 
 
-def _gather_kernel(kind, n):
-    """gather_publish or gather_land for n ranks, compiled once after the library's steps (fused.steps)."""
+def _gather_kernel(kernel, *arguments):
+    """gather_publish, gather_land or sum_land at `arguments` (n ranks; sum_land its element's bytes first), compiled
+    once after the library's steps (fused.steps)."""
     from . import _stream, fused
     from .argmax import SOURCE
     from .streamed import instance
-    name, line = instance(f'gather_{kind}', n, _GATHER_THREADS)
+    name, line = instance(kernel, *arguments, _GATHER_THREADS)
     if name not in _GATHER_KERNELS:
         _GATHER_KERNELS[name] = _stream.pipeline(fused.steps() + SOURCE + '\n' + _GATHER_SOURCE + '\n' + line + '\n', name)
     return _GATHER_KERNELS[name]
 
 
-def _fused_gather(x, dim, sizes, group):
-    """allgatherv on the mesh backend (above): x contiguous, of 2 or 4 bytes an element; the output a new tensor."""
+def _fused(x, dim, sizes, group, adds):
+    """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
+    block all of x: sizes x's extent along dim, n times): x contiguous, of 2 or 4 bytes an element; the output a new
+    tensor."""
     from . import _stream, fused
     n, rank = len(sizes), group.rank()
     if n == 1:
         return x.clone()
-    key = (tuple(x.shape), x.dtype, dim, tuple(sizes), group.group_name)
+    key = (tuple(x.shape), x.dtype, dim, tuple(sizes), group.group_name, adds)
     if key not in _FUSED:
         row, half = math.prod(x.shape) // max(1, x.shape[dim]), x.element_size() // 2
         counts, starts = _paged([s * row for s in sizes], x.element_size(), group)
         words = ([x.numel() * half, math.prod(x.shape[:dim]), math.prod(x.shape[dim + 1:]) * half, rank] + list(sizes) +
-                 [a * half for a in starts[:-1]])
-        shape = x.shape[:dim] + (sum(sizes),) + x.shape[dim + 1:]
+                 [a * (1 if adds else half) for a in starts[:-1]])
+        shape = x.shape if adds else x.shape[:dim] + (sum(sizes),) + x.shape[dim + 1:]
         spread = lambda count: max(1, min(16, -(-count // (_GATHER_THREADS * 8))))
+        land = _gather_kernel('sum_land', x.element_size(), n) if adds else _gather_kernel('gather_land', n)
         _FUSED[key] = {'rings': [_empty((starts[-1],), x, group) for _ in range(2)], 'turn': 0, 'words': words,
                        'shape': shape, 'counts': counts, 'starts': starts,
                        'arrivals': torch.zeros(1, dtype=torch.int32, device=x.device),
-                       'publish': (_gather_kernel('publish', n), spread(words[0])),
-                       'land': (_gather_kernel('land', n), spread(math.prod(shape) * half))}
+                       'publish': (_gather_kernel('gather_publish', n), spread(words[0])),
+                       'land': (land, spread(math.prod(shape) * half))}
     held = _FUSED[key]
     lease, held['turn'] = held['rings'][held['turn'] % 2], held['turn'] + 1
     starts, counts = held['starts'], held['counts']
