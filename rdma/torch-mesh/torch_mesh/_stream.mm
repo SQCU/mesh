@@ -1302,9 +1302,47 @@ static void fused_published() {
 }
 
 
+// Optional whole-function microprofile. Markers commit without waiting; read
+// only after the caller's final synchronization. Use Metal's GPU timestamps,
+// not the scheduling time of a CPU event callback. Each buffer is retained
+// until the profile is destroyed, and repeated reads do not consume a signal.
+struct GPUTimings {
+  at::mps::MPSStream *const stream = at::mps::getCurrentMPSStream();
+  id<MTLSharedEvent> event = [stream->device() newSharedEvent];
+  std::vector<id<MTLCommandBuffer>> buffers;
+  ~GPUTimings() {
+    for (id<MTLCommandBuffer> buffer : buffers) [buffer release];
+    [event release];
+  }
+  void mark() {
+    const Deadline deadline("GPU timing marker: a turn of torch's queue");
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        stream->endKernelCoalescing();
+        id<MTLCommandBuffer> buffer = stream->commandBuffer().rootCommandBuffer;
+        [buffer encodeSignalEvent:event value:buffers.size() + 1];
+        buffers.push_back([buffer retain]);
+        stream->synchronize(at::mps::SyncType::COMMIT);
+      }
+    });
+  }
+  std::vector<double> read() const {
+    std::vector<double> out;
+    for (id<MTLCommandBuffer> buffer : buffers) {
+      TORCH_CHECK(buffer.status == MTLCommandBufferStatusCompleted, "GPU timings require the function's final synchronization");
+      const double end = buffer.GPUEndTime;
+      TORCH_CHECK(end > 0 && (out.empty() || end >= out.back()), "GPU timing markers are not monotone");
+      out.push_back(end);
+    }
+    return out;
+  }
+};
+
 // The group's calls (torch_mesh/backend.py): `issue` a group of calls, issued and not completed where `split` (a
 // MeshWork to wait on, its outputs `outputs`), else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  pybind11::class_<GPUTimings>(module, "GPUTimings")
+    .def(pybind11::init<>()).def("mark", &GPUTimings::mark).def("read", &GPUTimings::read);
   module.def("pipeline", &pipeline);
   module.def("linear_source", &linear_source);
   module.def("linear_split", &linear_split);
