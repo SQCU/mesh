@@ -704,7 +704,7 @@ def attention(mesh, name, shape, causal=True, halves=1, dtype=None):
     dim] (causal or not, its halves), so the reserve sizes its leases for every share up to the bounds; its output, a
     scratch buffer of that shape split along the sequence, returned."""
     out = empty(mesh, name, shape, 1, dtype, scratch=True)
-    _declarable(mesh, name)['attention'] = (tuple(shape), halves, out.dtype, out)
+    _declarable(mesh, name)['attention'] = (tuple(shape), halves, out.dtype, out, causal)
     return out
 
 
@@ -788,7 +788,7 @@ def _spaces(declared, o, n, page):
     gathered blocks (page-padded) and its sequence."""
     out = []
     if 'attention' in declared:
-        (b, S, h, d), halves, dtype, _ = declared['attention']
+        (b, S, h, d), halves, dtype = declared['attention'][:3]
         lead, unit, width = b * h, S // o.units, 2 + d
         rows = unit * (o.units - n + 1) // halves
         out += [('scores', torch.float32, lambda p: SCORES), ('mask', torch.bool, lambda p: min(SCORES // lead, rows * unit * p)),
@@ -879,7 +879,8 @@ def _balance(mesh, name, held, group):
     held['read'] += len(steps)
     drop = min(held['skip'], len(steps))
     held['skip'] -= drop
-    words = _shared(held, group, [sum(s) for s in steps[drop:]])
+    mine = held.get('carry', []) + [sum(s) for s in steps[drop:]]
+    held['carry'], words = mine[SHARED:], _shared(held, group, mine[:SHARED])
     held['words'] = words = [a + b for a, b in zip(held['words'] or [[]] * len(words), words)]
     if min(map(len, words)) < WINDOW:
         return
@@ -894,15 +895,19 @@ def _balance(mesh, name, held, group):
     _replan(mesh, name)
 
 
+SHARED = 8  # the most words a rank exchanges at one boundary (_shared): _balance carries any more to the next
+
+
 def _shared(held, group, words):
-    """Each rank's `words` (float64) on every rank, through the backend on the host path: each rank's segment whole
-    pages of a CPU region lease (the library sends only leases and places each segment on a page: rdma/nccl.h Memory;
-    torch's memory on a group of another backend), sized at the first exchange from its words and held, grown where a
-    later one's need more (every rank's alike), its words' count then the words, all gathered by one
-    all_gather_into_tensor; a host-path call, complete where it returns, with nothing of torch's stream waited for."""
+    """Each rank's `words` (float64, at most SHARED) on every rank, through the backend on the host path: each rank's
+    segment whole pages of a CPU region lease (the library sends only leases and places each segment on a page:
+    rdma/nccl.h Memory; torch's memory on a group of another backend) of SHARED words, made at the first exchange, the
+    reserve's (the declaration's), its words' count then the words, all gathered by one all_gather_into_tensor; a
+    host-path call, complete where it returns, with nothing of torch's stream waited for."""
     from . import empty as lease
-    n, need = dist.get_world_size(group), _paged([1 + len(words)], 8, group)[0][0]
-    if held.get('page', 0) < need:
+    n, need = dist.get_world_size(group), _paged([1 + SHARED], 8, group)[0][0]
+    assert len(words) <= SHARED
+    if 'pages' not in held:
         made = lease if getattr(group, 'handle', 0) else lambda size, dtype, device: torch.empty(size, dtype=dtype, device=device)
         held['page'], held['pages'] = need, (made(need, dtype=torch.float64, device='cpu'), made(n * need, dtype=torch.float64, device='cpu'))
     mine, every = held['pages']
@@ -1607,8 +1612,9 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
     logsumexp), padded query rows garbage that the unshard drops."""
     o, declared = operand(mesh, name), _BALANCING.get((mesh, name), {}).get('attention')
     S = query.size(2) * o.units // o.capacity[mesh.get_local_rank(name)]
+    assert not declared or (declared[1], declared[4]) == (_halves(o, S, load_balance), is_causal), 'mesh: a ring unlike its declaration'
     return _ring_attention(mesh.get_group(name), o.key, query, key, value, is_causal, scale, _halves(o, S, load_balance),
-                           declared[-1] if declared else None)
+                           declared[3] if declared else None)
 
 
 SCORES = 1 << 26
