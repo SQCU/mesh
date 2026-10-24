@@ -696,12 +696,12 @@ static void linear_source(const std::string &source, int64_t cores) {
   linear_cores_ = cores;
 }
 
-static int64_t linear_split(int64_t K, int64_t N) {
-  const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
+static int64_t linear_fit(int64_t K, int64_t groups) {
   int64_t split = 1;
   while (split < 8 && split * groups < linear_cores_ * 256 && K / (split * 2) >= 1024) split *= 2;
   return split;
 }
+static int64_t linear_split(int64_t K, int64_t N) { return linear_fit(K, (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS); }
 
 static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act,
                          const std::optional<at::Tensor> &x1) {
@@ -733,7 +733,8 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
 }
 
 // torch_mesh::linears (linear.metal linear_group): up to four of linear's products, one dispatch: each problem's
-// threadgroups after the ones before it, at the widest split any takes and the narrowest loads any allows.
+// threadgroups after the ones before it, its split fitted as linear's to the threadgroups of them all and the least K
+// of any, and the narrowest loads any allows.
 static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const std::vector<at::Tensor> &ws,
                                        const std::vector<std::optional<at::Tensor>> &biases, const std::vector<int64_t> &acts,
                                        const std::vector<std::optional<at::Tensor>> &x1s) {
@@ -743,7 +744,7 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
   std::vector<std::optional<at::Tensor>> buffers(20);
   std::vector<int64_t> words(40, 0);
   std::vector<at::Tensor> ys;
-  int64_t first = 0, split = 1;
+  int64_t first = 0, least = INT64_MAX;
   bool wide_w = true, wide_x = true;
   for (size_t p = 0; p < P; p++) {
     const at::Tensor &x = xs[p], &w = ws[p];
@@ -760,13 +761,14 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
     for (int k = 0; k < 8; k++) words[8 * p + k] = d[k];
     words[32 + p] = first, words[36 + p] = acts[p];
     first += (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
-    split = std::max(split, linear_split(K, N));
+    least = std::min(least, K);
     wide_w &= ldw % 4 == 0 && K0 % 4 == 0, wide_x &= K0 % 4 == 0 && ld0 % 4 == 0 && ld1 % 4 == 0;
   }
   for (size_t p = P; p < 4; p++) {
     for (int k = 0; k < 5; k++) buffers[5 * p + k] = buffers[k];
     words[32 + p] = first;
   }
+  const int64_t split = linear_fit(least, first);
   const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, -1);
   auto found = linear_pipelines_.find(key);
   if (found == linear_pipelines_.end()) {
