@@ -58,7 +58,7 @@ from . import _stream
 
 # the checkout this package is installed from (its editable install: README "Install"), whose library it links
 STEPS = _stream.metal_prelude() + '\n'
-Crossing = namedtuple('Crossing', 'publish land comm', defaults=(0,))
+Crossing = namedtuple('Crossing', 'publish land')
 _NONE = (0,) * 6
 
 
@@ -77,7 +77,7 @@ def exchange(send, landings, polls, group=None, repeats=1, stride=0):
     import torch.distributed as dist
     group = group or dist.distributed_c10d._get_default_group()
     publish, land = _stream.fused_exchange(send, list(landings), group.handle, int(polls), int(repeats), int(stride))
-    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)), group.handle)
+    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 
 def _words(addresses):
@@ -95,25 +95,19 @@ def writes(send, landings, pairs, group, polls=0):
     are posted immediately, without waiting for the local producer.
     """
     publish, land = _stream.fused_writes(send, list(landings), list(pairs), group.handle, int(polls))
-    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)), group.handle)
+    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
 
 
 def encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None):
     """_stream.encode of kernel `handle`, its constants followed by `land`'s `peers` landing bindings and `publish`'s
     `peers` publication bindings (module docstring); one that publishes is committed by the stream's rule for a
-    publication.  Where its group is watched (torch_mesh.evidence), a publishing dispatch is marked before it as a
-    collective's issue and a landing one after it as its completion, the pool events _stream.mm marks every library
-    group with, so the work between a step's crossings is the evidence's whatever path they take."""
+    publication."""
     words = list(constants) + [0] * (len(constants) % 2)
     for crossing, bindings in ((land, 'land'), (publish, 'publish')):
         records = getattr(crossing, bindings) if crossing else ()
         if len(records) > peers:
             raise ValueError('kernel binding extent is smaller than its physical crossing')
         words += [w for k in range(peers) for w in _words(records[k] if k < len(records) else _NONE)]
-    if publish:
-        _stream.mark(publish.comm, 0)
     _stream.encode(handle, buffers, words, at, gx, gy, threads, bool(land or publish))
-    if land:
-        _stream.mark(land.comm, 1)
     if publish:
         _stream.fused_published()
