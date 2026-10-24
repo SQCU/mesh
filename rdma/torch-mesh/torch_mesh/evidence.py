@@ -10,9 +10,11 @@ at issue is where the GPU finished the work before the collective and the mark a
 its wait; on host tensors the monotonic clock (a host collective completes in the call).  A step's work on the rank is
 the sum, over its collectives, of the time from the mark after the previous collective (the previous step's last, or
 the step's boundary for the first) to the mark at this one's issue: the stretch a prepared call's rank times at each
-crossing it issues (metal-microbench mesh_rank.m).  `step` closes a step; `work`, taken at a step's boundary, returns each closed step's stretches
-(seconds, one a collective in issue order) and forgets them.  Two marks with no GPU work between them cannot be timed
-apart; that interval counts zero.
+crossing it issues (metal-microbench mesh_rank.m).  `step` closes a step; `work` returns the stretches (seconds, one a
+collective in issue order) of each closed step the GPU has passed and forgets them, waiting for nothing: on MPS a step
+whose closing mark the GPU has not reached stays for a later `work` (torch's pool events complete in the stream's
+order, so the latest completed closing mark bounds a prefix of complete marks).  Two marks with no GPU work between
+them cannot be timed apart; that interval counts zero.
 
 An unwatched program pays one dictionary lookup a group call in Python and one empty-map test a collective in C++;
 a watched group two marks a collective."""
@@ -23,7 +25,7 @@ _WATCHED = {}
 
 class _Watch:
     def __init__(self, device, handle):
-        self.device, self.handle, self.marks, self.steps, self.last = device, handle, [], [], None
+        self.device, self.handle, self.marks, self.steps, self.last, self.pending = device, handle, [], [], None, []
 
 
 def _stream():
@@ -68,8 +70,8 @@ def step(group):
 
 
 def work(group):
-    """The rank's stretches in each closed step of `group` ([seconds, one a collective in issue order] a step), the
-    steps then forgotten."""
+    """The rank's stretches in each closed step of `group` the GPU has passed ([seconds, one a collective in issue
+    order] a step), the steps then forgotten; nothing is waited for."""
     w = _WATCHED.get(id(group))
     if w is None:
         return []
@@ -85,9 +87,12 @@ def work(group):
         w.steps = []
         return out
     import torch
-    torch.mps.synchronize()
+    w.pending.extend(_stream().take(w.handle))
+    closed = [k for k, (kind, event) in enumerate(w.pending) if kind == 2]
+    passed = next((k + 1 for k in reversed(closed) if torch._C._mps_queryEvent(w.pending[k][1])), 0)
+    ready, w.pending = w.pending[:passed], w.pending[passed:]
     out, each, done = [], [], []
-    for kind, event in _stream().take(w.handle):
+    for kind, event in ready:
         if w.last is None:
             w.last = event
             continue
