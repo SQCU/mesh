@@ -2001,7 +2001,7 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
    relay is the identity at a rank), or -1: the last receive before it that meets its piece, a COPY into the same
    buffer whose piece holds its own, from a page of it (step k not reading the send buffer in place) */
 static int32_t forwards(const struct steps *s, uint32_t k, uint64_t page) {
-  if (s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
+  if (1 || s->prior_first[k] == s->prior_first[k + 1] || (s->read && named(s->read[k]))) return -1;
   const uint32_t r = s->prior[s->prior_first[k + 1] - 1];
   const struct mesh_step *a = s->steps + r, *b = s->steps + k;
   return a->op == MESH_STEP_COPY && a->first <= b->first && b->first + b->piece.elements <= a->first + a->piece.elements &&
