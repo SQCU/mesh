@@ -17,7 +17,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "mesh.h"
 
 static NSMutableArray *models_;
 static NSMutableArray *names_;
@@ -102,8 +101,7 @@ long mesh_coreml_placement(long handle, char *out, size_t size) {
       __block NSError *failure = nil;
       [MLComputePlan loadContentsOfURL:compiled_[handle] configuration:configuration
                      completionHandler:^(MLComputePlan *loaded, NSError *error) { plan = loaded; failure = error; dispatch_semaphore_signal(done); }];
-      if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)MESH_PLATFORM_NS)))
-        mesh_expired("libmesh-coreml: Core ML's compute plan load (mesh_coreml_placement)", MESH_PLATFORM_NS);
+      dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
       if (!plan) { snprintf(error_, sizeof error_, "compute plan: %s", failure.localizedDescription.UTF8String); return -1; }
       MLModelStructureProgramFunction *main = plan.modelStructure.program.functions[@"main"];
       NSMutableString *text = [NSMutableString string];

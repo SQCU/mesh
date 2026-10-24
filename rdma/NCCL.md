@@ -86,9 +86,9 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
   range, or one already met), is closed alone, and the root meets the next; one that sends nothing holds the root's
   read until the phase's deadline, which ends the program.
 - Every wait of a bootstrap, blocking init or not, is a 100 ms slice after which the revoke and the phase's deadline
-  are read again (design/rubrics.md M3, C5). A phase's deadline is `MESH_PLATFORM_NS` after the init began where no
-  rank was met, and `MESH_PLATFORM_NS` after its first rank met (the root's first accept, a non-root's connect) for the
-  rest of it; the second gather has its own `MESH_PLATFORM_NS`. Past a deadline the program ends, the wait and its
+  are read again (design/rubrics.md M3, C5). A phase's deadline is `MESH_PLATFORM_NS` after it began: a non-root's
+  connect, then its first gather; the root's accepts, every rank's report and its first gather under one deadline made
+  as its accepts begin; the second gather has its own `MESH_PLATFORM_NS`. Past a deadline the program ends, the wait and its
   deadline named on stderr (design/data-model.md section 6: the operator, 2026-10-23, "no wait may ever run longer than
   a deadline operand presented at the time the wait was constructed"); nothing waits on a peer that never comes.
 - While the process holds a lease of a bridge that stopped, its next lease (`ncclRemoteError`), communicator

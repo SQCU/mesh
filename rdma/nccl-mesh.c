@@ -1052,9 +1052,9 @@ static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
    peer closed it) or names no rank still to meet closed alone, the root accepting the next, though one that sends
    nothing holds the root's read until the phase ends) or a non-root's to the root
    (peers[0], placed once connected), each placed before the revoke is read, so a revoke either finds it or is read.  Its
-   phase's deadline is MESH_PLATFORM_NS after the init began where no rank was met, and MESH_PLATFORM_NS after the
-   first rank met (the root's first accept, a non-root's connect) for the rest of the phase, the first gather's
-   (`until`), past which the program ends: 0, ECANCELED (comm revoked), or the errno */
+   phase's deadline (`until`) is MESH_PLATFORM_NS after it began: a non-root's connect, then its first gather; the
+   root's accepts, every rank's report and its first gather under the one deadline made as its accepts begin; past it
+   the program ends: 0, ECANCELED (comm revoked), or the errno */
 static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports) {
   int *peers = comm->peers, status = 0;
   char host[NCCL_UNIQUE_ID_BYTES];
@@ -1090,8 +1090,7 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   uint16_t port = (uint16_t)atoi(colon + 1);
   int listener = !strcmp(root.id, id) ? root.fd : -1;
   if (listener < 0 && (listener = bootstrap_listen(host, &port)) < 0) return errno;
-  int met = 0;
-  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's root, its first rank's connect (bootstrap_open)", 0);
+  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's root, every rank's connect and report and the first gather (bootstrap_open)", 0);
   for (int r = 1; r < comm->nranks && !status;) {
     struct report heard;
     struct pollfd look = {listener, POLLIN, 0};
@@ -1100,10 +1099,6 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
       if (revoked(comm)) status = ECANCELED;
       else if (poll(&look, 1, bootstrap_slice(comm)) < 0 && errno != EINTR) status = errno;
       else if ((fd = accept(listener, NULL, NULL)) < 0 && errno != EWOULDBLOCK && errno != ECONNABORTED && errno != EINTR) status = errno;
-    if (!status && !met) {
-      comm->until = mesh_deadline("libnccl-mesh: the bootstrap's root, every other rank's connect and report and the first gather (bootstrap_open)", 0);
-      met = 1;
-    }
     if (!status) bootstrap_put(comm, 0, fd);
     if (!status && revoked(comm)) status = ECANCELED;
     const int read = status ? status : whole(comm, fd, &heard, sizeof heard, 0);
@@ -2522,13 +2517,13 @@ enum { GPU_ENDED, GPU_ERROR, GPU_UNCOMMITTED, GPU_REVOKED, GPU_HOLDING };
    read under the lock; the wait in MESH_PAUSE_NS slices, ending at the signal or at the buffer's end as its status tells
    it (Completed, or Error, which the platform's watchdog gives a buffer that overruns: nccl-mesh-metal.m metal_ended),
    and for a group (`group`: comm kept from its destroy meanwhile by `runs`) at a revoke or a holding's end too, and
-   past its deadline, MESH_PLATFORM_NS from its start, the program (design/data-model.md section 6); then the lock taken
-   again, and a wait made for a later program that touched comm meanwhile.  Under group_lock */
+   past its deadline, MESH_PLATFORM_NS from the wait's start, the program (design/data-model.md section 6); then the lock
+   taken again, and a later program that touched comm meanwhile awaited too, under the same deadline.  Under group_lock */
 static int gpu_wait(struct ncclComm *comm, int group) {
   int ended = GPU_ENDED;
+  const struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: a communicator's GPU programs' end (gpu_wait)", 0);
   while (ended == GPU_ENDED && finished && comm->last && metal_signaled(finished) < comm->last) {
     const uint64_t last = comm->last;
-    const struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: a communicator's last GPU program's end (gpu_wait)", 0);
     void *command = metal_retain(comm->command);
     if (group) atomic_fetch_add(&comm->runs, 1);
     pthread_mutex_unlock(&group_lock);

@@ -708,10 +708,7 @@ static std::vector<double> timed(int64_t handle, const std::vector<std::optional
     [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
     [encoder endEncoding];
     [buffer commit];
-    {
-      const Deadline deadline("timed: a command buffer's end");
-      [buffer waitUntilCompleted];
-    }
+    [buffer waitUntilCompleted];
     if (buffer.error) throw std::runtime_error(std::string("timed: ") + buffer.error.localizedDescription.UTF8String);
     out.push_back(buffer.GPUEndTime - buffer.GPUStartTime);
   }
@@ -752,10 +749,7 @@ static double sequence(int64_t handle, const std::vector<std::vector<std::option
   }
   [encoder endEncoding];
   [buffer commit];
-  {
-    const Deadline deadline("sequence: a command buffer's end");
-    [buffer waitUntilCompleted];
-  }
+  [buffer waitUntilCompleted];
   if (buffer.error) throw std::runtime_error(std::string("sequence: ") + buffer.error.localizedDescription.UTF8String);
   return (buffer.GPUEndTime - buffer.GPUStartTime) / (double)count;
 }
