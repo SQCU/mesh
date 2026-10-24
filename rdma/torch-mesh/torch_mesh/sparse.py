@@ -34,7 +34,7 @@ from pathlib import Path
 
 import torch
 
-from . import _stream
+from . import _stream, deadline
 
 SOURCE = Path(__file__).with_name('sparse.metal').read_text()
 BITMAP = '(bits[((n) * KB + (k)) >> 5] >> (((n) * KB + (k)) & 31)) & 1'
@@ -257,7 +257,8 @@ class SparseLinear(torch.nn.Module):
         if min(issued.values()) <= self.window * rounds:
             return 'dense' if issued['dense'] <= issued['tiles'] else 'tiles'
         if self.pending:
-            torch.mps.synchronize()
+            with deadline():
+                torch.mps.synchronize()
             self._settle()
         seen = self.seen.get(rows, {})
         latest = {l: seen.get(l, [])[1 - self.window * rounds - 1:] for l in ('dense', 'tiles')}
@@ -311,14 +312,16 @@ def _time(args):
     def ms(fn, reps=20):
         for _ in range(3):
             fn()
-        torch.mps.synchronize()
+        with deadline():
+            torch.mps.synchronize()
         times = []
         for _ in range(reps):
             b, e = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
             b.record()
             fn()
             e.record()
-            torch.mps.synchronize()
+            with deadline():
+                torch.mps.synchronize()
             times.append(b.elapsed_time(e))
         return statistics.median(times)
 
@@ -332,7 +335,8 @@ def _time(args):
         dense = ms(lambda: torch.nn.functional.linear(x, layer.weight))
         for _ in range(12):
             layer(x)
-        torch.mps.synchronize()
+        with deadline():
+            torch.mps.synchronize()
         layer._settle()
         routed = ms(lambda: layer(x))
         print(f'density {float(mask.float().mean()):.3f}: tiles {tiles:.3f} ms, dense {dense:.3f}, routed {routed:.3f} '

@@ -102,6 +102,7 @@ the dimension again at them."""
 import contextlib
 import itertools
 import math
+import resource
 
 import torch
 import torch.distributed as dist
@@ -281,8 +282,9 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> 
     """The blocks gathered from x's block (contiguous along dim), an opaque op, so a compiled graph calls it as torch's
     functional collectives are called.  On the mesh backend the list is a split of `out`, so it is one MPI_Allgatherv
     into `out` in place (ncclMeshAllGatherV: backend.py allgather).  Where the output is a region tensor (_region_backed),
-    this rank's block is copied into its place in it first and gathered from there, the call in place (nccl.h: sendbuff
-    rank's segment of recvbuff; mesh f9898875), so what it sends lies in the region; else out of place from x's block."""
+    it is the shape's held lease (_gathering), each rank's segment on a page of its own; this rank's block is copied
+    into its segment and gathered from there, the call in place (nccl.h: sendbuff rank's segment of recvbuff; mesh
+    f9898875), and the blocks' elements are taken out of the segments in one pass; else out of place from x's block."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     if not _region_backed(x, group):
         y = x.movedim(dim, 0).contiguous()
@@ -290,11 +292,30 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> 
         dist.all_gather(list(out.split(sizes)), y, group=group)
         return out.movedim(0, dim).contiguous()
     y = x.movedim(dim, 0)
-    out = _empty((sum(sizes),) + y.shape[1:], y, group)
-    blocks = list(out.split(sizes))
-    mine = blocks[dist.get_rank(group)].copy_(y)
-    dist.all_gather(blocks, mine, group=group)
-    return out.movedim(0, dim).contiguous()
+    out, counts, starts, index = _gathering(y, sizes, group)
+    rank = dist.get_rank(group)
+    mine = out[starts[rank]:starts[rank] + counts[rank]]
+    mine[:y.numel()].view(y.shape).copy_(y)
+    dist.all_gather(list(out.split(counts)), mine, group=group)
+    return out.index_select(0, index).view((sum(sizes),) + y.shape[1:]).movedim(0, dim).contiguous()
+
+
+_GATHERS = {}
+
+
+def _gathering(y, sizes, group):
+    """allgatherv's output for blocks like `y` (the gathered dimension first) of `sizes` on `group`, leased once for
+    the shape and held (design/rubrics.md D8): each rank's segment its block's elements padded to whole pages, since the
+    library places each segment on a page of its own and the bridge moves whole pages (rdma/nccl.h, Memory;
+    design/data-model.md section 8); with the segments' counts and starts and the index of the blocks' elements."""
+    key = (tuple(y.shape[1:]), y.dtype, tuple(sizes), group.group_name)
+    if key not in _GATHERS:
+        row, page = math.prod(y.shape[1:]), max(1, resource.getpagesize() // y.element_size())
+        counts = [-(-s * row // page) * page for s in sizes]
+        starts = list(itertools.accumulate(counts, initial=0))
+        index = torch.cat([torch.arange(a, a + s * row) for a, s in zip(starts, sizes)]).to(y.device)
+        _GATHERS[key] = _empty((starts[-1],), y, group), counts, starts, index
+    return _GATHERS[key]
 
 
 @torch.library.custom_op('torch_mesh::reduce_scatterv', mutates_args=())
@@ -532,7 +553,7 @@ def _local_redistribute(local, current, target, async_op=False):
                 for p, q in zip(current.placements, target.placements))
     if not _same(mid, current.placements):
         local, current = _local_redistribute(local, current, _with(current, mid), async_op), _with(current, mid)
-    for info in _gen_transform_infos_non_cached(current, target):
+    for info in _planned(current, target):
         i, (p, q) = info.mesh_dim, info.src_dst_placements
         if mesh.size(i) == 1 or _same((p,), (q,)):
             continue
@@ -556,6 +577,19 @@ def _local_redistribute(local, current, target, async_op=False):
         if not async_op and isinstance(local, funcol.AsyncCollectiveTensor):
             local = local.wait()
     return local
+
+
+_PLANNED = {}
+
+
+def _planned(current, target):
+    """torch's planner's steps from `current` to `target` (_gen_transform_infos_non_cached), planned once for their
+    placements, each RaggedShard's key told apart, and their shape, which the program fixes when it is compiled
+    (design/data-model.md section 9: no planning per call)."""
+    key = (current.mesh, tuple(map(repr, current.placements)), tuple(map(repr, target.placements)), tuple(current.shape))
+    if key not in _PLANNED:
+        _PLANNED[key] = _gen_transform_infos_non_cached(current, target)
+    return _PLANNED[key]
 
 
 def _placements(mesh, placements, ndim, held=None):

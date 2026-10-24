@@ -110,6 +110,8 @@ from pathlib import Path
 
 import torch
 
+from . import deadline
+
 SOURCE = Path(__file__).with_name('streamed.metal').read_text()
 _PIPELINES = {}
 aten = torch.ops.aten
@@ -142,8 +144,9 @@ def node():
     import re
     import subprocess
     if 'node' not in _PIPELINES:
-        chip = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True).stdout.strip()
-        listing = subprocess.run(['ioreg', '-r', '-c', 'AGXAccelerator', '-d', '1'], capture_output=True).stdout.decode('utf-8', 'replace')
+        chip = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True, timeout=5).stdout.strip()
+        listing = subprocess.run(['ioreg', '-r', '-c', 'AGXAccelerator', '-d', '1'], capture_output=True,
+                                 timeout=5).stdout.decode('utf-8', 'replace')
         cores = set(re.findall(r'"gpu-core-count" = ([0-9]+)', listing))
         if len(cores) != 1:
             raise RuntimeError(f'{chip or "this node"}: its registry names GPU core counts {sorted(cores)}, not one (ioreg gpu-core-count)')
@@ -1440,7 +1443,7 @@ def _gpu_busy():
     """The GPU's utilization now (ioreg's Device Utilization %), or None where its registry names none."""
     import re
     import subprocess
-    out = subprocess.run(['ioreg', '-r', '-d', '1', '-w', '0', '-c', 'IOAccelerator'], capture_output=True, text=True).stdout
+    out = subprocess.run(['ioreg', '-r', '-d', '1', '-w', '0', '-c', 'IOAccelerator'], capture_output=True, text=True, timeout=5).stdout
     found = re.search(r'"Device Utilization %"=([0-9]+)', out)
     return int(found.group(1)) if found else None
 
@@ -1457,7 +1460,8 @@ def _bandwidth(args):
     count = args.mib << 16
     data = torch.full((count * 8,), 0x5a5a, dtype=torch.int16, device='mps')
     out = torch.zeros(1024, dtype=torch.int32, device='mps')
-    torch.mps.synchronize()
+    with deadline():
+        torch.mps.synchronize()
     times = sorted(_stream.timed(_pipeline('streamed_read'), [data, out], _dims(count=count), 15, 1024, 1, 256, args.rounds + 1)[1:])
     row = {'kind': 'bandwidth', 'node': here, 'bytes': count * 16, 'rounds': args.rounds, 'gbps': count * 16 / times[0] / 1e9,
            'median_gbps': count * 16 / times[len(times) // 2] / 1e9, 'busy': [busy, _gpu_busy()]}

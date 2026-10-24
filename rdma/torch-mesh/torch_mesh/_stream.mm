@@ -27,7 +27,42 @@
 #include <utility>
 #include <array>
 #include <vector>
+#include <unistd.h>
 #include "nccl.h"
+
+// design/data-model.md section 6: each wait here (a turn of torch's queue, which dispatch_sync waits for, with any
+// command buffer waited inside it; a command buffer's end) carries a deadline fixed when it is made, its caller's or
+// 5 s (mesh.h MESH_PLATFORM_NS), on its thread's timer, armed as the wait is made and disarmed at its end; the timer's
+// expiry ends the process, the wait and its deadline on stderr.
+struct Deadline {
+  struct Named {
+    const char *wait;
+    uint64_t ns;
+  };
+  dispatch_source_t timer;
+  explicit Deadline(const char *wait, uint64_t ns = 0) : timer(thread_timer()) {
+    Named *named = (Named *)dispatch_get_context(timer);
+    *named = {wait, ns ? std::min<uint64_t>(ns, INT64_MAX) : UINT64_C(5000000000)};
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)named->ns), DISPATCH_TIME_FOREVER, 0);
+  }
+  ~Deadline() { dispatch_source_set_timer(timer, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0); }
+  static void expired(void *context) {
+    const Named *named = (const Named *)context;
+    fprintf(stderr, "torch_mesh: %s: past its deadline of %.3f s; the program ends (design/data-model.md section 6)\n", named->wait,
+            (double)named->ns / 1e9);
+    _exit(1);
+  }
+  static dispatch_source_t thread_timer() {
+    thread_local dispatch_source_t made = nullptr;
+    if (made) return made;
+    made = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0));
+    dispatch_set_context(made, new Named{"", 0});
+    dispatch_source_set_event_handler_f(made, expired);
+    dispatch_source_set_timer(made, DISPATCH_TIME_FOREVER, DISPATCH_TIME_FOREVER, 0);
+    dispatch_resume(made);
+    return made;
+  }
+};
 
 
 // The commit rule (README, Performance), one for every caller: eager calls and compiled graphs, the library's own
@@ -43,8 +78,8 @@
 // publication applies the rule again, and a host wait commits the open buffer, since nothing else would: the
 // library's (commit, host_wait) and torch's own (torch.mps.synchronize, torch.accelerator.synchronize, .item() and
 // .cpu() commit torch's open buffer and wait: MPSStream::synchronize COMMIT_AND_WAIT).  A host that blocks outside
-// torch while a publication waits stalls its peer, which is the program's to avoid; the peer's bounded wait ends the
-// call as a value.  In flight counts the buffers this library committed, not torch's own.
+// torch while a publication waits stalls its peer, which is the program's to avoid; the peer's wait ends at its
+// deadline (design/data-model.md section 6).  In flight counts the buffers this library committed, not torch's own.
 
 // One torch MPS stream's commits and group workspace, held by the stream (made at its first group and never freed:
 // torch's streams live as long as the process, and the library's workspace allocator holds it as its context).  Its
@@ -129,9 +164,10 @@ static std::vector<MeshStream *> streams_made() {
 }
 
 // A host wait of the library's on stream s, on torch's queue: a publication still waiting committed, and with `wait`
-// the stream committed and waited for (torch's COMMIT_AND_WAIT, taken here on its queue).
+// the stream committed and waited for (torch's COMMIT_AND_WAIT, taken here on its queue), within its Deadline.
 static void host_wait(MeshStream &s, bool wait) {
   MeshStream *self = &s;
+  const Deadline deadline("host_wait: a turn of torch's queue and, waited, its command buffers' end");
   at::mps::dispatch_sync_with_rethrow(s.mps->queue(), ^{
     @autoreleasepool {
       if (self->waiting()) self->signalled(wait);
@@ -211,13 +247,16 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   s->scratch = std::move(held);
   __block ncclResult_t result = ncclSuccess;
   __block ncclMeshIssue issue = {0, 0};
-  dispatch_sync(stream->queue(), ^{
-    @autoreleasepool {
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
-      result = (*encode)(&on);
-      if (!split || issue.published) s->published();
-    }
-  });
+  {
+    const Deadline deadline("on_stream: a turn of torch's queue, a group encoded");
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
+        result = (*encode)(&on);
+        if (!split || issue.published) s->published();
+      }
+    });
+  }
   s->streamed = true;
   s->retire(issue.ticket && !result ? issue.ticket : 0, std::exchange(s->scratch, {}));
   checked(result);
@@ -225,33 +264,38 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   return issue.ticket;
 }
 
-// every issued group through `ticket` completed on torch's stream where it is waited
-static void complete(uint64_t ticket) {
+// every issued group through `ticket` completed on torch's stream where it is waited, the turn of torch's queue within
+// `ns` (0: the Deadline's 5 s)
+static void complete(uint64_t ticket, uint64_t ns = 0) {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
   if (ncclMeshRetired() >= ticket) return s->retire(0, {});
   __block ncclResult_t result = ncclSuccess;
-  dispatch_sync(stream->queue(), ^{
-    @autoreleasepool {
-      ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
-      int published = 0;
-      result = ncclMeshComplete(ticket, &on, &published);
-      if (published) s->published();
-    }
-  });
+  {
+    const Deadline deadline("complete: a turn of torch's queue, a group's completion encoded", ns);
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr};
+        int published = 0;
+        result = ncclMeshComplete(ticket, &on, &published);
+        if (published) s->published();
+      }
+    });
+  }
   s->retire(0, std::exchange(s->scratch, {}));
   checked(result);
 }
 
 // c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
-// asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results
+// asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results; a
+// wait's timeout is its Deadline (c10d's kNoTimeout, 0: 5 s)
 class MeshWork : public c10d::Work {
  public:
   MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm)
       : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)), comm_(comm) {}
   bool isCompleted() override { finish(); return true; }
   bool isSuccess() const override { return finished_; }
-  bool wait(std::chrono::milliseconds) override { finish(); return true; }
+  bool wait(std::chrono::milliseconds timeout) override { finish((uint64_t)std::max<int64_t>(timeout.count(), 0) * 1000000); return true; }
   void synchronize() override { finish(); }
   c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
     finish();
@@ -261,10 +305,10 @@ class MeshWork : public c10d::Work {
   }
 
  private:
-  void finish() {
+  void finish(uint64_t ns = 0) {
     if (finished_) return;
     finished_ = true;
-    complete(ticket_);
+    complete(ticket_, ns);
     mark(comm_, 1);
   }
   uint64_t ticket_;
@@ -612,6 +656,7 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
     }
   std::vector<uint32_t> words(constants.begin(), constants.end());
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  const Deadline deadline("encode: a turn of torch's queue, a kernel encoded");
   dispatch_sync(stream->queue(), ^{
     id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
     [encoder setComputePipelineState:state];
@@ -654,7 +699,10 @@ static std::vector<double> timed(int64_t handle, const std::vector<std::optional
     [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
     [encoder endEncoding];
     [buffer commit];
-    [buffer waitUntilCompleted];
+    {
+      const Deadline deadline("timed: a command buffer's end");
+      [buffer waitUntilCompleted];
+    }
     if (buffer.error) throw std::runtime_error(std::string("timed: ") + buffer.error.localizedDescription.UTF8String);
     out.push_back(buffer.GPUEndTime - buffer.GPUStartTime);
   }
@@ -695,7 +743,10 @@ static double sequence(int64_t handle, const std::vector<std::vector<std::option
   }
   [encoder endEncoding];
   [buffer commit];
-  [buffer waitUntilCompleted];
+  {
+    const Deadline deadline("sequence: a command buffer's end");
+    [buffer waitUntilCompleted];
+  }
   if (buffer.error) throw std::runtime_error(std::string("sequence: ") + buffer.error.localizedDescription.UTF8String);
   return (buffer.GPUEndTime - buffer.GPUStartTime) / (double)count;
 }
@@ -811,6 +862,7 @@ static id<MTLResidencySet> fused_residency(at::mps::MPSStream *stream) {
   for (void *q : fused_queues_) added |= q == queue;
   if (!added) {
     id<MTLResidencySet> set = fused_residency_;
+    const Deadline deadline("fused_residency: a turn of torch's queue");
     dispatch_sync(stream->queue(), ^{ [stream->commandQueue() addResidencySet:set]; });
     fused_queues_.push_back(queue);
   }
@@ -849,21 +901,24 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   MeshStream *s = &stream_of(stream);
   id<MTLResidencySet> residency = fused_residency(stream);
   const ncclComm_t c = communicator(comm);
-  dispatch_sync(stream->queue(), ^{
-    @autoreleasepool {
-      ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
-                           nullptr, (__bridge void *)residency, (uint32_t)polls, records};
-      ncclResult_t made = ncclGroupStart();
-      for (int q = 0, i = 0; q < ranks && !made; q++) {
-        if (q == rank) continue;
-        made = ncclSend(out.at, out.count, out.type, q, c, &on);
-        if (!made) made = ncclRecv((void *)ins[i].at, ins[i].count, ins[i].type, q, c, &on);
-        i++;
+  {
+    const Deadline deadline("fused_exchange: a turn of torch's queue, a group encoded");
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
+                             nullptr, (__bridge void *)residency, (uint32_t)polls, records};
+        ncclResult_t made = ncclGroupStart();
+        for (int q = 0, i = 0; q < ranks && !made; q++) {
+          if (q == rank) continue;
+          made = ncclSend(out.at, out.count, out.type, q, c, &on);
+          if (!made) made = ncclRecv((void *)ins[i].at, ins[i].count, ins[i].type, q, c, &on);
+          i++;
+        }
+        const ncclResult_t ended = ncclGroupEnd();
+        result = made ? made : ended;
       }
-      const ncclResult_t ended = ncclGroupEnd();
-      result = made ? made : ended;
-    }
-  });
+    });
+  }
   s->streamed = true;
   s->retire(0, std::exchange(s->scratch, {}));
   checked(result);
@@ -877,6 +932,7 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
 // one commit rule (MeshStream::published), as a group that published is.
 static void fused_published() {
   MeshStream *s = &stream_of(at::mps::getCurrentMPSStream());
+  const Deadline deadline("fused_published: a turn of torch's queue");
   dispatch_sync(s->mps->queue(), ^{
     @autoreleasepool {
       s->published();

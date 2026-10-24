@@ -950,17 +950,22 @@ class Program:
         return (_native.recv(dst.tensor, task.members.index(sender), group),)
 
     # design/algorithm-sources.md#collectivesync_on_remote_fill
+    # design/data-model.md#6-why-code-here-only-loses-waits-and-guards
     def _wait_results(self, results, every=True):
+        from torch_mesh import deadline, expired
+        until = time.monotonic() + 5.0
         with self._cond:
             while True:
                 filled = [result for result in results if result._task.done]
                 if len(filled) == len(results) or filled and not every:
                     break
                 self._raise()
-                self._cond.wait()
+                if not self._cond.wait(max(0.0, until - time.monotonic())):
+                    expired('the program\'s results', 5.0)
         for result in filled:
             if result._task.event is not None:
-                result._task.event.synchronize()
+                with deadline():
+                    result._task.event.synchronize()
         return filled
 
     # design/algorithm-sources.md#program
@@ -973,8 +978,12 @@ class Program:
             self._cond.notify_all()
         if abandoned:
             self._world.revoke()
+        from torch_mesh import expired
+        until = time.monotonic() + 5.0
         for thread in self._threads:
-            thread.join()
+            thread.join(max(0.0, until - time.monotonic()))
+            if thread.is_alive():
+                expired(f'the program\'s thread {thread.name}', 5.0)
         self._world.close()
         self._replicated.clear()
 

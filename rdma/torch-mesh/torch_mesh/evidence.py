@@ -85,7 +85,10 @@ def work(group):
         w.steps = []
         return out
     import torch
-    torch.mps.synchronize()
+
+    from . import deadline
+    with deadline():
+        torch.mps.synchronize()
     out, each, done = [], [], []
     for kind, event in _stream().take(w.handle):
         if w.last is None:
