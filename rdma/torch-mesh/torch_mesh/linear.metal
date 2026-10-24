@@ -124,6 +124,12 @@ struct linear_act_store {
     }
 };
 
+// problem P through its own inlined body, its buffers the kernel's own arguments: pointers selected by p cost the Mini
+// 1.3 to 1.7 % of the two products' time at the LSTM's h16384 n3 shares and 16 to 18 % at h1024, the Studios 1 us or
+// less (gbench3, 2026-10-24)
+#define LINEAR_GROUP_CASE(P, X_, W_, Y_, B_, S_) case P: { const linear_act_store store{Y_, B_, g.d[P].N, g.d[P].B, g.act[P]}; \
+    linear_body<VW, VX, COLS, NSG, U>(X_, S_, W_, g.d[P], store, part, sg, lane, tg - g.first[P], tid); break; }
+
 template <uint VW, uint VX, uint COLS, uint NSG, uint U>
 [[max_total_threads_per_threadgroup(NSG * 32)]]
 kernel void linear_group(device const half* x0 [[buffer(0)]], device const half* w0 [[buffer(1)]], device half* y0 [[buffer(2)]],
@@ -139,13 +145,12 @@ kernel void linear_group(device const half* x0 [[buffer(0)]], device const half*
                          uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
     threadgroup float part[NSG * 8 * COLS];
     const uint p = tg >= g.first[3] ? 3 : tg >= g.first[2] ? 2 : tg >= g.first[1] ? 1 : 0;
-    device const half* x = p == 0 ? x0 : p == 1 ? x1 : p == 2 ? x2 : x3;
-    device const half* w = p == 0 ? w0 : p == 1 ? w1 : p == 2 ? w2 : w3;
-    device half* y = p == 0 ? y0 : p == 1 ? y1 : p == 2 ? y2 : y3;
-    device const half* b = p == 0 ? b0 : p == 1 ? b1 : p == 2 ? b2 : b3;
-    device const half* s = p == 0 ? s0 : p == 1 ? s1 : p == 2 ? s2 : s3;
-    const linear_act_store store{y, b, g.d[p].N, g.d[p].B, g.act[p]};
-    linear_body<VW, VX, COLS, NSG, U>(x, s, w, g.d[p], store, part, sg, lane, tg - g.first[p], tid);
+    switch (p) {
+        LINEAR_GROUP_CASE(0, x0, w0, y0, b0, s0)
+        LINEAR_GROUP_CASE(1, x1, w1, y1, b1, s1)
+        LINEAR_GROUP_CASE(2, x2, w2, y2, b2, s2)
+        default: LINEAR_GROUP_CASE(3, x3, w3, y3, b3, s3)
+    }
 }
 
 #ifdef MESH_METAL
