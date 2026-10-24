@@ -124,6 +124,18 @@ def compiler(gm, example_inputs):
                     graph.erase_node(m)
             i += len(group)
 
+    def native(node):
+        """A sum's crossing (linear_sum) on a mesh group of two ranks or more called natively, its crossing's form and
+        encodes _stream.mm's (torch_mesh::fused_step), no Python op between the graph and them."""
+        import torch.distributed as dist
+        group = dist.distributed_c10d._resolve_process_group(node.args[2])
+        if isinstance(group, backend.ProcessGroupMesh) and group.size() > 1:
+            x, w = node.args[:2]
+            repeats = node.args[3] if len(node.args) > 3 else 1
+            node.target = torch.ops.torch_mesh.fused_step.default
+            node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
+            node.meta.pop('eager_input_vals', None)
+
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
@@ -171,9 +183,11 @@ def compiler(gm, example_inputs):
                 if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
                     for n in nodes:
                         told(n, len(nodes))
+            for node in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
+                native(node)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv native'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
