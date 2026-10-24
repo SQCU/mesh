@@ -39,10 +39,9 @@ def compiler(gm, example_inputs):
     few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
     a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
     torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
-    product's one use folded into it.  A graph's sums on a group, where every collective it names that group in is one
-    of them and all of one form, are one issue's repeats (each node told their count: rdma/nccl.h ncclMeshFused repeats),
-    so the host issues their crossing once a graph.  Inductor's run-time size, alignment and scalar asserts are off: each
-    is a check at every call of what the compile fixed (design/data-model.md section 6)."""
+    product's one use folded into it, a cat of two row segments that is its x read in place, and up to four consecutive
+    independent products one dispatch (torch_mesh::linears).  Inductor's run-time size, alignment and scalar asserts are off: each is a check
+    at every call of what the compile fixed (design/data-model.md section 6)."""
     from pathlib import Path
 
     import torch
@@ -63,12 +62,52 @@ def compiler(gm, example_inputs):
         return (x is not None and w is not None and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
                 and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
-    def told(node, repeats):
-        """A sum's node told its repeats, the fake values Inductor records for its call alike."""
-        node.args = (*node.args[:3], repeats)
-        if 'eager_input_vals' in node.meta:
-            values, named = node.meta['eager_input_vals']
-            node.meta['eager_input_vals'] = ((*values[:3], repeats), named)
+    def joined(x):
+        """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
+        if x.target is not aten.cat.default or len(x.users) != 1 or len(x.args[0]) != 2 or (x.args[1:] or (0,))[0] not in (1, -1):
+            return None
+        parts = [p.meta.get('val') for p in x.args[0]]
+        if any(p is None or p.dtype != torch.half or p.dim() != 2 or p.stride(1) != 1 for p in parts):
+            return None
+        return x.args[0]
+
+    def grouped(graph):
+        """Consecutive products of torch_mesh::linear, up to four, none reading another's output nor any of their outputs
+        used before the last of them, as one torch_mesh::linears: one dispatch."""
+        import operator
+        order = {n: i for i, n in enumerate(graph.nodes)}
+        products = [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear.default]
+        above = {}
+
+        def ancestors(n):
+            if n not in above:
+                seen, stack = set(), list(n.all_input_nodes)
+                while stack:
+                    m = stack.pop()
+                    if m not in seen:
+                        seen.add(m)
+                        stack.extend(m.all_input_nodes)
+                above[n] = seen
+            return above[n]
+        i = 0
+        while i < len(products):
+            group = [products[i]]
+            for m in products[i + 1:4 + i]:
+                if any(g in ancestors(m) for g in group) or any(order[u] < order[m] for g in group for u in g.users):
+                    break
+                group.append(m)
+            if len(group) > 1:
+                args = [list(m.args) + [None, 0, None][len(m.args) - 2:] for m in group]
+                with graph.inserting_before(group[-1]):
+                    made = graph.call_function(torch.ops.torch_mesh.linears.default, tuple([a[k] for a in args] for k in range(5)))
+                    made.meta['val'] = [m.meta['val'] for m in group]
+                    for j, m in enumerate(group):
+                        part = graph.call_function(operator.getitem, (made, j))
+                        part.meta['val'] = m.meta['val']
+                        m.replace_all_uses_with(part)
+                for m in group:
+                    graph.erase_node(m)
+            i += len(group)
 
     class Leased(CustomGraphPass):
         def __call__(self, graph):
@@ -78,7 +117,7 @@ def compiler(gm, example_inputs):
                     told(node, 1)
                     made = node.args[0]
                     if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
-                            and made.args[2:] in ((), (None,))):
+                            and made.args[2:] in ((), (None,), (None, 0))):
                         with graph.inserting_before(node):
                             summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2], 1))
                         summed.meta['val'] = node.meta['val']
@@ -91,29 +130,27 @@ def compiler(gm, example_inputs):
                          and node.args[0].meta['val'].dim() == 1)
                 if mm or addmm:
                     x, w = node.args[-2:]
+                    parts = joined(x)
                     with graph.inserting_before(node):
                         weight = graph.call_function(aten.permute.default, (w, [1, 0]))
                         weight.meta['val'] = w.meta['val'].permute(1, 0)
-                        made = graph.call_function(torch.ops.torch_mesh.linear.default, (x, weight, node.args[0] if addmm else None))
+                        made = graph.call_function(torch.ops.torch_mesh.linear.default,
+                                                   (parts[0] if parts else x, weight, node.args[0] if addmm else None, 0) +
+                                                   ((parts[1],) if parts else ()))
                     made.meta['val'] = node.meta['val']
                     node.replace_all_uses_with(made)
                     graph.erase_node(node)
+                    if parts:
+                        graph.erase_node(x)
                     users = list(made.users)
                     if len(users) == 1 and users[0].target is aten.tanh.default:
-                        made.args = made.args + (1,)
+                        made.args = made.args[:3] + (1,) + made.args[4:]
                         users[0].replace_all_uses_with(made)
                         graph.erase_node(users[0])
-            sums = (torch.ops.torch_mesh.all_reduce.default, torch.ops.torch_mesh.linear_sum.default)
-            for name in {node.args[2] for node in graph.nodes if node.target in sums}:
-                nodes = [node for node in graph.nodes if any(isinstance(a, str) and a == name for a in node.args)]
-                forms = {(n.target, *((a.meta['val'].shape, a.meta['val'].stride(), a.meta['val'].dtype) if hasattr(a, 'meta') else a
-                                      for a in n.args[:2])) for n in nodes}
-                if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in sums:
-                    for n in nodes:
-                        told(n, len(nodes))
+            grouped(graph)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear repeats'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
