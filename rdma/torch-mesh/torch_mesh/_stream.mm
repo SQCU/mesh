@@ -227,7 +227,10 @@ static void checked(int64_t result) {
 // The evidence torch_mesh/evidence.py reads (design/heterogeneity.md R2, R3): on a watched communicator, a timing
 // event of torch's pool recorded on its stream as each collective is issued (0: the GPU has finished the work before
 // it) and once its issue, and an issued group's wait, are encoded (1: the GPU has passed it), as an issued group's wait
-// begins (0: the work between its issue and its wait), and at each step's boundary (2), in order.
+// begins (0: the work between its issue and its wait), and at each step's boundary (2), in order.  Each mark commits
+// torch's command buffer (the pool's synchronizing record), so no stretch holds the GPU idle while work encoded before
+// a mark waits for a later commit: on cp under the balancer such waits read as the Mini's work, 150 ms of its 180 at
+// one of 32 units.
 static std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> marks_;
 
 static void mark(int64_t comm, int64_t kind) {
@@ -236,7 +239,7 @@ static void mark(int64_t comm, int64_t kind) {
   if (found == marks_.end()) return;
   auto pool = at::mps::getMPSEventPool();
   const auto id = pool->acquireEvent(true);
-  pool->recordEvent(id, false);
+  pool->recordEvent(id, true);
   found->second.emplace_back(kind, (int64_t)id);
 }
 
