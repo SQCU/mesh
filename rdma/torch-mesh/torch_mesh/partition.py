@@ -924,7 +924,7 @@ def follow(*tensors):
     for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
         moving = [h for h in held if isinstance(h[0][i], RaggedShard) and key not in (None, h[0][i].key)]
-        rank, group = mesh.get_coordinate()[i], mesh.get_group(i)
+        rank, group = mesh.get_coordinate()[i], _own(mesh, mesh.mesh_dim_names[i]) if moving else None
         published = False
 
         def publish_boundary():
@@ -1047,14 +1047,27 @@ def _replan(mesh, name):
 _BALANCING = {}
 
 
+def _own(mesh, name):
+    """The balancer's own communicator over mesh dimension `name`'s ranks, made at its first use and kept: a group of
+    the dimension group's backend, met through the store, so making it crosses nothing of the program's communicator.
+    The balancer's exchanges (_shared, follow) run on it, so a plan the program declares on its own group binds the
+    program's groups alone (rdma/nccl.h ncclMeshCommPlan: a declared group is matched to an issued one by place)."""
+    held = _BALANCING.setdefault((mesh, name), {})
+    if 'own' not in held:
+        group = mesh.get_group(name)
+        held['own'] = dist.new_group(dist.get_process_group_ranks(group), backend=dist.get_backend(group),
+                                     use_local_synchronization=True)
+    return held['own']
+
+
 def evaluations(mesh, name, count):
     """The program's `count` evaluations over partitioned mesh dimension `name`, one a yield (its index): the program
     declares where its evaluations are, as it declares its tensors and its plan, and never sees a share.  Between two,
     the collective balances `name` (_balance): the dimension's Balancer (allocate.Balancer, made at the first call
     for the group's life, in memory) steps on each rank's work between its collectives in the evaluations the GPU has
     passed (torch_mesh.evidence, watched from here and read without a wait), every rank's exchanged once on the host
-    path (_shared); where it moves the parts, every tensor partition split along `name` is re-laid in place
-    (_relay) and the declared plan compiled again (_replan)."""
+    path on the balancer's own communicator (_shared, _own, made at the first call); where it moves the parts, every
+    tensor partition split along `name` is re-laid in place (_relay) and the declared plan compiled again (_replan)."""
     import allocate
     from . import evidence
     group, o = mesh.get_group(name), operand(mesh, name)
@@ -1063,6 +1076,7 @@ def evaluations(mesh, name, count):
         n = len(o.capacity)
         held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': [o.units - n + 1] * n}}),
                     closed=0, read=0, skip=1, words=None)
+        _own(mesh, name)
         evidence.watch(group, mesh.device_type)
     for k in range(count):
         if k:
@@ -1097,7 +1111,7 @@ def _balance(mesh, name, held, group):
     held['read'] += len(steps)
     drop = min(held['skip'], len(steps))
     held['skip'] -= drop
-    words = _shared(held, group, [sum(s) for s in steps[drop:]])
+    words = _shared(held, _own(mesh, name), [sum(s) for s in steps[drop:]])
     held['words'] = words = [a + b for a, b in zip(held['words'] or [[]] * len(words), words)]
     if min(map(len, words)) < WINDOW:
         return
