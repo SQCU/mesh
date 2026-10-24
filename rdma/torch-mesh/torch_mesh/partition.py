@@ -592,9 +592,10 @@ _PLANNED = {}
 
 def _planned(current, target):
     """torch's planner's steps from `current` to `target` (_gen_transform_infos_non_cached), planned once for their
-    placements, each RaggedShard's key told apart, and their shape, which the program fixes when it is compiled
-    (design/data-model.md section 9: no planning per call)."""
-    key = (current.mesh, tuple(map(repr, current.placements)), tuple(map(repr, target.placements)), tuple(current.shape))
+    placements, each told apart by its type and a RaggedShard's key as _same tells them, and their shape, which the
+    program fixes when it is compiled (design/data-model.md section 9: no planning per call)."""
+    typed = lambda placements: tuple((type(p), p, getattr(p, 'key', None)) for p in placements)
+    key = (current.mesh, typed(current.placements), typed(target.placements), tuple(current.shape))
     if key not in _PLANNED:
         _PLANNED[key] = _gen_transform_infos_non_cached(current, target)
     return _PLANNED[key]
