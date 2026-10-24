@@ -1561,6 +1561,13 @@ ncclResult_t ncclMeshMemBuffer(const void *ptr, void **buffer, size_t *offset) {
   return status ? fail(ncclInvalidArgument, "ncclMeshMemBuffer: %p is in no lease of this process (ncclMemAlloc)", ptr) : ncclSuccess;
 }
 
+/* nccl.h ncclMeshCommPage */
+ncclResult_t ncclMeshCommPage(ncclComm_t comm, size_t *bytes) {
+  if (!comm || !bytes) return fail(ncclInvalidArgument, "ncclMeshCommPage: a NULL argument");
+  *bytes = (size_t)comm->page;
+  return ncclSuccess;
+}
+
 /* an operator made into the communicator's table (a freed slot, else one more), its handle past ncclNumOps */
 static ncclResult_t op_make(ncclComm_t comm, struct redop made, ncclRedOp_t *op) {
   uint32_t k = 0;

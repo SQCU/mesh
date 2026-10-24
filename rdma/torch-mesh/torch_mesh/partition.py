@@ -211,16 +211,17 @@ def _gathering(x, dim, sizes, group):
     key = (tuple(x.shape[:dim]), tuple(x.shape[dim + 1:]), x.dtype, tuple(sizes), group.group_name)
     if key not in _GATHERS:
         row = math.prod(x.shape) // max(1, x.shape[dim])
-        counts, starts = _paged([s * row for s in sizes], x.element_size())
+        counts, starts = _paged([s * row for s in sizes], x.element_size(), group)
         _GATHERS[key] = _empty((starts[-1],), x, group), counts, starts
     return _GATHERS[key]
 
 
-def _paged(counts, size):
-    """Segments of `counts` elements of `size` bytes laid end to end, each padded to whole pages, since the library
-    places each segment of a V collective on a page of its own (rdma/nccl.h, Memory): the padded counts and the
-    segments' starts (the last the elements in all)."""
-    page = max(1, resource.getpagesize() // size)
+def _paged(counts, size, group):
+    """Segments of `counts` elements of `size` bytes laid end to end, each padded to whole pages of `group`'s region,
+    since the library places each segment of a V collective on a page of its own (rdma/nccl.h, Memory; the group's
+    page, ncclMeshCommPage, on the mesh backend, the OS's on another): the padded counts and the segments' starts (the
+    last the elements in all)."""
+    page = max(1, (group.page if getattr(group, 'handle', 0) else resource.getpagesize()) // size)
     padded = [-(-c // page) * page for c in counts]
     return padded, list(itertools.accumulate(padded, initial=0))
 
@@ -339,7 +340,7 @@ class RaggedShard(Shard):
             return self._select_split_tensor(tensor, n, rank, with_padding=False, contiguous=True)
         sizes, rest = _blocks(self._operand(n), tensor.size(self.dim))[0], tensor.movedim(self.dim, 0).shape[1:]
         counts = [s * math.prod(rest) for s in sizes]
-        padded, at = _paged(counts, tensor.element_size())
+        padded, at = _paged(counts, tensor.element_size(), group)
         out, blocks = _empty((padded[rank],), tensor, group), None
         if rank == src_data_rank:
             pieces = self._split_tensor(tensor, n, contiguous=False)[0]
@@ -466,8 +467,8 @@ def follow(tensor):
         sends, receives = [span(rank, q) for q in range(n)], [span(r, rank) for r in range(n)]
         rows = local.movedim(p.dim, 0)
         row = math.prod(rows.shape[1:])
-        out, out_at = _paged([c * row for c in sends], rows.element_size())
-        into, into_at = _paged([c * row for c in receives], rows.element_size())
+        out, out_at = _paged([c * row for c in sends], rows.element_size(), group)
+        into, into_at = _paged([c * row for c in receives], rows.element_size(), group)
         x, y = _empty((out_at[-1],), rows, group), _empty((into_at[-1],), rows, group)
         for q, first in enumerate(itertools.accumulate(sends[:-1], initial=0)):
             x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rows.shape[1:]).copy_(rows[first:first + sends[q]])
@@ -1319,7 +1320,7 @@ def _shared(held, group, words):
     of another backend), sized at the first exchange from its words and held, grown where a later one's need more
     (every rank's alike: SPMD), its words' count then the words, all gathered by one all_gather_into_tensor."""
     from . import empty
-    n, need = dist.get_world_size(group), _paged([1 + len(words)], 8)[0][0]
+    n, need = dist.get_world_size(group), _paged([1 + len(words)], 8, group)[0][0]
     if held.get('page', 0) < need:
         made = empty if getattr(group, 'handle', 0) else lambda size, dtype, device: torch.empty(size, dtype=dtype, device=device)
         held['page'], held['pages'] = need, (made(need, dtype=torch.float64, device='cpu'), made(n * need, dtype=torch.float64, device='cpu'))

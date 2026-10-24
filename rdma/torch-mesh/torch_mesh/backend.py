@@ -131,6 +131,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         _stream.attach(self, self.handle)
 
+    @property
+    def page(self):
+        """The bytes of a page of this communicator's region, on which each segment of a V collective starts (nccl.h
+        ncclMeshCommPage)."""
+        held = ffi.new('size_t *')
+        check(LIB.ncclMeshCommPage(self.comm, held))
+        return held[0]
+
     @classmethod
     def _of(cls, comm):
         """A group over a communicator libnccl-mesh made (a shrink's or a grow's), with no bootstrap of its own."""

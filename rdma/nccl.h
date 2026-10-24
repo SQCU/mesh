@@ -1093,6 +1093,10 @@ const char* ncclMeshMetalPrelude(void);
    stream's order (its landings landed, its SENDs done) nothing reads or writes the lease for it, and ncclMemFree may
    return its pages.  ncclInvalidArgument where ptr is in no lease of this process. */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
+/* The bytes of a page of comm's region (its block of pages, the unit of a lease and of an entry: design/
+   pages-and-functions.md), on which each segment of a V collective and each entry starts (Memory, above).
+   ncclInvalidArgument where comm or bytes is NULL. */
+ncclResult_t ncclMeshCommPage(ncclComm_t comm, size_t* bytes);
 /* Whether this process holds leases or communicators of an expired region (*expired 1; Memory, above): the value a
    client reads in its own error path, after a lease or communicator failed, to free what it holds of that region, or
    end, before it leases again.  ncclInvalidArgument where expired is NULL. */
