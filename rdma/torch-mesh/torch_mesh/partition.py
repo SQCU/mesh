@@ -728,6 +728,19 @@ def _migration_words(run, frame_bytes, vector, j=0):
     return [word for value in values for word in (value & 0xFFFFFFFF, value >> 32)] + [j, 0]
 
 
+def _routed(group):
+    """The communicator's physical fabric (routing.Fabric), its one-way write routes installed before its first write:
+    every physical path between each two ranks at equal weight, as rdma/tests/fused-physical.py installs them.  A write
+    compiles only along installed paths (nccl-mesh.c write_steps: none, EINVAL); installing drops the declared plan,
+    which the move's _replan declares again."""
+    from routing import Fabric
+    if getattr(group, '_fabric', None) is None:
+        fabric = Fabric.of(group.comm)
+        fabric.install(group.comm, {f'route:{a}:{b}': [1] * len(paths) for (a, b), paths in fabric.paths.items()})
+        group._fabric = fabric
+    return group._fabric
+
+
 def _follow_masked(placement, local, logical_shape, logical_stride, key, rank, group):
     """Stream sub-page affine intervals through owned ingress frames.
 
@@ -738,7 +751,6 @@ def _follow_masked(placement, local, logical_shape, logical_stride, key, rank, g
     retirement; it is not a bounded-memory recycling ring without a return edge.
     """
     from migration import compile_rows
-    from routing import Fabric
     from . import address, fused
 
     if not _region_backed(local, group) or tuple(logical_stride) != tuple(torch.empty(tuple(logical_shape), device='meta').stride()):
@@ -757,7 +769,7 @@ def _follow_masked(placement, local, logical_shape, logical_stride, key, rank, g
              (incoming[0].rows == 1 or incoming[0].source_stride == incoming[0].row_bytes))
     result = (original.narrow(0, incoming[0].source_offset // size, extent).view(program.destination_shapes[rank])
               if alias else _empty(program.destination_shapes[rank], local, group))
-    fabric = Fabric.of(group.comm)
+    fabric = _routed(group)
     channels = len(fabric.adjacent[rank])
     jobs = []
     # Compile kernels and allocate all needed leases before issuing any train.
@@ -878,6 +890,7 @@ def _follow_indexed(placement, local, logical_shape, logical_stride, key, rank, 
             buffer = _empty((count,), local, group)
         buffers.append(buffer)
     if remote:
+        _routed(group)
         # Original data functions may have used plain GPU stores. End that
         # command buffer once, without waiting, before publishing their pages.
         publish_boundary()
