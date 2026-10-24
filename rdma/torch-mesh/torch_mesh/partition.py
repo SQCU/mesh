@@ -704,7 +704,7 @@ def evaluations(mesh, name, count):
     if 'balancer' not in held:
         n = len(o.capacity)
         held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': [o.units - n + 1] * n}}),
-                    closed=0, read=0, skip=0)
+                    closed=0, read=0, skip=1, words=None)
         evidence.watch(group, mesh.device_type)
     for k in range(count):
         if k:
@@ -712,11 +712,15 @@ def evaluations(mesh, name, count):
         yield k
 
 
+WINDOW = 4  # the evaluations at one set of parts the Balancer observes at once, as its invocations
+
+
 def _balance(mesh, name, held, group):
     """One boundary between evaluations: the evaluation just issued closed (evidence.step), the closed evaluations the
-    GPU has passed read (those issued before the last move dropped: they ran on the old parts), this rank's work in
-    each (the sum of its stretches) exchanged with every rank's, and, once every rank has some, one step of the
-    Balancer on them (its robust median and error a rank; the same on every rank, from the same words); a move
+    GPU has passed read (those issued before the last move dropped, they ran on the old parts, and the first at a set
+    of parts, its warm-up, which holds the re-lay), this rank's work in each (the sum of its stretches) exchanged with
+    every rank's and held, and, once every rank has WINDOW at these parts, one step of the Balancer on all of them as
+    its invocations (so its median and standard error, and the band it stands within, see their real spread); a move
     attaches its parts, re-lays and replans."""
     from . import evidence
     o = operand(mesh, name)
@@ -727,14 +731,15 @@ def _balance(mesh, name, held, group):
     drop = min(held['skip'], len(steps))
     held['skip'] -= drop
     words = _shared(held, group, [sum(s) for s in steps[drop:]])
-    if not all(words):
+    held['words'] = words = [a + b for a, b in zip(held['words'] or [[]] * len(words), words)]
+    if min(map(len, words)) < WINDOW:
         return
-    balancer = held['balancer']
+    held['words'], balancer = None, held['balancer']
     balancer.decisions[name]['parts'] = o.parts.tolist()
     parts = [int(p) for p in balancer.observe({'evaluation': {'scales': {name: [1.0] * len(words)}, 'times': words}})[name]]
     if parts == o.parts.tolist():
         return
-    held['skip'] = held['closed'] - held['read']
+    held['skip'] = held['closed'] - held['read'] + 1
     _attach(mesh, name, parts)
     _relay(mesh, name)
     _replan(mesh, name)
