@@ -191,25 +191,16 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
 
 ### Parts from the run's own evidence
 
-No program knows the parts. Call `partition.rebalance` once a step, on every rank alike:
-
-```python
-if partition.rebalance(mesh, "tp", every=8):   # True where the parts moved and "tp" is attached again at them
-    w = partition.follow(w)                    # each sharded tensor onto the new parts
-```
-
-- The first call watches the dimension's group. Every collective on it is then marked as it is issued and once its
-  wait has run: on MPS by timing events on torch's stream (in `_stream.mm`, functional collectives included), on CPU
-  by the host clock (`torch_mesh/evidence.py`). A rank's work in a step is the time between its collectives, never
-  inside them, so a slow peer never reads as a slow rank.
-- Every `every` steps the ranks' stretches (one a collective) are gathered to all of them, and each runs the same
-  step of `rdma/allocate.py` `Balancer`, so all get the same parts. It minimises the steps' time, the sum over the
-  stretches of the slowest rank's, not the ranks' totals, which can agree while every collective still waits. That
-  step is DFPA: the ranks' measured points, the grains given to whoever finishes earliest with them, and a stop once
-  the measurements promise no gain past their own resolution. The parts then stand, so jitter does not reshard.
-- Parts that move are attached again by `rebalance` itself, and the program's sharded tensors take new shapes:
-  `partition.follow` moves one by one all-to-all a mesh dimension, only what changes rank crossing.
-- `partition.balancing(mesh, "tp")` returns what the last window saw.
+No program knows the parts. The dimension's group is watched from `attach`: every collective on it is marked as it is
+issued and once its wait has run, on MPS by timing events on torch's stream (in `_stream.mm`, functional collectives
+included), on CPU by the host clock (`torch_mesh/evidence.py`). A rank's work is the time between its collectives,
+never inside them, so a slow peer never reads as a slow rank. Between evaluations, never inside one,
+`partition.evaluated(mesh, "tp")` gives every rank every rank's median stretch and runs one step of `rdma/allocate.py`
+`Balancer`, the same on every rank, so all get the same parts for the next evaluation: DFPA, the ranks' measured
+points, the grains given to whoever finishes earliest with them, and a stop once the measurements promise no gain past
+their own resolution. The Balancer lives with the group, in memory, and ends with it. `partition.follow(*ts)` moves
+sharded tensors onto parts attached again, one group a move.
+- `partition.balancing(mesh, "tp")` returns what the last evaluation saw.
 - A placement has two throughputs, the aggregate and each stream's, so the calls trace a frontier rather than a best:
   `allocate.pareto(rows, coordinate=("ctx_in", "ctx_out"))` keeps, per workload coordinate, the call records (each a
   call's own `aggregate_tok_s` and `per_sequence_tok_s`, its `program`, `backend` and batch `bs`) that no other beats in

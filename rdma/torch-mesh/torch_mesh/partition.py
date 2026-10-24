@@ -3,7 +3,7 @@ dimension by parts the backend moves between calls by the measured residual (des
 
 Stock PyTorch splits every sharded extent equally (Shard follows torch.chunk).  Here a program declares a mesh
 dimension's P units, attach(mesh, tp=P), the same on every rank, and the backend gives coordinate r a part p_r >= 1 of
-them, an even split at first (rebalance moves them), and a capacity c_r, its part.  An extent N that P divides (any
+them, an even split, and a capacity c_r, its part.  An extent N that P divides (any
 other raises ValueError, on every rank alike) is split N p_r / P per coordinate in rank order, as the logical tensor
 reads, and rank r holds its share, N p_r / P elements along that dimension, with no padding: the blocks laid end to
 end in rank order are the logical tensor.  The parts are a tensor operand (operand(mesh, "tp").parts) read by the ops
@@ -86,8 +86,8 @@ Replicate mesh dimensions, as torch's does, and compares no shape (a ragged one'
 Left as they are: the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.
 Under torch.compile the SDPA ring is a graph break (UnsupportedOperatorException on fake tensors).
 
-rebalance(mesh, name, every) moves the parts by the evidence of the program's steps (allocate.Balancer) and attaches
-the dimension again at them."""
+evaluated(mesh, name) is one step of the group's Balancer (allocate.Balancer) on an evaluation's own evidence, between
+evaluations, the parts the next evaluation takes; the Balancer lives with the group, in memory."""
 import contextlib
 import itertools
 import math
@@ -160,7 +160,7 @@ def _along(mask, dim, ndim):
 
 def _region_backed(like, group):
     """Whether the collectives' buffers like `like` on `group` are region tensors: an MPS tensor on a group of the mesh
-    backend (its communicator's handle: rebalance's test), whose node's bridge leases the region (mesh 5ff5d699)."""
+    backend (its communicator's handle), whose node's bridge leases the region (mesh 5ff5d699)."""
     return group is not None and like.device.type == 'mps' and bool(getattr(group, 'handle', 0))
 
 
@@ -464,7 +464,7 @@ def calls(tensor):
 
 def plan(mesh, name, groups):
     """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
-    `groups` from the ops' own (calls, gathered, scattered), as a step issues them; again after each rebalance, whose
+    `groups` from the ops' own (calls, gathered, scattered), as a step issues them; again after each move, whose
     new parts are new shapes."""
     from . import plan as declare
     return declare(mesh.get_group(name), groups)
@@ -1238,58 +1238,6 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
 _BALANCING = {}
 
 
-def rebalance(mesh, name='tp', every=8):
-    """Whether the evidence of the last `every` steps moved the parts of partitioned mesh dimension `name`
-    (design/heterogeneity.md R3, R5, R10, R11): call it once a step, after the step is issued, on every rank of the
-    mesh alike.  The first call watches the dimension's group (torch_mesh.evidence: each rank's own work between its
-    collectives there, one stretch a collective); every `every` steps after it the ranks' stretches are gathered to
-    every rank and one step of the mesh repo's rdma/allocate.py Balancer (the same on every rank: R4) gives the parts,
-    each at least 1, at most the units less one a peer, minimising the steps' time: the sum over their stretches of
-    the slowest rank's, every stretch scaling with this dimension's parts.
-
-    A rank computes its whole buffer (R14: stock kernels), so each part is its capacity, and parts that move are
-    attached here again (the shapes change, which R11 weighs; the group keeps this balancer).  It returns True then,
-    and the program moves its sharded tensors onto them (follow).  The parts stand once the evidence promises no gain
-    past its resolution."""
-    import allocate
-    from . import evidence
-    o = operand(mesh, name)
-    group = mesh.get_group(name)
-    if mesh.device_type == 'mps' and not getattr(group, 'handle', 0):
-        raise ValueError(f'mesh: rebalance {name}: its group is not the mesh backend\'s (no communicator to watch)')
-    held, n = _BALANCING[id(group), name], len(o.capacity)
-    evidence.step(group)
-    held['steps'] = held.get('steps', 0) + 1
-    if held['steps'] < every:
-        return False
-    held['steps'] = 0
-    everyone = _exchange(held, group, evidence.work(group))
-    held['work'] = [sorted(sum(step) for step in steps)[len(steps) // 2] if steps else None for steps in everyone]
-    positions = max((len(step) for steps in everyone if steps for step in steps), default=0)
-    stretches = {f'step:{k}': {'scales': {name: [1.0] * n},
-                               'times': [[step[k] for step in steps if len(step) > k] if steps else None for steps in everyone]}
-                 for k in range(positions)}
-    held['balancer'].decisions[name]['parts'] = o.parts.tolist()
-    parts = held['balancer'].observe(stretches)[name]
-    if parts == o.parts.tolist():
-        return False
-    _attach(mesh, name, parts)
-    return True
-
-
-def _exchange(held, group, steps):
-    """Each rank's `steps` (its stretches, a list a step) on every rank (_shared): its steps' count, then each step's
-    count and its stretches."""
-    out = []
-    for words in _shared(held, group, [len(steps)] + [w for step in steps for w in (len(step), *step)]):
-        at, mine = 1, []
-        for _ in range(int(words[0])):
-            mine.append(words[at + 1:at + 1 + int(words[at])])
-            at += 1 + int(words[at])
-        out.append(mine)
-    return out
-
-
 def _shared(held, group, words):
     """Each rank's `words` (float64) on every rank, through the backend: each rank's segment whole pages in the region
     (the library sends only leases and places each segment on a page: rdma/nccl.h Memory; torch's memory on a group
@@ -1326,8 +1274,8 @@ def evaluated(mesh, name='tp'):
 
 
 def balancing(mesh, name='tp'):
-    """What rebalance last saw of partitioned dimension `name`: {'parts', 'stands', 'work': each rank's median
-    step work (seconds, its stretches summed) in the last window}, None before its first window."""
+    """What evaluated last saw of partitioned dimension `name`: {'parts', 'stands', 'work': each rank's median
+    stretch (seconds) in the evaluation}, None before the first."""
     held = _BALANCING.get((id(mesh.get_group(name)), name))
     if not held or 'work' not in held:
         return None
