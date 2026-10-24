@@ -310,12 +310,20 @@ def _gathering(y, sizes, group):
     design/data-model.md section 8); with the segments' counts and starts and the index of the blocks' elements."""
     key = (tuple(y.shape[1:]), y.dtype, tuple(sizes), group.group_name)
     if key not in _GATHERS:
-        row, page = math.prod(y.shape[1:]), max(1, resource.getpagesize() // y.element_size())
-        counts = [-(-s * row // page) * page for s in sizes]
-        starts = list(itertools.accumulate(counts, initial=0))
+        row = math.prod(y.shape[1:])
+        counts, starts = _paged([s * row for s in sizes], y.element_size())
         index = torch.cat([torch.arange(a, a + s * row) for a, s in zip(starts, sizes)]).to(y.device)
         _GATHERS[key] = _empty((starts[-1],), y, group), counts, starts, index
     return _GATHERS[key]
+
+
+def _paged(counts, size):
+    """Segments of `counts` elements of `size` bytes laid end to end, each padded to whole pages, since the library
+    places each segment of a V collective on a page of its own (rdma/nccl.h, Memory): the padded counts and the
+    segments' starts (the last the elements in all)."""
+    page = max(1, resource.getpagesize() // size)
+    padded = [-(-c // page) * page for c in counts]
+    return padded, list(itertools.accumulate(padded, initial=0))
 
 
 @torch.library.custom_op('torch_mesh::reduce_scatterv', mutates_args=())
@@ -1334,8 +1342,7 @@ def rebalance(mesh, name='tp', every=8):
     if held['steps'] < every:
         return False
     held['steps'] = 0
-    everyone = [None] * dist.get_world_size(group)
-    dist.all_gather_object(everyone, evidence.work(group), group=group)
+    everyone = _exchange(held, group, evidence.work(group))
     held['work'] = [sorted(sum(step) for step in steps)[len(steps) // 2] if steps else None for steps in everyone]
     positions = max((len(step) for steps in everyone if steps for step in steps), default=0)
     stretches = {f'step:{k}': {'scales': {name: [1.0] * n},
@@ -1347,6 +1354,32 @@ def rebalance(mesh, name='tp', every=8):
         return False
     _attach(mesh, name, parts)
     return True
+
+
+def _exchange(held, group, steps):
+    """Each rank's `steps` (its stretches, a list a step) on every rank, through the backend: each rank's one page of
+    float64 in the region (the library sends only leases, rdma/nccl.h Memory), held from the first window, gathered
+    into the pages of every rank: its steps' count, then each step's count and its stretches."""
+    from . import empty
+    n, page = dist.get_world_size(group), resource.getpagesize() // 8
+    if 'pages' not in held:
+        held['pages'] = empty(page, dtype=torch.float64, device='cpu'), empty(n * page, dtype=torch.float64, device='cpu')
+    mine, every = held['pages']
+    width = (page - 1) // max(1, len(steps))
+    if any(len(step) >= width for step in steps):
+        raise ValueError(f'mesh: rebalance: {len(steps)} steps of up to {max(map(len, steps))} collectives do not fit a '
+                         f'page of {page} float64')
+    words = [float(len(steps))]
+    for step in steps:
+        words += [float(len(step))] + list(step) + [0.0] * (width - 1 - len(step))
+    mine[:len(words)] = torch.tensor(words, dtype=torch.float64)
+    dist.all_gather_into_tensor(every, mine, group=group)
+    out = []
+    for words in every.view(n, page).tolist():
+        m = int(words[0])
+        w = (page - 1) // max(1, m)
+        out.append([words[2 + k * w:2 + k * w + int(words[1 + k * w])] for k in range(m)])
+    return out
 
 
 def balancing(mesh, name='tp'):
