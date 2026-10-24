@@ -964,11 +964,15 @@ static double sequence(int64_t handle, const std::vector<std::vector<std::option
 // tensors the program makes otherwise stay its MPS allocator's.
 static std::mutex region_tensors_lock_;
 static std::map<uintptr_t, size_t> region_tensors_;
+// the held-pool probe (not for main): held MPS requests the pool served, those it did not (each a fresh ncclMemAlloc),
+// paced waits, region bytes leased now and at most
+static std::atomic<int64_t> held_hits_{0}, held_misses_{0}, held_waits_{0}, region_bytes_{0}, region_peak_{0};
 
 static void returned(void *memory) {
   ncclMemFree(memory);
   std::lock_guard<std::mutex> guard(region_tensors_lock_);
-  region_tensors_.erase((uintptr_t)memory);
+  const auto found = region_tensors_.find((uintptr_t)memory);
+  if (found != region_tensors_.end()) region_bytes_ -= (int64_t)found->second, region_tensors_.erase(found);
 }
 
 struct RegionShape {
@@ -1029,6 +1033,7 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
         }
       });
       guard.lock();
+      held_waits_++;
       // a lease the completion handler has returned whose source DMA has retired too (polled: the library's proof is
       // nonblocking and signals nothing), within the Deadline
       while ((found = reusable()) == held_.end()) held_returned_->wait_for(guard, std::chrono::microseconds(100));
@@ -1036,12 +1041,16 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
     if (found != held_.end()) {
       memory = found->second;
       held_.erase(found);
+      if (mps) held_hits_++;
     }
   }
   if (!memory) {
     checked(ncclMemAlloc(&memory, bytes));
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
     region_tensors_[(uintptr_t)memory] = bytes;
+    if (held && mps) held_misses_++;
+    const int64_t now = region_bytes_ += (int64_t)bytes;
+    for (int64_t peak = region_peak_.load(); now > peak && !region_peak_.compare_exchange_weak(peak, now);) {}
     if (held && mps) held_made_[bytes].made++;
   }
   const auto options = at::TensorOptions().dtype(dtype);
@@ -1548,6 +1557,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_maker", &fused_maker);
+  module.def("lease_counts", []() {
+    std::lock_guard<std::mutex> guard(region_tensors_lock_);
+    return std::make_tuple(held_hits_.load(), held_misses_.load(), (int64_t)held_.size(), held_waits_.load(), region_bytes_.load(), region_peak_.load());
+  });
   module.def("held_trim", &held_trim);
   module.def("fused_release", &fused_release);
   module.def("fused_writes", &fused_writes, pybind11::arg("send"), pybind11::arg("landings"), pybind11::arg("pairs"),

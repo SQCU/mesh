@@ -324,7 +324,20 @@ def record(step, k=1):
     return Recording(step, _recordings, k)
 
 
+_after_first = []  # the held-pool probe (not for main): the lease counts once the first replay (the warm-up) returned
+
+
 def replay(recording, steps=1):
+    from . import _stream
+    took = _replay(recording, steps)
+    if not _after_first:
+        torch_mesh_sync = __import__('torch').mps.synchronize
+        torch_mesh_sync()
+        _after_first.append(_stream.lease_counts())
+    return took
+
+
+def _replay(recording, steps=1):
     """`steps` steps of a record()ed step issued back to back on torch's stream (Recording.issue), with no wait between
     them: the steps are an operand's leading dimension, each reading what the last wrote in the stream's order; every
     rank replays alike.  The one wait is where a consumer reads, the time this returns: the last graph's interval in
