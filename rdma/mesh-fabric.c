@@ -30,6 +30,7 @@ int mesh_fabric_stripe(const struct mesh_fabric *f,uint32_t rank,const struct me
     const double w=weights? weights[e]:(c->bandwidth? (double)c->bandwidth:1);
     if(!(w>0) || !isfinite(w))return -EINVAL;
     total+=w;n++;
+    break;
   }
   if(!n)return -ENOLINK;
   if(n>room)return -ENOSPC;
@@ -45,6 +46,7 @@ int mesh_fabric_stripe(const struct mesh_fabric *f,uint32_t rank,const struct me
     const double ideal=(double)remaining*w/total;
     parts[k]=floor+(uint64_t)ideal;remainder[k]=ideal-(double)(uint64_t)ideal;
     assigned+=parts[k];out[k].cable=e;k++;
+    break;
   }
   while(assigned<units){
     uint32_t best=0;
