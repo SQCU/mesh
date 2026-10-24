@@ -124,11 +124,10 @@ struct MeshStream {
   }
 
   // On torch's queue, as a group's encoding ends, the rule: a publication encoded in torch's open buffer, committed
-  // with every publication waiting there while at most one buffer is in flight (double buffering), else left to join
-  // it.
+  // at once (the commit-rule test: no publication joins an open buffer, however many are in flight).
   void published() {
     if (!waiting()) open = [mps->commandBuffer().rootCommandBuffer retain];
-    if (committed - progress.signaledValue <= 1) signalled(false);
+    signalled(false);
   }
 
   // On the host: the workspace `held` of the group issued as `ticket` kept until the library retires it (0: a group
