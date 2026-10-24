@@ -1159,7 +1159,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   });
   module.def("attach", &attach);
   module.def("commit", &commit);
-  module.def("region_empty", [](std::vector<int64_t> sizes, const at::Tensor &like, bool mps) { return region_empty(sizes, like, mps); });
+  module.def("region_empty", [](std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held) { return region_empty(sizes, like, mps, held); },
+             pybind11::arg("sizes"), pybind11::arg("like"), pybind11::arg("mps"), pybind11::arg("held") = false);
   module.def("address", &address);
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
