@@ -105,6 +105,14 @@ def _flat(value):
     return [value] if isinstance(value, torch.Tensor) else [t for v in value for t in _flat(v)]
 
 
+def _lease_counts():
+    hits, misses, pooled = _stream.lease_counts()
+    print(f'LEASES rank {dist.get_rank() if dist.is_initialized() else -1} held hits {hits} misses (fresh ncclMemAlloc) {misses} pooled at exit {pooled}', flush=True)
+
+
+__import__('atexit').register(_lease_counts)  # the lease-order probe (not for main)
+
+
 class ProcessGroupMesh(dist.ProcessGroup):
     supports_coalescing = True
     supports_splitting = False
