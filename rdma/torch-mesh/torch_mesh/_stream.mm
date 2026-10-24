@@ -819,11 +819,11 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
 }
 
 static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
-                             std::string group, bool adds, int64_t repeats);
+                             bool adds, std::string group, int64_t repeats);
 TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
   m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor");
   m.def("linears(Tensor[] x, Tensor[] w, Tensor?[] bias, int[] act, Tensor?[] x1) -> Tensor[]");
-  m.def("fused_step(Tensor x, Tensor? w, int dim, int[] sizes, str group_name, bool adds, int repeats) -> Tensor");
+  m.def("fused_step(Tensor x, Tensor? w, int dim, int[] sizes, bool adds, str group_name, int repeats) -> Tensor");
 }
 TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) {
   m.impl("linear", &linear);
@@ -1102,7 +1102,7 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   return {published, landed};
 }
 
-// A fused crossing's form, native (partition._fused: torch_mesh::fused_step): what its first call made in Python
+// A fused crossing's form (torch_mesh::fused_step: partition's allgatherv, a compiled graph's sums): what its first call made in Python
 // (fused_maker_: partition._fused_form) kept here, its pipelines, constant words (each with its repeat j's word at pj and
 // lj), grids, arrivals, segments' starts and counts and output shape; by its repeats, two leases' slots (each rank's
 // segment of each), taken in turn a batch; this batch's records as the kernels' binding words.  A call's output is a
@@ -1115,7 +1115,6 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
 struct FusedForm {
   int64_t comm = 0, polls = 0, ranks = 0, rank = 0, publish = -1, land = -1, pj = 0, lj = 0, pgx = 0, pthreads = 0, lgx = 0, lthreads = 0,
           slot = 0;
-  bool with_w = false;
   std::vector<int64_t> pwords, lwords, starts, counts, shape;
   at::Tensor arrivals;
   struct Ring {
@@ -1133,13 +1132,20 @@ static pybind11::object *fused_maker_ = nullptr;
 
 static void fused_maker(pybind11::object maker) { fused_maker_ = new pybind11::object(std::move(maker)); }
 
-// a record's six addresses as a kernel's words (fused.py _words: each its low then its high 32 bits)
-static void binding_words(std::vector<int64_t> &words, const std::vector<uint64_t> *record) {
-  for (int k = 0; k < 6; k++) {
-    const uint64_t a = record ? (*record)[k] : 0;
-    words.push_back((int64_t)(a & 0xFFFFFFFFu));
-    words.push_back((int64_t)(a >> 32));
-  }
+// a fused kernel's constant block (fused.py encode, fused_step): its own words padded to an even count, then `peers`
+// landing bindings and `peers` publication bindings, each a record's six addresses (zeros past the records given), each
+// address its low then its high 32 bits
+static std::vector<int64_t> fused_constants(std::vector<int64_t> words, int64_t peers, const std::vector<std::vector<uint64_t>> &land,
+                                            const std::vector<std::vector<uint64_t>> &publish) {
+  TORCH_CHECK((int64_t)land.size() <= peers && (int64_t)publish.size() <= peers, "kernel binding extent is smaller than its physical crossing");
+  if (words.size() % 2) words.push_back(0);
+  for (const auto *records : {&land, &publish})
+    for (int64_t k = 0; k < peers; k++)
+      for (int a = 0; a < 6; a++) {
+        const uint64_t address = k < (int64_t)records->size() ? (*records)[k].at(a) : 0;
+        words.push_back((int64_t)(address & 0xFFFFFFFFu)), words.push_back((int64_t)(address >> 32));
+      }
+  return words;
 }
 
 // the form of a crossing on `group`'s communicator, made by partition at its first call; `held` (fused_lock_) is let go
@@ -1170,7 +1176,7 @@ static FusedForm &fused_form_of(const at::Tensor &x, const std::optional<at::Ten
     f.land = t[9].cast<int64_t>(), f.lwords = t[10].cast<std::vector<int64_t>>(), f.lj = t[11].cast<int64_t>();
     f.lgx = t[12].cast<int64_t>(), f.lthreads = t[13].cast<int64_t>();
     f.starts = t[14].cast<std::vector<int64_t>>(), f.counts = t[15].cast<std::vector<int64_t>>(), f.shape = t[16].cast<std::vector<int64_t>>();
-    f.arrivals = t[17].cast<at::Tensor>(), f.with_w = w.has_value(), f.slot = f.starts.back();
+    f.arrivals = t[17].cast<at::Tensor>(), f.slot = f.starts.back();
   }
   held.lock();
   TORCH_CHECK(f.comm == comm, "torch_mesh::fused_step: ", group, "'s form names another communicator");
@@ -1209,22 +1215,18 @@ static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
     for (int64_t q = 0; q < f.ranks; q++)
       if (q != f.rank) landings.push_back(segments[q]);
     const auto made = fused_exchange(segments[f.rank], landings, f.comm, f.polls, repeats, f.slot * (int64_t)xc.element_size());
-    f.pbind.clear(), f.lbind.clear();
-    for (int64_t k = 0; k < peers; k++) binding_words(f.pbind, nullptr);
-    for (int64_t k = 0; k < peers; k++) binding_words(f.pbind, k < (int64_t)made.first.size() ? &made.first[k] : nullptr);
-    for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, k < (int64_t)made.second.size() ? &made.second[k] : nullptr);
-    for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, nullptr);
+    f.pbind = fused_constants({}, peers, {}, made.first), f.lbind = fused_constants({}, peers, made.second, {});
     f.ring = &ring, f.half = half, f.turn++;
   }
   f.j = (j + 1) % repeats;
   return j;
 }
 
-// partition._fused's crossing on the native path: repeat j of `repeats` (j this form's calls since its last batch), the
+// a fused crossing, natively: repeat j of `repeats` (j this form's calls since its last batch), the
 // batch's leases and exchange at j 0, then the publication (gather_publish, or linear_publish of x w^T) and the landing
 // (gather_land or sum_land) encoded in one turn of torch's queue; the output, a lease of the held pool
 static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
-                             std::string group, bool adds, int64_t repeats) {
+                             bool adds, std::string group, int64_t repeats) {
   TORCH_CHECK(repeats >= 1, "torch_mesh::fused_step: repeats ", repeats, ", where a batch is one crossing or more");
   const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
   std::unique_lock<std::mutex> held(*fused_lock_);
@@ -1401,7 +1403,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("address", &address);
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
-  module.def("fused_exchange", &fused_exchange);
+  module.def("fused_constants", &fused_constants);
   module.def("fused_maker", &fused_maker);
   module.def("fused_release", &fused_release);
   module.def("fused_writes", &fused_writes);
