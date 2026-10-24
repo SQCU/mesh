@@ -3934,11 +3934,15 @@ static ncclResult_t enqueue(struct call c) {
 }
 
 /* a declared call (nccl.h ncclMeshCall) as the call its function makes (collective, enqueue_counts, routed: a V form's
-   counts its own copy), admitted and its operator taken (admit, reduction), with no buffers */
+   counts its own copy), admitted and its operator taken (admit, reduction), with no buffers; one declared `fused` names
+   `fused_declared` as its fused stream's records, so plan_calls compiles its steps as that stream's call's (no records
+   are written to it: a group's are its issued stream's) */
+static ncclMeshFused fused_declared;
 static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call *c) {
   const int n = comm->nranks, me = comm->rank,
             v = !d->counts ? 0 : d->what == WHAT_COUNTED ? 2 * n : d->what == MESH_ALLGATHER || d->what == MESH_REDUCE_SCATTER ? n : 0;
-  *c = (struct call){.what = d->what, .root = d->peer, .peer = d->peer, .count = d->count, .type = d->type, .op = d->op, .comm = comm};
+  *c = (struct call){.what = d->what, .root = d->peer, .peer = d->peer, .count = d->count, .type = d->type, .op = d->op, .comm = comm,
+                     .fused = d->fused ? &fused_declared : NULL};
   if (d->what == ncclMeshCallWrite && (d->destination < 0 || d->destination >= n))
     return fail(ncclInvalidArgument, "a declared write's destination must belong to the fabric");
   if (d->what == ncclMeshCallWrite) { c->what = MESH_BROADCAST; c->target = d->destination + 1; }

@@ -1019,7 +1019,9 @@ ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out
    recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) a V form's (ncclMeshAllGatherV's
    and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type`, `op` (a
    reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
-   outside one its own group), issued `repeat` times in a row (its first call's; 0 as 1). */
+   outside one its own group), issued `repeat` times in a row (its first call's; 0 as 1).  `fused` (not 0): the call is
+   issued on a fused stream (ncclMeshStream fused), so its steps are compiled as that stream's are, each whole on one
+   cable (a fused crossing is one SEND and one landing toward each peer), not striped over the pair's cables. */
 enum { ncclMeshCallSend = 16, ncclMeshCallRecv = 17, ncclMeshCallAlltoAllV = 18, ncclMeshCallWrite = 19 };
 typedef struct {
   int what, peer;
@@ -1030,6 +1032,7 @@ typedef struct {
   int group;
   uint32_t repeat;
   int destination;
+  int fused;
 } ncclMeshCall;
 /* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
    (`issues`, the repeats' sum), the number of the communicator's group the order starts at (`first`: its groups

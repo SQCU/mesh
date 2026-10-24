@@ -405,10 +405,10 @@ def gathered(x, dim, sizes):
 def summed(x, group):
     """backend.all_reduce's sum of an operand like `x` (its elements and dtype) on mesh `group`, as its fused crossing
     issues it (_fused): this rank's page-padded segment sent to each peer and each peer's landed, in rank order, one
-    group (torch_mesh.plan)."""
+    group (torch_mesh.plan), declared fused (its steps compiled whole, as its fused stream's are)."""
     from .backend import RECV, SEND, Call
     count = _paged([x.numel()], x.element_size(), group)[0][0]
-    return [Call(kind, count, x.dtype, q) for q in range(group.size()) if q != group.rank() for kind in (SEND, RECV)]
+    return [Call(kind, count, x.dtype, q, fused=True) for q in range(group.size()) if q != group.rank() for kind in (SEND, RECV)]
 
 
 def scattered(x, dim, sizes, op='sum'):

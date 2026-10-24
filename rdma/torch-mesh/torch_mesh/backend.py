@@ -38,7 +38,7 @@ OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.
 ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV, WRITE = range(9)
 # a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
 # all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
-Call = collections.namedtuple('Call', 'kind count dtype root op counts destination', defaults=(0, ReduceOp.SUM, None, 0))
+Call = collections.namedtuple('Call', 'kind count dtype root op counts destination fused', defaults=(0, ReduceOp.SUM, None, 0, False))
 WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
         REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, SEND: LIB.ncclMeshCallSend,
         RECV: LIB.ncclMeshCallRecv, WRITE: LIB.ncclMeshCallWrite}
@@ -224,7 +224,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
                 code = LIB.ncclMax if code == LIB.ncclSum else LIB.ncclMin if code == LIB.ncclProd else code
             kept.append(ffi.new('size_t[]', [n * per for n in c.counts]) if c.counts is not None else ffi.NULL)
             made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'counts': kept[-1], 'type': nccl, 'op': code,
-                         'group': g, 'repeat': repeat, 'destination': c.destination})
+                         'group': g, 'repeat': repeat, 'destination': c.destination, 'fused': int(c.fused)})
         view = ffi.new('ncclMeshPlan **')
         check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made), view))
         return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
