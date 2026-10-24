@@ -415,7 +415,7 @@ def _(x, w, group_name):
 
 
 @torch.library.register_fake('torch_mesh::linear')
-def _(x, w, bias=None, act=0):
+def _(x, w, bias=None, act=0, x1=None):
     return x.new_empty(x.shape[0], w.shape[0])
 
 

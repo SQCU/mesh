@@ -61,6 +61,15 @@ def compiler(gm, example_inputs):
         return (x is not None and w is not None and x.dtype == w.dtype == torch.half and x.dim() == w.dim() == 2
                 and x.shape[0] <= 8 and x.is_contiguous() and w.stride(0) == 1 and w.stride(1) >= w.shape[0])
 
+    def joined(x):
+        """The two fp16 rows-segments x is the cat of along its last dimension, where that cat has no other use."""
+        if x.target is not aten.cat.default or len(x.users) != 1 or len(x.args[0]) != 2 or (x.args[1:] or (0,))[0] not in (1, -1):
+            return None
+        parts = [p.meta.get('val') for p in x.args[0]]
+        if any(p is None or p.dtype != torch.half or p.dim() != 2 or p.stride(1) != 1 for p in parts):
+            return None
+        return x.args[0]
+
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
@@ -68,7 +77,7 @@ def compiler(gm, example_inputs):
                     node.target = torch.ops.torch_mesh.all_reduce.default
                     made = node.args[0]
                     if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
-                            and made.args[2:] in ((), (None,))):
+                            and made.args[2:] in ((), (None,), (None, 0))):
                         with graph.inserting_before(node):
                             summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2]))
                         summed.meta['val'] = node.meta['val']
@@ -81,21 +90,26 @@ def compiler(gm, example_inputs):
                          and node.args[0].meta['val'].dim() == 1)
                 if mm or addmm:
                     x, w = node.args[-2:]
+                    parts = joined(x)
                     with graph.inserting_before(node):
                         weight = graph.call_function(aten.permute.default, (w, [1, 0]))
                         weight.meta['val'] = w.meta['val'].permute(1, 0)
-                        made = graph.call_function(torch.ops.torch_mesh.linear.default, (x, weight, node.args[0] if addmm else None))
+                        made = graph.call_function(torch.ops.torch_mesh.linear.default,
+                                                   (parts[0] if parts else x, weight, node.args[0] if addmm else None, 0) +
+                                                   ((parts[1],) if parts else ()))
                     made.meta['val'] = node.meta['val']
                     node.replace_all_uses_with(made)
                     graph.erase_node(node)
+                    if parts:
+                        graph.erase_node(x)
                     users = list(made.users)
                     if len(users) == 1 and users[0].target is aten.tanh.default:
-                        made.args = made.args + (1,)
+                        made.args = made.args[:3] + (1,) + made.args[4:]
                         users[0].replace_all_uses_with(made)
                         graph.erase_node(users[0])
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 

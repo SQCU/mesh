@@ -679,7 +679,8 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
 }
 
 // torch_mesh::linear (linear.metal): y[R, N] = act(x[R, K] w[N, K]^T (+ bias[N])) of fp16 MPS tensors (act 0 none, 1
-// tanh), w's rows any whole
+// tanh), x the cat along K of x [R, K0] and x1 [R, K - K0] where x1 is given (never made), rows of each any whole stride
+// apart, w's rows any whole
 // stride apart (w.stride(0)), one dispatch of linear_rows encoded in torch's open compute encoder (encode), its output a
 // new tensor of torch's.  Its K split, the simdgroups a threadgroup, is fitted to K, N and the GPU's cores: about 256
 // simdgroups a core over the N / 2 threadgroups, a power of two from 1 to 8 (rounded up), each simdgroup at least 1,024
@@ -702,15 +703,19 @@ static int64_t linear_split(int64_t K, int64_t N) {
   return split;
 }
 
-static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act) {
-  TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && x.size(1) == w.size(1),
-              "torch_mesh::linear takes fp16 x [R, K] and w [N, K], not ", x.sizes(), " ", x.scalar_type(), " and ", w.sizes(), " ",
-              w.scalar_type());
-  const at::Tensor xc = x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
-  const int64_t R = x.size(0), K = x.size(1), N = w.size(0), ldw = wc.stride(0);
+static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act,
+                         const std::optional<at::Tensor> &x1) {
+  const int64_t K0 = x.size(1), K = K0 + (x1 ? x1->size(1) : 0);
+  TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && w.size(1) == K &&
+                  (!x1 || (x1->scalar_type() == at::kHalf && x1->dim() == 2 && x1->size(0) == x.size(0))),
+              "torch_mesh::linear takes fp16 x [R, K0], x1 [R, K - K0] (or none) and w [N, K], not ", x.sizes(), " ", x.scalar_type(),
+              ", ", x1 ? x1->sizes() : at::IntArrayRef{}, " and ", w.sizes(), " ", w.scalar_type());
+  const at::Tensor xc = x.stride(1) == 1 ? x : x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
+  const at::Tensor x1c = !x1 ? xc : x1->stride(1) == 1 ? *x1 : x1->contiguous();
+  const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
   const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
   const int split = (int)linear_split(K, N);
-  const auto key = std::make_tuple(ldw % 4 ? 1 : 4, K % 4 ? 1 : 4, split, (int)act);
+  const auto key = std::make_tuple(ldw % 4 ? 1 : 4, K0 % 4 || ld0 % 4 || ld1 % 4 ? 1 : 4, split, (int)act);
   auto found = linear_pipelines_.find(key);
   if (found == linear_pipelines_.end()) {
     const std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
@@ -722,12 +727,12 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
                                                     args + ">) linear_rows<" + args + ">;\n", name)).first;
   }
   at::Tensor y = at::empty({R, N}, x.options());
-  encode(found->second, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y}, {R, K, N, bias ? 1 : 0, ldw}, 4, groups, 1,
-         split * 32, false);
+  encode(found->second, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y, std::nullopt, x1c},
+         {R, K, N, bias ? 1 : 0, ldw, K0, ld0, ld1}, 4, groups, 1, split * 32, false);
   return y;
 }
 
-TORCH_LIBRARY_FRAGMENT(torch_mesh, m) { m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0) -> Tensor"); }
+TORCH_LIBRARY_FRAGMENT(torch_mesh, m) { m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor"); }
 TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) { m.impl("linear", &linear); }
 
 // The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
