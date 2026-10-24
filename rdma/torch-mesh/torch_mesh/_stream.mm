@@ -930,13 +930,21 @@ struct RegionShape {
 // Held MPS leases (region_empty's `held`), by their bytes: each released once the stream's work on it had completed.
 // Of each size at most HELD_LEASES are made while any of them is on its way back (released, the stream not yet past
 // it): a request past that waits, within its Deadline, for the stream's completion handler to return one, the stream's
-// open buffer committed first so the handler can run.  So a program leasing a tensor a tick runs at most HELD_LEASES
-// ticks ahead of its GPU, and its leases are made in its first ticks, none after (a replay's 16 ticks, twice).  A
+// open buffer committed first only where the oldest on its way back was released into it (else the wait leaves the
+// commit rule's batching as it is).  So a program leasing a tensor a tick runs at most HELD_LEASES
+// ticks ahead of its GPU, and its leases are made in its first ticks, none after.  Leases return a command buffer's at a
+// time, and the commit rule holds about a buffer's ticks open beside two in flight, so the bound is well past what that
+// holds (a replay's 16 ticks, 16 times): the GPU still has work queued while a request waits.  A
 // request whose size has none on its way back (every lease held by a live tensor) is a new lease: the program needs it.
 // The library's workspaces (on torch's queue, inside an encode) are leased unpaced.
-constexpr size_t HELD_LEASES = 32;
+constexpr size_t HELD_LEASES = 256;
 static std::multimap<size_t, void *> held_;
-static std::map<size_t, std::pair<size_t, size_t>> held_made_;  // by bytes: leases made, leases on their way back
+// by bytes: the leases made, and the command buffer each lease on its way back was released into, oldest first
+struct HeldLeases {
+  size_t made = 0;
+  std::deque<id<MTLCommandBuffer>> returning;
+};
+static std::map<size_t, HeldLeases> held_made_;
 static auto *held_returned_ = new std::condition_variable;
 
 static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &like, bool mps, bool held, bool paced) {
@@ -946,17 +954,20 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   if (held) {
     std::unique_lock<std::mutex> guard(region_tensors_lock_);
     auto found = held_.find(bytes);
-    auto &[made, returning] = held_made_[bytes];
-    if (found == held_.end() && paced && mps && made >= HELD_LEASES && returning) {
+    HeldLeases &leases = held_made_[bytes];
+    if (found == held_.end() && paced && mps && leases.made >= HELD_LEASES && !leases.returning.empty()) {
+      const bool open = leases.returning.front().status < MTLCommandBufferStatusCommitted;
       guard.unlock();
-      MeshStream *s = &stream_of(at::mps::getCurrentMPSStream());
       const Deadline deadline("region_empty: a held lease returned by the stream's completion");
-      dispatch_sync(s->mps->queue(), ^{
-        @autoreleasepool {
-          if (s->waiting()) s->signalled(false);
-          else s->mps->synchronize(at::mps::SyncType::COMMIT);
-        }
-      });
+      if (open) {
+        MeshStream *s = &stream_of(at::mps::getCurrentMPSStream());
+        dispatch_sync(s->mps->queue(), ^{
+          @autoreleasepool {
+            if (s->waiting()) s->signalled(false);
+            else s->mps->synchronize(at::mps::SyncType::COMMIT);
+          }
+        });
+      }
       guard.lock();
       held_returned_->wait(guard, [&] { return (found = held_.find(bytes)) != held_.end(); });
     }
@@ -969,7 +980,7 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
     checked(ncclMemAlloc(&memory, bytes));
     std::lock_guard<std::mutex> guard(region_tensors_lock_);
     region_tensors_[(uintptr_t)memory] = bytes;
-    if (held && mps) held_made_[bytes].first++;
+    if (held && mps) held_made_[bytes].made++;
   }
   const auto options = at::TensorOptions().dtype(dtype);
   if (!mps) return at::from_blob(memory, sizes, [memory](void *) { returned(memory); }, options.device(at::kCPU));
@@ -996,21 +1007,28 @@ static at::Tensor region_empty(std::vector<int64_t> sizes, const at::Tensor &lik
   };
   return at::fromDLPack(managed, [managed, memory, bytes, held](void *) {
     managed->deleter(managed);
-    if (held) {
-      std::lock_guard<std::mutex> guard(region_tensors_lock_);
-      held_made_[bytes].second++;
-    }
-    at::mps::getCurrentMPSStream()->addCompletedHandler(^(id<MTLCommandBuffer>) {
-      if (!held) {
-        returned(memory);
-        return;
+    at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+    dispatch_sync(stream->queue(), ^{  // as MPSStream::addCompletedHandler, the buffer it joins kept for a held lease
+      @autoreleasepool {
+        if (held) {
+          std::lock_guard<std::mutex> guard(region_tensors_lock_);
+          held_made_[bytes].returning.push_back([stream->commandBuffer().rootCommandBuffer retain]);
+        }
+        [stream->commandBuffer() addCompletedHandler:^(id<MTLCommandBuffer>) {
+          if (!held) {
+            returned(memory);
+            return;
+          }
+          {
+            std::lock_guard<std::mutex> guard(region_tensors_lock_);
+            held_.emplace(bytes, memory);
+            auto &returning = held_made_[bytes].returning;
+            [returning.front() release];
+            returning.pop_front();
+          }
+          held_returned_->notify_all();
+        }];
       }
-      {
-        std::lock_guard<std::mutex> guard(region_tensors_lock_);
-        held_.emplace(bytes, memory);
-        held_made_[bytes].second--;
-      }
-      held_returned_->notify_all();
     });
   });
 }
