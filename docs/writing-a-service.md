@@ -188,7 +188,8 @@ which splits them evenly; each rank's block of them is the backend's (`partition
 Each layer's weights are the files' own [4H, K] (w_ih and w_hh side by side), held as [4, H, K]: each gate's units in
 turn. The backend's scatter (`partition.distribute_tensor`, `Shard(1)`) gives each rank its units of every gate, and
 the rank holds them from load as [4 x its units, K]. Its gates are then torch's linear of u by its own rows: a column
-split, so nothing crosses for it. Its units' cell state never leaves the rank. The new h slices of every layer are one
+split, so nothing crosses for it (in the recorded graph, torch_mesh::linear). The layers' gates are stacked and their
+cells run at once (`Tick.layers`), one kernel for every layer's c and h. Its units' cell state never leaves the rank. The new h slices of every layer are one
 ragged tensor along the units, and the backend's allgatherv (`torch_mesh::allgatherv`, partition's op) gathers them to
 every rank along that dimension: one fused crossing a tick. This is Megatron's split of a cell by hidden unit. The h slices (two, a tick's and the
 last), c and rank 0's output are region tensors made at load (`torch_mesh.empty`), and the blocks hold for the whole

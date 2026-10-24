@@ -10,9 +10,9 @@ import chain
 
 # docs/writing-a-service.md#the-lstm
 def cell(z, c, h):
-    """One layer's cell update from its gates z [rows, 4 x units] (torch's order: i, f, g and o, each over the units):
-    its units' c and h written in place."""
-    i, f, g, o = z.float().view(z.shape[0], 4, -1).unbind(1)
+    """The cell update of layers from their gates z [layers, rows, 4 x units] (torch's order: i, f, g and o, each over
+    the units): their units' c and h written in place."""
+    i, f, g, o = z.float().unflatten(-1, (4, -1)).unbind(-2)
     c.copy_(torch.sigmoid(f) * c + torch.sigmoid(i) * torch.tanh(g))
     h.copy_(torch.sigmoid(o) * torch.tanh(c))
 
@@ -39,9 +39,12 @@ class Tick:
             state.zero_()
 
     # docs/writing-a-service.md#the-lstm
-    def layer(self, l, x):
-        cell(torch.nn.functional.linear(torch.cat([x if l == 0 else self.h[l - 1], self.h[l]], 1), self.W[l], self.b[l]),
-             self.c[l], self.mine[l])
+    def layers(self, n, x):
+        """Layers 0 to n - 1 of a tick: each one's gates from its input and its own h of the tick before, then their
+        cells at once."""
+        z = torch.stack([torch.nn.functional.linear(torch.cat([x if l == 0 else self.h[l - 1], self.h[l]], 1), self.W[l],
+                                                    self.b[l]) for l in range(n)])
+        cell(z, self.c[:n], self.mine[:n])
 
     # docs/writing-a-service.md#the-lstm
     def gather(self):
@@ -51,8 +54,7 @@ class Tick:
     # docs/writing-a-service.md#the-lstm
     def starting(self, s, x):
         """Tick s < L - 1, while the layers above s have not begun (their h stays h(-1))."""
-        for l in range(s + 1):
-            self.layer(l, x)
+        self.layers(s + 1, x)
         self.gather()
 
     # docs/writing-a-service.md#the-lstm
@@ -61,9 +63,7 @@ class Tick:
         the GPU (the last one past the input's end), every layer, the gather, the top layer's h of step t - L + 1 into
         the output O (where this rank holds it), t advanced."""
         def one():
-            x = X.index_select(0, t.clamp(max=self.steps - 1))[0]
-            for l in range(self.L):
-                self.layer(l, x)
+            self.layers(self.L, X.index_select(0, t.clamp(max=self.steps - 1))[0])
             self.gather()
             if O is not None:
                 O.index_copy_(0, t - (self.L - 1), self.h[self.L - 1][None])
