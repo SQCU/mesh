@@ -125,13 +125,31 @@ def merge_partials(out, lse, group=None, root=-1):
 
 
 class Recording:
-    """A record()ed step: `step` compiled whole by the "mesh" backend at its first replay, each rank's compilation met
-    by every rank's before any of its collectives runs; `graphs` the graphs compiled so far."""
+    """A record()ed step: `k` steps unrolled in one graph compiled whole by the "mesh" backend at its first issue, and
+    the fewer a count k does not divide in a graph of their own, compiled at its first issue; each rank's compilation
+    met by every rank's before any of its collectives runs; `graphs` the graphs compiled so far."""
 
-    def __init__(self, step, name):
+    def __init__(self, step, name, k):
+        self.step, self.name, self.k, self.graphs, self.replays, self.unrolled = step, name, k, 0, 0, {}
+
+    def issue(self, steps):
+        """`steps` steps issued back to back on torch's stream with no wait: steps // k replays of the k-step graph,
+        then one of the rest's."""
+        full, rest = divmod(steps, self.k)
+        for n in [self.k] * full + [rest] * bool(rest):
+            if n not in self.unrolled:
+                self.unrolled[n] = self._graph(n)
+            self.unrolled[n]()
+        self.replays += steps
+
+    def _graph(self, n):
+        """n steps unrolled in one graph (torch.compile with fullgraph), compiled at its first call."""
         import torch
-        self.step, self.name, self.graphs, self.replays = step, name, 0, 0
-        self.compiled = torch.compile(step, backend=self._backend, fullgraph=True, dynamic=False)
+
+        def steps():
+            for _ in range(n):
+                self.step()
+        return torch.compile(steps, backend=self._backend, fullgraph=True, dynamic=False)
 
     def _backend(self, gm, example_inputs):
         """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
@@ -153,10 +171,11 @@ class Recording:
 _recordings = 0
 
 
-def record(step):
+def record(step, k=1):
     """`step` (a function of no arguments that runs one step on MPS tensors, its collectives torch's) recorded, the
-    CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of the step
-    (torch.compile with fullgraph, its collectives functional ones), compiled at its first replay by the "mesh"
+    CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of `k` steps
+    unrolled (torch.compile with fullgraph, its collectives functional ones), so a replay's host cost (the graph's
+    guards, its subclass wrapping, Inductor's wrapper) is paid once for k steps, compiled at its first replay by the "mesh"
     backend (compiler: Inductor's kernels, the graph's collectives each issued on torch's stream under the one commit
     rule and completed where it is waited) after every rank has compiled it.  Nothing runs while it records:
     its tensors keep what they held, and each replay writes them.  Every rank records the same steps in the same
@@ -165,26 +184,25 @@ def record(step):
     replay)."""
     global _recordings
     _recordings += 1
-    return Recording(step, _recordings)
+    return Recording(step, _recordings, k)
 
 
 def replay(recording, steps=1):
-    """`steps` replays of a record()ed step issued back to back on torch's stream, with no wait between them: the steps
-    are an operand's leading dimension, each reading what the last wrote in the stream's order; every rank replays
-    alike.  The one wait is where a consumer reads, the time this returns: the last step's interval in the stream, the
-    span between two MPS timing events torch records before and after it (each event's time taken as its listener
-    runs, equally late for both), read once the end event has passed.  With the steps back to back the span runs from
-    the end of the step before it to its own end, the GPU's time or the host's issue, whichever is slower; as before,
-    a first replay's compile falls inside it.  The steps' outputs are read where the caller reads them (torch commits
-    and waits at .item(), .cpu() and torch.mps.synchronize())."""
+    """`steps` steps of a record()ed step issued back to back on torch's stream (Recording.issue), with no wait between
+    them: the steps are an operand's leading dimension, each reading what the last wrote in the stream's order; every
+    rank replays alike.  The one wait is where a consumer reads, the time this returns: the last graph's interval in
+    the stream over its steps, the span between two MPS timing events torch records before and after it (each event's
+    time taken as its listener runs, equally late for both), read once the end event has passed.  With the graphs back
+    to back the span runs from the end of the graph before it to its own end, the GPU's time or the host's issue,
+    whichever is slower; as before, a first replay's compile falls inside it.  The steps' outputs are read where the
+    caller reads them (torch commits and waits at .item(), .cpu() and torch.mps.synchronize())."""
     import torch
     if steps < 1:
         return 0.0
-    for _ in range(steps - 1):
-        recording.compiled()
+    last = steps % recording.k or min(recording.k, steps)
+    recording.issue(steps - last)
     begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     begin.record()
-    recording.compiled()
+    recording.issue(last)
     end.record()
-    recording.replays += steps
-    return begin.elapsed_time(end) / 1e3
+    return begin.elapsed_time(end) / 1e3 / last

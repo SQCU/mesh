@@ -127,15 +127,17 @@ is the library's.
   crossing a step.
 - **x_{t+1} = e_{t+1} + tanh(z).** Every rank writes tanh(z), the step's output, and makes the next x from it on its
   own.
-- **One graph.** The step is recorded once (`torch_mesh.record`: torch.compile of the whole step by the "mesh"
-  backend) and replayed every step, so the backend's dispatch runs when the step is compiled, never between its ops.
-  The recorded step (`chain.stepper`) reads e_t from the input operand and writes tanh(z) into the output operand at a
-  step counter it holds on the GPU, so every replay is the same graph.
+- **One graph.** The step is recorded once (`torch_mesh.record(step, k)`: torch.compile by the "mesh" backend of k
+  steps unrolled in one graph, and of the fewer that k does not divide in a graph of their own) and replayed
+  (`Recording.issue`). The backend's dispatch runs when a graph is compiled, never between its ops, and a replay's host
+  cost is paid once for k steps. The recorded step (`chain.stepper`) reads e_t from the input operand and writes
+  tanh(z) into the output operand at a step counter it holds on the GPU, so every replay is the same graph.
 
 ## The configuration
 
 The service takes one operand: a configuration file. It names the input, the weights (a directory holding `a.npy` and
-`b.npy`, each [width, width]) and the output. It gives the width and the two rotations' blocks. Its paths are read from
+`b.npy`, each [width, width]) and the output. It gives the width, the two rotations' blocks, and `steps_per_replay`,
+the k steps one replay of the recorded step runs. Its paths are read from
 the directory the service runs in, the checkout's root in the sample. The input file says how many steps and rows there
 are, so the configuration does not. It names no shares and no rank: each rank's block is the backend's. Every value must
 be there. The service has no defaults, and a missing value is an error.
@@ -161,7 +163,7 @@ rows a second of all streams together and the steps a second of each stream. It 
 step, the host's own time to issue it, and a plain all-reduce of the step's sum alone (the library's), the step's
 crossing without its math.
 
-The step is compiled, every rank's compilation met, and its first replay run, before the timed run, which replays it
+The step's graphs are compiled, every rank's compilation met, and each run once before the timed run, which replays
 from the first step again. The whole-run times include the input's broadcast and the first steps' other one-time
 costs. The line also gives the steady step and the rows a second it reaches: the GPU's time from the middle step
 to the last, read from two timing events on torch's stream, over the steps between them. No wait is added to take it.

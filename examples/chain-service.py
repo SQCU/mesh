@@ -52,12 +52,13 @@ def main():
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=width)
     steps, rows, inputs = chain.operand(config['input'], rank, width)
+    k = config['steps_per_replay']
     at, b = chain.weights(mesh, folds, width)
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
     o, t = torch_mesh.empty(rows, width, dtype=torch.half).zero_(), torch.zeros(1, dtype=torch.int64, device='mps')
-    recording = torch_mesh.record(chain.stepper(E, O, o, t, at, b))
-    torch_mesh.replay(recording)
+    recording = torch_mesh.record(chain.stepper(E, O, o, t, at, b), k)
+    torch_mesh.replay(recording, min(steps, k + steps % k))
     o.zero_()
     t.zero_()
     if rank == 0:
@@ -65,19 +66,18 @@ def main():
     torch_mesh.check_memory()
     torch.mps.synchronize()
     dist.barrier()
-    half = steps // 2
+    half = steps // k // 2 * k
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()
     dist.broadcast(E, src=0)
-    for s in range(steps):
-        recording.compiled()
-        if s == half:
-            middle.record()
+    recording.issue(half)
+    middle.record()
+    recording.issue(steps - half)
     end.record()
     hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
-    steady = middle.elapsed_time(end) / 1e3 / (steps - 1 - half)
+    steady = middle.elapsed_time(end) / 1e3 / (steps - half)
     if rank == 0:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, width))).copy_(O)
     p = torch_mesh.empty(rows, width, dtype=torch.half).zero_()
@@ -89,6 +89,7 @@ def main():
     torch.mps.synchronize()
     crossing = time.perf_counter() - began
     summary = dict(rank=rank, size=size, blocks=partition.split(mesh, 'tp', width), rows=rows, width=width, steps=steps,
+                   steps_per_replay=k,
                    seconds=seconds, aggregate_rows_per_second=steps * rows / seconds,
                    steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
                    step_microseconds=seconds / steps * 1e6, steady_step_microseconds=steady * 1e6,

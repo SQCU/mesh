@@ -3,5 +3,6 @@
   "weights": "chain-weights",
   "output": "chain-output.npy",
   "width": 1024,
-  "rotation_blocks": [1, 1]
+  "rotation_blocks": [1, 1],
+  "steps_per_replay": 16
 }
