@@ -1334,6 +1334,24 @@ def _block(query, key, value, into, scores, scale=None, queries=None, keys=None,
         part[..., 2:] = s.to(value.dtype) @ value
 
 
+_RINGS = {}
+
+
+def _ring(query, value, lengths, rows, rank, group):
+    """The ring's region leases for a shape, made once and held, so no call leases or wraps one: the gathered query
+    blocks, the partials (zeroed once: a row no block of the shape writes stays [0, 0, 0], and every row one writes is
+    written whole at every call), the merged rows and the output, [batch, positions, heads, dim] (held: the next call
+    of the shape writes it again)."""
+    key = (tuple(query.shape), tuple(lengths), query.dtype, value.size(-1), group.group_name)
+    if key not in _RINGS:
+        width = 2 + value.size(-1)
+        _RINGS[key] = (_empty((sum(lengths) * (query.numel() // query.size(2)),), query, group),
+                       _empty((sum(rows), width), query, group, torch.float32).zero_(),
+                       _empty((rows[rank], width), query, group, torch.float32),
+                       _empty((query.size(0), lengths[rank], query.size(1), value.size(-1)), query, group))
+    return _RINGS[key]
+
+
 def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1):
     """Ring attention over capacity blocks as split-KV partials: every rank's query block gathered (one Allgatherv,
     static counts, into a region tensor on the mesh backend: _empty, this rank's copied into its place there and the
@@ -1344,8 +1362,9 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     owner's rows merged at it by their log-sum-exp (ProcessGroupMesh.merge_partials, ncclMeshReduceScatterV); the
     partials' rows laid out position-major (each position's heads together), so the output O / l is one gather of the
     merged rows into a region lease laid out [batch, positions, heads, dim] and divided there in place (a caller's
-    view of it as [batch, positions, heads x dim] is no copy), the logsumexp m + log l.  This rank's own block is computed while the gather is in flight.
-    Padded query rows compute garbage that the unshard drops.  Forward only."""
+    view of it as [batch, positions, heads x dim] is no copy), the logsumexp m + log l.  This rank's own block is
+    computed while the gather is in flight.  Its leases are held for the shape (_ring).  Padded query rows compute
+    garbage that the unshard drops.  Forward only."""
     from .backend import ProcessGroupMesh
     if not isinstance(group, ProcessGroupMesh):
         raise TypeError('mesh: the ring\'s merge is the mesh backend\'s partials operator (torch_mesh::merge_partials)')
@@ -1357,12 +1376,11 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     rank, size = dist.get_rank(group), dist.get_world_size(group)
     S = query.size(2) * o.units // o.capacity[rank]
     lengths, lead, width = _blocks(o, S)[0], tuple(query.shape[:2]), 2 + value.size(-1)
-    row = query.numel() // query.size(2)
-    blocks = list(_empty((sum(lengths) * row,), query, group).split([s * row for s in lengths]))
+    row, rows = query.numel() // query.size(2), [math.prod(lead) * s for s in lengths]
+    gathered_lease, packed, merged, out = _ring(query, value, lengths, rows, rank, group)
+    blocks = list(gathered_lease.split([s * row for s in lengths]))
     blocks[rank].view(query.shape).copy_(query)
     gathered = dist.all_gather(blocks, blocks[rank], group=group, async_op=True)
-    rows = [math.prod(lead) * s for s in lengths]
-    packed = _empty((sum(rows), width), query, group, torch.float32).zero_()
     owners = list(packed.split(rows))
     keys, valid = _positions(key_name, rank, S, halves, query.device)
     mine, step, scores = _spans(o, rank, S, halves), lengths[rank] // halves, _scores(query, group)
@@ -1383,9 +1401,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     for j in range(size):
         if j != rank:
             owned(j)
-    merged = _empty((rows[rank], width), query, group, torch.float32)
     group.merge_partials(merged, packed, rows)
     m, l = (t.view(lead[0], lengths[rank], lead[1]) for t in (merged[:, 0], merged[:, 1]))
-    out = _empty((lead[0], lengths[rank], lead[1], value.size(-1)), query, group)
     out.view(-1, value.size(-1)).copy_(merged[:, 2:]).view(out.shape).div_(l[..., None]).masked_fill_((l == 0)[..., None], 0)
     return out.transpose(1, 2), torch.where(l > 0, m + l.log(), -math.inf).transpose(1, 2)
