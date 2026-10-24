@@ -150,7 +150,7 @@ kernel void linear_group(device const half* x0 [[buffer(0)]], device const half*
 
 #ifdef MESH_METAL
 template <uint PEERS>
-struct linear_publish_words { uint R, K, N, B, LDW, K0, LD0, LD1; mesh_step_binding land[PEERS], publish[PEERS]; };
+struct linear_publish_words { uint R, K, N, B, LDW, K0, LD0, LD1, j; mesh_step_binding land[PEERS], publish[PEERS]; };
 
 struct linear_step_store {
     device uchar* send;

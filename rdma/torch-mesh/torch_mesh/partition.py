@@ -319,20 +319,28 @@ def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
             K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
             split = _stream.linear_split(K, N)
             publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 else 1, 2, split, 2, n - 1),
-                       [x.shape[0], K, N, 0, ldw, K, K, K], -(-N // 2), split * 32)
-        _FUSED[key] = {'rings': [_empty((starts[-1],), x, group) for _ in range(2)], 'turn': 0, 'words': words,
-                       'shape': shape, 'counts': counts, 'starts': starts,
+                       [x.shape[0], K, N, 0, ldw, K, K, K, 0], 8, -(-N // 2), split * 32)
+        _FUSED[key] = {'rings': {}, 'turn': 0, 'j': 0, 'words': words, 'shape': shape, 'counts': counts, 'starts': starts,
                        'arrivals': torch.zeros(1, dtype=torch.int32, device=x.device),
                        'publish': publish, 'land': (land, spread(math.prod(shape) * half))}
     held = _FUSED[key]
-    lease, held['turn'] = held['rings'][held['turn'] % 2], held['turn'] + 1
-    starts, counts = held['starts'], held['counts']
-    segment = lambda q: lease[starts[q]:starts[q] + counts[q]]
-    crossing = fused.exchange(segment(rank), [segment(q) for q in range(n) if q != rank], _stream.polls, group)
-    (publish, pwords, gp, threads), (land, gl) = held['publish'], held['land']
-    fused.encode(publish, [x] + ([] if w is None else [w]) + [segment(rank), held['arrivals']] + ([] if w is None else [x]), pwords, 15,
-                 gp, 1, threads, n - 1,
-                 publish=crossing)
+    starts, counts, j = held['starts'], held['counts'], held['j']
+    held['j'] = (j + 1) % repeats
+    if j == 0:
+        if repeats not in held['rings']:
+            leases = [_empty((repeats * starts[-1],), x, group) for _ in range(2)]
+            held['rings'][repeats] = [[(slot, [slot[starts[q]:starts[q] + counts[q]] for q in range(n)])
+                                       for slot in lease.split(starts[-1])] for lease in leases]
+        held['slots'], held['turn'] = held['rings'][repeats][held['turn'] % 2], held['turn'] + 1
+        segments = held['slots'][0][1]
+        held['crossing'] = fused.exchange(segments[rank], [segments[q] for q in range(n) if q != rank], _stream.polls, group, repeats,
+                                          starts[-1] * x.element_size())
+    (slot, segments), crossing = held['slots'][j], held['crossing']
+    (publish, pwords, at, gp, threads), (land, gl) = held['publish'], held['land']
+    pwords, lwords = list(pwords), list(held['words'])
+    pwords[at], lwords[4] = j, j
+    fused.encode(publish, [x] + ([] if w is None else [w]) + [segments[rank], held['arrivals']] + ([] if w is None else [x]), pwords, 15,
+                 gp, 1, threads, n - 1, publish=crossing)
     out = torch.empty(held['shape'], dtype=x.dtype, device=x.device)
     fused.encode(land, [slot, out], lwords, 15, gl, 1, _GATHER_THREADS, n - 1, land=crossing)
     return out
