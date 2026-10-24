@@ -104,6 +104,44 @@ kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w
     linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
 }
 
+// Up to four products in one dispatch (torch_mesh::linears): problem p's threadgroups follow the ones before it
+// (first[p]), its buffers 5p to 5p + 4 (x, w, y, bias, x1), its dims d[p] and activation act[p].
+struct linear_group_words { linear_dims d[4]; uint first[4], act[4]; };
+
+struct linear_act_store {
+    device half* y;
+    device const half* bias;
+    uint N, B, ACT;
+    void operator()(uint r, uint n, float s) const {
+        const float v = s + (B ? float(bias[n]) : 0.0f);
+        y[ulong(r) * N + n] = half(ACT == 1 ? tanh(v) : v);
+    }
+};
+
+template <uint VW, uint VX, uint COLS, uint NSG, uint U>
+[[max_total_threads_per_threadgroup(NSG * 32)]]
+kernel void linear_group(device const half* x0 [[buffer(0)]], device const half* w0 [[buffer(1)]], device half* y0 [[buffer(2)]],
+                         device const half* b0 [[buffer(3)]], device const half* s0 [[buffer(4)]],
+                         device const half* x1 [[buffer(5)]], device const half* w1 [[buffer(6)]], device half* y1 [[buffer(7)]],
+                         device const half* b1 [[buffer(8)]], device const half* s1 [[buffer(9)]],
+                         device const half* x2 [[buffer(10)]], device const half* w2 [[buffer(11)]], device half* y2 [[buffer(12)]],
+                         device const half* b2 [[buffer(13)]], device const half* s2 [[buffer(14)]],
+                         device const half* x3 [[buffer(15)]], device const half* w3 [[buffer(16)]], device half* y3 [[buffer(17)]],
+                         device const half* b3 [[buffer(18)]], device const half* s3 [[buffer(19)]],
+                         constant linear_group_words& g [[buffer(20)]],
+                         uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                         uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float part[NSG * 8 * COLS];
+    const uint p = tg >= g.first[3] ? 3 : tg >= g.first[2] ? 2 : tg >= g.first[1] ? 1 : 0;
+    device const half* x = p == 0 ? x0 : p == 1 ? x1 : p == 2 ? x2 : x3;
+    device const half* w = p == 0 ? w0 : p == 1 ? w1 : p == 2 ? w2 : w3;
+    device half* y = p == 0 ? y0 : p == 1 ? y1 : p == 2 ? y2 : y3;
+    device const half* b = p == 0 ? b0 : p == 1 ? b1 : p == 2 ? b2 : b3;
+    device const half* s = p == 0 ? s0 : p == 1 ? s1 : p == 2 ? s2 : s3;
+    const linear_act_store store{y, b, g.d[p].N, g.d[p].B, g.act[p]};
+    linear_body<VW, VX, COLS, NSG, U>(x, s, w, g.d[p], store, part, sg, lane, tg - g.first[p], tid);
+}
+
 #ifdef MESH_METAL
 template <uint PEERS>
 struct linear_publish_words { uint R, K, N, B, LDW, K0, LD0, LD1; mesh_step_binding land[PEERS], publish[PEERS]; };

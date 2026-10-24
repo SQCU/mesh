@@ -732,8 +732,63 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
   return y;
 }
 
-TORCH_LIBRARY_FRAGMENT(torch_mesh, m) { m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor"); }
-TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) { m.impl("linear", &linear); }
+// torch_mesh::linears (linear.metal linear_group): up to four of linear's products, one dispatch: each problem's
+// threadgroups after the ones before it, at the widest split any takes and the narrowest loads any allows.
+static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const std::vector<at::Tensor> &ws,
+                                       const std::vector<std::optional<at::Tensor>> &biases, const std::vector<int64_t> &acts,
+                                       const std::vector<std::optional<at::Tensor>> &x1s) {
+  const size_t P = xs.size();
+  TORCH_CHECK(P >= 1 && P <= 4 && ws.size() == P && biases.size() == P && acts.size() == P && x1s.size() == P,
+              "torch_mesh::linears takes one to four products, each its x, w, bias, act and x1");
+  std::vector<std::optional<at::Tensor>> buffers(20);
+  std::vector<int64_t> words(40, 0);
+  std::vector<at::Tensor> ys;
+  int64_t first = 0, split = 1;
+  bool wide_w = true, wide_x = true;
+  for (size_t p = 0; p < P; p++) {
+    const at::Tensor &x = xs[p], &w = ws[p];
+    const int64_t K0 = x.size(1), K = K0 + (x1s[p] ? x1s[p]->size(1) : 0);
+    TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && w.size(1) == K,
+                "torch_mesh::linears: product ", p, " takes fp16 x [R, K0], x1 [R, K - K0] and w [N, K]");
+    const at::Tensor xc = x.stride(1) == 1 ? x : x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
+    const at::Tensor x1c = !x1s[p] ? xc : x1s[p]->stride(1) == 1 ? *x1s[p] : x1s[p]->contiguous();
+    const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
+    ys.push_back(at::empty({R, N}, x.options()));
+    buffers[5 * p] = xc, buffers[5 * p + 1] = wc, buffers[5 * p + 2] = ys.back();
+    buffers[5 * p + 3] = biases[p] ? std::optional<at::Tensor>(biases[p]->contiguous()) : ys.back(), buffers[5 * p + 4] = x1c;
+    const int64_t d[8] = {R, K, N, biases[p] ? 1 : 0, ldw, K0, ld0, ld1};
+    for (int k = 0; k < 8; k++) words[8 * p + k] = d[k];
+    words[32 + p] = first, words[36 + p] = acts[p];
+    first += (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
+    split = std::max(split, linear_split(K, N));
+    wide_w &= ldw % 4 == 0, wide_x &= K0 % 4 == 0 && ld0 % 4 == 0 && ld1 % 4 == 0;
+  }
+  for (size_t p = P; p < 4; p++) {
+    for (int k = 0; k < 5; k++) buffers[5 * p + k] = buffers[k];
+    words[32 + p] = first;
+  }
+  const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, (int)split, -1);
+  auto found = linear_pipelines_.find(key);
+  if (found == linear_pipelines_.end()) {
+    const std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
+                             std::to_string(LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(LINEAR_LOADS);
+    std::string name = "linear_group_" + args;
+    for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
+    found = linear_pipelines_.emplace(key, pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(linear_group<" +
+                                                    args + ">) linear_group<" + args + ">;\n", name)).first;
+  }
+  encode(found->second, buffers, words, 20, first, 1, split * 32, false);
+  return ys;
+}
+
+TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
+  m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor");
+  m.def("linears(Tensor[] x, Tensor[] w, Tensor?[] bias, int[] act, Tensor?[] x1) -> Tensor[]");
+}
+TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) {
+  m.impl("linear", &linear);
+  m.impl("linears", &linears);
+}
 
 // The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
 // GPU time (GPUEndTime - GPUStartTime), the measure the engine's kernel harness reports.  Torch's stream is synchronized
