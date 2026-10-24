@@ -335,6 +335,11 @@ class ProcessGroupMesh(dist.ProcessGroup):
         of [m, l, O] (partial), merged into `out` (it may be `partials`) on every member (an all-reduce), at `root` (a
         reduce), or, where `rows` gives each rank's rows of them in rank order, rank r's rows[r] merged into its `out`
         (ncclMeshReduceScatterV).  One call of the one path, coalesced like any other."""
+        return self.merger(out, partials, rows, root, async_op)()
+
+    def merger(self, out, partials, rows=None, root=-1, async_op=False):
+        """merge_partials made now, its operator and its call, as a function of nothing that issues it (a declared
+        ring's, made at its declaration and at every move: partition.attention)."""
         width = partials.shape[-1]
         if width not in self._operators:
             made = ffi.new('ncclRedOp_t *')
@@ -343,7 +348,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         merge = self._operators[width]
         call = ((REDUCE_SCATTER, [partials], [out], [r * width for r in rows], merge, 0) if rows is not None
                 else (ALLREDUCE, [partials], [out], [], merge, 0) if root < 0 else (REDUCE, [partials], [out], [], merge, root))
-        return self._issue([call], [out], async_op)
+        return lambda: self._issue([call], [out], async_op)
 
 
 def partial(out, lse):
