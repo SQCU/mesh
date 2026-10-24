@@ -3,25 +3,18 @@ import os
 import numpy as np
 import torch
 import torch_mesh
-from torch.distributed.tensor import Replicate, Shard
+from torch.distributed.tensor import Shard
 from torch_mesh import partition
 
 import chain
 
 
 # docs/writing-a-service.md#the-lstm
-def gate_rows(H):
-    """A layer's [4H, K] gate weights' rows unit-major: (i, f, g, o) of each unit in turn."""
-    units = np.arange(H)
-    return np.stack([units, H + units, 2 * H + units, 3 * H + units], 1).reshape(-1)
-
-
-# docs/writing-a-service.md#the-lstm
 @torch.compile(fullgraph=True)
 def cell(z, c, h):
-    """One layer's cell update from its gates z [rows, 4 units] ((i, f, g, o) of each unit in turn): its units' c and h
-    written in place, one compiled kernel."""
-    i, f, g, o = z.float().view(z.shape[0], -1, 4).unbind(-1)
+    """One layer's cell update from its gates z [rows, 4 x units] (torch's order: i, f, g and o, each over the units):
+    its units' c and h written in place, one compiled kernel."""
+    i, f, g, o = z.float().view(z.shape[0], 4, -1).unbind(1)
     c.copy_(torch.sigmoid(f) * c + torch.sigmoid(i) * torch.tanh(g))
     h.copy_(torch.sigmoid(o) * torch.tanh(c))
 
@@ -29,9 +22,12 @@ def cell(z, c, h):
 class Tick:
     # docs/writing-a-service.md#the-lstm
     def __init__(self, mesh, weights, biases, rows, steps):
+        """weights and biases: each layer's [4, H, K] and [4, H] split along the units (the backend's ragged shards),
+        each rank's held from here as [4 x its units, K] and [4 x its units] in region tensors."""
         self.mesh, self.rows, self.steps, self.L = mesh, rows, steps, len(weights)
-        self.W, self.b = weights, biases
-        H, HR = self.W[0].shape[0] // 4, self.b[0].to_local().numel() // 4
+        held = lambda t: torch_mesh.empty(t.to_local().shape, dtype=t.dtype).copy_(t.to_local()).view(-1, *t.shape[2:])
+        H, HR = weights[0].shape[1], weights[0].to_local().shape[1]
+        self.W, self.b = [held(w) for w in weights], [held(b) for b in biases]
         self.c = torch_mesh.empty(self.L, rows, HR, dtype=torch.float32).zero_()
         self.mine = [torch_mesh.empty(self.L, rows, HR, dtype=torch.half).zero_() for _ in range(2)]
         self.h = torch.zeros(self.L, rows, H, dtype=torch.half, device='mps')
@@ -47,8 +43,8 @@ class Tick:
             if not 0 <= s - l < self.steps:
                 mine[l] = last[l]
                 continue
-            u = partition.from_local(torch.cat([x if l == 0 else self.h[l - 1], self.h[l]], 1), self.mesh, [Replicate()])
-            cell(torch.nn.functional.linear(u, self.W[l], self.b[l]).to_local(), self.c[l], mine[l])
+            u = torch.cat([x if l == 0 else self.h[l - 1], self.h[l]], 1)
+            cell(torch.nn.functional.linear(u, self.W[l], self.b[l]), self.c[l], mine[l])
         self.h = partition.from_local(mine, self.mesh, [Shard(2)]).full_tensor()
         self.tick = s + 1
         return self.h[self.L - 1]

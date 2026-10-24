@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -18,39 +19,38 @@ CHUNK = 512
 
 
 # docs/writing-a-service.md#the-lstm
-def weights(config, mesh):
-    """Each layer's gate weights [4H, K] and bias [4H], unit-major, split over the mesh dimension tp by the backend's
-    scatter from rank 0 (partition.distribute_tensor), which reads the files memory-mapped into region tensors; every
-    other rank passes the global shape alone."""
+def weights(config):
+    """Each layer's w_ih and w_hh side by side, [4, H, K] (the files' own order: each gate's units in turn), and its
+    bias [4, H], in region tensors, read memory-mapped (rank 0's, before the communicator exists, so no peer's wait
+    spans this host work)."""
     L, KIN, H, folder = config['layers'], config['input_width'], config['width'], Path(config['weights'])
     load = lambda name: np.load(folder / f'{name}.npy', mmap_mode='r')
-    rows, made = lstm.gate_rows(H), []
+    made = []
     for l in range(L):
-        K = (KIN if l == 0 else H) + H
-        if dist.get_rank() == 0:
-            w_ih, w_hh, bias = load(f'w_ih_{l}'), load(f'w_hh_{l}'), load(f'b_{l}')
-            W = torch_mesh.empty(4 * H, K, dtype=torch.half)
-            for c in range(0, 4 * H, CHUNK):
-                picked = rows[c:c + CHUNK]
-                W[c:c + CHUNK].copy_(torch.from_numpy(np.concatenate([w_ih[picked], w_hh[picked]], 1)))
-            b = torch_mesh.empty(4 * H, dtype=torch.half).copy_(torch.from_numpy(bias[rows].copy()))
-        else:
-            W, b = torch_mesh.empty(1, K, dtype=torch.half).expand(4 * H, K), torch_mesh.empty(1, dtype=torch.half).expand(4 * H)
-        made.append([partition.distribute_tensor(t, mesh, [Shard(0)], src_data_rank=0) for t in (W, b)])
-    return [w for w, _ in made], [b for _, b in made]
+        w_ih, w_hh = load(f'w_ih_{l}'), load(f'w_hh_{l}')
+        W = torch_mesh.empty(4, H, w_ih.shape[1] + H, dtype=torch.half)
+        for c in range(0, 4 * H, CHUNK):
+            W.view(4 * H, -1)[c:c + CHUNK].copy_(torch.from_numpy(np.concatenate([w_ih[c:c + CHUNK], w_hh[c:c + CHUNK]], 1)))
+        made.append((W, torch_mesh.empty(4, H, dtype=torch.half).copy_(torch.from_numpy(load(f'b_{l}').reshape(4, H).copy()))))
+    return made
 
 
 # docs/writing-a-service.md#the-lstm
 def main():
     config = json.loads(open(sys.argv[1]).read())
+    held = weights(config) if os.environ['RANK'] == '0' else None
     dist.init_process_group(backend='mesh', device_id=torch.device('mps', 0))
     rank, size = dist.get_rank(), dist.get_world_size()
     L, KIN, H = config['layers'], config['input_width'], config['width']
     mesh = DeviceMesh.from_group(dist.group.WORLD, 'mps', mesh_dim_names=('tp',))
     partition.attach(mesh, tp=H)
     steps, rows, inputs = chain.operand(config['input'], rank, KIN)
-    W, b = weights(config, mesh)
-    tick = lstm.Tick(mesh, W, b, rows, steps)
+    shape = lambda l: (4, H, (KIN if l == 0 else H) + H)
+    split = lambda t: partition.distribute_tensor(t, mesh, [Shard(1)], src_data_rank=0)
+    held = held or [(torch_mesh.empty(1, 1, shape(l)[2], dtype=torch.half).expand(shape(l)),
+                     torch_mesh.empty(1, 1, dtype=torch.half).expand(4, H)) for l in range(L)]
+    tick = lstm.Tick(mesh, [split(w) for w, _ in held], [split(b) for _, b in held], rows, steps)
+    del held
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
     if rank == 0:
         X.copy_(torch.from_numpy(inputs[:]))
@@ -75,8 +75,8 @@ def main():
     steady = middle.elapsed_time(end) / 1e3 / (ticks - 1 - half)
     if O is not None:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
-    blocks, following = partition.split(mesh, 'tp', H), partition.evaluated(mesh, 'tp')
-    summary = dict(rank=rank, size=size, blocks=blocks, following=following, balancing=partition.balancing(mesh, 'tp'), layers=L, rows=rows,
+    blocks = partition.split(mesh, 'tp', H)
+    summary = dict(rank=rank, size=size, blocks=blocks, layers=L, rows=rows,
                    input_width=KIN, width=H, steps=steps, ticks=ticks, seconds=seconds,
                    aggregate_rows_per_second=steps * rows / seconds,
                    steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
