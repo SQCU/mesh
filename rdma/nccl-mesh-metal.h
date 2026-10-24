@@ -134,10 +134,13 @@ void metal_uses(struct metal_program *, void *const *buffers, size_t n, int writ
 struct metal_result metal_open_gate(struct metal_program *, void *words, size_t word, uint64_t value);
 /* the wait alone (a COPY's landing in place), one threadgroup */
 struct metal_result metal_spin(struct metal_program *, const struct metal_wait *);
-/* the wait, then every threadgroup's piece of the landed bytes combined into dst (an ncclDataType_t or METAL_MERGE, op as
-   above), n elements (the merge's rows), each threadgroup awaiting the counts on its own (nccl-mesh-kernels.h
-   mesh_step_await) */
-struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, const struct metal_wait *);
+/* the landed bytes combined into dst, n elements of an ncclDataType_t (op as above), page by page as the entry's `pages`
+   pages of `page` bytes land (nccl-mesh-kernels.h PAGES: each page awaited alone, then summed, by as many threadgroups
+   as there are to claim it), the count of pages summed stored in the word just past the landed bytes' pages (the next
+   one the pages' claim, both 0 before), so a SEND of the sum names it (nccl-mesh.c forwards); METAL_MERGE's rows after
+   the whole entry has landed, each threadgroup awaiting the counts on its own (mesh_step_await) */
+struct metal_result metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, size_t n, mesh_pages pages, uint64_t page,
+                               const struct metal_wait *);
 /* the same two steps run by the caller's kernel (nccl.h ncclMeshFused: the Metal 4 form, or a classic program begun with
    a residency set): each one's record written to the device's argument ring as a Metal 4 dispatch's would be, the
    buffers it names made resident, and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
