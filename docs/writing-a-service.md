@@ -127,6 +127,10 @@ is the library's.
   crossing a step.
 - **x_{t+1} = e_{t+1} + tanh(z).** Every rank writes tanh(z), the step's output, and makes the next x from it on its
   own.
+- **One graph.** The step is recorded once (`torch_mesh.record`: torch.compile of the whole step by the "mesh"
+  backend) and replayed every step, so the backend's dispatch runs when the step is compiled, never between its ops.
+  The recorded step (`chain.stepper`) reads e_t from the input operand and writes tanh(z) into the output operand at a
+  step counter it holds on the GPU, so every replay is the same graph.
 
 ## The configuration
 
@@ -157,8 +161,9 @@ rows a second of all streams together and the steps a second of each stream. It 
 step, the host's own time to issue it, and a plain all-reduce of the step's sum alone (the library's), the step's
 crossing without its math.
 
-The whole-run times include the input's broadcast and the first steps' one-time costs, such as the library compiling
-its kernels. The line also gives the steady step and the rows a second it reaches: the GPU's time from the middle step
+The step is compiled, every rank's compilation met, and its first replay run, before the timed run, which replays it
+from the first step again. The whole-run times include the input's broadcast and the first steps' other one-time
+costs. The line also gives the steady step and the rows a second it reaches: the GPU's time from the middle step
 to the last, read from two timing events on torch's stream, over the steps between them. No wait is added to take it.
 
 ## The LSTM

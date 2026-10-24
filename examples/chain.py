@@ -26,6 +26,15 @@ def step(x, at, b, out):
     return torch.tanh((y @ b).redistribute(placements=[Replicate()]).to_local(), out=out)
 
 
+# docs/writing-a-service.md#the-step
+def stepper(E, O, o, t, at, b):
+    def one():
+        step(E.index_select(0, t)[0] + o, at, b, o)
+        O.index_copy_(0, t, o[None])
+        t.add_(1)
+    return one
+
+
 # docs/writing-a-service.md#how-the-example-moves-its-data
 def operand(path, rank, width):
     shape, inputs = torch_mesh.empty(2, dtype=torch.int64, device='cpu'), None

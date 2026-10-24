@@ -55,6 +55,11 @@ def main():
     at, b = chain.weights(mesh, folds, width)
     del folds
     E, O = (torch_mesh.empty(steps, rows, width, dtype=torch.half) for _ in range(2))
+    o, t = torch_mesh.empty(rows, width, dtype=torch.half).zero_(), torch.zeros(1, dtype=torch.int64, device='mps')
+    recording = torch_mesh.record(chain.stepper(E, O, o, t, at, b))
+    torch_mesh.replay(recording)
+    o.zero_()
+    t.zero_()
     if rank == 0:
         E.copy_(torch.from_numpy(inputs[:]))
     torch_mesh.check_memory()
@@ -64,10 +69,9 @@ def main():
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()
     dist.broadcast(E, src=0)
-    o = torch.zeros(rows, width, dtype=torch.half, device='mps')
-    for t in range(steps):
-        o = chain.step(E[t] + o, at, b, O[t])
-        if t == half:
+    for s in range(steps):
+        recording.compiled()
+        if s == half:
             middle.record()
     end.record()
     hosted = time.perf_counter() - began
