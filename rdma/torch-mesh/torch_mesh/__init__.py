@@ -163,12 +163,12 @@ def compiler(gm, example_inputs):
                 nodes = [node for node in graph.nodes if any(isinstance(a, str) and a == name for a in node.args)]
                 forms = {(n.target, *((a.meta['val'].shape, a.meta['val'].stride(), a.meta['val'].dtype) if hasattr(a, 'meta') else a
                                       for a in n.args[:2])) for n in nodes}
-                if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in sums:
+                if False and len(nodes) > 1 and len(forms) == 1 and nodes[0].target in sums:
                     for n in nodes:
                         told(n, len(nodes))
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats no-batch'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 
