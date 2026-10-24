@@ -22,24 +22,24 @@
    MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets them), every rank's node (mesh_observe) meets there,
    the root listening on that host alone where it is an IPv6 address; the id is its name.  ncclCommInitRankConfig with
    config->blocking 0 is NCCL's non-blocking init (ncclMeshCommInitRank, below).  Its first gather carries each rank's
-   node, the nodes its bridge reaches and the streams free to take (mesh-call.h mesh_nodes_reached, mesh_streams_free);
-   each rank then holds, toward each other member's node it is joined to, the stream of the least identity free at both
+   node and every live physical endpoint, including availability (mesh-call.h mesh_endpoints);
+   each rank then holds, on every physical cable joining it to a member, the stream of the least identity free at both
    ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (a holding's
    lists and counts are its holder's alone; a link has several, so communicators sharing a node pair hold their own;
-   EBUSY where none toward a member's node is free at both ends); the second gather carries each rank's holding's
+   EBUSY where a physical cable has none free at both ends); the second gather carries each rank's holding's
    status.  Each phase of the bootstrap (the connect or accepts, each gather) has a deadline, mesh.h MESH_PLATFORM_NS
-   from its start, past which the program ends (design/data-model.md section 6).  A communicator names nodes and its own pages, never a
-   link, port, lane, frame, queue pair or SEND size.  An init fails as a value where two ranks are on one node (its
+   from its start, past which the program ends (design/data-model.md section 6).  The data program names nodes and its own pages; the compiled fabric retains every physical cable.
+   The bridge owns ports, lanes, frames, queue pairs and SEND sizing.  An init fails as a value where two ranks are on one node (its
    holdings are kept a node), a stream is held by another process,
    or its bridge is still ending its last holding, or gone; what it held is then let go and the next init reads the streams as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the
    next (one that sends nothing holds the root's read until the phase ends).  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
-   every member from the same reports and kept for its life: its nodes are its members, one link a pair (the channel
-   toward a member is one stream, on one cable: design/data-model.md section 9 names the cables this leaves unused),
+   every member from the same reciprocal reports and kept for its life: its nodes are its members,
+   every physical cable is a separate channel, including all parallel cables (ncclMeshCommFabric),
    and a route crosses members alone, so a node a route is to cross takes part as a member.  The communicator's own
    table makes every member a contributor, so a member on a route combines its own operand into what it sends on; only
-   a program passed to ncclMeshCommInitRank, compiled with mesh-plan.h mesh_compile's contributors, has a member that
-   sends on what lands alone (the identity, data-model.md section 9's relay).  Two members no path between members
+   a program passed to ncclMeshCommInitRank with mesh_compile's contributors, or an explicit ncclMeshWrite path,
+   has a member that sends on what lands alone (the identity, data-model.md section 9's relay).  Two members no path between members
    joins fail a collective, and a call between two members not joined fails, as values (ncclInvalidUsage).  ncclMeshCommInitRank (below) is the same init for a program
    that passes its own programs or paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take;
    Split holds its children's streams over comm (NCCL's bootstrapSplit), and Shrink makes no exchange, so a shrink to
@@ -76,24 +76,23 @@
    ncclCollConfig_t.algSelection is not read.  Every member compiles the same programs from the same map and the same
    operands (every rank passes the same paths, programs and forms), so nothing is compared at run time.  A group
    (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps_cut: the
-   program's own cuts on pages; a point-to-point call one step) on its communicator's channels: toward each member it
-   is joined to, the holding its init took of the stream toward the member's node, each step one entry of its send
+   program's own cuts on pages; a point-to-point call one logical crossing), lowered to explicit physical cable/range
+   records on its communicator's channels: one holding per cable, each transfer one entry of its send
    list (the pages its bytes lie in) or its landing list (the pages they land in), each direction one list both ends
-   lay alike (mesh-plan.h mesh_group_lay: a rank's k-th send to a peer is the peer's k-th receive from it, the
+   lay alike (a rank's k-th send on a cable is the peer's k-th receive on that same cable, the
    point-to-point calls in call order, as NCCL pairs them), presented to the bridge as the group is issued (mesh-call.h
    mesh_stream_present).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
    waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
    which the program ends: design/data-model.md section 6), and its holding's end with units outstanding takes its stream out of its link's pairing
    (design/transport.md section 14).  A publication
-   raises the holding's `ready` past the entry; a landing is awaited on its `landed`, and nothing waits on `sent`: a
-   write over bytes a SEND still reads is ordered after it by nothing.  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
+   raises the holding's `ready` past the entry; a landing is awaited on its `landed`.
+   The data program owns source/relay lifetimes; there are no `sent` waits (design/data-model.md section 6).  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
    payload is checked, so calls that do not pair (unequal counts, different collectives or orders) are the caller's
    error and are not detected.  Uneven segments are their own calls
    (ncclMeshAllGatherV, ncclMeshReduceScatterV, below), whose count vector every rank passes alike.
 
    Host path: a NULL stream.  Buffers are host pointers into this node's region (a lease's: Memory, below), sent from
-   and landed in in place and combined on the host; every call returns once its group has run and its landings are
-   consumed, its SENDs perhaps not yet done.  Metal path: a stream that
+   and landed in in place and combined on the host; every call returns once its publications and required landings have run; outgoing buffer lifetimes remain the caller's.  Metal path: a stream that
    is an ncclMeshStream.  The group is encoded into its commandBuffer (the caller commits it), every buffer argument an
    ncclMeshBuffer (an id<MTLBuffer> and a byte offset into it: an MPS tensor's storage and offset) of any type, a
    crossing's over a lease (Memory, below); float64 moves as its bytes, and a float64 reduction there fails as a value
@@ -122,11 +121,8 @@
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
    (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
    reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
-   in pages the stream's earlier work still reads.  Its completion, in the stream or on return, does not wait for its
-   SENDs: a buffer a SEND read may be written once a later landing from each peer it went to depends on that SEND, and
-   before that the peer may receive the later bytes (numerics corrupted rather than a wait: design/data-model.md
-   section 6).  A wait is a kernel polling its holding's `landed` count and nothing else (rdma/mesh.metal
-   mesh_wait_bounded), which the bridge sets ~0 where the link is
+   in pages the stream's earlier work still reads. Its end does not await outgoing SEND completion.
+   A wait is a kernel polling its holding's required `landed` count, and nothing else (rdma/mesh.metal mesh_wait_bounded), which the bridge sets ~0 where the link is
    lost; every wait is bounded: the stream's `polls` is the most loads of a count a wait makes,
    the caller's bound for the group's crossings, which it derives from its plan (the lag it expects at them, over the
    period of one load on the node's GPU: rdma/NCCL.md "Bounded waits"); 0, or more than NCCL_MESH_POLLS, is
@@ -985,11 +981,22 @@ struct mesh_fabric;
 ncclResult_t ncclMeshCommFabric(ncclComm_t comm, const struct mesh_fabric** fabric);
 ncclResult_t ncclMeshCommRoutes(ncclComm_t comm, const struct mesh_trees* trees, const double* cable_weights);
 struct mesh_paths;
-ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths, uint32_t chunk_pages);
+ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths* paths);
 ncclResult_t ncclMeshWrite(const void* source_buffer, void* landing_buffer, size_t count, ncclDataType_t datatype,
                           int source, int destination, ncclComm_t comm, cudaStream_t stream);
 struct ncclMeshCableSample { uint64_t wire,ready,sent,landed; uint32_t cable,peer; };
 ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample* samples, int room, int* count);
+/* design/whole-function.md#measurements: observed eligibility-to-completion windows,
+   with transition-time bounds. This observer does not publish, wait on or change transport words. */
+typedef struct ncclMeshTrace *ncclMeshTrace_t;
+struct ncclMeshWindow {
+  uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,peak_queue_bytes;
+  double queue_byte_seconds;
+  uint32_t cable,peer;
+};
+struct ncclMeshTraceStats { uint64_t polls,max_gap_ns; uint32_t incomplete; };
+ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out);
+ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out, int room, int *count, struct ncclMeshTraceStats *stats);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
    MESH_REDUCE_SCATTER, MESH_ALLGATHER, or ncclMeshCallSend, ncclMeshCallRecv, ncclMeshCallAlltoAllV), its `peer` (a
    send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's
@@ -1084,7 +1091,7 @@ uint64_t ncclMeshRetired(void);
    installed library), and needs no path to one.  The steps' text is the argument record (struct mesh_args), a fused
    step's six bindings as one record (struct mesh_step_binding: ncclMeshFused's order, a classic kernel's form of
    them) and mesh_step_enter, mesh_step_wait, mesh_step_claim, mesh_step_failed,
-   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_release and mesh_step_read (any element type: a landed
+   mesh_step_check, mesh_step_counts, mesh_step_await, mesh_step_write, mesh_step_release and mesh_step_read (any element type: a landed
    element, loaded system-coherent from the caller's own landing buffer), on a holding's counts (`ready` to store,
    `landed` to await); the library's own, so the caller compiles them with its kernels and keeps no copy.
    Every thread of the threadgroup calls mesh_step_await and mesh_step_release (each holds a barrier);

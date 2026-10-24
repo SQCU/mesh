@@ -162,7 +162,7 @@ int mesh_fabric_stripe(const struct mesh_fabric *,uint32_t rank,const struct mes
 struct mesh_paths { uint32_t count; const uint32_t *first,*cable; const double *log_weight; };
 int mesh_paths_check(const struct mesh_fabric *,uint32_t source,uint32_t destination,const struct mesh_paths *);
 int mesh_write_compile(const struct mesh_fabric *,uint32_t rank,uint32_t source,uint32_t destination,
-                        const struct mesh_paths *,struct mesh_operand,uint64_t page,uint32_t chunk_pages,
+                        const struct mesh_paths *,struct mesh_operand,uint64_t page,
                         struct mesh_transfer *,uint32_t room);
 
 /* A compiled collective, the operand a call runs: every rank's moves, as MSCCL-IR is the program the MSCCL runtime

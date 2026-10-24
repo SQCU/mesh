@@ -74,10 +74,10 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
   - Every rank passes the same values. `ncclCommInitRank` is this call with no paths, programs, small, name or config,
     and `ncclCommInitRankConfig` the same with its config.
 - Both inits hold the communicator's streams at the bootstrap's two gathers. The first carries each rank's node and the
-  nodes its bridge reaches; each rank then holds its bridge's stream toward each other member's node it is joined to, as
+  nodes its bridge reaches; each rank then holds a stream on every physical cable joining it to another member, as
   it holds rows (the stream's owner word taken from 0 by one compare-and-swap). The second carries each rank's
   holding's status. A communicator names nodes and its own pages alone. An init fails as a value where two ranks are on
-  one node (`ncclInvalidUsage`: its holdings are kept a node, so two ranks of one node would share one slot), where no stream toward a member's node is free at both ends (EBUSY: a link has up to four, each
+  one node (`ncclInvalidUsage`: its holdings are kept a node, so two ranks of one node would share one slot), where a physical cable has no stream free at both ends (EBUSY: a link has up to four, each
   held by one communicator, and one whose last holding its bridge is still ending is not free) or the link is gone
   (ENOLINK)
   (`ncclSystemError`); what it held is let go, and the next init reads the streams as they then stand. A bootstrap
@@ -117,25 +117,20 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
 - Making a communicator, a lone rank's too, attaches the process's client of its node's bridge ([Memory](#memory)),
   so the node's bridge runs; it fails where `ncclMemAlloc` would.
 
-Each communicator makes its map at its init from its members' reports (`nccl-mesh.c` `map_of`), alike on every member,
-and keeps it for its life: its members its nodes, each marked by its bridge's node number, two joined by one link
-where each one's bridge reaches the other's node, at the lesser of the two ends' bandwidths, and the routing table
-(`mesh_routes`: each node's in-tree of shortest routes, by fewest links and then over the faster hops, a parent among
-equals the least hash of its mark, its parent's and the root's, so routes of equal length spread rather than pile onto
-the lowest-numbered node, and a route moves only where the shortest routes between its ends change, never for a link
-lost elsewhere or a node joining; a route between two nodes the higher-marked one's in-tree path, one path both ways).
-Its nodes are its members: a route between two members crosses members alone, so a node a route is to cross takes
-part as a member. Two ranks are linked where a link joins them, one link a pair at the lesser bandwidth of the first live
-stream each end's bridge reports toward the other: the channel toward a member is one stream on one cable (`comm_hold`),
-so a pair's other cables carry none of the communicator's bytes. That falls short of design/data-model.md section 9
-("Where today's code is slower than this"), where the bridge lays a holding's pages over every link toward the node. A
-communicator has one channel toward each member it is joined to, and none toward another ([Routes between
-unlinked ranks](#routes-between-unlinked-ranks)). A later communicator reads the reports again, so a node that joins,
-a node gone or a link lost (down until its ports' next children pair it again, with nobody acting: design/transport.md
-section 14) reaches the next communicator with no edit and no restart. libmesh's whole map of every node's record
-(`mesh_map` over no members, Python `mesh.current()`) joins two nodes where each one's bridge reaches the other too,
-but by a link a cable (the fewer of the two ends' counts: parallel links where several cables join them, which the
-routes and the packed trees count together), each at the least bandwidth either end's record reports.
+Each communicator builds an immutable physical multigraph from reciprocal endpoint reports
+(`nccl-mesh.c` `fabric_discover`). Every physical cable has a stable wire identity and its own
+channel; parallel cables remain separate. Bootstrap acquires a mutually free stream on
+every cable between members. A busy or nonreciprocal cable fails initialization instead
+of silently reducing the fabric to one channel per peer. Later communicators discover
+the then-current fabric.
+
+`ncclMeshCommFabric` exposes that table. Logical collective routes aggregate parallel
+capacities, and `mesh_fabric_stripe` lowers each crossing to explicit cable/range records.
+Their positive weights and transport quanta determine the split before execution. A
+crossing uses every parallel cable when it has enough quanta; there is no size threshold
+choosing a separate single-cable executor. Multihop `ncclMeshWrite` paths name physical
+cables, including their parallel alternatives. A relay forwards received pages directly
+from its landing rows. See [whole-function routing](../design/whole-function.md).
 
 The bridges' records are a map whatever reaches what: a node that still has a record may be reached by no bridge,
 and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it is.
@@ -253,9 +248,9 @@ library never learns a lane, a frame or a queue pair (design/transport.md sectio
     previous landing in the same buffer is encoded before the call. A channel that also publishes is gated on its
     publication, which the caller's publishing kernel stores from its last threadgroup, so there the reading kernel may
     be the publishing kernel itself, encoded after the call (torch_mesh/fused.py's step kernel).
-  - **Group end.** Nothing waits for a group's SENDs: its completion, in the stream or on return, may come while the
-    NIC still reads a SEND's pages. A buffer a SEND read may be written once a later landing from each peer it went to
-    depends on that SEND; before that, the peer may receive the later bytes ([Failures](#failures)).
+  - **Group end.** Publication is not send completion. There is no `sent` wait; the
+    data program retains source and relay buffers until their downstream consumers
+    finish, and establishes reuse through its dependencies (data-model.md section 6).
   - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
     (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
@@ -317,14 +312,13 @@ output_data/transport-buffers-20261021/LIBRARY.md ranks the changes of 2026-10-2
   collectives in the same order on every rank; the library delivers correct bytes. So the order of every read and
   write of a group is known from the programs every rank compiled, and the library encodes it in the stream's order.
   It names its own pages and four counts, credits nothing (TN3205's credit holds a SEND until its receive is posted),
-  publishes with one fence, waits on `landed` alone (never on `sent`), and bounds each wait by a
+  publishes with one fence, waits on required `landed` dependencies, and bounds each wait by a
   count of polls, since a GPU spin with no end halts the node.
 - **The data function**: its own buffers and their order.
 
 ### One track
 
-A completion whose groups all lie on one channel of one communicator (a two-rank collective, as each crossing of a
-two-rank decode is) is plain dispatches in the GPU command stream, and the stream's own order is the dependency
+A completion whose groups all lie on one physical channel of one communicator is plain dispatches in the GPU command stream, and the stream's own order is the dependency
 (`nccl-mesh.c` `complete_track`). Whether a group lies on one channel is read from its schedule where the group is
 planned (`struct inflight` `lone`), the entries both ends lay alike; nothing at run time chooses the form. A fused
 group ([Fused crossings](#two-paths)) on any number of channels completes each of them this way in turn, in the
@@ -335,12 +329,9 @@ stream's order, its steps records the caller's kernels run and no dispatch (`ncc
 - Each consumption is its own dispatch after that. A combine is one wide `land_*`: every threadgroup's thread 0 waits on
   `landed`, then the threadgroup combines its share. A COPY is one `spin`. A first combine of a call reading its send
   buffer in place is a `spin`, then `combine3_*`.
-- The two-rank all-reduce's SEND reads the operand its REDUCE combines into, and no scratch copy is made. The combine
-  is encoded after the SEND's publication (`need`), and they meet unordered: nothing orders the combine after the NIC's
-  read. Where this rank publishes first, its SEND waits in credit until the peer posts its receive, and the peer's bytes
-  may land and be combined into the operand before the SEND's last pages are read; the peer then receives the partial
-  sum in those pages, and its result there differs from this rank's. That is accepted rather than a wait or a copy
-  (the operator, 2026-10-23: "we always corrupt data processing code's numerics if it's a choice between that, running slower, faulting, or hanging").
+- The in-place form reads the operand it combines into. Publication alone does not
+  establish that a downstream reader has finished. Buffer ownership belongs to the
+  data program; the executor does not insert `sent` waits to repair an aliasing schedule.
 - No track is recorded, no thread picks and no `tracks` dispatch runs: on one track the stream's order is the one
   serial order every rank builds alike, and a wait on it holds no other channel.
 
@@ -353,10 +344,9 @@ This is NCCL's per-peer progress, chosen by the operator on 2026-10-20 in place 
   consumptions (landing entries), each in list order.
   - Nothing credits a publication.
   - A consumption runs once its landing came, and it is combined where it belongs; where it combines into bytes a SEND
-    of its channel reads, it runs once that publication has run (`need`), unordered with the NIC's read of it
-    ([One track](#one-track)).
-  - A step's first event that has a receive before it (`mesh_group_before`) waits on that receive's channel having
-    consumed it.
+    of its channel reads, it runs once that publication has run (`need`). This is publication ordering, not DMA completion.
+  - A step depends on every earlier receive whose buffer range overlaps its range.
+    Disjoint receives on different cables need no dependency edge.
   - Neither cursor waits on the other beyond these.
 - **On the GPU.** The tracks are one dispatch, one thread group per track. Thread 0 picks the next item whose
   conditions hold, every thread runs it through the same kernel bodies the single dispatches use, and a consumption
@@ -500,14 +490,12 @@ Porting:
   (`combine3_*`), the result's ranges no step writes are copied from it after the publications, and no scratch buffer
   no step writes is made. Otherwise its operand is made in place in the region: a premultiply, or a copy within the
   region. The two-rank all-reduce in place makes no copy: its program sends the operand from the operand itself, and
-  nothing orders the combine after the SEND's read ([One track](#one-track)). Reproduction target (metal-microbench
+  buffer-reuse schedule must account for outgoing readers ([One track](#one-track)). Historical reproduction (metal-microbench
   docs/measurement.md 2026-09-30 part A, 95967e6..42a16ed): per 16.8 MB all-reduce, the library's copies of the
   operand 16.78 MB to 0; tp 271.5-272.2 ms a step. The slot copy into the rings, which that left, is gone too.
-- The NIC reads a SEND's pages until the SEND is done, and a group completes without waiting for that: a buffer a SEND
-  read may be rewritten once a later landing from each peer it went to depends on that SEND, else the peer may receive
-  the later bytes (the operator, 2026-10-23: "we always corrupt data processing code's numerics if it's a choice between that, running slower, faulting, or hanging"). Once a group has completed in the stream's order, nothing the library
-  encoded reads or writes its leases, and `ncclMemFree` may return their pages: the bridge releases a page once no
-  request names it.
+- The NIC reads a SEND's pages until it finishes. A local group's end does not establish
+  that fact. Source and relay leases must remain live through their downstream uses;
+  `ncclMemFree` follows the data program's last use, not merely publication.
 - A host-path group waits for its own communicator's GPU groups alone and fails while one of them is issued and not
   complete; it spins on its landings, never parks, and holds no lock another communicator's groups take, so a rank
   waiting in a host-path collective (an `ncclBroadcast` from a peer) does not stop its other communicators.

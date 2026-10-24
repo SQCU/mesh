@@ -35,34 +35,48 @@ static void writes(ncclComm_t comm,const struct mesh_fabric *f,int rank,size_t c
   assert(f->nodes<=8);
   const int pairs=(int)(f->nodes*(f->nodes-1));
   ncclMeshCall calls[pairs];
-  int *landing[pairs],at=0;
+  enum { iterations=12 };
+  int *landing[iterations][pairs], *sources[iterations], at=0;
+  for(int t=0;t<iterations;t++)checked(ncclMemAlloc((void **)&sources[t],count*sizeof *input));
   for(uint32_t source=0;source<f->nodes;source++)for(uint32_t destination=0;destination<f->nodes;destination++){
     if(source==destination)continue;
     uint32_t first[257]={0},cable[2048],walk[8],n=0;
     double weights[256];
     paths(f,source,destination,1u<<source,walk,0,first,cable,weights,&n);
     const struct mesh_paths routes={n,first,cable,weights};
-    checked(ncclMeshCommWriteRoutes(comm,(int)source,(int)destination,&routes,4));
+    checked(ncclMeshCommWriteRoutes(comm,(int)source,(int)destination,&routes));
     calls[at]=(ncclMeshCall){.what=ncclMeshCallWrite,.count=count,.type=ncclInt32,.peer=(int)source,
       .destination=(int)destination,.group=0,.repeat=1};
-    checked(ncclMemAlloc((void **)&landing[at],count*sizeof *input));at++;
+    for(int t=0;t<iterations;t++)checked(ncclMemAlloc((void **)&landing[t][at],count*sizeof *input));at++;
   }
   checked(ncclMeshCommPlan(comm,calls,pairs,NULL));
-  for(int t=0;t<12;t++){
-    for(size_t i=0;i<count;i++)input[i]=(int)(i%997)+rank*1000+t*10000;
-    for(int k=0;k<pairs;k++)memset(landing[k],0,count*sizeof *input);
+  for(int t=0;t<iterations;t++){
+    for(size_t i=0;i<count;i++)sources[t][i]=(int)(i%997)+rank*1000+t*10000;
     checked(ncclGroupStart());
-    for(int k=0;k<pairs;k++)checked(ncclMeshWrite(input,landing[k],count,ncclInt32,calls[k].peer,calls[k].destination,comm,NULL));
+    for(int k=0;k<pairs;k++)checked(ncclMeshWrite(sources[t],landing[t][k],count,ncclInt32,calls[k].peer,calls[k].destination,comm,NULL));
     checked(ncclGroupEnd());
-    memset(input,0xff,count*sizeof *input);
     for(int k=0;k<pairs;k++)if(calls[k].destination==rank)for(size_t i=0;i<count;i++){
       const int expected=(int)(i%997)+calls[k].peer*1000+t*10000;
-      if(landing[k][i]!=expected){
-        fprintf(stderr,"write %d->%d, iteration %d, element %zu: %d != %d\n",calls[k].peer,rank,t,i,landing[k][i],expected);exit(4);
+      if(landing[t][k][i]!=expected){
+        fprintf(stderr,"write %d->%d, iteration %d, element %zu: %d != %d\n",calls[k].peer,rank,t,i,landing[t][k][i],expected);exit(4);
       }
     }
   }
-  for(int k=0;k<pairs;k++)checked(ncclMemFree(landing[k]));
+  /* A full-program rendezvous: every destination validated its output before any
+     rank releases a source or relay lease. There is no per-send completion wait. */
+  int *done,*joined;
+  checked(ncclMemAlloc((void **)&done,sizeof *done));
+  checked(ncclMemAlloc((void **)&joined,sizeof *joined));
+  *done=1;
+  const ncclMeshCall end={.what=MESH_ALLREDUCE,.count=1,.type=ncclInt32,.op=ncclSum,.repeat=1};
+  checked(ncclMeshCommPlan(comm,&end,1,NULL));
+  checked(ncclAllReduce(done,joined,1,ncclInt32,ncclSum,comm,NULL));
+  assert(*joined==(int)f->nodes);
+  for(int t=0;t<iterations;t++){
+    checked(ncclMemFree(sources[t]));
+    for(int k=0;k<pairs;k++)checked(ncclMemFree(landing[t][k]));
+  }
+  checked(ncclMemFree(done));checked(ncclMemFree(joined));
   printf("{\"rank\":%d,\"one_way_all_pairs\":%d,\"iterations\":12,\"verified\":true}\n",rank,pairs);fflush(stdout);
 }
 

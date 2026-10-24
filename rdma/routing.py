@@ -86,14 +86,14 @@ class Fabric:
             total = max(units, len(flows))
             wanted = [v / sum(flows) * total for v in flows]
             name = f'route:{pair[0]}:{pair[1]}'
-            decisions[name] = {'parts': project(wanted, total, 1, [1] * len(flows), [total] * len(flows)),
-                               'grain': 1, 'low': [1] * len(flows), 'high': [total] * len(flows),
+            decisions[name] = {'parts': wanted,
+                               'grain': 0, 'low': [1e-6] * len(flows), 'high': [total] * len(flows),
                                'edges': sorted({str(e) for path in self.paths[pair] for e in self.arcs(pair[0], path)})}
         return decisions, {'fluid_lower_bound_seconds': optimum * scale / rate,
                            'directed_load_bytes': [sum(edge[e][k] * short.x[k] * scale for k in range(len(columns))) for e in range(len(edge))],
                            'demand_bytes': {f'{a}:{b}': demands[a, b] for a, b in pairs}}
 
-    def install(self, comm, parts, chunk_pages=16):
+    def install(self, comm, parts):
         import mesh
         ffi, lib = mesh.ffi, mesh.lib
         for (source, destination), paths in self.paths.items():
@@ -108,7 +108,7 @@ class Fabric:
                 cable.extend(path); first.append(len(cable))
             arrays = ffi.new('uint32_t[]', first), ffi.new('uint32_t[]', cable), ffi.new('double[]', [math.log(x) for x in weights])
             routes = ffi.new('struct mesh_paths *', {'count': len(paths), 'first': arrays[0], 'cable': arrays[1], 'log_weight': arrays[2]})
-            mesh.check(lib.ncclMeshCommWriteRoutes(comm, source, destination, routes, chunk_pages))
+            mesh.check(lib.ncclMeshCommWriteRoutes(comm, source, destination, routes))
 
 
 class QueueSample:
@@ -127,4 +127,4 @@ class QueueSample:
     def read(self):
         self.check(self.lib.ncclMeshCommSample(self.comm, self.rows, self.count, self.n))
         return [{'cable': int(s.cable), 'peer': int(s.peer), 'wire': int(s.wire),
-                 'ready': int(s.ready), 'sent': int(s.sent), 'landed': int(s.landed)} for s in self.rows[:self.count]]
+                 'ready': int(s.ready), 'sent': int(s.sent), 'landed': int(s.landed)} for s in self.rows[0:self.count]]

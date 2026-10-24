@@ -21,16 +21,16 @@ static void writes(void){
     int count[3];
     unsigned char *coverage=calloc(elements,1);
     for(uint32_t r=0;r<3;r++){
-      count[r]=mesh_write_compile(&f,r,0,1,&paths,operand,16384,2,NULL,0);
+      count[r]=mesh_write_compile(&f,r,0,1,&paths,operand,16384,NULL,0);
       assert(count[r]>=0);
       steps[r]=calloc((size_t)count[r]+1,sizeof **steps);
-      assert(mesh_write_compile(&f,r,0,1,&paths,operand,16384,2,steps[r],count[r])==count[r]);
+      assert(mesh_write_compile(&f,r,0,1,&paths,operand,16384,steps[r],count[r])==count[r]);
     }
     unsigned used=0;
     for(uint32_t r=0;r<3;r++)for(int k=0;k<count[r];k++){
       const struct mesh_transfer *t=steps[r]+k;
       const struct mesh_step *s=&t->step;
-      assert(s->first%4096==0 && s->piece.elements>0 && s->piece.elements<=8192);
+      assert(s->first%4096==0 && s->piece.elements>0);
       assert(s->first+s->piece.elements<=elements);
       int matches=0;
       for(int j=0;j<count[s->peer];j++){

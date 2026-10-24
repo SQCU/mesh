@@ -36,8 +36,10 @@ installs the next routes, and compiles the next sequence before starting it.
 No route decision belongs inside a tensor operation or recurrent timestep.
 
 `ncclMeshCommSample` exposes byte prefixes supplied, sent, and landed on each
-local cable. Supplied minus sent is queued outgoing payload, not a measurement
-of compute interference. Sampling a complete execution can measure peak queued
+local cable. Supplied minus sent is the ordinary published backlog. A relay may
+already be eligible through another cable's landed prefix, before its ordinary
+supplied prefix advances, so this sample can undercount relay backlog. It is not
+a measurement of compute interference. Sampling a complete execution can measure peak queued
 bytes and their time integral; endpoint counters alone cannot recover a queue
 that grew and drained during the execution.
 
@@ -68,8 +70,8 @@ per-cable evidence on the actual cluster.
 ## One-way writes
 
 `mesh_paths` specifies simple paths as physical cable indices. `mesh_write_compile`
-splits a typed operand among them, then into bounded chunks. It emits matching
-sends and copies at every hop, with no reduction or payload transformation at a
+splits a typed operand among them. It emits one matching send and copy per path
+hop, with no reduction or payload transformation at a
 relay. Every rank declares `ncclMeshCallWrite` with the same source, destination,
 and element count; each supplies a registered landing buffer of that extent.
 Only the source reads its source buffer and only the destination's complete
@@ -79,9 +81,26 @@ landing buffer is an output. Other ranks' buffers are relay storage.
 the function's calls. `ncclMeshWrite` executes that declaration. A relay's send
 entry reads its receive's registered rows directly and uses the incoming
 stream's landed prefix as its supplied word. The bridge can forward a page as
-soon as it lands; it need not wait for a host round trip or for the whole chunk.
+soon as it lands; it need not wait for a host round trip or for the whole range.
+There is no chunk-size parameter or extra per-chunk publication in the interface.
 The ordinary two-participant NCCL send/receive interface still requires a direct
 connection; a multi-hop write declares its participating relays collectively.
+
+## Buffer ownership and GPU payloads
+
+Publication is not send completion. There are no waits on `sent`. The data program
+keeps each source and relay lease alive and unmodified through its downstream
+uses; independent layers can have independent leases. A complete-function
+rendezvous in a test establishes safe reuse between evaluations without adding
+per-send synchronization to the executor.
+
+A GPU producer stores its published result through `mesh_step_write`, and a GPU
+consumer reads NIC-written bytes through `mesh_step_read`. Ordinary cached stores
+can be invisible to the NIC while a command buffer is running; ordinary loads
+can retain old contents of a reused receive buffer. The collective's own payload
+producers follow the same coherent-store rule. No staging copy is added to repair
+an ordinary producer. The DNN example computes its second matrix product directly
+into the published lease using the existing Metal tensor-operation pattern.
 
 ## Ahead of time
 

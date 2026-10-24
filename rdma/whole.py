@@ -36,28 +36,53 @@ def project(values, total, grain, low, high):
     return [x * grain for x in result]
 
 
-class FunctionSearch:
+def _sigmoid(x):
+    return 1 / (1 + math.exp(-x)) if x >= 0 else math.exp(x) / (1 + math.exp(x))
+
+
+def simplex(values, total, low, high):
+    """A smooth bounded simplex: one multiplier conserves the total."""
+    if not sum(low) <= total <= sum(high):
+        raise ValueError('infeasible simplex')
+    if total == sum(low):
+        return list(map(float, low))
+    if total == sum(high):
+        return list(map(float, high))
+    left, right = min(values) - 80, max(values) + 80
+    for _ in range(80):
+        multiplier = (left + right) / 2
+        amount = sum(lo + (hi - lo) * _sigmoid(v - multiplier) for v, lo, hi in zip(values, low, high))
+        if amount > total:
+            left = multiplier
+        else:
+            right = multiplier
+    return [lo + (hi - lo) * _sigmoid(v - (left + right) / 2) for v, lo, hi in zip(values, low, high)]
+
+
+class FunctionFlow:
     """design/whole-function.md#finite-differences"""
 
-    def __init__(self, decisions, resolution=0.002, fraction=0.125):
+    def __init__(self, decisions, learning_rate=0.15, perturbation=0.2, congestion_weight=1.0):
         self.decisions = copy.deepcopy(decisions)
-        self.centre = {}
-        self.radius = {}
+        self.vector, self.momentum, self.energy = {}, {}, {}
+        self.learning_rate, self.perturbation = float(learning_rate), float(perturbation)
+        self.congestion_weight = float(congestion_weight)
+        self.serial, self.round, self.workload = 0, 0, None
+        self.samples, self.history = [], []
         for name, spec in self.decisions.items():
-            p = list(map(int, spec['parts']))
-            spec.update(total=sum(p), grain=int(spec.get('grain', 1)),
-                        low=list(spec.get('low', [1] * len(p))), high=list(spec.get('high', [sum(p)] * len(p))))
-            q = project(p, spec['total'], spec['grain'], spec['low'], spec['high'])
-            if q != p:
-                raise ValueError(f'{name}: initial allocation is outside its lattice')
-            self.centre[name] = p
-            self.radius[name] = max(spec['grain'], int(spec['total'] * fraction / spec['grain']) * spec['grain'])
-        self.resolution = float(resolution)
-        self.serial, self.round = 0, 0
-        self.jobs, self.observations, self.history = [], [], []
-        self.workload = None
-        self.standing = False
-        self._start()
+            parts = list(map(float, spec['parts']))
+            total = sum(parts)
+            spec.update(total=total, grain=int(spec.get('grain', 0)),
+                        low=list(map(float, spec.get('low', [0] * len(parts)))),
+                        high=list(map(float, spec.get('high', [total] * len(parts)))))
+            if not all(lo <= v <= hi for v, lo, hi in zip(parts, spec['low'], spec['high'])):
+                raise ValueError('initial vector is outside its simplex')
+            fraction = [(v - lo) / (hi - lo) if hi > lo else 0.5 for v, lo, hi in zip(parts, spec['low'], spec['high'])]
+            self.vector[name] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fraction]
+            self.momentum[name] = [0.0] * len(parts)
+            self.energy[name] = [0.0] * len(parts)
+        self.dimension = sum(map(len, self.vector.values()))
+        self.order = 1 << max(1, (self.dimension - 1).bit_length())
 
     def state(self):
         return copy.deepcopy(self.__dict__)
@@ -68,130 +93,75 @@ class FunctionSearch:
         obj.__dict__.update(copy.deepcopy(state))
         return obj
 
+    def _direction(self):
+        row, at, result = 1 + self.round % (self.order - 1), 0, {}
+        for name, values in self.vector.items():
+            result[name] = [1.0 - 2.0 * ((row & (at + i)).bit_count() % 2) for i in range(len(values))]
+            at += len(values)
+        return result
+
+    def _values(self, sign):
+        c, direction = self.perturbation / (self.round + 1) ** 0.101, self._direction()
+        return {name: simplex([v + sign * c * d for v, d in zip(values, direction[name])],
+                              self.decisions[name]['total'], self.decisions[name]['low'], self.decisions[name]['high'])
+                for name, values in self.vector.items()}
+
+    @property
+    def centre(self):
+        return self._values(0)
+
     def ask(self):
-        return {'id': self.serial, 'parts': copy.deepcopy(self.jobs[0]['parts']),
-                'phase': self.jobs[0]['kind'], 'round': self.round}
+        # A fixed +--+ finite-difference stencil cancels linear timing drift.
+        # All four evaluations are ordinary complete functions. No winner is chosen.
+        sign = (1, -1, -1, 1)[len(self.samples)]
+        continuous = self._values(sign)
+        parts = {}
+        for name, values in continuous.items():
+            spec = self.decisions[name]
+            parts[name] = project(values, int(spec['total']), spec['grain'], spec['low'], spec['high']) if spec['grain'] else values
+        return {'id': self.serial, 'parts': parts, 'continuous': continuous, 'phase': 'finite_difference',
+                'offset': sign * self.perturbation / (self.round + 1) ** 0.101, 'round': self.round}
 
     @property
     def parts(self):
         return self.ask()['parts']
-
-    def _job(self, kind, parts=None, **extra):
-        return {'kind': kind, 'parts': copy.deepcopy(self.centre if parts is None else parts), **extra}
-
-    def _start(self):
-        self.round += 1
-        self.observations = []
-        self.jobs = [self._job('baseline')]
-
-    def _probes(self, observation):
-        pressure = observation.get('queues', {})
-        order = sorted(self.decisions, key=lambda k: -sum(
-            float(pressure.get(str(e), {}).get('peak_bytes', 0)) for e in self.decisions[k].get('edges', [])))
-        for name in order:
-            spec, p = self.decisions[name], self.centre[name]
-            pivot = len(p) - 1
-            for i in range(pivot):
-                for sign in (1, -1):
-                    give, take = (pivot, i) if sign > 0 else (i, pivot)
-                    amount = min(self.radius[name], p[give] - spec['low'][give], spec['high'][take] - p[take])
-                    amount = int(amount // spec['grain']) * spec['grain']
-                    if amount <= 0:
-                        continue
-                    parts = copy.deepcopy(self.centre)
-                    parts[name][give] -= amount
-                    parts[name][take] += amount
-                    self.jobs.append(self._job('probe', parts, name=name, coordinate=i, offset=sign * amount))
-        if self.jobs:
-            self.jobs.append(self._job('baseline_end'))
-        else:
-            self.standing = True
-            self._start()
-
-    @staticmethod
-    def _queue(observation):
-        return sum(float(q.get('integral_byte_seconds', 0)) for q in observation.get('queues', {}).values()) / observation['seconds']
-
-    def _candidate(self):
-        first, last = self.observations[0], self.observations[-1]
-        elapsed = last['serial'] - first['serial']
-        slopes = {}
-        for o in self.observations[1:-1]:
-            job = o['job']
-            drift = (last['seconds'] - first['seconds']) * (o['serial'] - first['serial']) / elapsed
-            key = (job['name'], job['coordinate'])
-            slopes.setdefault(key, []).append((job['offset'], o['seconds'] - drift, self._queue(o)))
-        parts, derivatives = copy.deepcopy(self.centre), {}
-        for name, spec in self.decisions.items():
-            gradient, queue_gradient = [], []
-            for i in range(len(parts[name]) - 1):
-                samples = sorted(slopes.get((name, i), []))
-                if len(samples) == 1:
-                    samples.append((0, first['seconds'], self._queue(first)))
-                    samples.sort()
-                if len(samples) < 2:
-                    gradient.append(0.0); queue_gradient.append(0.0)
-                    continue
-                a, b = samples[0], samples[-1]
-                gradient.append((b[1] - a[1]) / (b[0] - a[0]))
-                queue_gradient.append((b[2] - a[2]) / (b[0] - a[0]))
-            gradient.append(0.0); queue_gradient.append(0.0)
-            mean = statistics.mean(gradient)
-            gradient = [g - mean for g in gradient]
-            norm = max(map(abs, gradient), default=0)
-            derivatives[name] = {'seconds_per_unit': list(gradient), 'queue_per_unit': queue_gradient}
-            if norm * self.radius[name] <= self.resolution * last['seconds']:
-                mean = statistics.mean(queue_gradient)
-                gradient = [g - mean for g in queue_gradient]
-                norm = max(map(abs, gradient), default=0)
-            if norm:
-                wanted = [p - self.radius[name] * g / norm for p, g in zip(parts[name], gradient)]
-                parts[name] = project(wanted, spec['total'], spec['grain'], spec['low'], spec['high'])
-        self.history.append({'round': self.round, 'centre': copy.deepcopy(self.centre), 'candidate': copy.deepcopy(parts),
-                             'derivatives': derivatives, 'baseline_seconds': last['seconds']})
-        if parts == self.centre:
-            self._shrink()
-            self._start()
-        else:
-            self.jobs = [self._job('control'), self._job('trial', parts), self._job('trial', parts), self._job('control')]
-
-    def _shrink(self):
-        self.standing = True
-        for name, spec in self.decisions.items():
-            self.radius[name] = max(spec['grain'], self.radius[name] // (2 * spec['grain']) * spec['grain'])
-            self.standing &= self.radius[name] == spec['grain']
 
     def observe(self, observation):
         expected = self.ask()
         if observation.get('scope') != 'function' or not observation.get('complete'):
             raise ValueError('feedback requires a completed whole function')
         if observation.get('id') != expected['id'] or observation.get('parts') != expected['parts']:
-            raise ValueError('feedback does not describe the pending compiled configuration')
-        if self.workload is None:
-            self.workload = observation.get('workload')
-        if observation.get('workload') != self.workload:
+            raise ValueError('feedback does not describe the compiled configuration')
+        workload = observation.get('workload')
+        if self.workload is not None and workload != self.workload:
             raise ValueError('finite differences require the same workload')
-        seconds = float(observation['seconds'])
-        if not math.isfinite(seconds) or seconds <= 0:
-            raise ValueError('function latency must be finite and positive')
-        job = self.jobs.pop(0)
-        self.observations.append({**copy.deepcopy(observation), 'seconds': seconds, 'job': job, 'serial': self.serial})
+        seconds, congestion = float(observation['seconds']), float(observation.get('congestion_seconds', 0))
+        if not math.isfinite(seconds) or seconds <= 0 or not math.isfinite(congestion) or congestion < 0:
+            raise ValueError('function latency and congestion must be finite')
+        self.workload = workload
+        cost = math.log(seconds) + self.congestion_weight * congestion / seconds
+        self.samples.append({'id': self.serial, 'seconds': seconds, 'cost': cost, 'offset': expected['offset']})
         self.serial += 1
-        if job['kind'] == 'baseline':
-            self._probes(observation)
-        elif job['kind'] == 'baseline_end':
-            self._candidate()
-        elif not self.jobs:
-            trial = [o for o in self.observations if o['job']['kind'] == 'trial']
-            control = [o for o in self.observations if o['job']['kind'] == 'control']
-            t, c = (statistics.median(o['seconds'] for o in group) for group in (trial, control))
-            tq, cq = (statistics.median(self._queue(o) for o in group) for group in (trial, control))
-            accepted = t < c * (1 - self.resolution) or (t <= c * (1 + self.resolution) and tq < cq * (1 - self.resolution))
-            self.history[-1].update(trial_seconds=t, control_seconds=c, accepted=accepted)
-            if accepted:
-                self.centre = copy.deepcopy(trial[0]['job']['parts'])
-                self.standing = False
-            else:
-                self._shrink()
-            self._start()
+        if len(self.samples) == 4:
+            c = self.samples[0]['offset']
+            derivative = (self.samples[0]['cost'] - self.samples[1]['cost'] - self.samples[2]['cost'] + self.samples[3]['cost']) / (4 * c)
+            direction, gradient = self._direction(), {}
+            before = self.centre
+            rate = self.learning_rate / (self.round + 1) ** 0.3
+            for name, values in self.vector.items():
+                raw = [derivative * d for d in direction[name]]
+                mean = statistics.mean(raw)
+                gradient[name] = [g - mean for g in raw]
+                for i, g in enumerate(gradient[name]):
+                    self.momentum[name][i] = 0.8 * self.momentum[name][i] + 0.2 * g
+                    self.energy[name][i] = 0.95 * self.energy[name][i] + 0.05 * g * g
+                    m = self.momentum[name][i] / (1 - 0.8 ** (self.round + 1))
+                    v = self.energy[name][i] / (1 - 0.95 ** (self.round + 1))
+                    values[i] -= rate * m / math.sqrt(v + 1e-12)
+                centre = statistics.mean(values)
+                self.vector[name] = [v - centre for v in values]
+            self.history.append({'round': self.round, 'before': before, 'after': self.centre,
+                                 'gradient': gradient, 'learning_rate': rate, 'samples': self.samples})
+            self.samples = []
+            self.round += 1
         return self.ask()

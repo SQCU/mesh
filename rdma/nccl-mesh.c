@@ -236,7 +236,7 @@ struct channel {
   const uint64_t *wire;
   struct mesh_stream_view view;
   void *buffer;
-  size_t ready, landed, sent;
+  size_t ready, landed;
   uint64_t ready_at, sends, lands, published, consumed, waited;
   mesh_pages out, in;
 };
@@ -252,7 +252,7 @@ struct ncclComm {
   struct mesh_fabric fabric;
   uint32_t *endpoint;
   double *cable_weights;
-  struct write_route { struct mesh_paths paths; uint32_t chunk_pages; } *writes;
+  struct mesh_paths *writes;
   uint64_t page;
   struct mesh_trees paths, trees, rooted;
   struct entry *entries, *given;
@@ -371,7 +371,7 @@ static void comm_free(struct ncclComm *comm) {
   plan_free(comm, comm->plan);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->endpoint); free((void *)comm->fabric.cable);
   free(comm->cable_weights);
-  for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p].paths);
+  for (int p = 0; comm->writes && p < comm->nranks * comm->nranks; p++) paths_free(&comm->writes[p]);
   free(comm->writes);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
@@ -646,8 +646,10 @@ ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample *sam
   return ncclSuccess;
 }
 
-ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths *paths, uint32_t chunk_pages) {
-  if (!comm || source < 0 || destination < 0 || !chunk_pages || mesh_paths_check(&comm->fabric, (uint32_t)source, (uint32_t)destination, paths))
+#include "nccl-mesh-trace.h"
+
+ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths *paths) {
+  if (!comm || source < 0 || destination < 0 || mesh_paths_check(&comm->fabric, (uint32_t)source, (uint32_t)destination, paths))
     return fail(ncclInvalidArgument, "one-way write paths must connect their endpoints over distinct nodes");
   const uint32_t P = paths->count, E = paths->first[P];
   uint32_t *first = malloc((P + 1) * sizeof *first), *cable = malloc(E * sizeof *cable);
@@ -661,9 +663,8 @@ ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destinatio
     pthread_mutex_unlock(&group_lock); free(first); free(cable); free(weights);
     return fail(ncclSystemError, "out of memory");
   }
-  struct write_route *to = comm->writes + source * comm->nranks + destination;
-  paths_free(&to->paths); to->paths = (struct mesh_paths){P, first, cable, weights};
-  to->chunk_pages = chunk_pages;
+  struct mesh_paths *to = comm->writes + source * comm->nranks + destination;
+  paths_free(to); *to = (struct mesh_paths){P, first, cable, weights};
   plan_free(comm, comm->plan); comm->plan = NULL;
   pthread_mutex_unlock(&group_lock);
   return ncclSuccess;
@@ -1204,7 +1205,6 @@ static int channel_buffer(struct channel *ch, const struct hdr *m) {
   lo &= ~(page - 1);
   hi = (hi + page - 1) & ~(page - 1);
   ch->ready = at[0] - lo; ch->landed = at[1] - lo;
-  ch->sent = (uintptr_t)ch->view.sent - lo;
   ch->ready_at = at[0] - (uintptr_t)m;
   return (ch->buffer = metal_wrap((void *)lo, hi - lo)) ? 0 : ENOMEM;
 }
@@ -1854,12 +1854,10 @@ static size_t piece_bytes(const struct mesh_step *step) { return step->piece.ele
 /* design/whole-function.md#one-way-writes */
 static ncclResult_t write_steps(struct call *c) {
   struct ncclComm *comm = c->comm;
-  const struct write_route *route = comm->writes ? comm->writes + c->root * comm->nranks + c->target - 1 : NULL;
-  const struct mesh_paths *paths = route ? &route->paths : NULL;
-  const uint32_t chunk_pages = route ? route->chunk_pages : 0;
+  const struct mesh_paths *paths = comm->writes ? comm->writes + c->root * comm->nranks + c->target - 1 : NULL;
   const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], c->count};
   const int count = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
-    paths, operand, comm->page, chunk_pages, NULL, 0);
+    paths, operand, comm->page, NULL, 0);
   if (count < 0) return fail(ncclInvalidUsage, "one-way write requires its compiled physical paths: %s", strerror(-count));
   const size_t room = (size_t)count + 1;
   struct steps *s = calloc(1, sizeof *s);
@@ -1872,7 +1870,7 @@ static ncclResult_t write_steps(struct call *c) {
     steps_free(s); free(transfers); return fail(ncclSystemError, "out of memory");
   }
   const int made = mesh_write_compile(&comm->fabric, (uint32_t)comm->rank, (uint32_t)c->root, (uint32_t)c->target - 1,
-    paths, operand, comm->page, chunk_pages, transfers, (uint32_t)room);
+    paths, operand, comm->page, transfers, (uint32_t)room);
   if (made < 0) { steps_free(s); free(transfers); return fail(ncclInternalError, "one-way write compile: %s", strerror(-made)); }
   for (int k = 0; k < made; k++) { s->steps[k] = transfers[k].step; s->cable[k] = transfers[k].cable; }
   free(transfers); c->bound = s;
@@ -2111,7 +2109,7 @@ static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t
 /* the group's entries laid from each channel's last scheduled entry and page (its compiled ones are from each list's
    0), each step's channel and entry kept; each landing that combines into bytes an earlier SEND of its call on its
    channel reads (mesh_compile's two-node direct exchange; a SEND that reads the send buffer in place reads none,
-   plan_direct) with that SEND's entry (struct message `need`) */
+   plan_direct) with that SEND's publication entry (struct message `need`) */
 static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; h < comm->count; h++) {
     const struct channel *ch = comm->channels + h;
@@ -2370,13 +2368,13 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
 
 /* every channel's entries published and consumed on the host: a SEND's published by `ready` (a release store past it,
    its step's receive before it consumed), a combine's landing combined into its buffer (its first one, a call reading
-   its send buffer in place, writing send op landed), a COPY's consumed once landed (it landed in place); a combine
-   into bytes an earlier SEND of its call on its channel reads runs once that SEND is published, unordered with the
-   NIC's read of it; nothing waits for the SENDs, so the call returns while the NIC may still read them.  Every wait
-   ends at an event: its
+   its send buffer in place, writing send op landed), a COPY's consumed once landed (it landed in place). Source and
+   relay buffers remain owned by the data program until their consumers finish; publishing does not retire a SEND.
+   No SEND-completion wait is added here (design/data-model.md section 6). Every landing wait ends at an event: its
    count, a count's ~0 (the link lost, the bridge stopped), the end of its holding with work left (its stream no
    longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge restarted), or a revoke,
-   each read at every look, and the wait ends by its deadline, MESH_PLATFORM_NS from its start, past which the program ends (the operator, 2026-10-23: "no wait may ever
+   each read at every look; the landings and publications finish by their
+   deadline, MESH_PLATFORM_NS from its start, past which the program ends (the operator, 2026-10-23: "no wait may ever
    run longer than a deadline operand presented at the time the wait was constructed"; design/data-model.md section
    6).  Every look spins: nothing parks */
 static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel *ch) {
@@ -2814,9 +2812,8 @@ static ncclResult_t publish(struct metal_program *program, struct ncclComm *comm
    past it; a combine's landed bytes combined
    into its buffer (its first one, a call reading its send buffer in place, after a wait: with op landed), a COPY's
    wait alone (it landed in place), the fused crossing's landing recorded for its caller's kernel
-   (metal_land_deferred); a receive's first event after the receive
-   before it (as a track's item, metal_depend: that receive's channel, track `base` + its index, consumed past it; in
-   the stream, consumed before it) */
+   (metal_land_deferred); a receive depends on every earlier overlapping receive (metal_depend), while disjoint
+   ranges on separate cables can proceed independently */
 static ncclResult_t consume(struct metal_program *program, struct ncclComm *comm, uint32_t h, uint32_t base) {
   struct channel *ch = comm->channels + h;
   const uint64_t at = ch->consumed;
@@ -2872,7 +2869,7 @@ static uint32_t one_track(const struct inflight *through) {
    one serial order every rank builds alike: the next send entries published as soon as their steps' receives before
    them are consumed (a run of them one release; the fused crossing's alone), else the next landing consumed (its
    step's receive before it consumed, and a combine into bytes an earlier SEND of its call reads only once that SEND is
-   published, unordered with the NIC's read of it); a program whose SEND waits on a receive that waits on that SEND
+   published); a program whose SEND waits on a receive that waits on that SEND
    fails here.  No track is recorded, no thread picks, and no tracks dispatch runs: no wait on one track can hold
    another channel's */
 static ncclResult_t complete_track(struct metal_program *program, struct inflight *through, uint32_t h, int *published) {
@@ -3187,15 +3184,16 @@ static ncclResult_t epilogue(struct metal_program *program, const struct call *l
       const size_t before = c->what == MESH_REDUCE_SCATTER ? segment_at(c, (int)r, &length) : 0;
       const struct where from = {sum.buffer, sum.offset + before * z};
       if (c->post) result = gpu(metal_truncdiv(program, c->type, recv.buffer, recv.offset, from.buffer, from.offset, length, (uint64_t)comm->nranks), "the result");
-      else result = gpu(metal_copy(program, METAL_LAND, recv.buffer, recv.offset, from.buffer, from.offset, length * z), "the result");
-    } else if (c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER)
+      else if (!same(from, recv)) result = gpu(metal_copy(program, METAL_LAND, recv.buffer, recv.offset, from.buffer, from.offset, length * z), "the result");
+    } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && !same(sum, recv))
       result = gpu(metal_copy(program, METAL_LAND, recv.buffer, recv.offset, sum.buffer, sum.offset, elements(c) * z), "the result");
   }
   return result;
 }
 
-/* the groups in flight whose entries are all published and consumed, in issue order: their results, and they are
-   complete, with no wait for their SENDs (their pool leases free again while a SEND may still read them: spares_give) */
+/* the groups in flight whose entries are all published and consumed, in issue order: on each channel where the group
+   published and its landings consumed; their results are encoded and the groups retired. This does not retire
+   outgoing DMA: source and relay lease lifetimes are the data program's (design/data-model.md section 6) */
 static ncclResult_t retire(struct metal_program *program) {
   ncclResult_t result = ncclSuccess;
   while (inflight && !result) {

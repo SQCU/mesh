@@ -96,10 +96,10 @@ int mesh_paths_check(const struct mesh_fabric *f,uint32_t source,uint32_t destin
 }
 
 int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source,uint32_t destination,
-                        const struct mesh_paths *paths,struct mesh_operand operand,uint64_t page,uint32_t chunk_pages,
+                        const struct mesh_paths *paths,struct mesh_operand operand,uint64_t page,
                         struct mesh_transfer *out,uint32_t room){
   const int check=mesh_paths_check(f,source,destination,paths);
-  if(check || rank>=f->nodes || !operand.element_bytes || !page || !chunk_pages)return -(check?check:EINVAL);
+  if(check || rank>=f->nodes || !operand.element_bytes || !page)return -(check?check:EINVAL);
   if(!operand.elements)return 0;
   const uint32_t P=paths->count;
   uint64_t a=page,b=operand.element_bytes;
@@ -111,7 +111,7 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
   double maximum=paths->log_weight[0],total=0;
   for(uint32_t p=1;p<P;p++)if(paths->log_weight[p]>maximum)maximum=paths->log_weight[p];
   for(uint32_t p=0;p<P;p++)total+=exp(paths->log_weight[p]-maximum);
-  uint64_t assigned=0,chunks=0;
+  uint64_t assigned=0;
   for(uint32_t p=0;p<P;p++){
     const double real=(double)(units-floor*P)*exp(paths->log_weight[p]-maximum)/total;
     count[p]=floor+(uint64_t)real;remainder[p]=real-(uint64_t)real;assigned+=count[p];
@@ -121,24 +121,19 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
     for(uint32_t p=1;p<P;p++)if(remainder[p]>remainder[best])best=p;
     count[best]++;remainder[best]=-1;assigned++;
   }
-  for(uint32_t p=0;p<P;p++){
-    if(p)base[p]=base[p-1]+count[p-1];
-    const uint64_t c=(count[p]+chunk_pages-1)/chunk_pages;
-    if(c>chunks)chunks=c;
-  }
+  for(uint32_t p=1;p<P;p++)base[p]=base[p-1]+count[p-1];
   uint32_t written=0;
-  for(uint64_t chunk=0;chunk<chunks;chunk++)for(uint32_t p=0;p<P;p++){
-    const uint64_t unit=chunk*chunk_pages;
-    if(unit>=count[p])continue;
-    const uint64_t lo=(base[p]+unit)*q,part=count[p]-unit<chunk_pages?count[p]-unit:chunk_pages;
-    const uint64_t amount=part> (operand.elements-lo)/q?operand.elements-lo:part*q;
+  for(uint32_t p=0;p<P;p++){
+    if(!count[p])continue;
+    const uint64_t lo=base[p]*q;
+    const uint64_t amount=count[p]>(operand.elements-lo)/q?operand.elements-lo:count[p]*q;
     uint32_t at=source;
     for(uint32_t k=paths->first[p];k<paths->first[p+1];k++){
       const uint32_t e=paths->cable[k],next=f->cable[e].node[f->cable[e].node[0]==at];
       if(rank==at || rank==next){
         if(out && written<room)out[written]=(struct mesh_transfer){
           .step={rank==at?MESH_STEP_SEND:MESH_STEP_COPY,rank==at?next:at,
-                 (uint32_t)(chunk*f->nodes+k-paths->first[p]),0,lo,{operand.type,operand.element_bytes,amount}},.cable=e};
+                 k-paths->first[p],0,lo,{operand.type,operand.element_bytes,amount}},.cable=e};
         written++;
       }
       at=next;

@@ -251,7 +251,6 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
     const Deadline deadline("on_stream: a turn of torch's queue, a group encoded");
     dispatch_sync(stream->queue(), ^{
       @autoreleasepool {
-        stream->synchronize(at::mps::SyncType::COMMIT);
         ncclMeshStream on{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, split ? &issue : nullptr};
         result = (*encode)(&on);
         if (!split || issue.published) s->published();
