@@ -67,6 +67,7 @@ def main():
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()
     dist.broadcast(X, src=0)
+    torch_mesh.plan(mesh.get_group('tp'), [partition.gathered(tick.mine, 2, tick.sizes, mesh.get_group('tp'))])
     for s in range(L - 1):
         tick.starting(s, X[s])
     recording.issue(half)
@@ -76,6 +77,7 @@ def main():
     hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
+    torch_mesh.plan(mesh.get_group('tp'), [])
     steady = middle.elapsed_time(end) / 1e3 / (steps - half)
     if O is not None:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
