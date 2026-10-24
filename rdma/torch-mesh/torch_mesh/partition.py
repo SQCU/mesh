@@ -316,7 +316,7 @@ def _fused(x, dim, sizes, group, adds, w=None):
             K, N, ldw = x.shape[1], w.shape[0], w.stride(0)
             split = _stream.linear_split(K, N)
             publish = (_linear_kernel(4 if ldw % 4 == 0 else 1, 4 if K % 4 == 0 else 1, 2, split, 2, n - 1),
-                       [x.shape[0], K, N, 0, ldw, 0], -(-N // 2), split * 32)
+                       [x.shape[0], K, N, 0, ldw, K, K, K], -(-N // 2), split * 32)
         _FUSED[key] = {'rings': [_empty((starts[-1],), x, group) for _ in range(2)], 'turn': 0, 'words': words,
                        'shape': shape, 'counts': counts, 'starts': starts,
                        'arrivals': torch.zeros(1, dtype=torch.int32, device=x.device),
@@ -327,7 +327,8 @@ def _fused(x, dim, sizes, group, adds, w=None):
     segment = lambda q: lease[starts[q]:starts[q] + counts[q]]
     crossing = fused.exchange(segment(rank), [segment(q) for q in range(n) if q != rank], _stream.polls, group)
     (publish, pwords, gp, threads), (land, gl) = held['publish'], held['land']
-    fused.encode(publish, [x] + ([] if w is None else [w]) + [segment(rank), held['arrivals']], pwords, 15, gp, 1, threads, n - 1,
+    fused.encode(publish, [x] + ([] if w is None else [w]) + [segment(rank), held['arrivals']] + ([] if w is None else [x]), pwords, 15,
+                 gp, 1, threads, n - 1,
                  publish=crossing)
     out = torch.empty(held['shape'], dtype=x.dtype, device=x.device)
     fused.encode(land, [lease, out], held['words'], 15, gl, 1, _GATHER_THREADS, n - 1, land=crossing)
