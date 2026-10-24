@@ -5,12 +5,12 @@ import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from whole import FunctionSearch, project
+from whole import FunctionFlow, project
 
 
 class WholeFunctionTests(unittest.TestCase):
     def search(self):
-        return FunctionSearch({'compute': {'parts': [64, 64], 'grain': 1}, 'route': {'parts': [64, 64], 'grain': 1}})
+        return FunctionFlow({'compute': {'parts': [64, 64], 'grain': 0}, 'route': {'parts': [64, 64], 'grain': 0}})
 
     @staticmethod
     def latency(parts):
@@ -20,20 +20,43 @@ class WholeFunctionTests(unittest.TestCase):
     def test_coupled_finite_differences_and_drift(self):
         search = self.search()
         initial = self.latency(search.centre)
-        for iteration in range(220):
+        for iteration in range(1200):
             request = search.ask()
             observation = {**request, 'scope': 'function', 'complete': True, 'workload': 'full-dnn',
                            'seconds': self.latency(request['parts']) + iteration * 0.0005,
                            'queues': {'0': {'peak_bytes': 1000, 'integral_byte_seconds': request['parts']['route'][0]}}}
-            restored = FunctionSearch.of(search.state())
+            restored = FunctionFlow.of(search.state())
             self.assertEqual(search.observe(observation), restored.observe(observation))
             for values in search.parts.values():
-                self.assertEqual(sum(values), 128)
+                self.assertAlmostEqual(sum(values), 128)
                 self.assertGreaterEqual(min(values), 1)
-        self.assertLess(self.latency(search.centre), 1.02)
+        self.assertLess(self.latency(search.centre), 1.05)
         self.assertLess(self.latency(search.centre), initial * 0.6)
-        self.assertTrue(any(record.get('accepted') for record in search.history))
-        self.assertTrue(all('derivatives' in record for record in search.history))
+        self.assertEqual(len(search.history), 300)
+        self.assertTrue(all('gradient' in record and 'accepted' not in record for record in search.history))
+
+    def test_every_stencil_updates_without_acceptance_state(self):
+        search = self.search()
+        before = search.centre
+        for seconds in (60, 70, 90, 120):
+            request = search.ask()
+            self.assertEqual(request['phase'], 'finite_difference')
+            self.assertTrue(any(v != int(v) for p in request['parts'].values() for v in p))
+            search.observe({**request, 'scope': 'function', 'complete': True, 'workload': 'dnn', 'seconds': seconds})
+        self.assertEqual(search.round, 1)
+        self.assertNotEqual(search.centre, before)
+        self.assertNotIn('standing', search.state())
+        self.assertNotIn('radius', search.state())
+        self.assertNotIn('accepted', search.history[0])
+
+    def test_congestion_continuously_moves_routes_at_equal_latency(self):
+        flow = FunctionFlow({'route': {'parts': [64, 64], 'grain': 0}})
+        for _ in range(400):
+            request = flow.ask()
+            congestion = (request['parts']['route'][0] - 100) ** 2 / 1000
+            flow.observe({**request, 'scope': 'function', 'complete': True, 'workload': 'dnn',
+                          'seconds': 1.0, 'congestion_seconds': congestion})
+        self.assertAlmostEqual(flow.centre['route'][0], 100, delta=2)
 
     def test_partial_or_wrong_configuration_cannot_train(self):
         search = self.search()

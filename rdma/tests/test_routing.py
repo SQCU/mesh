@@ -17,7 +17,7 @@ class RoutingTests(unittest.TestCase):
         decisions, result = fabric.allocate({(1, 0): 1_000_000_000})
         self.assertEqual(len(fabric.paths[1, 0]), 6)
         self.assertAlmostEqual(result['fluid_lower_bound_seconds'], 0.02, places=7)
-        self.assertEqual(sum(decisions['route:1:0']['parts']), 4096)
+        self.assertAlmostEqual(sum(decisions['route:1:0']['parts']), 4096)
         self.assertEqual(len([x for x in result['directed_load_bytes'] if x > 0]), 7)
 
     def test_simultaneous_demands_share_directed_cables(self):

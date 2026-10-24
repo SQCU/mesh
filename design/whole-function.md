@@ -117,27 +117,79 @@ quanta, producer times, queues, and dispatch costs remain for measured feedback.
 
 ## Finite differences
 
-`whole.FunctionSearch` treats compute splits and route splits as coordinates of
-one bounded integer product of simplices. Every measurement identifies the exact
-configuration, workload, and completed function evaluation. The solver brackets
-its finite-difference stencil with full baseline evaluations to remove linear
-timing drift, forms a joint projected descent proposal, and compares it against
-fresh control evaluations in control/trial/trial/control order. Rejected moves
-shrink the trust region. Persisted state includes outstanding evaluations;
-partial-operation observations and observations of another configuration fail.
+`whole.FunctionFlow` evolves a continuous vector jointly representing compute
+shares and physical path shares. For each allocation, a bounded logistic map
+`x_i = low_i + (high_i - low_i) sigmoid(z_i - lambda)` chooses the single
+multiplier that conserves its total. Routing weights stay continuous through
+installation. Only realization into physical pages or indivisible compute tiles
+rounds them; the latent vector retains changes smaller than a tile.
 
-Latency of the complete function is primary. Queue area supplies a secondary
-direction and tie-break when latency differences are below the declared
-resolution. Queue pressure also orders the stencil's routing coordinates. This
-does not assume a bandwidth-only or a FLOPS-only machine and does not price DMA
-relaying as a tensor computation. It is a local measured optimizer, not a proof
-of global optimality on a nonlinear execution substrate.
+A fixed Hadamard sequence supplies joint directions. Four complete executions
+at `z + c*d, z - c*d, z - c*d, z + c*d` measure the directional derivative
+`(J_0 - J_1 - J_2 + J_3)/(4*c)`. This cancels additive linear drift in the measured
+cost across that stencil. Every stencil unconditionally updates the vector with
+bias-corrected first and second gradient moments and a decaying step size.
+There is no control/trial comparison, acceptance threshold, rollback, or winner
+selection. Best attained measurements are reporting statistics and do not steer
+the state. Persisted state contains the vector, moments, and partial stencil.
+
+The current cost is `J = log(T) + w * sum_e(A_e/C_e) / T^2`, where `T` is complete
+function latency, `A_e` is integrated queued bytes on directed cable `e`, and
+`C_e` is that cable's capacity in bytes/second. The congestion term is continuous
+and dimensionless, with default weight `w = 1`. It prices own and relay traffic
+sharing links without equating DMA with GPU arithmetic. Every observation names
+the exact compiled configuration, workload, and completed function. Incorrect or
+partial results are measurement failures, never samples of a slower route.
+
+The finite-difference estimate remains subject to timing noise and tile/page
+granularity. This is a measured local descent, not a global-optimality proof or a
+promise that each individual evaluation will be faster than its predecessor.
 
 ## Measurements
 
-Sample byte prefixes during the complete execution, retaining timestamps, peak
-backlog, and integrated backlog per directed cable alongside end-to-end latency.
-Retain before/after counters to distinguish useful traffic on every physical
-cable from a nominal route weight. Report transport padding separately from
-logical delivered bytes. An advertised capacity or positive weight is not a
-measurement of saturation.
+`ncclMeshTraceStart/Stop` observes existing entry lists, eligibility words, and
+sent/landed prefixes in a native thread. Relay eligibility comes from each entry's
+actual custom word (normally the incoming landed prefix). For every outgoing
+entry it records first eligibility through completed sending, bytes, queue area,
+and lower/upper timestamps bracketing the observed transitions. Incoming entries
+separately record first arrival and completed landing. The observer
+neither changes those words nor adds a transport wait. Stop joins the observer
+after the complete function's downstream consumers finish. Per-cable byte-prefix
+deltas independently check the traffic totals. Poll gaps and incomplete traces
+remain explicit; sampled queue integrals are estimates.
+
+## Roofline
+
+Let `W` be the union of each compiled range's first-eligible to last-landed
+interval. It includes stalls within an unfinished transaction and excludes
+compute-only gaps outside every such interval. Let
+`C = sum_e C_e` include **all directed physical cables**, even those idle during
+part of `W`. The ideal capacity during those windows is `C*|W|` bytes. With `V`
+actual wire bytes (each hop and padded transport page counted once), report
+attained wire bandwidth `V/|W|`, utilization `V/(C*|W|)`, unused capacity
+`C*|W| - V`, and the all-links ideal duration `V/C`. Also report the tighter bound
+`max_e V_e/C_e` for the measured routing. Useful delivered bytes `U` are reported
+separately, giving `U/|W|` and hop/padding amplification `V/U`. Extra relay traffic
+must not masquerade as extra useful throughput.
+
+`roofline.py` matches outgoing and incoming entries by physical cable, direction,
+and cumulative page range. Each pages-to-pages window starts with source
+eligibility and ends at the destination's completed landing, rather than
+substituting local send completion. It merges overlapping windows rather than
+adding their durations and reports ingress and egress for each node separately.
+Across nodes, causal TCP request/reply clock observations bound root-minus-local
+offsets immediately before each complete evaluation. It expands and contracts
+windows by those bounds and the polling brackets, retaining the resulting
+latency and bandwidth bounds. Offset constancy is assumed only over that
+evaluation. These pages-to-pages windows include clock uncertainty even in their
+per-node summaries because their endpoints are on different nodes. A lower
+duration bound of zero has no finite bandwidth upper bound; uncertainty is not
+silently replaced by a point estimate.
+
+Report best attained whole-function latency and best attained transaction-window
+bandwidth with their evaluation IDs and corresponding other measurements. They
+may belong to different evaluations. The cluster's advertised 80 Gbit/s per
+direction on seven cables gives `C = 140 GB/s`; this is a physical ceiling, not
+a demonstrated sustainable payload rate. Positive traffic on all fourteen
+directions establishes coverage; the utilization above measures the remaining
+gap to that ceiling.

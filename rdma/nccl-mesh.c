@@ -2348,10 +2348,11 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
    gate_of, *gate whether its first dispatch stores the communicator's gate), presented (present_group) and counted
    (commit_group); a failure before any entry is presented is the call's alone, one after it the communicator's (its
    lists stand mid-group) */
-static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder, int *gate) {
+static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder, int *gate,
+                             int immutable_writes) {
   schedule_laid(comm, plans);
   ncclResult_t result = place_group(program, comm, plans, holder);
-  if (!result && program) gate_of(comm, plans, gate);
+  if (!result && program && !immutable_writes) gate_of(comm, plans, gate);
   if (!result) result = present_group(comm, plans);
   if (result) return result;
   if (*gate) comm->gates++;
@@ -2624,7 +2625,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
     }
   }
   int gate = 0, running = 0;
-  if (!result && remote && !(result = schedule(NULL, comm, plans, holder, &gate))) { running = 1; atomic_fetch_add(&comm->runs, 1); }
+  if (!result && remote && !(result = schedule(NULL, comm, plans, holder, &gate, 0))) { running = 1; atomic_fetch_add(&comm->runs, 1); }
   pthread_mutex_unlock(&group_lock);
   if (running) {
     if ((result = run(comm, plans))) {
@@ -2907,6 +2908,27 @@ static ncclResult_t complete_track(struct metal_program *program, struct infligh
    consumptions (a combine into bytes an earlier SEND of its channel reads after that publication: its `need`); the
    tracks run as one (metal_tracks).  No rank orders anything another rank must share */
 static ncclResult_t complete(struct metal_program *program, struct inflight *through, int *published) {
+  if (through->fused == 2) {
+    /* A group of immutable one-way writes. Relay entries already name their
+       incoming landed word; publishing a channel never releases relay bytes
+       early. The producer releases each physical channel once. Its consumer
+       needs only that channel's final landing prefix, not one GPU wait per
+       path fragment. All leases belong to the enclosing data function. */
+    struct ncclComm *comm = through->comm;
+    ncclResult_t result = ncclSuccess;
+    touch(comm);
+    metal_gate(program, comm->violation);
+    for (uint32_t h = 0; h < comm->count && !result; h++) {
+      struct channel *ch = comm->channels + h;
+      if (ch->published < through->end[h][0])
+        result = publish(program, comm, h, through->end[h][0], published);
+      if (!result && ch->consumed < through->end[h][1]) {
+        ch->consumed = through->end[h][1] - 1;
+        result = consume(program, comm, h, METAL_NONE);
+      }
+    }
+    return result;
+  }
   const uint32_t lone = one_track(through);
   if (lone != METAL_NONE) return complete_track(program, through, lone, published);
   /* a fused group (the groups before it already complete: launch_metal) is records its caller's kernels run, no
@@ -3266,6 +3288,9 @@ static ncclResult_t losses_through(uint64_t ticket) {
    call also receives (a forwarding rank, a broadcast tree's inner rank: a fused publication is released before the
    kernel that reads the landing, so it would send the buffer's old bytes: such a group runs unfused) */
 static int fusable(const struct call *list, size_t n) {
+  int writes = n != 0;
+  for (size_t i = 0; i < n; i++) writes &= list[i].target != 0;
+  if (writes) return 2;
   const int ranks = list[0].comm->nranks;
   uint8_t *seen = calloc((size_t)ranks, 1);
   if (!seen) return 0;
@@ -3294,6 +3319,34 @@ static int fusable(const struct call *list, size_t n) {
   }
   free(seen);
   return whole;
+}
+
+static int fused_writes_disjoint(const struct call *list, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    const struct call *c = list + i;
+    const struct steps *st = c->bound;
+    for (uint32_t k = 0; st && k < st->count; k++) {
+      const struct mesh_step *receive = st->steps + k;
+      if (receive->op == MESH_STEP_SEND) continue;
+      const struct where a = shifted(c->recv_at, receive->first * SIZE[c->type]);
+      const size_t bytes = piece_bytes(receive);
+      for (size_t j = 0; j < n; j++) {
+        const struct call *other = list + j;
+        if (other->root == c->comm->rank && a.buffer == other->send_at.buffer &&
+            a.offset < other->send_at.offset + elements(other) * SIZE[other->type] &&
+            other->send_at.offset < a.offset + bytes) return 0;
+        const struct steps *ot = other->bound;
+        for (uint32_t q = 0; j <= i && ot && q < ot->count; q++) {
+          if (j == i && q >= k) break;
+          const struct mesh_step *prior = ot->steps + q;
+          if (prior->op == MESH_STEP_SEND) continue;
+          const struct where b = shifted(other->recv_at, prior->first * SIZE[other->type]);
+          if (a.buffer == b.buffer && a.offset < b.offset + piece_bytes(prior) && b.offset < a.offset + bytes) return 0;
+        }
+      }
+    }
+  }
+  return 1;
 }
 
 /* one group on the stream's command buffer (or, the Metal 4 form, its Metal 4 encoder: nccl-mesh-metal.h metal_begin4),
@@ -3349,7 +3402,12 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
      toward each peer, an in-place broadcast or all-gather, at most one SEND and one landing of a whole buffer each,
      forwarding nothing) is an ordinary group on that stream, its steps the library's: no record is written and both
      counts are 0, so the caller's kernels publish and await nothing (a form choice, not a refusal) */
-  ncclMeshFused *const fused = list[0].fused && remote && fusable(list, n) ? list[0].fused : NULL;
+  const int fused_kind = list[0].fused && remote ? fusable(list, n) : 0;
+  ncclMeshFused *const fused = fused_kind ? list[0].fused : NULL;
+  if (fused_kind == 2 && !fused_writes_disjoint(list, n)) {
+    pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
+    return fail(ncclInvalidUsage, "fused writes require disjoint landing ranges and immutable source ranges");
+  }
   if (list[0].fused && !fused) list[0].fused->publishes = list[0].fused->lands = 0;
   for (size_t i = 0; i < n && !fused; i++) list[i].fused = NULL;
   if (finished) metal_collect(finished);
@@ -3400,10 +3458,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && remote) {
     if (!(g = calloc(1, sizeof *g)) || !(g->start = calloc(2 * (size_t)comm->count + 1, sizeof *g->start))) result = fail(ncclSystemError, "out of memory");
     else {
-      g->comm = comm; g->holder = holder; g->fused = fused != NULL;
+      g->comm = comm; g->holder = holder; g->fused = fused_kind;
       g->end = g->start + comm->count;
       for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
-      if (!(result = schedule(program, comm, plans, holder, &gate))) { g->plans = plans; plans = NULL; }
+      if (!(result = schedule(program, comm, plans, holder, &gate, fused_kind == 2))) { g->plans = plans; plans = NULL; }
     }
     if (result && g) { free(g->start); free(g); g = NULL; }
     if (!result) {
@@ -3450,8 +3508,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result && g) {
     uint32_t lands = 0, publishes = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
-      publishes += (uint32_t)(g->end[h][0] - g->start[h][0]);
-      lands += (uint32_t)(g->end[h][1] - g->start[h][1]);
+      publishes += g->fused == 2 ? g->end[h][0] > g->start[h][0] : (uint32_t)(g->end[h][0] - g->start[h][0]);
+      lands += g->fused == 2 ? g->end[h][1] > g->start[h][1] : (uint32_t)(g->end[h][1] - g->start[h][1]);
     }
     /* a fused group is completed at once, issued or not: its steps are records its caller's kernels run, and the
        library encodes no wait of it; the groups in flight before it are completed first, so it completes alone on its

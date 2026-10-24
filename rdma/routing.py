@@ -1,9 +1,6 @@
 """design/whole-function.md#ahead-of-time"""
 import math
 
-from whole import project
-
-
 class Fabric:
     def __init__(self, nodes, cables):
         self.nodes, self.cables = int(nodes), list(cables)

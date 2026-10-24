@@ -4,7 +4,7 @@
 struct traced_entry {
   struct mesh_entry entry;
   struct ncclMeshWindow window;
-  uint64_t previous_queue;
+  uint64_t previous_queue, previous_ns;
   uint32_t channel;
 };
 struct ncclMeshTrace {
@@ -23,18 +23,22 @@ static void trace_read(struct ncclMeshTrace *trace) {
   memset(trace->queued, 0, (comm->count + 1) * sizeof *trace->queued);
   for (uint32_t h = 0; h < comm->count && !trace->status; h++) {
     const struct channel *channel = comm->channels + h;
-    const uint64_t count = atomic_load_explicit(channel->view.presented[0], memory_order_acquire);
-    if (count - trace->cursor[h] > MESH_STREAM_ENTRIES) { trace->status = EOVERFLOW; break; }
-    while (trace->cursor[h] < count) {
+    for (uint32_t direction = 0; direction < 2 && !trace->status; direction++) {
+    const uint32_t slot = 2 * h + direction;
+    const uint64_t count = atomic_load_explicit(channel->view.presented[direction], memory_order_acquire);
+    if (count - trace->cursor[slot] > MESH_STREAM_ENTRIES) { trace->status = EOVERFLOW; break; }
+    while (trace->cursor[slot] < count) {
       if (trace->count == trace->room) { trace->status = ENOSPC; break; }
       struct traced_entry *record = trace->entries + trace->count++;
-      record->entry = channel->view.list[0][trace->cursor[h] % MESH_STREAM_ENTRIES];
+      record->entry = channel->view.list[direction][trace->cursor[slot] % MESH_STREAM_ENTRIES];
       record->channel = h;
-      record->window = (struct ncclMeshWindow){.cable = channel->cable, .peer = (uint32_t)channel->peer,
-        .wire = *channel->wire, .first = trace->page[h], .last = trace->page[h] + record->entry.pages,
+      record->previous_ns = trace->previous_ns;
+      record->window = (struct ncclMeshWindow){.cable = channel->cable, .peer = (uint32_t)channel->peer, .direction = direction,
+        .wire = *channel->wire, .first = trace->page[slot], .last = trace->page[slot] + record->entry.pages,
         .bytes = record->entry.pages * comm->page};
-      trace->page[h] += record->entry.pages;
-      trace->cursor[h]++;
+      trace->page[slot] += record->entry.pages;
+      trace->cursor[slot]++;
+    }
     }
   }
   for (int k = 0; k < trace->count && !trace->status; k++) {
@@ -42,8 +46,25 @@ static void trace_read(struct ncclMeshTrace *trace) {
     struct ncclMeshWindow *w = &record->window;
     if (w->end_hi_ns) continue;
     const struct channel *channel = comm->channels + record->channel;
+    if (w->direction) {
+      const uint64_t read_before = mesh_clock_ns();
+      const uint64_t landed = atomic_load_explicit(channel->view.landed, memory_order_acquire);
+      if (landed == UINT64_MAX) { trace->status = ENOLINK; break; }
+      const uint64_t now = mesh_clock_ns();
+      if (!w->start_hi_ns && landed > w->first) {
+        w->start_lo_ns = record->previous_ns;
+        w->start_hi_ns = now;
+      }
+      if (landed >= w->last) {
+        w->end_lo_ns = record->previous_ns;
+        w->end_hi_ns = now;
+      }
+      record->previous_ns = read_before;
+      continue;
+    }
     const _Atomic uint64_t *word = record->entry.word ?
       (const _Atomic uint64_t *)((const char *)comm->attach->context.M + record->entry.word) : channel->view.ready;
+    const uint64_t read_before = mesh_clock_ns();
     const uint64_t ready = atomic_load_explicit(word, memory_order_acquire);
     const uint64_t sent = atomic_load_explicit(channel->view.sent, memory_order_acquire);
     if (ready == UINT64_MAX || sent == UINT64_MAX) { trace->status = ENOLINK; break; }
@@ -53,16 +74,17 @@ static void trace_read(struct ncclMeshTrace *trace) {
     const uint64_t queued = supplied > done ? (supplied - done) * comm->page : 0;
     const uint64_t now = mesh_clock_ns();
     if (!w->start_hi_ns && (supplied || done)) {
-      w->start_lo_ns = trace->previous_ns;
+      w->start_lo_ns = record->previous_ns;
       w->start_hi_ns = now;
     }
     if (sent >= w->last) {
-      w->end_lo_ns = trace->previous_ns;
+      w->end_lo_ns = record->previous_ns;
       w->end_hi_ns = now;
     }
-    w->queue_byte_seconds += 0.5 * (double)(record->previous_queue + queued) * (now - trace->previous_ns) * 1e-9;
+    w->queue_byte_seconds += 0.5 * (double)(record->previous_queue + queued) * (now - record->previous_ns) * 1e-9;
     if (queued > w->peak_queue_bytes) w->peak_queue_bytes = queued;
     record->previous_queue = queued;
+    record->previous_ns = read_before;
     trace->queued[record->channel] += queued;
   }
   for (uint32_t h = 0; h < comm->count; h++)
@@ -93,8 +115,8 @@ ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out)
   trace->comm = comm; trace->room = room;
   atomic_init(&trace->stop, 0);
   trace->entries = calloc((size_t)room, sizeof *trace->entries);
-  trace->cursor = calloc(comm->count + 1, sizeof *trace->cursor);
-  trace->page = calloc(comm->count + 1, sizeof *trace->page);
+  trace->cursor = calloc(2 * comm->count + 1, sizeof *trace->cursor);
+  trace->page = calloc(2 * comm->count + 1, sizeof *trace->page);
   trace->queued = calloc(comm->count + 1, sizeof *trace->queued);
   trace->peak = calloc(comm->count + 1, sizeof *trace->peak);
   if (!trace->entries || !trace->cursor || !trace->page || !trace->queued || !trace->peak) {
@@ -102,8 +124,10 @@ ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out)
     return fail(ncclSystemError, "out of memory");
   }
   for (uint32_t h = 0; h < comm->count; h++) {
-    trace->cursor[h] = atomic_load_explicit(comm->channels[h].view.presented[0], memory_order_acquire);
-    trace->page[h] = pages_to_word(comm->channels[h].out);
+    for (uint32_t direction = 0; direction < 2; direction++)
+      trace->cursor[2 * h + direction] = atomic_load_explicit(comm->channels[h].view.presented[direction], memory_order_acquire);
+    trace->page[2 * h] = pages_to_word(comm->channels[h].out);
+    trace->page[2 * h + 1] = pages_to_word(comm->channels[h].in);
   }
   trace->previous_ns = mesh_clock_ns();
   const int status = pthread_create(&trace->thread, NULL, trace_run, trace);

@@ -992,7 +992,7 @@ typedef struct ncclMeshTrace *ncclMeshTrace_t;
 struct ncclMeshWindow {
   uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,peak_queue_bytes,cable_peak_queue_bytes;
   double queue_byte_seconds;
-  uint32_t cable,peer;
+  uint32_t cable,peer,direction; /* 0 send eligibility/completion, 1 receive arrival/completion */
 };
 struct ncclMeshTraceStats { uint64_t polls,max_gap_ns; uint32_t incomplete; };
 uint64_t ncclMeshTraceClock(void);

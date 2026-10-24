@@ -82,6 +82,18 @@ def _words(addresses):
     return [w for a in addresses for w in (a & 0xFFFFFFFF, a >> 32)]
 
 
+def writes(send, landings, pairs, group, polls=0):
+    """Immutable routed writes, one landing lease per (source, destination).
+
+    The producer releases every returned publication after making its operand.
+    The consumer awaits every returned landing before reading its destinations.
+    Bindings follow physical channels, not peers. Source and relay leases remain
+    unchanged through the whole function's downstream uses.
+    """
+    publish, land = _stream.fused_writes(send, list(landings), list(pairs), group.handle, int(polls))
+    return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))
+
+
 def encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None):
     """_stream.encode of kernel `handle`, its constants followed by `land`'s `peers` landing bindings and `publish`'s
     `peers` publication bindings (module docstring); one that publishes is committed by the stream's rule for a
@@ -89,6 +101,8 @@ def encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, pu
     words = list(constants) + [0] * (len(constants) % 2)
     for crossing, bindings in ((land, 'land'), (publish, 'publish')):
         records = getattr(crossing, bindings) if crossing else ()
+        if len(records) > peers:
+            raise ValueError('kernel binding extent is smaller than its physical crossing')
         words += [w for k in range(peers) for w in _words(records[k] if k < len(records) else _NONE)]
     _stream.encode(handle, buffers, words, at, gx, gy, threads, bool(land or publish))
     if publish:

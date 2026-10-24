@@ -948,6 +948,58 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
   return {published, landed};
 }
 
+// A declared set of routed writes. Bindings name physical channels, including
+// parallel cables; relay readiness stays in the compiled stream entries.
+static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uint64_t>>> fused_writes(
+    const at::Tensor &send, const std::vector<at::Tensor> &landings,
+    const std::vector<std::array<int, 2>> &pairs, int64_t comm, int64_t polls) {
+  TORCH_CHECK(landings.size() == pairs.size(), "fused writes: one landing lease per declared write");
+  TORCH_CHECK(polls >= 0 && polls <= (int64_t)UINT32_MAX, "fused writes: polls is a 32-bit count of loads");
+  const ncclComm_t c = communicator(comm);
+  int channels = 0;
+  checked(ncclMeshCommSample(c, nullptr, 0, &channels));
+  Group g{true};
+  const Operand out = g.moving(send);
+  std::vector<Operand> in;
+  for (const at::Tensor &landing : landings) {
+    in.push_back(g.moving(landing));
+    TORCH_CHECK(in.back().count == out.count && in.back().type == out.type,
+                "fused writes: landing extent and dtype must match the source");
+  }
+  std::vector<std::array<uint64_t, 6>> publish(channels), land(channels);
+  ncclMeshFused steps = {reinterpret_cast<uint64_t(*)[6]>(publish.data()), reinterpret_cast<uint64_t(*)[6]>(land.data()),
+                         (uint32_t)channels, (uint32_t)channels};
+  ncclMeshFused *const records = &steps;
+  const Operand *const ins = in.data();
+  const auto *const endpoints = pairs.data();
+  const size_t count = pairs.size();
+  __block ncclResult_t result = ncclSuccess;
+  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  MeshStream *s = &stream_of(stream);
+  id<MTLResidencySet> residency = fused_residency(stream);
+  {
+    const Deadline deadline("fused_writes: a turn of torch's queue, a group encoded");
+    dispatch_sync(stream->queue(), ^{
+      @autoreleasepool {
+        ncclMeshStream on = {(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, s, nullptr,
+                             nullptr, (__bridge void *)residency, (uint32_t)polls, records};
+        ncclResult_t made = ncclGroupStart();
+        for (size_t i = 0; i < count && !made; i++)
+          made = ncclMeshWrite(out.at, (void *)ins[i].at, out.count, out.type, endpoints[i][0], endpoints[i][1], c, &on);
+        const ncclResult_t ended = ncclGroupEnd();
+        result = made ? made : ended;
+      }
+    });
+  }
+  s->streamed = true;
+  s->retire(0, std::exchange(s->scratch, {}));
+  checked(result);
+  std::vector<std::vector<uint64_t>> published, landed;
+  for (uint32_t k = 0; k < steps.publishes; k++) published.emplace_back(publish[k].begin(), publish[k].end());
+  for (uint32_t k = 0; k < steps.lands; k++) landed.emplace_back(land[k].begin(), land[k].end());
+  return {published, landed};
+}
+
 // A fused crossing's publishing kernel just encoded on torch's stream (fused.encode): a publication under the stream's
 // one commit rule (MeshStream::published), as a group that published is.
 static void fused_published() {
@@ -990,5 +1042,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("records", &records);
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_exchange", &fused_exchange);
+  module.def("fused_writes", &fused_writes);
   module.def("fused_published", &fused_published);
 }
