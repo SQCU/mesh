@@ -91,7 +91,6 @@ the dimension again at them."""
 import contextlib
 import itertools
 import math
-import os
 import resource
 
 import torch
@@ -384,10 +383,10 @@ class RaggedShard(Shard):
 # The operand's API.
 def attach(mesh, **dims):
     """Partition mesh dimensions by name: attach(mesh, tp=units), the units every extent the program splits along the
-    dimension is a multiple of, the same on every rank.  The parts are those the last evaluation on these nodes left
-    (evaluated: its Balancer, kept in each node's store), rank 0's on every rank, else an even split in rank order (the
-    first units mod n one more); the dimension's group is watched from here for the evaluation's own evidence
-    (torch_mesh.evidence).  Two exchanges of a page, at load."""
+    dimension is a multiple of, the same on every rank.  The backend splits them evenly over the coordinates in rank
+    order (the first units mod n one more).  The dimension's Balancer lives with its group, in memory, from here, and
+    its group is watched from here for the evaluations' own evidence (torch_mesh.evidence); nothing outlives the
+    communicator or the process."""
     import allocate
     from . import evidence
     for name, units in dims.items():
@@ -395,46 +394,11 @@ def attach(mesh, **dims):
         if not 0 < n <= units:
             raise ValueError(f'mesh: partition {name}: {units} units over a mesh dimension of {mesh.mesh_dim_names}, '
                              f'at least one a coordinate')
-        group = mesh.get_group(name)
-        held = _BALANCING[id(group), name] = {}
-        nodes = [int(v[0]) for v in _shared(held, group, [_node()])] if getattr(group, 'handle', 0) else list(range(n))
-        held['path'] = os.path.join(_STORE, f'{name}-{units}-{"-".join(map(str, nodes))}.json')
-        state = _stored(held['path'])
-        held['balancer'] = allocate.Balancer.of(state) if state else allocate.Balancer(
-            {name: {'parts': [units // n + (r < units % n) for r in range(n)], 'low': [1] * n, 'high': [units - n + 1] * n}})
-        _attach(mesh, name, [int(p) for p in _shared(held, group, held['balancer'].parts[name])[0]])
+        group, parts = mesh.get_group(name), [units // n + (r < units % n) for r in range(n)]
+        _BALANCING[id(group), name] = {'balancer': allocate.Balancer({name: {'parts': parts, 'low': [1] * n,
+                                                                             'high': [units - n + 1] * n}})}
+        _attach(mesh, name, parts)
         evidence.watch(group, mesh.device_type)
-
-
-_STORE = os.path.expanduser('~/.cache/torch_mesh/balance')
-
-
-def _node():
-    """This node's bridge node number (rdma/mesh.py current: mesh_reached)."""
-    import mesh as library
-    own = library.ffi.new('uint32_t *')
-    library.lib.mesh_reached(library.ffi.NULL, 0, own)
-    return own[0]
-
-
-def _stored(path):
-    """A Balancer's state an evaluation left at `path` (evaluated), None where none did."""
-    import json
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
-
-
-def _store(path, state):
-    """A Balancer's state kept at `path` for the next evaluation's attach, written whole (a new file renamed over it)."""
-    import json
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    part = f'{path}.{os.getpid()}'
-    with open(part, 'w') as f:
-        json.dump(state, f)
-    os.replace(part, path)
 
 
 def _attach(mesh, name, parts):
@@ -1343,12 +1307,12 @@ def _shared(held, group, words):
 
 
 def evaluated(mesh, name='tp'):
-    """The parts the evidence of the evaluation just ended gives, kept in each node's store for the next evaluation's
-    attach (design/data-model.md section 9: the shares set between evaluations, a new share a new compiled plan): the
-    program calls it once its evaluation has ended, after its own synchronize, never inside one.  Each rank's evidence
-    is its work between its collectives on the dimension's group since attach (torch_mesh.evidence), every stretch an
-    invocation; one exchange gives every rank every rank's median, and one step of the Balancer (the same on every
-    rank: R4) the parts."""
+    """The parts the evidence of the evaluation just ended gives, for the next evaluation on this communicator (design/
+    data-model.md section 9: the shares set between evaluations, a new share a new compiled plan): called once an
+    evaluation has ended, after the program's own synchronize, never inside one; the Balancer is the group's, in
+    memory, and ends with it.  Each rank's evidence is its work between its collectives on the dimension's group since
+    attach (torch_mesh.evidence), every stretch an invocation; one exchange gives every rank every rank's median, and
+    one step of the Balancer (the same on every rank: R4) the parts."""
     from . import evidence
     o, group = operand(mesh, name), mesh.get_group(name)
     held, n = _BALANCING[id(group), name], len(o.capacity)
@@ -1358,9 +1322,7 @@ def evaluated(mesh, name='tp'):
     held['work'] = [m[0] if m else None for m in medians]
     balancer = held['balancer']
     balancer.decisions[name]['parts'] = o.parts.tolist()
-    parts = balancer.observe({'evaluation': {'scales': {name: [1.0] * n}, 'times': [m or None for m in medians]}})[name]
-    _store(held['path'], balancer.state())
-    return parts
+    return balancer.observe({'evaluation': {'scales': {name: [1.0] * n}, 'times': [m or None for m in medians]}})[name]
 
 
 def balancing(mesh, name='tp'):
