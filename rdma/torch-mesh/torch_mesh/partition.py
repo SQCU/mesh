@@ -331,6 +331,25 @@ def _allgatherv(x, dim, sizes, group):
     return allgatherv(x, dim, list(sizes), group.group_name)
 
 
+def _row(x, dim):
+    """The elements of x a step along `dim` holds (its shape's product but that dimension's)."""
+    return math.prod(s for k, s in enumerate(x.shape) if k != dim)
+
+
+def gathered(x, dim, sizes):
+    """allgatherv's group of a block like `x` (its shape and dtype) along `dim`, each rank's block sizes[r] long: one
+    all-gather of every rank's block (torch_mesh.plan)."""
+    from .backend import ALLGATHER, Call
+    return [Call(ALLGATHER, x.numel(), x.dtype, counts=[s * _row(x, dim) for s in sizes])]
+
+
+def scattered(x, dim, sizes, op='sum'):
+    """reduce_scatterv's group of an operand like `x` along `dim`, each rank's block sizes[r] long: one reduce-scatter
+    (torch_mesh.plan)."""
+    from .backend import REDUCE_SCATTER, Call
+    return [Call(REDUCE_SCATTER, x.numel(), x.dtype, op=getattr(dist.ReduceOp, op.upper()), counts=[s * _row(x, dim) for s in sizes])]
+
+
 def _reduce_scatterv(x, dim, sizes, rank, op, group):
     return reduce_scatterv(x, dim, list(sizes), rank, op, group.group_name)
 
@@ -467,6 +486,22 @@ def follow(tensor):
         dist.all_to_all_single(y, x, receives, sends, group=group)
         local, placements[i] = y.movedim(0, p.dim).contiguous(), RaggedShard(p.dim, key)
     return from_local(local, mesh, placements)
+
+
+def calls(tensor):
+    """The groups full_tensor() of RaggedTensor `tensor` issues, one all-gather of its blocks a partitioned mesh
+    dimension (RaggedShard._to_replicate_tensor), each from its shape and the operand attached now (torch_mesh.plan)."""
+    mesh, local = tensor.device_mesh, tensor.to_local()
+    return [gathered(local, p.dim, _blocks(_OPERANDS[p.key], tensor.shape[p.dim])[0])
+            for i, p in enumerate(tensor.placements) if isinstance(p, RaggedShard) and mesh.size(i) > 1]
+
+
+def plan(mesh, name, groups):
+    """The program's collectives on mesh dimension `name`'s group declared once, in their order (torch_mesh.plan):
+    `groups` from the ops' own (calls, gathered, scattered), as a step issues them; again after each rebalance, whose
+    new parts are new shapes."""
+    from . import plan as declare
+    return declare(mesh.get_group(name), groups)
 
 
 def split(mesh, name, N):

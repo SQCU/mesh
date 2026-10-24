@@ -19,6 +19,7 @@ A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGet
 store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; its pg_options are not
 read.
 The silent-link bound is the library's (nccl.h)."""
+import collections
 import math
 
 import torch
@@ -35,6 +36,16 @@ OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.
        (ReduceOp.AVG, LIB.ncclAvg))
 # a call's kind (_stream.mm Kind)
 ALLREDUCE, REDUCE, BROADCAST, ALLGATHER, REDUCE_SCATTER, ALLTOALL, SEND, RECV = range(8)
+# a declared call (ProcessGroupMesh.plan): its kind, its elements, its dtype, its root or peer, its operator and, for an
+# all-gather or a reduce-scatter, each rank's elements (an all-to-all's to each rank, then from each)
+Call = collections.namedtuple('Call', 'kind count dtype root op counts', defaults=(0, ReduceOp.SUM, None))
+WHAT = {ALLREDUCE: LIB.MESH_ALLREDUCE, REDUCE: LIB.MESH_REDUCE, BROADCAST: LIB.MESH_BROADCAST, ALLGATHER: LIB.MESH_ALLGATHER,
+        REDUCE_SCATTER: LIB.MESH_REDUCE_SCATTER, ALLTOALL: LIB.ncclMeshCallAlltoAllV, SEND: LIB.ncclMeshCallSend,
+        RECV: LIB.ncclMeshCallRecv}
+TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
+         torch.uint32: LIB.ncclUint32, torch.int64: LIB.ncclInt64, torch.uint64: LIB.ncclUint64, torch.float16: LIB.ncclFloat16,
+         torch.float32: LIB.ncclFloat32, torch.float64: LIB.ncclFloat64, torch.bfloat16: LIB.ncclBfloat16,
+         torch.float8_e4m3fn: LIB.ncclFloat8e4m3, torch.float8_e5m2: LIB.ncclFloat8e5m2}
 
 
 def op(reduce_op):
@@ -42,6 +53,14 @@ def op(reduce_op):
         if reduce_op == known:
             return code
     raise NotImplementedError(f'the mesh backend reduces by sum, product, max, min and avg, not {reduce_op}')
+
+
+def typed(dtype, reduces):
+    """A dtype as _stream.mm's Group passes a tensor of it (moving, reducing): its NCCL type and that type's elements an
+    element (a complex reduction's two; a type NCCL lacks moved as its bytes)."""
+    if reduces and dtype.is_complex:
+        return TYPES[dtype.to_real()], 2
+    return (TYPES[dtype], 1) if dtype in TYPES else (LIB.ncclUint8, torch.empty(0, dtype=dtype).element_size())
 
 
 def span(tensors):
@@ -179,6 +198,28 @@ class ProcessGroupMesh(dist.ProcessGroup):
         if work is None:
             return done(result)
         return work
+
+    def plan(self, groups):
+        """This group's collectives declared once, in their order (nccl.h ncclMeshCommPlan): `groups` the groups its
+        calls issue, each a list of Calls (one torch collective is one group), or (that list, repeat) issued repeat
+        times in a row, the order repeated from this group's next collective on.  Each is compiled now, so none is
+        planned where it is issued, and none is compared with its declaration.  [] drops the plan.  Returns each
+        declared group's (send entries, landing entries) on this rank's lists."""
+        rows = [(g, *(group if isinstance(group, tuple) else (group, 1))) for g, group in enumerate(groups)]
+        rows = [(g, repeat, call) for g, calls, repeat in rows for call in calls]
+        made, kept = [], []
+        for g, repeat, c in rows:
+            reduces = c.kind in (ALLREDUCE, REDUCE, REDUCE_SCATTER)
+            nccl, per = typed(c.dtype, reduces)
+            code = op(c.op) if reduces else LIB.ncclSum
+            if c.dtype == torch.bool and reduces:
+                code = LIB.ncclMax if code == LIB.ncclSum else LIB.ncclMin if code == LIB.ncclProd else code
+            kept.append(ffi.new('size_t[]', [n * per for n in c.counts]) if c.counts is not None else ffi.NULL)
+            made.append({'what': WHAT[c.kind], 'peer': c.root, 'count': c.count * per, 'counts': kept[-1], 'type': nccl, 'op': code,
+                         'group': g, 'repeat': repeat})
+        view = ffi.new('ncclMeshPlan **')
+        check(LIB.ncclMeshCommPlan(self.comm, ffi.new('ncclMeshCall[]', made or 1), len(made), view))
+        return [] if view[0] == ffi.NULL else [tuple(view[0].entries[g]) for g in range(view[0].groups)]
 
     def _alltoall(self, sends, receives, result, opts):
         """MPI_Alltoallv (ncclMeshAlltoAllV): sends[q] to rank q and receives[q] from it, None moving none."""

@@ -16,6 +16,9 @@ an all-reduce or reduce by libnccl-mesh's partials operator, ncclMeshRedOpCreate
 its own keys merged by the rows' logsumexp into the attention over all of them; partition's ring attention merges by it
 (a reduce-scatter by the operator).
 
+plan() declares a program's collectives on a group once, in their order (libnccl-mesh's ncclMeshCommPlan), each
+compiled then, so none is planned where it is issued.
+
 record() and replay() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
 compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its replays issued back to back."""
 
@@ -74,6 +77,19 @@ def check_memory():
                       'zero copy, and the GPU wires them beside the region, which risks the node. Make them with '
                       'torch_mesh.empty (docs/writing-a-service.md#memory-outside-the-region)', stacklevel=2)
     return outside
+
+
+def plan(group, calls):
+    """The collectives a program issues on `group` (None: the default group) declared once, in their order: `calls`
+    the groups, each a list of torch_mesh.backend.Call (one torch collective, or one coalesced batch, a group) or (that
+    list, repeat) issued repeat times in a row, the order repeated from the group's next collective on (backend
+    ProcessGroupMesh.plan; partition's ops give their own, partition.calls).  Every rank declares its own calls, the same
+    groups in the same order, at the same point.  Returns each group's (send entries, landing entries) on this rank."""
+    import torch.distributed as dist
+
+    from . import backend
+    group = group or dist.distributed_c10d._get_default_group()
+    return backend._mesh(group.group_name, 'plan').plan(calls)
 
 
 def merge_partials(out, lse, group=None, root=-1):
