@@ -560,7 +560,8 @@ def follow(*tensors):
     now (after the Balancer moved it), as a list.  A mesh dimension's move is one coalesced group (the backend's) of one
     MPI_Alltoallv a tensor (ncclMeshAlltoAllV) of the rows that change rank alone, each piece a segment of whole pages
     (_paged: the library places each segment on a page) of a region lease, sent once and copied once into its place in
-    the tensor's new block, a region tensor; the rows that stay are copied into their place there, crossing nothing.
+    the tensor's new block, a region tensor contiguous in the tensor's own layout; the rows that stay are copied into
+    their place there, crossing nothing.
     Each is returned at its logical shape and that shape's contiguous strides (a moved block's leading extents of one
     may carry any stride, which from_local's inference would refuse)."""
     mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape] for t in tensors]
@@ -572,7 +573,8 @@ def follow(*tensors):
         rank, group, landed = mesh.get_coordinate()[i], mesh.get_group(i), []
         with dist._coalescing_manager(group=group, device=moving[0][1].device):
             for h in moving:
-                p, rows = h[0][i], h[1].movedim(h[0][i].dim, 0)
+                p, d = h[0][i], h[0][i].dim % h[1].ndim
+                rows = h[1].movedim(d, 0)
                 old, rest = _OPERANDS[p.key], rows.shape[1:]
                 a, b = (list(itertools.accumulate(o.parts.tolist(), initial=0)) for o in (old, _OPERANDS[key]))
                 g, n, row = _units(old, h[2][p.dim]), len(old.capacity), math.prod(rest)
@@ -581,19 +583,19 @@ def follow(*tensors):
                 first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
                 out, out_at = _paged([0 if q == rank else c * row for q, c in enumerate(sends)], rows.element_size(), group)
                 land, land_at = _paged([0 if r == rank else c * row for r, c in enumerate(receives)], rows.element_size(), group)
-                x, y, new = _empty((out_at[-1],), rows, group), _empty((land_at[-1],), rows, group), _empty((into[-1],) + rest, rows, group)
-                new[into[rank]:into[rank + 1]].copy_(rows[first[rank]:first[rank + 1]])
+                x, y = _empty((out_at[-1],), rows, group), _empty((land_at[-1],), rows, group)
+                new = _empty(h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:], rows, group)
+                new.movedim(d, 0)[into[rank]:into[rank + 1]].copy_(rows[first[rank]:first[rank + 1]])
                 for q in range(n):
                     if q != rank:
                         x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rest).copy_(rows[first[q]:first[q + 1]])
                 dist.all_to_all_single(y, x, land, out, group=group)
-                landed.append((h, new, y, land_at, into, receives, row))
-        for h, new, y, land_at, into, receives, row in landed:
+                landed.append((h, new, d, rest, y, land_at, into, receives, row))
+        for h, new, d, rest, y, land_at, into, receives, row in landed:
             for r in range(len(receives)):
                 if r != rank:
-                    new[into[r]:into[r + 1]].view(-1).copy_(y[land_at[r]:land_at[r] + receives[r] * row])
-            h[0][i] = RaggedShard(h[0][i].dim, key)
-            h[1] = new.movedim(0, h[0][i].dim)
+                    new.movedim(d, 0)[into[r]:into[r + 1]].copy_(y[land_at[r]:land_at[r] + receives[r] * row].view((receives[r],) + rest))
+            h[0][i], h[1] = RaggedShard(h[0][i].dim, key), new
     contiguous = lambda shape: torch.empty(shape, device='meta').stride()
     return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape in held]
 
