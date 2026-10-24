@@ -156,22 +156,19 @@ autograd, is compiled and committed by the same rule.
 ## Uneven nodes
 
 Stock PyTorch splits every sharded extent equally. `torch_mesh.partition` is a partition operand on raw tensors: a
-mesh dimension's extents split among its ranks by parts proportional to each node's speed, the program holding its
-share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`,
+mesh dimension's extents split among its ranks by parts the backend sets and moves by the measured residual, the
+program holding its share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`,
 `all_to_all_single` with splits: MPI's v-collectives). An unequal list is one program over unequal segments, the
 library's MPI_Allgatherv and MPI_Reduce_scatter (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`, [NCCL.md](../NCCL.md)),
 not a broadcast or reduce rooted at each rank; where the list is the pieces of one contiguous tensor (`out.split(sizes)`,
 as `partition`'s collectives pass it) the call reads or writes that tensor in place. Its callers are metal-microbench
-`tools/torch_parallel/tp.py` and `cp.py`, at `PARTITION` (parts that are their own capacity) or at `PARTS` checked in
-turn within `CAPACITY` in one process (the 09-30 form). Reproduction target (metal-microbench docs/measurement.md,
-2026-09-30): `tp.py` `SP=1 PARTS="5,11 4,12" CAPACITY=5,12`, 255-256 ms a step on the pair, an SP=1 all-gather
-214-229 us and a reduce-scatter 196-212 us a call. On DTensor the partition is a placement, `RaggedShard`, carried
+`tools/torch_parallel/tp.py`, `cp.py` and `ep.py` and this repository's examples/chain* and lstm*. On DTensor the partition is a placement, `RaggedShard`, carried
 by `RaggedTensor`, a DTensor subclass whose own dispatch keeps it capacity-shaped through every op (padding re-masked
 before contractions, gathered where an op needs the dimension whole); nothing of torch is patched.
 
 ```python
 from torch_mesh import partition
-partition.attach(mesh, tp=((5, 11), (5, 11)))    # (capacities, parts) of each coordinate along "tp"
+partition.attach(mesh, tp=16)                    # the units of every extent split along "tp"; the backend's parts
 blocks = partition.split(mesh, "tp", N)          # each rank's block of an extent N, in rank order
 w = partition.distribute_tensor(weight, mesh, [Shard(0)])            # a RaggedTensor: capacity blocks
 parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partition.RowwiseParallel()})
@@ -181,24 +178,21 @@ parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partit
   its `RaggedShard`; `ColwiseParallel`, `RowwiseParallel` and `SequenceParallel` are torch's styles over them.
 - Context parallelism over capacity blocks: `context_parallel_buffers`, `ring_attention` (padded keys masked, the
   blocks merged by the partials merge) and `context_parallel_unshard`, called in place of torch's `context_parallel`.
-  Reproduction target (metal-microbench docs/measurement.md, 2026-09-30): `cp.py` `PARTS="10,22 11,21"
-  CAPACITY=11,22`, 501.6-505.3 ms a step on the pair.
 - A partitioned dimension may be any of its mesh's: a 2-D mesh's second dimension partitioned with its first
   replicated or splitting another tensor dimension (SDPA's ring runs along the partitioned dimension's group, the
   heads or batch split by the other).
 
-- A coordinate's capacity is the most it holds; a rank that keeps its share in a buffer of its capacity, its valid
-  elements first, keeps its shapes while the parts move within the capacities. `partition.write(mesh, tp=parts)`
-  changes the parts between calls, the same on every rank.
-- The parts move on the run's own evidence (below); see [design/heterogeneity.md](../../design/heterogeneity.md).
+- The program declares the units and no parts. The backend splits them evenly at first, each part its rank's
+  capacity, and the parts move on the run's own evidence (below); see [design/heterogeneity.md](../../design/heterogeneity.md).
   Parts are indexed by rank, not by node.
 
 ### Parts from the run's own evidence
 
-Nobody needs to know the parts in advance. Call `partition.rebalance` once a step, on every rank alike:
+No program knows the parts. Call `partition.rebalance` once a step, on every rank alike:
 
 ```python
-parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved within the capacities
+if partition.rebalance(mesh, "tp", every=8):   # True where the parts moved and "tp" is attached again at them
+    w = partition.follow(w)                    # each sharded tensor onto the new parts
 ```
 
 - The first call watches the dimension's group. Every collective on it is then marked as it is issued and once its
@@ -210,8 +204,8 @@ parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved wit
   stretches of the slowest rank's, not the ranks' totals, which can agree while every collective still waits. That
   step is DFPA: the ranks' measured points, the grains given to whoever finishes earliest with them, and a stop once
   the measurements promise no gain past their own resolution. The parts then stand, so jitter does not reshard.
-- Parts that move past a capacity are the program's to attach again (capacities and parts both), its buffers taking
-  new shapes.
+- Parts that move are attached again by `rebalance` itself, and the program's sharded tensors take new shapes:
+  `partition.follow` moves one by one all-to-all a mesh dimension, only what changes rank crossing.
 - `partition.balancing(mesh, "tp")` returns what the last window saw.
 - A placement has two throughputs, the aggregate and each stream's, so the calls trace a frontier rather than a best:
   `allocate.pareto(rows, coordinate=("ctx_in", "ctx_out"))` keeps, per workload coordinate, the call records (each a
