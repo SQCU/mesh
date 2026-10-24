@@ -53,11 +53,10 @@ def main():
     del held
     X = torch_mesh.empty(steps, rows, KIN, dtype=torch.half)
     O = torch_mesh.empty(steps, rows, H, dtype=torch.half) if rank == 0 else None
-    t, K = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), config['replay_ticks']
-    if steps % K:
-        raise ValueError(f'replay_ticks {K} divides no {steps} steps: each replay runs that many ticks')
-    recording = torch_mesh.record(tick.stepper(X, O, t, K))
-    torch_mesh.replay(recording)
+    t, K = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), min(config['replay_ticks'], steps)
+    recordings = [torch_mesh.record(tick.stepper(X, O, t, n)) for n in (K, steps % K) if n]
+    for recording in recordings:
+        torch_mesh.replay(recording)
     tick.reset()
     t.fill_(L - 1)
     if rank == 0:
@@ -66,28 +65,32 @@ def main():
     torch.mps.synchronize()
     dist.barrier()
     ticks, half = steps + L - 1, steps // K // 2
+    whole, rest = recordings[0], recordings[1:]
     middle, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
     began = time.perf_counter()
     dist.broadcast(X, src=0)
     for s in range(L - 1):
         tick.starting(s, X[s])
     for s in range(steps // K):
-        recording.compiled()
+        whole.compiled()
         if s == half:
             middle.record()
+    for recording in rest:
+        recording.compiled()
     end.record()
     hosted = time.perf_counter() - began
     torch.mps.synchronize()
     seconds = time.perf_counter() - began
-    steady = middle.elapsed_time(end) / 1e3 / ((steps // K - 1 - half) * K)
+    after = (steps // K - 1 - half) * K + steps % K
+    steady = middle.elapsed_time(end) / 1e3 / after if after else None
     if O is not None:
         torch.from_numpy(np.lib.format.open_memmap(config['output'], 'w+', np.float16, (steps, rows, H))).copy_(O)
     blocks = partition.split(mesh, 'tp', H)
     summary = dict(rank=rank, size=size, blocks=blocks, replay_ticks=K, layers=L, rows=rows,
                    input_width=KIN, width=H, steps=steps, ticks=ticks, seconds=seconds,
                    aggregate_rows_per_second=steps * rows / seconds,
-                   steady_aggregate_rows_per_second=rows / steady, per_stream_steps_per_second=steps / seconds,
-                   tick_microseconds=seconds / ticks * 1e6, steady_tick_microseconds=steady * 1e6,
+                   steady_aggregate_rows_per_second=rows / steady if steady else None, per_stream_steps_per_second=steps / seconds,
+                   tick_microseconds=seconds / ticks * 1e6, steady_tick_microseconds=steady * 1e6 if steady else None,
                    host_microseconds=hosted / ticks * 1e6, latency_ticks=L,
                    sent_bytes_per_tick=(size - 1) * rows * L * blocks[rank] * torch.half.itemsize)
     print(json.dumps(summary), flush=True)
