@@ -390,6 +390,11 @@ def _(input, reduce_op, group_name):
     return torch.empty_like(input)
 
 
+@torch.library.register_fake('torch_mesh::linear')
+def _(x, w, bias=None):
+    return x.new_empty(x.shape[0], w.shape[0])
+
+
 def create(opts, options):
     """The group (torch's extended creator: `opts` its store, rank and size; `options`, the caller's pg_options, not
     read: a group's map is its bridges')."""
