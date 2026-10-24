@@ -56,6 +56,8 @@ def main():
     t, k = torch.empty(1, dtype=torch.int64, device='mps').fill_(L - 1), config['steps_per_replay']
     recording = torch_mesh.record(tick.stepper(X, O, t), k)
     torch_mesh.replay(recording, min(steps, k + steps % k))
+    for s in range(L - 1):
+        tick.starting(s, X[s])
     tick.reset()
     t.fill_(L - 1)
     if rank == 0:
