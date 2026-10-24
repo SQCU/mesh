@@ -60,7 +60,8 @@ int metal_ended(void *command);
 /* A program's waits bounded by `polls` wherever a dispatch has failure words to record in (the program's, `violation`
    or metal_gate's, or those a wait names): at most `polls` loads of a count (rdma/mesh.metal mesh_wait_bounded), past
    which the dispatch records a failure, which the host finds there after the command buffer (nccl-mesh.c
-   comm_failure) and the call fails as a value; no kernel halts on the record, every later dispatch running as encoded,
+   comm_failure): the bound is the wait's deadline, and its expiry ends the program there (design/data-model.md section
+   6), a revoke's or a lost link's being a value; no kernel halts on the record, every later dispatch running as encoded,
    a later wait on those failure words ending at once, and one under way within 2^10 loads (nccl-mesh-kernels.h
    mesh_step_failed), so a dispatch's waits spin about one bound in all, however many waves its threadgroups run in.  The failure words: [0] the cause (METAL_BOUND the bound reached,
    METAL_LOST the link's ~0, METAL_REVOKED the bound reached once a revoke set [6]; a landing is none, whatever its

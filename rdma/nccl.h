@@ -26,12 +26,12 @@
    each rank then holds, toward each other member's node it is joined to, the stream of the least identity free at both
    ends, as it holds rows (mesh_stream_take: design/transport.md section 14), one communicator a stream (a holding's
    lists and counts are its holder's alone; a link has several, so communicators sharing a node pair hold their own;
-   EBUSY where none toward a member's node is free at both ends); the second gather, bounded by mesh.h MESH_PLATFORM_NS
-   a send or receive, carries each rank's holding's status.  A communicator names nodes and its own pages, never a
+   EBUSY where none toward a member's node is free at both ends); the second gather carries each rank's holding's
+   status.  Each phase of the bootstrap (the connect or accepts, each gather) has a deadline, mesh.h MESH_PLATFORM_NS
+   from its start, past which the program ends (design/data-model.md section 6).  A communicator names nodes and its own pages, never a
    link, port, lane, frame, queue pair or SEND size.  An init fails as a value where two ranks are on one node (its
    holdings are kept a node), a stream is held by another process,
-   or its bridge is still ending its last holding, or gone, or a peer is
-   silent past that bound; what it held is then let go and the next init reads the streams as they stand.  A
+   or its bridge is still ending its last holding, or gone; what it held is then let go and the next init reads the streams as they stand.  A
    connection to the root whose report fails or names no rank still to meet is closed alone and the root meets the
    next (one that sends nothing holds the root's read until the phase ends).  A communicator's map is its members joined where their bridges reach each other's nodes, made alike by
    every member from the same reports and kept for its life: its nodes are its members, and a route crosses members
@@ -51,7 +51,8 @@
    it returns ncclSuccess (it flushes nothing), and ncclCommGetAsyncError reads ncclSuccess once it is done; its
    revokeFlags is not read; from any thread, under comm's own
    lock, never one a group holds while it waits.  ncclCommDestroy waits for the GPU work the library committed for comm
-   until its command buffer's status is Completed or Error (none not committed, no clock), then gives its streams back
+   until its command buffer's status is Completed or Error (none not committed), within MESH_PLATFORM_NS, past which the
+   program ends (design/data-model.md section 6), then gives its streams back
    and frees it (a holding given with units outstanding takes its
    stream out of its link's pairing: design/transport.md section 14); a lease a group of a revoked or failed comm named
    is the caller's to keep until then, since its bridge may still post receives into it for entries presented; work in a caller's encoder is the caller's to
@@ -77,9 +78,9 @@
    list (the pages its bytes lie in) or its landing list (the pages they land in), each direction one list both ends
    lay alike (mesh-plan.h mesh_group_lay: a rank's k-th send to a peer is the peer's k-th receive from it, the
    point-to-point calls in call order, as NCCL pairs them), presented to the bridge as the group is issued (mesh-call.h
-   mesh_stream_present).  A member that fails, is revoked or ends mid-group sends nothing more: no clock of the
-   library or the bridge decides anything, its peers' host-path waits end at a revoke or the link's loss and their GPU
-   waits at their bounds, and its holding's end with units outstanding takes its stream out of its link's pairing
+   mesh_stream_present).  A member that fails, is revoked or ends mid-group sends nothing more: its peers' host-path
+   waits end at a revoke, the link's loss or their deadlines, and their GPU waits at their bounds (a deadline past
+   which the program ends: design/data-model.md section 6), and its holding's end with units outstanding takes its stream out of its link's pairing
    (design/transport.md section 14).  A publication
    raises the holding's `ready` past the entry; a landing is awaited on its `landed`; a write over bytes a SEND reads
    waits for its `sent`.  Nothing credits a publication: the hardware holds a SEND until its receive is posted.  No
@@ -109,10 +110,11 @@
    once, with every group before it; a host-path group fails while its own communicator's groups are issued and not
    complete, and waits only for its own communicator's GPU work, until its command buffer completes (an error status,
    which the platform's watchdog gives a command buffer that overruns, fails the group, and one not yet committed fails
-   it at once, ncclInvalidUsage), a revoke or a holding's end, no clock ending it.  A group waits for room in its bridge's lists until the bridge takes its entries, a revoke or
-   its holding's end, no clock ending it.  A host-path group spins on
+   it at once, ncclInvalidUsage), a revoke or a holding's end.  A group waits for room in its bridge's lists until the
+   bridge takes its entries, a revoke or its holding's end.  A host-path group spins on
    its landings, never parks, and holds no lock another communicator's groups take; its waits end at their counts, a
-   count's ~0, its holding's end or a revoke, and no clock ends them.  A group whose entries lie on one channel completes as
+   count's ~0, its holding's end or a revoke.  Each of these waits has a deadline, MESH_PLATFORM_NS from its start,
+   past which the program ends (design/data-model.md section 6).  A group whose entries lie on one channel completes as
    plain dispatches in the stream's order; a group on two or more, with each channel progressing on its own
    (rdma/NCCL.md "One track", "Per-channel progress").  A group's landings in a stream wait to be posted until the stream
    reaches the group (its first publication on the channel, or a gate store of its first dispatch), so no receive lands
@@ -126,8 +128,9 @@
    ncclMeshComplete encodes its stream's.  A wait that reaches its bound or reads a lost link records its
    cause, entry and channel in its communicator's failure words, on which no kernel halts (every later dispatch runs as
    encoded, a later wait on those words ending at once, one under way within 2^10 loads: nccl-mesh-kernels.h
-   mesh_step_failed), and the group fails as a value after its command
-   buffer (ncclCommGetAsyncError, or the communicator's next group).
+   mesh_step_failed), read by the host after its command buffer (ncclCommGetAsyncError, or the communicator's next
+   group): the bound is the wait's deadline, and a wait past it ends the program there (design/data-model.md section
+   6); a lost link, or a bound reached after a revoke, fails the group as a value.
    The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
    id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
    classic form's.  The group is encoded as compute dispatches between the encoder's commands before and after it, bound

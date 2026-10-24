@@ -102,8 +102,9 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
    bridge's number, its table mesh_routes'; then over `members` (bridge numbers; n 0: every node), mesh_map_members of
    it; node[i] (node NULL: none) map node i's bridge.  Room and returns as mesh_map_members'. */
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map);
-/* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
-   passes and writes it there; 0 where it differs, ETIMEDOUT where the bound passed, else an unreachable bridge's errno.
+/* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial and writes it
+   there, within the deadline bound_ns (0 or UINT64_MAX: 5 s), past which the program ends (design/data-model.md
+   section 6); 0 where it differs, else an unreachable bridge's errno.
    Read (*serial 0) before mesh_map, it makes a later change end the next wait at once. */
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
 /* Whether the map links its nodes a and b, either way (a mesh every pair; with a table, their route crossing relays

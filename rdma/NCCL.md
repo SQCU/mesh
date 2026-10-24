@@ -80,16 +80,17 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
   one node (`ncclInvalidUsage`: its holdings are kept a node, so two ranks of one node would share one slot), where no stream toward a member's node is free at both ends (EBUSY: a link has up to four, each
   held by one communicator, and one whose last holding its bridge is still ending is not free) or the link is gone
   (ENOLINK)
-  (`ncclSystemError`), or where its bootstrap's phase passes its bound (`ncclRemoteError`, ETIMEDOUT); what it held is
-  let go, and the next init reads the streams as they then stand.
+  (`ncclSystemError`); what it held is let go, and the next init reads the streams as they then stand. A bootstrap
+  phase past its deadline ends the program (below).
 - A connection to the root whose report fails (its peer closed it), or names no rank still to meet (a rank out of
   range, or one already met), is closed alone, and the root meets the next; one that sends nothing holds the root's
-  read until the phase ends.
-- Every wait of a bootstrap, blocking init or not, is a 100 ms slice after which the revoke and the phase's end are read
-  again (design/rubrics.md M3, C5). A phase ends `MESH_PLATFORM_NS` after the init began where no rank was met, and
-  `MESH_PLATFORM_NS` after its first rank met (the root's first accept, a non-root's connect) for the rest of it; the
-  second gather has its own `MESH_PLATFORM_NS`. A root that no rank meets therefore fails as a value and is made again
-  by its caller; nothing waits on a peer that never comes.
+  read until the phase's deadline, which ends the program.
+- Every wait of a bootstrap, blocking init or not, is a 100 ms slice after which the revoke and the phase's deadline
+  are read again (design/rubrics.md M3, C5). A phase's deadline is `MESH_PLATFORM_NS` after the init began where no
+  rank was met, and `MESH_PLATFORM_NS` after its first rank met (the root's first accept, a non-root's connect) for the
+  rest of it; the second gather has its own `MESH_PLATFORM_NS`. Past a deadline the program ends, the wait and its
+  deadline named on stderr (design/data-model.md section 6: the operator, 2026-10-23, "no wait may ever run longer than
+  a deadline operand presented at the time the wait was constructed"); nothing waits on a peer that never comes.
 - While the process holds a lease of a bridge that stopped, its next lease (`ncclRemoteError`), communicator
   (`ncclInvalidUsage`: the process's own leases, which only it can free) and `ncclCommRegister` are refused naming it,
   until it has freed every such lease: a process never holds leases of two regions. A node's region is most of its
@@ -102,9 +103,9 @@ torch-mesh's `_stream`), which compiles them in its own process. Only the librar
   communicator, failed or not; no call but these four takes it before its init has ended.
 - A rank's connect and the root's accept hold nothing of the node's bridge: a rank attaches once its bootstrap has
   connected, or accepted every rank, and its report (its node and the nodes its bridge reaches) follows that attach. A
-  blocking init's root waits in its accept, at most its phase's bound.
-- A rank's connect to its root gives up `MESH_PLATFORM_NS` after its first try: an init toward a root that does not
-  listen fails as a value (`ncclRemoteError`, ETIMEDOUT), never retried for good.
+  blocking init's root waits in its accept, at most its phase's deadline.
+- A rank's connect to its root has the deadline `MESH_PLATFORM_NS` after its first try: an init toward a root that does
+  not listen ends the program then, never retried for good.
 - `ncclCommSplit` takes the ranks of a color and holds the child's streams over comm (NCCL's bootstrapSplit, with the
   init's two gathers), streams of its own, as every init takes. `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those that departed, with no
   exchange among the rest, so it holds no stream: a shrink to one rank is a lone rank's communicator, and one to two
@@ -367,9 +368,11 @@ kernel like a dma or networking send/rcv channel for more than 5 seconds without
 `ncclMeshStream.polls` is the most loads of a count one wait of the group makes (`rdma/mesh.metal`
 `mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing. 0, or more than
 `NCCL_MESH_POLLS` (nccl.h), is `NCCL_MESH_POLLS`, in either form: torch-mesh's waits and the engine's encoded crossings
-pass 0. A wait that reaches its bound records its entry, its channel and the bound in its communicator's failure
-words, and the group fails as a value after its command buffer (`ncclCommGetAsyncError`, or the communicator's next
-group: "landed nothing within N polls"). No kernel halts on the record: every later dispatch runs as encoded. But once
+pass 0. The bound is the wait's deadline (design/data-model.md section 6; a kernel has no clock, so its deadline is a
+count of loads). A wait that reaches its bound records its entry, its channel and the bound in its communicator's
+failure words, and the program ends where the host first reads them, after the command buffer
+(`ncclCommGetAsyncError`, or the communicator's next group), naming the wait and its bound on stderr; a bound reached
+after a revoke, and a lost link, fail the group as a value. No kernel halts on the record: every later dispatch runs as encoded. But once
 one wait has recorded a failure, every other wait on the same failure words ends: a later one at once
 (`mesh_step_failed`, read before each wait), and one under way within 2^10 loads (`mesh_wait_bounded`'s stop word, the
 failure claim). So a dispatch's waits hold the GPU about one bound in all, whatever its width: a wide landing's
@@ -522,8 +525,10 @@ it copies its first child's partial as it comes, combines the rest, and sends th
 
 ## Failures
 
-No clock ends a group's wait (the operator, 2026-10-22: "we don't introduce race conditions or use timing anywhere ...
-because using timing is always slower than not using timing"). A group whose entries do not find room in its bridge's
+Every wait of a group has a deadline, `MESH_PLATFORM_NS` from the wait's start, past which the program ends, the wait
+and its deadline named on stderr: no retry and no recovery (design/data-model.md section 6; the operator, 2026-10-23:
+"no wait may ever run longer than a deadline operand presented at the time the wait was constructed; the presumed
+default is 5 seconds"). A group whose entries do not find room in its bridge's
 lists (`MESH_STREAM_ENTRIES` presented and not taken) waits for the bridge's `taken` to advance; a host-path group
 waits for its own communicator's GPU work until its command buffer completes, an error status (which the platform's
 watchdog gives a command buffer that overruns) failing the group, and one not yet committed failing it at once
@@ -561,8 +566,8 @@ still running (a non-blocking one's) ends as a value, its host-path groups retur
 end at their landings or their bounds, or once another wait on the communicator's failure words has failed (no kernel
 stops at the revoke; a wait that reaches its bound after it names it as its cause), and every later group on it is refused (`ncclInvalidUsage`, "revoked") until `ncclCommDestroy` gives its
 streams back; `ncclCommFinalize` after it returns `ncclSuccess`, and its `revokeFlags` is not read. `ncclCommDestroy` awaits the command buffer of the last GPU program the library committed for the communicator until its
-status is Completed or Error (the platform's watchdog ends one that overruns), with no clock and the groups' lock
-released meanwhile; one not committed is not awaited; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
+status is Completed or Error (the platform's watchdog ends one that overruns), within its deadline,
+`MESH_PLATFORM_NS`, past which the program ends, the groups' lock released meanwhile; one not committed is not awaited; work encoded in a caller's encoder (torch-mesh's) is the caller's to finish first, as NCCL's
 contract has it: a kernel of it still queued when its streams are given back would write a stream the next holder
 may take. Likewise a lease a group of a revoked or failed communicator named is the caller's to keep until
 `ncclCommDestroy`: the communicator still holds its streams, its bridge may still post receives into that lease for

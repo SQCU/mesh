@@ -292,7 +292,7 @@ struct ncclComm {
   ncclResult_t async, failed;
   pthread_mutex_t guard;
   int revoked, *peers, initing, *toward;
-  double until;
+  struct mesh_deadline until;
   pthread_t init;
   struct said why, failure;
   void **scratch, **spent;
@@ -873,12 +873,10 @@ const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last.text; }
    blocking root waits in its accept); each reads a revoke of the communicator (ncclCommRevoke, ncclCommAbort,
    ncclCommDestroy: a non-blocking init's) at each look (NCCL's socketPollConnect reads abortFlag so), and the revoke
    shuts the init's sockets down (`peers`), so its gathers end.  The connect and the accept hold nothing of the
-   bridge's: a rank attaches once its bootstrap has connected, or accepted every rank (comm_init).  The first gather has
-   no deadline, that revoke and the caller's process its cancellers (these sockets carry no DMA and enter no driver),
-   and it holds no stream of the bridge's.  The second follows this rank's holds of its streams, on which its peers'
-   wait, so each of its sends and receives is bounded by mesh.h MESH_PLATFORM_NS (ETIMEDOUT:
-   design/transport.md).  A rank's connect gives up MESH_PLATFORM_NS after its first try (ETIMEDOUT), so an init toward
-   a root that does not listen fails as a value rather than trying for good.  A rank's report is struct report.  The id
+   bridge's: a rank attaches once its bootstrap has connected, or accepted every rank (comm_init).  The first gather
+   holds no stream of the bridge's; the second follows this rank's holds of its streams, on which its peers wait.
+   Each phase's waits (the connect, the accepts, each gather) end by the phase's deadline, mesh.h MESH_PLATFORM_NS
+   from its start, past which the program ends (design/data-model.md section 6).  A rank's report is struct report.  The id
    is also the communicator's name where its init names none. */
 static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
 
@@ -944,19 +942,24 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
 
 /* whether comm was revoked; a group on it failed naming it */
 static int revoked(ncclComm_t comm) { return __atomic_load_n(&comm->revoked, __ATOMIC_SEQ_CST); }
-static double now_s(void);
 /* design/rubrics.md M3, C5: each wait of a bootstrap a slice of BOOTSTRAP_SLICE_MS (a poll's timeout, a placed socket's
-   SO_RCVTIMEO and SO_SNDTIMEO), after which the revoke and the phase's end (`until`) are read again: no wait of an init
-   lasts past MESH_PLATFORM_NS of its phase, blocking or not, and a revoke ends a non-blocking one within a slice */
+   SO_RCVTIMEO and SO_SNDTIMEO), after which the revoke and the phase's deadline (`until`) are read again: no wait of an
+   init lasts past its phase's deadline, blocking or not, the program ending there (design/data-model.md section 6),
+   and a revoke ends a non-blocking one within a slice */
 #define BOOTSTRAP_SLICE_MS 100
-/* `size` bytes sent or received whole on comm's bootstrap socket `fd`: 0, ECANCELED (revoked), ETIMEDOUT (the phase's
-   end passed), ECONNRESET (the peer closed), or the errno */
+/* a poll's timeout in ms: a slice, or what is left of the phase's deadline where less (past it, the program ends) */
+static int bootstrap_slice(const struct ncclComm *comm) {
+  const uint64_t left = mesh_deadline_left(&comm->until);
+  return left < (uint64_t)BOOTSTRAP_SLICE_MS * 1000000 ? (int)((left + 999999) / 1000000) : BOOTSTRAP_SLICE_MS;
+}
+/* `size` bytes sent or received whole on comm's bootstrap socket `fd`: 0, ECANCELED (revoked), ECONNRESET (the peer
+   closed), or the errno; past the phase's deadline the program ends */
 static int whole(struct ncclComm *comm, int fd, void *bytes, size_t size, int sending) {
   for (size_t done = 0; done < size;) {
     const ssize_t moved = sending ? send(fd, (char *)bytes + done, size - done, 0) : recv(fd, (char *)bytes + done, size - done, 0);
     if (moved < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
       if (revoked(comm)) return ECANCELED;
-      if (now_s() >= comm->until) return ETIMEDOUT;
+      mesh_deadline_left(&comm->until);
       continue;
     }
     if (moved <= 0) return moved ? errno : ECONNRESET;
@@ -990,9 +993,9 @@ static void bootstrap_put(struct ncclComm *comm, int r, int fd) {
    peer closed it) or names no rank still to meet closed alone, the root accepting the next, though one that sends
    nothing holds the root's read until the phase ends) or a non-root's to the root
    (peers[0], placed once connected), each placed before the revoke is read, so a revoke either finds it or is read.  Its
-   phase ends MESH_PLATFORM_NS after the init began where no rank was met, and MESH_PLATFORM_NS after the first rank met
-   (the root's first accept, a non-root's connect) for the rest of the phase, the first gather's (`until`): 0,
-   ECANCELED (comm revoked), ETIMEDOUT, or the errno */
+   phase's deadline is MESH_PLATFORM_NS after the init began where no rank was met, and MESH_PLATFORM_NS after the
+   first rank met (the root's first accept, a non-root's connect) for the rest of the phase, the first gather's
+   (`until`), past which the program ends: 0, ECANCELED (comm revoked), or the errno */
 static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *reports) {
   int *peers = comm->peers, status = 0;
   char host[NCCL_UNIQUE_ID_BYTES];
@@ -1000,11 +1003,10 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
   char *colon = strrchr(host, ':');
   if (!colon) return EINVAL;
   *colon = 0;
-  const double bound = (double)MESH_PLATFORM_NS / 1e9;
-  comm->until = now_s() + bound;
+  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's connect to its root (bootstrap_open)", 0);
   if (comm->rank) {
     struct addrinfo hint = {.ai_socktype = SOCK_STREAM}, *addresses = NULL;
-    while (peers[0] < 0 && !revoked(comm) && now_s() < comm->until) {
+    while (peers[0] < 0 && !revoked(comm)) {
       if (!getaddrinfo(host, colon + 1, &hint, &addresses)) {
         for (struct addrinfo *a = addresses; a && peers[0] < 0 && !revoked(comm); a = a->ai_next) {
           const int fd = socket(a->ai_family, SOCK_STREAM, 0);
@@ -1014,37 +1016,39 @@ static int bootstrap_open(struct ncclComm *comm, const char *id, struct report *
           socklen_t length = sizeof error;
           while (error == EINPROGRESS || error == EINTR)
             if (revoked(comm)) error = ECANCELED;
-            else if (now_s() >= comm->until) error = ETIMEDOUT;
-            else if (poll(&look, 1, BOOTSTRAP_SLICE_MS) < 0) error = errno == EINTR ? EINPROGRESS : errno;
+            else if (poll(&look, 1, bootstrap_slice(comm)) < 0) error = errno == EINTR ? EINPROGRESS : errno;
             else if (look.revents && getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length)) error = errno;
           if (error) close(fd);
           else bootstrap_put(comm, 0, fd);
         }
         freeaddrinfo(addresses);
       }
-      if (peers[0] < 0) usleep(BOOTSTRAP_SLICE_MS * 1000);
+      if (peers[0] < 0) usleep((useconds_t)bootstrap_slice(comm) * 1000);
     }
-    comm->until = now_s() + bound;
-    return revoked(comm) ? ECANCELED : peers[0] < 0 ? ETIMEDOUT : 0;
+    comm->until = mesh_deadline("libnccl-mesh: the bootstrap's first gather, a rank's report and the table (gather)", 0);
+    return revoked(comm) ? ECANCELED : 0;
   }
   uint16_t port = (uint16_t)atoi(colon + 1);
   int listener = !strcmp(root.id, id) ? root.fd : -1;
   if (listener < 0 && (listener = bootstrap_listen(host, &port)) < 0) return errno;
   int met = 0;
+  comm->until = mesh_deadline("libnccl-mesh: the bootstrap's root, its first rank's connect (bootstrap_open)", 0);
   for (int r = 1; r < comm->nranks && !status;) {
     struct report heard;
     struct pollfd look = {listener, POLLIN, 0};
     int fd = -1;
     while (fd < 0 && !status)
       if (revoked(comm)) status = ECANCELED;
-      else if (now_s() >= comm->until) status = ETIMEDOUT;
-      else if (poll(&look, 1, BOOTSTRAP_SLICE_MS) < 0 && errno != EINTR) status = errno;
+      else if (poll(&look, 1, bootstrap_slice(comm)) < 0 && errno != EINTR) status = errno;
       else if ((fd = accept(listener, NULL, NULL)) < 0 && errno != EWOULDBLOCK && errno != ECONNABORTED && errno != EINTR) status = errno;
-    if (!status && !met) { comm->until = now_s() + bound; met = 1; }
+    if (!status && !met) {
+      comm->until = mesh_deadline("libnccl-mesh: the bootstrap's root, every other rank's connect and report and the first gather (bootstrap_open)", 0);
+      met = 1;
+    }
     if (!status) bootstrap_put(comm, 0, fd);
     if (!status && revoked(comm)) status = ECANCELED;
     const int read = status ? status : whole(comm, fd, &heard, sizeof heard, 0);
-    if (read == ECANCELED || read == ETIMEDOUT) status = read;
+    if (read == ECANCELED) status = read;
     if (status) { bootstrap_put(comm, 0, -1); break; }
     /* a connection whose report does not come, or names no rank still to meet, is closed alone */
     if (read || heard.rank <= 0 || heard.rank >= comm->nranks || peers[heard.rank] >= 0) { bootstrap_put(comm, 0, -1); continue; }
@@ -1251,7 +1255,7 @@ static ncclResult_t comm_init(struct ncclComm *made) {
   if (!result && nranks > 1 && comm_apart(reports, (uint32_t)nranks)) result = apart_fail(made->name);
   if (!result && nranks > 1) {
     mine->status = comm_hold(made, reports);
-    made->until = now_s() + (double)MESH_PLATFORM_NS / 1e9;
+    made->until = mesh_deadline("libnccl-mesh: the init's second gather, after its holds (gather)", 0);
     if ((status = gather(made, nranks, rank, reports, 0))) result = fail(ncclRemoteError, "the bootstrap at %s: %s", made->id, strerror(status));
     for (int r = 0; !result && r < nranks; r++)
       if (reports[r].status) result = hold_fail(made->name, r, reports[r].status);
@@ -1357,8 +1361,9 @@ ncclResult_t ncclCommRevoke(ncclComm_t comm, int revokeFlags) {
 /* ncclCommDestroy: comm stopped (comm_stop), its init's thread joined (a non-blocking init's, which the stop ends), its
    host-path groups returned (each at its next look) and the GPU work the library committed for it awaited (gpu_wait,
    group_lock released for it: its command buffer's Completed or Error status, which the platform's watchdog gives
-   one that overruns, and no clock; the stop that is the destroy's own does not end it, and a buffer not committed
-   is not awaited: nothing would run it while its committer waits), its groups in flight lost; then its streams
+   one that overruns; the stop that is the destroy's own does not end it, and a buffer not committed is not awaited:
+   nothing would run it while its committer waits), its groups in flight lost, each of these waits within its deadline,
+   MESH_PLATFORM_NS from its start, past which the program ends (design/data-model.md section 6); then its streams
    given back (its bridge posts nothing more of their holdings), its pool's leases returned, and comm freed.  Work encoded in a caller's encoder is the
    caller's to finish first (NCCL's: no communicator is destroyed under its own operations in flight): a kernel of it
    still queued would write the stream given back (rdma/NCCL.md "Failures") */
@@ -1366,10 +1371,16 @@ static int gpu_wait(struct ncclComm *comm, int group);
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
   comm_stop(comm);
-  if (comm->initing) pthread_join(comm->init, NULL);
+  if (comm->initing) {
+    const struct mesh_deadline ended = mesh_deadline("ncclCommDestroy: its non-blocking init's end (init_run's `async`)", 0);
+    while (__atomic_load_n(&comm->async, __ATOMIC_ACQUIRE) == ncclInProgress) { mesh_deadline_left(&ended); usleep(20); }
+    pthread_join(comm->init, NULL);
+  }
+  const struct mesh_deadline returned = mesh_deadline("ncclCommDestroy: its host-path groups' return (`runs`)", 0);
   pthread_mutex_lock(&group_lock);
   while (atomic_load(&comm->runs)) {
     pthread_mutex_unlock(&group_lock);
+    mesh_deadline_left(&returned);
     usleep(20);
     pthread_mutex_lock(&group_lock);
   }
@@ -1585,12 +1596,6 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
    presents its entries before it publishes any (schedule); a member that fails mid-group sends nothing more, and its
    holding's end with units outstanding takes its stream out of the pairing (design/transport.md section 14). ---------- */
 
-static double now_s(void) {
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  return now.tv_sec + now.tv_nsec * 1e-9;
-}
-
 /* a failed communicator's groups in flight lost (inflight_lose); its kept result, its kept message named
    (ncclGetLastError: told, nothing formatted again).  Under group_lock */
 static ncclResult_t comm_told(struct ncclComm *comm) {
@@ -1614,8 +1619,9 @@ static ncclResult_t comm_fail(struct ncclComm *comm, ncclResult_t result, const 
   return comm_told(comm);
 }
 
-/* the communicator's failure: the one it kept; a revoke; one its GPU work recorded in its failure words (a wait's
-   bound reached, its link lost: nccl-mesh-metal.h METAL_*); else a stream it holds
+/* the communicator's failure: the one it kept; a revoke; one its GPU work recorded in its failure words (its link
+   lost, or a wait's bound reached after a revoke: nccl-mesh-metal.h METAL_*; a wait past its bound, its deadline, ends
+   the program here, where the host first reads it: design/data-model.md section 6); else a stream it holds
    no longer its own (a bridge's restart, or a pairing lost and made again, opens every stream new: mesh-call.h
    mesh_stream_held), kept now (comm_fail), so ncclCommGetAsyncError reads it before any group runs on it; ncclSuccess
    where none.  Under group_lock */
@@ -1631,6 +1637,13 @@ static ncclResult_t comm_failure(struct ncclComm *comm) {
     if (cause == METAL_LOST)
       return comm_fail(comm, ncclRemoteError, "the link to node %u was lost (its holding's counts ~0) at entry %llu", node,
                        (unsigned long long)(at - 1));
+    if (cause == METAL_BOUND) {
+      const uint64_t polls = atomic_load_explicit(v + 4, memory_order_relaxed);
+      char wait[320];
+      snprintf(wait, sizeof wait, "libnccl-mesh: communicator %s's GPU wait for entry %llu on the channel to node %u, %llu polls (its "
+               "stream's bound, ncclMeshStream polls)", comm->name, (unsigned long long)(at - 1), node, (unsigned long long)polls);
+      mesh_expired(wait, polls * (MESH_PLATFORM_NS / NCCL_MESH_POLLS));
+    }
     return comm_fail(comm, ncclRemoteError, "entry %llu on the channel to node %u was not done within %llu polls of a GPU wait (its "
                      "stream's bound, ncclMeshStream polls): its bytes had not landed or been sent, the peer's work there beginning that "
                      "much later, or its link was lost", (unsigned long long)(at - 1), node,
@@ -2156,7 +2169,8 @@ static int room_for(const struct channel *ch, int list, uint64_t need) {
    (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): comm kept from its destroy
    (`runs`), and the list of communicators the program being encoded touched set aside (it is comm alone where a group
    presents, launch_metal), so a program another thread encodes meanwhile ends with its own; each look spins, ending at
-   the bridge's `taken` advancing, at a revoke or at the holding's end, never at a clock; then the lock taken again, the
+   the bridge's `taken` advancing, at a revoke or at the holding's end, and past its deadline, MESH_PLATFORM_NS from its
+   start, the program (design/data-model.md section 6); then the lock taken again, the
    list restored and comm's failure read again (comm_failure: a group in flight of it may have failed meanwhile).
    Under group_lock */
 static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, int list, uint64_t need) {
@@ -2165,11 +2179,13 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
   atomic_fetch_add(&comm->runs, 1);
   pthread_mutex_unlock(&group_lock);
   ncclResult_t result = ncclSuccess;
+  const struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: room on a stream's list for a group's entries (room_wait)", 0);
   while (!result && !room_for(ch, list, need))
     if (revoked(comm)) result = revoked_fail(comm);
     else if (!mesh_stream_held(&comm->attach->context, ch->stream, *ch->wire))
       result = fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended before the group's entries there were "
                     "presented (design/transport.md section 14); none was presented", comm->name, ch->node);
+    else mesh_deadline_left(&deadline);
   pthread_mutex_lock(&group_lock);
   atomic_fetch_sub(&comm->runs, 1);
   if (mine) touch(comm);
@@ -2179,8 +2195,8 @@ static ncclResult_t room_wait(struct ncclComm *comm, const struct channel *ch, i
    the bridge has room for all of them (each list's entries presented and not taken fewer than MESH_STREAM_ENTRIES with
    them: the bridge takes an entry as it reads it while fewer than that of the list are taken and not done), so a group
    is presented whole or not at all; a send entry's bytes ready once `ready` passes them (word 0), a landing entry gated
-   as gate_of says.  The wait for room (room_wait) holds no lock and no clock ends it (design/rubrics.md M3, 10-18:
-   every wait killable).  0; ncclSystemError where a list's entries are more than the bridge ever takes, the wait's
+   as gate_of says.  The wait for room (room_wait) holds no lock and ends by its deadline (design/rubrics.md M3, 10-18:
+   every wait killable; design/data-model.md section 6).  0; ncclSystemError where a list's entries are more than the bridge ever takes, the wait's
    failure (a revoke, the holding's end, comm's failure: nothing presented, the call's failure alone); a refused
    presentation fails comm (its lists stand mid-group).  Under group_lock */
 static ncclResult_t present_group(struct ncclComm *comm, struct schedule *plans) {
@@ -2255,10 +2271,10 @@ static mesh_pages count_of(_Atomic uint64_t *word) { return pages_from_word(atom
    then every send entry's bytes sent, so the caller may write its send buffer again.  Every wait ends at an event: its
    count, a count's ~0 (the link lost, the bridge stopped), the end of its holding with work left (its stream no
    longer the communicator's own, mesh_stream_held: a pairing lost and made again, a bridge restarted), or a revoke,
-   each read at every look.  No clock ends it (the operator, 2026-10-22: "we don't introduce race conditions or use
-   timing anywhere ... because using timing is always slower than not using timing"): a peer that has not yet
-   presented is waited for, and the caller decides whether to revoke and run again
-   (design/pages-and-functions.md).  Every look spins: nothing parks */
+   each read at every look, and each of the two waits (the landings and publications, then the SENDs) ends by its
+   deadline, MESH_PLATFORM_NS from its start, past which the program ends (the operator, 2026-10-23: "no wait may ever
+   run longer than a deadline operand presented at the time the wait was constructed"; design/data-model.md section
+   6).  Every look spins: nothing parks */
 static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel *ch) {
   return fail(ncclRemoteError, "communicator %s: its holding of the stream toward node %u ended with the group's entries there not done (the "
               "stream is no longer its own: its link lost and paired again, or its bridge restarted; design/transport.md section 14)",
@@ -2266,8 +2282,10 @@ static ncclResult_t held_fail(const struct ncclComm *comm, const struct channel 
 }
 static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
   const mesh_pages none = {0};
+  const struct mesh_deadline landing = mesh_deadline("libnccl-mesh: a host-path group's landings and publications (run)", 0);
   for (;;) {
     if (revoked(comm)) return revoked_fail(comm);
+    mesh_deadline_left(&landing);
     int open = 0;
     for (uint32_t h = 0; h < comm->count; h++) {
       struct channel *ch = comm->channels + h;
@@ -2307,8 +2325,10 @@ static ncclResult_t run(struct ncclComm *comm, struct schedule *plans) {
     }
     if (!open) break;
   }
+  const struct mesh_deadline sending = mesh_deadline("libnccl-mesh: a host-path group's SENDs done (run)", 0);
   for (int all = 0; !all;) {
     if (revoked(comm)) return revoked_fail(comm);
+    mesh_deadline_left(&sending);
     all = 1;
     for (uint32_t h = 0; h < comm->count; h++) {
       const struct channel *ch = comm->channels + h;
@@ -2410,13 +2430,14 @@ enum { GPU_ENDED, GPU_ERROR, GPU_UNCOMMITTED, GPU_REVOKED, GPU_HOLDING };
    mutex (design/rubrics.md M3, M4: other communicators' groups and revokes go on meanwhile): the count and the buffer
    read under the lock; the wait in MESH_PAUSE_NS slices, ending at the signal or at the buffer's end as its status tells
    it (Completed, or Error, which the platform's watchdog gives a buffer that overruns: nccl-mesh-metal.m metal_ended),
-   never at a clock, and for a group (`group`: comm kept from its destroy meanwhile by `runs`) at a revoke or a holding's
-   end too; then the lock taken again, and the wait made again where a later program touched comm meanwhile.  Under
-   group_lock */
+   and for a group (`group`: comm kept from its destroy meanwhile by `runs`) at a revoke or a holding's end too, and
+   past its deadline, MESH_PLATFORM_NS from its start, the program (design/data-model.md section 6); then the lock taken
+   again, and a wait made for a later program that touched comm meanwhile.  Under group_lock */
 static int gpu_wait(struct ncclComm *comm, int group) {
   int ended = GPU_ENDED;
   while (ended == GPU_ENDED && finished && comm->last && metal_signaled(finished) < comm->last) {
     const uint64_t last = comm->last;
+    const struct mesh_deadline deadline = mesh_deadline("libnccl-mesh: a communicator's last GPU program's end (gpu_wait)", 0);
     void *command = metal_retain(comm->command);
     if (group) atomic_fetch_add(&comm->runs, 1);
     pthread_mutex_unlock(&group_lock);
@@ -2427,7 +2448,8 @@ static int gpu_wait(struct ncclComm *comm, int group) {
       for (uint32_t h = 0; group && h < comm->count && ended == GPU_ENDED; h++)
         if (!mesh_stream_held(&comm->attach->context, comm->channels[h].stream, *comm->channels[h].wire)) ended = GPU_HOLDING;
       if (ended != GPU_ENDED) break;
-      metal_wait(finished, last, MESH_PAUSE_NS);
+      const uint64_t left = mesh_deadline_left(&deadline);
+      metal_wait(finished, last, left < MESH_PAUSE_NS ? left : MESH_PAUSE_NS);
     }
     metal_release(command);
     pthread_mutex_lock(&group_lock);

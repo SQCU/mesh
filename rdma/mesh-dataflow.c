@@ -68,15 +68,20 @@ int mesh_region(uint64_t *bytes,uint64_t *unleased){
 }
 
 /* design/transport.md: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
-   copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open) */
+   copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open); the read
+   within its deadline, MESH_PLATFORM_NS from its start (design/data-model.md section 6) */
 static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){
+  const struct mesh_deadline deadline=mesh_deadline("libmesh: the map's records read (mesh_records_read)",0);
   for(;;){
     uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
     if(before&1){
+      const uint64_t left=mesh_deadline_left(&deadline);
       if(os_sync_wait_on_address_with_timeout(&m->map,before,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return -ESRCH;
+           OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_PAUSE_NS?left:MESH_PAUSE_NS)<0 && errno==ETIMEDOUT &&
+         mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return -ESRCH;
       continue;
     }
+    mesh_deadline_left(&deadline);
     uint64_t count=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
     int fits=at<=length && count<=(length-at)/sizeof(struct mesh_record);
     struct mesh_record *copy=fits?malloc((count?count:1)*sizeof *copy):NULL;
@@ -187,17 +192,22 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
   if(error)return -error;
   /* the records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
      (mesh-records.c health_put); a read that a health write overlapped is read again, and an odd serial (a write open)
-     waited on as mesh_records_read waits on the map's, ESRCH where the bridge went while it was open */
+     waited on as mesh_records_read waits on the map's, ESRCH where the bridge went while it was open; the read within
+     its deadline, MESH_PLATFORM_NS from its start (design/data-model.md section 6) */
+  const struct mesh_deadline deadline=mesh_deadline("libmesh: the nodes' health read (mesh_nodes_health)",0);
   int count;
   for(;;){
     const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
     if(before&1){
+      const uint64_t left=mesh_deadline_left(&deadline);
       if(os_sync_wait_on_address_with_timeout(&m->health,before,sizeof m->health,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid))){
+           OS_CLOCK_MACH_ABSOLUTE_TIME,left<MESH_PAUSE_NS?left:MESH_PAUSE_NS)<0 && errno==ETIMEDOUT &&
+         mesh_gone((pid_t)atomic_load(&m->bridge_pid))){
         count=-ESRCH;break;
       }
       continue;
     }
+    mesh_deadline_left(&deadline);
     count=mesh_records_read(m,length,&r);
     if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
     free(r);r=NULL;
@@ -215,22 +225,23 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
 }
 
 /* design/transport.md C5 (8e716999's mesh.wait(serial), on this bound): the map's serial waited on until
-   it differs from *serial, the bridge's exit (ESRCH: its pid in the region 0 or another, or its process gone, read at
-   every wake and every MESH_PAUSE_NS re-look, as mesh_records_read reads it) or bound_ns (UINT64_MAX: none) */
+   it differs from *serial or the bridge's exit (ESRCH: its pid in the region 0 or another, or its process gone, read at
+   every wake and every MESH_PAUSE_NS re-look, as mesh_records_read reads it), within the deadline bound_ns (0 or
+   UINT64_MAX: none given, MESH_PLATFORM_NS), past which the program ends (design/data-model.md section 6) */
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return error;
-  const uint64_t bridge=atomic_load_explicit(&m->bridge_pid,memory_order_acquire),now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  const uint64_t until=bound_ns>UINT64_MAX-now?UINT64_MAX:now+bound_ns;
+  const struct mesh_deadline deadline=mesh_deadline("libmesh: the map's serial awaited (mesh_map_wait)",bound_ns==UINT64_MAX?0:bound_ns);
+  const uint64_t bridge=atomic_load_explicit(&m->bridge_pid,memory_order_acquire);
   uint64_t seen=atomic_load_explicit(&m->map,memory_order_acquire);
-  for(uint64_t at=now;!error && seen==*serial && at<until;at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)){
+  while(!error && seen==*serial){
+    const uint64_t left=mesh_deadline_left(&deadline);
     os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
-                                         until-at<MESH_PAUSE_NS?until-at:MESH_PAUSE_NS);
+                                         left<MESH_PAUSE_NS?left:MESH_PAUSE_NS);
     seen=atomic_load_explicit(&m->map,memory_order_acquire);
     if(seen==*serial && (atomic_load_explicit(&m->bridge_pid,memory_order_acquire)!=bridge || mesh_gone((pid_t)bridge)))error=ESRCH;
   }
-  if(!error)error=seen!=*serial?0:ETIMEDOUT;
   if(!error)*serial=seen;
   munmap(m,length);
   return error;
