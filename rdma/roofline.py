@@ -111,3 +111,57 @@ def roofline(cables, ranks, useful_bytes, offsets):
             'capacity_utilization_bounds': [ideal / hi if hi else None, ideal / lo if lo else None],
             'unused_capacity_bytes_bounds': [capacity * lo - wire, capacity * hi - wire],
             'clock_probe_bounds_ns': probes, 'clock_offset_bounds_ns': offsets, 'nodes': nodes}
+
+
+def finishes(cables, ranks, stages, offsets):
+    """Completion residuals for a repeated compiled group, after the full call.
+
+    Every stage has the same entry sequence on each cable. Page-prefix order
+    identifies stages without inserting phase barriers or modifying transport.
+    """
+    arrivals = {(w['cable'], w['peer'], w['first'], w['last']): (r['rank'], w)
+                for r in ranks for w in r['windows'] if w['direction'] == 1}
+    groups = [{} for _ in range(stages)]
+    for rank in ranks:
+        source = rank['rank']
+        for cable, c in enumerate(cables):
+            entries = sorted((w for w in rank['windows'] if not w['direction'] and w['cable'] == cable),
+                             key=lambda w: w['first'])
+            if not entries:
+                continue
+            if len(entries) % stages:
+                raise ValueError('trace does not match repeated compiled stages')
+            count = len(entries) // stages
+            arc = str(2 * cable + (source == c['nodes'][1]))
+            for layer in range(stages):
+                part = entries[layer * count:(layer + 1) * count]
+                starts, ends, inner, outer = [], [], [], []
+                for w in part:
+                    dest, landed = arrivals[w['cable'], source, w['first'], w['last']]
+                    start = [w['start_lo_ns'] + offsets[str(source)][0], w['start_hi_ns'] + offsets[str(source)][1]]
+                    end = [landed['end_lo_ns'] + offsets[str(dest)][0], landed['end_hi_ns'] + offsets[str(dest)][1]]
+                    starts.append(start); ends.append(end)
+                    inner.append((start[1], end[0])); outer.append((start[0], end[1]))
+                groups[layer][arc] = {'source': source, 'bytes': sum(w['bytes'] for w in part),
+                                     'start_ns': [min(s[k] for s in starts) for k in (0, 1)],
+                                     'finish_ns': [max(e[k] for e in ends) for k in (0, 1)],
+                                     'window_seconds_bounds': [union_ns(inner) * 1e-9, union_ns(outer) * 1e-9]}
+    report, penalty = [], 0.0
+    tails = [0.0] * len(ranks)
+    for group in groups:
+        if len(group) != 2 * len(cables):
+            raise ValueError('equal-finish observation requires traffic on every directed cable')
+        origin = min(v['start_ns'][0] for v in group.values())
+        end = max(v['finish_ns'][1] for v in group.values())
+        span = (end - origin) * 1e-9
+        mid = [((v['finish_ns'][0] - origin) + (v['finish_ns'][1] - origin)) * 0.5e-9 for v in group.values()]
+        mean = sum(mid) / len(mid)
+        variance = sum((t - mean) ** 2 for t in mid) / len(mid)
+        penalty += variance / span ** 2 / stages
+        spread = [max(0, max(v['finish_ns'][0] for v in group.values()) - min(v['finish_ns'][1] for v in group.values())) * 1e-9,
+                  (max(v['finish_ns'][1] for v in group.values()) - min(v['finish_ns'][0] for v in group.values())) * 1e-9]
+        for rank in range(len(ranks)):
+            tails[rank] += max(sum(v['window_seconds_bounds']) / 2 for v in group.values() if v['source'] == rank)
+        report.append({'span_seconds': span, 'spread_seconds_bounds': spread,
+                       'rms_finish_seconds': variance ** 0.5, 'arcs': group})
+    return {'stages': report, 'finish_variance': penalty, 'delivery_tail_seconds': tails}

@@ -28,6 +28,22 @@ class RoutingTests(unittest.TestCase):
         self.assertGreaterEqual(span, 2_000_000_000 / 30_000_000_000 - 1e-8)
         self.assertTrue(all(x > 0 for x in result['directed_load_bytes']))
         self.assertTrue(all(x <= 10_000_000_000 * span * 1.000001 for x in result['directed_load_bytes']))
+        # Extra Studio relays can fill all fourteen directions without adding
+        # any bytes to the Mini cut. A min-hop face wrongly excludes this.
+        self.assertTrue(all(abs(x / 10_000_000_000 - span) < 1e-7 for x in result['directed_load_bytes']))
+        for direction in (0, 1):
+            parallel = result['directed_load_bytes'][direction:8:2]
+            self.assertLess(max(parallel) - min(parallel), 1e-5 * demands[0, 1])
+
+    def test_spare_ragged_parallel_capacity_has_equal_service_times(self):
+        fabric = self.fabric()
+        fabric.cables[1]['bits_per_second'] //= 2
+        demands = {pair: 1_000_000_000 for pair in fabric.paths}
+        _, result = fabric.allocate(demands)
+        for direction in (0, 1):
+            times = [result['directed_load_bytes'][2 * e + direction] /
+                     (fabric.cables[e]['bits_per_second'] / 8) for e in range(4)]
+            self.assertLess(max(times) - min(times), 1e-7)
 
 
 if __name__ == '__main__':

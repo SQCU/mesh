@@ -48,7 +48,8 @@ class Fabric:
 
     def allocate(self, demands, quantum=16384, units=4096):
         """design/whole-function.md#ahead-of-time"""
-        from scipy.optimize import linprog
+        import numpy as np
+        from scipy.optimize import linprog, minimize
         pairs = sorted(demands)
         columns = [(pair, p) for pair in pairs for p in range(len(self.paths[pair]))]
         scale = max(float(v) for v in demands.values())
@@ -73,13 +74,33 @@ class Fabric:
             raise RuntimeError(f'physical route allocation: {solved.message}')
         optimum = float(solved.x[-1])
         bounds[-1] = (0, optimum * (1 + 1e-8) + 1e-10)
-        short = linprog([float(len(self.paths[pair][p])) for pair, p in columns] + [0.0],
-                        A_ub=edge, b_ub=[0.0] * len(edge), A_eq=equality, b_eq=rhs, bounds=bounds, method='highs')
-        if not short.success:
-            raise RuntimeError(f'physical route hop minimization: {short.message}')
+        # Equalize finish times on the optimum-duration face. Minimizing hops
+        # first excludes relaying on spare cables, even when it adds no load
+        # at the bottleneck. Wire bytes remain distinct from useful bytes.
+        incidence = np.asarray(edge)[:, :-1]
+        conservation = np.asarray(equality)[:, :-1]
+        service = incidence / (np.asarray(capacities) / rate)[:, None]
+        limit = (np.asarray(capacities) / rate) * bounds[-1][1]
+
+        def potential(x):
+            t = service @ x - optimum
+            return float(t @ t + 1e-8 * (x @ x))
+
+        def gradient(x):
+            return 2 * (service.T @ (service @ x - optimum) + 1e-8 * x)
+
+        centered = minimize(potential, solved.x[:-1], jac=gradient, method='SLSQP', bounds=bounds[:-1],
+                            constraints=[{'type': 'eq', 'fun': lambda x: conservation @ x - rhs,
+                                          'jac': lambda x: conservation},
+                                         {'type': 'ineq', 'fun': lambda x: limit - incidence @ x,
+                                          'jac': lambda x: -incidence}],
+                            options={'ftol': 1e-12, 'maxiter': 1000})
+        if not centered.success:
+            raise RuntimeError(f'physical route service-time minimization: {centered.message}')
+        flow = centered.x
         decisions = {}
         for pair in pairs:
-            flows = [float(short.x[k]) * scale for k, (commodity, _) in enumerate(columns) if commodity == pair]
+            flows = [float(flow[k]) * scale for k, (commodity, _) in enumerate(columns) if commodity == pair]
             total = max(units, len(flows))
             wanted = [v / sum(flows) * total for v in flows]
             name = f'route:{pair[0]}:{pair[1]}'
@@ -87,7 +108,7 @@ class Fabric:
                                'grain': 0, 'low': [1e-6] * len(flows), 'high': [total] * len(flows),
                                'edges': sorted({str(e) for path in self.paths[pair] for e in self.arcs(pair[0], path)})}
         return decisions, {'fluid_lower_bound_seconds': optimum * scale / rate,
-                           'directed_load_bytes': [sum(edge[e][k] * short.x[k] * scale for k in range(len(columns))) for e in range(len(edge))],
+                           'directed_load_bytes': list(incidence @ flow * scale),
                            'demand_bytes': {f'{a}:{b}': demands[a, b] for a, b in pairs}}
 
     def install(self, comm, parts):

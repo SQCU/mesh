@@ -83,6 +83,36 @@ def min_max(total, grain, low, high, times):
             return c, max(floor, pivot)
 
 
+def equal_finish(total, grain, low, high, a, b):
+    """Affine equal-finish shares, restored from fa36bea6^; min_max realizes tiles.
+
+    a includes measured fixed cost and dependency delivery tail; b is measured
+    work cost per unit. Neither is an assumed price for DMA/compute interference.
+    """
+    if not (len(a) == len(b) == len(low) == len(high)) or not a:
+        raise ValueError('equal-finish dimensions')
+    if any(not math.isfinite(v) or v <= 0 for v in b):
+        raise ValueError('equal-finish slopes must be positive')
+    if not sum(low) <= total <= sum(high):
+        raise ValueError('infeasible equal-finish bounds')
+    held = {}
+    while True:
+        free = [i for i in range(len(a)) if i not in held]
+        T = ((total - sum(held.values()) + sum(a[i] / b[i] for i in free)) /
+             sum(1 / b[i] for i in free) if free else max(a[i] + b[i] * held[i] for i in held))
+        s = [held[i] if i in held else (T - a[i]) / b[i] for i in range(len(a))]
+        below = [i for i in free if s[i] < low[i]]
+        above = [i for i in free if s[i] > high[i]]
+        if not below and not above:
+            break
+        if sum(low[i] - s[i] for i in below) >= sum(s[i] - high[i] for i in above):
+            held.update((i, float(low[i])) for i in below)
+        else:
+            held.update((i, float(high[i])) for i in above)
+    c, _ = min_max(total, grain, low, high, [lambda u, i=i: a[i] + b[i] * u for i in range(len(a))])
+    return c, s, T
+
+
 def time(points):
     """A rank's time for d units from its measured points [(units, seconds)], made nondecreasing in units (pool
     adjacent violators [Ayer et al. 1955]: more units never take less time), the time interpolated linearly between

@@ -104,7 +104,7 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
   const uint32_t P=paths->count;
   uint64_t a=page,b=operand.element_bytes;
   while(b){const uint64_t r=a%b;a=b;b=r;}
-  const uint64_t q=page/a,units=(operand.elements-1)/q+1,floor=units>=P;
+  const uint64_t q=page/a,units=(operand.elements-1)/q+1;
   uint64_t *count=calloc(P,sizeof *count),*base=calloc(P,sizeof *base);
   double *remainder=calloc(P,sizeof *remainder);
   if(!count || !base || !remainder){free(count);free(base);free(remainder);return -ENOMEM;}
@@ -113,8 +113,11 @@ int mesh_write_compile(const struct mesh_fabric *f,uint32_t rank,uint32_t source
   for(uint32_t p=0;p<P;p++)total+=exp(paths->log_weight[p]-maximum);
   uint64_t assigned=0;
   for(uint32_t p=0;p<P;p++){
-    const double real=(double)(units-floor*P)*exp(paths->log_weight[p]-maximum)/total;
-    count[p]=floor+(uint64_t)real;remainder[p]=real-(uint64_t)real;assigned+=count[p];
+    /* Weights describe total flow, not surplus after a page on every path.
+       A sub-page path can round to zero; cable coverage belongs to the joint
+       flow allocation, not to an extra relay page in every commodity. */
+    const double real=(double)units*exp(paths->log_weight[p]-maximum)/total;
+    count[p]=(uint64_t)real;remainder[p]=real-(uint64_t)real;assigned+=count[p];
   }
   while(assigned<units){
     uint32_t best=0;

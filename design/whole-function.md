@@ -83,8 +83,38 @@ entry reads its receive's registered rows directly and uses the incoming
 stream's landed prefix as its supplied word. The bridge can forward a page as
 soon as it lands; it need not wait for a host round trip or for the whole range.
 There is no chunk-size parameter or extra per-chunk publication in the interface.
+Path weights describe total flow. The compiler rounds those shares to page
+counts by largest remainder, conserving the operand exactly. It does not add a
+mandatory page to every possible path: that would distort the requested vector
+and create relay dependencies for shares smaller than a page. Physical cable
+coverage is assessed across the function's complete set of writes.
 The ordinary two-participant NCCL send/receive interface still requires a direct
 connection; a multi-hop write declares its participating relays collectively.
+
+### Fused physical writes
+
+`torch_mesh.fused.writes` declares a group of those writes and returns publication
+and landing bindings in physical channel order. Parallel cables remain separate.
+The producer releases one cumulative publication per active cable after writing
+its data; the consumer awaits one final landing prefix per active cable. Relay
+entries continue to use incoming landed prefixes directly. Neither a relay GPU
+wait nor a publication of an unlanded relay page is introduced.
+
+These writes use leases owned by the complete data function. Previous users of
+landing leases must have finished **before the group is encoded**: reception is
+posted immediately, without waiting for that node's own producer. Source and
+relay leases remain immutable through downstream uses. Overlapping landing
+ranges, or landing ranges overlapping local sources, fail during realization.
+The DNN uses distinct leases per layer and a complete-function rendezvous before
+reuse. Its producer publishes from its last threadgroup; its consumer reads the
+received values directly. The ordinary write interface remains available for
+the control comparison.
+
+The plan also compiles the immutable group's per-cable entry order by hop depth,
+then declared call and operand offset. Both ends derive the same order. Local
+first hops precede relays, so a ready local producer is not queued behind an
+unready relay. This is an AOT dependency ordering, with no runtime arbitration
+or additional waits. Ordinary groups retain their existing ordering.
 
 ## Buffer ownership and GPU payloads
 
@@ -108,12 +138,19 @@ into the published lease using the existing Metal tensor-operation pattern.
 paths. For a declared function's pairwise byte demands, `allocate` solves a
 multi-commodity linear program: each commodity's path flows sum to its bytes,
 and each directed physical cable's aggregate load is bounded by its capacity
-times a common duration. A positive per-path quantum floor maintains path
-coverage. The second solve minimizes byte-hops at the first solve's duration.
+times a common duration. A positive per-path quantum floor reserves flow in
+the fluid model; realization can round a sub-page share to zero. The second
+solve minimizes byte-hops at the first solve's duration.
 It uses [HiGHS through SciPy](https://docs.scipy.org/doc/scipy/reference/optimize.linprog-highs.html).
 The result is the fluid model's constrained optimum, not a claim that a real
 program with dependency release times attains that duration. Integer transport
 quanta, producer times, queues, and dispatch costs remain for measured feedback.
+
+Linear objectives can leave an arbitrary cable busy while equivalent parallel
+cables carry almost nothing. A third, convex AOT solve minimizes
+`sum_e(load_e^2 / capacity_e)` on the same duration and byte-hop optimum face.
+This distributes spare parallel capacity in proportion to capacity, including
+unequal cables. It introduces no measured-candidate acceptance decision.
 
 ## Finite differences
 
@@ -185,6 +222,14 @@ evaluation. These pages-to-pages windows include clock uncertainty even in their
 per-node summaries because their endpoints are on different nodes. A lower
 duration bound of zero has no finite bandwidth upper bound; uncertainty is not
 silently replaced by a point estimate.
+
+Clock probes now reuse the existing TCPStore connection. Recorded page causality
+also tightens their offset intervals: source eligibility precedes first arrival.
+An all-pairs shortest-path closure propagates these difference constraints.
+No symmetric-delay assumption or assumed attained bandwidth enters the bounds.
+Inconsistent constraints fail the measurement. Reports retain both raw probes
+and refined intervals; historical comparisons apply the same refinement to old
+raw traces, so narrower clock uncertainty is not credited as a transport speedup.
 
 Report best attained whole-function latency and best attained transaction-window
 bandwidth with their evaluation IDs and corresponding other measurements. They

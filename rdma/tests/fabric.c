@@ -1,6 +1,7 @@
 #include "mesh-plan.h"
 #include <assert.h>
 #include <errno.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,7 +50,7 @@ static void writes(void){
       used|=1u<<t->cable;
     }
     for(uint64_t i=0;i<elements;i++)assert(coverage[i]==1);
-    if(elements>3*4096)assert(used==31);
+    assert(used);
     for(int r=0;r<3;r++)free(steps[r]);
     free(coverage);
   }
@@ -57,6 +58,14 @@ static void writes(void){
   const struct mesh_paths loop={1,bad_first,bad_cable,weight};
   assert(mesh_paths_check(&f,0,1,&loop)==EINVAL);
   assert(mesh_paths_check(&f,0,0,&paths)==EINVAL);
+  /* A negligible relay share must not take a mandatory page away from the
+     requested 1:2:3 direct allocation. Every physical direct cable is used. */
+  const double exact_weights[]={0,log(2),log(3),log(1e-10)};
+  const struct mesh_paths exact={4,first,path,exact_weights};
+  struct mesh_transfer exact_steps[4];
+  assert(mesh_write_compile(&f,0,0,1,&exact,(struct mesh_operand){0,4,6*4096},16384,exact_steps,4)==3);
+  for(int k=0;k<3;k++)assert(exact_steps[k].cable==(unsigned)k && exact_steps[k].step.piece.elements==(uint64_t)(k+1)*4096);
+  assert(mesh_write_compile(&f,2,0,1,&exact,(struct mesh_operand){0,4,6*4096},16384,NULL,0)==0);
   puts("one-way paths: reciprocal entries, unique destination coverage, relay dependencies, ragged tails passed");
 }
 

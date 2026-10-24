@@ -62,11 +62,14 @@ def simplex(values, total, low, high):
 class FunctionFlow:
     """design/whole-function.md#finite-differences"""
 
-    def __init__(self, decisions, learning_rate=0.15, perturbation=0.2, congestion_weight=1.0):
+    def __init__(self, decisions, learning_rate=0.15, perturbation=0.2, congestion_weight=1.0,
+                 finish_weight=1.0, fit_compute=False):
         self.decisions = copy.deepcopy(decisions)
         self.vector, self.momentum, self.energy = {}, {}, {}
         self.learning_rate, self.perturbation = float(learning_rate), float(perturbation)
         self.congestion_weight = float(congestion_weight)
+        self.finish_weight, self.fit_compute = float(finish_weight), bool(fit_compute)
+        self.compute_samples, self.compute_model = [], None
         self.serial, self.round, self.workload = 0, 0, None
         self.samples, self.history = [], []
         for name, spec in self.decisions.items():
@@ -118,7 +121,13 @@ class FunctionFlow:
         parts = {}
         for name, values in continuous.items():
             spec = self.decisions[name]
-            parts[name] = project(values, int(spec['total']), spec['grain'], spec['low'], spec['high']) if spec['grain'] else values
+            if name == 'compute' and self.fit_compute and self.compute_model is not None:
+                from allocate import min_max
+                slopes = self.compute_model['slopes']
+                parts[name], _ = min_max(int(spec['total']), spec['grain'], list(map(int, spec['low'])), list(map(int, spec['high'])),
+                                          [lambda u, i=i: slopes[i] * (u - values[i]) for i in range(len(values))])
+            else:
+                parts[name] = project(values, int(spec['total']), spec['grain'], spec['low'], spec['high']) if spec['grain'] else values
         return {'id': self.serial, 'parts': parts, 'continuous': continuous, 'phase': 'finite_difference',
                 'offset': sign * self.perturbation / (self.round + 1) ** 0.101, 'round': self.round}
 
@@ -139,7 +148,12 @@ class FunctionFlow:
         if not math.isfinite(seconds) or seconds <= 0 or not math.isfinite(congestion) or congestion < 0:
             raise ValueError('function latency and congestion must be finite')
         self.workload = workload
-        cost = math.log(seconds) + self.congestion_weight * congestion / seconds
+        finish = float(observation.get('finish_variance', 0))
+        if not math.isfinite(finish) or finish < 0:
+            raise ValueError('finish variance must be finite and nonnegative')
+        if self.fit_compute:
+            self._compute_observation(observation)
+        cost = math.log(seconds) + self.congestion_weight * congestion / seconds + self.finish_weight * finish
         self.samples.append({'id': self.serial, 'seconds': seconds, 'cost': cost, 'offset': expected['offset']})
         self.serial += 1
         if len(self.samples) == 4:
@@ -160,8 +174,51 @@ class FunctionFlow:
                     values[i] -= rate * m / math.sqrt(v + 1e-12)
                 centre = statistics.mean(values)
                 self.vector[name] = [v - centre for v in values]
+            if self.fit_compute:
+                self._compute_step()
             self.history.append({'round': self.round, 'before': before, 'after': self.centre,
                                  'gradient': gradient, 'learning_rate': rate, 'samples': self.samples})
             self.samples = []
             self.round += 1
         return self.ask()
+
+    def _compute_observation(self, observation):
+        n = len(self.decisions['compute']['parts'])
+        times = observation['compute_seconds']
+        tails = observation['delivery_tail_seconds']
+        if len(times) != n or len(tails) != n or any(not math.isfinite(t) or t <= 0 for t in times + tails):
+            raise ValueError('one positive producer and delivery time per rank required')
+        self.compute_samples.append({'parts': observation['parts']['compute'], 'seconds': list(times), 'tails': list(tails)})
+        self.compute_samples = self.compute_samples[-64:]
+
+    def _compute_step(self):
+        """Historical equal_finish/min_max, driven only by completed functions.
+
+        Fit fixed and work-dependent producer cost separately. A weak prior
+        identifies the first single-share sample; later share variation supplies
+        the slope. Transport tails come from cable windows, not GPU contention.
+        """
+        import numpy as np
+        from scipy.optimize import nnls
+        from allocate import equal_finish
+        spec = self.decisions['compute']
+        total, n = spec['total'], len(spec['parts'])
+        weights = np.asarray([0.97 ** (len(self.compute_samples) - 1 - k) for k in range(len(self.compute_samples))])
+        fixed, slopes, tails = [], [], []
+        for i in range(n):
+            x = np.asarray([s['parts'][i] / total for s in self.compute_samples])
+            y = np.asarray([s['seconds'][i] for s in self.compute_samples])
+            prior = [0.0, float(y[0] / x[0])] if self.compute_model is None else [self.compute_model['fixed'][i], self.compute_model['slopes'][i] * total]
+            matrix = np.column_stack((np.ones(len(x)), x)) * np.sqrt(weights)[:, None]
+            coef, _ = nnls(np.vstack((matrix, np.eye(2) * 0.03)), np.r_[y * np.sqrt(weights), np.asarray(prior) * 0.03])
+            fixed.append(float(coef[0])); slopes.append(max(float(coef[1]) / total, 1e-12))
+            tails.append(float(np.average([s['tails'][i] for s in self.compute_samples], weights=weights)))
+        tiles, target, finish = equal_finish(int(total), spec['grain'], list(map(int, spec['low'])), list(map(int, spec['high'])),
+                                             [a + t for a, t in zip(fixed, tails)], slopes)
+        # Move the continuous centre each stencil; never keep/reject a measured
+        # candidate. Tile realization uses the historical time-aware min_max.
+        values = [(a + b) / 2 for a, b in zip(self.centre['compute'], target)]
+        fractions = [(v - lo) / (hi - lo) for v, lo, hi in zip(values, spec['low'], spec['high'])]
+        self.vector['compute'] = [math.log(max(v, 1e-12) / max(1 - v, 1e-12)) for v in fractions]
+        self.compute_model = {'fixed': fixed, 'slopes': slopes, 'tails': tails, 'target': target,
+                              'tiles': tiles, 'predicted_finish': finish}

@@ -35,7 +35,7 @@ static void trace_read(struct ncclMeshTrace *trace) {
       record->previous_ns = trace->previous_ns;
       record->window = (struct ncclMeshWindow){.cable = channel->cable, .peer = (uint32_t)channel->peer, .direction = direction,
         .wire = *channel->wire, .first = trace->page[slot], .last = trace->page[slot] + record->entry.pages,
-        .bytes = record->entry.pages * comm->page};
+        .bytes = record->entry.pages * comm->page, .relay = !direction && record->entry.word != 0};
       trace->page[slot] += record->entry.pages;
       trace->cursor[slot]++;
     }

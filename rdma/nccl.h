@@ -244,13 +244,20 @@ struct mesh_trees;
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
 typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
-/* A fused crossing's steps, run by the caller's kernels (below): a publication toward each peer
-   it sends to and a landing from each peer it receives from, each one's six bindings' GPU addresses, in the library's
+/* A fused crossing's steps, run by the caller's kernels (below): publication and landing
+   records on physical channels, each one's six bindings' GPU addresses, in the library's
    binding order (0 d, 1 s, 2 its argument record, 3 a, 4 v, 5 progress); a Metal 4 kernel takes them through its
    argument table, a classic one as one record of its bytes (ncclMeshMetalPrelude's mesh_step_binding, the six in this
    order).  The caller gives `publish` and `land` room for `publishes` and `lands` records (its declared
-   group's entries, ncclMeshPlan); the group writes its records in its peers' order (its channels') and sets the two
-   counts to those written: 0 and 0 where the group is not a fused crossing, which then runs as an ordinary group. */
+   group's entries, ncclMeshPlan); the group writes its records in physical channel order and sets the two
+   counts to those written: 0 and 0 where the group is not a fused crossing, which then runs as an ordinary group.
+   A group consisting exclusively of ncclMeshWrite uses one publication and one final landing prefix per active
+   physical channel, including parallel cables and relays. Its source and relay leases are immutable through the
+   complete data function's downstream uses. Landing ranges are disjoint from each other and from local source
+   ranges. Previous users of those landing leases must have completed before encoding the group: these receives
+   are posted immediately, without a stream-start gate. Relays use their compiled incoming landed prefixes;
+   releasing a publication cannot release an unlanded relay page. The caller's producer releases every publication
+   after making its data, and its consumer awaits every landing before reading results. */
 typedef struct { uint64_t (*publish)[6], (*land)[6]; uint32_t publishes, lands; } ncclMeshFused;
 typedef struct {
   void *commandBuffer;
@@ -992,7 +999,7 @@ typedef struct ncclMeshTrace *ncclMeshTrace_t;
 struct ncclMeshWindow {
   uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,peak_queue_bytes,cable_peak_queue_bytes;
   double queue_byte_seconds;
-  uint32_t cable,peer,direction; /* 0 send eligibility/completion, 1 receive arrival/completion */
+  uint32_t cable,peer,direction,relay; /* direction: 0 send, 1 receive; relay: send reads landed prefix */
 };
 struct ncclMeshTraceStats { uint64_t polls,max_gap_ns; uint32_t incomplete; };
 uint64_t ncclMeshTraceClock(void);

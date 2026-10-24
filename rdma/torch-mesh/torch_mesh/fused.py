@@ -88,7 +88,9 @@ def writes(send, landings, pairs, group, polls=0):
     The producer releases every returned publication after making its operand.
     The consumer awaits every returned landing before reading its destinations.
     Bindings follow physical channels, not peers. Source and relay leases remain
-    unchanged through the whole function's downstream uses.
+    unchanged through the whole function's downstream uses. Previous users of
+    the disjoint landing leases must finish before encoding this call; receives
+    are posted immediately, without waiting for the local producer.
     """
     publish, land = _stream.fused_writes(send, list(landings), list(pairs), group.handle, int(polls))
     return Crossing(tuple(map(tuple, publish)), tuple(map(tuple, land)))

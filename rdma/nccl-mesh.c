@@ -2058,6 +2058,52 @@ static void schedules_free(const struct ncclComm *comm, struct schedule *plans) 
   free(plans);
 }
 
+/* Immutable WRITE groups have no cross-call buffer dependencies. Give the two
+   ends of each cable the same AOT order: first hops before relays, then declared
+   call and operand offset. A ready local producer cannot sit behind a relay
+   waiting for another producer. Relay data still uses the incoming page prefix. */
+static int write_order(const void *left, const void *right) {
+  const struct message *a = left, *b = right;
+  const uint32_t ar = a->c->bound->steps[a->step].round, br = b->c->bound->steps[b->step].round;
+  if (ar != br) return ar < br ? -1 : 1;
+  if (a->c != b->c) return a->c < b->c ? -1 : 1;
+  return a->offset < b->offset ? -1 : a->offset > b->offset;
+}
+
+static int all_writes(const struct call *list, size_t n) {
+  for (size_t i = 0; i < n; i++) if (!list[i].target) return 0;
+  return n != 0;
+}
+
+static void order_writes(const struct ncclComm *comm, struct schedule *plans) {
+  for (uint32_t h = 0; h < comm->count; h++)
+    for (int send = 1; send >= 0; send--) {
+      struct message *items = send ? plans[h].out : plans[h].in;
+      const size_t n = send ? plans[h].outs : plans[h].ins;
+      qsort(items, n, sizeof *items, write_order);
+      mesh_pages end = {0};
+      for (size_t k = 0; k < n; k++) {
+        end = pages_add(end, items[k].pages);
+        items[k].entry = k; items[k].end = end;
+      }
+    }
+}
+
+static ncclResult_t ordered_writes(const struct ncclComm *comm, const struct schedule *plans, struct schedule **out) {
+  struct schedule *copy = calloc(comm->count + 1, sizeof *copy);
+  if (!copy) return fail(ncclSystemError, "out of memory");
+  for (uint32_t h = 0; h < comm->count; h++) {
+    copy[h] = plans[h];
+    copy[h].out = malloc((plans[h].outs + 1) * sizeof *copy[h].out);
+    copy[h].in = malloc((plans[h].ins + 1) * sizeof *copy[h].in);
+    if (!copy[h].out || !copy[h].in) { schedules_free(comm, copy); return fail(ncclSystemError, "out of memory"); }
+    memcpy(copy[h].out, plans[h].out, plans[h].outs * sizeof *copy[h].out);
+    memcpy(copy[h].in, plans[h].in, plans[h].ins * sizeof *copy[h].in);
+  }
+  order_writes(comm, copy); *out = copy;
+  return ncclSuccess;
+}
+
 /* a group's calls compiled: each crossing call's steps (plan_calls) and the group's entries on each channel, each list
    from its 0 (schedule_group); *plans NULL where it failed */
 static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule **plans) {
@@ -2072,7 +2118,7 @@ static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size
    times in a row, and its entries on each channel from each list's 0 (`plans`, each message's call one of `calls`);
    a communicator's plan: the caller's view (`view`), its declared groups in order (`group`) and each one's entries
    (`entries`, the view's) */
-struct compiled { struct call *calls; size_t n; uint32_t repeat; struct schedule *plans; };
+struct compiled { struct call *calls; size_t n; uint32_t repeat; struct schedule *plans, *write_plans; };
 struct plan { ncclMeshPlan view; struct compiled *group; uint64_t (*entries)[2]; };
 
 /* the plan's group that the communicator's group numbered `holder` is: its place in the plan's order, repeated from
@@ -2089,14 +2135,18 @@ static const struct compiled *group_at(const struct plan *plan, uint64_t holder)
    issued call at its place (nothing planned at the call, nothing compared: nccl.h ncclMeshCommPlan), else, with no
    plan, compiled here (compile_group).  Under group_lock */
 static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct schedule **plans) {
-  if (!comm->plan) return compile_group(comm, list, n, plans);
+  if (!comm->plan) {
+    const ncclResult_t result = compile_group(comm, list, n, plans);
+    if (!result && list[0].fused && all_writes(list, n)) order_writes(comm, *plans);
+    return result;
+  }
   const struct compiled *x = group_at(comm->plan, holder);
   struct schedule *made = calloc(comm->count + 1, sizeof *made);
   ncclResult_t result = made ? ncclSuccess : fail(ncclSystemError, "out of memory");
   for (size_t i = 0; i < x->n && !result; i++)
     if (x->calls[i].bound && !(list[i].bound = steps_copy(x->calls[i].bound))) result = fail(ncclSystemError, "out of memory");
   for (uint32_t h = 0; h < comm->count && !result; h++) {
-    const struct schedule *p = x->plans + h;
+    const struct schedule *p = (list[0].fused && x->write_plans ? x->write_plans : x->plans) + h;
     struct schedule *q = made + h;
     *q = (struct schedule){malloc((p->outs + 1) * sizeof *p->out), malloc((p->ins + 1) * sizeof *p->in), p->outs, p->ins, {0, 0}, 0, 0};
     if (!q->out || !q->in) { result = fail(ncclSystemError, "out of memory"); break; }
@@ -2598,7 +2648,10 @@ static ncclResult_t launch(struct call *list, size_t n) {
     struct call *c = list + i;
     struct steps *s = c->bound;
     const size_t bytes = elements(c) * SIZE[c->type];
-    if (c->what == WHAT_SEND && c->peer == comm->rank) {
+    if (c->target) {
+      c->sum = c->recv_at; c->direct = 1;
+      if (s) s->buffer[0] = comm->rank == c->root ? c->send_at : c->recv_at;
+    } else if (c->what == WHAT_SEND && c->peer == comm->rank) {
       if (!(c->copy = malloc(bytes ? bytes : 1))) result = fail(ncclSystemError, "out of memory");
       else memcpy(c->copy, c->send, bytes);
     } else if (c->what == WHAT_SEND) { if (s) s->buffer[0] = c->send_at; }
@@ -3193,7 +3246,7 @@ static ncclResult_t epilogue(struct metal_program *program, const struct call *l
   for (size_t i = 0; i < n && !result; i++) {
     const struct call *c = list + i;
     const size_t z = SIZE[c->type], count = c->count;
-    if (c->target && c->comm->rank != c->target - 1) continue;
+    if (c->target) continue;
     const struct where recv = c->recv_at, sum = c->sum;
     if (c->what == WHAT_RECV && c->peer == comm->rank) {
       while (self < n && !(list[self].what == WHAT_SEND && list[self].peer == comm->rank)) self++;
@@ -3429,6 +3482,13 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     struct call *c = list + i;
     struct steps *st = c->bound;
     const size_t bytes = elements(c) * SIZE[c->type];
+    if (c->target) {
+      /* A WRITE sends the producer's lease itself. It is not a broadcast's
+         staging copy, which would run before a deferred producer makes data. */
+      c->sum = c->recv_at; c->direct = 1;
+      if (st) st->buffer[0] = comm->rank == c->root ? c->send_at : c->recv_at;
+      continue;
+    }
     if (counted(c)) { if (st) { st->buffer[0] = c->send_at; st->buffer[1] = c->recv_at; } continue; }
     if (p2p(c)) { if (st) st->buffer[0] = c->what == WHAT_SEND ? c->send_at : c->recv_at; continue; }
     const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
@@ -3482,6 +3542,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     struct steps *st = c->bound;
     const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
     const struct where send = c->send_at, own = c->sum;
+    if (c->target) continue;
     if (counted(c)) {
       size_t sent, landed, part = own_segment(c, &sent, &landed);
       if (part && !same((struct where){send.buffer, send.offset + sent}, (struct where){c->recv_at.buffer, c->recv_at.offset + landed}))
@@ -3796,7 +3857,10 @@ static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call
 
 /* a plan's own: its groups' calls and entries */
 static void plan_free(const struct ncclComm *comm, struct plan *plan) {
-  for (uint32_t g = 0; plan && g < plan->view.groups; g++) { calls_free(plan->group[g].calls, plan->group[g].n); schedules_free(comm, plan->group[g].plans); }
+  for (uint32_t g = 0; plan && g < plan->view.groups; g++) {
+    calls_free(plan->group[g].calls, plan->group[g].n);
+    schedules_free(comm, plan->group[g].plans); schedules_free(comm, plan->group[g].write_plans);
+  }
   if (plan) { free(plan->group); free(plan->entries); }
   free(plan);
 }
@@ -3829,6 +3893,7 @@ ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int co
   for (uint32_t g = 0; g < groups && !result; g++) {
     struct compiled *x = made->group + g;
     result = compile_group(comm, x->calls, x->n, &x->plans);
+    if (!result && all_writes(x->calls, x->n)) result = ordered_writes(comm, x->plans, &x->write_plans);
     for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
   }
   if (!result) {

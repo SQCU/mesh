@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from whole import FunctionFlow, project
+from allocate import equal_finish
 
 
 class WholeFunctionTests(unittest.TestCase):
@@ -74,6 +75,42 @@ class WholeFunctionTests(unittest.TestCase):
         self.assertEqual(project([2, 80, 4], 96, 8, [8, 8, 8], [48, 48, 48]), [24, 48, 24])
         with self.assertRaises(ValueError):
             project([1, 1], 3, 2, [0, 0], [4, 4])
+
+    def test_historical_equal_finish_accounts_for_fixed_cost_and_tiles(self):
+        tiles, continuous, finish = equal_finish(30, 2, [2, 2, 2], [30, 30, 30], [1, 3, 5], [1, 1, 3])
+        self.assertAlmostEqual(sum(continuous), 30)
+        self.assertTrue(all(abs(a + b * s - finish) < 1e-10 for a, b, s in zip([1, 3, 5], [1, 1, 3], continuous)))
+        actual = max(a + b * s for a, b, s in zip([1, 3, 5], [1, 1, 3], tiles))
+        brute = min(max(1 + x, 3 + y, 5 + 3 * (30 - x - y)) for x in range(2, 29, 2)
+                    for y in range(2, 30 - x, 2))
+        self.assertEqual(actual, brute)
+        self.assertLess(tiles[2], min(tiles[:2]))
+
+    def test_complete_function_compute_model_moves_work_off_slow_node(self):
+        flow = FunctionFlow({'compute': {'parts': [512, 512, 512], 'grain': 64, 'low': [64] * 3,
+                                         'high': [1536] * 3}}, fit_compute=True)
+        for _ in range(100):
+            request = flow.ask()
+            times = [0.001 + b * x for b, x in zip([1e-5, 1.2e-5, 5e-5], request['parts']['compute'])]
+            tails = [0.002, 0.002, 0.004]
+            observation = {**request, 'scope': 'function', 'complete': True, 'workload': 'dnn',
+                           'seconds': max(t + d for t, d in zip(times, tails)),
+                           'compute_seconds': times, 'delivery_tail_seconds': tails}
+            restored = FunctionFlow.of(flow.state())
+            self.assertEqual(flow.observe(observation), restored.observe(observation))
+        self.assertLess(flow.centre['compute'][2], min(flow.centre['compute'][:2]) / 3)
+        self.assertEqual(flow.round, 25)
+        self.assertAlmostEqual(flow.compute_model['fixed'][2], 0.001, delta=0.0001)
+        self.assertAlmostEqual(flow.compute_model['slopes'][2], 5e-5, delta=1e-6)
+
+    def test_finish_residual_steers_routes_at_equal_function_latency(self):
+        flow = FunctionFlow({'route': {'parts': [64, 64], 'grain': 0}})
+        for _ in range(400):
+            request = flow.ask()
+            residual = (request['parts']['route'][0] - 90) ** 2 / 1000
+            flow.observe({**request, 'scope': 'function', 'complete': True, 'workload': 'dnn',
+                          'seconds': 1.0, 'finish_variance': residual})
+        self.assertAlmostEqual(flow.centre['route'][0], 90, delta=2)
 
 
 if __name__ == '__main__':
