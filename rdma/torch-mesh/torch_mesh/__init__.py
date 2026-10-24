@@ -44,7 +44,10 @@ def compiler(gm, example_inputs):
     names that group in is one of them and all of one form, are one issue's repeats (each node told their count:
     rdma/nccl.h ncclMeshFused repeats), so the host issues their crossing once a graph.  Inductor's run-time size,
     alignment and scalar asserts are off: each is a check at every call of what the compile fixed (design/data-model.md
-    section 6)."""
+    section 6).  A product whose x is a landing through linear's menu (an activation, an added tensor) makes that x in
+    its prologue (menu: z, zact), so no pointwise dispatch makes it.  A cat (a stack among them) is one pointwise kernel
+    however many its inputs (force_pointwise_cat), so rows a graph's steps keep are written in one dispatch, not one a
+    row."""
     from pathlib import Path
 
     import torch
@@ -124,6 +127,33 @@ def compiler(gm, example_inputs):
                     graph.erase_node(m)
             i += len(group)
 
+    LANDINGS = (torch.ops.torch_mesh.linear_sum.default, torch.ops.torch_mesh.all_reduce.default)
+
+    def menu(graph, product):
+        """A product (torch_mesh::linear) whose x is a landing (a fused crossing's sum, its land kernel's plain rows) through
+        linear's menu alone, an activation of the landing (tanh) and an added tensor of its shape: that x made in the
+        product's prologue (z the landing, zact its activation), so no pointwise dispatch makes it; the menu's ops keep
+        any other users, and any other op between, no fold.  Whether it folded."""
+        x = product.args[0]
+        if (len(product.args) > 4 and product.args[4] is not None) or x.target is not aten.add.Tensor or x.kwargs or len(x.users) != 1:
+            return False
+        for i in (0, 1):
+            z, x0, zact = x.args[i], x.args[1 - i], 0
+            if not (hasattr(z, 'meta') and hasattr(x0, 'meta')) or z.meta['val'].shape != x0.meta['val'].shape:
+                continue
+            if z.target is aten.tanh.default:
+                z, zact = z.args[0], 1
+            landing = z.args[0] if z.target is torch.ops._c10d_functional.wait_tensor.default else z
+            if landing.target in LANDINGS and z.meta['val'].dtype == x0.meta['val'].dtype == torch.half:
+                args = list(product.args) + [None, 0][len(product.args) - 2:]
+                product.args = (x0, args[1], args[2], args[3], None, z, zact)
+                act = x.args[i]
+                graph.erase_node(x)
+                if act is not z and not act.users:
+                    graph.erase_node(act)
+                return True
+        return False
+
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
@@ -171,10 +201,13 @@ def compiler(gm, example_inputs):
                 if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
                     for n in nodes:
                         told(n, len(nodes))
+            for node in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear.default]:
+                menu(graph, node)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv'
-    with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv menu'
+    with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False,
+                      force_pointwise_cat=True):
         return lookup_backend('inductor')(gm, example_inputs)
 
 
@@ -266,12 +299,15 @@ class Recording:
         self.replays += steps
 
     def _graph(self, n):
-        """n steps unrolled in one graph (torch.compile with fullgraph), compiled at its first call."""
+        """n steps unrolled in one graph (torch.compile with fullgraph), compiled at its first call, then the step's
+        `flush` where it has one (record)."""
         import torch
 
         def steps():
             for _ in range(n):
                 self.step()
+            if hasattr(self.step, 'flush'):
+                self.step.flush()
         return torch.compile(steps, backend=self._backend, fullgraph=True, dynamic=False)
 
     def _backend(self, gm, example_inputs):
@@ -295,7 +331,8 @@ _recordings = 0
 
 
 def record(step, k=1):
-    """`step` (a function of no arguments that runs one step on MPS tensors, its collectives torch's) recorded, the
+    """`step` (a function of no arguments that runs one step on MPS tensors, its collectives torch's; its `flush`, where
+    it has one, run once after each graph's steps: what a step keeps for its graph, written once a graph) recorded, the
     CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of `k` steps
     unrolled (torch.compile with fullgraph, its collectives functional ones), so a replay's host cost (the graph's
     guards, its subclass wrapping, Inductor's wrapper) is paid once for k steps, compiled at its first replay by the "mesh"

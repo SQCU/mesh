@@ -682,6 +682,8 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
 }
 
 // torch_mesh::linear (linear.metal): y[R, N] = act(x[R, K] w[N, K]^T (+ bias[N])) of fp16 MPS tensors (act 0 none, 1
+// tanh), or, given z [R, K], of x + zact(z) as linear's menu reads it (linear_menu_rows_kernel: a landing's plain rows,
+// the compiler's fold; zact 0 none, 1 tanh); otherwise (act 0 none, 1
 // tanh), x the cat along K of x [R, K0] and x1 [R, K - K0] where x1 is given (never made), rows of each any whole stride
 // apart, w's rows any whole
 // stride apart (w.stride(0)), one dispatch of linear_rows encoded in torch's open compute encoder (encode), its output a
@@ -707,27 +709,29 @@ static int64_t linear_fit(int64_t K, int64_t groups) {
 static int64_t linear_split(int64_t K, int64_t N) { return linear_fit(K, (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS); }
 
 static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::optional<at::Tensor> &bias, int64_t act,
-                         const std::optional<at::Tensor> &x1) {
+                         const std::optional<at::Tensor> &x1, const std::optional<at::Tensor> &z, int64_t zact) {
   const int64_t K0 = x.size(1), K = K0 + (x1 ? x1->size(1) : 0);
   TORCH_CHECK(x.scalar_type() == at::kHalf && w.scalar_type() == at::kHalf && x.dim() == 2 && w.dim() == 2 && w.size(1) == K &&
-                  (!x1 || (x1->scalar_type() == at::kHalf && x1->dim() == 2 && x1->size(0) == x.size(0))),
-              "torch_mesh::linear takes fp16 x [R, K0], x1 [R, K - K0] (or none) and w [N, K], not ", x.sizes(), " ", x.scalar_type(),
-              ", ", x1 ? x1->sizes() : at::IntArrayRef{}, " and ", w.sizes(), " ", w.scalar_type());
+                  (!x1 || (x1->scalar_type() == at::kHalf && x1->dim() == 2 && x1->size(0) == x.size(0))) &&
+                  (!z || (!x1 && z->scalar_type() == at::kHalf && z->sizes() == x.sizes())),
+              "torch_mesh::linear takes fp16 x [R, K0], x1 [R, K - K0] (or none) and w [N, K], or x and z [R, K] (no x1), not ", x.sizes(),
+              " ", x.scalar_type(), ", ", x1 ? x1->sizes() : at::IntArrayRef{}, " and ", w.sizes(), " ", w.scalar_type());
   const at::Tensor xc = x.stride(1) == 1 ? x : x.contiguous(), wc = w.stride(1) == 1 ? w : w.contiguous();
-  const at::Tensor x1c = !x1 ? xc : x1->stride(1) == 1 ? *x1 : x1->contiguous();
+  const at::Tensor x1c = z ? (z->stride(1) == 1 ? *z : z->contiguous()) : !x1 ? xc : x1->stride(1) == 1 ? *x1 : x1->contiguous();
   const int64_t R = x.size(0), N = w.size(0), ldw = wc.stride(0), ld0 = xc.stride(0), ld1 = x1c.stride(0);
   const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
-  const int split = (int)linear_split(K, N);
-  const auto key = std::make_tuple(ldw % 4 || K0 % 4 ? 1 : 4, K0 % 4 || ld0 % 4 || ld1 % 4 ? 1 : 4, split, (int)act);
+  const int split = (int)linear_split(K, N), menu = z ? 1 + (int)zact : 0;
+  const auto key = std::make_tuple(ldw % 4 || K0 % 4 ? 1 : 4, K0 % 4 || ld0 % 4 || ld1 % 4 ? 1 : 4, split, (int)act + 2 * menu);
   auto found = linear_pipelines_.find(key);
   if (found == linear_pipelines_.end()) {
     const std::string args = std::to_string(std::get<0>(key)) + ", " + std::to_string(std::get<1>(key)) + ", " +
                              std::to_string(LINEAR_COLUMNS) + ", " + std::to_string(split) + ", " + std::to_string(LINEAR_LOADS) + ", " +
-                             std::to_string(act);
-    std::string name = "linear_rows_" + args;
+                             std::to_string(act) + (z ? ", " + std::to_string(zact) : "");
+    const std::string kernel = z ? "linear_menu_rows_kernel" : "linear_rows";
+    std::string name = kernel + "_" + args;
     for (auto &ch : name) ch = ch == ',' || ch == ' ' ? '_' : ch;
-    found = linear_pipelines_.emplace(key, pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(linear_rows<" +
-                                                    args + ">) linear_rows<" + args + ">;\n", name)).first;
+    found = linear_pipelines_.emplace(key, pipeline(linear_source_ + "\ntemplate [[host_name(\"" + name + "\")]] [[kernel]] decltype(" + kernel +
+                                                    "<" + args + ">) " + kernel + "<" + args + ">;\n", name)).first;
   }
   at::Tensor y = at::empty({R, N}, x.options());
   encode(found->second, {xc, wc, y, bias ? std::optional<at::Tensor>(bias->contiguous()) : y, std::nullopt, x1c},
@@ -787,7 +791,7 @@ static std::vector<at::Tensor> linears(const std::vector<at::Tensor> &xs, const 
 }
 
 TORCH_LIBRARY_FRAGMENT(torch_mesh, m) {
-  m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None) -> Tensor");
+  m.def("linear(Tensor x, Tensor w, Tensor? bias=None, int act=0, Tensor? x1=None, Tensor? z=None, int zact=0) -> Tensor");
   m.def("linears(Tensor[] x, Tensor[] w, Tensor?[] bias, int[] act, Tensor?[] x1) -> Tensor[]");
 }
 TORCH_LIBRARY_IMPL(torch_mesh, MPS, m) {

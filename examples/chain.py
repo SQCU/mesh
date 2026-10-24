@@ -31,10 +31,17 @@ def step(x, at, b, out):
 
 # docs/writing-a-service.md#the-step
 def stepper(E, O, o, t, at, b):
+    rows = []
+
     def one():
         step(E.index_select(0, t)[0] + o, at, b, o)
-        O.index_copy_(0, t, o[None])
+        rows.append(o.clone())
         t.add_(1)
+
+    def flush():
+        O.index_copy_(0, t - len(rows) + torch.arange(len(rows), device=t.device), torch.stack(rows))
+        rows.clear()
+    one.flush = flush
     return one
 
 

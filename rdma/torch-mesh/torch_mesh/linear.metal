@@ -28,53 +28,109 @@ template <uint V> inline float4 linear_part(device const half* p, uint k, uint h
     return v;
 }
 
-template <uint VW, uint VX, uint COLS, uint NSG, uint U, typename Store>
-inline void linear_body(device const half* x, device const half* x1, device const half* w, const linear_dims d, thread const Store& store,
+// x's source, the rows a pass of linear_body reads (block: rows r0 to r0 + 7, the last repeated past R): load<SEG, VX>
+// gives elements k to k + 3 of row r's segment SEG (0: k < K0, 1: K0 up), those at or past hi zero, and one element k.
+// linear_dense: x [R, K0] and x1 [R, K - K0], rows LD0 and LD1 apart (x = x1 and K0 = K where there is one).
+struct linear_dense_rows {
+    device const half* x[8];
+    device const half* x1[8];
+    uint K0;
+    template <uint SEG, uint VX> float4 load(uint r, uint k, uint hi) const { return linear_part<VX>(SEG ? x1[r] - K0 : x[r], k, hi); }
+    float one(uint r, uint k) const { return float(k < K0 ? x[r][k] : x1[r][k - K0]); }
+};
+struct linear_dense {
+    device const half* x;
+    device const half* x1;
+    uint LD0, LD1, K0;
+    linear_dense_rows block(uint r0, uint R) const {
+        linear_dense_rows b;
+        b.K0 = K0;
+        for (uint r = 0; r < 8; r++) {
+            b.x[r] = x + ulong(min(r0 + r, R - 1)) * LD0;
+            b.x1[r] = x1 + ulong(min(r0 + r, R - 1)) * LD1;
+        }
+        return b;
+    }
+};
+
+// linear_menu: x as linear's menu makes it from a landing's plain rows z (the land kernel's output, before this dispatch
+// in the stream): x + ZACT(z) (ZACT 0 none, 1 tanh), x and z [R, K] rows LD0 and LD1 apart, one segment (K0 = K)
+template <uint ZACT>
+struct linear_menu_rows {
+    device const half* x[8];
+    device const half* z[8];
+    template <uint SEG, uint VX> float4 load(uint r, uint k, uint hi) const {
+        const float4 v = linear_part<VX>(z[r], k, hi);
+        return (ZACT == 1 ? tanh(v) : v) + linear_part<VX>(x[r], k, hi);
+    }
+    float one(uint r, uint k) const {
+        const float v = float(z[r][k]);
+        return (ZACT == 1 ? tanh(v) : v) + float(x[r][k]);
+    }
+};
+template <uint ZACT>
+struct linear_menu {
+    device const half* x;
+    device const half* z;
+    uint LD0, LD1;
+    linear_menu_rows<ZACT> block(uint r0, uint R) const {
+        linear_menu_rows<ZACT> b;
+        for (uint r = 0; r < 8; r++) {
+            b.x[r] = x + ulong(min(r0 + r, R - 1)) * LD0;
+            b.z[r] = z + ulong(min(r0 + r, R - 1)) * LD1;
+        }
+        return b;
+    }
+};
+
+template <uint COLS> struct linear_cols { device const half* p[COLS]; };
+template <uint COLS> struct linear_acc { float v[8][COLS]; };
+
+// a simdgroup's span [lo, hi) of segment SEG: U loads of each row in flight, then one at a time
+template <uint SEG, uint VW, uint VX, uint COLS, uint U, typename Rows>
+inline void linear_span(thread const Rows& rows, thread const linear_cols<COLS>& wr, thread linear_acc<COLS>& acc, uint lo, uint hi,
+                        uint lane) {
+    uint k = lo + lane * 4;
+    for (; k + 128 * (U - 1) < hi; k += 128 * U) {
+        float4 wv[U][COLS];
+        for (uint u = 0; u < U; u++)
+            for (uint c = 0; c < COLS; c++) wv[u][c] = linear_part<VW>(wr.p[c], k + 128 * u, hi);
+        for (uint u = 0; u < U; u++)
+            for (uint r = 0; r < 8; r++) {
+                const float4 xv = rows.template load<SEG, VX>(r, k + 128 * u, hi);
+                for (uint c = 0; c < COLS; c++) acc.v[r][c] += dot(xv, wv[u][c]);
+            }
+    }
+    for (; k < hi; k += 128) {
+        float4 wv[COLS];
+        for (uint c = 0; c < COLS; c++) wv[c] = linear_part<VW>(wr.p[c], k, hi);
+        for (uint r = 0; r < 8; r++) {
+            const float4 xv = rows.template load<SEG, VX>(r, k, hi);
+            for (uint c = 0; c < COLS; c++) acc.v[r][c] += dot(xv, wv[c]);
+        }
+    }
+}
+
+template <uint VW, uint VX, uint COLS, uint NSG, uint U, typename Src, typename Store>
+inline void linear_body(thread const Src& src, device const half* w, const linear_dims d, thread const Store& store,
                         threadgroup float* part, uint sg, uint lane, uint tg, uint tid) {
     const uint R = d.R, K = d.K, N = d.N, n0 = tg * COLS, K4 = K & ~3u;
     const uint span = (K4 / 4 + NSG - 1) / NSG * 4, k0 = sg * span, k1 = min(K4, k0 + span);
-    device const half* wr[COLS];
-    for (uint c = 0; c < COLS; c++) wr[c] = w + ulong(min(n0 + c, N - 1)) * d.LDW;
+    linear_cols<COLS> wr;
+    for (uint c = 0; c < COLS; c++) wr.p[c] = w + ulong(min(n0 + c, N - 1)) * d.LDW;
     for (uint r0 = 0; r0 < R; r0 += 8) {
-        float acc[8][COLS];
+        linear_acc<COLS> acc;
         for (uint r = 0; r < 8; r++)
-            for (uint c = 0; c < COLS; c++) acc[r][c] = 0.0f;
-        device const half* xr[8];
-        device const half* xs[8];
-        for (uint r = 0; r < 8; r++) {
-            xr[r] = x + ulong(min(r0 + r, R - 1)) * d.LD0;
-            xs[r] = x1 + ulong(min(r0 + r, R - 1)) * d.LD1;
-        }
-        for (uint seg = 0; seg < 2; seg++) {
-            const uint lo = seg ? max(k0, d.K0) : k0, hi = seg ? k1 : min(k1, d.K0), off = seg ? d.K0 : 0;
-            device const half* const* xx = seg ? xs : xr;
-            uint k = lo + lane * 4;
-            for (; k + 128 * (U - 1) < hi; k += 128 * U) {
-                float4 wv[U][COLS];
-                for (uint u = 0; u < U; u++)
-                    for (uint c = 0; c < COLS; c++) wv[u][c] = linear_part<VW>(wr[c], k + 128 * u, hi);
-                for (uint u = 0; u < U; u++)
-                    for (uint r = 0; r < 8; r++) {
-                        const float4 xv = linear_part<VX>(xx[r] - off, k + 128 * u, hi);
-                        for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[u][c]);
-                    }
-            }
-            for (; k < hi; k += 128) {
-                float4 wv[COLS];
-                for (uint c = 0; c < COLS; c++) wv[c] = linear_part<VW>(wr[c], k, hi);
-                for (uint r = 0; r < 8; r++) {
-                    const float4 xv = linear_part<VX>(xx[r] - off, k, hi);
-                    for (uint c = 0; c < COLS; c++) acc[r][c] += dot(xv, wv[c]);
-                }
-            }
-        }
+            for (uint c = 0; c < COLS; c++) acc.v[r][c] = 0.0f;
+        const auto rows = src.block(r0, R);
+        linear_span<0, VW, VX, COLS, U>(rows, wr, acc, k0, min(k1, d.K0), lane);
+        linear_span<1, VW, VX, COLS, U>(rows, wr, acc, max(k0, d.K0), k1, lane);
         if (sg == 0 && K4 + lane < K)
             for (uint r = 0; r < 8; r++)
-                for (uint c = 0; c < COLS; c++)
-                    acc[r][c] += float(K4 + lane < d.K0 ? xr[r][K4 + lane] : xs[r][K4 + lane - d.K0]) * float(wr[c][K4 + lane]);
+                for (uint c = 0; c < COLS; c++) acc.v[r][c] += rows.one(r, K4 + lane) * float(wr.p[c][K4 + lane]);
         for (uint r = 0; r < 8; r++)
             for (uint c = 0; c < COLS; c++) {
-                const float s = simd_sum(acc[r][c]);
+                const float s = simd_sum(acc.v[r][c]);
                 if (lane == 0) part[(sg * 8 + r) * COLS + c] = s;
             }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -107,7 +163,22 @@ kernel void linear_rows(device const half* x [[buffer(0)]], device const half* w
                         uint tg [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
     threadgroup float part[NSG * 8 * COLS];
     const linear_store<ACT> store{y, bias, d.N, d.B};
-    linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
+    const linear_dense src{x, x1, d.LD0, d.LD1, d.K0};
+    linear_body<VW, VX, COLS, NSG, U>(src, w, d, store, part, sg, lane, tg, tid);
+}
+
+// linear_rows with x read through linear's menu (linear_menu): z at buffer 5, its rows LD1 apart, ZACT its activation
+template <uint VW, uint VX, uint COLS, uint NSG, uint U, uint ACT, uint ZACT>
+[[max_total_threads_per_threadgroup(NSG * 32)]]
+kernel void linear_menu_rows_kernel(device const half* x [[buffer(0)]], device const half* w [[buffer(1)]], device half* y [[buffer(2)]],
+                                    device const half* bias [[buffer(3)]], constant linear_dims& d [[buffer(4)]],
+                                    device const half* z [[buffer(5)]], uint sg [[simdgroup_index_in_threadgroup]],
+                                    uint lane [[thread_index_in_simdgroup]], uint tg [[threadgroup_position_in_grid]],
+                                    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float part[NSG * 8 * COLS];
+    const linear_store<ACT> store{y, bias, d.N, d.B};
+    const linear_menu<ZACT> src{x, z, d.LD0, d.LD1};
+    linear_body<VW, VX, COLS, NSG, U>(src, w, d, store, part, sg, lane, tg, tid);
 }
 
 // Up to four products in one dispatch (torch_mesh::linears): problem p's threadgroups follow the ones before it
@@ -145,7 +216,8 @@ kernel void linear_group(device const half* x0 [[buffer(0)]], device const half*
     device const half* b = p == 0 ? b0 : p == 1 ? b1 : p == 2 ? b2 : b3;
     device const half* s = p == 0 ? s0 : p == 1 ? s1 : p == 2 ? s2 : s3;
     const linear_act_store store{y, b, g.d[p].N, g.d[p].B, g.act[p]};
-    linear_body<VW, VX, COLS, NSG, U>(x, s, w, g.d[p], store, part, sg, lane, tg - g.first[p], tid);
+    const linear_dense src{x, s, g.d[p].LD0, g.d[p].LD1, g.d[p].K0};
+    linear_body<VW, VX, COLS, NSG, U>(src, w, g.d[p], store, part, sg, lane, tg - g.first[p], tid);
 }
 
 #ifdef MESH_METAL
@@ -171,7 +243,8 @@ kernel void linear_publish(device const half* x [[buffer(0)]], device const half
     for (uint q = 0; q < PEERS; q++) mesh_step_enter(*p.publish[q].p, p.publish[q].v, p.publish[q].progress, tg == 0 && tid == 0);
     const linear_dims d = {p.R, p.K, p.N, 0, p.LDW, p.K0, p.LD0, p.LD1};
     const linear_step_store store{send, p.N};
-    linear_body<VW, VX, COLS, NSG, U>(x, x1, w, d, store, part, sg, lane, tg, tid);
+    const linear_dense src{x, x1, d.LD0, d.LD1, d.K0};
+    linear_body<VW, VX, COLS, NSG, U>(src, w, d, store, part, sg, lane, tg, tid);
     threadgroup_barrier(mem_flags::mem_device);
     if (mesh_last_arrival<true>(arrivals, 0, groups, tid, &last)) {
         for (uint q = 0; q < PEERS; q++) mesh_step_release(*p.publish[q].p, p.publish[q].a, tid, p.j);

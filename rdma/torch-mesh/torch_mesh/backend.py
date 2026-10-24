@@ -421,7 +421,7 @@ def _(x, w, bias, act, x1):
 
 
 @torch.library.register_fake('torch_mesh::linear')
-def _(x, w, bias=None, act=0, x1=None):
+def _(x, w, bias=None, act=0, x1=None, z=None, zact=0):
     return x.new_empty(x.shape[0], w.shape[0])
 
 
