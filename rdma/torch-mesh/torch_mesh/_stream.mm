@@ -226,7 +226,8 @@ static void checked(int64_t result) {
 
 // The evidence torch_mesh/evidence.py reads (design/heterogeneity.md R2, R3): on a watched communicator, a timing
 // event of torch's pool recorded on its stream as each collective is issued (0: the GPU has finished the work before
-// it) and once its wait is encoded (1: the GPU has passed it), and at each step's boundary (2), in order.
+// it) and once its issue, and an issued group's wait, are encoded (1: the GPU has passed it), as an issued group's wait
+// begins (0: the work between its issue and its wait), and at each step's boundary (2), in order.
 static std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> marks_;
 
 static void mark(int64_t comm, int64_t kind) {
@@ -263,7 +264,7 @@ static uint64_t on_stream(const std::function<ncclResult_t(ncclMeshStream *)> &c
   s->streamed = true;
   s->retire(issue.ticket && !result ? issue.ticket : 0, std::exchange(s->scratch, {}));
   checked(result);
-  if (!issue.ticket) mark(comm, 1);
+  mark(comm, 1);
   return issue.ticket;
 }
 
@@ -311,6 +312,7 @@ class MeshWork : public c10d::Work {
   void finish(uint64_t ns = 0) {
     if (finished_) return;
     finished_ = true;
+    mark(comm_, 0);
     complete(ticket_, ns);
     mark(comm_, 1);
   }
