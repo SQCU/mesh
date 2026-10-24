@@ -1174,30 +1174,27 @@ static FusedForm &fused_form_of(const at::Tensor &x, const std::optional<at::Ten
   return fused_forms_.emplace(key, std::move(f)).first->second;
 }
 
-// partition._fused's crossing on the native path: repeat j of `repeats` (j this form's calls since its last batch), the
-// batch's leases and exchange at j 0, then the publication (gather_publish, or linear_publish of x w^T) and the landing
-// (gather_land or sum_land) encoded in one turn of torch's queue; the output, a lease of the held pool
 // a call's repeat j of `repeats` in form f (its calls since its last batch), and at j 0 the batch: its two leases' slots
-// (made once a repeats), the half taken in turn, the exchange of its segments and the records' binding words
+// (made once a repeats, both leases taken before either is laid out), the half taken in turn, the exchange of its
+// segments and the records' binding words.  The form's counters advance only once the leases are taken and the exchange
+// is made, so a refused lease leaves the form as it was and no peer exchanged with
 static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
   const int64_t j = f.j, peers = f.ranks - 1;
-  f.j = (j + 1) % repeats;
   if (j == 0) {
     FusedForm::Ring &ring = f.rings[repeats];
-    if (ring.slots[0].empty())
-      for (int h = 0; h < 2; h++) {
-        const at::Tensor lease = region_empty({repeats * f.slot}, xc, true);
+    if (ring.slots[0].empty()) {
+      const at::Tensor leases[2] = {region_empty({repeats * f.slot}, xc, true), region_empty({repeats * f.slot}, xc, true)};
+      for (int h = 0; h < 2; h++)
         for (int64_t r = 0; r < repeats; r++) {
-          const at::Tensor slot = lease.narrow(0, r * f.slot, f.slot);
+          const at::Tensor slot = leases[h].narrow(0, r * f.slot, f.slot);
           ring.slots[h].push_back(slot);
           std::vector<at::Tensor> segments;
           for (int64_t q = 0; q < f.ranks; q++) segments.push_back(slot.narrow(0, f.starts[q], f.counts[q]));
           ring.segments[h].push_back(segments);
         }
-      }
-    f.ring = &ring;
-    f.half = f.turn++ % 2;
-    const std::vector<at::Tensor> &segments = ring.segments[f.half][0];
+    }
+    const int64_t half = f.turn % 2;
+    const std::vector<at::Tensor> &segments = ring.segments[half][0];
     std::vector<at::Tensor> landings;
     for (int64_t q = 0; q < f.ranks; q++)
       if (q != f.rank) landings.push_back(segments[q]);
@@ -1207,10 +1204,15 @@ static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
     for (int64_t k = 0; k < peers; k++) binding_words(f.pbind, k < (int64_t)made.first.size() ? &made.first[k] : nullptr);
     for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, k < (int64_t)made.second.size() ? &made.second[k] : nullptr);
     for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, nullptr);
+    f.ring = &ring, f.half = half, f.turn++;
   }
+  f.j = (j + 1) % repeats;
   return j;
 }
 
+// partition._fused's crossing on the native path: repeat j of `repeats` (j this form's calls since its last batch), the
+// batch's leases and exchange at j 0, then the publication (gather_publish, or linear_publish of x w^T) and the landing
+// (gather_land or sum_land) encoded in one turn of torch's queue; the output, a lease of the held pool
 static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
                              std::string group, bool adds, int64_t repeats) {
   const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
@@ -1271,15 +1273,11 @@ static std::tuple<at::Tensor, at::Tensor> cell_step(const std::vector<at::Tensor
                   c.scalar_type() == at::kFloat && dim == 2,
               "torch_mesh::cell_step takes one to four layers' x, x1, w and bias, their state c [L, R, HR] float, and the gather's dim 2");
   const int64_t R = c.size(1), HR = c.size(2);
-  static std::map<std::vector<int64_t>, at::Tensor> likes;
-  const std::vector<int64_t> block{(int64_t)P, R, HR};
-  auto like = likes.find(block);
-  if (like == likes.end()) like = likes.emplace(block, region_empty(block, xs[0], true)).first;
-  FusedForm &f = fused_form_of(like->second, std::nullopt, dim, sizes, group, false);
-  const int64_t j = fused_turn(f, like->second, repeats);
-  const std::vector<at::Tensor> &segments = f.ring->segments[f.half][j];
+  // the gather's form by a block [L, R, HR] of x's dtype on its device: x's first element, every stride 0
+  const at::Tensor like = xs[0].as_strided({(int64_t)P, R, HR}, {0, 0, 0});
+  FusedForm &f = fused_form_of(like, std::nullopt, dim, sizes, group, false);
   const at::Tensor cc = c.is_contiguous() ? c : c.contiguous();
-  const at::Tensor c1 = region_empty(cc.sizes().vec(), cc, true, true);
+  const at::Tensor c1 = region_empty(cc.sizes().vec(), cc, true, true), out = region_empty(f.shape, like, true, true);
   std::vector<std::optional<at::Tensor>> buffers(26);
   std::vector<int64_t> words(4 * 12, 0);
   int64_t first = 0, least = INT64_MAX;
@@ -1303,9 +1301,6 @@ static std::tuple<at::Tensor, at::Tensor> cell_step(const std::vector<at::Tensor
     for (int k = 0; k < 6; k++) buffers[6 * p + k] = buffers[k];
     words[12 * p + 10] = first;
   }
-  buffers[24] = segments[f.rank], buffers[25] = f.arrivals;
-  words.push_back(j), words.push_back(0);
-  words.insert(words.end(), f.pbind.begin(), f.pbind.end());
   const int64_t split = linear_fit(least, first);
   const auto key = std::make_tuple(wide_w ? 4 : 1, wide_x ? 4 : 1, split, f.ranks - 1);
   auto kernel = cell_pipelines_.find(key);
@@ -1314,12 +1309,15 @@ static std::tuple<at::Tensor, at::Tensor> cell_step(const std::vector<at::Tensor
     pybind11::gil_scoped_acquire gil;
     kernel = cell_pipelines_.emplace(key, (*cell_maker_)(std::get<0>(key), std::get<1>(key), split, f.ranks - 1).cast<int64_t>()).first;
   }
+  const int64_t j = fused_turn(f, like, repeats);
+  buffers[24] = f.ring->segments[f.half][j][f.rank], buffers[25] = f.arrivals;
+  words.push_back(j), words.push_back(0);
+  words.insert(words.end(), f.pbind.begin(), f.pbind.end());
   std::vector<int64_t> lwords = f.lwords;
   lwords[f.lj] = j;
   if (lwords.size() % 2) lwords.push_back(0);
   lwords.insert(lwords.end(), f.lbind.begin(), f.lbind.end());
   const Dispatch publication = encoded(kernel->second, buffers, words, 26, first, 1, split * 32);
-  const at::Tensor out = region_empty(f.shape, like->second, true, true);
   const Dispatch landing = encoded(f.land, {f.ring->slots[f.half][j], out}, lwords, 15, f.lgx, 1, f.lthreads);
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
