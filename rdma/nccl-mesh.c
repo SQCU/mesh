@@ -31,7 +31,7 @@
 #include <fcntl.h>
 
 
-enum { WHAT_SEND = 16, WHAT_RECV, WHAT_COUNTED };
+enum { WHAT_SEND = ncclMeshCallSend, WHAT_RECV = ncclMeshCallRecv, WHAT_COUNTED = ncclMeshCallAlltoAllV };
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN, COMBINE_MERGE };
 
 static const size_t SIZE[ncclNumTypes] = {1, 1, 4, 4, 8, 8, 2, 4, 8, 2, 1, 1};
@@ -271,13 +271,14 @@ struct spare { void *address; size_t bytes; uint64_t holder; };
    buffer over them) and its failure once kept (`failed`, its message `failure`: comm_fail); `last`, the count of the last
    GPU program signalling `finished` that touched it, and that program's command buffer (`command`, retained), (`touched`,
    `next_touched` while one is encoded: program_end), and
-   the number its next group issued takes (`groups`: group_numbered); `runs`, its host-path groups running; `revoked`, set by
+   the number its next group issued takes (`groups`: group_numbered); its plan (`plan`, ncclMeshCommPlan; NULL none); `runs`, its host-path groups running; `revoked`, set by
    ncclCommRevoke and ncclCommDestroy, failing every group after it; `peers`, its bootstrap's sockets, kept for its life
    once its init succeeds (NCCL's bootstrapState), which a revoke shuts down and comm_free closes, under `guard`, and the
    end of its bootstrap's present phase (`until`, bootstrap_open, gather).  A
    non-blocking init (nccl.h ncclMeshCommInitRank) runs on `init` (`initing`: ncclCommDestroy joins it), `async`
    ncclInProgress until it ends and `why` its failure's message (its id 0 while none is kept) */
 struct attach;
+struct plan;
 struct ncclComm {
   struct mesh_link_map map;
   uint64_t page;
@@ -309,6 +310,7 @@ struct ncclComm {
   uint64_t last, groups;
   void *command;
   struct ncclComm *next_touched;
+  struct plan *plan;
   _Atomic int runs;
 };
 
@@ -371,6 +373,7 @@ static void bootstrap_close(struct ncclComm *comm) {
 }
 
 static void comm_leave(struct ncclComm *comm);
+static void plan_free(const struct ncclComm *comm, struct plan *plan);
 /* comm's pool and its gate returned to the region (ncclMemFree), after its holdings are given back (comm_leave: the
    bridge posts nothing more of a given holding, so only rows a unit already posted names stay held, mesh-dataflow.c
    mesh_pinned) */
@@ -389,6 +392,7 @@ static void comm_free(struct ncclComm *comm) {
   if (comm->violation) metal_release(comm->violation);
   metal_release(comm->command);
   comm_leave(comm);
+  plan_free(comm, comm->plan);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent); free(comm->channels); free(comm->toward);
   free(comm->ops);
   pthread_mutex_destroy(&comm->guard);
@@ -1668,14 +1672,8 @@ struct steps {
      which buffers any step writes (`needed`, a buffer each; one no step writes is never made) */
   struct where *read;
   unsigned char *fresh, *needed;
-  const struct mesh_program *program;
-  struct mesh_operand operand;
-  /* the operand's segments in operand elements, owned (`cut`): a reduce-scatter's and an all-gather's NCCL's (a rank's
-     count each, or an uneven call's counts), NULL the program's own cut */
-  const uint64_t *segments;
-  uint64_t *cut;
-  /* each step's channel and entry as schedule_group places them, and the receive before it (by round, then plan
-     order) that has any bytes, or -1 */
+  /* each step's channel and entry as its group's issue lays them (schedule_laid), and the receive before it (by round,
+     then plan order) that has any bytes, or -1 */
   uint32_t *channel;
   uint64_t *entry;
   int32_t *before;
@@ -1794,8 +1792,25 @@ static ncclResult_t operands_check(const struct call *list, size_t n) {
 static void steps_free(struct steps *s) {
   if (!s) return;
   free(s->buffer); free(s->steps); free(s->done); free(s->channel); free(s->entry); free(s->before); free(s->read); free(s->fresh);
-  free(s->needed); free(s->cut);
+  free(s->needed);
   free(s);
+}
+
+/* a compiled call's steps for one issue of it (group_bound): its steps, their order (`before`) and its receives of no
+   bytes done, copied; its buffers, channels and entries the issue's own (place_group, schedule_laid) */
+static struct steps *steps_copy(const struct steps *from) {
+  const size_t most = from->count + 1;
+  struct steps *s = calloc(1, sizeof *s);
+  if (s) *s = (struct steps){.count = from->count, .buffers = from->buffers};
+  if (!s || !(s->steps = malloc(most * sizeof *s->steps)) || !(s->done = malloc(most)) || !(s->before = malloc(most * sizeof *s->before)) ||
+      !(s->channel = calloc(most, sizeof *s->channel)) || !(s->entry = calloc(most, sizeof *s->entry)) ||
+      !(s->buffer = calloc(s->buffers, sizeof *s->buffer))) {
+    steps_free(s);
+    return NULL;
+  }
+  memcpy(s->steps, from->steps, from->count * sizeof *s->steps); memcpy(s->done, from->done, from->count);
+  memcpy(s->before, from->before, from->count * sizeof *s->before);
+  return s;
 }
 
 static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
@@ -1824,27 +1839,25 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     }
     struct steps *s = calloc(1, sizeof *s);
     const size_t most = (program ? program->first[program->nodes] : counted(c) ? 2 * (size_t)comm->nranks : 1) + 1;
+    uint64_t cut[nccl ? comm->nranks : 1];
     if (s) s->buffers = counted(c) ? 2 : 1 + (program ? program->scratch : 0);
     if (!s || !(s->steps = calloc(most, sizeof *s->steps)) || !(s->done = calloc(most, 1)) || !(s->channel = calloc(most, sizeof *s->channel)) ||
         !(s->entry = calloc(most, sizeof *s->entry)) || !(s->before = calloc(most, sizeof *s->before)) ||
-        !(s->buffer = calloc(s->buffers, sizeof *s->buffer)) || (nccl && !(s->cut = malloc((size_t)comm->nranks * sizeof *s->cut)))) {
+        !(s->buffer = calloc(s->buffers, sizeof *s->buffer))) {
       steps_free(s);
       return fail(ncclSystemError, "out of memory");
     }
     c->bound = s;
     const uint32_t u = unit_of(c);
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)(SIZE[c->type] * u), elements(c) / u};
-    s->operand = operand;
-    s->program = program;
-    for (int r = 0; nccl && r < comm->nranks; r++) s->cut[r] = (c->segments ? c->segments[r] : c->count) / u;
-    s->segments = s->cut;
+    for (int r = 0; nccl && r < comm->nranks; r++) cut[r] = (c->segments ? c->segments[r] : c->count) / u;
     if (p2p(c)) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1;
     } else if (counted(c))
       s->count = mesh_counted_steps((uint32_t)comm->nranks, (uint32_t)comm->rank, c->segments, (struct mesh_operand){operand.type, operand.element_bytes, 0},
                                     s->steps);
-    else s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, s->segments, comm->page, s->steps);
+    else s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, nccl ? cut : NULL, comm->page, s->steps);
     for (uint32_t k = 0; k < s->count; k++)
       if (piece_bytes(s->steps + k) && comm->toward[s->steps[k].peer] < 0)
         return fail(ncclInvalidUsage, "a call of %s moves bytes between rank %d and rank %u (node %u), which no link of this node joins: a "
@@ -1887,10 +1900,9 @@ static int meet(const struct mesh_step *x, const struct mesh_step *y) {
   return x->buffer == y->buffer && x->first < y->first + y->piece.elements && y->first < x->first + x->piece.elements;
 }
 
-/* each channel's entries for the group, each list from the last scheduled one's end (mesh_group_lay), each step's
-   channel and entry kept, the receive before it (mesh-plan.h mesh_group_before) kept, a receive with no bytes done;
-   each landing that combines into bytes an earlier SEND of its call on its channel reads (mesh_compile's two-node
-   direct exchange) with that SEND's entry and end (struct message `need`, `sent`) */
+/* each channel's entries for the group, each list from its 0 (mesh_group_lay: schedule_laid lays them from the last
+   scheduled entry and page), the receive before each step (mesh-plan.h mesh_group_before) kept, a receive with no
+   bytes done */
 static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule *plans) {
   const uint32_t N = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   size_t total = 1;
@@ -1908,12 +1920,12 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
   for (uint32_t h = 0; h < comm->count && !result; h++) {
     const struct channel *ch = comm->channels + h;
     struct schedule *p = plans + h;
-    *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, {ch->sends, ch->lands}, 0, 0};
+    *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, {0, 0}, 0, 0};
     if (!p->out || !p->in) { result = fail(ncclSystemError, "out of memory"); break; }
     for (int send = 1; send >= 0; send--) {
       uint32_t placed = 0;
-      mesh_group_lay(&group, me, (uint32_t)ch->peer, send, send ? ch->sends : ch->lands, scratch, made, &placed);
-      mesh_pages end = send ? ch->out : ch->in;
+      mesh_group_lay(&group, me, (uint32_t)ch->peer, send, 0, scratch, made, &placed);
+      mesh_pages end = {0};
       for (uint32_t k = 0; k < placed; k++) {
         const struct mesh_place *x = &made[k].place;
         struct call *c = list + made[k].call;
@@ -1923,18 +1935,6 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
         const struct message m = {.c = c, .step = x->step, .entry = x->entry, .pages = pages, .end = end,
                                   .offset = step->first * step->piece.element_bytes, .bytes = piece_bytes(step)};
         if (send) p->out[p->outs++] = m; else p->in[p->ins++] = m;
-        c->bound->channel[x->step] = h; c->bound->entry[x->step] = x->entry;
-      }
-    }
-    for (size_t k = 0; k < p->ins; k++) {
-      struct message *m = p->in + k;
-      const struct steps *st = m->c->bound;
-      if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
-      for (size_t j = 0; j < p->outs; j++) {
-        const struct message *o = p->out + j;
-        if (o->c != m->c || o->step >= m->step || (st->read && named(st->read[o->step])) || !meet(st->steps + o->step, st->steps + m->step)) continue;
-        if (o->entry + 1 > m->need) m->need = o->entry + 1;
-        if (pages_below(m->sent, o->end)) m->sent = o->end;
       }
     }
   }
@@ -1951,6 +1951,86 @@ static ncclResult_t schedule_group(struct ncclComm *comm, struct call *list, siz
 static void schedules_free(const struct ncclComm *comm, struct schedule *plans) {
   for (uint32_t h = 0; plans && h < comm->count; h++) { free(plans[h].out); free(plans[h].in); }
   free(plans);
+}
+
+/* a group's calls compiled: each crossing call's steps (plan_calls) and the group's entries on each channel, each list
+   from its 0 (schedule_group); *plans NULL where it failed */
+static ncclResult_t compile_group(struct ncclComm *comm, struct call *list, size_t n, struct schedule **plans) {
+  ncclResult_t result = plan_calls(comm, list, n);
+  if (!result && !(*plans = calloc(comm->count + 1, sizeof **plans))) result = fail(ncclSystemError, "out of memory");
+  if (!result) result = schedule_group(comm, list, n, *plans);
+  if (result) { schedules_free(comm, *plans); *plans = NULL; }
+  return result;
+}
+
+/* a declared group compiled once (ncclMeshCommPlan): its calls (`calls`, `n`, each with its steps), issued `repeat`
+   times in a row, and its entries on each channel from each list's 0 (`plans`, each message's call one of `calls`);
+   a communicator's plan: the caller's view (`view`), its declared groups in order (`group`) and each one's entries
+   (`entries`, the view's) */
+struct compiled { struct call *calls; size_t n; uint32_t repeat; struct schedule *plans; };
+struct plan { ncclMeshPlan view; struct compiled *group; uint64_t (*entries)[2]; };
+
+/* the plan's group that the communicator's group numbered `holder` is: its place in the plan's order, repeated from
+   the plan's first group */
+static const struct compiled *group_at(const struct plan *plan, uint64_t holder) {
+  uint64_t at = (holder - plan->view.first) % plan->view.issues;
+  const struct compiled *x = plan->group;
+  while (at >= x->repeat) at -= x++->repeat;
+  return x;
+}
+
+/* the group numbered `holder` bound to its compiled form, *plans its entries on each channel from each list's 0 (NULL
+   where it failed): its plan's group (group_at), each call's steps that group's copied and each message's call the
+   issued call at its place (nothing planned at the call, nothing compared: nccl.h ncclMeshCommPlan), else, with no
+   plan, compiled here (compile_group).  Under group_lock */
+static ncclResult_t group_bound(struct ncclComm *comm, struct call *list, size_t n, uint64_t holder, struct schedule **plans) {
+  if (!comm->plan) return compile_group(comm, list, n, plans);
+  const struct compiled *x = group_at(comm->plan, holder);
+  struct schedule *made = calloc(comm->count + 1, sizeof *made);
+  ncclResult_t result = made ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (size_t i = 0; i < x->n && !result; i++)
+    if (x->calls[i].bound && !(list[i].bound = steps_copy(x->calls[i].bound))) result = fail(ncclSystemError, "out of memory");
+  for (uint32_t h = 0; h < comm->count && !result; h++) {
+    const struct schedule *p = x->plans + h;
+    struct schedule *q = made + h;
+    *q = (struct schedule){malloc((p->outs + 1) * sizeof *p->out), malloc((p->ins + 1) * sizeof *p->in), p->outs, p->ins, {0, 0}, 0, 0};
+    if (!q->out || !q->in) { result = fail(ncclSystemError, "out of memory"); break; }
+    for (size_t k = 0; k < p->outs; k++) { q->out[k] = p->out[k]; q->out[k].c = list + (p->out[k].c - x->calls); }
+    for (size_t k = 0; k < p->ins; k++) { q->in[k] = p->in[k]; q->in[k].c = list + (p->in[k].c - x->calls); }
+  }
+  if (result) { schedules_free(comm, made); made = NULL; }
+  *plans = made;
+  return result;
+}
+
+/* the group's entries laid from each channel's last scheduled entry and page (its compiled ones are from each list's
+   0), each step's channel and entry kept; each landing that combines into bytes an earlier SEND of its call on its
+   channel reads (mesh_compile's two-node direct exchange; a SEND that reads the send buffer in place reads none,
+   plan_direct) with that SEND's entry and end (struct message `need`, `sent`) */
+static void schedule_laid(struct ncclComm *comm, struct schedule *plans) {
+  for (uint32_t h = 0; h < comm->count; h++) {
+    const struct channel *ch = comm->channels + h;
+    struct schedule *p = plans + h;
+    p->first[0] = ch->sends; p->first[1] = ch->lands;
+    for (int send = 1; send >= 0; send--)
+      for (size_t k = 0; k < (send ? p->outs : p->ins); k++) {
+        struct message *m = (send ? p->out : p->in) + k;
+        m->entry += p->first[!send];
+        m->end = pages_add(send ? ch->out : ch->in, m->end);
+        m->c->bound->channel[m->step] = h; m->c->bound->entry[m->step] = m->entry;
+      }
+    for (size_t k = 0; k < p->ins; k++) {
+      struct message *m = p->in + k;
+      const struct steps *st = m->c->bound;
+      if (st->steps[m->step].op != MESH_STEP_REDUCE) continue;
+      for (size_t j = 0; j < p->outs; j++) {
+        const struct message *o = p->out + j;
+        if (o->c != m->c || o->step >= m->step || (st->read && named(st->read[o->step])) || !meet(st->steps + o->step, st->steps + m->step)) continue;
+        if (o->entry + 1 > m->need) m->need = o->entry + 1;
+        if (pages_below(m->sent, o->end)) m->sent = o->end;
+      }
+    }
+  }
 }
 
 /* a lease of comm's pool of at least `bytes` (its smallest free one that holds them, else a new one: ncclMemAlloc),
@@ -2145,23 +2225,19 @@ static void commit_group(struct ncclComm *comm, const struct schedule *plans) {
   }
 }
 
-/* the group's schedule (schedule_group), its bytes placed and checked (place_group), its landings gated where the group
-   is the Metal path's (`program` not NULL: gate_of, *gate whether its first dispatch stores the communicator's gate),
-   presented (present_group) and counted (commit_group); a failure before any entry is presented is the call's alone,
-   one after it the communicator's (its lists stand mid-group); *made NULL where it failed */
-static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct call *list, size_t n, uint64_t holder,
-                             struct schedule **made, int *gate) {
-  struct schedule *plans = calloc(comm->count + 1, sizeof *plans);
-  *made = NULL;
-  if (!plans) return fail(ncclSystemError, "out of memory");
-  ncclResult_t result = schedule_group(comm, list, n, plans);
-  if (!result) result = place_group(program, comm, plans, holder);
+/* the group's compiled entries (group_bound) laid from each channel's last scheduled entry and page (schedule_laid), its
+   bytes placed and checked (place_group), its landings gated where the group is the Metal path's (`program` not NULL:
+   gate_of, *gate whether its first dispatch stores the communicator's gate), presented (present_group) and counted
+   (commit_group); a failure before any entry is presented is the call's alone, one after it the communicator's (its
+   lists stand mid-group) */
+static ncclResult_t schedule(struct metal_program *program, struct ncclComm *comm, struct schedule *plans, uint64_t holder, int *gate) {
+  schedule_laid(comm, plans);
+  ncclResult_t result = place_group(program, comm, plans, holder);
   if (!result && program) gate_of(comm, plans, gate);
   if (!result) result = present_group(comm, plans);
-  if (result) { schedules_free(comm, plans); return result; }
+  if (result) return result;
   if (*gate) comm->gates++;
   commit_group(comm, plans);
-  *made = plans;
   return ncclSuccess;
 }
 
@@ -2405,7 +2481,8 @@ static ncclResult_t launch(struct call *list, size_t n) {
     result = fail(ncclInvalidUsage, "a host-path group while this communicator's GPU groups are issued and not complete (ncclMeshComplete)");
   if (!result && remote && finished && comm->last) result = gpu_finished(comm);
   if (!result && remote && finished) metal_collect(finished);
-  if (!result) result = plan_calls(comm, list, n);
+  struct schedule *plans = NULL;
+  if (!result) result = group_bound(comm, list, n, holder, &plans);
   if (!result) result = operands_check(list, n);
   for (size_t i = 0; i < n && !result; i++) {
     struct call *c = list + i;
@@ -2437,19 +2514,18 @@ static ncclResult_t launch(struct call *list, size_t n) {
       }
     }
   }
-  struct schedule *plans = NULL;
-  int gate = 0;
-  if (!result && remote && !(result = schedule(NULL, comm, list, n, holder, &plans, &gate))) atomic_fetch_add(&comm->runs, 1);
+  int gate = 0, running = 0;
+  if (!result && remote && !(result = schedule(NULL, comm, plans, holder, &gate))) { running = 1; atomic_fetch_add(&comm->runs, 1); }
   pthread_mutex_unlock(&group_lock);
-  if (plans) {
+  if (running) {
     if ((result = run(comm, plans))) {
       pthread_mutex_lock(&group_lock);
       comm_fail(comm, result, "%s", last.text);
       pthread_mutex_unlock(&group_lock);
     }
-    schedules_free(comm, plans);
     atomic_fetch_sub(&comm->runs, 1);
   }
+  schedules_free(comm, plans);
   if (!result) {
     size_t self = 0;
     for (size_t i = 0; i < n; i++) {
@@ -3170,9 +3246,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (!result) group_numbered(comm);
   const uint64_t holder = comm->groups;
   if (!result && remote) result = comm_failure(comm);
-  if (!result) result = plan_calls(comm, list, n);
+  struct schedule *plans = NULL;
+  if (!result) result = group_bound(comm, list, n, holder, &plans);
   if (!result) result = operands_check(list, n);
-  if (result) { pthread_mutex_unlock(&group_lock); calls_free(list, n); return result; }
+  if (result) { pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n); return result; }
   /* a group on a fused stream that is no fused crossing (fusable: one that crosses no link, or not ncclSend and ncclRecv
      toward each peer, an in-place broadcast or all-gather, at most one SEND and one landing of a whole buffer each,
      forwarding nothing) is an ordinary group on that stream, its steps the library's: no record is written and both
@@ -3187,7 +3264,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
                                          : metal_begin(list[0].command, list[0].encoder, fused ? list[0].residency : NULL, violation,
                                                        polls, &message);
   if (!program) {
-    pthread_mutex_unlock(&group_lock); calls_free(list, n);
+    pthread_mutex_unlock(&group_lock); schedules_free(comm, plans); calls_free(list, n);
     return fail(ncclSystemError, "%s", message);
   }
   comm->scratch_used = 0;
@@ -3230,7 +3307,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       g->comm = comm; g->holder = holder; g->fused = fused != NULL;
       g->end = g->start + comm->count;
       for (uint32_t h = 0; h < comm->count; h++) { g->start[h][0] = comm->channels[h].sends; g->start[h][1] = comm->channels[h].lands; }
-      result = schedule(program, comm, list, n, holder, &g->plans, &gate);
+      if (!(result = schedule(program, comm, plans, holder, &gate))) { g->plans = plans; plans = NULL; }
     }
     if (result && g) { free(g->start); free(g); g = NULL; }
     if (!result) {
@@ -3307,6 +3384,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
   if (!scheduled) spares_give(comm, holder);
   pthread_mutex_unlock(&group_lock);
+  schedules_free(comm, plans);
   if (!scheduled) calls_free(list, n);
   if (result) comm->async = result;
   return result;
@@ -3619,6 +3697,72 @@ static ncclResult_t enqueue(struct call c) {
   }
   calls[call_count++] = c;
   return ncclGroupEnd();
+}
+
+/* a declared call (nccl.h ncclMeshCall) as the call its function makes (collective, enqueue_counts, routed: a V form's
+   counts its own copy), admitted and its operator taken (admit, reduction), with no buffers */
+static ncclResult_t declared(ncclComm_t comm, const ncclMeshCall *d, struct call *c) {
+  const int n = comm->nranks, me = comm->rank,
+            v = !d->counts ? 0 : d->what == WHAT_COUNTED ? 2 * n : d->what == MESH_ALLGATHER || d->what == MESH_REDUCE_SCATTER ? n : 0;
+  *c = (struct call){.what = d->what, .root = d->peer, .peer = d->peer, .count = d->count, .type = d->type, .op = d->op, .comm = comm};
+  if ((d->what < MESH_ALLREDUCE || d->what > MESH_ALLGATHER) && (d->what < WHAT_SEND || d->what > WHAT_COUNTED))
+    return fail(ncclInvalidArgument, "a declared call's kind %d (mesh-plan.h MESH_*, nccl.h ncclMeshCall*)", d->what);
+  if (d->what == WHAT_COUNTED && !d->counts) return fail(ncclInvalidArgument, "a declared all-to-all without its counts");
+  if (v && !(c->segments = malloc((size_t)v * sizeof *c->segments))) return fail(ncclSystemError, "out of memory");
+  for (int k = 0; k < v; k++) { c->segments[k] = d->counts[k]; c->total += d->counts[k]; }
+  if (v && d->what != WHAT_COUNTED) c->count = d->counts[me];
+  if (d->what == WHAT_COUNTED) c->count = c->total - c->segments[me] - c->segments[n + me];
+  const ncclResult_t refused = admit(c);
+  return refused || !reducing(c->what) ? refused : reduction(c);
+}
+
+/* a plan's own: its groups' calls and entries */
+static void plan_free(const struct ncclComm *comm, struct plan *plan) {
+  for (uint32_t g = 0; plan && g < plan->view.groups; g++) { calls_free(plan->group[g].calls, plan->group[g].n); schedules_free(comm, plan->group[g].plans); }
+  if (plan) { free(plan->group); free(plan->entries); }
+  free(plan);
+}
+
+/* nccl.h ncclMeshCommPlan: the declared groups (consecutive calls of one number each) made as their calls (declared),
+   then compiled under group_lock (compile_group, as a group with no plan is at its call), the plan taken from comm's
+   next group on in place of the one before (freed); a failure frees what it made */
+ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall *calls, int count, const ncclMeshPlan **plan) {
+  if (plan) *plan = NULL;
+  if (!comm || count < 0 || (count && !calls)) return fail(ncclInvalidArgument, "ncclMeshCommPlan's arguments");
+  uint32_t groups = 0;
+  for (int i = 0; i < count; i++) groups += !i || calls[i].group != calls[i - 1].group;
+  struct plan *made = groups ? calloc(1, sizeof *made) : NULL;
+  ncclResult_t result = !groups || (made && (made->group = calloc(groups, sizeof *made->group)) && (made->entries = calloc(groups, sizeof *made->entries)))
+                        ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  if (made) made->view.groups = groups;
+  for (int i = 0, g = -1; i < count && !result; i++) {
+    if (!i || calls[i].group != calls[i - 1].group) {
+      struct compiled *x = made->group + ++g;
+      int n = 1;
+      while (i + n < count && calls[i + n].group == calls[i].group) n++;
+      x->repeat = calls[i].repeat ? calls[i].repeat : 1;
+      made->view.issues += x->repeat;
+      if (!(x->calls = calloc((size_t)n, sizeof *x->calls))) { result = fail(ncclSystemError, "out of memory"); break; }
+    }
+    struct compiled *x = made->group + g;
+    result = declared(comm, calls + i, x->calls + x->n++);
+  }
+  pthread_mutex_lock(&group_lock);
+  for (uint32_t g = 0; g < groups && !result; g++) {
+    struct compiled *x = made->group + g;
+    result = compile_group(comm, x->calls, x->n, &x->plans);
+    for (uint32_t h = 0; h < comm->count && !result; h++) { made->entries[g][0] += x->plans[h].outs; made->entries[g][1] += x->plans[h].ins; }
+  }
+  if (!result) {
+    struct plan *was = comm->plan;
+    if (made) { made->view.first = comm->groups + 1; made->view.entries = (const uint64_t (*)[2])made->entries; }
+    comm->plan = made;
+    made = was;
+    if (plan) *plan = comm->plan ? &comm->plan->view : NULL;
+  }
+  pthread_mutex_unlock(&group_lock);
+  plan_free(comm, made);
+  return result;
 }
 
 static ncclResult_t collective(int what, const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op,

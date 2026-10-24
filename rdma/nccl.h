@@ -970,6 +970,44 @@ typedef struct {
    by size class), named by the caller's configuration where a price chose them: the caller's configuration document
    is the one place a form is decided (metal-microbench docs/principles.md section 6). */
 ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
+/* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,
+   MESH_REDUCE_SCATTER, MESH_ALLGATHER, or ncclMeshCallSend, ncclMeshCallRecv, ncclMeshCallAlltoAllV), its `peer` (a
+   send's or a receive's, a reduce's or a broadcast's root), `count` as its call takes it (a reduce-scatter's
+   recvcount, an all-gather's sendcount), `counts` (NULL: none; read for these alone) a V form's (ncclMeshAllGatherV's
+   and ncclMeshReduceScatterV's, a rank's count each; ncclMeshAlltoAllV's sendcounts then recvcounts), `type`, `op` (a
+   reduction's), and `group`: consecutive calls of one number are one group (ncclGroupStart to ncclGroupEnd; a call
+   outside one its own group), issued `repeat` times in a row (its first call's; 0 as 1). */
+enum { ncclMeshCallSend = 16, ncclMeshCallRecv = 17, ncclMeshCallAlltoAllV = 18 };
+typedef struct {
+  int what, peer;
+  size_t count;
+  const size_t* counts;
+  ncclDataType_t type;
+  ncclRedOp_t op;
+  int group;
+  uint32_t repeat;
+} ncclMeshCall;
+/* A communicator's plan (ncclMeshCommPlan): its `groups` declared groups, the groups one pass of its order issues
+   (`issues`, the repeats' sum), the number of the communicator's group the order starts at (`first`: its groups
+   numbered from 1 in issue order, the first after the call), and of declared group g this rank's entries on its send
+   lists and on its landing lists (entries[g][0] and [1]: a fused crossing's publications and landings, ncclMeshFused). */
+typedef struct {
+  uint32_t groups;
+  uint64_t issues, first;
+  const uint64_t (*entries)[2];
+} ncclMeshPlan;
+/* The program's whole workload declared once, after comm forms (design/rubrics.md D2: the shapes and the callgraph
+   are fixed when the program is compiled): every call it will make on comm, in its order, each declared group compiled
+   here once as a group issued with no plan is compiled at its call (each crossing call's steps, mesh_program_steps_cut
+   or one step a point-to-point call, and the group's entries on each channel, mesh_group_lay), so a group issued after
+   it plans nothing.  From comm's next group on, its groups are the plan's in order, each `repeat` times, the order
+   repeated: the k-th group after the call runs declared group (k mod issues)'s compiled form with the issued calls'
+   buffers, and nothing compares the two (a group that is not its declaration is the program's error, undefined).
+   Every rank passes its own calls (its own peers), the same groups in the same order, at the same point between its
+   groups.  The plan is comm's until the next call or its destroy, *plan (may be NULL) its view; count 0 drops it, each
+   group then compiled at its call.  A form set after it (ncclMeshCommForms) changes no planned group.  A declared call
+   that would fail at its call fails the plan as a value (ncclInvalidArgument, ncclInvalidUsage), comm's plan kept. */
+ncclResult_t ncclMeshCommPlan(ncclComm_t comm, const ncclMeshCall* calls, int count, const ncclMeshPlan** plan);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose communicator failed returns
