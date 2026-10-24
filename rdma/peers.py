@@ -24,7 +24,7 @@ def host() -> dict:
     number, and its serial number, read from the IORegistry's archive form (AGENTS.md: a node is its hardware)."""
     import plistlib, subprocess
     entry = plistlib.loads(subprocess.run(["/usr/sbin/ioreg", "-a", "-rd1", "-c", "IOPlatformExpertDevice"],
-                                          capture_output=True, check=True, timeout=5).stdout)[0]
+                                          capture_output=True, check=True).stdout)[0]
     return {"node_id": entry["IOPlatformUUID"], "node": node_number(entry["IOPlatformUUID"]),
             "serial": entry["IOPlatformSerialNumber"]}
 

@@ -62,8 +62,6 @@ from pathlib import Path
 
 import torch
 
-from . import deadline, expired
-
 _objc = None
 
 
@@ -525,14 +523,9 @@ class Operation:
                 end.record()
                 marks[i] = (begin, end)
         if hosted:
-            with deadline():
-                ready.synchronize()
+            ready.synchronize()
         futures = {i: self.engines.workers.submit(engines[i].run, self, shards[i][0], x2, prologue, outs[i]) for i in hosted}
-        until = time.monotonic() + 5.0
-        try:
-            seconds = {i: f.result(timeout=max(0.0, until - time.monotonic())) for i, f in futures.items()}
-        except concurrent.futures.TimeoutError:
-            expired('the host-side engines\' shares', 5.0)
+        seconds = {i: f.result() for i, f in futures.items()}
         pieces = [outs[i] for i in held]
         if self.combine == 'concat':
             y = torch.cat([p.to(dtype) for p in pieces], dim=1) if len(pieces) > 1 else pieces[0].to(dtype)
@@ -609,8 +602,7 @@ def rebalance(engines):
     """Each (operation, rows) decision's search (allocate.Coupled) on its calls since the last: each engine's share
     times (the GPU's from its events) and the calls' spans on the GPU's timeline, the measure; the next allocation,
     written into the operations.  {decision: parts}."""
-    with deadline():
-        torch.mps.synchronize()
+    torch.mps.synchronize()
     out, engines.last = {}, {}
     for key, d in engines.decisions.items():
         calls = engines.evidence.pop(key, [])

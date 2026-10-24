@@ -5,7 +5,6 @@ point to point, MPI_Allgatherv and MPI_Reduce_scatter (ncclMeshAllGatherV, ncclM
 the all-to-all and the split-KV partials merge (ncclMeshRedOpCreatePartials's operator).  Host-path calls
 complete where they return, MPS ones are encoded on torch's stream and waited where their consumer runs.  It computes
 nothing: a program's numerics are its supplied kernels'."""
-import datetime
 import os
 
 import numpy as np
@@ -18,11 +17,6 @@ _TORCH = {'float16': torch.float16, 'float32': torch.float32, 'float64': torch.f
 _NUMPY = {value: np.dtype(name) for name, value in _TORCH.items() if name != 'bfloat16'}
 DEVICES = {'cpu': 'cpu', 'metal': 'mps', 'mps': 'mps'}
 OPS = {'sum': dist.ReduceOp.SUM, 'max': dist.ReduceOp.MAX, 'min': dist.ReduceOp.MIN}
-
-
-# design/data-model.md#6-why-code-here-only-loses-waits-and-guards: the deadline of a World's rendezvous and its
-# groups' store meetings
-DEADLINE = datetime.timedelta(seconds=5)
 
 
 # design/algorithm-sources.md#programtensor
@@ -52,8 +46,7 @@ class World:
             group = dist.group.WORLD
         if group is None and int(os.environ.get('WORLD_SIZE', '1')) > 1:
             from torch_mesh import backend  # noqa: F401
-            dist.init_process_group(backend='mesh', timeout=DEADLINE,
-                                    **({'device_id': torch.device('mps', 0)} if device == 'mps' else {}))
+            dist.init_process_group(backend='mesh', **({'device_id': torch.device('mps', 0)} if device == 'mps' else {}))
             group, self.owned = dist.group.WORLD, True
         self.group = group
         self.rank = dist.get_rank(group) if group is not None else 0
@@ -69,7 +62,7 @@ class World:
                 self.groups[(queue, members)] = self.group
             elif self.rank in members:
                 ranks = [dist.get_global_rank(self.group, r) for r in members]
-                self.groups[(queue, members)] = dist.new_group(ranks=ranks, timeout=DEADLINE, use_local_synchronization=True)
+                self.groups[(queue, members)] = dist.new_group(ranks=ranks, use_local_synchronization=True)
             else:
                 self.groups[(queue, members)] = None
 

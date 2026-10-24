@@ -62,17 +62,9 @@ def account():
     except (OSError, KeyError): return {}
     return {"user": entry.pw_uid, "group": entry.pw_gid, "extra_groups": []}
 
-# ../design/data-model.md#6-why-code-here-only-loses-waits-and-guards
-DEADLINE = 5.0
-
-def expired(wait):
-    print(f"telemetry: {wait}: past its deadline of {DEADLINE:.3f} s; the program ends (design/data-model.md section 6)", file=sys.stderr, flush=True)
-    os._exit(1)
-
 def run(command, text=False, **as_account):
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True, **as_account) as process:
-        try: return process.communicate(timeout=DEADLINE)[0]
-        except subprocess.TimeoutExpired: expired(f"{command[0]}'s output")
+        return process.communicate()[0]
 
 def output(command):
     try:

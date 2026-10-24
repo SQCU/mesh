@@ -20,34 +20,7 @@ plan() declares a program's collectives on a group once, in their order (libnccl
 compiled then, so none is planned where it is issued.
 
 record() and replay() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
-compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its replays issued back to back.
-
-deadline() bounds a wait that blocks in C with no timeout of its own, and expired() ends the program at a wait's
-deadline (design/data-model.md section 6)."""
-import contextlib
-
-
-def expired(wait, seconds):
-    """design/data-model.md section 6: `wait` past its deadline of `seconds`: said on stderr, and the process ends."""
-    import os
-    import sys
-    print(f'{wait}: past its deadline of {seconds:.3f} s; the program ends (design/data-model.md section 6)', file=sys.stderr,
-          flush=True)
-    os._exit(1)
-
-
-@contextlib.contextmanager
-def deadline(seconds=5.0):
-    """design/data-model.md section 6: the block's wait (torch.mps.synchronize(), an MPS event's synchronize()) within
-    `seconds` of the block's start; past it faulthandler prints the threads' tracebacks, the wait's line among them,
-    and the deadline ("Timeout (0:00:05)!"), and ends the process.  faulthandler keeps one such timer a process: one
-    thread's waits."""
-    import faulthandler
-    faulthandler.dump_traceback_later(seconds, exit=True)
-    try:
-        yield
-    finally:
-        faulthandler.cancel_dump_traceback_later()
+compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its replays issued back to back."""
 
 
 def _autoload():
