@@ -12,7 +12,7 @@ struct ncclMeshTrace {
   pthread_t thread;
   _Atomic int stop;
   int status, count, room;
-  uint64_t *cursor, *page;
+  uint64_t *cursor, *page, *queued, *peak;
   uint64_t previous_ns, polls, max_gap_ns;
   struct traced_entry *entries;
 };
@@ -20,6 +20,7 @@ struct ncclMeshTrace {
 static void trace_read(struct ncclMeshTrace *trace) {
   struct ncclComm *comm = trace->comm;
   const uint64_t before = mesh_clock_ns();
+  memset(trace->queued, 0, (comm->count + 1) * sizeof *trace->queued);
   for (uint32_t h = 0; h < comm->count && !trace->status; h++) {
     const struct channel *channel = comm->channels + h;
     const uint64_t count = atomic_load_explicit(channel->view.presented[0], memory_order_acquire);
@@ -62,7 +63,10 @@ static void trace_read(struct ncclMeshTrace *trace) {
     w->queue_byte_seconds += 0.5 * (double)(record->previous_queue + queued) * (now - trace->previous_ns) * 1e-9;
     if (queued > w->peak_queue_bytes) w->peak_queue_bytes = queued;
     record->previous_queue = queued;
+    trace->queued[record->channel] += queued;
   }
+  for (uint32_t h = 0; h < comm->count; h++)
+    if (trace->queued[h] > trace->peak[h]) trace->peak[h] = trace->queued[h];
   const uint64_t after = mesh_clock_ns();
   if (after - trace->previous_ns > trace->max_gap_ns) trace->max_gap_ns = after - trace->previous_ns;
   trace->previous_ns = before;
@@ -79,17 +83,22 @@ static void *trace_run(void *argument) {
   return NULL;
 }
 
+uint64_t ncclMeshTraceClock(void) { return mesh_clock_ns(); }
+
 ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out) {
-  if (!comm || !out || room <= 0 || room > MESH_STREAM_ENTRIES)
+  if (!comm || !out || room <= 0 || (unsigned)room > MESH_STREAM_ENTRIES)
     return fail(ncclInvalidArgument, "trace capacity must be within the stream entry ring");
   struct ncclMeshTrace *trace = calloc(1, sizeof *trace);
   if (!trace) return fail(ncclSystemError, "out of memory");
   trace->comm = comm; trace->room = room;
+  atomic_init(&trace->stop, 0);
   trace->entries = calloc((size_t)room, sizeof *trace->entries);
   trace->cursor = calloc(comm->count + 1, sizeof *trace->cursor);
   trace->page = calloc(comm->count + 1, sizeof *trace->page);
-  if (!trace->entries || !trace->cursor || !trace->page) {
-    free(trace->entries); free(trace->cursor); free(trace->page); free(trace);
+  trace->queued = calloc(comm->count + 1, sizeof *trace->queued);
+  trace->peak = calloc(comm->count + 1, sizeof *trace->peak);
+  if (!trace->entries || !trace->cursor || !trace->page || !trace->queued || !trace->peak) {
+    free(trace->entries); free(trace->cursor); free(trace->page); free(trace->queued); free(trace->peak); free(trace);
     return fail(ncclSystemError, "out of memory");
   }
   for (uint32_t h = 0; h < comm->count; h++) {
@@ -99,7 +108,7 @@ ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out)
   trace->previous_ns = mesh_clock_ns();
   const int status = pthread_create(&trace->thread, NULL, trace_run, trace);
   if (status) {
-    free(trace->entries); free(trace->cursor); free(trace->page); free(trace);
+    free(trace->entries); free(trace->cursor); free(trace->page); free(trace->queued); free(trace->peak); free(trace);
     return fail(ncclSystemError, "trace observer: %s", strerror(status));
   }
   *out = trace;
@@ -115,9 +124,10 @@ ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out
   *stats = (struct ncclMeshTraceStats){.polls = trace->polls, .max_gap_ns = trace->max_gap_ns};
   for (int k = 0; k < trace->count; k++) {
     out[k] = trace->entries[k].window;
+    out[k].cable_peak_queue_bytes = trace->peak[trace->entries[k].channel];
     stats->incomplete += !out[k].end_hi_ns;
   }
   const int status = trace->status;
-  free(trace->entries); free(trace->cursor); free(trace->page); free(trace);
+  free(trace->entries); free(trace->cursor); free(trace->page); free(trace->queued); free(trace->peak); free(trace);
   return status ? fail(ncclSystemError, "trace observer: %s", strerror(status)) : ncclSuccess;
 }

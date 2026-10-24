@@ -990,11 +990,12 @@ ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample* sam
    with transition-time bounds. This observer does not publish, wait on or change transport words. */
 typedef struct ncclMeshTrace *ncclMeshTrace_t;
 struct ncclMeshWindow {
-  uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,peak_queue_bytes;
+  uint64_t start_lo_ns,start_hi_ns,end_lo_ns,end_hi_ns,bytes,wire,first,last,peak_queue_bytes,cable_peak_queue_bytes;
   double queue_byte_seconds;
   uint32_t cable,peer;
 };
 struct ncclMeshTraceStats { uint64_t polls,max_gap_ns; uint32_t incomplete; };
+uint64_t ncclMeshTraceClock(void);
 ncclResult_t ncclMeshTraceStart(ncclComm_t comm, int room, ncclMeshTrace_t *out);
 ncclResult_t ncclMeshTraceStop(ncclMeshTrace_t trace, struct ncclMeshWindow *out, int room, int *count, struct ncclMeshTraceStats *stats);
 /* A call a program declares ahead (ncclMeshCommPlan): `what` (mesh-plan.h MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE,

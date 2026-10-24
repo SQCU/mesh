@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -646,7 +647,6 @@ ncclResult_t ncclMeshCommSample(ncclComm_t comm, struct ncclMeshCableSample *sam
   return ncclSuccess;
 }
 
-#include "nccl-mesh-trace.h"
 
 ncclResult_t ncclMeshCommWriteRoutes(ncclComm_t comm, int source, int destination, const struct mesh_paths *paths) {
   if (!comm || source < 0 || destination < 0 || mesh_paths_check(&comm->fabric, (uint32_t)source, (uint32_t)destination, paths))
@@ -1562,6 +1562,8 @@ ncclResult_t ncclMeshCommPage(ncclComm_t comm, size_t *bytes) {
   *bytes = (size_t)comm->page;
   return ncclSuccess;
 }
+
+#include "nccl-mesh-trace.h"
 
 /* an operator made into the communicator's table (a freed slot, else one more), its handle past ncclNumOps */
 static ncclResult_t op_make(ncclComm_t comm, struct redop made, ncclRedOp_t *op) {
