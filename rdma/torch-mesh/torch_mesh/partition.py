@@ -123,6 +123,7 @@ class _Operand:
     def __init__(self, key, parts):
         self.key, self.capacity, self.units = key, tuple(int(p) for p in parts), sum(int(p) for p in parts)
         self.parts, self.cache = torch.tensor(self.capacity, dtype=torch.int64), {}
+        self.high = self.units - len(self.capacity) + 1  # this rank's most units (_reserve)
 
     def cached(self, what, build):
         if what not in self.cache:
@@ -349,12 +350,17 @@ def _(x, w, dim, sizes, group_name, adds, repeats):
     return x.new_empty(operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:])
 
 
+def _page(group):
+    """Bytes a page of `group`'s region: the library places each segment of a V collective on a page of its own."""
+    return group.page if getattr(group, 'handle', 0) else resource.getpagesize()
+
+
 def _paged(counts, size, group):
     """Segments of `counts` elements of `size` bytes laid end to end, each padded to whole pages of `group`'s region,
     since the library places each segment of a V collective on a page of its own (rdma/nccl.h, Memory; the group's
     page, ncclMeshCommPage, on the mesh backend, the OS's on another): the padded counts and the segments' starts (the
     last the elements in all)."""
-    page = max(1, (group.page if getattr(group, 'handle', 0) else resource.getpagesize()) // size)
+    page = max(1, _page(group) // size)
     padded = [-(-c // page) * page for c in counts]
     return padded, list(itertools.accumulate(padded, initial=0))
 
@@ -544,8 +550,9 @@ def attach(mesh, **dims):
 
 def _attach(mesh, name, parts):
     """`parts` attached to mesh dimension `name` as a new operand: tensors split by the old one keep it (follow)."""
-    key = f'{name}#{next(_KEYS)}'
+    key, old = f'{name}#{next(_KEYS)}', _OPERANDS.get(_NAMED.get((mesh, name)))
     _OPERANDS[key] = _Operand(key, parts)
+    _OPERANDS[key].high = old.high if old else _OPERANDS[key].high
     _NAMED[mesh, name] = key
 
 
@@ -585,8 +592,7 @@ def follow(*tensors):
             first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
             shape = h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:]
             if getattr(t, '_capacity', None) is None:
-                high = _BALANCING.get((mesh, mesh.mesh_dim_names[i]), {}).get('high', old.units - n + 1)
-                t._capacity = _empty((max(math.prod(shape), high * g * row),), rows, group)
+                t._capacity = _empty((max(math.prod(shape), old.high * g * row),), rows, group)
             if math.prod(shape) > t._capacity.numel():
                 raise RuntimeError(f'mesh: a share of {into[-1]} past the capacity of {tuple(shape)} (the Balancer\'s bounds)')
             new = t._capacity[:math.prod(shape)].view(shape)
@@ -615,8 +621,11 @@ def follow(*tensors):
                 stage[1] = (_empty((starts[-1],), rows, group, torch.int32), counts, starts)
             word, counts, starts = stage[1]
             dist.all_gather(list(word.split(counts)), word[starts[rank]:starts[rank + 1]], group=group)
-    contiguous = lambda shape: torch.empty(shape, device='meta').stride()
-    return [from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)) for placements, local, shape, _ in held]
+    contiguous, out = lambda shape: torch.empty(shape, device='meta').stride(), []
+    for placements, local, shape, t in held:
+        out.append(from_local(local, mesh, placements, shape=shape, stride=contiguous(shape)))
+        out[-1]._capacity, out[-1]._scratch = getattr(t, '_capacity', None), getattr(t, '_scratch', False)
+    return out
 
 
 # The tensors partition split along each partitioned mesh dimension, re-laid in place where the balancer moves its
@@ -665,18 +674,21 @@ def _relay(mesh, name):
 def _reserve(mesh, name, held, group):
     """The contiguity solver, once, before a dimension's Balancer: each tensor split along `name` gets a capacity lease of
     this rank's `high` units (its block copied to the prefix) and the communicator its staging, so follow moves in
-    place.  `high` is bisected from the share held to units - n + 1: the most whose leases the region grants with
-    headroom, one more lease of the largest block taken and returned at once, for the leases a program takes after the
-    reserve (held outputs at new shapes, the ring's, a replan's).  Every rank's, exchanged once, is returned: the
-    Balancer's bounds."""
+    place.  It runs after the first evaluation, whose leases (the ring's and the unshard's at capacity, SCORES) are held
+    by then.  `high` is bisected from the share held to units - n + 1: the most whose leases the region grants with
+    headroom, one more lease of the largest block taken and returned at once, for the leases a program takes later (a
+    replan's).  A rank the region refuses its share fails every rank, after the exchange.  Every rank's, exchanged once,
+    is returned: the Balancer's bounds."""
     o, rank, n = operand(mesh, name), mesh.get_local_rank(name), len(operand(mesh, name).capacity)
     ts = [t for r in list(_SPLIT.get((mesh, name), {}).values()) if (t := r()) is not None]
+    if any(getattr(t, '_reserved', name) != name for t in ts):
+        raise NotImplementedError(f'mesh: a tensor split along two partitioned mesh dimensions, each with evaluations')
     dims = [t.placements[mesh.mesh_dim_names.index(name)].dim % t.ndim for t in ts]
     per = [_units(o, t.shape[d]) * (t.to_local().numel() // max(t.to_local().shape[d], 1)) for t, d in zip(ts, dims)]
-    page = group.page if getattr(group, 'handle', 0) else resource.getpagesize()
+    page, staged = _page(group), 2 if getattr(group, 'handle', 0) else 0
     wide = max([e * t.element_size() for t, e in zip(ts, per)], default=0)
     leases = lambda p: [_empty((max(p * e, 1),), t.to_local(), group) for t, e in zip(ts, per)] + [
-        _empty((p * wide + n * page,), ts[0].to_local(), group, torch.uint8) for _ in range(2)]
+        _empty((p * wide + n * page,), ts[0].to_local(), group, torch.uint8) for _ in range(staged)]
 
     def fits(p):
         try:
@@ -685,18 +697,23 @@ def _reserve(mesh, name, held, group):
             return False
         finally:
             torch.mps.synchronize() if mesh.device_type == 'mps' else None
-    lo, hi = int(o.parts[rank]), o.units - n + 1
-    while ts and lo < hi:
+    lo, hi = (int(o.parts[rank]) if ts else o.units - n + 1), o.units - n + 1
+    refused = bool(ts) and not fits(lo)
+    while lo < hi and not refused:
         mid = (lo + hi + 1) // 2
         lo, hi = (mid, hi) if fits(mid) else (lo, mid - 1)
-    held['high'], caps = lo, leases(lo) if ts else []
+    words = _shared(held, group, [float(lo), float(refused)])
+    if any(w[1] for w in words):  # every rank raises together, none left waiting in an exchange
+        raise RuntimeError(f'mesh: the region refuses a share with headroom on ranks {[r for r, w in enumerate(words) if w[1]]}')
+    o.high, caps = lo, leases(lo) if ts else []
     for t, cap in zip(ts, caps):
         prefix = cap[:t.to_local().numel()].view(t.to_local().shape)
-        t._capacity, t._local_tensor = cap, prefix if getattr(t, '_scratch', False) else _copy(prefix, t.to_local())
+        t._capacity, t._reserved = cap, name
+        t._local_tensor = prefix if getattr(t, '_scratch', False) else _copy(prefix, t.to_local())
     if getattr(group, 'handle', 0) and ts:
         counts, starts = _paged([1] * n, 4, group)
         group._staging = [caps[-2:], (_empty((starts[-1],), ts[0].to_local(), group, torch.int32), counts, starts)]
-    return [int(w[0]) for w in _shared(held, group, [float(lo)])]
+    return [int(w[0]) for w in words]
 
 
 def calls(tensor):
@@ -747,12 +764,14 @@ def evaluations(mesh, name, count):
     from . import evidence
     group, o = mesh.get_group(name), operand(mesh, name)
     held = _BALANCING.setdefault((mesh, name), {})
-    if 'balancer' not in held:
-        n = len(o.capacity)
-        held.update(balancer=allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': _reserve(mesh, name, held, group)}}),
-                    closed=0, read=0, skip=1, words=None)
+    if 'closed' not in held:
+        held.update(closed=0, read=0, skip=1, words=None)  # the first evaluation: its warm-up, and the reserve
         evidence.watch(group, mesh.device_type)
     for k in range(count):
+        if k and 'balancer' not in held:  # after the first evaluation, so its leases (the ring's, SCORES) are counted
+            n = len(o.capacity)
+            high = _reserve(mesh, name, held, group)
+            held['balancer'] = allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n, 'high': high}})
         if k:
             _balance(mesh, name, held, group)
         yield k
@@ -816,6 +835,8 @@ def counts(src, dst):
     o, e, d, rank = _OPERANDS[p.key], p.dim % src.ndim, dst.placements[i].dim % src.ndim, src.device_mesh.get_coordinate()[i]
     s, t = ([_units(o, src.shape[c]) * q for q in o.parts.tolist()] for c in (e, d))
     rest = src.numel() // (src.shape[e] * src.shape[d])
+    if math.prod(src.to_local().shape[:d]) != 1:
+        raise NotImplementedError(f"mesh: counts needs dst's split dimension {d} outermost in src's block")
     return [s[r] * t[rank] * rest for r in range(len(s))], [s[rank] * t[q] * rest for q in range(len(s))]
 
 
@@ -1496,9 +1517,9 @@ def context_parallel_unshard(mesh, name, buffers, seq_dims, load_balance=True):
     for b, dim in zip(buffers, seq_dims):
         shape, b = lambda s: b.shape[:dim] + (s,) + b.shape[dim + 1:], b.contiguous()
         counts, starts = _paged([s * math.prod(shape(1)) for s in lengths], b.element_size(), group)
-        page = (group.page if getattr(group, 'handle', 0) else resource.getpagesize()) // b.element_size()
+        page = _page(group) // b.element_size()
         out = _held(group, f'unshard {len(joined)}', (starts[-1],), b, None, S * math.prod(shape(1)) + len(lengths) * page)
-        whole = _held(group, f'unshard {len(joined)} whole', shape(S), b)
+        whole = _kept(shape(S), b, group)
         out[starts[rank]:starts[rank] + b.numel()].view(b.shape).copy_(b)
         dist.all_gather(list(out.split(counts)), out[starts[rank]:starts[rank] + counts[rank]], group=group)
         for r, (at, s) in enumerate(zip(starts, lengths)):
@@ -1519,6 +1540,8 @@ def ring_attention(mesh, name, query, key, value, is_causal=False, scale=None, l
 
 
 SCORES = 1 << 26
+
+
 def _holding(group):
     """The leases held for `group` (_held): on the communicator's object, gone with it; a group of another backend,
     whose object holds nothing, takes a lease a call."""
@@ -1542,14 +1565,24 @@ def _held(group, what, shape, like, dtype=None, capacity=0):
     return held[key][:n].view(shape)
 
 
+def _kept(shape, like, group, capacity=0):
+    """A region tensor the caller keeps (the ring's output, the unshard's sequence: autograd may save one across later
+    calls), its lease the held-life pool's (_stream.region_empty held: taken again only once its tensor is gone and the
+    stream has passed it), of `capacity` elements where given so one size serves every share, its prefix at `shape`."""
+    n = math.prod(shape)
+    if not _region_backed(like, group):
+        return _empty(shape, like, group)
+    from . import _stream
+    return _stream.region_empty([max(n, capacity, 1)], like, True, True)[:n].view(shape)
+
+
 def _high(key, S):
-    """Positions of a sequence of S at the most units the reserve gave this rank on the dimension operand `key` is
-    attached to (0 where it reserved none)."""
-    o, held = _OPERANDS[key], [h for (m, name), h in _BALANCING.items() if _NAMED.get((m, name)) == key]
-    return S // o.units * held[0].get('high', 0) if held else 0
+    """Positions of a sequence of S at the most units this rank may hold on the operand `key` (its high: _reserve's,
+    units - n + 1 before it)."""
+    return S // _OPERANDS[key].units * _OPERANDS[key].high
 
 
-def _block(query, key, value, into, group, scale=None, queries=None, keys=None, valid=None):
+def _block(query, key, value, into, group, scale=None, queries=None, keys=None, valid=None, capacity=0):
     """Each query row's attention over these keys as the library's partials, written into `into` (rows of [m, l, O]:
     the row's greatest score, its sum of exponentials and its unnormalized output, nccl.h ncclMeshRedOpCreatePartials;
     l 0 where it sees no key), the scores SCORES at a time, every pass over them in place, and every result of a chunk
@@ -1558,6 +1591,7 @@ def _block(query, key, value, into, group, scale=None, queries=None, keys=None, 
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     lead, rows, n = query.shape[:-2], query.shape[-2], key.shape[-2]
     step, kt = max(1, SCORES // (math.prod(lead) * n)), key.transpose(-2, -1)
+    most = math.prod(lead) * min(SCORES // math.prod(lead), capacity or rows)  # the largest chunk at any share
     scores = _held(group, 'scores', (SCORES,), query, torch.float32)
     for at in range(0, rows, step):
         q, part = query[..., at:at + step, :], into[..., at:at + step, :]
@@ -1566,13 +1600,15 @@ def _block(query, key, value, into, group, scale=None, queries=None, keys=None, 
         torch.matmul(q, kt, out=s) if q.dtype == s.dtype else s.copy_(q @ kt)
         s.mul_(scale)
         if queries is not None:
-            s.masked_fill_(torch.gt(keys, queries[at:at + step, None], out=_held(group, 'mask', (c, n), query, torch.bool)), -math.inf)
+            mask = _held(group, 'mask', (c, n), query, torch.bool, SCORES)
+            s.masked_fill_(torch.gt(keys, queries[at:at + step, None], out=mask), -math.inf)
         if valid is not None:
             s.masked_fill_(~valid, -math.inf)
-        top, total = (_held(group, what, lead + (c, 1), query, torch.float32) for what in ('top', 'total'))
+        top, total = (_held(group, what, lead + (c, 1), query, torch.float32, most) for what in ('top', 'total'))
         part[..., :1] = torch.amax(s, -1, keepdim=True, out=top).masked_fill_(top == -math.inf, 0)
         part[..., 1:2] = torch.sum(s.sub_(top).exp_(), -1, keepdim=True, out=total)
-        part[..., 2:] = torch.matmul(s.to(value.dtype), value, out=_held(group, 'out', lead + (c, value.size(-1)), value))
+        out = _held(group, 'out', lead + (c, value.size(-1)), value, None, most * value.size(-1))
+        part[..., 2:] = torch.matmul(s.to(value.dtype), value, out=out)
 
 
 def _ring(query, value, lengths, rows, rank, group, high):
@@ -1581,12 +1617,12 @@ def _ring(query, value, lengths, rows, rank, group, high):
     at every call), the merged rows and the output, [batch, positions, heads, dim]."""
     width, row, lead = 2 + value.size(-1), query.numel() // query.size(2), math.prod(query.shape[:2])
     packed = _held(group, 'ring partials', (sum(rows), width), query, torch.float32)
-    if _holding(group).get('ring blocks') != tuple(lengths):
-        _holding(group)['ring blocks'] = tuple(lengths)
+    if _holding(group).get('ring blocks') != (tuple(lengths), tuple(query.shape), width):
+        _holding(group)['ring blocks'] = (tuple(lengths), tuple(query.shape), width)
         packed.zero_()
     return (_held(group, 'ring queries', (sum(lengths) * row,), query), packed,
             _held(group, 'ring merged', (rows[rank], width), query, torch.float32, lead * high * width),
-            _held(group, 'ring out', (query.size(0), lengths[rank], query.size(1), value.size(-1)), query, None, row * high))
+            _kept((query.size(0), lengths[rank], query.size(1), value.size(-1)), query, group, row * high))
 
 
 def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1):
@@ -1632,7 +1668,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
             if seen:
                 at, cols = slice(a * height, (a + 1) * height), slice(seen[0] * step, (seen[-1] + 1) * step)
                 _block(q[:, :, at], key[:, :, cols], value[:, :, cols], into[:, :, at], group, scale,
-                       queries[at] if is_causal else None, keys[cols], valid[cols])
+                       queries[at] if is_causal else None, keys[cols], valid[cols], S)
     owned(rank)
     gathered.wait()
     for j in range(size):
