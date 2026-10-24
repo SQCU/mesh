@@ -1108,7 +1108,10 @@ static std::pair<std::vector<std::vector<uint64_t>>, std::vector<std::vector<uin
 // segment of each), taken in turn a batch; this batch's records as the kernels' binding words.  A call's output is a
 // lease of the held pool (region_empty, held: returned once its tensor is freed and the stream has passed it).  A call is
 // one dispatch_sync: both its kernels encoded (the publication's and the landing's) and the publication committed by
-// the stream's rule (MeshStream::published); the exchange (fused_exchange) at its batch's first repeat.
+// the stream's rule (MeshStream::published); the exchange (fused_exchange) at its batch's first repeat.  Forms are kept
+// by communicator (the group's, found by its name at every call: attach) and released with it (fused_release, from the
+// group's shutdown), under one lock (fused_lock_: a backward's crossings may run on autograd's thread); the map is never
+// destroyed at exit, where torch's MPS allocator may be gone before it.
 struct FusedForm {
   int64_t comm = 0, polls = 0, ranks = 0, rank = 0, publish = -1, land = -1, pj = 0, lj = 0, pgx = 0, pthreads = 0, lgx = 0, lthreads = 0,
           slot = 0;
@@ -1124,8 +1127,8 @@ struct FusedForm {
   int64_t turn = 0, j = 0, half = 0;
   std::vector<int64_t> pbind, lbind;
 };
-static std::map<std::vector<int64_t>, FusedForm> fused_forms_;
-static std::map<std::string, int64_t> fused_groups_;
+static auto *fused_forms_ = new std::map<std::vector<int64_t>, FusedForm>;
+static auto *fused_lock_ = new std::mutex;
 static pybind11::object *fused_maker_ = nullptr;
 
 static void fused_maker(pybind11::object maker) { fused_maker_ = new pybind11::object(std::move(maker)); }
@@ -1139,59 +1142,69 @@ static void binding_words(std::vector<int64_t> &words, const std::vector<uint64_
   }
 }
 
+// the form of a crossing on `group`'s communicator, made by partition at its first call; `held` (fused_lock_) is let go
+// while the maker runs (it takes the GIL, which a thread waiting on the lock may hold)
 static FusedForm &fused_form_of(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, const std::vector<int64_t> &sizes,
-                                const std::string &group, bool adds) {
-  auto g = fused_groups_.find(group);
-  if (g == fused_groups_.end()) g = fused_groups_.emplace(group, (int64_t)fused_groups_.size()).first;
+                                const std::string &group, bool adds, std::unique_lock<std::mutex> &held) {
+  const int64_t comm = communicator_of(c10::IValue(group));
+  TORCH_CHECK(comm, "torch_mesh::fused_step: ", group, " is no live mesh group of this process");
   std::vector<int64_t> key(x.sizes().begin(), x.sizes().end());
-  key.insert(key.end(), {-1, (int64_t)x.scalar_type(), dim, g->second, adds ? 1 : 0, -2});
+  key.insert(key.end(), {-1, (int64_t)x.scalar_type(), dim, comm, adds ? 1 : 0, -2});
   key.insert(key.end(), sizes.begin(), sizes.end());
   if (w) {
     key.push_back(-3);
     key.insert(key.end(), w->sizes().begin(), w->sizes().end());
     key.insert(key.end(), w->strides().begin(), w->strides().end());
   }
-  auto found = fused_forms_.find(key);
-  if (found != fused_forms_.end()) return found->second;
+  auto found = fused_forms_->find(key);
+  if (found != fused_forms_->end()) return found->second;
   TORCH_CHECK(fused_maker_, "torch_mesh::fused_step: no form maker (partition registers it as it loads)");
-  pybind11::gil_scoped_acquire gil;
-  const pybind11::tuple t = (*fused_maker_)(x, w ? pybind11::cast(*w) : pybind11::none(), dim, sizes, group, adds);
   FusedForm f;
-  f.comm = t[0].cast<int64_t>(), f.polls = t[1].cast<int64_t>(), f.ranks = t[2].cast<int64_t>(), f.rank = t[3].cast<int64_t>();
-  f.publish = t[4].cast<int64_t>(), f.pwords = t[5].cast<std::vector<int64_t>>(), f.pj = t[6].cast<int64_t>();
-  f.pgx = t[7].cast<int64_t>(), f.pthreads = t[8].cast<int64_t>();
-  f.land = t[9].cast<int64_t>(), f.lwords = t[10].cast<std::vector<int64_t>>(), f.lj = t[11].cast<int64_t>();
-  f.lgx = t[12].cast<int64_t>(), f.lthreads = t[13].cast<int64_t>();
-  f.starts = t[14].cast<std::vector<int64_t>>(), f.counts = t[15].cast<std::vector<int64_t>>(), f.shape = t[16].cast<std::vector<int64_t>>();
-  f.arrivals = t[17].cast<at::Tensor>(), f.with_w = w.has_value(), f.slot = f.starts.back();
-  return fused_forms_.emplace(key, std::move(f)).first->second;
+  held.unlock();
+  {
+    pybind11::gil_scoped_acquire gil;
+    const pybind11::tuple t = (*fused_maker_)(x, w ? pybind11::cast(*w) : pybind11::none(), dim, sizes, group, adds);
+    f.comm = t[0].cast<int64_t>(), f.polls = t[1].cast<int64_t>(), f.ranks = t[2].cast<int64_t>(), f.rank = t[3].cast<int64_t>();
+    f.publish = t[4].cast<int64_t>(), f.pwords = t[5].cast<std::vector<int64_t>>(), f.pj = t[6].cast<int64_t>();
+    f.pgx = t[7].cast<int64_t>(), f.pthreads = t[8].cast<int64_t>();
+    f.land = t[9].cast<int64_t>(), f.lwords = t[10].cast<std::vector<int64_t>>(), f.lj = t[11].cast<int64_t>();
+    f.lgx = t[12].cast<int64_t>(), f.lthreads = t[13].cast<int64_t>();
+    f.starts = t[14].cast<std::vector<int64_t>>(), f.counts = t[15].cast<std::vector<int64_t>>(), f.shape = t[16].cast<std::vector<int64_t>>();
+    f.arrivals = t[17].cast<at::Tensor>(), f.with_w = w.has_value(), f.slot = f.starts.back();
+  }
+  held.lock();
+  TORCH_CHECK(f.comm == comm, "torch_mesh::fused_step: ", group, "'s form names another communicator");
+  return fused_forms_->try_emplace(key, std::move(f)).first->second;
 }
 
-// partition._fused's crossing on the native path: repeat j of `repeats` (j this form's calls since its last batch), the
-// batch's leases and exchange at j 0, then the publication (gather_publish, or linear_publish of x w^T) and the landing
-// (gather_land or sum_land) encoded in one turn of torch's queue; the output, a lease of the held pool
-static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
-                             std::string group, bool adds, int64_t repeats) {
-  const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
-  FusedForm &f = fused_form_of(xc, w, dim, sizes, group, adds);
+// every form on communicator `comm` released, its leases back to the region once the stream has passed them (the
+// group's shutdown: ProcessGroupMesh.shutdown, as destroy_process_group ends it)
+static void fused_release(int64_t comm) {
+  std::lock_guard<std::mutex> guard(*fused_lock_);
+  for (auto f = fused_forms_->begin(); f != fused_forms_->end();) f = f->second.comm == comm ? fused_forms_->erase(f) : std::next(f);
+}
+
+// a call's repeat j of `repeats` in form f (its calls since its last batch), and at j 0 the batch: its two leases' slots
+// (made once a repeats, both leases taken before either is laid out), the half taken in turn, the exchange of its
+// segments and the records' binding words.  The form's counters advance only once the leases are taken and the exchange
+// is made, so a refused lease leaves the form as it was and no peer exchanged with
+static int64_t fused_turn(FusedForm &f, const at::Tensor &xc, int64_t repeats) {
   const int64_t j = f.j, peers = f.ranks - 1;
-  f.j = (j + 1) % repeats;
   if (j == 0) {
     FusedForm::Ring &ring = f.rings[repeats];
-    if (ring.slots[0].empty())
-      for (int h = 0; h < 2; h++) {
-        const at::Tensor lease = region_empty({repeats * f.slot}, xc, true);
+    if (ring.slots[0].empty()) {
+      const at::Tensor leases[2] = {region_empty({repeats * f.slot}, xc, true), region_empty({repeats * f.slot}, xc, true)};
+      for (int h = 0; h < 2; h++)
         for (int64_t r = 0; r < repeats; r++) {
-          const at::Tensor slot = lease.narrow(0, r * f.slot, f.slot);
+          const at::Tensor slot = leases[h].narrow(0, r * f.slot, f.slot);
           ring.slots[h].push_back(slot);
           std::vector<at::Tensor> segments;
           for (int64_t q = 0; q < f.ranks; q++) segments.push_back(slot.narrow(0, f.starts[q], f.counts[q]));
           ring.segments[h].push_back(segments);
         }
-      }
-    f.ring = &ring;
-    f.half = f.turn++ % 2;
-    const std::vector<at::Tensor> &segments = ring.segments[f.half][0];
+    }
+    const int64_t half = f.turn % 2;
+    const std::vector<at::Tensor> &segments = ring.segments[half][0];
     std::vector<at::Tensor> landings;
     for (int64_t q = 0; q < f.ranks; q++)
       if (q != f.rank) landings.push_back(segments[q]);
@@ -1201,7 +1214,25 @@ static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor
     for (int64_t k = 0; k < peers; k++) binding_words(f.pbind, k < (int64_t)made.first.size() ? &made.first[k] : nullptr);
     for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, k < (int64_t)made.second.size() ? &made.second[k] : nullptr);
     for (int64_t k = 0; k < peers; k++) binding_words(f.lbind, nullptr);
+    f.ring = &ring, f.half = half, f.turn++;
   }
+  f.j = (j + 1) % repeats;
+  return j;
+}
+
+// partition._fused's crossing on the native path: repeat j of `repeats` (j this form's calls since its last batch), the
+// batch's leases and exchange at j 0, then the publication (gather_publish, or linear_publish of x w^T) and the landing
+// (gather_land or sum_land) encoded in one turn of torch's queue; the output, a lease of the held pool
+static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor> &w, int64_t dim, std::vector<int64_t> sizes,
+                             std::string group, bool adds, int64_t repeats) {
+  TORCH_CHECK(repeats >= 1, "torch_mesh::fused_step: repeats ", repeats, ", where a batch is one crossing or more");
+  const at::Tensor xc = x.is_contiguous() ? x : x.contiguous();
+  std::unique_lock<std::mutex> held(*fused_lock_);
+  FusedForm &f = fused_form_of(xc, w, dim, sizes, group, adds, held);
+  // the output leased first: a lease the region refuses raises before the batch's exchange, so no peer waits on a
+  // publication that never comes
+  const at::Tensor out = region_empty(f.shape, xc, true, true);
+  const int64_t j = fused_turn(f, xc, repeats);
   const FusedForm::Ring &ring = *f.ring;
   const std::vector<at::Tensor> &segments = ring.segments[f.half][j];
   std::vector<int64_t> pwords = f.pwords, lwords = f.lwords;
@@ -1216,7 +1247,6 @@ static at::Tensor fused_step(const at::Tensor &x, const std::optional<at::Tensor
   pbuffers.push_back(f.arrivals);
   if (w) pbuffers.push_back(xc);
   const Dispatch publication = encoded(f.publish, pbuffers, pwords, 15, f.pgx, 1, f.pthreads);
-  const at::Tensor out = region_empty(f.shape, xc, true, true);
   const Dispatch landing = encoded(f.land, {ring.slots[f.half][j], out}, lwords, 15, f.lgx, 1, f.lthreads);
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   MeshStream *s = &stream_of(stream);
@@ -1335,6 +1365,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("metal_prelude", &metal_prelude);
   module.def("fused_exchange", &fused_exchange);
   module.def("fused_maker", &fused_maker);
+  module.def("fused_release", &fused_release);
   module.def("fused_writes", &fused_writes);
   module.def("fused_published", &fused_published);
 }
