@@ -564,8 +564,10 @@ def follow(*tensors):
     copied into their place there, crossing nothing.  The staging is two pairs of leases taken for the move, each grown
     to the largest need, the tensors taking them in turn (a pair written again only after a later tensor's call has
     landed), and returned with the move: the move's own memory is its new blocks and the staging, not every tensor's
-    staging at once.  Each is returned at its logical shape and that shape's contiguous strides (a moved block's
-    leading extents of one may carry any stride, which from_local's inference would refuse)."""
+    staging at once.  The rows that stay pass through the staging too, so no copy has both sides strided (torch's MPS
+    copy makes such a copy through a temporary of its size, from 10 MiB a 1 GiB heap).  Each is returned at its logical
+    shape and that shape's contiguous strides (a moved block's leading extents of one may carry any stride, which
+    from_local's inference would refuse)."""
     mesh, held = tensors[0].device_mesh, [[list(t.placements), t.to_local(), t.shape] for t in tensors]
     for i in range(mesh.ndim):
         key = _NAMED.get((mesh, mesh.mesh_dim_names[i])) if mesh.mesh_dim_names else None
@@ -582,14 +584,15 @@ def follow(*tensors):
             first, into = list(itertools.accumulate(sends, initial=0)), list(itertools.accumulate(receives, initial=0))
             out, out_at = _paged([0 if q == rank else c * row for q, c in enumerate(sends)], rows.element_size(), group)
             land, land_at = _paged([0 if r == rank else c * row for r, c in enumerate(receives)], rows.element_size(), group)
-            pair, sizes = stage[k % 2], (out_at[-1] * rows.element_size(), land_at[-1] * rows.element_size())
+            pair, sizes = stage[k % 2], ((out_at[-1] + sends[rank] * row) * rows.element_size(), land_at[-1] * rows.element_size())
             for s, need in enumerate(sizes):
                 if pair[s] is None or pair[s].numel() < need:
                     pair[s] = _empty((max(need, 1),), rows, group, torch.uint8)
             x, y = (pair[s][:need].view(rows.dtype) for s, need in enumerate(sizes))
+            x, stay = x[:out_at[-1]], x[out_at[-1]:].view((sends[rank],) + rest)
             new = _empty(h[1].shape[:d] + (into[-1],) + h[1].shape[d + 1:], rows, group)
             block = new.movedim(d, 0)
-            block[into[rank]:into[rank + 1]].copy_(rows[first[rank]:first[rank + 1]])
+            block[into[rank]:into[rank + 1]].copy_(stay.copy_(rows[first[rank]:first[rank + 1]]))
             for q in range(n):
                 if q != rank:
                     x[out_at[q]:out_at[q] + sends[q] * row].view((sends[q],) + rest).copy_(rows[first[q]:first[q + 1]])
