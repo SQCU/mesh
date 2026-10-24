@@ -33,9 +33,12 @@ def compiler(gm, example_inputs):
     nothing wrapped around its run.  A compiled collective's publication is committed by the same rule as an eager
     one's (_stream.mm, the commit rule; README, Performance), so how a program is written does not decide how fast its
     collectives are.  The graph the backend is handed is a forward (a training graph's backward runs from autograd,
-    under the same rule).  Its all-reduces are torch_mesh::all_reduce (backend.all_reduce), which Inductor calls rather
-    than lowers: it would lower one to a copy into a buffer of its own and an all_reduce_ in place there
-    (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h Memory).  Its products of a
+    under the same rule).  Its sums of MPS tensors on a mesh group of two ranks or more, and its gathers there
+    (torch_mesh::allgatherv), are fused crossings called natively (torch_mesh::fused_step: _stream.mm), a sum of a
+    product the product's own publication; its other all-reduces are torch_mesh::all_reduce (backend.all_reduce).
+    Inductor calls both rather than lowers them: it would lower an all-reduce to a copy into a buffer of its own and an
+    all_reduce_ in place there (torch/_inductor/comm_lowering.py), memory the library does not send from (rdma/nccl.h
+    Memory).  Its products of a
     few fp16 rows by a weight laid out as nn.Linear's (aten.mm(x, w^T), aten.addmm(b, x, w^T): w^T the transposed view of
     a [N, K] whose rows lie apart by K or more, x at most 8 rows) are torch_mesh::linear, one plain dispatch of
     torch-mesh's own (linear.metal) where MPS's matmul costs its host about 12 us a call, with a tanh that is a
@@ -58,8 +61,7 @@ def compiler(gm, example_inputs):
 
     aten = torch.ops.aten
     # each fused crossing's op and where its group's name lies among its arguments, its repeats the next
-    CROSSINGS = {torch.ops.torch_mesh.all_reduce.default: 2, torch.ops.torch_mesh.linear_sum.default: 2,
-                 torch.ops.torch_mesh.allgatherv.default: 3}
+    CROSSINGS = {torch.ops.torch_mesh.fused_step.default: 5}
 
     def rows(x, w):
         """Whether x @ w is linear's: on MPS (its one implementation), fp16, x [R <= 8, K] contiguous, w the transposed
@@ -124,33 +126,38 @@ def compiler(gm, example_inputs):
                     graph.erase_node(m)
             i += len(group)
 
-    def native(node):
-        """A sum's crossing (linear_sum) on a mesh group of two ranks or more called natively, its crossing's form and
-        encodes _stream.mm's (torch_mesh::fused_step), no Python op between the graph and them."""
+    def ranks(name):
+        """The ranks of the mesh group named `name`, where it has two or more (its crossings are fused_step's), else 0."""
         import torch.distributed as dist
-        group = dist.distributed_c10d._resolve_process_group(node.args[2])
-        if isinstance(group, backend.ProcessGroupMesh) and group.size() > 1:
-            x, w = node.args[:2]
-            repeats = node.args[3] if len(node.args) > 3 else 1
-            node.target = torch.ops.torch_mesh.fused_step.default
-            node.args = (x, w, 0, [x.meta['val'].shape[0]] * group.size(), node.args[2], True, repeats)
-            node.meta.pop('eager_input_vals', None)
+        group = dist.distributed_c10d._resolve_process_group(name)
+        return group.size() if isinstance(group, backend.ProcessGroupMesh) and group.size() > 1 else 0
+
+    def fused(graph, node, *args):
+        """node's crossing as torch_mesh::fused_step(x, w, dim, sizes, adds, group_name, 1), its repeats told later."""
+        with graph.inserting_before(node):
+            made = graph.call_function(torch.ops.torch_mesh.fused_step.default, (*args, 1))
+        made.meta['val'] = node.meta['val']
+        node.replace_all_uses_with(made)
+        graph.erase_node(node)
 
     class Leased(CustomGraphPass):
         def __call__(self, graph):
             for node in list(graph.nodes):
                 if node.target is torch.ops._c10d_functional.all_reduce.default:
-                    node.target = torch.ops.torch_mesh.all_reduce.default
-                    told(node, 1)
-                    made = node.args[0]
-                    if (node.args[1] == 'sum' and made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
-                            and made.args[2:] in ((), (None,), (None, 0))):
-                        with graph.inserting_before(node):
-                            summed = graph.call_function(torch.ops.torch_mesh.linear_sum.default, (*made.args[:2], node.args[2], 1))
-                        summed.meta['val'] = node.meta['val']
-                        node.replace_all_uses_with(summed)
-                        graph.erase_node(node)
+                    made, op, name = node.args[:3]
+                    n, val = ranks(name), made.meta['val']
+                    if op != 'sum' or not n or val.device.type != 'mps' or val.dim() == 0:
+                        node.target = torch.ops.torch_mesh.all_reduce.default
+                    elif (made.target is torch.ops.torch_mesh.linear.default and len(made.users) == 1
+                          and made.args[2:] in ((), (None,), (None, 0))):
+                        fused(graph, node, *made.args[:2], 0, [made.args[0].meta['val'].shape[0]] * n, True, name)
                         graph.erase_node(made)
+                    else:
+                        fused(graph, node, made, None, 0, [val.shape[0]] * n, True, name)
+                    continue
+                if (node.target is torch.ops.torch_mesh.allgatherv.default and ranks(node.args[3])
+                        and node.args[0].meta['val'].device.type == 'mps'):
+                    fused(graph, node, node.args[0], None, *node.args[1:3], False, node.args[3])
                     continue
                 mm = node.target is aten.mm.default and rows(*node.args)
                 addmm = (node.target is aten.addmm.default and not node.kwargs and len(node.args) == 3 and rows(*node.args[1:])
@@ -183,11 +190,9 @@ def compiler(gm, example_inputs):
                 if len(nodes) > 1 and len(forms) == 1 and nodes[0].target in CROSSINGS:
                     for n in nodes:
                         told(n, len(nodes))
-            for node in [n for n in graph.nodes if n.target is torch.ops.torch_mesh.linear_sum.default]:
-                native(node)
 
         def uuid(self):
-            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv native'
+            return 'torch_mesh::all_reduce torch_mesh::linear cat linears repeats allgatherv fused_step'
     with config.patch(post_grad_custom_pre_pass=Leased(), size_asserts=False, alignment_asserts=False, scalar_asserts=False):
         return lookup_backend('inductor')(gm, example_inputs)
 

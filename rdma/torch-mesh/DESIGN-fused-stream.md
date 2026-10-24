@@ -31,24 +31,25 @@ and then each of its channels is completed in the stream's order, one after anot
 `complete_track`). The tracks dispatch never runs for a fused group.
 
 **torch-mesh.** `torch_mesh/fused.py`, and a section of `_stream.mm` of its own (`fused_residency`, `metal_prelude`,
-`fused_exchange`, `fused_published`):
+`fused_exchange`, `fused_constants`, `fused_published`, `fused_step`):
 
 | Call | Takes | Returns |
 |---|---|---|
 | `fused.steps()` | nothing | the Metal text to compile a kernel after: `ncclMeshMetalPrelude`, rdma/mesh.metal and then the steps |
-| `fused.exchange(send, landings, polls, group=None)` | the rank's part; a landing tensor for each other rank, in rank order, each its own size; `polls`, the landing waits' bound (`_stream.polls`, the library's); a group of n ranks | `Crossing(publish, land)`, a tuple of six addresses for each peer each. A call the library won't fuse raises with its reason; nothing slower runs. |
+| `torch_mesh::fused_step(x, w, dim, sizes, adds, group_name, repeats)` | the rank's block (or, with `w`, the rows whose product x w^T is its part); the blocks' sizes along `dim`; a sum (`adds`) or a gather; a mesh group of n ranks; the crossings one issue presents | the gathered or summed tensor, a lease of the held pool. Repeat j of a batch; at j 0 the batch's two leases and its exchange (`fused_exchange`: the records, a publication and a landing for each peer), then both kernels encoded in one turn of torch's queue. Its form is partition's (`_fused_form`), made at its first call and kept by communicator until the group's shutdown. A call the library won't fuse raises with its reason; nothing slower runs. |
 | `fused.encode(handle, buffers, constants, at, gx, gy, threads, peers, land=None, publish=None)` | `_stream.encode`'s arguments, the peer count, and the crossings it lands and publishes | nothing. One that publishes goes under the one commit rule. |
 
 - The kernel's constant block is its own words padded to an even count, then each peer's landing `mesh_step_binding`,
-  then each peer's publication, each address two words, low word first.
+  then each peer's publication, each address two words, low word first (`fused_constants`, for both calls).
 - The call runs on main's `MeshStream`: the stream's workspace allocator (a fused group asks it for nothing), its
   `streamed`, and its `published()` for a publishing kernel. That is the one commit rule, the same as for every group.
 - The residency set is the device's one set, added once to each queue it meets.
 
 ## The chain (examples/)
 
-The host makes two calls a step: `fused.exchange` of the step's part, which only writes the records (a publication
-and a landing for each peer), and the kernel's encode. One more dispatch after the last step lands the last crossing.
+The host makes one call a step, natively: `torch_mesh::fused_step` (above; the compiled graph calls it, no Python op
+between). As first written, the chain made two, the exchange of the step's part and the kernel's encode, and one more
+dispatch after the last step landed the last crossing; the sections below keep that history.
 
 **Landing crossing t − 1, at the start of step t's prologue.** For each peer's landing in turn:
 1. Every thread of every worker calls `mesh_step_enter`, which stores the record's sequence in the ring's progress word

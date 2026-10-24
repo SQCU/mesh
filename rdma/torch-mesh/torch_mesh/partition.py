@@ -181,7 +181,7 @@ def _in_region(y):
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, repeats: int = 1) -> torch.Tensor:
     """The blocks gathered along `dim` from x's block, an opaque op, so a compiled graph calls it as torch's
-    functional collectives are called.  On the mesh backend (_region_backed) it is a fused crossing (_fused):
+    functional collectives are called.  On the mesh backend (_region_backed) it is a fused crossing (torch_mesh::fused_step):
     this rank's block copied once into its page-padded segment of a held lease and published by partition's own
     kernel, every peer's landing waited for and the segments joined along `dim` by another, the library encoding no
     dispatch, the crossing issued once for `repeats` of them (a graph's, torch_mesh.compiler); else out of place from
@@ -192,7 +192,9 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str, rep
         out = _empty((sum(sizes),) + y.shape[1:], y)
         dist.all_gather(list(out.split(sizes)), y, group=group)
         return out.movedim(0, dim).contiguous()
-    return _fused(x.contiguous(), dim, sizes, group, False, None, repeats)
+    if len(sizes) == 1:
+        return x.clone()
+    return torch.ops.torch_mesh.fused_step(x, None, dim, list(sizes), False, group_name, repeats)
 
 
 # The all-gather and the all-reduce as a fused crossing (rdma/nccl.h ncclMeshFused; torch_mesh/fused.py): one SEND
@@ -296,20 +298,6 @@ def _linear_kernel(*arguments):
     return _GATHER_KERNELS[name]
 
 
-def _fused(x, dim, sizes, group, adds, w=None, repeats=1):
-    """allgatherv on the mesh backend (above), or where `adds` the all-reduce's sum (backend.all_reduce, every rank's
-    block all of x: sizes x's extent along dim, n times): x contiguous, of 2 or 4 bytes an element; the output a lease of
-    the held pool (above), its own while its tensor lives.  Where `w` (a weight [N, K] of fp16 rows
-    any whole stride apart) is given, the sum's operand is x's product with it, x [R, K] (backend.linear_sum):
-    linear.metal's linear_publish computes it into this rank's segment and publishes it there through the collective's
-    steps, in place of gather_publish.  The call is repeat j of the `repeats` one issue presents, j its calls of this
-    form since the last issue (torch_mesh.compiler).  Native: torch_mesh::fused_step (_stream.mm), its form made here at
-    its first call (_fused_form)."""
-    if len(sizes) == 1:
-        return x.clone() if w is None else torch.ops.torch_mesh.linear(x, w)
-    return torch.ops.torch_mesh.fused_step(x.contiguous(), w, dim, list(sizes), group.group_name, adds, repeats)
-
-
 def _fused_form(x, w, dim, sizes, group_name, adds):
     """A fused crossing's form for torch_mesh::fused_step, made at its first call (_stream.mm fused_maker): the
     communicator and the waits' bound; this rank and the ranks; the publication's kernel (gather_publish, or
@@ -319,12 +307,11 @@ def _fused_form(x, w, dim, sizes, group_name, adds):
     from . import _stream
     group = dist.distributed_c10d._resolve_process_group(group_name)
     n, rank = len(sizes), group.rank()
-    operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
+    operand, shape = _fused_shapes(x, w, dim, sizes, adds)
     row, half = math.prod(operand) // max(1, operand[dim]), x.element_size() // 2
     counts, starts = _paged([s * row for s in sizes], x.element_size(), group)
     words = ([math.prod(operand) * half, math.prod(operand[:dim]), math.prod(operand[dim + 1:]) * half, rank, 0] + list(sizes) +
              [a * (1 if adds else half) for a in starts[:-1]])
-    shape = operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:]
     spread = lambda count: max(1, min(16, -(-count // (_GATHER_THREADS * 8))))
     land = _gather_kernel('sum_land', x.element_size(), n) if adds else _gather_kernel('gather_land', n)
     if w is None:
@@ -343,10 +330,16 @@ from . import _stream as _native  # noqa: E402  (torch_mesh::fused_step's librar
 _native.fused_maker(_fused_form)
 
 
-@torch.library.register_fake('torch_mesh::fused_step')
-def _(x, w, dim, sizes, group_name, adds, repeats):
+def _fused_shapes(x, w, dim, sizes, adds):
+    """A fused crossing's operand's shape (x's, or x w^T's [R, N]) and its output's: the operand's where it sums, else
+    the blocks joined along dim."""
     operand = tuple(x.shape) if w is None else (x.shape[0], w.shape[0])
-    return x.new_empty(operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:])
+    return operand, operand if adds else operand[:dim] + (sum(sizes),) + operand[dim + 1:]
+
+
+@torch.library.register_fake('torch_mesh::fused_step')
+def _(x, w, dim, sizes, adds, group_name, repeats):
+    return x.new_empty(_fused_shapes(x, w, dim, sizes, adds)[1])
 
 
 def _paged(counts, size, group):
@@ -400,7 +393,7 @@ def _row(x, dim):
 
 def gathered(x, dim, sizes, group):
     """allgatherv's group of a block like `x` (its shape and dtype) along `dim` on mesh `group`, each rank's block
-    sizes[r] long, as it issues it (torch_mesh.plan): on the mesh backend its fused crossing (_fused), this rank's
+    sizes[r] long, as it issues it (torch_mesh.plan): on the mesh backend its fused crossing (fused_step), this rank's
     page-padded segment sent to each peer and each peer's landed, in rank order, declared fused; else one all-gather of
     every rank's block."""
     from .backend import ALLGATHER, RECV, SEND, Call
@@ -413,7 +406,7 @@ def gathered(x, dim, sizes, group):
 
 def summed(x, group):
     """backend.all_reduce's sum of an operand like `x` (its elements and dtype) on mesh `group`, as its fused crossing
-    issues it (_fused): this rank's page-padded segment sent to each peer and each peer's landed, in rank order, one
+    issues it (fused_step): this rank's page-padded segment sent to each peer and each peer's landed, in rank order, one
     group (torch_mesh.plan), declared fused (its steps compiled whole, as its fused stream's are)."""
     from .backend import RECV, SEND, Call
     count = _paged([x.numel()], x.element_size(), group)[0][0]
