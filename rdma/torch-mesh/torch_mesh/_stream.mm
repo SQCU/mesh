@@ -680,8 +680,9 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
 
 // torch_mesh::linear (linear.metal): y[R, N] = x[R, K] w[N, K]^T (+ bias[N]) of fp16 MPS tensors, w's rows any whole
 // stride apart (w.stride(0)), one dispatch of linear_rows encoded in torch's open compute encoder (encode), its output a
-// new tensor of torch's.  Its K split, the simdgroups a threadgroup, is fitted to N and the GPU's cores: about 256
-// simdgroups a core over the N / 2 threadgroups, a power of two from 1 to 8 (rounded up).  Its pipelines (by load width
+// new tensor of torch's.  Its K split, the simdgroups a threadgroup, is fitted to K, N and the GPU's cores: about 256
+// simdgroups a core over the N / 2 threadgroups, a power of two from 1 to 8 (rounded up), each simdgroup at least 1,024
+// elements of K.  Its pipelines (by load width
 // and split) compile at their first call from the source backend.py hands over as it loads (linear_source).
 static std::string linear_source_;
 static int64_t linear_cores_ = 0;
@@ -701,7 +702,7 @@ static at::Tensor linear(const at::Tensor &x, const at::Tensor &w, const std::op
   const int64_t R = x.size(0), K = x.size(1), N = w.size(0), ldw = wc.stride(0);
   const int64_t groups = (N + LINEAR_COLUMNS - 1) / LINEAR_COLUMNS;
   int split = 1;
-  while (split < 8 && split * groups < linear_cores_ * 256) split *= 2;
+  while (split < 8 && split * groups < linear_cores_ * 256 && K / (split * 2) >= 1024) split *= 2;
   const auto key = std::make_tuple(ldw % 4 ? 1 : 4, K % 4 ? 1 : 4, split);
   auto found = linear_pipelines_.find(key);
   if (found == linear_pipelines_.end()) {
