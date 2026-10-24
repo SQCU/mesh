@@ -174,6 +174,12 @@ class ProcessGroupMesh(dist.ProcessGroup):
         it published and nothing else, and its own GPU waits end at their landings or their bounds."""
         check(LIB.ncclCommRevoke(self.comm, 0))
 
+    def shutdown(self):
+        """torch's end of this group (destroy_process_group): the fused crossings' forms on its communicator released,
+        their leases back to the region once the stream has passed them (_stream.mm fused_release)."""
+        _stream.fused_release(self.handle)
+        super().shutdown()
+
     def size(self):
         return self._size
 
