@@ -5,8 +5,8 @@ Stock PyTorch splits every sharded extent equally (Shard follows torch.chunk).  
 dimension's P units, attach(mesh, tp=P), the same on every rank, and the backend gives coordinate r a part p_r >= 1 of
 them, an even split at first (rebalance moves them), and a capacity c_r, its part.  An extent N that P divides (any
 other raises ValueError, on every rank alike) is split N p_r / P per coordinate in rank order, as the logical tensor
-reads, and rank r holds its share in a local buffer of c_r N / P along that dimension: its N p_r / P valid elements
-first, padding after.  The parts are a tensor operand (operand(mesh, "tp").parts) read by the ops below when they run.
+reads, and rank r holds its share, N p_r / P elements along that dimension, with no padding: the blocks laid end to
+end in rank order are the logical tensor.  The parts are a tensor operand (operand(mesh, "tp").parts) read by the ops below when they run.
 follow(t) moves a sharded tensor onto the parts a rebalance attached.  On raw tensors split(mesh, "tp", N) gives the
 valid blocks in rank order, the ones the list collectives take
 (dist.all_gather into a list of unequal outputs, dist.reduce_scatter of a list of unequal inputs: MPI's v-collectives
@@ -20,32 +20,22 @@ without shape= means "a capacity block" (global = local P / c_r).  ColwiseParall
 SequenceParallel below are torch's parallel styles over them.  A tensor that meets a RaggedShard on its mesh dimension
 holds the same one or none there (R6: a plain Shard or another partition raises ValueError).
 
-Uneven partitioning as GSPMD does it [Xu et al. 2021, "GSPMD: general and scalable parallelization for ML computation
-graphs", arXiv:2105.04663, §3.3: pad a dimension to the shards' size, and mask the padding to the identity of the next
-operation wherever its data could leak into valid results]:
-- Padding holds the identity of its next consumer, or garbage that nothing reads unmasked.  Sources keep the identity:
-  a local buffer is written with zeros past its valid extent (distribute_tensor, follow), and the collectives below
-  write the identity past `valid`.
-- Before an op that reduces or contracts over a partitioned dimension of a local shard (its DTensor sharding has a
-  Partial output on that mesh dimension: mm, bmm, addmm, baddbmm, dot, mv, sum, amax, amin and every other), each
-  input sharded there is re-masked to the Partial's identity (0 for sums and contractions, -inf for max, +inf for
-  min): where(valid, x, identity), the op torch_mesh::remask.
-- Count-dependent: mean over a partitioned dimension is the masked sum divided by its logical count.  An op whose
-  sharding gives any other Partial there (avg, the norms, embedding's mask), or a ragged output extent P does not
-  divide (a view), and convolution, argmax, argmin and equal, get the dimension whole first, by the gather below, where
-  only the valid elements remain; softmax, var, sort, top-k, scans and indexing need it whole by DTensor's own rules.
+No block holds padding (each capacity is its part), so an op on a local shard runs as torch runs it, a contraction
+or reduction over a partitioned dimension giving the Partial its sharding gives, with nothing masked:
+- Count-dependent: mean over a partitioned dimension is the sum divided by its logical count.  An op whose sharding
+  gives any other Partial there (avg, the norms, embedding's mask), or a ragged output extent P does not divide (a
+  view), and convolution, argmax, argmin and equal, get the dimension whole first, by the gather below; softmax, var,
+  sort, top-k, scans and indexing need it whole by DTensor's own rules.
 - Attention: SDPA on query, key and value split along the sequence by one RaggedShard (on any mesh dimension) is ring
   attention, each source's keys past its valid extents masked (score -inf); context parallelism's ring
   (ring_attention) masks the same way over head-tail halves.  The softmax over the split is the library's partials
   merge (below).
-No kernel changes: stock kernels compute garbage in padding that nothing reads unmasked.
 
-Redistribution, each block at its capacity (static counts, never padded to a common size): Shard to Replicate
-all-gathers the blocks and packs the valid elements into the logical tensor (torch_mesh::pack, a fixed-shape index from
-the parts); Replicate to Shard takes this rank's valid elements into its block (torch_mesh::unpack, then its static
-block); Partial to Shard unpacks with the identity and reduce-scatters the blocks; Shard to Partial places this rank's
-valid elements among zeros; Shard(d) to Shard(d') goes through Replicate; Shard's scatter from a source rank is the
-rooted V (the backend's scatter, MPI_Scatterv through ncclMeshAlltoAllV).  Context parallelism's head-tail split keeps
+Redistribution, each block its part (static counts, never padded to a common size): Shard to Replicate all-gathers
+the blocks, which laid end to end are the logical tensor; Replicate to Shard takes this rank's block of it; Partial to
+Shard reduce-scatters the blocks; Shard to Partial places this rank's block among zeros; Shard(d) to Shard(d') goes
+through Replicate; Shard's scatter from a source rank is the rooted V (the backend's scatter, MPI_Scatterv through
+ncclMeshAlltoAllV), each segment whole pages of the region.  Context parallelism's head-tail split keeps
 each half at its capacity: rank r's block is its head's valid positions, padding, its tail's, padding
 (context_parallel_buffers, context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its
 ring, called in their place).
@@ -61,8 +51,7 @@ gathered queries and its partials; so the library reads what they send where it 
 refuses a lease, torch's own memory.
 
 Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
-- torch.library.custom_op with register_fake and register_autograd: torch_mesh::remask, pack, unpack, allgatherv,
-  reduce_scatterv.
+- torch.library.custom_op with register_fake: torch_mesh::allgatherv and reduce_scatterv.
 - RaggedShard subclasses torch.distributed.tensor.placement_types.Shard and overrides the methods DTensor calls on a
   placement instance: local_shard_size_and_offset and _local_shard_size_and_offset (compute_local_shape_and_global_
   offset, the redistribute planner, the RNG), _split_tensor and _select_split_tensor (and through them the inherited
@@ -160,88 +149,13 @@ def _blocks(o, N):
     return sizes, [sum(sizes[:r]) for r in range(len(sizes))]
 
 
-# The operand read when an op runs: masks and indices from the parts, cached per operand.
-def _valid(key, rank, length, device):
-    """A local block of `length` of rank `rank`: which of its elements are valid (its first length p/c)."""
-    o = _OPERANDS[key]
-    return o.cached(('valid', rank, length, str(device)),
-                    lambda p: torch.arange(length, device=device) < length // o.capacity[rank] * p[rank])
-
-
-def _index(key, length, device):
-    """For blocks of every rank laid end to end (`length` in all): where each logical element lies."""
-    o = _OPERANDS[key]
-
-    def build(p):
-        g = length // sum(o.capacity)
-        starts = itertools.accumulate((c * g for c in o.capacity), initial=0)
-        return torch.cat([torch.arange(s, s + q * g) for s, q in zip(starts, p)]).to(device)
-    return o.cached(('index', length, str(device)), build)
-
-
 def _along(mask, dim, ndim):
     shape = [1] * ndim
     shape[dim] = -1
     return mask.view(shape)
 
 
-@torch.library.custom_op('torch_mesh::remask', mutates_args=())
-def remask(x: torch.Tensor, dim: int, key: str, rank: int, identity: float) -> torch.Tensor:
-    """x, rank `rank`'s local block along `dim`, with every element past its valid extent `identity`."""
-    return torch.where(_along(_valid(key, rank, x.size(dim), x.device), dim, x.dim()), x, identity)
-
-
-@torch.library.custom_op('torch_mesh::pack', mutates_args=())
-def pack(x: torch.Tensor, dim: int, key: str) -> torch.Tensor:
-    """Every rank's block along `dim`, laid end to end in x, as the logical tensor: the valid elements."""
-    return x.index_select(dim, _index(key, x.size(dim), x.device))
-
-
-@torch.library.custom_op('torch_mesh::unpack', mutates_args=())
-def unpack(x: torch.Tensor, dim: int, key: str, identity: float) -> torch.Tensor:
-    """The logical tensor x as every rank's block laid end to end along `dim`, `identity` past each block's valid
-    extent."""
-    o = _OPERANDS[key]
-    shape = list(x.shape)
-    shape[dim] = x.size(dim) * sum(o.capacity) // o.units
-    return x.new_full(shape, identity).index_copy(dim, _index(key, shape[dim], x.device), x)
-
-
-@remask.register_fake
-def _(x, dim, key, rank, identity):
-    return torch.empty_like(x)
-
-
-@pack.register_fake
-def _(x, dim, key):
-    o, shape = _OPERANDS[key], list(x.shape)
-    shape[dim] = x.size(dim) * o.units // sum(o.capacity)
-    return x.new_empty(shape)
-
-
-@unpack.register_fake
-def _(x, dim, key, identity):
-    o, shape = _OPERANDS[key], list(x.shape)
-    shape[dim] = x.size(dim) * sum(o.capacity) // o.units
-    return x.new_empty(shape)
-
-
-def _keep(names):
-    def setup(ctx, inputs, output):
-        ctx.saved = dict(zip(names, inputs[1:]))
-    return setup
-
-
-remask.register_autograd(lambda ctx, g: (remask(g, ctx.saved['dim'], ctx.saved['key'], ctx.saved['rank'], 0.0), None, None, None, None),
-                         setup_context=_keep(('dim', 'key', 'rank')))
-pack.register_autograd(lambda ctx, g: (unpack(g, ctx.saved['dim'], ctx.saved['key'], 0.0), None, None),
-                       setup_context=_keep(('dim', 'key')))
-unpack.register_autograd(lambda ctx, g: (pack(g, ctx.saved['dim'], ctx.saved['key']), None, None, None),
-                         setup_context=_keep(('dim', 'key')))
-
-
-# The collectives, each block at its capacity, the split dimension moved to the front.
-_IDENTITY = {'sum': 0.0, 'avg': 0.0, 'max': -math.inf, 'min': math.inf}
+# The collectives, each block its part, the split dimension moved to the front.
 
 
 def _region_backed(like, group):
@@ -250,25 +164,11 @@ def _region_backed(like, group):
     return group is not None and like.device.type == 'mps' and bool(getattr(group, 'handle', 0))
 
 
-def _lease(shape, like):
-    """An MPS region tensor like `like` (torch_mesh.empty: a lease of the node's bridge's region, which the library reads
-    and writes where it lies: rdma/NCCL.md "Memory"), made by name as 5ff5d699 made it (DTensor's dispatch runs no
-    factory mode, and torch documents no MPS allocator to place it: mesh 7e6f0335); None where the region refuses the
-    lease (full, or its bridge stopped: the library's error, the collective's own to raise), where aee2829b's region
-    allocator took the device's own buffer."""
-    from . import empty
-    try:
-        return empty(tuple(shape), dtype=like.dtype, device='mps')
-    except RuntimeError:
-        return None
-
-
 def _empty(shape, like, group=None, dtype=None):
-    """A region tensor (_lease) where the buffer is _region_backed and the region holds it, else torch.empty; like `like`,
-    of `dtype` where given."""
-    like = like if dtype is None else like.new_empty(0, dtype=dtype)
-    made = _lease(shape, like) if _region_backed(like, group) else None
-    return made if made is not None else torch.empty(shape, dtype=like.dtype, device=like.device)
+    """A region tensor (torch_mesh.empty) on `like`'s device, of its dtype or `dtype`: every buffer a collective here
+    sends from or lands in is a lease, and a region that refuses one is the library's error, raised."""
+    from . import empty
+    return empty(tuple(shape), dtype=dtype or like.dtype, device=like.device.type)
 
 
 def _in_region(y):
@@ -328,12 +228,12 @@ def _paged(counts, size):
 def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: str, group_name: str) -> torch.Tensor:
     """The blocks reduce-scattered out of place from x (contiguous along dim), this rank's block, an opaque op.  On
     the mesh backend the list is a split of `y`, so it is one MPI_Reduce_scatter reading `y` in place
-    (ncclMeshReduceScatterV: backend.py reduce_scatter).  Where the buffers are region tensors (_region_backed), `y` is x's
-    block where it lies in the region already, else its contiguous copy into a region tensor (mesh f9898875), and the
-    output a region tensor of its own, so what it sends lies in the region and the output holds no lease of the input."""
+    (ncclMeshReduceScatterV: backend.py reduce_scatter).  `y` is x's block where it lies in the region already, else its
+    contiguous copy into a region tensor (mesh f9898875), and the output a region tensor of its own, so what it sends
+    lies in the region and the output holds no lease of the input."""
     group = dist.distributed_c10d._resolve_process_group(group_name)
     y = x.movedim(dim, 0)
-    held = _lease(y.shape, y) if _region_backed(x, group) and not _in_region(y) else None
+    held = _empty(y.shape, y) if not _in_region(y) else None
     y = held.copy_(y) if held is not None else y.contiguous()
     out = _empty((sizes[rank],) + y.shape[1:], y, group)
     dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
@@ -416,54 +316,62 @@ class RaggedShard(Shard):
         return self.local_shard_size_and_offset(curr_local_size, num_chunks, rank)
 
     def _split_tensor(self, tensor, num_chunks, *, with_padding=True, contiguous=True):
-        sizes = _blocks(self._operand(num_chunks), tensor.size(self.dim))[0]
-        blocks = unpack(tensor, self.dim, self.key, 0.0).split(sizes, self.dim)
+        blocks = tensor.split(_blocks(self._operand(num_chunks), tensor.size(self.dim))[0], self.dim)
         return [b.contiguous() if contiguous else b for b in blocks], [0] * len(blocks)
 
     @maybe_run_for_local_tensor
     def _select_split_tensor(self, tensor, num_chunks, index, *, with_padding=True, contiguous=True, clone=True):
         sizes, offsets = _blocks(self._operand(num_chunks), tensor.size(self.dim))
-        block = unpack(tensor, self.dim, self.key, 0.0).narrow(self.dim, offsets[index], sizes[index])
+        block = tensor.narrow(self.dim, offsets[index], sizes[index])
         return block.contiguous() if contiguous or clone else block
 
     def _shard_tensor(self, tensor, mesh, mesh_dim, src_data_rank=0):
-        """Scatterv of the blocks from src_data_rank (src_data_rank None: this rank's own block)."""
+        """Scatterv of the blocks from src_data_rank (src_data_rank None: this rank's own block), each segment whole
+        pages (_paged) in region tensors: the source sends from `tensor` itself where it lies in the region with every
+        block on whole pages, else from a paged region copy of its blocks; each rank's block lands in a region tensor
+        leased through the group."""
         coordinate = mesh.get_coordinate()
         if coordinate is None:
             return tensor.new_empty(0, requires_grad=tensor.requires_grad)
-        n, rank = mesh.size(mesh_dim), coordinate[mesh_dim]
+        n, rank, group = mesh.size(mesh_dim), coordinate[mesh_dim], mesh.get_group(mesh_dim)
         if src_data_rank is None:
             return self._select_split_tensor(tensor, n, rank, with_padding=False, contiguous=True)
-        sizes = _blocks(self._operand(n), tensor.size(self.dim))[0]
-        out = _empty(tensor.shape[:self.dim] + (sizes[rank],) + tensor.shape[self.dim + 1:], tensor)
-        blocks = self._split_tensor(tensor, n)[0] if rank == src_data_rank else None
-        dist.scatter(out, blocks, group=mesh.get_group(mesh_dim), group_src=src_data_rank)
-        return out
+        sizes, rest = _blocks(self._operand(n), tensor.size(self.dim))[0], tensor.movedim(self.dim, 0).shape[1:]
+        counts = [s * math.prod(rest) for s in sizes]
+        padded, at = _paged(counts, tensor.element_size())
+        out, blocks = _empty((padded[rank],), tensor, group), None
+        if rank == src_data_rank:
+            pieces = self._split_tensor(tensor, n, contiguous=False)[0]
+            if self.dim == 0 and padded == counts and _in_region(tensor):
+                blocks = list(tensor.reshape(-1).split(counts))
+            else:
+                staged = _empty((at[-1],), tensor, group)
+                for q, piece in enumerate(pieces):
+                    staged[at[q]:at[q] + counts[q]].view((sizes[q],) + rest).copy_(piece.movedim(self.dim, 0))
+                blocks = list(staged.split(padded))
+        dist.scatter(out, blocks, group=group, group_src=src_data_rank)
+        return out[:counts[rank]].view((sizes[rank],) + rest).movedim(0, self.dim)
 
     def _reduce_shard_tensor(self, tensor, mesh, reduce_op, mesh_dim):
-        """Partial to Shard: the logical partial unpacked with the reduction's identity, reduce-scattered."""
+        """Partial to Shard: the blocks of the logical partial reduce-scattered."""
         coordinate = mesh.get_coordinate()
         if coordinate is None:
             return tensor
         sizes = _blocks(self._operand(mesh.size(mesh_dim)), tensor.size(self.dim))[0]
-        padded = unpack(tensor, self.dim, self.key, _IDENTITY[reduce_op])
-        return _reduce_scatterv(padded, self.dim, sizes, coordinate[mesh_dim], reduce_op, mesh.get_group(mesh_dim))
+        return _reduce_scatterv(tensor, self.dim, sizes, coordinate[mesh_dim], reduce_op, mesh.get_group(mesh_dim))
 
     def _to_replicate_tensor(self, local_tensor, mesh, mesh_dim, current_logical_shape):
-        """The blocks gathered (allgatherv), packed to the valid elements where a capacity exceeds its part; where
-        every part is its capacity, as the backend attaches them, the blocks laid end to end are the logical tensor."""
-        o = self._operand(mesh.size(mesh_dim))
-        gathered = _allgatherv(local_tensor, self.dim, _blocks(o, current_logical_shape[self.dim])[0], mesh.get_group(mesh_dim))
-        return gathered if o.cached('whole', lambda parts: tuple(parts) == o.capacity) else pack(gathered, self.dim, self.key).contiguous()
+        """The blocks gathered (allgatherv), which laid end to end are the logical tensor."""
+        sizes = _blocks(self._operand(mesh.size(mesh_dim)), current_logical_shape[self.dim])[0]
+        return _allgatherv(local_tensor, self.dim, sizes, mesh.get_group(mesh_dim))
 
     def _to_partial_tensor(self, local_tensor, mesh, mesh_dim, current_logical_shape):
-        """Shard to Partial("sum"): this rank's valid elements at their logical places, zeros elsewhere."""
+        """Shard to Partial("sum"): this rank's block at its logical place, zeros elsewhere."""
         sizes, offsets = _blocks(self._operand(mesh.size(mesh_dim)), current_logical_shape[self.dim])
         rank, total = mesh.get_coordinate()[mesh_dim], sum(sizes)
         zeros = [local_tensor.new_zeros(local_tensor.shape[:self.dim] + (s,) + local_tensor.shape[self.dim + 1:])
                  for s in (offsets[rank], total - offsets[rank] - sizes[rank])]
-        valid = remask(local_tensor, self.dim, self.key, rank, 0.0)
-        return pack(torch.cat([zeros[0], valid, zeros[1]], self.dim), self.dim, self.key)
+        return torch.cat([zeros[0], local_tensor, zeros[1]], self.dim)
 
     def _to_new_shard_dim(self, local_tensor, mesh, mesh_dim, current_logical_shape, new_shard_dim):
         """Shard(d) to Shard(d') on a partitioned mesh dimension: through Replicate."""
@@ -816,8 +724,7 @@ class RaggedTensor(DTensor):
 
 
 # The dispatch: DTensor's (sharding propagation, redistribution, the local op, the wrap), each Shard on a partitioned
-# mesh dimension its RaggedShard, each input sharded on a partitioned mesh dimension on which the output is Partial
-# first re-masked to the Partial's identity.
+# mesh dimension its RaggedShard.
 _REMASKED = ('sum', 'max', 'min')
 _WHOLE = (aten.convolution.default, aten.convolution_backward.default, aten.argmax.default, aten.argmin.default,
           aten.equal.default)
@@ -947,14 +854,6 @@ def _propagated(op_call, args, kwargs):
         if out.use_val_from_redistribute_schema:
             local.extend(flat[len(info.flat_args_schema):])
     mesh = info.compute_mesh
-    coordinate = mesh.get_coordinate()
-    for i, key in keys.items():
-        partial = next((s.placements[i] for s in _specs(spec) if s.placements[i].is_partial()), None)
-        if partial is None:
-            continue
-        for j, s in enumerate(flat):
-            if isinstance(s, DTensorSpec) and isinstance(s.placements[i], RaggedShard):
-                local[j] = remask(local[j], s.placements[i].dim % local[j].dim(), key, coordinate[i], _IDENTITY[partial.reduce_op])
     local_args = pytree.tree_unflatten(local, info.args_tree_spec) if info.args_tree_spec is not None else local
     op = out.redistribute_schema.op if out.needs_redistribute and out.redistribute_schema.op != op_call else op_call
     if op_call in d._random_ops and _random.is_rng_supported_mesh(mesh) and not local_args[0].is_meta:
